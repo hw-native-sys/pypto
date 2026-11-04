@@ -19,7 +19,7 @@ from pypto.backend import BackendType, pto_backend
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.runtime import ExecutionMode, RunConfig
 
-from tests.software_pipeline_cases import make_epilogue
+from tests.software_pipeline_cases import make_epilogue, make_scratch_pressure
 
 pytestmark = [
     pytest.mark.ptoas_compile,
@@ -172,6 +172,14 @@ def test_runtime_score_bound_avoids_unreachable_fallback_storage(tmp_path):
     assert "pto.alloc_multi_tile" not in pto and "pto.alloc_tile addr =" in pto
     assert pto.count("scf.for") == 1
     assert "pto.verified_" not in pto and "pto.trowsum" in pto
+
+
+@pytest.mark.parametrize("rows", [32, 56])
+def test_retired_scratch_permits_larger_tiles_with_ptoas(tmp_path, rows):
+    """Check affordable and capacity-pressure tiles through the existing CPU entry."""
+    pto, _ = _single(make_scratch_pressure(rows, total_rows=1792), tmp_path)
+    assert all(op in pto for op in ("pto.trowsum", "pto.tadds", "pto.tstore"))
+    assert "pto.subview" in pto, "the first phase must retain its software slots"
 
 
 if __name__ == "__main__":

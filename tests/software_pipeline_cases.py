@@ -39,3 +39,37 @@ def make_epilogue(trips: int = 65, dynamic: bool = False):
         return out
 
     return kernel
+
+
+def make_scratch_pressure(rows: int = 44, total_rows: int = 36960):
+    """Keep stages and total work fixed while varying the second phase's tile.
+
+    The reduction uses software slots. The following loop carries its source
+    cursor, retaining the existing unrolled pipeline. Retiring the reduction's
+    scratch can therefore permit larger tiles without reducing pipeline depth.
+    Both outputs are observable and checked by the manual benchmark.
+    """
+    if rows <= 0 or total_rows < 512 or total_rows % rows:
+        raise ValueError(f"Expected positive tile rows dividing total_rows >= 512, got {rows}, {total_rows}")
+    trips, cols, scratch_rows = total_rows // rows, 128, 64
+
+    @pl.jit
+    def kernel(
+        x: pl.Tensor[[total_rows, cols], pl.FP32],
+        reduced: pl.Out[pl.Tensor[[8 * scratch_rows, 1], pl.FP32]],
+        processed: pl.Out[pl.Tensor[[total_rows, cols], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            scratch = pl.create_tile([scratch_rows, cols], dtype=pl.FP32)
+            for i in pl.pipeline(8, stage=2):
+                value = pl.load(x, [i * scratch_rows, 0], [scratch_rows, cols])
+                row_total = pl.row_sum(value, scratch)
+                pl.store(row_total, [i * scratch_rows, 0], reduced)
+            cursor = pl.const(0, pl.INDEX)
+            for j in pl.pipeline(trips, stage=4):
+                next_value = pl.load(x, [cursor * rows, 0], [rows, cols])
+                pl.store(pl.add(next_value, 1.0), [j * rows, 0], processed)
+                cursor = (cursor + 1) % trips
+        return reduced, processed
+
+    return kernel

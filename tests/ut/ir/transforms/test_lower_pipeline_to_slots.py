@@ -21,6 +21,7 @@ from pypto.arith import Analyzer
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.text_parser import parse
+from pypto.pypto_core import codegen
 from pypto.pypto_core import ir as _ir_core
 
 _PASS_NAME = "LowerPipelineToSlots"
@@ -1490,6 +1491,573 @@ def test_static_pipeline_marks_steady_loop_and_isolates_scratch():
     assert loops[0].attrs["software_pipeline_slots"] == 3
     assert set(refs) == {"dead", "scratch"}
     assert not refs["dead"].same_as(refs["scratch"])
+
+
+@pytest.mark.usefixtures("ascend_backend")
+class TestRetiredPipelineScratch:
+    """Capacity relief must preserve existing layouts and asynchronous boundaries."""
+
+    @staticmethod
+    def _program(
+        rows: int = 64, cols: int = 128, later_rows: int = 96, trailing_use: bool = False
+    ) -> ir.Program:
+        """Lower a reduction followed by two simultaneous ordinary-loop inputs."""
+        height = 16 * max(rows, later_rows)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self, x: pl.Tensor[[height, cols], pl.FP32], y: pl.Out[pl.Tensor[[height, cols], pl.FP32]]
+            ):
+                scratch: pl.Tile[[rows, cols], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                    [rows, cols], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                for i in pl.pipeline(8, stage=2):
+                    value: pl.Tile[[rows, cols], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                        x, [i * rows, 0], [rows, cols]
+                    )
+                    reduced: pl.Tile[[rows, 1], pl.FP32, pl.Mem.Vec] = pl.tile.row_sum(value, scratch)
+                    _stored = pl.tile.store(reduced, [i * rows, 0], y)
+                for j in pl.range(8):
+                    later: pl.Tile[[later_rows, cols], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                        x, [j * later_rows, 0], [later_rows, cols]
+                    )
+                    other: pl.Tile[[later_rows, cols], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                        x, [(j + 8) * later_rows, 0], [later_rows, cols]
+                    )
+                    combined: pl.Tile[[later_rows, cols], pl.FP32, pl.Mem.Vec] = pl.tile.add(later, other)
+                    _later_store = pl.tile.store(combined, [j * later_rows, 0], y)
+                if trailing_use:
+                    _scratch_store = pl.tile.store(scratch, [0, 0], y)
+
+        return _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+
+    @pytest.mark.parametrize(
+        ("rows", "cols", "later_rows", "reuse"), [(16, 16, 16, False), (64, 128, 96, True)]
+    )
+    def test_only_capacity_pressure_retires_scratch(self, rows, cols, later_rows, reuse):
+        """Do not change affordable layouts; preserve slots before sacrificing depth."""
+        before = self._program(rows, cols, later_rows)
+        steady = [stmt for stmt in _walk_stmts(before) if isinstance(stmt, ir.ForStmt) and stmt.attrs]
+        assert any(stmt.attrs.get("software_pipeline_slots") == 2 for stmt in steady)
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "later", "other"})
+        assert any(refs["scratch"].same_as(refs[name]) for name in ("later", "other")) is reuse
+        # The large case needs 64 KiB input slots, 32 KiB scratch and two
+        # 48 KiB later inputs. Scratch must be retired for the allocation to fit.
+        _plan_memory(before, allocate=True)
+
+    def test_full_lifetime_includes_drain_and_later_uses(self):
+        """A scratch use after the sibling loop prevents early retirement."""
+        before = self._program(trailing_use=True)
+        row_sums = [
+            stmt
+            for stmt in _walk_stmts(before)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.row_sum").name
+        ]
+        assert len(row_sums) == 2, "the steady loop and drain must both reference scratch"
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "later", "other"})
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(before, allocate=True)
+
+    def test_failed_retirement_retry_restores_scratch_isolation(self):
+        """A partial capacity saving must not leak into the original fallback."""
+        before = self._program(later_rows=128)
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "later", "other"})
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+        # The original 224 KiB still needs 192 KiB after retiring 32 KiB,
+        # which exceeds the 184 KiB Vec budget and must discard that attempt.
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(before, allocate=True)
+
+    def test_retired_scratch_arena_rejects_ineligible_subrange_member(self):
+        """A carry family cannot enter a retired-scratch arena through a disjoint subrange."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self,
+                x: pl.Tensor[[1672, 128], pl.FP32],
+                y: pl.Out[pl.Tensor[[1672, 128], pl.FP32]],
+            ):
+                payload = pl.tile.full([32, 128], dtype=pl.FP32, value=7.0)
+                scratch = pl.tile.create([64, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                for i in pl.pipeline(8, stage=2):
+                    value = pl.tile.load(x, [i * 64, 0], [64, 128])
+                    reduced = pl.tile.row_sum(value, scratch)
+                    _stored = pl.tile.store(reduced, [i * 64, 0], y)
+                for carry, step in pl.while_(init_values=(payload, 0)):
+                    pl.cond(step < 2)
+                    _carried_store = pl.tile.store(carry, [step * 32, 0], y)
+                    result, _steps = pl.yield_(carry, step + 1)
+                _payload_store = pl.tile.store(result, [1200, 0], y)
+                for j in pl.range(8):
+                    later = pl.tile.load(x, [j * 209, 0], [209, 128])
+                    _later_store = pl.tile.store(later, [j * 209, 0], y)
+
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert any(isinstance(stmt, ir.WhileStmt) for stmt in _walk_stmts(before))
+        assert _slotted_memrefs(before)["value"].slot_count_ == 2
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "payload", "later"})
+        assert not refs["scratch"].same_as(refs["later"])
+        assert not refs["scratch"].same_as(refs["payload"])
+        # Even after retiring 32 KiB scratch, the 64 KiB slots, 104.5 KiB
+        # later tile and separately allocated 16 KiB payload exceed 184 KiB.
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(before, allocate=True)
+
+    def test_while_payload_family_is_preserved_during_other_scratch_retirement(self):
+        """A successful retry must keep all handles of initialized scratch together."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self,
+                x: pl.Tensor[[1648, 128], pl.FP32],
+                y: pl.Out[pl.Tensor[[1648, 128], pl.FP32]],
+            ):
+                scratch = pl.tile.create([32, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                pure_scratch = pl.tile.create([32, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                for i in pl.pipeline(8, stage=2):
+                    value = pl.tile.load(x, [i * 32, 0], [32, 128])
+                    reduced = pl.tile.row_sum(value, scratch)
+                    _stored = pl.tile.store(reduced, [i * 32, 0], y)
+                for k in pl.pipeline(8, stage=2):
+                    second_value = pl.tile.load(x, [k * 32, 0], [32, 128])
+                    second_reduced = pl.tile.row_sum(second_value, pure_scratch)
+                    _second_store = pl.tile.store(second_reduced, [k * 32, 0], y)
+                fill = pl.tile.full([32, 128], dtype=pl.FP32, value=7.0)
+                saved = pl.tile.assemble(scratch, fill, [0, 0])
+                for carry, step in pl.while_(init_values=(saved, 0)):
+                    pl.cond(step < 2)
+                    _carried_store = pl.tile.store(carry, [step * 32, 0], y)
+                    result, _steps = pl.yield_(carry, step + 1)
+                alias = result
+                _payload_store = pl.tile.store(alias, [1200, 0], y)
+                for j in pl.range(8):
+                    later = pl.tile.load(x, [j * 103, 0], [103, 128])
+                    other = pl.tile.load(x, [(j + 8) * 103, 0], [103, 128])
+                    combined = pl.tile.add(later, other)
+                    _later_store = pl.tile.store(combined, [j * 103, 0], y)
+
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        after = _plan_memory(before, allocate=True)
+        refs = _allocation_bases(after, {"scratch", "pure_scratch", "saved", "alias", "later", "other"})
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+        assert any(refs["pure_scratch"].same_as(refs[name]) for name in ("later", "other"))
+
+        # Check the carry and result too: updating only assignment types can
+        # leave these handles pointing at an allocation discarded by the retry.
+        loop = next(stmt for stmt in _walk_stmts(after) if isinstance(stmt, ir.WhileStmt))
+        payload_type = loop.iter_args[0].initValue.type
+        assert isinstance(payload_type, ir.TileType)
+        payload = payload_type.memref
+        assert payload is not None and payload.base_.same_as(refs["scratch"])
+        handles = [
+            stmt.var
+            for stmt in _walk_stmts(after)
+            if isinstance(stmt, ir.AssignStmt)
+            and _source_name(stmt.var.name_hint) in {"scratch", "saved", "alias"}
+        ]
+        handles.extend((loop.iter_args[0], loop.return_vars[0]))
+        for var in handles:
+            assert isinstance(var.type, ir.TileType)
+            memref = var.type.memref
+            assert memref is not None and memref.base_.same_as(payload.base_)
+            ir.assert_structural_equal(memref.byte_offset_, payload.byte_offset_)
+
+    def test_caller_owned_alias_is_excluded_from_retirement(self):
+        """Capacity relief may reuse the local load, while preserving a tile argument."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self,
+                x: pl.Tensor[[1536, 128], pl.FP32],
+                p: pl.InOut[pl.Tile[[96, 128], pl.FP32, pl.Mem.Vec]],
+                y: pl.Out[pl.Tensor[[1536, 128], pl.FP32]],
+            ):
+                scratch = pl.tile.create([64, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                for i in pl.pipeline(8, stage=2):
+                    value = pl.tile.load(x, [i * 64, 0], [64, 128])
+                    reduced = pl.tile.row_sum(value, scratch)
+                    _stored = pl.tile.store(reduced, [i * 64, 0], y)
+                for j in pl.range(8):
+                    later = pl.tile.reshape(p, [96, 128])
+                    other = pl.tile.load(x, [j * 96, 0], [96, 128])
+                    combined = pl.tile.add(later, other)
+                    _later_store = pl.tile.store(combined, [j * 96, 0], y)
+                _parameter_store = pl.tile.store(p, [0, 0], y)
+
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        after = _plan_memory(before, allocate=True)
+        refs = _allocation_bases(after, {"scratch", "later", "other"})
+        parameter = next(iter(after.functions.values())).params[1]
+        assert isinstance(parameter.type, ir.TileType)
+        assert parameter.type.memref is not None
+        assert parameter.type.memref.base_.same_as(refs["later"])
+        assert not refs["scratch"].same_as(refs["later"])
+        assert refs["scratch"].same_as(refs["other"])
+
+        # The full pipeline must retain a local declaration for scratch; using
+        # the parameter's family previously left its PTO handle undefined.
+        with passes.PassContext(
+            [],
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            enable_buffer_ir=False,
+            enable_software_pipeline=True,
+        ):
+            lowered = PassManager(OptimizationStrategy.Default).run_passes(Before)
+        scratch = next(
+            stmt.var
+            for stmt in _walk_stmts(lowered)
+            if isinstance(stmt, ir.AssignStmt) and _source_name(stmt.var.name_hint) == "scratch"
+        )
+        pto = codegen.PTOCodegen().generate(lowered)
+        assert f"%{scratch.name_hint} = pto.alloc_tile" in pto
+
+    @pytest.mark.parametrize("scope", ["sibling", "producer-parent", "dynamic", "full-window-alias"])
+    def test_pure_scratch_can_retire_after_all_producer_loops(self, scope):
+        """Multiple producer uses, completed parent loops and runtime trips stay eligible."""
+        limit = "n" if scope == "dynamic" else "8"
+        scratch_name = "scratch_alias" if scope == "full-window-alias" else "scratch"
+        second_scratch_name = "second_scratch_alias" if scope == "full-window-alias" else "scratch"
+        alias = (
+            "            scratch_alias = pl.tile.reshape(scratch, [32, 128])\n"
+            if scope == "full-window-alias"
+            else ""
+        )
+        second_alias = alias.replace("scratch_alias", "second_scratch_alias")
+        producer = f"""        for i in pl.pipeline({limit}, stage=2):
+            value = pl.tile.load(x, [i * 32, 0], [32, 128])
+{alias}            reduced = pl.tile.row_sum(value, {scratch_name})
+            _stored = pl.tile.store(reduced, [i * 32, 0], y)
+        for k in pl.pipeline({limit}, stage=2):
+            second_value = pl.tile.load(x, [k * 32, 0], [32, 128])
+{second_alias}            second_reduced = pl.tile.row_sum(second_value, {second_scratch_name})
+            _second_store = pl.tile.store(second_reduced, [k * 32, 0], y)
+"""
+        if scope == "producer-parent":
+            producer = "        for epoch in pl.range(2):\n" + "".join(
+                f"    {line}\n" for line in producer.splitlines()
+            )
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+    def kernel(self, x: pl.Tensor[[1792, 128], pl.FP32],
+               y: pl.Out[pl.Tensor[[1792, 128], pl.FP32]], n: pl.Scalar[pl.INDEX]):
+        scratch = pl.tile.create([32, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+{producer}        for j in pl.range(8):
+            later = pl.tile.load(x, [j * 112, 0], [112, 128])
+            other = pl.tile.load(x, [(j + 8) * 112, 0], [112, 128])
+            combined = pl.tile.add(later, other)
+            _later_store = pl.tile.store(combined, [j * 112, 0], y)
+""")
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert not _pipeline_loops(before)
+        assert any(
+            isinstance(stmt, ir.ForStmt) and stmt.attrs.get("software_pipeline_slots") == 2
+            for stmt in _walk_stmts(before)
+        )
+        if scope == "full-window-alias":
+            assert any(
+                isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.value, ir.Call)
+                and stmt.value.op.name == ir.get_op("tile.reshape").name
+                for stmt in _walk_stmts(before)
+            ), "the immutable metadata alias must survive into memory planning"
+        refs = _allocation_bases(_plan_memory(before, allocate=True), {"scratch", "later", "other"})
+        assert any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+
+    def test_view_alias_keeps_scratch_live_after_later_loop(self):
+        """A nonzero-offset view must extend its whole allocation family's lifetime."""
+
+        class ThroughView(ir.IRMutator):
+            rewrites = 0
+
+            def visit_assign_stmt(self, op):
+                if _source_name(op.var.name_hint) == "scratch":
+                    sliced = ir.op.tile.slice(op.var, [32, 128], [32, 0], span=_S)
+                    slice_var = ir.Var("scratch_slice", sliced.type, _S)
+                    reshaped = ir.op.tile.reshape(slice_var, [64, 64], span=_S)
+                    self.view = ir.Var("scratch_view", reshaped.type, _S)
+                    return ir.SeqStmts(
+                        [op, ir.AssignStmt(slice_var, sliced, _S), ir.AssignStmt(self.view, reshaped, _S)], _S
+                    )
+                if _source_name(op.var.name_hint) == "_scratch_store":
+                    assert isinstance(op.value, ir.Call)
+                    self.rewrites += 1
+                    call = ir.Call(
+                        op.value.op, [self.view, *op.value.args[1:]], op.value.kwargs, op.value.type, _S
+                    )
+                    return ir.AssignStmt(op.var, call, _S)
+                return super().visit_assign_stmt(op)
+
+        mutator = ThroughView()
+        before = mutator.visit_program(self._program(trailing_use=True))
+        assert mutator.rewrites == 1, "the trailing read must use the view rather than scratch directly"
+        refs = _allocation_bases(
+            _plan_memory(before), {"scratch", "scratch_slice", "scratch_view", "later", "other"}
+        )
+        assert all(refs["scratch"].same_as(refs[name]) for name in ("scratch_slice", "scratch_view"))
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(before, allocate=True)
+
+    def test_if_phi_keeps_scratch_live_after_later_loop(self):
+        """A phi may retain initialized scratch beyond an otherwise reusable loop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self,
+                x: pl.Tensor[[1536, 128], pl.FP32],
+                y: pl.Out[pl.Tensor[[1536, 128], pl.FP32]],
+                flag: pl.Scalar[pl.BOOL],
+            ):
+                scratch = pl.tile.create([64, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                for i in pl.pipeline(8, stage=2):
+                    value = pl.tile.load(x, [i * 64, 0], [64, 128])
+                    reduced = pl.tile.row_sum(value, scratch)
+                    _stored = pl.tile.store(reduced, [i * 64, 0], y)
+                fill = pl.tile.full([64, 128], dtype=pl.FP32, value=7.0)
+                saved = pl.tile.assemble(scratch, fill, [0, 0])
+                if flag:
+                    scratch_phi = pl.yield_(saved)
+                else:
+                    scratch_phi = pl.yield_(saved)
+                for j in pl.range(8):
+                    later = pl.tile.load(x, [j * 96, 0], [96, 128])
+                    other = pl.tile.load(x, [(j + 8) * 96, 0], [96, 128])
+                    combined = pl.tile.add(later, other)
+                    _later_store = pl.tile.store(combined, [j * 96, 0], y)
+                _scratch_store = pl.tile.store(scratch_phi, [0, 0], y)
+
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert any(isinstance(stmt, ir.IfStmt) and stmt.return_vars for stmt in _walk_stmts(before))
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "saved", "later", "other"})
+        assert refs["scratch"].same_as(refs["saved"]), "the initialized payload must remain on scratch"
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(before, allocate=True)
+
+    @pytest.mark.parametrize("second_loop", ["for", "while"])
+    def test_chained_loop_results_keep_scratch_live_after_later_loop(self, second_loop):
+        """A late read through sequential carries keeps the initialized scratch payload live."""
+        if second_loop == "for":
+            header = "        for second, (second_carry,) in pl.range(2, init_values=(first_result,)):\n"
+            final_yield = "            final_result = pl.yield_(second_carry)\n"
+        else:
+            header = (
+                "        for second_carry, second in pl.while_(init_values=(first_result, 0)):\n"
+                "            pl.cond(second < 2)\n"
+            )
+            final_yield = "            final_result, _steps = pl.yield_(second_carry, second + 1)\n"
+        Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+    def kernel(self, x: pl.Tensor[[1536, 128], pl.FP32],
+               y: pl.Out[pl.Tensor[[1536, 128], pl.FP32]]):
+        scratch = pl.tile.create([64, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+        for i in pl.pipeline(8, stage=2):
+            value = pl.tile.load(x, [i * 64, 0], [64, 128])
+            reduced = pl.tile.row_sum(value, scratch)
+            _stored = pl.tile.store(reduced, [i * 64, 0], y)
+        fill = pl.tile.full([64, 128], dtype=pl.FP32, value=7.0)
+        saved = pl.tile.assemble(scratch, fill, [0, 0])
+        for first, (first_carry,) in pl.range(2, init_values=(saved,)):
+            _first_store = pl.tile.store(first_carry, [first * 64, 0], y)
+            first_result = pl.yield_(first_carry)
+{header}            _second_store = pl.tile.store(second_carry, [second * 64, 0], y)
+{final_yield}        for j in pl.range(8):
+            later = pl.tile.load(x, [j * 96, 0], [96, 128])
+            other = pl.tile.load(x, [(j + 8) * 96, 0], [96, 128])
+            combined = pl.tile.add(later, other)
+            _later_store = pl.tile.store(combined, [j * 96, 0], y)
+        _scratch_store = pl.tile.store(final_result, [0, 0], y)
+""")
+
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        carries = [
+            stmt
+            for stmt in _walk_stmts(before)
+            if isinstance(stmt, (ir.ForStmt, ir.WhileStmt))
+            and any(
+                _source_name(var.name_hint) in {"first_result", "final_result"} for var in stmt.return_vars
+            )
+        ]
+        assert len(carries) == 2, "both loop results must survive lowering"
+        assert carries[1].iter_args[0].initValue.same_as(carries[0].return_vars[0])
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "saved", "later", "other"})
+        assert refs["scratch"].same_as(refs["saved"]), "the initialized payload must remain on scratch"
+        # Both carries retain the same payload. Its final read follows the
+        # pressure loop, so neither input may overwrite the allocation early.
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other")), (
+            "later inputs must not overwrite the payload still read through the final loop result"
+        )
+        with pytest.raises(ValueError, match="Vec buffer usage.*exceeds"):
+            _plan_memory(before, allocate=True)
+
+    def test_mixed_scratch_families_retire_only_the_unprotected_allocation(self):
+        """A successful retirement retry must still protect nested phi sources."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self,
+                x: pl.Tensor[[1280, 128], pl.FP32],
+                y: pl.Out[pl.Tensor[[1280, 128], pl.FP32]],
+                flag: pl.Scalar[pl.BOOL],
+                inner_flag: pl.Scalar[pl.BOOL],
+            ):
+                scratch = pl.tile.create([64, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                protected = pl.tile.create([16, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                for i in pl.pipeline(8, stage=2):
+                    value = pl.tile.load(x, [i * 64, 0], [64, 128])
+                    reduced = pl.tile.row_sum(value, scratch)
+                    _stored = pl.tile.store(reduced, [i * 64, 0], y)
+                for p in pl.pipeline(8, stage=2):
+                    protected_value = pl.tile.load(x, [p * 16, 0], [16, 128])
+                    protected_reduced = pl.tile.row_sum(protected_value, protected)
+                    _protected_store = pl.tile.store(protected_reduced, [p * 16, 0], y)
+                upper = pl.tile.slice(protected, [8, 128], [0, 0])
+                lower = pl.tile.slice(protected, [8, 128], [8, 0])
+                if flag:
+                    if inner_flag:
+                        selected = pl.yield_(upper)
+                    else:
+                        selected = pl.yield_(lower)
+                    protected_phi = pl.yield_(selected)
+                else:
+                    protected_phi = pl.yield_(lower)
+                for j in pl.range(8):
+                    later = pl.tile.load(x, [j * 80, 0], [80, 128])
+                    other = pl.tile.load(x, [(j + 8) * 80, 0], [80, 128])
+                    combined = pl.tile.add(later, other)
+                    _later_store = pl.tile.store(combined, [j * 80, 0], y)
+                _scratch_store = pl.tile.store(protected_phi, [0, 0], y)
+
+        before = _run_to_slots(Before, passes.MemoryPlanner.PYPTO, software=True)
+        assert sum(isinstance(stmt, ir.IfStmt) for stmt in _walk_stmts(before)) == 2
+        steady = [stmt for stmt in _walk_stmts(before) if isinstance(stmt, ir.ForStmt) and stmt.attrs]
+        assert sum(stmt.attrs.get("software_pipeline_slots") == 2 for stmt in steady) == 2
+        after = _plan_memory(before)
+        refs = _allocation_bases(after, {"scratch", "protected", "later", "other"})
+        assert any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+        assert not any(refs["protected"].same_as(refs[name]) for name in ("scratch", "later", "other"))
+        _plan_memory(before, allocate=True)
+
+    @pytest.mark.parametrize("kind", ["for", "while"])
+    def test_common_parent_backedge_prevents_retirement(self, kind):
+        """Sibling loops repeat together, so the next scratch write can race DMA."""
+        before = self._program()
+        function = next(iter(before.functions.values()))
+        if kind == "for":
+            loop = ir.ForStmt(
+                ir.Var("outer", ir.ScalarType(DataType.INDEX), _S),
+                _index(0),
+                _index(2),
+                _index(1),
+                [],
+                function.body,
+                [],
+                _S,
+            )
+        else:
+            step = ir.IterArg("step", ir.ScalarType(DataType.INDEX), _index(0), _S)
+            next_step = ir.Add(step, _index(1), DataType.INDEX, _S)
+            body = ir.SeqStmts([function.body, ir.YieldStmt([next_step], _S)], _S)
+            loop = ir.WhileStmt(
+                ir.Lt(step, _index(2), DataType.BOOL, _S),
+                [step],
+                body,
+                [ir.Var("steps", step.type, _S)],
+                _S,
+            )
+        function = ir.Function(
+            function.name,
+            list(zip(function.params, function.param_directions)),
+            function.return_types,
+            loop,
+            _S,
+            type=function.func_type,
+        )
+        before = ir.Program([function], before.name, _S)
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "later", "other"})
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
+
+    @pytest.mark.parametrize(
+        "kind", ["explicit-workspace", "submit", "call-attribute", "discarded-partial-view"]
+    )
+    def test_strict_alias_family_is_never_retired(self, kind):
+        """Another use of a scratch alias can carry a stronger storage contract."""
+
+        class StrictScratch(ir.IRMutator):
+            insertions = 0
+
+            def visit_assign_stmt(self, op):
+                if kind != "explicit-workspace" and _source_name(op.var.name_hint) == "scratch":
+                    source = op.var
+                elif (
+                    kind == "explicit-workspace"
+                    and isinstance(op.value, ir.Call)
+                    and op.value.op.name == ir.get_op("tile.row_sum").name
+                ):
+                    source = op.value.args[1]
+                else:
+                    return super().visit_assign_stmt(op)
+                alias = ir.Var(f"workspace_alias_{op.var.name_hint}", source.type, op.span)
+                if kind == "submit":
+                    # The async alias use is outside the marked loop and its
+                    # GlobalVar callee has no operator-registry entry.
+                    extra = ir.Submit(
+                        ir.GlobalVar("worker"), [alias], [], ir.ScalarType(DataType.TASK_ID), op.span
+                    )
+                elif kind == "call-attribute":
+                    # The only reference is in an attribute, outside the
+                    # operation's registered positional memory effects.
+                    assert isinstance(op.value, ir.Call)
+                    extra = ir.Call(
+                        op.value.op,
+                        op.value.args,
+                        op.value.kwargs,
+                        {"dependency": alias},
+                        op.value.type,
+                        op.span,
+                    )
+                elif kind == "discarded-partial-view":
+                    # A discarded view has no AssignStmt at which to prove
+                    # that the complete static allocation window is retained.
+                    extra = ir.op.tile.slice(alias, [32, 128], [32, 0], span=op.span)
+                else:
+                    # Keep the original legacy role and add the stronger
+                    # explicit contract through another Var on the same base.
+                    assert isinstance(op.value, ir.Call)
+                    extra = ir.Call(
+                        ir.get_op("tile.rsqrt"), [op.value.args[0], alias], {}, op.value.args[0].type, op.span
+                    )
+                self.insertions += 1
+                return ir.SeqStmts(
+                    [op, ir.AssignStmt(alias, source, op.span), ir.EvalStmt(extra, op.span)], op.span
+                )
+
+        mutator = StrictScratch()
+        before = mutator.visit_program(self._program())
+        assert mutator.insertions == (2 if kind == "explicit-workspace" else 1), (
+            "strict references must be inserted"
+        )
+        refs = _allocation_bases(_plan_memory(before), {"scratch", "later", "other"})
+        assert not any(refs["scratch"].same_as(refs[name]) for name in ("later", "other"))
 
 
 if __name__ == "__main__":
