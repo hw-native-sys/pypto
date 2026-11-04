@@ -922,10 +922,6 @@ void CollectAccessConstraints(const FunctionPtr& func,
   result.target_hazard_inputs.looping_written_workspace_bases = workspace_collector.TakeLoopingBases();
   result.target_hazard_inputs.retirable_pipeline_scratch_bases =
       workspace_collector.TakePipelineScratchBases();
-  if (!result.target_hazard_inputs.retirable_pipeline_scratch_bases.empty()) {
-    ScratchRetirementCollector retirement(result.target_hazard_inputs, lifetimes);
-    retirement.Run(func, result.declared_allocation_bases);
-  }
 
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
@@ -948,6 +944,12 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   }
   ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
   CollectAccessConstraints(func, lifetimes.var_sharing_groups, result);
+  // Retirement needs tracked lifetimes and declared-allocation exclusions.
+  // Keep this proof out of the shared, lifetime-free storage-selection path.
+  if (!result.target_hazard_inputs.retirable_pipeline_scratch_bases.empty()) {
+    ScratchRetirementCollector retirement(result.target_hazard_inputs, lifetimes);
+    retirement.Run(func, result.declared_allocation_bases);
+  }
   return result;
 }
 
