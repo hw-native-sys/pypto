@@ -1824,6 +1824,15 @@ void OpConversionRegistry::RegisterGatherOps() {
           return flat;
         };
 
+        // Use the same source-reuse decision in the capacity estimate and the
+        // lowering. Newly emitted reshape variables are not in the incoming
+        // context, so their storage proof must come from the original operand.
+        auto source_window_shape = index_shape;
+        source_window_shape.back() = input_shape.back();
+        const bool reuse_packed_source =
+            As<TileType>(input->GetType()) && context.packed_tiles.count(input) != 0 &&
+            tile_view_semantics::ShapeExprListsEquivalent(input_shape, source_window_shape);
+
         // Keep large gathers row-bounded on every backend. This conservative
         // estimate covers the source, output, and the flat-index working tiles;
         // surrounding live values can still require a smaller user tile.
@@ -1869,12 +1878,7 @@ void OpConversionRegistry::RegisterGatherOps() {
             if (aligned < *bytes || aligned > remaining) return true;
             remaining -= aligned;
           }
-          auto requested = index_shape;
-          requested.back() = make_idx(source_cols);
-          const bool copy_source = !As<TileType>(input->GetType()) ||
-                                   context.packed_tiles.count(input) == 0 ||
-                                   !tile_view_semantics::ShapeExprListsEquivalent(input_shape, requested);
-          if (copy_source) {
+          if (!reuse_packed_source) {
             const uint64_t source_row = row_bytes(source_cols, input_dtype.GetByte());
             if (source_row == 0) return false;
             if (static_cast<uint64_t>(rows) > remaining / source_row) return true;
@@ -2019,15 +2023,24 @@ void OpConversionRegistry::RegisterGatherOps() {
 
           auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero, zero}, span);
           auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(S2)}, span);
-          auto inp_raw = emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp_raw");
+          // A full packed local source needs only a view reshape. Slicing it
+          // first emits an unsupported ND slice; repacking the synthesized 2D
+          // variable would also add a copy the capacity estimate did not charge.
+          ExprPtr inp_raw = reuse_packed_source
+                                ? input
+                                : emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp_raw");
           auto inp_2d = reshape_to(prologue, inp_raw, {make_idx(I0I1), make_idx(S2)}, "gather_inp");
           ExprPtr gather_src = inp_2d;
-          if (As<TileType>(input->GetType())) {
+          if (As<TileType>(input->GetType()) && !reuse_packed_source) {
             gather_src = MaterializeGatherSource(inp_2d, {make_idx(I0I1), make_idx(S2)}, context, prologue,
                                                  span, "gather_src");
           }
           auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(I1), make_idx(K)}, span);
-          auto idx_raw = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx_raw");
+          // The index window is its entire shape; packed local indices can
+          // likewise be reshaped directly without an intermediate ND slice.
+          ExprPtr idx_raw = As<TileType>(index->GetType()) && context.packed_tiles.count(index) != 0
+                                ? index
+                                : emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx_raw");
           auto idx_2d = reshape_to(prologue, idx_raw, {make_idx(I0I1), make_idx(K)}, "gather_idx");
 
           auto flat_idx = emit_flat_idx(prologue, idx_2d, I0I1, S2, K, "gather");

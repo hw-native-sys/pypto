@@ -585,6 +585,9 @@ sources use a shared row-at-a-time lowering instead, as do sources whose
 logical row width is not 32-byte aligned; the output accumulator and
 any existing local source still need to fit. Local rank-3 sources and indices
 require packed-storage proof before merging their leading dimensions.
+Full-shape packed local rank-3 operands are reshaped directly: the source's
+original proof avoids an extra packing copy of the synthesized 2D view, keeping
+the emitted allocations consistent with the capacity estimate.
 The converter receives a read-only `ConversionContext` containing packed-storage
 facts collected from earlier lowered producers in one SSA traversal. A separate
 allocation-origin fact follows aliases and views so capacity checks count the

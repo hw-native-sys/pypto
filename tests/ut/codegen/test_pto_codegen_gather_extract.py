@@ -266,6 +266,43 @@ def test_gather_counts_backing_storage_and_window_copy(ascend_backend, case):
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize(
+    "dtype_name,source_cols", [("FP32", 744), ("FP16", 1488), ("INT32", 744), ("INT16", 1488)]
+)
+@pytest.mark.parametrize("local_index", [False, True])
+def test_rank3_gather_reuses_full_packed_local_source(ascend_backend, dtype_name, source_cols, local_index):
+    # Every dtype has a 95,232-byte packed source with 32-byte-aligned rows.
+    # The source and gather temporaries fit A2/A3 Vec, but a second full source
+    # does not. A new reshape SSA value must not lose the original packing proof.
+    index_init = "indices = pl.full([2, 16, 32], dtype=pl.INT32, value=0)" if local_index else "indices = idx"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        idx: pl.Tensor[[2, 16, 32], pl.INT32],
+        output: pl.Out[pl.Tensor[[2, 16, 32], pl.{dtype_name}]],
+    ) -> pl.Tensor[[2, 16, 32], pl.{dtype_name}]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            local = pl.full([2, 16, {source_cols}], dtype=pl.{dtype_name}, value=1)
+            {index_init}
+            picked = pl.tensor.gather(local, dim=-1, index=indices)
+            output = pl.assemble(output, picked, [0, 0, 0])
+        return output
+""")
+
+    mlir = _codegen(program)
+    assert "scf.for" not in mlir
+    assert "pto.subview" not in mlir
+    assert "pto.textract" not in mlir
+    assert "pto.tadds" not in mlir
+    gathers = [line for line in mlir.splitlines() if "pto.tgather ins(" in line]
+    assert len(gathers) == 1
+    assert f"rows=32, cols={source_cols}" in gathers[0]
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize(
     "source_shape,dtype", [([1, 3], pl.FP32), ([4, 3], pl.FP32), ([4, 3], pl.FP16), ([2, 2, 3], pl.FP32)]
 )
 def test_gather_unaligned_source_rows_use_row_fallback(ascend_backend, source_shape, dtype):
