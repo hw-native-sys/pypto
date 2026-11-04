@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, ir, passes
 from pypto.ir.compile import compile as ir_compile
 from pypto.language.parser.diagnostics import ParserSyntaxError, ParserTypeError
 
@@ -208,6 +209,104 @@ def test_external_source_not_found(tmp_path):
             ) -> pl.Tensor[[16, 16], pl.FP16]:
                 out = self.K(a, out)
                 return out
+
+
+def _external_contract_program(
+    cpp: Path, indices: list[int] | None, *, result_count: int = 2, invalid: str | None = None
+) -> ir.Program:
+    """Construct raw IR to test the external declaration boundary independently of JIT."""
+    span = ir.Span.unknown()
+    tensor = ir.TensorType([1, 32], DataType.FP32)
+    params = [ir.Var(name, tensor, span) for name in ("first", "second", "third")]
+    attrs: dict[str, object] = {"external_source": str(cpp)}
+    if indices is not None:
+        returned = [params[i] for i in indices]
+        if invalid == "foreign":
+            returned[0] = ir.Var("foreign", tensor, span)
+        attrs["external_return_params"] = returned
+    types = [tensor] * result_count
+    if invalid == "dtype":
+        types[0] = ir.TensorType([1, 32], DataType.FP16)
+    if invalid == "shape":
+        types[0] = ir.TensorType([1, 64], DataType.FP32)
+    function = ir.Function(
+        "producer",
+        [(p, ir.ParamDirection.Out) for p in params],
+        types,
+        ir.SeqStmts([], span),
+        span,
+        type=ir.FunctionType.AIV,
+        attrs=attrs,
+    )
+    return ir.Program([function], "ExternalContract", span)
+
+
+@pytest.mark.parametrize("indices", [[1, 2], [2, 0], [1, 1], []])
+def test_external_contract_survives_ssa_and_round_trip(tmp_path, indices):
+    """Parameter references must follow SSA renaming and survive persisted pass dumps."""
+    before = _external_contract_program(_write_kernel(tmp_path), indices, result_count=len(indices))
+    after = passes.convert_to_ssa()(before)
+    restored = ir.deserialize(ir.serialize(after))
+    reparsed = pl.parse(str(after))
+    for program in (after, restored, reparsed):
+        assert isinstance(program, ir.Program)
+        ir.assert_structural_equal(after, program)
+        func = program.get_function("producer")
+        assert func is not None
+        returned = func.attrs["external_return_params"]
+        assert len(returned) == len(indices)
+        assert all(value is func.params[index] for value, index in zip(returned, indices))
+        passes.normalize_return_order()(program)
+
+
+@pytest.mark.parametrize(
+    ("indices", "invalid", "message"),
+    [
+        (None, None, "returned parameter contract has 3 entries"),
+        ([1], None, "returned parameter contract has 1 entries"),
+        ([1, 2], "foreign", "must reference its own parameter"),
+        ([1, 2], "dtype", "same tensor dtype and shape"),
+        ([1, 2], "shape", "different shape"),
+    ],
+)
+def test_external_contract_rejects_ambiguous_or_invalid_returns(tmp_path, indices, invalid, message):
+    program = _external_contract_program(_write_kernel(tmp_path), indices, invalid=invalid)
+    if invalid != "foreign":
+        with pytest.raises(ValueError, match=message):
+            passes.normalize_return_order()(program)
+    # The property verifier must validate declarations instead of exempting all
+    # external functions just because they have no executable ReturnStmt.
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.ReturnParamsExplicit)
+    diagnostics = passes.PropertyVerifierRegistry.verify(properties, program)
+    assert diagnostics
+    assert any(message in diagnostic.message for diagnostic in diagnostics)
+
+
+def test_external_signature_only_full_output_contract(tmp_path):
+    """Raw signature-only IR retains the ordered-all-outputs convention."""
+    program = _external_contract_program(_write_kernel(tmp_path), None, result_count=3)
+    passes.normalize_return_order()(program)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.ReturnParamsExplicit)
+    assert not passes.PropertyVerifierRegistry.verify(properties, program)
+
+
+@pytest.mark.parametrize("contract", [0, "output", [0], [True]])
+def test_external_contract_requires_parameter_references(tmp_path, contract):
+    span = ir.Span.unknown()
+    tensor = ir.TensorType([1, 32], DataType.FP32)
+    output = ir.Var("output", tensor, span)
+    with pytest.raises(TypeError, match="parameter Vars|expected Var"):
+        ir.Function(
+            "producer",
+            [(output, ir.ParamDirection.Out)],
+            [tensor],
+            ir.SeqStmts([], span),
+            span,
+            type=ir.FunctionType.AIV,
+            attrs={"external_source": str(_write_kernel(tmp_path)), "external_return_params": contract},
+        )
 
 
 if __name__ == "__main__":

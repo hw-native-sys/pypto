@@ -48,7 +48,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast, get_args, get_origin
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
-from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_RETURN_PARAMS_ATTR
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
@@ -2279,7 +2279,13 @@ class Specializer:
         # kernel expands to an AIC member + AIV member + Group wrapper so the
         # entry's call lowers to a single MixedKernels submit.
         if ctx.func_type == "extern":
-            return self._render_external(ctx, params, ret_ann, all_param_names)
+            return self._render_external(
+                ctx,
+                params,
+                ret_ann,
+                all_param_names,
+                self._external_return_params(func_def, tensor_params, out_params, ret_type),
+            )
 
         # Transform body
         dep_names = set(ctx.dep_names)
@@ -2377,12 +2383,57 @@ class Specializer:
 
         return result_lines
 
+    @staticmethod
+    def _external_return_params(
+        func_def: ast.FunctionDef,
+        tensor_params: list[str],
+        out_params: list[str],
+        ret_type: str | None,
+    ) -> list[str] | None:
+        """Preserve explicit extern result identities before discarding its body.
+
+        A return here declares aliases, not native computation. Accept a single
+        terminal return of tensor parameters; arbitrary Python computation has
+        no representation in a declaration-only kernel and must not be erased.
+        """
+        body = [
+            stmt
+            for stmt in func_def.body
+            if not (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+            )
+        ]
+        returns = [node for stmt in body for node in ast.walk(stmt) if isinstance(node, ast.Return)]
+        if returns:
+            if len(body) != 1 or not isinstance(body[0], ast.Return) or len(returns) != 1:
+                raise ValueError(
+                    f"Extern '{func_def.name}' must declare returned tensor parameters with a single "
+                    "return statement; its body is not executed"
+                )
+            value = returns[0].value
+            elements = value.elts if isinstance(value, ast.Tuple) else [value]
+            tensor_param_names = set(tensor_params)
+            if any(
+                not isinstance(element, ast.Name) or element.id not in tensor_param_names
+                for element in elements
+            ):
+                raise ValueError(f"Extern '{func_def.name}' can only return tensor parameters")
+            return [cast(ast.Name, element).id for element in elements]
+        # Retain the existing JIT single-result default explicitly. Multi-result
+        # signature-only declarations use the IR's all-writable-params contract.
+        if ret_type and out_params and not ret_type.startswith("tuple["):
+            return [out_params[0]]
+        return None
+
     def _render_external(
         self,
         ctx: SpecializeContext,
         params: list[str],
         ret_ann: str,
         all_param_names: list[str],
+        returned_params: list[str] | None,
     ) -> list[str]:
         """Render an external C++ kernel declaration as @pl.function source lines.
 
@@ -2410,9 +2461,15 @@ class Specializer:
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
+            result_contract = (
+                [f"    pl.func_attr({{{EXTERNAL_RETURN_PARAMS_ATTR!r}: [{', '.join(returned_params)}]}})"]
+                if returned_params is not None
+                else []
+            )
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
+                *result_contract,
                 "    ...",
             ]
 

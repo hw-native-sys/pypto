@@ -179,12 +179,45 @@ Paths resolve relative to the file defining the kernel. Editing the referenced
 `.cpp` changes the JIT cache key, so a kernel change triggers recompilation even
 though the Python stub is unchanged.
 
+## Returned tensor identities
+
+An extern result aliases a tensor parameter supplied to the native kernel.
+Declare a subset or reordered results with a single return of parameter names:
+
+```python
+@pl.jit.extern(core_type="aiv", source="kernels/producer.cpp")
+def producer(
+    first: pl.Out[pl.Tensor],
+    second: pl.Out[pl.Tensor],
+    third: pl.Out[pl.Tensor],
+) -> tuple[pl.Tensor, pl.Tensor]:
+    return second, third
+```
+
+This return declares aliases; Python does not execute it as kernel computation.
+The JIT preserves the names in the `external_return_params` function attribute,
+so dropping an unused result or outlining a SPMD wrapper cannot shift later
+consumers onto a different output buffer. Repeated parameter returns are also
+preserved. Return expressions that compute a value, return a local variable, or
+select a result through control flow are rejected.
+
+In raw `@pl.function` IR, declare the same mapping with a prologue such as
+`pl.func_attr({"external_return_params": [second, third]})`, followed by `...`.
+Each reference must name a parameter of that function and match the corresponding
+return's tensor dtype and logical shape. References survive SSA renaming,
+memory initialization, printing and serialization.
+
+Without this attribute, a raw extern declaration returns **all** `Out`/`InOut`
+parameters in declaration order, with matching result count and tensor types.
+An ambiguous signature is rejected instead of binding results by a heuristic.
+The JIT's existing first-`Out` default for a signature-only single-result stub
+is recorded explicitly; use an explicit return to declare another result.
+
 ## What the compiler does
 
-- **Passes**: the header-only function survives the pass pipeline unchanged
-  (its empty body is a no-op for tile passes); it is exempt only from the
-  `ReturnParamsExplicit` property, which requires a `ReturnStmt` a header cannot
-  have.
+- **Passes**: the declaration has no executable tile body. `ReturnParamsExplicit`
+  validates its returned-parameter contract, and `NormalizeReturnOrder` uses it
+  to make Group/SPMD wrapper returns explicit parameter references.
 - **Orchestration codegen**: assigns the kernel a `func_id` and emits the submit
   exactly as for a DSL kernel — a single AIC/AIV `rt_submit_*_task`, or a
   `MixedKernels{aic_id, aiv_id, ...}` + `rt_submit_task` for a group.
@@ -197,6 +230,8 @@ though the Python stub is unchanged.
 ## Restrictions
 
 - `external_source` is only valid on `FunctionType.AIC` / `FunctionType.AIV`.
-- The body must be a bare `...` (signature only).
+- A raw `@pl.function` body must be `...` (signature only), optionally preceded
+  by `pl.func_attr`. A `@pl.jit.extern` may additionally declare the single
+  parameter-return statement described above.
 - A `Group` must be all-external or all-DSL — mixing external and DSL members in
   one group is rejected.

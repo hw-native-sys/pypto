@@ -162,10 +162,40 @@ def pa_aiv(self, query: pl.Tensor, out: pl.Out[pl.Tensor]): ...
 路径相对于定义该 kernel 的文件解析。修改所引用的 `.cpp` 会改变 JIT 缓存键，因此即使
 Python stub 未变，kernel 变更也会触发重新编译。
 
+## 返回 Tensor 的身份
+
+extern 的返回值是传入原生 kernel 的 Tensor 参数的别名（alias）。返回子集或调整
+返回顺序时，用一条 return 语句明确列出参数名：
+
+```python
+@pl.jit.extern(core_type="aiv", source="kernels/producer.cpp")
+def producer(
+    first: pl.Out[pl.Tensor],
+    second: pl.Out[pl.Tensor],
+    third: pl.Out[pl.Tensor],
+) -> tuple[pl.Tensor, pl.Tensor]:
+    return second, third
+```
+
+这条 return 用于声明别名，不会作为 kernel 计算在 Python 中执行。JIT 将参数引用
+保存在函数属性 `external_return_params` 中，保证删除未使用的返回值或提取 SPMD
+wrapper 后，后续消费者仍然读取正确的输出 buffer。重复返回同一个参数也会保留。
+返回计算表达式、局部变量或通过控制流选择返回值的写法会被拒绝。
+
+在原始 `@pl.function` IR 中，可用函数体开头的
+`pl.func_attr({"external_return_params": [second, third]})` 声明相同映射，后面接 `...`。
+每个引用必须指向该函数自己的参数，并与相应返回类型的 dtype 和逻辑形状一致。
+这些引用会随 SSA 重命名、内存初始化、打印及序列化正确传递。
+
+若没有该属性，原始 extern 声明按参数声明顺序返回**全部** `Out`/`InOut` 参数，
+返回数量和 Tensor 类型必须匹配。有歧义的签名会被拒绝，避免按位置猜测返回身份。
+JIT 对只有签名的单返回值声明仍使用已有的首个 `Out` 默认值，并显式记录该映射；
+需要返回其他参数时，请明确写出 return。
+
 ## 编译器行为
 
-- **Passes**：仅有函数头的函数原样穿过 pass 流水线（空体对 tile passes 是 no-op）；它
-  仅豁免 `ReturnParamsExplicit` 属性 —— 该属性要求存在 `ReturnStmt`，而函数头本就没有。
+- **Passes**：声明没有可执行的 tile 函数体。`ReturnParamsExplicit` 验证返回参数契约，
+  `NormalizeReturnOrder` 使用该契约，将 Group/SPMD wrapper 的返回值规范化为参数引用。
 - **Orchestration 代码生成**：为该 kernel 分配 `func_id`，并像 DSL kernel 一样生成派发
   —— 单核 AIC/AIV 的 `rt_submit_*_task`，或 group 的 `MixedKernels{aic_id, aiv_id, ...}`
   - `rt_submit_task`。
@@ -176,6 +206,7 @@ Python stub 未变，kernel 变更也会触发重新编译。
 ## 约束
 
 - `external_source` 仅在 `FunctionType.AIC` / `FunctionType.AIV` 上有效。
-- 函数体必须是裸的 `...`（仅签名）。
+- 原始 `@pl.function` 函数体必须是 `...`（仅签名），前面可有 `pl.func_attr`。
+  `@pl.jit.extern` 还可以用上述单条参数 return 声明返回身份。
 - 一个 `Group` 必须全为外部 kernel 或全为 DSL kernel —— 不允许在同一 group 中混用外部
   与 DSL 成员。

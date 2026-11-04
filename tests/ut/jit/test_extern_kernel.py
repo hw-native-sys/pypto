@@ -18,6 +18,7 @@ call lowers to a single MixedKernels submit.
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pypto.language as pl
@@ -25,10 +26,12 @@ import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR
+from pypto.backend import BackendType
 from pypto.backend.pto_backend import generate
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.jit.specializer import Specializer
 from pypto.pypto_core import codegen, ir
+from pypto.runtime import RunConfig
 
 _KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 _PAIR_ROWS = 16
@@ -46,6 +49,15 @@ def _write_kernel(tmp_path: Path, name: str = "ext.cpp") -> Path:
     src = tmp_path / name
     src.write_text(_KERNEL_SRC)
     return src
+
+
+def _load_jit_module(path: Path):
+    """Load a generated JIT fixture with a real source file for specialization."""
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _specialize(entry, *args):
@@ -788,6 +800,132 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
 
         @pl.jit.extern(core_type="aiv", source=cpp, include_dirs=[missing])
         def k(a: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("core_type", ["aiv", "aic", "mixed"])
+@pytest.mark.parametrize("dispatch", ["direct", "spmd", "submit"])
+@pytest.mark.parametrize(
+    ("returned", "consumed"),
+    [
+        (("first", "second", "third"), ("second", "third")),
+        (("first", "second", "third"), ("first", "third")),
+        (("first", "second", "third"), ("first", "second")),
+        (("first", "second", "third"), ("first", "second", "third")),
+        (("first", "second", "third"), ("third",)),
+        (("second", "third"), ("second", "third")),
+        (("third", "first", "second"), ("first", "second", "third")),
+    ],
+    ids=["unused-leading", "unused-middle", "unused-trailing", "all-live", "one-live", "subset", "reordered"],
+)
+def test_extern_return_buffer_identities(tmp_path, ascend_backend, core_type, dispatch, returned, consumed):
+    """Unused results must not shift physical buffers at a later task (#3251).
+
+    Generate a real JIT module so each matrix entry exercises specialization,
+    outlining, the complete pass pipeline, and orchestration emission. All
+    output types are equal: only buffer identity can detect this regression.
+    """
+    cpp = _write_kernel(tmp_path)
+    source_arg = (
+        f"aic_source={str(cpp)!r}, aiv_source={str(cpp)!r}"
+        if core_type == "mixed"
+        else f"source={str(cpp)!r}"
+    )
+    result_type = "pl.Tensor" if len(returned) == 1 else f"tuple[{', '.join('pl.Tensor' for _ in returned)}]"
+    producer_call = f"{', '.join(returned)} = producer(first, second, third)"
+    consumer_call = f"output = consumer({', '.join(consumed)}, output)"
+    if dispatch == "direct":
+        calls = f"    {producer_call}\n    {consumer_call}"
+    else:
+        capture = " as producer_tid" if dispatch == "submit" else ""
+        deps = ", deps=[producer_tid]" if dispatch == "submit" else ""
+        calls = (
+            f'    with pl.spmd(1, name_hint="produce"){capture}:\n'
+            f"        {producer_call}\n"
+            f'    with pl.spmd(1, name_hint="consume"{deps}):\n'
+            f"        {consumer_call}"
+        )
+    module_path = tmp_path / "extern_case.py"
+    module_path.write_text(
+        f"""import pypto.language as pl
+
+@pl.jit.extern(core_type={core_type!r}, {source_arg})
+def producer(first: pl.Out[pl.Tensor], second: pl.Out[pl.Tensor], third: pl.Out[pl.Tensor]) -> {result_type}:
+    return {", ".join(returned)}
+
+@pl.jit.extern(core_type="aiv", source={str(cpp)!r})
+def consumer(
+    {", ".join(f"x{i}: pl.Tensor" for i in range(len(consumed)))},
+    output: pl.Out[pl.Tensor],
+) -> pl.Tensor:
+    return output
+
+@pl.jit(auto_scope=False)
+def entry(output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
+    first = pl.create_tensor([1, 32], dtype=pl.FP32)
+    second = pl.create_tensor([1, 32], dtype=pl.FP32)
+    third = pl.create_tensor([1, 32], dtype=pl.FP32)
+{calls}
+    return output
+"""
+    )
+    module = _load_jit_module(module_path)
+    generated = tmp_path / "generated"
+    module.entry.compile(config=RunConfig(backend_type=ascend_backend, save_kernels_dir=str(generated)))
+    orchestration = (generated / "orchestration" / "entry.cpp").read_text()
+    actual = re.findall(r"params_t\d+\.add_input\((\w+)\);", orchestration)
+    assert actual == list(consumed), orchestration
+    if dispatch == "submit":
+        assert ".task_id()" in orchestration
+        assert ".set_dependencies(" in orchestration
+
+
+def test_extern_single_readonly_return_keeps_input_identity(tmp_path):
+    """An explicit return names its parameter even when the kernel has no Out slots."""
+    cpp = _write_kernel(tmp_path)
+
+    @pl.jit.extern(core_type="aiv", source=cpp)
+    def forward(value: pl.Tensor) -> pl.Tensor:
+        return value
+
+    @pl.jit.extern(core_type="aiv", source=cpp)
+    def consumer(value: pl.Tensor, output: pl.Out[pl.Tensor]) -> pl.Tensor:
+        return output
+
+    @pl.jit(auto_scope=False)
+    def entry(value: pl.Tensor[[1, 32], pl.FP32], output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
+        alias = forward(value)
+        output = consumer(alias, output)
+        return output
+
+    generated = tmp_path / "generated"
+    entry.compile(config=RunConfig(save_kernels_dir=str(generated)))
+    code = (generated / "orchestration" / "entry.cpp").read_text()
+    assert "params_t1.add_input(ext_value);" in code
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["return pl.add(output, output)", "alias = output\n    return alias", "if True:\n        return output"],
+)
+def test_extern_rejects_computed_return_identity(tmp_path, body):
+    """An external stub must not silently discard computation that selects its result."""
+    cpp = _write_kernel(tmp_path)
+    module_path = tmp_path / "invalid_extern.py"
+    module_path.write_text(
+        f"""import pypto.language as pl
+@pl.jit.extern(core_type="aiv", source={str(cpp)!r})
+def invalid(output: pl.Out[pl.Tensor]) -> pl.Tensor:
+    {body}
+@pl.jit
+def entry(output: pl.Out[pl.Tensor]):
+    output = invalid(output)
+    return output
+"""
+    )
+    module = _load_jit_module(module_path)
+    with pytest.raises(ValueError, match="can only return tensor parameters|single return statement"):
+        _specialize(module.entry, torch.empty(1, 32))
 
 
 if __name__ == "__main__":

@@ -493,8 +493,8 @@ inline constexpr const char* kAttrSplitAiv = "split_aiv";
  * ``@pl.function(external_source=...)`` decorator; the function's DSL body is
  * then an empty ``...``. Read by ``ExpandMixedKernel`` (external members cannot
  * be ABI-normalised or inferred into dual dispatch),
- * ``VerifyReturnParamsExplicit`` (a declaration-only body legitimately has no
- * ``ReturnStmt``), the Python printer, and the backend, which compiles the named
+ * ``VerifyReturnParamsExplicit`` (validates the declaration's return contract),
+ * the Python printer, and the backend, which compiles the named
  * ``.cpp`` in place of PyPTO codegen. Never stripped.
  *
  * Decorator-only: the printer emits it as an ``@pl.function(external_source=...)``
@@ -503,6 +503,24 @@ inline constexpr const char* kAttrSplitAiv = "split_aiv";
  * ``_DECORATOR_ONLY_FUNC_ATTRS``.
  */
 inline constexpr const char* kAttrExternalSource = "external_source";
+
+/**
+ * @brief Ordered parameter references returned by an external kernel declaration.
+ *
+ * Value type: ``std::vector<VarPtr>``. The JIT records explicit parameter returns
+ * here before replacing the extern body with an empty declaration. Each entry
+ * corresponds to one flat return type; subsets, permutations, and repetitions
+ * are preserved. References (rather than parameter offsets) follow SSA renaming
+ * and signature changes through the existing attribute remapping machinery.
+ *
+ * Read and validated by return_lineage for both tracing and structural lookups,
+ * including ReturnParamsExplicit verification. Never stripped. Printed as a
+ * ``pl.func_attr`` prologue and serialized with the ordinary Var-list payload.
+ * Without this attr, a declaration returns all Out/InOut parameters in order
+ * only when their count and tensor types match its declared results; an
+ * ambiguous signature must supply the explicit contract.
+ */
+inline constexpr const char* kAttrExternalReturnParams = "external_return_params";
 
 /**
  * @brief Reserved Function attr key naming the builtin template package that
