@@ -23,12 +23,26 @@ PTO codegen 直接接收分配句柄和目标操作数。
 | add、mul | FP16、FP32、INT32 |
 | sub、div、maximum、minimum、abs、exp、sqrt、neg、relu、log、recip | FP32 |
 | adds、subs、muls、divs、maximums、minimums、lrelu、full | FP32 |
+| row_max、row_sum、row_expand_sub、row_expand_div | FP32，正静态 valid |
 
 标量参数遵循已有 scalar ABI，元素标量在 lowering 中显式转换。
 `full` 后接 store 的无 load kernel 也可入选。BF16 传输不包含 BF16 算术或填充。
 `recip` 的独立目的地由存储合法化和验证保证；精度属性保留原生既有策略。
 GM 返回别名必须解析到参数，其类型（包括 TensorView 元数据）须与声明的返回类型一致；
 返回视图不匹配的 kernel 保持 Tile。
+
+FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归约写入列优先
+`[R,1]` 目的地，物理行数须为 8 的倍数。广播读取该列向量，保留矩阵的物理形状和
+有效矩形。scratch 是显式的 full-valid FP32 Tile，物理形状须覆盖源；规划时保留为
+显式操作数，Buffer IR 声明其写效果。归约的源、scratch 和目的地须互不重叠。广播可以精确复用
+矩阵输入，但不能复用列向量。地址复用时列向量保留带类型描述符，不被解释成行优先窗口。
+
+列向量仅用作片上归约和广播操作数。直接从 GM 加载列向量或将其写入 GM 的内核
+保留在 Tile IR，等待列向量传输 recipe 的验证；普通稠密传输 recipe 不覆盖跨步列。
+
+支持完整的 `row_max -> row_expand_sub -> exp -> row_sum -> row_expand_div` softmax
+链。包含运行时/空 valid 状态、窗口操作数、其他 dtype 或其他归约操作的行配方 kernel
+继续 Tile。空归约轴不沿用逐元素操作的无数据路径语义。
 
 结构化 If/For/While 可携带 Tile、标量和同一 GM 参数的别名。
 分支两臂的 GM 结果必须解析到同一参数；循环回边必须保持初始 GM 别名。
@@ -57,20 +71,21 @@ assemble 目标的对齐，包括带显式 valid shape 的 slice。无法证明�
 `transpose_view`、`matmul` 和 `matmul_acc`。FP16/BF16/FP32 输入以 FP32 累加，
 INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或累加写入。
 较宽的 Acc valid 区域通过同一存储上的乘积视图写入。矩阵区域 carry 必须保持
-同一存储别名；任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和 workspace
+同一存储别名；任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和其他 workspace
 操作仍不在默认范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
 转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
-reduction、运行时 offset 的 relabel、窗口区域 carry、非连续 relabel、行距不兼容或目标为窗口的
+其他 reduction、运行时 offset 的 relabel、窗口区域 carry、非连续 relabel、行距不兼容或目标为窗口的
 assemble、槽位、helper ABI 和跨核资源在正常流水线保持 Tile。同一符号分配需要多个不同形状或
 类型的窗口父视图时也保持 Tile；对已 relabel 的窗口再 slice 同样尚未开放。已有生产配方可通过显式底层 pass 流水线开发和测试，
 配方存在本身不代表默认支持。
 
 ```text
 默认 / True: load -> add -> mul -> store  => Buffer
-默认 / True: load -> reduction -> store   => Tile（整个 kernel）
-False:       两种 kernel                 => Tile
+默认 / True: 带显式 scratch 的 FP32 softmax => Buffer
+默认 / True: load -> col_sum -> store     => Tile（整个 kernel）
+False:       所有 kernel                 => Tile
 ```
 
 用 `PassContext([], enable_buffer_ir=False)` 选择旧路径。JIT 缓存包含 bool 与 Buffer

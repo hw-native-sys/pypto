@@ -158,6 +158,13 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
 void ValidateBufferReshape(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
   INTERNAL_CHECK(args.size() == 1 && args[0]) << "Internal error: buffer.reshape requires exactly one source";
   auto matrix_source = ir::As<ir::BufferType>(args[0]->GetType());
+  const auto destination_type = ir::As<ir::BufferType>(result);
+  if (IsColumnVectorBuffer(matrix_source) || IsColumnVectorBuffer(destination_type)) {
+    CHECK(IsColumnVectorBuffer(matrix_source) && IsColumnVectorBuffer(destination_type) &&
+          matrix_source->shape_ == destination_type->shape_)
+        << "buffer.reshape of a column vector must preserve its physical descriptor";
+    return;
+  }
   if (matrix_source && IsMatrixBufferSpace(matrix_source->memory_space_)) {
     ValidateMatrixReshape(matrix_source, ir::As<ir::BufferType>(result));
     return;

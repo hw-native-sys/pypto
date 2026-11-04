@@ -13,7 +13,10 @@
 #define PYPTO_BACKEND_COMMON_BUFFER_TYPE_SUPPORT_H_
 
 #include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::backend {
@@ -31,6 +34,26 @@ inline bool IsDenseVecBufferTile(const ir::TileTypePtr& tile, const ir::TileView
          tile->GetMemorySpace() == ir::MemorySpace::Vec && view.blayout == ir::TileLayout::row_major &&
          view.slayout == ir::TileLayout::none_box && view.fractal == 512 && view.pad == ir::PadValue::null &&
          view.compact == ir::CompactMode::null;
+}
+
+/// Row reductions produce a contiguous column vector, not a row-major [R, 1]
+/// tile. Keep this separate from ordinary dense Vec support and view recipes.
+inline bool IsColumnVectorBufferTile(const ir::TileTypePtr& tile, const ir::TileView& view) {
+  if (tile->shape_.size() != 2) return false;
+  const auto rows = ir::As<ir::ConstInt>(tile->shape_[0]);
+  const auto cols = ir::As<ir::ConstInt>(tile->shape_[1]);
+  return rows && cols && rows->value_ > 0 && rows->value_ % 8 == 0 && cols->value_ == 1 &&
+         tile->dtype_ == DataType::FP32 && tile->GetMemorySpace() == ir::MemorySpace::Vec &&
+         view.blayout == ir::TileLayout::col_major && view.slayout == ir::TileLayout::none_box &&
+         view.fractal == 512 && view.pad == ir::PadValue::null && view.compact == ir::CompactMode::null;
+}
+
+inline bool IsColumnVectorBuffer(const ir::BufferTypePtr& type) {
+  return type && type->shape_.size() == 2 && type->shape_[0] % 8 == 0 && type->shape_[1] == 1 &&
+         type->dtype_ == DataType::FP32 && type->memory_space_ == ir::MemorySpace::Vec &&
+         type->blayout_ == ir::TileLayout::col_major && type->slayout_ == ir::TileLayout::none_box &&
+         type->fractal_ == 512 && type->pad_ == ir::PadValue::null &&
+         type->compact_ == ir::CompactMode::null && type->valid_shape_[0] > 0 && type->valid_shape_[1] == 1;
 }
 
 /// On-chip spaces whose descriptors carry a cube fractal layout. Their bytes

@@ -29,6 +29,7 @@ and valid extents; matching valid extents alone do not qualify.
 | add, mul | FP16, FP32, INT32 |
 | sub, div, maximum, minimum, abs, exp, sqrt, neg, relu, log, recip | FP32 |
 | adds, subs, muls, divs, maximums, minimums, lrelu, full | FP32 |
+| row_max, row_sum, row_expand_sub, row_expand_div | FP32, positive static valid |
 
 Scalar parameters use the existing scalar ABI; element operands receive explicit
 conversion during lowering. `full` followed by store also qualifies without a
@@ -37,6 +38,25 @@ requires a distinct destination, enforced by storage legalization and verificati
 Precision attributes retain their existing native policy. GM return aliases must
 resolve to parameters whose types match the declared results, including TensorView
 metadata; kernels with mismatched return views retain Tile IR.
+
+The FP32 row recipes accept dense allocation-backed matrices and static positive
+valid extents. Reductions write a column-major `[R,1]` destination whose physical
+rows are a multiple of eight. Broadcast reads that column vector and preserves
+the matrix's physical shape and valid rectangle. Scratch is an explicit,
+full-valid FP32 tile covering the source's physical shape. It remains an explicit
+operand during planning; Buffer IR declares its write effect. Reduction source, scratch and destination
+must be disjoint. Broadcast may reuse its matrix exactly, but never its column
+vector. A column vector retains its typed descriptor when storage addresses are
+reused; it is not reinterpreted as a row-major window.
+
+Column vectors are on-chip reduction/broadcast operands only. Kernels that load
+or store them directly to GM remain on Tile IR until a column transfer recipe is
+validated; the ordinary dense transfer recipe does not cover strided columns.
+
+This supports the complete `row_max -> row_expand_sub -> exp -> row_sum ->
+row_expand_div` softmax chain. Row recipes in kernels with runtime/empty valid
+state, window operands, other dtypes or other reduction operations retain Tile
+IR. Empty reduction axes do not inherit the elementwise no-data behavior.
 
 Structured If/For/While regions may carry Tiles, scalars and aliases of one GM
 parameter. Both branch arms must resolve a GM result to the same parameter;
@@ -77,13 +97,13 @@ operands accumulate in FP32; INT8 operands accumulate in INT32. Literal and
 runtime `init_cond` select initializing or accumulating writes. Wider Acc valid
 regions use a product-shaped descriptor over the same storage. Matrix region
 carries must preserve one storage alias; arbitrary matrix carry copies, MX,
-FIFO, slots, scaled/quantized writeback and workspace operations remain excluded.
+FIFO, slots, scaled/quantized writeback and other workspace operations remain excluded.
 Torch debugging models fractal layouts and shared addressed matrix storage,
 including transpose relabels and product views. Only complete untouched Acc
 boxes have defined preservation outside a partially valid product.
 
 A5 retains Tile IR until its default rollout has clean runtime acceptance.
-Reductions, runtime-offset relabels, window region carries, strided relabels,
+Other reductions, runtime-offset relabels, window region carries, strided relabels,
 assemble with incompatible pitches or window targets, slots, helper ABIs and
 cross-core resources remain Tile in the normal pipeline. A symbolic allocation
 requiring several differently shaped or typed window parents also remains Tile,
@@ -93,8 +113,9 @@ availability alone does not widen default acceptance.
 
 ```text
 Default / True: load -> add -> mul -> store  => Buffer
-Default / True: load -> reduction -> store   => Tile (whole kernel)
-False:          both kernels                => Tile
+Default / True: FP32 softmax with explicit scratch => Buffer
+Default / True: load -> col_sum -> store     => Tile (whole kernel)
+False:          all kernels                 => Tile
 ```
 
 Use `PassContext([], enable_buffer_ir=False)` for the legacy path. JIT keys

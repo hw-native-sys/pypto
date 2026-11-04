@@ -185,6 +185,7 @@ MIGRATION_FAMILIES = (
             "tile.col_argmax",
             "tile.col_argmin",
         ),
+        restricted=frozenset({"tile.row_max", "tile.row_sum"}),
     ),
     MigrationFamily(
         "G10: Axis expansion and broadcast",
@@ -206,6 +207,7 @@ MIGRATION_FAMILIES = (
             "tile.row_expand_mul",
             "tile.row_expand_sub",
         ),
+        restricted=frozenset({"tile.row_expand_sub", "tile.row_expand_div"}),
     ),
     MigrationFamily(
         "G11: Padding",

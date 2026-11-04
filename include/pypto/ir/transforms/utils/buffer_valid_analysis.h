@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -74,6 +75,9 @@ class BufferValidAnalysis : public IRVisitor {
     IRVisitor::VisitStmt_(loop);
   }
   void VisitExpr_(const CallPtr& call) override {
+    // Empty reduction axes have different semantics from empty elementwise
+    // outputs; the first row recipes deliberately require a wholly static kernel.
+    restricted_ |= backend::FindLogicalBufferRowRecipe(call->op_->name_) != nullptr;
     if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") || IsOp(call, "tile.assemble") ||
         IsOp(call, "tile.move") || IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view") ||
         IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {

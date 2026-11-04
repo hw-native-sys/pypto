@@ -25,6 +25,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/ir/expr.h"
@@ -94,7 +95,8 @@ class BufferKernelSupport : public IRVisitor {
     if (!checked_types_.insert(type.get()).second) return;
     if (auto tile = As<TileType>(type)) {
       const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-      if (!StaticShape(tile->shape_)) {
+      const bool column = backend::IsColumnVectorBufferTile(tile, view);
+      if (!column && !StaticShape(tile->shape_)) {
         supported = false;
         return;
       }
@@ -107,6 +109,10 @@ class BufferKernelSupport : public IRVisitor {
                      (view.blayout == TileLayout::row_major || view.blayout == TileLayout::col_major) &&
                      view.pad == PadValue::null && view.compact == CompactMode::null && view.stride.empty();
         if (box) supported &= As<ConstInt>(tile->shape_[0])->value_ % box->rows == 0 && cols % box->cols == 0;
+      } else if (column) {
+        const auto rows = As<ConstInt>(tile->shape_[0])->value_;
+        supported &= view.stride.empty() || (view.stride.size() == 2 && ConstantEquals(view.stride[0], 1) &&
+                                             ConstantEquals(view.stride[1], rows));
       } else {
         supported &= backend::IsDenseVecBufferTile(tile, view) && cols % (256 / tile->dtype_.GetBit()) == 0;
         supported &=
@@ -122,7 +128,7 @@ class BufferKernelSupport : public IRVisitor {
           supported &= valid ? valid->value_ >= 0 && valid->value_ <= As<ConstInt>(tile->shape_[i])->value_
                              : space == MemorySpace::Vec && scalar &&
                                    (scalar->dtype_ == DataType::INDEX || scalar->dtype_.IsSignedInt());
-          if (space != MemorySpace::Vec) supported &= valid && valid->value_ > 0;
+          if (space != MemorySpace::Vec || column) supported &= valid && valid->value_ > 0;
         }
       }
       if (const auto memory = tile->memref_.value_or(nullptr)) {
@@ -368,6 +374,11 @@ class BufferKernelSupport : public IRVisitor {
     } else if (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num") ||
                IsOp(call, "tile.get_subblock_idx")) {
       supported &= call->args_.empty() && call->kwargs_.empty();
+    } else if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
+      supported &= backend::SupportsLogicalBufferRow(*row_recipe, call);
+      // Native row recipes below are dense allocations. A slice retains a
+      // different physical pitch and needs its own reduction/broadcast recipe.
+      for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
     } else if (!IsOp(call, "tile.alloc")) {
       const auto* recipe = backend::FindLogicalBufferElementwiseRecipe(call->op_->name_);
       supported &=
@@ -510,6 +521,9 @@ class BufferKernelSupport : public IRVisitor {
       return;
     }
     const auto space = tile->GetMemorySpace();
+    // Reduction columns are on-chip operands only. The ordinary GM recipe
+    // cannot transfer a contiguous column into a strided row-major tensor.
+    supported &= !backend::IsColumnVectorBufferTile(tile, tile_view_semantics::GetEffectiveTileView(*tile));
     if (space == MemorySpace::Vec || (load && space == MemorySpace::Mat)) {
       supported &= tile->dtype_ == tensor->dtype_;
     } else {
