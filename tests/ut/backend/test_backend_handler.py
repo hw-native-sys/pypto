@@ -220,6 +220,34 @@ def test_direct_cast_requeries_changed_packed_geometry(target):
     assert not handler.is_direct_cast(split)
 
 
+@pytest.mark.parametrize("packed_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+@pytest.mark.parametrize("decode", [False, True])
+@pytest.mark.parametrize("matching", [False, True])
+def test_direct_packed_cast_normalizes_both_dynamic_valid_extents(packed_dtype, decode, matching):
+    """Affine packed extents must compare by value in either conversion direction."""
+    span = _ir_core.Span.unknown()
+    n = _ir_core.Var("n", _ir_core.ScalarType(pl.INDEX), span)
+    packed_cols = _ir_core.Add(n, _ir_core.ConstInt(1, pl.INDEX), pl.INDEX, span)
+    unpacked_cols = _ir_core.Mul(
+        _ir_core.Add(n, _ir_core.ConstInt(1 if matching else 2, pl.INDEX), pl.INDEX, span),
+        _ir_core.ConstInt(2, pl.INDEX),
+        pl.INDEX,
+        span,
+    )
+    packed_view = _ir_core.TileView(valid_shape=[16, packed_cols])
+    unpacked_view = _ir_core.TileView(valid_shape=[16, unpacked_cols])
+    call = _direct_cast_query(
+        packed_dtype if decode else pl.BF16,
+        pl.BF16 if decode else packed_dtype,
+        [16, 32 if decode else 64],
+        [16, 64 if decode else 32],
+        source_view=packed_view if decode else unpacked_view,
+        result_view=unpacked_view if decode else packed_view,
+    )
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    assert handler.is_direct_cast(call) == matching
+
+
 @pytest.mark.parametrize(
     "case", ["logical_shape", "valid_shape", "dynamic_valid", "stride", "offset", "memory", "rows", "compact"]
 )

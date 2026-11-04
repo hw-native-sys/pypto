@@ -49,31 +49,36 @@ bool LogicalExtentsMatch(const ir::TileTypePtr& source, const ir::TileTypePtr& r
                          const std::vector<ir::ExprPtr>& source_shape,
                          const std::vector<ir::ExprPtr>& result_shape) {
   if (source_shape.size() != result_shape.size() || source_shape.empty()) return false;
-  if (source->dtype_.IsPackedFp4() == result->dtype_.IsPackedFp4()) {
-    return ir::tile_view_semantics::ShapeExprListsEquivalent(source_shape, result_shape);
+  auto normalized_source = source_shape;
+  auto normalized_result = result_shape;
+  if (source->dtype_.IsPackedFp4() != result->dtype_.IsPackedFp4()) {
+    const bool packed_source = source->dtype_.IsPackedFp4();
+    auto& expanded = packed_source ? normalized_source : normalized_result;
+    const auto packed = packed_source ? source : result;
+    const auto view = ir::tile_view_semantics::GetEffectiveTileView(*packed);
+    size_t axis = expanded.size() - 1;
+    if (view.blayout == ir::TileLayout::col_major) {
+      if (expanded.size() != 2) return false;
+      axis = 0;
+    }
+    const auto two = std::make_shared<ir::ConstInt>(2, DataType::INDEX, ir::Span::unknown());
+    if (const auto extent = ir::As<ir::ConstInt>(expanded[axis])) {
+      // Guard before doubling malformed raw IR: a boolean capability query must
+      // not overflow while deciding that a descriptor is unsupported.
+      if (extent->value_ < 0 || extent->value_ > std::numeric_limits<int64_t>::max() / 2) return false;
+      expanded[axis] = std::make_shared<ir::ConstInt>(extent->value_ * 2, DataType::INDEX, extent->span_);
+    } else {
+      expanded[axis] = std::make_shared<ir::Mul>(expanded[axis], two, DataType::INDEX, ir::Span::unknown());
+    }
   }
-  const bool packed_source = source->dtype_.IsPackedFp4();
-  auto expanded = packed_source ? source_shape : result_shape;
-  const auto packed = packed_source ? source : result;
-  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*packed);
-  size_t axis = expanded.size() - 1;
-  if (view.blayout == ir::TileLayout::col_major) {
-    if (expanded.size() != 2) return false;
-    axis = 0;
+  // Inference can retain (n + 1) * 2 while simplification expands it to
+  // n * 2 + 2. Normalize both endpoints before structural comparison.
+  ir::arith::Analyzer analyzer;
+  for (size_t axis = 0; axis < normalized_source.size(); ++axis) {
+    normalized_source[axis] = analyzer.Simplify(normalized_source[axis]);
+    normalized_result[axis] = analyzer.Simplify(normalized_result[axis]);
   }
-  const auto two = std::make_shared<ir::ConstInt>(2, DataType::INDEX, ir::Span::unknown());
-  if (const auto extent = ir::As<ir::ConstInt>(expanded[axis])) {
-    // Guard before doubling malformed raw IR: a boolean capability query must
-    // not overflow while deciding that a descriptor is unsupported.
-    if (extent->value_ < 0 || extent->value_ > std::numeric_limits<int64_t>::max() / 2) return false;
-    expanded[axis] = std::make_shared<ir::ConstInt>(extent->value_ * 2, DataType::INDEX, extent->span_);
-  } else {
-    ir::arith::Analyzer analyzer;
-    expanded[axis] = analyzer.Simplify(
-        std::make_shared<ir::Mul>(expanded[axis], two, DataType::INDEX, ir::Span::unknown()));
-  }
-  return ir::tile_view_semantics::ShapeExprListsEquivalent(expanded,
-                                                           packed_source ? result_shape : source_shape);
+  return ir::tile_view_semantics::ShapeExprListsEquivalent(normalized_source, normalized_result);
 }
 
 bool CheckConditions(const TcvtConditions& rule, const ir::TileTypePtr& source, const ir::TileTypePtr& result,
