@@ -10,6 +10,7 @@
 """Build ownership, command compatibility and failure cleanup regressions."""
 
 import importlib
+import os
 import struct
 import subprocess
 import sys
@@ -411,6 +412,25 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
         [ptoas, "--version"], cwd=compiler.project_root, capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == version_output
+
+
+def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypatch, tmp_path):
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_AUDIT", "libobserver.so")
+
+    def run(command, **kwargs):
+        # Metadata probes may normalize their environment; compilation may not.
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        assert environment["LD_PRELOAD"] == "liballocator.so:"
+        assert environment["LD_AUDIT"] == "libobserver.so"
+        Path(command[command.index("-o") + 1]).write_bytes(b"binary")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    compiler = compiler_module.KernelCompiler("a2a3")
+    assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == b"binary"
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from time import perf_counter_ns
 from typing import Any, cast
 
 from pypto._cache_config import CacheConfig, record_bypass, record_stats, time_stage
+from pypto._environment import default_output_root
 from pypto._identity import digest_record, fingerprint_extra_sources
 from pypto.pypto_core import DataType
 
@@ -279,7 +280,9 @@ def resolve_persistent(
         # Avoid tempfile's write probes under a readonly TMPDIR. The usual
         # build_output parent is created lazily; the exceptional temporary
         # parent is allocated securely before any runtime output can use it.
-        private_root = Path.cwd() / "build_output"
+        # Placement is not a compilation input. Resolve it only for a new
+        # object, after the object hit above, without copying shared artifacts.
+        private_root = Path(os.path.abspath(default_output_root()))
         if private_root == config.root or config.root in private_root.parents:
             private_root = _fallback_private_root(config.root, os.getpid())
         store = JITArtifactStore(config.root, readonly=config.readonly, private_root=private_root)

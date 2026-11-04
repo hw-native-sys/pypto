@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
+from pypto._environment import explicit_env_request
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
 from pypto._target import _platform_string
@@ -299,9 +300,8 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         or kwargs["profiling"]
         or get_active_profiler() is not None
         or kwargs.get("output_dir") is not None
-        or bool(os.environ.get("PYPTO_PROG_BUILD_DIR"))
-        or os.environ.get("PYPTO_EMIT_DEBUG_RUNNER") is not None
-        or os.environ.get("PYPTO_REBUILD_FROM_PTO") is not None
+        or explicit_env_request(os.environ.get("PYPTO_EMIT_DEBUG_RUNNER"))
+        or explicit_env_request(os.environ.get("PYPTO_REBUILD_FROM_PTO"))
         or kwargs.get("verification_level") is not None
         or kwargs["diagnostic_phase"] is not None
         or kwargs["disabled_diagnostics"] is not None

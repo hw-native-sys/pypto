@@ -26,6 +26,7 @@ import pytest
 from pypto import CacheConfig, cache_stats, ir, passes
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import ToolchainIdentity, digest_record
+from pypto.backend import BackendType
 from pypto.ir.compiled_artifact import CompiledArtifact
 from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
 from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
@@ -33,7 +34,7 @@ from pypto.jit import _artifact_manifest
 from pypto.jit._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
 from pypto.jit._persistent import JITArtifactStore
 from pypto.jit.artifact_cache import ArtifactStore, BuildDisposition, LookupStatus
-from pypto.runtime import RunConfig, _prebuilt
+from pypto.runtime import ExecutionMode, RunConfig, _prebuilt
 from pypto.runtime._artifact_runtime import ArtifactRuntime, bind_artifact, restore_artifact
 from pypto.runtime._artifact_sources import (
     UnsupportedArtifactInput,
@@ -1586,6 +1587,66 @@ def test_vpto_sources_survive_artifact_relocation(tmp_path, fake_runtime):
     assert json.loads((relocated / "kernel_config.json").read_text())["kernels"][0]["vpto_sources"] == [
         "vpto/0/0/helper.pto"
     ]
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_private_output_base_does_not_change_persistent_artifacts(
+    tmp_path, automatic_jit_case, fake_runtime, monkeypatch, relative
+):
+    kernel, builds = automatic_jit_case
+    root = tmp_path / "cache"
+    run_base = Path("private") if relative else tmp_path / "private"
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(run_base))
+    config = RunConfig(
+        backend_type=BackendType.Ascend910B,
+        execution_mode=ExecutionMode.SIM,
+        cache_config=CacheConfig(enabled=True, root=root),
+    )
+    with passes.PassContext([]):
+        fresh = kernel.warmup(config=config)
+        assert fresh._artifact_runtime.run_directory.parent == tmp_path / "private"
+        assert fresh.output_dir.is_relative_to(root)
+        assert len(builds) == 1
+        monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "other"))
+        assert kernel.warmup(config=config) is fresh
+        assert fresh._artifact_runtime.run_directory.parent == tmp_path / "private"
+        files_before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        kernel._artifact_objects.clear()
+        fake_runtime.runner._compile_and_assemble.side_effect = AssertionError("unexpected rebuild")
+        before = cache_stats()
+        restored = kernel.warmup(config=config)
+        after = cache_stats()
+    assert restored._artifact_runtime.run_directory.parent == tmp_path / "other"
+    # A fresh object retains its GENERATED source directory after promotion;
+    # restoration binds READY directly. Both must consume the same binary tree.
+    assert restored._artifact_runtime.handle.directory == fresh._artifact_runtime.handle.directory
+    assert len(builds) == 1
+    assert after.ready_hits - before.ready_hits == 1
+    assert after.forced_rebuilds == before.forced_rebuilds
+    assert after.generation_builds == before.generation_builds
+    assert after.binary_builds == before.binary_builds
+    assert files_before == {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    assert not list((tmp_path / "other").rglob("*.so"))
+
+
+@pytest.mark.parametrize("with_parent", [False, True])
+def test_private_output_base_inside_cache_keeps_runtime_outside(
+    tmp_path, automatic_jit_case, monkeypatch, with_parent
+):
+    kernel, _ = automatic_jit_case
+    root = tmp_path / "cache"
+    selected = root / "nested" / ".." / "runs" if with_parent else root / "runs"
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(selected))
+    config = RunConfig(
+        backend_type=BackendType.Ascend910B,
+        execution_mode=ExecutionMode.SIM,
+        cache_config=CacheConfig(enabled=True, root=root),
+    )
+    with passes.PassContext([]):
+        compiled = kernel.compile(config=config)
+    runtime_directory = compiled._artifact_runtime.run_directory
+    assert not runtime_directory.is_relative_to(root)
+    assert not (root / "runs").exists()
 
 
 if __name__ == "__main__":
