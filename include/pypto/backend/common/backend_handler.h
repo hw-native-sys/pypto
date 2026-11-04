@@ -17,7 +17,6 @@
 #include <limits>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"

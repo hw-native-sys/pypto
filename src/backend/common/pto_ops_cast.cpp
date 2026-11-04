@@ -31,7 +31,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
