@@ -109,53 +109,12 @@ int64_t OrchestrationStmtCodegen::GetGMPipeWorkspaceElements(const FunctionPtr& 
 
 std::optional<OrchestrationStmtCodegen::GMPipeCreateUse> OrchestrationStmtCodegen::ResolveGMPipeCreateUse(
     const std::vector<StmtPtr>& stmts, size_t create_stmt_idx, const VarPtr& create_var) const {
-  if (!create_var) return std::nullopt;
-
-  for (size_t i = create_stmt_idx + 1; i < stmts.size(); ++i) {
-    auto assign = As<AssignStmt>(stmts[i]);
-    if (assign && assign->var_ && assign->var_.get() == create_var.get()) {
-      break;
-    }
-
-    // The consumer may be a Submit (e.g. pl.spmd_submit of a mixed kernel
-    // that receives the injected gm_pipe_buffer create); view it as a Call.
-    CallPtr call;
-    if (assign) {
-      call = AsCallOrSubmitView(assign->value_);
-    } else if (auto eval = As<EvalStmt>(stmts[i])) {
-      call = AsCallOrSubmitView(eval->expr_);
-    }
-    if (!call) continue;
-
-    bool uses_create_var = false;
-    for (const auto& arg : call->args_) {
-      auto arg_var = AsVarLike(arg);
-      if (arg_var && arg_var.get() == create_var.get()) {
-        uses_create_var = true;
-        break;
-      }
-    }
-    if (!uses_create_var) continue;
-
-    auto gv = As<GlobalVar>(call->op_);
-    if (!gv) return std::nullopt;
-    auto callee_func = program_->GetFunction(gv->name_);
-    if (!callee_func) return std::nullopt;
-
-    // Resolve core_num from the same source as the launch spec: pl.spmd_submit
-    // carries it on the dispatch call's attrs, while scope-based pl.spmd /
-    // Group wrappers carry it on the callee function's attrs. Sizing the
-    // GM-pipe workspace from callee attrs alone would under-allocate for a
-    // direct ``pl.spmd_submit(self.aic_or_aiv_kernel, ..., core_num=N)``
-    // (N blocks launched, 1-block workspace).
-    auto core_num_expr = EffectiveLaunchSpec(call, callee_func).first;
-    std::string rendered_core_num;
-    if (core_num_expr) {
-      rendered_core_num = RenderLaunchCoreNum(core_num_expr);
-    }
-    return GMPipeCreateUse{callee_func, rendered_core_num, core_num_expr};
-  }
-  return std::nullopt;
+  auto use = alloc_batching::ResolveGMPipeCreateUse(stmts, create_stmt_idx, create_var, program_,
+                                                    gm_pipe_consumers_);
+  if (!use) return std::nullopt;
+  std::string core_num;
+  if (use->core_num) core_num = RenderLaunchCoreNum(use->core_num);
+  return GMPipeCreateUse{use->callee, core_num, use->core_num};
 }
 
 bool OrchestrationStmtCodegen::ExprRefsAnyOf(const ExprPtr& expr,

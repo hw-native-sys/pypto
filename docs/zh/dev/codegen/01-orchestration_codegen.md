@@ -166,6 +166,14 @@ SIMPLER_SCOPE() {
 
 只有尺寸在 scope 入口处已经可见（entry-valid）的 create 才会被提升到入口。若尺寸读取了函数体自身定义的值——普通局部变量，或 `if` / `for` / `while` 的 return_var（其 C++ 声明在对应语句处才emit）——该 create 会保留在语句顺序上，从而保证生成的 C++ 不会在声明之前使用某个名字。`__gm_pipe_buffer` 占位符同样适用此规则：它的真实尺寸是 `slot_bytes * core_num`，而非其 IR shape。
 
+GM pipe 的分配容量必须等于实际消费内核的每 block 环形缓冲区容量乘以有效 launch
+`core_num`；注入的 `tensor.create([1])` 形状只是占位值。当 `LegalizeGraphBoundary`
+将分配移到 Graph 调用方时，容量分析沿该边界张量形参追踪到具体内核的 `Call` 或
+`Submit`。与任务提交一致，调用点属性优先于被调函数属性。Graph 容器本身没有 block
+数；不同缓冲区分别保留各自的布局和 launch 宽度，即使其内核复用了相同的 pipe ID。
+代码生成与分配批处理共用消费者查询。无法确定兼容具体消费者的转发会被拒绝，不能
+静默退化成只分配一个 block 的容量。
+
 ### 参数方向
 
 每个函数参数的 `ParamDirection` 决定其在任务提交中的表现：
