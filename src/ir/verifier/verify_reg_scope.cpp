@@ -35,6 +35,22 @@
 
 namespace pypto::ir {
 namespace {
+// A malformed builder/deserialized literal must not prove an ancestor empty:
+// codegen narrows literals to their declared dtype before executing the loop.
+bool IsRepresentableLoopLiteral(const ConstIntPtr& literal) {
+  if (!literal) return false;
+  const auto type = As<ScalarType>(literal->GetType());
+  if (!type || !(type->dtype_.IsInt() || type->dtype_ == DataType::INDEX)) return false;
+  const auto bits = type->dtype_.GetBit();
+  const bool is_unsigned = type->dtype_.IsUnsignedInt();
+  if (is_unsigned && literal->value_ < 0) return false;
+  if (bits == 0) return false;
+  if (bits >= 64) return true;
+  if (is_unsigned) return static_cast<uint64_t>(literal->value_) < (uint64_t{1} << bits);
+  const auto limit = int64_t{1} << (bits - 1);
+  return literal->value_ >= -limit && literal->value_ < limit;
+}
+
 /// Two linear walks separate ownership from uses, including uses preceding an
 /// illegal definition. Maps use Var identity, never spelling: rebinding a name
 /// to a Tile result must not accidentally authorize an earlier Reg escape.
@@ -201,28 +217,23 @@ class RegionChecker : public IRVisitor {
     if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
       Error("HardwareLoopPolicy.Require does not support loop attrs", op->span_);
     }
+    const auto induction_type = As<ScalarType>(op->loop_var_->GetType());
+    if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require &&
+        (!induction_type || induction_type->dtype_ != DataType::INDEX)) {
+      Error("Hardware loop induction variable must have INDEX dtype", op->span_);
+    }
     // Enforce target-independent hardware-loop limits during the existing IR
     // walk. No target profile or repeated per-loop body analysis is needed.
     const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
     if (hardware_loop) ++hardware_loop_depth_;
     const bool previous_empty = empty_hardware_loop_;
     const auto stop = As<ConstInt>(op->stop_);
-    const auto stop_type = As<ScalarType>(op->stop_->GetType());
-    const bool unsigned_stop = stop_type && stop_type->dtype_.IsUnsignedInt();
-    const auto bits = stop_type ? stop_type->dtype_.GetBit() : 64;
-    // Validate the literal before interpreting emptiness: narrowing an invalid
-    // signed or unsigned literal can change both sign and iteration count.
-    // Guard zero widths before subtracting one to form a signed shift count.
-    const bool invalid_stop = stop && ((unsigned_stop && stop->value_ < 0) ||
-                                       (bits > 0 && bits < 63 &&
-                                        (unsigned_stop ? stop->value_ >= (int64_t{1} << bits)
-                                                       : stop->value_ < -(int64_t{1} << (bits - 1)) ||
-                                                             stop->value_ >= (int64_t{1} << (bits - 1)))));
+    const bool invalid_stop = stop && !IsRepresentableLoopLiteral(stop);
     const auto start = As<ConstInt>(op->start_);
     const auto step = As<ConstInt>(op->step_);
     // Empty sequential ancestors suppress hardware realization requirements
     // even when the ancestor uses Auto policy rather than Require.
-    if (start && stop && step && !invalid_stop &&
+    if (IsRepresentableLoopLiteral(start) && stop && !invalid_stop && IsRepresentableLoopLiteral(step) &&
         ((step->value_ > 0 && start->value_ >= stop->value_) ||
          (step->value_ < 0 && start->value_ <= stop->value_))) {
       empty_hardware_loop_ = true;

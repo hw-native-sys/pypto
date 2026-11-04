@@ -575,5 +575,54 @@ def test_hardware_loop_rejects_break_continue_even_when_empty(stmt_type, stop):
     assert any("is not supported inside hardware_loop" in d.message for d in diagnostics)
 
 
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.INT64])
+@pytest.mark.parametrize("stop", [0, 2])
+def test_hardware_loop_requires_index_induction_variable(dtype, stop):
+    # Raw IR can bypass the DSL's INDEX induction-variable construction.
+    loop = ir.ForStmt(
+        ir.Var("i", ir.ScalarType(dtype), SPAN),
+        integer(0),
+        integer(stop),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("induction variable must have INDEX" in d.message for d in verify(region(loop)))
+
+
+@pytest.mark.parametrize(
+    "start,step",
+    [(128, 1), (0, -129)],
+)
+def test_invalid_auto_ancestor_literals_do_not_hide_hardware_limits(start, step):
+    # INT8 narrowing changes 128 to -128 and -129 to 127; neither
+    # pre-narrowing comparison can certify that the emitted loop is empty.
+    inner = ir.ForStmt(
+        scalar("inner"),
+        integer(0),
+        integer(65536),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    outer = ir.ForStmt(
+        scalar("outer"),
+        ir.ConstInt(start, DataType.INT8, SPAN),
+        integer(1 if step < 0 else 0),
+        ir.ConstInt(step, DataType.INT8, SPAN),
+        [],
+        region(inner),
+        [],
+        SPAN,
+    )
+    assert any("65535" in d.message for d in verify(outer))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

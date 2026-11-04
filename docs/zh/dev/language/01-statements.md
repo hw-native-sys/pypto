@@ -277,5 +277,8 @@ Builder 和手工构造的 IR 同样必须使用常量 `start=0`、`step=1`，�
 未显式认证的操作按未知处理。分析在当前 IR 上重新计算，结果不进入序列化
 和结构哈希。`passes.PassContext([], report_hardware_loops=True)` 可启用 codegen 报告，
 由 `context.get_hardware_loop_reports()` 读取；报告不是可复用的正确性证明。
+此可选 profile 分析独立于 A5 codegen 准入。A5 backend 当前未提供经过认证的
+hardware-loop profile，因此即使 codegen 接受某个非空循环，报告仍可能为
+`Unknown` / `HWL_UNSUPPORTED_PROFILE`。循环是否能生成 PTO 应以 codegen 诊断为准。
 硬件循环候选内部的嵌套 `for` 也必须使用同一 profile 进行资格分析。内层循环即使保持
 `Auto`，只要满足资格即可；内层循环若为 Ineligible 或 Unknown，外层硬件循环也不能通过资格分析。

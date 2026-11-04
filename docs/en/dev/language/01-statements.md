@@ -123,6 +123,10 @@ certified by the profile. Reports are recomputed from current IR and are not
 persisted in serialization or structural hashes. With
 `passes.PassContext([], report_hardware_loops=True)`, codegen records the latest
 reports for `context.get_hardware_loop_reports()`; these are not reusable proofs.
+This optional profile analysis is separate from A5 codegen admission. The A5
+backend currently supplies no certified hardware-loop profile, so nonempty loops
+can report `Unknown` / `HWL_UNSUPPORTED_PROFILE` even when codegen accepts them.
+Use the codegen diagnostics to determine whether a loop can be emitted.
 Nested `for` statements inside a hardware-loop candidate are analyzed with the
 same profile. They may remain `Auto` when they qualify; an ineligible or unknown
 inner loop prevents the enclosing hardware-loop qualification.

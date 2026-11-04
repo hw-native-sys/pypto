@@ -342,20 +342,25 @@ class ControlFlowParser:
         # Infer loop var dtype from range bounds to preserve roundtrip fidelity.
         # Bare Python ints still map to INDEX, but explicitly typed INT64 bounds
         # should rebuild an INT64 loop var when the printer emitted them that way.
+        # Hardware-loop lowering binds the induction SSA value to MLIR's
+        # index type regardless of the stop scalar dtype (for example a
+        # UINT32/INT32 dynamic bound). Keep the raw-IR verifier contract
+        # stable while preserving bound-type inference for ordinary ranges.
         _loop_var_dtype = DataType.INDEX
-        saw_index_bound = False
-        saw_int64_bound = False
-        for _bound in (range_args.get("start"), range_args.get("stop"), range_args.get("step")):
-            if isinstance(_bound, ir.ConstInt):
-                if _bound.dtype == DataType.INDEX:
-                    saw_index_bound = True
-                elif _bound.dtype == DataType.INT64:
-                    saw_int64_bound = True
-                else:
-                    _loop_var_dtype = _bound.dtype
-                    break
-        if _loop_var_dtype == DataType.INDEX and saw_int64_bound and not saw_index_bound:
-            _loop_var_dtype = DataType.INT64
+        if iterator_type != "hardware_loop":
+            saw_index_bound = False
+            saw_int64_bound = False
+            for _bound in (range_args.get("start"), range_args.get("stop"), range_args.get("step")):
+                if isinstance(_bound, ir.ConstInt):
+                    if _bound.dtype == DataType.INDEX:
+                        saw_index_bound = True
+                    elif _bound.dtype == DataType.INT64:
+                        saw_int64_bound = True
+                    else:
+                        _loop_var_dtype = _bound.dtype
+                        break
+            if _loop_var_dtype == DataType.INDEX and saw_int64_bound and not saw_index_bound:
+                _loop_var_dtype = DataType.INT64
         loop_var = self.services.builder.var(loop_var_name, ir.ScalarType(_loop_var_dtype))
         span = self.services.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
