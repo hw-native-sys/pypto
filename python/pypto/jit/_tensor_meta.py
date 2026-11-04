@@ -1207,6 +1207,34 @@ def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> 
     )
 
 
+def _shaped_view_meta(
+    call: ast.Call,
+    target: str | None,
+    local: Mapping[str, TensorMeta],
+    scope: _StaticScope,
+    resolve_shape: Callable[..., tuple[ShapeDim, ...] | None],
+) -> TensorMeta | None:
+    # 带形状的视图保留存储类型，并显式选择布局。
+    # 例如，MX 缩放存储可作为 ND 字节跨越外部调用边界，无需数值转换。
+    # IR 仍负责校验存储大小及布局转换是否受支持。
+    src = _tensor_or_input_operand(call)
+    if not isinstance(src, ast.Name) or src.id not in local:
+        return None
+    src_meta = local[src.id]
+    shape_node = _call_operand(call, 1, "shape")
+    if shape_node is None:
+        return None
+    result_name = f"{target}_l{call.lineno}_c{call.col_offset}" if target is not None else None
+    shape = resolve_shape(shape_node, result_name, dimension_arithmetic=True)
+    layout_node = scope.fold(_call_operand(call, None, "layout"))
+    layout = (src_meta.layout or _ir.TensorLayout.ND) if layout_node is None else scope.value(layout_node)
+    if shape is None or (layout is not None and not isinstance(layout, _ir.TensorLayout)):
+        return None
+    if layout_node is not None and layout is None:
+        return None
+    return TensorMeta(shape=shape, dtype=src_meta.dtype, layout=layout)
+
+
 def extract_local_tensor_metas(
     func: Any,
     seed_meta: dict[str, TensorMeta] | None = None,
@@ -1514,6 +1542,9 @@ def extract_local_tensor_metas(
         # Keep it explicit so a dependency's annotation cannot overwrite it.
         return TensorMeta(shape=shape, dtype=src_meta.dtype, layout=_ir.TensorLayout.ND)
 
+    def _view_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
+        return _shaped_view_meta(call, target, local, scope, _resolve_shape)
+
     def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pl.slice(input, shape, offset, ...) / pl.tensor.slice(tensor, shape,
         # offset, ...) — shape/offset/drop_dims/etc. share the same names in
@@ -1566,6 +1597,7 @@ def extract_local_tensor_metas(
         "slice": _slice_meta,
         "window": _window_meta,
         "reshape": _reshape_meta,
+        "view": _view_meta,
     }
 
     # 3-segment spellings this walker also understands, keyed by the FULL
@@ -1620,6 +1652,44 @@ def extract_local_tensor_metas(
     return local if visible_only or stop_at_dep is not None or stop_at_call is not None else collected
 
 
+def _external_loop_index_dtypes(func: Any, call_name: str, call_node: ast.Call | None) -> dict[str, DataType]:
+    """为普通 range 循环中外部调用处未重新绑定的归纳变量确定类型。"""
+    body = _ast_analysis.get_func_def(func)
+    if call_node is None:
+        call_node = next(
+            (
+                node
+                for node in ast.walk(body)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == call_name
+            ),
+            None,
+        )
+    if call_node is None:
+        return {}
+    indices: dict[str, DataType] = {}
+    for loop in ast.walk(body):
+        if not isinstance(loop, ast.For) or not isinstance(loop.target, ast.Name):
+            continue
+        if not isinstance(loop.iter, ast.Call):
+            continue
+        if _flatten_dotted_call(loop.iter.func) not in (("pl", "parallel"), ("pl", "range")):
+            continue
+        # 显式指定类型的边界构造器可以选择不同的归纳变量类型。
+        bounds = [
+            *loop.iter.args,
+            *(kw.value for kw in loop.iter.keywords if kw.arg in ("start", "stop", "step")),
+        ]
+        if any(isinstance(node, ast.Call) for bound in bounds for node in ast.walk(bound)):
+            continue
+        body_nodes = (node for stmt in loop.body for node in ast.walk(stmt))
+        if call_node not in body_nodes or loop.target.id in _body_binding_names(loop.body):
+            continue
+        indices[loop.target.id] = DataType.INDEX
+    return indices
+
+
 def resolve_dep_call_metadata(
     dep: "JITFunction",
     caller_func: Any,
@@ -1667,6 +1737,7 @@ def resolve_dep_call_metadata(
     dep with that static extent.
     """
     dep_param_names = dep._param_names()
+    call_name = dep_call_name or dep.__name__
     if dep._external_builder is not None:
         from pypto.language.typing.scalar import Scalar  # noqa: PLC0415
 
@@ -1678,7 +1749,7 @@ def resolve_dep_call_metadata(
             dtype = ann.dtype if isinstance(ann, Scalar) else ann
             if isinstance(dtype, DataType):
                 caller_scalar_dtypes.setdefault(name, dtype)
-    call_name = dep_call_name or dep.__name__
+        caller_scalar_dtypes.update(_external_loop_index_dtypes(caller_func, call_name, call_node))
     call_args = (
         _call_binding.call_arg_refs(call_node)
         if call_node is not None

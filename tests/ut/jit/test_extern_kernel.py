@@ -477,6 +477,162 @@ def test_foreign_multiple_outputs_are_rebound(tmp_path):
     _generate_external_config(entry, args, tmp_path)
 
 
+def test_foreign_scoped_writeback_uses_active_alias(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor], enabled: pl.Scalar[pl.INT32]) -> pl.Tensor:
+        leaf(out)
+        for _ in pl.range(0, 3):
+            leaf(out)
+        if enabled > 0:
+            leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32), 1)
+    source = _specialize(entry, *args)
+    assert source.count("out_v1 = self.foreign_body(out_v1)") == 2
+    assert "return out_v1" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_writebacks_propagate_transitively(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def inner(out: pl.Tensor):
+        leaf(out)
+
+    @pl.jit.inline(auto_scope=False)
+    def outer(out: pl.Tensor):
+        inner(out)
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]) -> pl.Tensor:
+        outer(out)
+        leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32),)
+    source = _specialize(entry, *args)
+    assert "out_v1 = self.outer(out)" in source
+    assert "out_v2 = self.foreign_body(out_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_loop_and_branch_writebacks(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(out: pl.Tensor, enabled: pl.Scalar[pl.INT32]):
+        for _ in pl.range(0, 3):
+            if enabled > 0:
+                leaf(out)
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor], enabled: pl.Scalar[pl.INT32]) -> pl.Tensor:
+        leaf(out)
+        for _ in pl.range(0, 2):
+            helper(out, enabled)
+        leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32), 1)
+    source = _specialize(entry, *args)
+    assert "out_v1 = self.helper(out_v1, enabled)" in source
+    assert "out_v2 = self.foreign_body(out_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_explicit_inline_return_keeps_value_semantics(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(out: pl.Tensor) -> pl.Tensor:
+        leaf(out)
+        return out
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]) -> pl.Tensor:
+        out = helper(out)
+        leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32),)
+    source = _specialize(entry, *args)
+    assert "out_v1 = self.helper(out)" in source
+    assert "out_v2 = self.foreign_body(out_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_multiple_outputs_keep_parameter_order(tmp_path):
+    def foreign_body(x, y):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"x": "write", "y": "write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(x: pl.Tensor, y: pl.Tensor) -> None:
+        leaf(y=y, x=x)
+
+    @pl.jit
+    def entry(x: pl.Out[pl.Tensor], y: pl.Out[pl.Tensor]) -> tuple[pl.Tensor, pl.Tensor]:
+        helper(y=y, x=x)
+        leaf(x, y)
+        return x, y
+
+    args = (torch.empty(1, 32), torch.empty(1, 32))
+    source = _specialize(entry, *args)
+    assert "x_v1, y_v1 = self.helper(x, y)" in source
+    assert "x_v2, y_v2 = self.foreign_body(x_v1, y_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_parameter_rebind_requires_explicit_return(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(out: pl.Tensor):
+        leaf(out)
+        out = pl.create_tensor([1, 32], pl.FP32)
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]):
+        helper(out)
+
+    with pytest.raises(TypeError, match="helper.*rebinds.*out.*return those tensors explicitly"):
+        _specialize(entry, torch.empty(1, 32))
+
+
+def test_foreign_untyped_scalar_reports_parameter_before_rendering(tmp_path):
+    def foreign_body(out, scale):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]):
+        leaf(out, 1.0)
+
+    with pytest.raises(ValueError, match="foreign_body.*cannot infer.*scale"):
+        _specialize(entry, torch.empty(1, 32))
+
+
 def test_foreign_cache_tracks_generated_cpp(tmp_path, monkeypatch):
     def foreign_body(out):
         pass
@@ -526,7 +682,59 @@ def test_foreign_scalar_argument_inherits_caller_dtype(tmp_path):
     _generate_external_config(entry, (torch.empty(1, 32), 2.5), tmp_path)
 
 
-def test_foreign_different_call_shapes_are_rejected(tmp_path):
+def test_foreign_mx_scale_storage_view_preserves_dtype_and_nd_layout(tmp_path):
+    def foreign_body(scale, out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"scale": "read", "out": "write"})
+
+    @pl.jit
+    def entry(scale: pl.Tensor[[8, 16], pl.FP8E8M0, pl.MX_B_NN], out: pl.Out[pl.Tensor]):
+        backing = pl.tensor.view(scale, [1, 128], layout=pl.ND)
+        leaf(backing, out)
+        return out
+
+    args = (torch.empty(8, 16, dtype=torch.float8_e8m0fnu), torch.empty(1, 128))
+    source = _specialize(entry, *args)
+    assert "scale: pl.Tensor[[1, 128], pl.FP8E8M0]" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_scalar_argument_inherits_loop_index_dtype(tmp_path):
+    def foreign_body(out, page):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]) -> pl.Tensor:
+        for page in pl.parallel(2):
+            leaf(out, page)
+        return out
+
+    source = _specialize(entry, torch.empty(1, 32))
+    assert "page: pl.Scalar[pl.INDEX]" in source
+    _generate_external_config(entry, (torch.empty(1, 32),), tmp_path)
+
+
+def test_foreign_rebound_loop_index_does_not_keep_index_dtype(tmp_path):
+    def foreign_body(out, page):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor], scale: pl.Scalar[pl.FP32]) -> pl.Tensor:
+        for page in pl.parallel(2):
+            page = scale
+            leaf(out, page)
+        return out
+
+    with pytest.raises(ValueError, match="page"):
+        _specialize(entry, torch.empty(1, 32), 0.5)
+
+
+def test_foreign_different_call_shapes_are_specialized(tmp_path):
     def foreign_body(out):
         pass
 
@@ -537,8 +745,13 @@ def test_foreign_different_call_shapes_are_rejected(tmp_path):
         leaf(x)
         leaf(y)
 
-    with pytest.raises(ValueError, match="same shapes, dtypes and layouts"):
-        entry.specialize(torch.empty(1, 32), torch.empty(1, 64))
+    args = (torch.empty(1, 32), torch.empty(1, 64))
+    _, _, tensor_meta, scalars, constexpr, dynamic = entry._bind_args(args, {})
+    contexts = entry._build_contexts(tensor_meta, scalars, constexpr, dynamic)
+    foreign = [ctx for ctx in contexts if ctx.external_parameter_access is not None]
+    assert {ctx.tensor_meta["out"].shape for ctx in foreign} == {(1, 32), (1, 64)}
+    assert len({ctx.func_name for ctx in foreign}) == 2
+    assert pl.parse(Specializer("_jit_foreign_shapes", contexts).specialize()) is not None
 
 
 def test_foreign_void_call_cannot_be_used_as_value(tmp_path):

@@ -149,7 +149,8 @@ Python stub 未变，kernel 变更也会触发重新编译。
 ## 直接调用 Python DSL kernel
 
 Python DSL 可以实现惰性的 `__pypto_jit__()` 协议，使用户只保留原始算子表达。
-安装配套 CANNBotDSL 设备导出接入后，A5 示例为：
+PyPTO 也会直接识别 CANNBotDSL 的 `cb.kernel` 对象，无需生产者提供 PyPTO hook。
+安装配套 CANNBotDSL 和 PyPTO 适配器后，A5 示例为：
 
 ```python
 import os
@@ -209,12 +210,37 @@ Tensor 读写方向和可选的 backend/runtime 要求。生成的完整源码�
 
 框架将独立调用语句改写为隐式接收每个写入 Tensor，保留 SSA 和循环携带依赖。
 支持多输出与关键字参数；输出实参必须是不同的 Tensor 变量。Python callable 仍为 void，
-不能将调用用作值。一个 program 内，同一生产者各调用点必须具有相同的 Tensor 签名。
-支持从芯片 orchestration 及其 inline helper 调用。
+不能将调用用作值。支持从芯片 orchestration 及其 inline helper 调用；
+推导签名不同的调用会生成独立特化，包括通过嵌套 helper 发起的调用。
+
+无返回值的 inline helper 直接把 Tensor 形参传给 foreign writer 时，框架也会向其
+调用者传播写回。有显式返回值的 helper 保持原有返回契约。若 helper 重新绑定了被写入
+的形参，或通过局部别名/view 写入，请显式返回更新后的 Tensor，并在调用处接回结果。
+
+普通范围边界的 `pl.range`、`pl.parallel` 循环变量，在循环体内未被重新赋值时，
+会在外部调用处推导为 `pl.INDEX`。生产者可以直接接收这些行号或页号，
+无需读取硬件启动时的 block ID。
 
 构建器在查缓存前运行；源码、局部 include 和读写/core 元数据参与两层缓存身份，
 本次请求内复用生成结果。生产者可以采用按内容寻址的存储；JIT 依赖对象不保存调用者的
-Tensor、地址或本次请求的可变源码路径。CANNBotDSL 接入目前支持 A5/TMR、最内层连续的
+Tensor、地址或本次请求的可变源码路径。
+
+CANNBotDSL 适配器位于 `pypto.jit.cannbotdsl`。识别 kernel、转换 Tensor/Scalar 元数据、
+通过生产者现有编译器 API 完成 tracing/lowering、生成 runtime ABI 包装以及配置外部任务，
+均由 PyPTO 负责。适配器消费生成的 SourceBundle 和原生设备 ABI，包括物理参数顺序和
+Tensor 读写信息。CANNBotDSL 负责通用编译和设备代码生成，此接入无需它提供
+`export_device` 入口或 `cannbotdsl.interop.pypto` 模块。
+CANNBotDSL 是可选依赖，仅在使用此适配器时导入。
+
+通过嵌套 inline helper 调用时，Tensor 形状、dtype、layout 或 Scalar 类型不同的调用
+会保留各自的外部 kernel 特化；签名相同的调用复用同一特化。这也适用于生产者 kernel
+为同一个 Python 对象的情况。
+
+适配器将 PyPTO FP8E8M0 直接映射到 CANNBotDSL 的 `float8_e8m0` 存储类型。
+打包的 MX scale 布局需使用显式、等大小的 ND 存储视图；此操作只改元数据，保留原始
+scale 字节，不重新编码。CANNBotDSL 接入目前支持 A5/TMR、最内层连续的
 ND Tensor、显式 runtime Scalar、AIV/AIC/MIX 和基本动态形状。
-CANN 9.3.0 缺少 CPU-debug 条件头文件，可能使可选的持久缓存保守跳过；
+该设备调用 ABI 不支持读取硬件 block 索引/数量或 launch 范围的同步；任务索引应作为
+runtime Scalar 显式传入。不支持的启动操作会在编译器优化前被拒绝。
+SDK 安装若缺少可选的 CPU-debug 条件头文件，可能使持久缓存保守跳过；
 默认的进程内缓存仍可使用。

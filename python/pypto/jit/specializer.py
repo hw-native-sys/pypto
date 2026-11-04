@@ -1348,6 +1348,12 @@ def _specialize_eager_tile_annotation(
     return ast.unparse(node)
 
 
+def _implicit_return_value(params: tuple[str, ...]) -> ast.expr:
+    """为无返回值辅助函数的张量写回结果构造新的 AST。"""
+    values: list[ast.expr] = [ast.Name(id=name, ctx=ast.Load()) for name in params]
+    return values[0] if len(values) == 1 else ast.Tuple(elts=values, ctx=ast.Load())
+
+
 def _infer_return_type(
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
@@ -1774,6 +1780,8 @@ class Specializer:
             for ctx in contexts
             if ctx.external_parameter_access is not None
         }
+        self._implicit_inline_returns: dict[str, tuple[str, ...]] = {}
+        self._propagate_void_inline_writebacks()
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
@@ -1853,6 +1861,78 @@ class Specializer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _propagate_void_inline_writebacks(self) -> None:
+        """通过无返回值的内联边界返回被外部核写入的参数。
+
+        上下文按叶子优先处理，因此父调用可观察到内联子函数已传播的读写行为。
+        有返回值的辅助函数保留显式结果契约和普通表达式语义。
+        """
+        for ctx in self._contexts:
+            if ctx.func_type != "inline":
+                continue
+            tree = ast.parse(textwrap.dedent(ctx.source))
+            func_def = _find_func_def(tree, ctx.source_def_name)
+            assert func_def is not None
+            returns = [node for node in ast.walk(func_def) if isinstance(node, ast.Return)]
+            if any(
+                node.value is not None
+                and not (isinstance(node.value, ast.Constant) and node.value.value is None)
+                for node in returns
+            ):
+                continue
+            targets = (
+                _resolve_dep_call_targets(func_def, set(ctx.dep_names), ctx.dep_call_variants)
+                if ctx.dep_call_variants
+                else {}
+            )
+            written: set[str] = set()
+            for node in ast.walk(func_def):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                if node.func.id not in ctx.dep_names:
+                    continue
+                dep_name = targets.get(id(node), ctx.dep_func_names.get(node.func.id, node.func.id))
+                mutated = self._dep_mutated_params.get(dep_name, ())
+                if not mutated:
+                    continue
+                params = self._dep_param_names[dep_name]
+                bound = dict(zip(params, node.args))
+                bound.update((keyword.arg, keyword.value) for keyword in node.keywords if keyword.arg)
+                for param in mutated:
+                    argument = bound.get(param)
+                    if isinstance(argument, ast.Name) and argument.id in ctx.tensor_meta:
+                        written.add(argument.id)
+            if not written:
+                continue
+            # 用户显式重新绑定变量可能替换参数存储。
+            # 应保留其显式结果，不能通过推断替代。
+            rebound = {
+                node.id
+                for node in ast.walk(func_def)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+            }
+            if ambiguous := written & rebound:
+                raise TypeError(
+                    f"Inline helper {ctx.source_def_name!r} rebinds foreign-written tensor parameter(s) "
+                    f"{sorted(ambiguous)!r}; return those tensors explicitly"
+                )
+            ordered = tuple(name for name in ctx.param_names if name in written)
+            self._implicit_inline_returns[ctx.func_name] = ordered
+            self._dep_mutated_params[ctx.func_name] = ordered
+
+    def _add_inline_writeback_returns(self, ctx: SpecializeContext, func_def: ast.FunctionDef) -> str | None:
+        """在函数体变量重命名前插入隐式张量结果。"""
+        params = self._implicit_inline_returns.get(ctx.func_name, ())
+        if not params:
+            return None
+        for node in ast.walk(func_def):
+            if isinstance(node, ast.Return):
+                node.value = _implicit_return_value(params)
+        if not isinstance(func_def.body[-1], ast.Return):
+            func_def.body.append(ast.Return(value=_implicit_return_value(params)))
+        types = [_build_tensor_annotation(ctx.tensor_meta[name], is_out=False) for name in params]
+        return types[0] if len(types) == 1 else f"tuple[{', '.join(types)}]"
 
     def _build_source_map(self, src: str) -> dict[int, tuple[str, int, int]]:
         """Map each generated-program line to the user's original source location.
@@ -2035,8 +2115,9 @@ class Specializer:
             extra_anns=extra_param_anns,
         )
 
-        # Infer return type
-        ret_type = _infer_return_type(
+        # 外部写回以隐式张量结果穿过无返回值的内联边界。
+        # 在变量重命名前插入返回语句，使其指向循环、分支和重复外部写入后的最新张量版本。
+        ret_type = self._add_inline_writeback_returns(ctx, func_def) or _infer_return_type(
             func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""

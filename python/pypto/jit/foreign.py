@@ -11,7 +11,8 @@
 
 可调用对象的 ``__pypto_jit__()`` 钩子返回带 ``external_builder`` 的稳定
 ``JITFunction``。构建器接收特化上下文并返回此描述符。
-PyPTO 负责参数绑定、任务依赖和编译；提供方负责设备源码生成及运行时 ABI 包装。
+PyPTO 负责参数绑定、任务依赖和编译；提供方提供设备代码。
+``jit.cannbotdsl`` 等提供方适配器也可由 PyPTO 维护，负责类型转换和运行时 ABI 包装。
 """
 
 from dataclasses import dataclass
@@ -48,6 +49,14 @@ def apply_external_spec(ctx: SpecializeContext, spec: object) -> None:
         raise ValueError(f"External kernel {ctx.func_name!r}: invalid core type {spec.core_type!r}")
     if spec.dual_aiv_dispatch and spec.core_type != "mixed":
         raise ValueError("dual_aiv_dispatch requires a mixed external kernel")
+    unknown = [
+        name for name in ctx.param_names if name not in ctx.tensor_meta and name not in ctx.scalar_dtypes
+    ]
+    if unknown:
+        raise ValueError(
+            f"External kernel {ctx.func_name!r}: cannot infer parameters {unknown}; "
+            "pass tensors or explicitly typed runtime scalars"
+        )
     if set(spec.parameter_access) != set(ctx.tensor_meta) or any(
         access not in ("read", "write", "read_write") for access in spec.parameter_access.values()
     ):

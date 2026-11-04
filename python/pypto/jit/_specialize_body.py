@@ -259,6 +259,15 @@ class BodyTransformer(ast.NodeTransformer):
     # Statement-level transforms
     # ------------------------------------------------------------------
 
+    def _foreign_writeback_target(self, name: str) -> str:
+        """为外部调用结果赋值选取当前张量别名。"""
+        if name not in self._assign_count:
+            self._record_first_assign(name)
+            return name
+        if self._scope_depth == self._assign_depth[name]:
+            return self._rebind(name)
+        return self._var_renames.get(name, name)
+
     def visit_Expr(self, node: ast.Expr) -> ast.stmt | list[ast.stmt] | None:
         """Remove bind_dynamic(...) and dynvar assignment statements."""
         if isinstance(node.value, ast.Call):
@@ -294,12 +303,7 @@ class BodyTransformer(ast.NodeTransformer):
                         value = self.visit_Call(call)
                         targets: list[ast.expr] = []
                         for arg in mutated:
-                            var = arg.id
-                            if var in self._assign_count:
-                                if self._scope_depth == self._assign_depth[var]:
-                                    var = self._rebind(var)
-                            else:
-                                self._record_first_assign(var)
+                            var = self._foreign_writeback_target(arg.id)
                             targets.append(ast.Name(id=var, ctx=ast.Store()))
                         target = targets[0] if len(targets) == 1 else ast.Tuple(elts=targets, ctx=ast.Store())
                         return ast.copy_location(ast.Assign(targets=[target], value=value), node)

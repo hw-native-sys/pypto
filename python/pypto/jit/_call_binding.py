@@ -302,11 +302,12 @@ def resolve_call_site_constexpr(
 # A resolved compile-time binding: sorted ``(param, folded source text)`` pairs.
 # Hashable, so it can stand in the identity of one generated function.
 _ConstexprBinding = tuple[tuple[str, str], ...]
-# One generated ``@pl.function``: a Python function plus the compile-time
-# binding it is compiled against. Everything downstream used to key on
-# ``id(func)`` alone, which is why a dep reached with two different constants
-# had to be refused -- there was one slot to put it in.
+# 一个生成的 ``@pl.function`` 由 Python 函数和编译时绑定共同确定。
+# 依赖外部核的调用链可在此键上追加私有签名标识，该标识与 plan.binding 分离。
+# 此前下游仅用 ``id(func)`` 作为键，同一依赖只有一个存储位置，
+# 因此必须拒绝以两个不同常量调用它的情况。
 VariantKey = tuple[int, _ConstexprBinding]
+_CallVariantKey = Callable[["JITFunction", VariantKey, str, ast.Call, Mapping[str, str]], VariantKey]
 
 
 def freeze_binding(values: Mapping[str, str]) -> _ConstexprBinding:
@@ -378,28 +379,29 @@ def expand_constexpr_variants(
     deps_topo: "Sequence[JITFunction]",
     callers_by_id: Mapping[int, Sequence[tuple[Any, str]]],
     entry_constexpr: Mapping[str, str],
+    *,
+    call_variant_key: _CallVariantKey | None = None,
 ) -> VariantPlan:
-    """Expand the dep graph into one generated function per compile-time binding.
+    """按编译时绑定展开依赖图，每种绑定生成一个函数。
 
-    Walks caller-first (``reversed(deps_topo)``), so by the time a dep is
-    reached every caller variant that can reach it already exists and its own
-    forwarded values are resolved. Each call site is folded independently; call
-    sites that agree on every value collapse onto one variant, which is what
-    keeps the ordinary single-binding program emitting exactly one function per
-    dep.
+    按调用者优先顺序遍历（``reversed(deps_topo)``），因此到达一个依赖时，
+    能够到达它的所有调用者变体均已存在，且各自转发的值已经解析。
+    各调用点独立折叠；所有值均一致的调用点合并为同一个变体，
+    使普通单绑定程序仍然为每个依赖只生成一个函数。
 
-    Args:
-        entry: The entry function, whose binding seeds the walk
-        deps_topo: Every reachable dep, leaf-first
-        callers_by_id: ``id(dep func) -> [(caller func, call name), ...]``
-        entry_constexpr: The entry's own resolved binding
+    参数：
+        entry：入口函数，其绑定作为遍历起点。
+        deps_topo：所有可达依赖，叶子优先。
+        callers_by_id：``id(dep func) -> [(caller func, call name), ...]``。
+        entry_constexpr：入口已解析的绑定。
+        call_variant_key：可选的请求内调用点键解析器，用于在 constexpr 之外
+            还需按张量/标量特化的调用点。返回的键不改变实际 constexpr 绑定。
 
-    Returns:
-        The full :class:`VariantPlan` for this request
+    返回：
+        本次请求完整的 :class:`VariantPlan`。
 
-    Raises:
-        TypeError: if a constexpr parameter is unbound at a call site or bound
-            to something with no compile-time value.
+    异常：
+        TypeError：调用点的 constexpr 参数未绑定，或绑定值无法在编译时确定。
     """
     entry_key: VariantKey = (id(entry._func), freeze_binding(entry_constexpr))
     plan = VariantPlan(
@@ -439,7 +441,11 @@ def expand_constexpr_variants(
                         if splits
                         else {}
                     )
-                    dep_key: VariantKey = (id(dep._func), freeze_binding(values))
+                    dep_key: VariantKey = (
+                        call_variant_key(dep, caller_key, call_name, call, values)
+                        if call_variant_key is not None
+                        else (id(dep._func), freeze_binding(values))
+                    )
                     if dep_key not in plan.binding:
                         plan.order.append(dep_key)
                         plan.jit_func[dep_key] = dep

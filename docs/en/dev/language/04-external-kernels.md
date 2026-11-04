@@ -164,7 +164,8 @@ though the Python stub is unchanged.
 ## Calling a Python DSL kernel directly
 
 A Python DSL can implement the lazy `__pypto_jit__()` protocol so callers keep
-only their operator expressions. With the companion CANNBotDSL device-export
+only their operator expressions. PyPTO also recognizes CANNBotDSL `cb.kernel`
+objects directly, without a producer-side PyPTO hook. With the companion CANNBotDSL
 integration installed, the A5 example is:
 
 ```python
@@ -230,15 +231,46 @@ PyPTO has no mandatory dependency on the producer's package.
 A bare call is rewritten internally to capture each written tensor, preserving
 SSA and loop-carried dependencies. Multiple outputs and keyword arguments work;
 output arguments must be distinct tensor variables. The Python callable remains
-void: using its call as a value is rejected. All call sites of one producer in
-one program must have the same inferred tensor signature. Foreign calls are
-supported from chip orchestration and inline orchestration helpers.
+void: using its call as a value is rejected. Foreign calls are supported from
+chip orchestration and inline orchestration helpers. Different inferred
+signatures receive separate specializations, including through nested helpers.
+
+A void inline helper that directly passes its tensor parameters to foreign
+writers also propagates those writes to its caller. Helpers with explicit
+return values keep their existing return contract. When a helper rebinds a
+written parameter or writes through local aliases/views, return the updated
+tensors explicitly and capture the results at the call site.
+
+Unrebound induction variables of `pl.range` and `pl.parallel` with ordinary
+range bounds are inferred as `pl.INDEX` at foreign calls. A producer can use
+them as explicit row or page identifiers without reading hardware launch IDs.
 
 Builders run before cache lookup; source content, local includes and access/core
 metadata participate in both cache identities. Generated source is reused within
 the request. Producers may use content-addressed storage; no captured tensors,
 addresses or mutable per-request source paths are stored on the JIT dependency.
+The CANNBotDSL adapter lives in `pypto.jit.cannbotdsl`. PyPTO owns kernel
+recognition, tensor/scalar metadata conversion, tracing and lowering through
+the producer's existing compiler APIs, runtime ABI wrapper generation, and
+external task configuration. It consumes the generated SourceBundle and native
+device ABI, including physical parameter order and tensor access effects.
+CANNBotDSL supplies generic compilation and device code generation; it does
+not need an `export_device` entry or a `cannbotdsl.interop.pypto` module for this
+integration. CANNBotDSL is an optional dependency and is imported only when
+this adapter is used.
+
+Calls through nested inline helpers retain separate external specializations
+when tensor shapes, dtypes, layouts, or scalar types differ. Calls with the
+same signature reuse a specialization, including when the producer kernel is
+the same Python object.
+
+The adapter maps PyPTO FP8E8M0 directly to CANNBotDSL's `float8_e8m0` storage
+type. Packed MX scale layouts require an explicit equal-size ND storage view;
+this changes metadata only and preserves the scale bytes without re-encoding.
 The CANNBotDSL integration currently supports A5/TMR, ND tensors with a contiguous
 innermost axis, explicit runtime scalars, AIV/AIC/MIX and basic dynamic shapes.
-The CANN 9.3.0 SDK has a missing CPU-debug-only include which can make the optional
-persistent cache bypass conservatively; the default in-process cache still works.
+Hardware block indices/counts and launch-wide synchronization are not part of
+this device-call ABI; pass task indices explicitly as runtime scalar arguments.
+Unsupported launch operations are rejected before compiler optimization.
+An SDK installation missing optional CPU-debug headers can make the persistent
+cache bypass conservatively; the default in-process cache still works.
