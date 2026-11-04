@@ -23,7 +23,7 @@
 循环 carry 与原地强制别名都已由 `MaterializeSemanticAliases` 建立。
 
 前一个 pass 还会确定编译器创建的选择池容量。证明安全的
-[条件重置](36-materialize_semantic_aliases.md#条件重置存储)可以使用单个共享静态槽位进入规划。
+[条件重置](38-materialize_semantic_aliases.md#条件重置存储)可以使用单个共享静态槽位进入规划。
 否则双槽池保留完整容量；整个 allocation 的复用不会丢弃仍然存活的槽位。
 
 ## 规划器边界

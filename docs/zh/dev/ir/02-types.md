@@ -75,7 +75,7 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 在构造时即进行校验，通过 `ir.set_call_attrs` 附加属性时也会校验。
 
 公开 Tile DSL 使用 `TileType`；默认完整 kernel 选择通过
-[LowerTileToBuffer](../passes/55-lower_tile_to_buffer.md) 转换支持的函数。直接 PTO 代码生成也支持
+[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md) 转换支持的函数。直接 PTO 代码生成也支持
 显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/BF16/FP32/INT32
 描述符，以及 `R` 为 8 的倍数、valid 为正静态值的 FP32 列优先 `[R,1]` 描述符，
 标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数支持
