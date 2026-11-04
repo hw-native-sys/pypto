@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/call_shape_binding.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
@@ -2019,6 +2020,17 @@ void RemapDanglingGmRefsToParam(const StmtPtr& body_stmt,
 // Main Expansion Logic
 // ============================================================================
 
+// Resolve a complete old->fresh parameter map before handing it to DeepClone.
+// DeepClone substitutes seeded Vars verbatim; it cannot repair a fresh tensor
+// parameter whose type still references an original scalar. IRMutator resolves
+// those type dependencies transitively, including forward parameter references.
+class ParameterTypeRemapper : public IRMutator {
+ public:
+  explicit ParameterTypeRemapper(const std::unordered_map<const Var*, ExprPtr>& param_map) {
+    var_remap_.insert(param_map.begin(), param_map.end());
+  }
+};
+
 struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
@@ -2165,7 +2177,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // split_aiv SplitVectorKernel placement for byte-identical output.
   aiv_final = PrependPipeSetupKeepingSubblockIdx(automatic_pipe_setup.aiv_stmts, aiv_final);
 
-  // Helper to create fresh params and build a DeepClone var_map
+  // Seed every parameter first, then publish the final type-remapped identities.
+  // Both the signature and DeepClone must use these exact final Var objects.
   auto make_param_map = [&]() {
     std::unordered_map<const Var*, ExprPtr> param_map;
     std::vector<VarPtr> fresh_params;
@@ -2174,7 +2187,23 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       fresh_params.push_back(fresh);
       param_map[var.get()] = fresh;
     }
+    ParameterTypeRemapper remapper(param_map);
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      auto fresh = As<Var>(remapper.VisitExpr(func->params_[i]));
+      INTERNAL_CHECK_SPAN(fresh != nullptr, func->span_)
+          << "Internal error: cloned parameter remapped to a non-Var expression";
+      fresh_params[i] = fresh;
+      param_map[func->params_[i].get()] = std::move(fresh);
+    }
     return std::make_pair(fresh_params, param_map);
+  };
+
+  auto remap_return_types = [&](const std::unordered_map<const Var*, ExprPtr>& param_map) {
+    CallShapeInstantiation remapper(param_map);
+    std::vector<TypePtr> types;
+    types.reserve(func->return_types_.size());
+    for (const auto& type : func->return_types_) types.push_back(remapper.InstantiateType(type));
+    return types;
   };
 
   // Rewrite the vars a boundary tpop replaced (the op result / the move source)
@@ -2291,7 +2320,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
     aiv_attrs.emplace_back(kAttrDualAivDispatch, true);
   }
   auto aiv_func = std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_,
-                                             func->return_types_, aiv_cloned_body, func->span_,
+                                             remap_return_types(aiv_map), aiv_cloned_body, func->span_,
                                              FunctionType::AIV, std::nullopt, std::nullopt, aiv_attrs);
 
   if (!create_group) {
@@ -2302,8 +2331,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   std::string group_name = func->name_;  // Group replaces the original
 
   // Create fresh parameters for the group function
-  auto [group_params, group_map_unused] = make_param_map();
-  (void)group_map_unused;
+  auto [group_params, group_map] = make_param_map();
+  // The call result lives in the Group caller's coordinates, not the AIV's.
+  auto group_return_types = remap_return_types(group_map);
 
   // Build call args from group params
   std::vector<ExprPtr> call_args(group_params.begin(), group_params.end());
@@ -2316,10 +2346,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // AIV call (returns result)
   auto aiv_gvar = std::make_shared<GlobalVar>(aiv_name);
   TypePtr aiv_return_type;
-  if (func->return_types_.size() == 1) {
-    aiv_return_type = func->return_types_[0];
-  } else if (func->return_types_.size() > 1) {
-    aiv_return_type = std::make_shared<TupleType>(func->return_types_);
+  if (group_return_types.size() == 1) {
+    aiv_return_type = group_return_types[0];
+  } else if (group_return_types.size() > 1) {
+    aiv_return_type = std::make_shared<TupleType>(group_return_types);
   }
 
   CallPtr aiv_call;
@@ -2365,7 +2395,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   auto group_body = SeqStmts::Flatten(std::move(group_stmts), func->span_);
   auto group_func = std::make_shared<Function>(group_name, group_params, func->param_directions_,
-                                               func->return_types_, group_body, func->span_,
+                                               group_return_types, group_body, func->span_,
                                                FunctionType::Group, std::nullopt, std::nullopt, func->attrs_);
 
   return {aic_func, aiv_func, group_func};
