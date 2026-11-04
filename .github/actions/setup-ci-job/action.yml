@@ -586,10 +586,7 @@ runs:
         fi
         PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
         PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_${PTOAS_ARCH}.whl"
-        # Release assets can be republished without changing the version. Scope
-        # cache entries by the pinned digest so a new pin never reuses old bytes.
-        CACHE_WHEEL_DIR="$PTOAS_CACHE_DIR/$PTOAS_SHA256"
-        CACHE_WHEEL="$CACHE_WHEEL_DIR/$PTOAS_WHEEL_NAME"
+        CACHE_WHEEL="$PTOAS_CACHE_DIR/$PTOAS_WHEEL_NAME"
         # $PTOAS_CACHE_DIR is shared across concurrent jobs on the host (unlike the
         # per-job pip dir), so two cache-miss jobs must not fight over one temp
         # file: download into a per-job mktemp, verify it, then atomically rename
@@ -599,8 +596,8 @@ runs:
         # partial/corrupt file left by a crashed pre-atomic-rename run.
         if [ ! -f "$CACHE_WHEEL" ]; then
           echo "Cache miss — downloading ptoas ${PTOAS_VERSION} for ${PTOAS_ARCH}"
-          mkdir -p "$CACHE_WHEEL_DIR"
-          tmp_wheel="$(mktemp "$CACHE_WHEEL_DIR/.ptoas-${PTOAS_ARCH}.XXXXXX")"
+          mkdir -p "$PTOAS_CACHE_DIR"
+          tmp_wheel="$(mktemp "$PTOAS_CACHE_DIR/.ptoas-${PTOAS_ARCH}.XXXXXX")"
           trap 'rm -f "$tmp_wheel"' EXIT
           curl --fail --location --retry 3 --retry-all-errors \
             "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
