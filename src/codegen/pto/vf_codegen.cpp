@@ -68,6 +68,11 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter")) {
       memory.push_back(call);
+      // VMI adds the view origin when materializing an address. Its scalar
+      // dependencies live in the Tile type, so ordinary operand traversal
+      // would otherwise omit them from the helper's scalar captures.
+      const auto tile = As<TileType>(call->args_[0]->GetType());
+      if (tile && tile->tile_view_) VisitExpr(tile->tile_view_->start_offset);
     }
     IRVisitor::VisitExpr_(call);
   }

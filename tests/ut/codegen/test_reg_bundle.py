@@ -543,6 +543,47 @@ def test_capture_offsets_exclude_tile_view_origin(tmp_path):
 
 
 @pytest.mark.ptoas_compile
+@pytest.mark.parametrize("store", [False, True])
+def test_loop_captures_dynamic_view_origin_from_tile_type(store, tmp_path):
+    # origin is deliberately absent from the scope's ordinary expressions:
+    # only the TileView type exposes the scalar needed by VMI addressing.
+    builder = IRBuilder()
+    with builder.function("dynamic_view_origin", span=SPAN, type=ir.FunctionType.AIV) as f:
+        origin = f.param("origin", ir.ScalarType(DataType.INDEX))
+        view = builder.let(
+            "view",
+            tile.full([128], dtype=DataType.FP32, value=1),
+            type=ir.TileType(
+                [128],
+                DataType.FP32,
+                ir.MemRef("storage", 0, 1024),
+                tile_view=ir.TileView([128], [1], origin),
+                memory_space=ir.MemorySpace.Vec,
+            ),
+        )
+        with builder.reg_scope(SPAN):
+            index = ir.Var("i", ir.ScalarType(DataType.INDEX), SPAN)
+            with builder.for_loop(index, 0, 2, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require):
+                value = builder.emit_reg(
+                    "value",
+                    "reg.load",
+                    [view, ir.ConstInt(0, DataType.INDEX, SPAN)],
+                    {"lanes": 64},
+                    SPAN,
+                )
+                if store:
+                    builder.emit_reg_store("updated", view, value, span=SPAN)
+    bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "DynamicOrigin", SPAN))
+    compile_vf_bundle(bundle, tmp_path)
+    helper = bundle.helpers[0]
+    assert helper.parameter_types == ["!pto.ptr<f32, ub>", "index"]
+    assert "scf.for" in helper.source
+    assert "%arg1" in helper.source
+    assert "pto.vmi.vload" in helper.source
+    assert ("pto.vmi.vstore" in helper.source) == store
+
+
+@pytest.mark.ptoas_compile
 def test_external_plain_alias_shares_one_capture(tmp_path):
     builder = IRBuilder()
     with builder.function("plain_alias", span=SPAN, type=ir.FunctionType.AIV) as f:
