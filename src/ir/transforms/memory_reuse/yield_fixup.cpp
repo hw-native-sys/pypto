@@ -208,13 +208,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto result = IRMutator::VisitStmt_(op);
-    if (selections_) {
-      if (selections_->overwrite_barriers.count(op.get())) {
-        return SeqStmts::Flatten({SelectionBarrier(op->span_), result}, op->span_);
-      }
-      return result;
-    }
-    if (fixup_if_stmts_) return result;
+    if (selections_ || fixup_if_stmts_) return result;
 
     // Follow semantic aliases of a repaired phi. Registered views re-derive
     // their relative window; writeback results keep their input's whole window.

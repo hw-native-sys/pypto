@@ -332,17 +332,15 @@ def test_conditional_selection_slot_liveness(
             assert _yielded_slot(branches[0].then_body) == _yielded_slot(branches[0].else_body) == 0
             body = branches[0].else_body if reset_in_else else branches[0].then_body
             assert isinstance(body, ir.SeqStmts)
-            reset_position = next(
-                i
-                for i, stmt in enumerate(body.stmts)
-                if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "reset"
+            # Sharing storage must leave overwrite synchronization to PTOAS.
+            assert not any(
+                isinstance(stmt, ir.EvalStmt)
+                and isinstance(stmt.expr, ir.Call)
+                and stmt.expr.op.name == ir.get_op("system.bar_all").name
+                for stmt in body.stmts
             )
-            barrier = body.stmts[reset_position - 1]
-            assert reset_position > 0 and isinstance(barrier, ir.EvalStmt)
-            assert isinstance(barrier.expr, ir.Call)
-            assert barrier.expr.op.name == ir.get_op("system.bar_all").name
         # Once the choice has become scalar control flow, rerunning semantic
-        # materialization must preserve both capacity and synchronization.
+        # materialization must preserve the lowered selection.
         ir.assert_structural_equal(passes.materialize_semantic_aliases()(materialized), materialized)
         if planner == passes.MemoryPlanner.PYPTO:
             materialized = passes.memory_reuse()(materialized)
@@ -370,13 +368,14 @@ def test_conditional_selection_preserves_storage_constraints(
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("planner", [*_PLANNERS, passes.MemoryPlanner.PTOAS])
 @pytest.mark.parametrize("reset_in_else", [False, True])
+@pytest.mark.parametrize("old_use", ["none", "before"])
 def test_conditional_selection_single_slot_ptoas(
-    planner, reset_in_else, pass_verification_instruments, ascend_backend, tmp_path
+    planner, reset_in_else, old_use, pass_verification_instruments, ascend_backend, tmp_path
 ) -> None:
-    """The shared static descriptor and both synchronization points lower to PTOAS."""
+    """PTOAS handles shared-window accesses, including a store before overwrite."""
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
-    before = _conditional_reset_program(reset_in_else=reset_in_else)
+    before = _conditional_reset_program(reset_in_else=reset_in_else, old_use=old_use)
     with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
         if planner == passes.MemoryPlanner.PYPTO:

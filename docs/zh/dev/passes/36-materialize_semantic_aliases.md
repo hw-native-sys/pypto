@@ -51,9 +51,8 @@ saved = pl.tile.store(selected, [0, 0], out)
 
 这里 `current`、`reset` 和 `selected` 共享一个 65536 字节窗口。若另有一个独立存活的
 65536 字节 Tile，总容量由 196608 降为 131072 字节。两支均 yield 槽位零，重建的描述符
-使用常量偏移、`slot_count=1`，且不带 `slot_index`。覆盖 producer 前紧邻的 barrier
-确保此前的异步访问完成，If 出口的 barrier 继续保留。这用额外同步换取容量降低，
-本身不代表运行时间改善。
+使用常量偏移、`slot_count=1`，且不带 `slot_index`。共享窗口访问的同步由 PTOAS
+通过 `--enable-insert-sync` 处理；此优化不会在覆盖 producer 前插入 barrier。
 
 普通 SSA 重命名上的读取仍算作对旧值的观察，即使重命名在 If 之后创建。读取选择结果
 则观察当前执行路径选中的值。同分支尾部或 If 之后独立读取 `current` 都会阻止合并。

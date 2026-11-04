@@ -47,9 +47,6 @@ struct StorageSelectionPlan {
   std::map<const Var*, VarPtr> tiles;
   std::map<const Var*, ExprPtr> indices;
   std::vector<StmtPtr> allocations;
-  // Original producer statements whose writes reuse a selected input window.
-  // A barrier immediately before each write retires prior asynchronous accesses.
-  std::set<const Stmt*> overwrite_barriers;
 };
 StmtPtr MaterializeStorageSelections(const StmtPtr& body, const std::vector<VarPtr>& parameters,
                                      StorageSelectionPlan plan);

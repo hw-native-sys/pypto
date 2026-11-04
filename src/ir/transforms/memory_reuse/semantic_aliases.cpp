@@ -765,7 +765,6 @@ StorageSelectionPlan BuildStorageSelectionPlan(const FunctionPtr& function) {
     if (first->size_ > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / count) continue;
     std::map<const Var*, uint64_t> producer_slots;
     for (size_t i = 0; i < producers.size(); ++i) producer_slots[producers[i].get()] = share ? 0 : i;
-    if (share) plan.overwrite_barriers.insert(index.defs.at(producers[1]).definition_stmt.get());
     const auto bytes = first->size_;
     const auto base =
         std::make_shared<Var>(names.Fresh("mem_storage_selection_"), GetPtrType(), first->span_);
@@ -796,6 +795,7 @@ StorageSelectionPlan BuildStorageSelectionPlan(const FunctionPtr& function) {
       // A coalesced selection has one ordinary static window. Keep the scalar
       // yields for the existing SSA rewrite, but never use their result as an
       // address or as multi-slot metadata for this single-slot allocation.
+      // PTOAS inserts synchronization for accesses to the shared window.
       auto memory =
           share ? std::make_shared<MemRef>(base, int64_t{0}, bytes, value->span_)
                 : std::make_shared<MemRef>(base, MulByteOffsets(selected, integer(bytes, value->span_)),
@@ -1020,7 +1020,7 @@ std::set<const Var*> FindSingleSlotSelections(const FunctionPtr& function, const
     for (const auto& value : values) {
       if (!As<TileType>(value->GetType())) continue;
       // One-based event coordinates also let the query include reads in the
-      // overwriting producer itself; a preceding barrier cannot protect those.
+      // overwriting producer itself, which still requires the old payload.
       events[origin(value)].emplace_back(index.stmt_order.at(statement) + 1,
                                          reverse.stmt_order.at(statement) + 1);
     }

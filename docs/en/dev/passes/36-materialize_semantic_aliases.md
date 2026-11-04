@@ -61,10 +61,9 @@ saved = pl.tile.store(selected, [0, 0], out)
 Here `current`, `reset` and `selected` share one 65536-byte window. With another
 independently live 65536-byte tile, the total is 131072 bytes instead of 196608.
 Both arms yield slot zero, while the reconstructed descriptor has a constant
-offset, `slot_count=1` and no `slot_index`. A barrier immediately before the
-replacement producer retires earlier asynchronous accesses; the If exit barrier
-is retained. This trades an additional synchronization point for lower capacity;
-it does not by itself establish a runtime speedup.
+offset, `slot_count=1` and no `slot_index`. Synchronization for shared-window
+accesses is handled by PTOAS with `--enable-insert-sync`; this optimization does
+not insert a barrier before the replacement producer.
 
 Reads through ordinary SSA renames count as observations of the old value, even
 if the rename is created after the If. Reading the selected result is different:
