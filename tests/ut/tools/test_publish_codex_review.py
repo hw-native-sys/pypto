@@ -1132,5 +1132,72 @@ def test_review_upload_attempts_replace_only_current_run_artifact(workflow):
     assert not uploads[-1].get("continue-on-error", False)
 
 
+@pytest.mark.parametrize(
+    "prepare_attempt,review_attempt,publish_attempt",
+    [
+        (1, 1, 1),  # Initial run.
+        (3, 3, 3),  # All producers execute again.
+        (1, 2, 2),  # Only review and its dependent publish execute again.
+        (1, 3, 3),  # Repeated review reruns still consume the original snapshot.
+        (1, 1, 2),  # Only publish executes again.
+        (1, 2, 3),  # Publish reruns after a partial review rerun.
+    ],
+)
+@pytest.mark.parametrize("successful_upload", ["upload_review", "upload_review_retry", "upload_review_final"])
+def test_reruns_download_the_artifacts_from_their_producers(
+    workflow, prepare_attempt, review_attempt, publish_attempt, successful_upload
+):
+    """Retained job outputs must select the artifacts that were actually uploaded."""
+
+    def render(template, context):
+        """Expand the workflow's actual expressions using each job's own attempt."""
+        return re.sub(
+            r"\$\{\{(.*?)\}\}",
+            lambda match: str(workflow_expression(match[1], context)),
+            template,
+        )
+
+    artifacts = {}
+    retained_jobs = {}
+    downloads = {}
+    for job_name, attempt in zip(
+        ("prepare", "review", "publish"), (prepare_attempt, review_attempt, publish_attempt)
+    ):
+        job = workflow["jobs"][job_name]
+        dependencies = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
+        context = {
+            "github": {"run_id": 12345, "run_attempt": attempt},
+            "needs": {name: retained_jobs[name] for name in dependencies if name in retained_jobs},
+            "steps": {
+                "context": {"outputs": {"ready": "true", "number": "12", "head": HEAD, "base": BASE}},
+                "codex": {"outputs": {"completed": "true"}},
+            },
+        }
+        downloads[job_name] = []
+        for step in job["steps"]:
+            action = step.get("uses", "").split("@", 1)[0]
+            if action == "actions/download-artifact":
+                name = render(step["with"]["name"], context)
+                assert name in artifacts, f"{job_name} attempt {attempt} requested missing artifact {name}"
+                downloads[job_name].append(artifacts[name])
+            elif action == "actions/upload-artifact":
+                # Retry gate behavior is covered separately. Whichever attempt
+                # succeeds must supply the result later consumed by publish.
+                if job_name == "review" and step["id"] != successful_upload:
+                    continue
+                name = render(step["with"]["name"], context)
+                artifacts[name] = (job_name, step["name"], attempt)
+        retained_jobs[job_name] = {
+            "outputs": {key: render(value, context) for key, value in job.get("outputs", {}).items()}
+        }
+
+    snapshot = ("prepare", "Upload discussion snapshot", prepare_attempt)
+    result_step = next(
+        step for step in workflow["jobs"]["review"]["steps"] if step.get("id") == successful_upload
+    )
+    assert downloads["review"] == [snapshot]
+    assert downloads["publish"] == [("review", result_step["name"], review_attempt), snapshot]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
