@@ -871,20 +871,28 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts, const SiblingU
   // The phase verifier permits a bare alias between a Final producer and its
   // store. Follow only single-use aliases in this same SeqStmts: a copy/view or
   // an additional reader still needs the original full accumulator. Reverse
-  // order propagates the store endpoint through a chain with constant work per
+  // order propagates the store endpoint through a chain with indexed work per
   // definition. The aliases are removed only after the producer/store fold wins.
   for (auto it = stmts.rbegin(); it != stmts.rend(); ++it) {
     auto assign = As<AssignStmt>(*it);
     auto source = assign ? AsVarLike(assign->value_) : nullptr;
     if (!source) continue;
-    auto source_use = idx.use_counts.find(source.get());
-    auto alias_use = idx.use_counts.find(assign->var_.get());
-    if (source_use == idx.use_counts.end() || source_use->second != 1 || alias_use == idx.use_counts.end() ||
-        alias_use->second != 1) {
-      continue;
-    }
     auto store = idx.store_of.find(assign->var_.get());
     if (store == idx.store_of.end()) continue;
+    auto source_use = idx.use_counts.find(source.get());
+    auto alias_use = idx.use_counts.find(assign->var_.get());
+    if (source_use == idx.use_counts.end() || source_use->second != 1 || alias_use == idx.use_counts.end()) {
+      continue;
+    }
+    int alias_reads = alias_use->second;
+    const auto store_call = As<Call>(store->second->value_);
+    // DirectGmPlacer remaps only the store's actual input to each subtile.
+    // Metadata on that store may therefore follow the terminal alias, but
+    // references to earlier aliases or from retained consumers must survive.
+    if (AsVarLike(store_call->args_[0]).get() == assign->var_.get()) {
+      alias_reads -= uses.MetadataReadsOwnedBy(assign->var_.get(), store->second->var_.get());
+    }
+    if (alias_reads != 1) continue;
     idx.store_of.emplace(source.get(), store->second);
     idx.store_alias_next.emplace(source.get(), assign->var_.get());
   }

@@ -178,7 +178,7 @@ auto rebuilt = transform_utils::RebuildRegisteredCall(
 
 搜索下限（search minimum）是向上取整到对应对齐粒度的下界，而不是 tile 网格的偏移。启用 padding 时，上界包含第一个同时满足问题尺寸和下限的对齐 tile；辅助约束 `max_n` 仍限制 N。搜索对齐和物理 boxing 不改变 cube 的 16×16 M/N MAD fractal：增大搜索步长不能减少同一个 tile 的计算代价。
 
-在规范 split-K 重写后，结果使用分类（result-use classification）对每个函数的全部读取只计数一次，包括嵌套区域的捕获，以及调用属性和关键字参数中的值引用。关键字引用算作读取，不算位置矩阵操作数。各区域随后仅对直接 store 和 cast 建立索引，并查询不可变的计数。这样避免在每个外层 `SeqStmts` 中重扫全部后代；读取索引的复杂度与 IR 大小呈线性关系，不受嵌套深度影响。 仅当改写会重映射 metadata 所属区域时，才可在匹配中扣除其引用：direct-store 的 metadata 跟随替换源，克隆的规范循环体中的 seed 引用跟随新 initializer。区域区间以稳定的 SSA 定义 Var 建立索引，再用二分搜索查询，因此 eligibility 分析保持在 O(N log N) 以内，不重复扫描嵌套 body。
+在规范 split-K 重写后，结果使用分类（result-use classification）对每个函数的全部读取只计数一次，包括嵌套区域的捕获，以及调用属性和关键字参数中的值引用。关键字引用算作读取，不算位置矩阵操作数。各区域随后仅对直接 store 和 cast 建立索引，并查询不可变的计数。这样避免在每个外层 `SeqStmts` 中重扫全部后代；读取索引的复杂度与 IR 大小呈线性关系，不受嵌套深度影响。 仅当改写会重映射 metadata 所属区域时，才可在匹配中扣除其引用：direct-store 的 metadata 跟随替换源，克隆的规范循环体中的 seed 引用跟随新 initializer。沿普通别名链查找 store 时，只扣除该 store 的 metadata 对其实际输入别名的引用；对更早别名的引用或保留消费者中的引用仍要求保留完整值。区域区间以稳定的 SSA 定义 Var 建立索引，再用二分搜索查询，因此 eligibility 分析保持在 O(N log N) 以内，不重复扫描嵌套 body。
 
 `ChooseL0Tile` 通过**穷举式 roofline 搜索**挑选 L0 GEMM tile，而非闭式公式。对每个合法且对齐的 `(m, n, k)`（每维都是 `GetL0FractalAlignment()` 的倍数，L0C 预算按 `AlignUp(m, l0c_align_m) × n` 计算），它以核心 cycle 估算 wall-clock 并返回最小者：
 

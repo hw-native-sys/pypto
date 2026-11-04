@@ -5019,5 +5019,101 @@ def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, ca
     passes.verify_properties(properties, after, "keyword edge after AutoTile")
 
 
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("K", [64, 544])
+@pytest.mark.parametrize("reference", ["terminal", "intermediate", "external"])
+def test_alias_store_metadata_ownership(planner, K, reference):
+    """Only metadata remapped by the replaced store may be discounted."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[384, K], pl.BF16],
+            rhs: pl.Tensor[[K, 640], pl.BF16],
+            out: pl.Out[pl.Tensor[[384, 640], pl.FP32]],
+        ) -> pl.Tensor[[384, 640], pl.FP32]:
+            a = pl.load(lhs, [0, 0], [384, K], target_memory=pl.Mem.Mat)
+            b = pl.load(rhs, [0, 0], [K, 640], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(a, b)
+            alias1 = c
+            alias2 = alias1
+            result = pl.store(alias2, [0, 0], out)
+            return result
+
+    class AddMetadata(ir.IRMutator):
+        def __init__(self):
+            super().__init__()
+            self.intermediate = None
+            self.producer_call = None
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("tile.matmul").name:
+                self.producer_call = op.value
+            if op.var.name_hint.startswith("alias1"):
+                self.intermediate = op.var
+            if not isinstance(op.value, ir.Call) or op.value.op.name != ir.get_op("tile.store").name:
+                return op
+            value = self.intermediate if reference == "intermediate" else op.value.args[0]
+            assert value is not None
+            kwargs, attrs = dict(op.value.kwargs), dict(op.value.attrs)
+            attrs["source_ref"] = value
+            attrs["dump_vars"] = [value]
+            call = ir.Call(op.value.op, op.value.args, kwargs, attrs, op.value.type, op.value.span)
+            updated = ir.AssignStmt(op.var, call, op.span)
+            if reference == "external":
+                # A retained call owns these reads; replacing the store cannot
+                # remap them, even though the referenced terminal alias agrees.
+                assert self.producer_call is not None
+                # Its positional operands are a and b: the alias is referenced
+                # only by metadata, so ordinary operand counts cannot mask a bug.
+                retained = ir.Call(
+                    self.producer_call.op,
+                    self.producer_call.args,
+                    dict(self.producer_call.kwargs),
+                    attrs,
+                    self.producer_call.type,
+                    op.span,
+                )
+                return ir.SeqStmts([op, ir.EvalStmt(retained, op.span)], op.span)
+            return updated
+
+    before = AddMetadata().visit_program(passes.convert_to_ssa()(Before))
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    _assert_ssa_valid(after, "alias_metadata_after")
+    if reference != "terminal":
+        ir.assert_structural_equal(after, before)
+        return
+
+    class Stores(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.count = 0
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("tile.store").name:
+                self.count += 1
+                metadata = dict(op.attrs)
+                assert metadata["source_ref"].same_as(op.args[0])
+                assert metadata["dump_vars"][0].same_as(op.args[0])
+                assert isinstance(op.args[0].type, ir.TileType)
+                dims = op.args[0].type.shape
+                rows, cols = dims
+                assert isinstance(rows, ir.ConstInt) and isinstance(cols, ir.ConstInt)
+                assert int(rows.value) * int(cols.value) * 4 <= 131072
+            super().visit_call(op)
+
+    stores = Stores()
+    stores.visit_program(after)
+    assert stores.count > 0
+    assert "alias1" not in ir.python_print(after) and "alias2" not in ir.python_print(after)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
