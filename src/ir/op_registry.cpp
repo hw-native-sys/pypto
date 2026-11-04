@@ -203,7 +203,10 @@ void OpRegistryEntry::ValidateIRStage() const {
   CHECK(!validate_explicit_type_.has_value() || (ir_stage_ == OpIRStage::Buffer && internal_only_))
       << "Operator '" << name_ << "' explicit type validation requires an internal-only Buffer operator";
   if (ir_stage_ == OpIRStage::Functional) {
-    CHECK(output_arity_ > 0) << "Functional operator '" << name_ << "' must produce at least one value";
+    // Logical waits and VF barriers are statement-only even before buffer
+    // lowering. Their absence of a value must not masquerade as UnknownType.
+    CHECK(output_arity_ > 0 || op_category_ == "SyncOp")
+        << "Functional operator '" << name_ << "' must produce a value or be a statement-only SyncOp";
     CHECK(buffer_arg_effects_.empty() && buffer_results_.empty())
         << "Functional operator '" << name_ << "' cannot carry buffer contracts";
     return;
@@ -242,7 +245,7 @@ void OpRegistryEntry::ValidateCall(const std::vector<ExprPtr>& args, const TypeP
   INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" << name_ << "'";
   auto tuple = As<TupleType>(result_type);
   if (output_arity_ == 0) {
-    INTERNAL_CHECK_SPAN(ir_stage_ == OpIRStage::Buffer && As<VoidType>(result_type), span)
+    INTERNAL_CHECK_SPAN(As<VoidType>(result_type), span)
         << "Operator '" << name_ << "' declares zero results but did not deduce VoidType";
   } else {
     INTERNAL_CHECK_SPAN(!As<VoidType>(result_type), span)

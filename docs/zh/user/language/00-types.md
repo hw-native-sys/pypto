@@ -30,6 +30,14 @@ MaskReg 必须使用 `pl.BOOL`，VecReg 禁止使用 BOOL。例如，
 Reg 和局部 Scalar 不得逃逸。支持 IR 构造、验证、二进制序列化和 DSL 文本往返。
 VF 后端编译仍需 PR3；参见[寄存器操作](../../dev/language/06-register-operations.md)。
 
+## 完成凭证标注（IR 基础设施）
+
+`pl.SyncToken[pipe]` 描述来自具体 `pl.PipeType` 的局部 SSA 完成事实，
+例如 `pl.SyncToken[pl.PipeType.MTE2]`。`pl.sync` 提供逻辑记录、等待、合取、
+空完成事实、地址重叠与 VF 屏障操作。token 没有硬件 flag ID，不能进入函数签名。
+这些接口属于 IR 构造与验证基础设施：硬件降低尚未实现，包含这些操作的 kernel
+不能编译。参见[逻辑同步 IR](../../dev/ir/11-logical-sync.md)。
+
 ## Quickstart：读懂一个签名
 
 <!-- doctest: setup -->

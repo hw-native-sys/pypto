@@ -405,6 +405,7 @@ _TYPE_FACTORIES: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContextType": lambda: ir.PrefetchAsyncContextType(),
     "AsyncEventType": lambda: ir.AsyncEventType(),
     "AsyncSessionType": lambda: ir.AsyncSessionType(),
+    "SyncTokenType": lambda: ir.SyncTokenType(ir.PipeType.MTE2),
 }
 
 # Bound but not instantiable: pure base classes with no nanobind constructor.

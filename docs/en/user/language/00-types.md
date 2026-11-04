@@ -44,6 +44,16 @@ IR construction, validation, binary serialization and DSL text roundtrips are
 supported. VF backend compilation remains unavailable until PR3.
 See [register operations](../../dev/language/06-register-operations.md).
 
+## Completion-token annotations (IR infrastructure)
+
+`pl.SyncToken[pipe]` describes a local SSA completion fact from a concrete
+`pl.PipeType`, such as `pl.SyncToken[pl.PipeType.MTE2]`. `pl.sync` provides the
+logical record, wait, join, empty-completion, address-overlap and VF-barrier
+operations. Tokens have no hardware flag ID and cannot enter function signatures.
+This is IR construction and verification infrastructure: hardware lowering is
+not implemented, so kernels containing these operations cannot be compiled.
+See [logical synchronization IR](../../dev/ir/11-logical-sync.md).
+
 ## Quickstart: reading a signature
 
 <!-- doctest: setup -->

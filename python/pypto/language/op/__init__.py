@@ -24,6 +24,7 @@ namespaces remain available for cases where the caller wants to be explicit.
 
 from . import array_ops as array
 from . import prefetch_ops as prefetch
+from . import sync_ops as sync
 from . import system_ops as system
 from . import tensor_ops as tensor
 from . import tile_ops as tile
@@ -202,6 +203,7 @@ __all__ = [
     "prefetch",
     "tile",
     "system",
+    "sync",
     "tensor",
     # Unified dispatch
     "add",

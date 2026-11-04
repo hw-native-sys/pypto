@@ -125,6 +125,7 @@ enum class ObjectKind {
   PrefetchAsyncContextType,
   AsyncEventType,
   AsyncSessionType,
+  SyncTokenType,
   RegType,
 
   // Other IR node kinds
