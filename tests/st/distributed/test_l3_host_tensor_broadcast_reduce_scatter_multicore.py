@@ -28,18 +28,6 @@ from pypto.ir import DistributedConfig
 from pypto.runtime import RunConfig
 
 
-def _signal_lane_wait(signal, nr, my_rank_placeholder, cores):
-    for peer in pl.range(nr):
-        if peer != my_rank_placeholder:
-            for lane in pl.range(cores):
-                pld.system.wait(
-                    signal=signal,
-                    offsets=[peer, lane],
-                    expected=0,
-                    cmp=pld.WaitCmp.Eq,
-                )
-
-
 def _build_multicore_broadcast_program(n_ranks: int, size: int, core_num: int, signal_stride: int, root: int):
     nr = n_ranks
     sz = size
@@ -73,7 +61,15 @@ def _build_multicore_broadcast_program(n_ranks: int, size: int, core_num: int, s
     ) -> pl.Tensor[[1, sz], pl.FP32]:
         ctx = pld.get_comm_ctx(signal)
         my_rank = pld.rank(ctx)
-        _signal_lane_wait(signal, nr, my_rank, cores)
+        for peer in pl.range(nr):
+            if peer != my_rank:
+                for lane in pl.range(cores):
+                    pld.system.wait(
+                        signal=signal,
+                        offsets=[peer, lane],
+                        expected=0,
+                        cmp=pld.WaitCmp.Eq,
+                    )
         reduced = pl.load(data, [0, 0], [stage_rows, stage_cols], valid_shape=[1, sz])
         out = pl.store(reduced, [0, 0], out)
         signal_values = pl.load(signal, [0, 0], [nr, signal_stage_cols], valid_shape=[nr, stride])
@@ -145,7 +141,15 @@ def _build_multicore_reduce_scatter_program(n_ranks: int, size: int, core_num: i
     ) -> pl.Tensor[[1, sz], pl.FP32]:
         ctx = pld.get_comm_ctx(signal)
         my_rank = pld.rank(ctx)
-        _signal_lane_wait(signal, nr, my_rank, cores)
+        for peer in pl.range(nr):
+            if peer != my_rank:
+                for lane in pl.range(cores):
+                    pld.system.wait(
+                        signal=signal,
+                        offsets=[peer, lane],
+                        expected=0,
+                        cmp=pld.WaitCmp.Eq,
+                    )
         reduced = pl.load(data, [my_rank, 0], [1, row_stage_cols], valid_shape=[1, sz])
         out = pl.store(reduced, [0, 0], out)
         signal_values = pl.load(signal, [0, 0], [nr, signal_stage_cols], valid_shape=[nr, stride])
