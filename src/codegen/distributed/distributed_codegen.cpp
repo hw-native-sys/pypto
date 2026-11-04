@@ -40,6 +40,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -78,6 +79,9 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
 std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
   VerifyDistributedCodegenPreconditions(program);
+  // Share recursive HOST return maps across all CHIP entries in this immutable
+  // program. RAII clears the cache on normal return and exception unwinding.
+  ir::return_lineage::ScopedTraceCache return_cache(/*require_terminal_returns=*/true);
 
   program_ = program;
   emitter_.Clear();
@@ -91,6 +95,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   host_orch_var_defs_.clear();
   unwrap_hoisted_var_refs_ = false;
   tuple_element_tensors_.clear();
+  returned_param_indices_.clear();
   tuple_element_task_handles_.clear();
   emitted_builtin_variants_.clear();
   builtin_next_level_specs_.clear();
@@ -755,6 +760,9 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
           << "for tuple var '" << tuple_var << "' index " << tge->index_;
       emitter_.EmitLine(var_name + " = " + it->second);
     } else {
+      CHECK_SPAN(!scalar_type, op->span_)
+          << "Distributed HOST cannot consume a scalar returned by a CHIP dispatch; "
+             "use an explicit output tensor";
       auto it = tuple_element_tensors_.find(std::make_pair(tuple_var, tge->index_));
       INTERNAL_CHECK_SPAN(it != tuple_element_tensors_.end(), op->span_)
           << "Internal error: TupleGetItemExpr unpacking found no Out parameter "
@@ -1214,40 +1222,102 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // (it's only seeded from input parameter names in the runtime), so allocate
   // a fresh shared-memory tensor for it before emitting ``add_tensor``.
   std::string target = current_target_var_;
-  if (!target.empty() && !callee->return_types_.empty()) {
-    bool has_out_param = false;
-    for (const auto& dir : callee->param_directions_) {
-      if (dir == ir::ParamDirection::Out || dir == ir::ParamDirection::InOut) {
-        has_out_param = true;
-        break;
+  // Parameter direction describes write effects, not which values are returned.
+  // A stateful CHIP entry may mutate KV/cache arguments without returning them,
+  // and its declared results may be reordered or repeat the same parameter.
+  // HOST codegen accepts both normalized and raw typed callees. Trace their
+  // return lineage conservatively rather than inferring normalization from type.
+  // Memoize per callee so repeated HOST calls do not rescan a large CHIP body.
+  std::vector<std::pair<size_t, size_t>> mapped_tensor_params;
+  CHECK_SPAN(target.empty() || is_sub || submit || !ir::As<ir::ScalarType>(call->GetType()), call->span_)
+      << "Distributed HOST cannot consume a scalar returned by a CHIP dispatch; use an explicit output "
+         "tensor";
+  const auto& declared_results = callee->return_types_;
+  // Plain Call already carries the parser's effective type when the callee
+  // has no annotation. Use it to bind the result instead of dropping it.
+  const auto inferred_result = declared_results.empty() && !submit ? call->GetType() : nullptr;
+  const auto nested_tuple =
+      ir::As<ir::TupleType>(declared_results.size() == 1 ? declared_results.front() : inferred_result);
+  const size_t result_count = nested_tuple
+                                  ? nested_tuple->types_.size()
+                                  : (ir::AsTensorTypeLike(inferred_result) ? 1 : declared_results.size());
+  const bool has_writable_param =
+      std::any_of(callee->param_directions_.begin(), callee->param_directions_.end(), [](auto direction) {
+        return direction == ir::ParamDirection::Out || direction == ir::ParamDirection::InOut;
+      });
+  if (!target.empty() && result_count != 0) {
+    auto [mapping_it, inserted] = returned_param_indices_.try_emplace(callee.get());
+    if (inserted) {
+      // HOST codegen also accepts raw typed callees. FunctionType alone is
+      // not evidence of SSA/ReturnParamsExplicit: guard formal rebinding in
+      // the shared analysis, then cache its result for repeated HOST calls.
+      const auto ret = nested_tuple ? ir::return_lineage::FindFirstReturn(callee->body_) : nullptr;
+      const bool project_tuple =
+          ret && ret->value_.size() == 1 && ir::As<ir::TupleType>(ret->value_[0]->GetType());
+      mapping_it->second = project_tuple
+                               ? ir::return_lineage::ReturnedTupleElementParamIndices(callee, program_)
+                               : ir::return_lineage::ReturnedParamIndices(callee, program_);
+    }
+    const auto& returned_params = mapping_it->second;
+    bool has_unknown_tensor_result = false;
+    for (size_t result = 0; result < result_count; ++result) {
+      const auto& type = nested_tuple ? nested_tuple->types_[result]
+                                      : (inferred_result ? inferred_result : declared_results[result]);
+      if (!ir::AsTensorTypeLike(type)) continue;
+      if (result >= returned_params.size()) {
+        has_unknown_tensor_result = true;
+        continue;
+      }
+      const auto& parameter = returned_params[result];
+      if (!parameter.has_value()) {
+        has_unknown_tensor_result = true;
+        continue;
+      }
+      const size_t index = *parameter;
+      INTERNAL_CHECK_SPAN(index < callee->params_.size(), call->span_)
+          << "Distributed HOST returned parameter index is out of range";
+      mapped_tensor_params.emplace_back(result, index);
+    }
+    if (has_unknown_tensor_result) {
+      CHECK_SPAN(mapped_tensor_params.empty(), call->span_)
+          << "Distributed HOST mixed known and unresolved tensor returns require explicit output parameters "
+             "in '"
+          << callee->name_ << "'";
+      // SubWorkers retain their task-argument ABI. A CHIP return with an
+      // explicit but unknown source cannot use the implicit output slot:
+      // the generated CHIP entry would never write to that extra argument.
+      CHECK_SPAN(is_sub || (returned_params.empty() && has_writable_param), call->span_)
+          << "Distributed HOST cannot bind unresolved explicit tensor returns in '" << callee->name_
+          << "'; return caller-supplied tensor parameters with fixed identities";
+    }
+  }
+  const bool explicit_tensor_returns = !mapped_tensor_params.empty();
+  if (is_sub && !target.empty() && !declared_results.empty() && !has_writable_param &&
+      !explicit_tensor_returns) {
+    // Allocate a shared-memory tensor for the return value if absent.
+    // share_memory_() is required for fork-based distributed visibility.
+    auto ret_type = std::dynamic_pointer_cast<const ir::TensorType>(callee->return_types_.front());
+    INTERNAL_CHECK(ret_type) << "Distributed callee return must be TensorType";
+    std::string shape = "(";
+    for (size_t i = 0; i < ret_type->shape_.size(); ++i) {
+      if (i > 0) shape += ", ";
+      const auto& dim = ret_type->shape_[i];
+      if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
+        shape += std::to_string(const_int->value_);
+      } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
+        shape += SanitizeName(var->name_hint_);
+      } else {
+        CHECK(false) << "Distributed callee return shape dim " << i << " must be ConstInt or Var";
       }
     }
-    if (!has_out_param) {
-      // Allocate a shared-memory tensor for the return value if absent.
-      // share_memory_() is required for fork-based distributed visibility.
-      auto ret_type = std::dynamic_pointer_cast<const ir::TensorType>(callee->return_types_.front());
-      INTERNAL_CHECK(ret_type) << "Distributed callee return must be TensorType";
-      std::string shape = "(";
-      for (size_t i = 0; i < ret_type->shape_.size(); ++i) {
-        if (i > 0) shape += ", ";
-        const auto& dim = ret_type->shape_[i];
-        if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
-          shape += std::to_string(const_int->value_);
-        } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
-          shape += SanitizeName(var->name_hint_);
-        } else {
-          CHECK(false) << "Distributed callee return shape dim " << i << " must be ConstInt or Var";
-        }
-      }
-      if (ret_type->shape_.size() == 1) shape += ",";
-      shape += ")";
-      const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
-      emitter_.EmitLine("if \"" + target + "\" not in tensors:");
-      emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
-                        torch_dtype + ").share_memory_()");
-      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
-                        "\"]), TensorArgType.OUTPUT_EXISTING)");
-    }
+    if (ret_type->shape_.size() == 1) shape += ",";
+    shape += ")";
+    const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
+    emitter_.EmitLine("if \"" + target + "\" not in tensors:");
+    emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
+                      torch_dtype + ").share_memory_()");
+    emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
+                      "\"]), TensorArgType.OUTPUT_EXISTING)");
   }
 
   // Append the per-rank comm ordering token as the LAST TENSOR — after every
@@ -1323,6 +1393,33 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     }
   }
 
+  if (explicit_tensor_returns) {
+    INTERNAL_CHECK_SPAN(call->args_.size() == callee->params_.size(), call->span_)
+        << "Internal error: distributed HOST explicit return mapping requires every callee argument for '"
+        << callee->name_ << "'";
+    const bool tuple_result = submit || nested_tuple || result_count > 1;
+    for (const auto& [result, index] : mapped_tensor_params) {
+      const auto& arg = call->args_[index];
+      INTERNAL_CHECK_SPAN(ir::AsTensorTypeLike(arg->GetType()), call->span_)
+          << "Internal error: distributed HOST returned parameter " << index
+          << " requires a tensor argument in '" << callee->name_ << "'";
+      // A single DistributedTensor is addressed through its window buffer,
+      // not through the plain tensor dictionary (same as the legacy path).
+      if (!tuple_result && ir::As<ir::DistributedTensorType>(arg->GetType())) continue;
+      VisitExpr(arg);
+      const std::string returned_arg = current_expr_value_;
+      current_expr_value_.clear();
+      if (tuple_result) {
+        tuple_element_tensors_[std::make_pair(target, static_cast<int>(result))] = returned_arg;
+      } else {
+        emitter_.EmitLine("tensors[\"" + target + "\"] = tensors[\"" + returned_arg + "\"]");
+      }
+    }
+    return;
+  }
+
+  // Preserve the legacy implicit-output and shared-output allocation paths.
+  // An unresolved explicit return cannot select a writable argument above.
   // If this call has an assignment target (return value), alias it to the OUT
   // parameter tensor.  In simpler's runtime model, the callee writes in-place
   // to the OUT parameter, so the return value is the same tensor.

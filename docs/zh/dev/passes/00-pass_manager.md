@@ -64,7 +64,7 @@
 | `RuntimeScopesMaterialized` | Orchestration 函数带有显式的 RuntimeScopeStmt 节点，codegen 不再隐式生成 `SIMPLER_SCOPE()` 包裹 |
 | `AssignTypeSymmetry` | 每个只被定义一次的 Var，在其定义所在的 AssignStmt 上满足 `structural_equal(var->GetType(), value->GetType())`（memref 作为分配细节被排除；pre-SSA 的重绑定没有唯一定义值） |
 | `ManualDepsOnSubmitOnly` | 普通跨函数 Call 不携带 `attrs["manual_dep_edges"]`——手写依赖边只存在于 `Submit::deps_` |
-| `ReturnParamsExplicit` | InCore/Group/Spmd/Graph 的 tensor 返回值按指针恒等引用函数参数（#1702、#2601） |
+| `ReturnParamsExplicit` | InCore/Group/Spmd/Graph/Orchestration 中属于参数回写的 tensor 返回值按指针恒等引用函数参数；新分配输出和标量返回不受此约束（#1702、#2601） |
 | `UnrollResolved` | 不再残留 `ForKind::Unroll`；由 UnrollLoops 产生 |
 | `AivSplitValid` | SplitAivScopeStmt 区域结构合法：区域内无 cube 计算与 split 轴 reduce，边界算子只出现在区域内 |
 | `HardSyncallOccupancyValid` | 每个硬 (FFTS) `system.syncall` 都在满占用下启动——部分或超额启动会导致设备侧死锁 (507018) |
