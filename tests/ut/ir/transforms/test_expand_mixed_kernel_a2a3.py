@@ -18,7 +18,7 @@ import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import backend, ir, passes
+from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 
 
@@ -3124,6 +3124,148 @@ def test_branch_loop_initializer_keeps_enclosing_producer(use_while):
     loop = next(s for s in ir.flatten_to_stmts(branch.else_body) if isinstance(s, (ir.ForStmt, ir.WhileStmt)))
     assert loop.iter_args[0].initValue.same_as(seed.var)
     assert all(not isinstance(s, ir.AssignStmt) for s in ir.flatten_to_stmts(branch.else_body))
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+@pytest.mark.parametrize("extent", ["n", "n + 16", "32"])
+@pytest.mark.parametrize("scalar_last", [False, True])
+@pytest.mark.parametrize("tuple_return", [False, True])
+def test_dynamic_parameter_types_follow_cloned_scalars(backend_type, extent, scalar_last, tuple_return):
+    """Issue #3203: fresh signatures and loop carries must share the same extent Var.
+
+    Static shapes are the control. Moving n behind the tensors exercises forward
+    references in IR signatures, independently of Python annotation ordering.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+    output_type = f"pl.Tensor[[{extent}, 16], pl.FP32]"
+    input_type = f"pl.Tensor[[{extent}, 16], pl.BF16]"
+    return_type = f"tuple[{output_type}, {input_type}]" if tuple_return else output_type
+    return_values = "out_result, a" if tuple_return else "out_result"
+    # The compound case keeps n only in type metadata, not in loop bounds.
+    loop_bound = "2" if extent == "n + 16" else "n // 16"
+    Before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def mixed(self, n: pl.Scalar[pl.INDEX], a: {input_type},
+              b: pl.Tensor[[16, 16], pl.BF16], out: {output_type}) -> {return_type}:
+        for i, (out_iter,) in pl.range({loop_bound}, init_values=(out,)):
+            x = pl.tile.load(a, [i * 16, 0], [16, 16], target_memory=pl.Mem.Mat)
+            w = pl.tile.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs = pl.tile.move(x, target_memory=pl.Mem.Left)
+            rhs = pl.tile.move(w, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(lhs, rhs)
+            v = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            y = pl.tile.add(v, 1.0)
+            stored = pl.tile.store(y, [i * 16, 0], out_iter)
+            out_result = pl.yield_(stored)
+        return {return_values}
+""")
+    before = passes.infer_tile_memory_space()(Before)
+    original = before.get_function("mixed")
+    assert original is not None
+    original_scalar = original.params[0]
+    if scalar_last:
+        params = list(zip(original.params, original.param_directions, strict=True))
+        reordered = ir.Function(
+            original.name,
+            params[1:] + params[:1],
+            original.return_types,
+            original.body,
+            original.span,
+            type=original.func_type,
+            attrs=original.attrs,
+        )
+        before = ir.Program([reordered], before.name, before.span)
+
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.TypeChecked)
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    # The text parser requires scalar annotations before their uses. Forward
+    # references below are constructed directly in IR, so omit only the text
+    # roundtrip instrument; keep property checks before and after expansion.
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        passes.run_verifier(properties)(before)
+        After = passes.expand_mixed_kernel()(before)
+        passes.run_verifier(properties)(After)
+    if not scalar_last:
+        ir.assert_structural_equal(After, pl.parse_program(ir.python_print(After)))
+
+    def assert_extent(tensor_type, scalar):
+        assert isinstance(tensor_type, ir.TensorType)
+        symbols = {var.unique_id for var in codegen.collect_vars_from_shape_expr(tensor_type.shape[0])}
+        assert symbols == (set() if extent == "32" else {scalar.unique_id})
+        if tensor_type.tensor_view is not None:
+            for dim in tensor_type.tensor_view.valid_shape:
+                assert {var.unique_id for var in codegen.collect_vars_from_shape_expr(dim)} <= symbols
+
+    # Distinct function-local identities are essential: comparing printed names
+    # alone hides exactly the stale-reference bug this regression detects.
+    scalar_ids = {original_scalar.unique_id}
+    for name in ("mixed_aic", "mixed_aiv", "mixed"):
+        function = After.get_function(name)
+        assert function is not None
+        scalar = function.params[-1 if scalar_last else 0]
+        assert isinstance(scalar.type, ir.ScalarType)
+        assert scalar.unique_id not in scalar_ids
+        scalar_ids.add(scalar.unique_id)
+        a_index, out_index = (0, 2) if scalar_last else (1, 3)
+        assert_extent(function.params[a_index].type, scalar)
+        assert_extent(function.params[out_index].type, scalar)
+        for return_type in function.return_types:
+            assert_extent(return_type, scalar)
+
+    aiv = After.get_function("mixed_aiv")
+    assert aiv is not None
+    loop = next(stmt for stmt in ir.flatten_to_stmts(aiv.body) if isinstance(stmt, ir.ForStmt))
+    assert len(loop.iter_args) == 1
+    carry = loop.iter_args[0]
+    ir.assert_structural_equal(carry.type, carry.initValue.type)
+    assert_extent(carry.type, aiv.params[-1 if scalar_last else 0])
+
+    group = After.get_function("mixed")
+    assert group is not None
+    calls = [stmt.expr for stmt in ir.flatten_to_stmts(group.body) if isinstance(stmt, ir.EvalStmt)]
+    aiv_call = next(call for call in calls if isinstance(call, ir.Call) and call.op.name == "mixed_aiv")
+    call_types = aiv_call.type.types if isinstance(aiv_call.type, ir.TupleType) else [aiv_call.type]
+    assert len(call_types) == (2 if tuple_return else 1)
+    for call_type in call_types:
+        assert_extent(call_type, group.params[-1 if scalar_last else 0])
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        passes.run_verifier(properties)(passes.split_vector_kernel()(After))
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_dynamic_parameter_loop_after_ssa_conversion(backend_type):
+    """Keep the original issue's implicit loop carry and SSA conversion pipeline."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+    Before = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def mixed(self, n: pl.Scalar[pl.INDEX], a: pl.Tensor[[n, 16], pl.BF16],
+              b: pl.Tensor[[16, 16], pl.BF16], out: pl.Tensor[[n, 16], pl.FP32]
+              ) -> pl.Tensor[[n, 16], pl.FP32]:
+        for i in pl.range(n // 16):
+            x = pl.tile.load(a, [i * 16, 0], [16, 16], target_memory=pl.Mem.Mat)
+            w = pl.tile.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs = pl.tile.move(x, target_memory=pl.Mem.Left)
+            rhs = pl.tile.move(w, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(lhs, rhs)
+            v = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            y = pl.tile.add(v, 1.0)
+            out = pl.tile.store(y, [i * 16, 0], out)
+        return out
+""")
+    before = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Before))
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.TypeChecked)
+    passes.run_verifier(properties)(before)
+    After = passes.expand_mixed_kernel()(before)
+    passes.run_verifier(properties)(After)
 
 
 if __name__ == "__main__":
