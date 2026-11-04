@@ -175,7 +175,8 @@ void BindPass(nb::module_& m) {
              "Device region storage and transfers also have nonoverlapping effective address windows")
       .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas")
       .value("HardwareLoopContractValid", IRProperty::HardwareLoopContractValid,
-             "Required hardware loops retain Sequential intent");
+             "Required hardware loops retain Sequential intent")
+      .value("LogicalSyncValid", IRProperty::LogicalSyncValid, "Logical completion ownership and schemas");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

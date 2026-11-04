@@ -438,6 +438,11 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       ReadRequiredTypeFields(obj, type_kind, {"type_kind"});
       return GetVoidType();
     }
+    if (type_kind == "SyncTokenType") {
+      const auto fields = ReadRequiredTypeFields(obj, type_kind, {"type_kind", "pipe"});
+      return std::make_shared<SyncTokenType>(
+          static_cast<PipeType>(ReadTypeInteger<int>(fields.at("pipe"), "pipe")));
+    }
     if (type_kind == "BufferType") {
       const auto fields =
           ReadRequiredTypeFields(obj, type_kind,

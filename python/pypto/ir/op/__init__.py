@@ -16,6 +16,7 @@ This module organizes IR operations by category (e.g., tensor, tile, system oper
 from . import array_ops as array
 from . import distributed
 from . import prefetch_ops as prefetch
+from . import sync_ops as sync
 from . import system_ops as system
 from . import tensor_ops as tensor
 from . import tile_ops as tile
@@ -25,6 +26,7 @@ __all__ = [
     "distributed",
     "prefetch",
     "tile",
+    "sync",
     "system",
     "tensor",
 ]

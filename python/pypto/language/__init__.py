@@ -84,6 +84,7 @@ from .dsl_api import (
 from .op import array_ops as array
 from .op import prefetch_ops as prefetch
 from .op import reg_ops as reg
+from .op import sync_ops as sync
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
@@ -270,6 +271,7 @@ from .typing import (
     Ptr,
     Reg,
     Scalar,
+    SyncToken,
     Tensor,
     Tile,
     Tuple,
@@ -368,6 +370,7 @@ __all__ = [
     "array",
     "prefetch",
     "tile",
+    "sync",
     "system",
     "tensor",
     # Unified dispatch
@@ -546,6 +549,7 @@ __all__ = [
     "PipeType",
     "Ptr",
     "PrefetchAsyncContext",
+    "SyncToken",
     "AsyncEvent",
     "AsyncSession",
     "TensorLayout",

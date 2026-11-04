@@ -182,6 +182,7 @@ _TYPE_KIND_NAMES: dict[type, str] = {
     ir.ScalarType: "Scalar",
     ir.ArrayType: "Array",
     ir.RegType: "Reg",
+    ir.SyncTokenType: "SyncToken",
 }
 
 
@@ -515,7 +516,7 @@ class TypeResolver:
         Returns:
             Type name string if recognized, None otherwise
         """
-        valid = ("Tensor", "Tile", "Scalar", "Array", "Reg", "Tuple", "DistributedTensor")
+        valid = ("Tensor", "Tile", "Scalar", "Array", "Reg", "SyncToken", "Tuple", "DistributedTensor")
         if isinstance(node, ast.Attribute) and node.attr in valid:
             return node.attr
         if isinstance(node, ast.Name) and node.id in valid:
@@ -632,6 +633,9 @@ class TypeResolver:
         if type_name == "Scalar":
             dtype = self.resolve_dtype(slice_value)
             return ir.ScalarType(dtype)
+
+        if type_name == "SyncToken":
+            return self._resolve_sync_token_type(slice_value)
 
         if type_name == "Reg":
             if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in (2, 3):
@@ -1162,6 +1166,24 @@ class TypeResolver:
         """
         base_var = self._intern_base_ptr(name, span, skip_scope_lookup=True)
         return ir.MemRef(base_var, 0, 0, span, is_pinned=True, slots=slots, slot=slot)
+
+    def _resolve_sync_token_type(self, node: ast.expr) -> ir.SyncTokenType:
+        """Resolve the static source-pipeline identity of a completion token."""
+        if isinstance(node, ast.Tuple):
+            raise ParserTypeError("SyncToken requires one PipeType argument", span=self._get_span(node))
+        pipe_node = node
+        # Resolve canonical printer syntax independently of a captured pl alias.
+        owner = pipe_node.value if isinstance(pipe_node, ast.Attribute) else None
+        is_pipe = (isinstance(owner, ast.Name) and owner.id == "PipeType") or (
+            isinstance(owner, ast.Attribute) and owner.attr == "PipeType"
+        )
+        if isinstance(pipe_node, ast.Attribute) and is_pipe and hasattr(ir.PipeType, pipe_node.attr):
+            pipe = getattr(ir.PipeType, pipe_node.attr)
+        else:
+            success, pipe = self.expr_evaluator.try_eval_expr(pipe_node)
+            if not success or not isinstance(pipe, ir.PipeType):
+                raise ParserTypeError("SyncToken pipe must be a PipeType", span=self._get_span(pipe_node))
+        return ir.SyncTokenType(pipe)
 
     def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
         """Resolve tuple[T1, T2, ...] return type annotation.
@@ -1871,6 +1893,15 @@ class TypeResolver:
                 span=span,
                 hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
             )
+
+        if isinstance(annotation_type, ir.SyncTokenType) and isinstance(inferred_type, ir.SyncTokenType):
+            if annotation_type.pipe != inferred_type.pipe:
+                raise ParserTypeError(
+                    f"SyncToken annotation for '{var_name}' disagrees with the source pipeline",
+                    span=span,
+                    hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
+                )
+            return
 
         if isinstance(annotation_type, ir.TupleType) and isinstance(inferred_type, ir.TupleType):
             if len(annotation_type.types) != len(inferred_type.types):

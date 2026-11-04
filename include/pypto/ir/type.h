@@ -30,6 +30,10 @@
 namespace pypto {
 namespace ir {
 
+// Keep the ubiquitous type header independent of pipe helpers. Including
+// pipe.h here introduces unrelated ADL candidates into every IR translation unit.
+enum PipeType : int;
+
 // Forward declarations
 class Expr;
 using ExprPtr = std::shared_ptr<const Expr>;
@@ -1020,6 +1024,36 @@ inline PrefetchAsyncContextTypePtr GetPrefetchAsyncContextType() {
   static const auto prefetch_async_context_type = std::make_shared<PrefetchAsyncContextType>();
   return prefetch_async_context_type;
 }
+
+/**
+ * @brief SSA completion token for a prefix of one intra-core execution pipeline.
+ *
+ * A token is an immutable completion fact local to one execution of a leaf
+ * AIC/AIV function. The enclosing function determines the core; the type records
+ * only the source pipeline. It neither owns a hardware flag nor becomes consumed
+ * by a wait, so multiple consumers can depend on the same completion point.
+ *
+ * Record captures the complete source-pipeline command prefix, including earlier
+ * waits imported into that pipeline. Completed is the empty, satisfied fact;
+ * joining two tokens conjoins their facts without capturing a new program point.
+ */
+class SyncTokenType : public Type {
+ public:
+  PipeType pipe_;
+
+  /// Requires a concrete pipeline, not PipeType::ALL.
+  explicit SyncTokenType(PipeType pipe);
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SyncTokenType; }
+  [[nodiscard]] std::string TypeName() const override { return "SyncTokenType"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Type::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&SyncTokenType::pipe_, "pipe")));
+  }
+};
+
+using SyncTokenTypePtr = std::shared_ptr<const SyncTokenType>;
 
 /**
  * @brief Opaque handle to an in-flight asynchronous DMA completion event.

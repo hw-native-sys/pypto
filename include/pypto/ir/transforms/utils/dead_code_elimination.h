@@ -26,9 +26,10 @@ namespace dce {
 /// Returns empty string if the statement doesn't match this pattern.
 std::string GetStmtOpName(const StmtPtr& stmt);
 
-/// Check if a statement is a side-effect op that must be preserved.
-/// The predicate is customizable; this is a default implementation for
-/// cross-core and tile ops.
+/// Check whether a statement has observable effects or observes execution order.
+/// Motion clients must preserve these dependencies. Logical record is included
+/// because its captured prefix depends on position, although default DCE may
+/// delete a completely unused capture. Waits and VF barriers remain observable.
 bool IsSideEffectOp(const StmtPtr& stmt);
 
 /// Collect all AssignStmts recursively from nested statements.

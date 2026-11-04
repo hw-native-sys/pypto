@@ -699,5 +699,17 @@ def test_submit_packed_format_checks_skip_omitted_outputs_before_commctx(directi
         assert "parameter 'source' expects fp4e1m2x2" in diagnostics[0].message
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_type_check_sync_token_phi_preserves_source_pipeline(nested):
+    """Matching ObjectKind must not relabel a completion from another pipe."""
+    first: ir.Type = ir.SyncTokenType(ir.PipeType.MTE2)
+    second: ir.Type = ir.SyncTokenType(ir.PipeType.V)
+    if nested:
+        first = ir.TupleType([first])
+        second = ir.TupleType([second])
+    diagnostics = _typecheck_diagnostics(_if_with_types(first, second, first))
+    assert any("SyncToken source-pipeline mismatch" in diagnostic.message for diagnostic in diagnostics)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

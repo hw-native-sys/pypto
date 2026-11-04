@@ -129,6 +129,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "RegScopeValid";
     case IRProperty::HardwareLoopContractValid:
       return "HardwareLoopContractValid";
+    case IRProperty::LogicalSyncValid:
+      return "LogicalSyncValid";
     default:
       return "Unknown";
   }
@@ -173,6 +175,7 @@ const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::LogicalSyncValid,
                                    IRProperty::HardwareLoopContractValid,
                                    IRProperty::InlineFunctionsEliminated,
                                    IRProperty::MixedKernelExpanded,
@@ -222,6 +225,7 @@ VerificationLevel GetDefaultVerificationLevel() {
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::LogicalSyncValid,
                                    IRProperty::HardwareLoopContractValid,
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
@@ -242,6 +246,7 @@ const IRPropertySet& GetDefaultVerifyProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::LogicalSyncValid,
                                    IRProperty::HardwareLoopContractValid,
                                    IRProperty::NoNestedCalls,
                                    IRProperty::BreakContinueValid,

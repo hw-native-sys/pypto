@@ -102,8 +102,8 @@ DSL parser is not yet supported.
 Registrations default to `OpIRStage::Functional`. Internal buffer operators
 explicitly select `OpIRStage::Buffer` and `set_internal_only()`. Their output
 arity is declared: zero requires `VoidType`, one a native result, and multiple
-results a matching `TupleType`. Functional registrations still require at least
-one result under the existing contract.
+results a matching `TupleType`. Functional registrations require at least one
+result, except statement-only SyncOps, which declare zero results and `VoidType`.
 
 Every buffer operand declares data and metadata access separately with
 `set_buffer_arg_effect(i, data, metadata)`; scalar operands use
@@ -591,6 +591,16 @@ pipe_m = ir.PipeType(ir.PipeType.M)    # Matrix pipe
 pipe_all = ir.PipeType(ir.PipeType.ALL) # All pipes
 ```
 
+### SyncTokenType
+
+`ir.SyncTokenType(ir.PipeType.MTE2)` describes a non-consuming SSA completion
+fact from one source pipeline. The enclosing specialized AIC/AIV leaf function
+determines its core and execution instance; it has no `core_type` or event ID.
+The DSL annotation is `pl.SyncToken[pl.PipeType.MTE2]`. These values are local
+IR infrastructure, not function ABI values. Hardware lowering is unavailable.
+See [logical synchronization](11-logical-sync.md) for the six operations,
+control-flow rules, ordering effects and validation contract.
+
 ### UnknownType
 
 Placeholder for unknown or inferred types.
@@ -785,6 +795,7 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 | **VoidType** | - | - | Known absence of an SSA result |
 | **TupleType** | - | - | Multiple return values |
 | **PipeType** | - | - | Hardware synchronization |
+| **SyncTokenType** | - | - | Local SSA pipeline completion facts |
 | **UnknownType** | - | - | Type inference placeholder |
 
 ## Common Patterns
