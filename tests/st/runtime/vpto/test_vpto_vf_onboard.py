@@ -94,6 +94,7 @@ def _prepare(directory: Path):
     assert "args[3]" in original_wrapper and "int32_t" in original_wrapper
     support = runpy.run_path(str(FIXTURE / "test_validation.py"))
     ptoas = support["require_ptoas"]()
+    ptoas = os.path.abspath(ptoas)
     support["run"](
         directory,
         "emit-caller",

@@ -193,7 +193,10 @@ an entry in the artifact cache:
   `dump_ptoas_passes=True`.
 - `compile_profiling=True`, an active `CompileProfiler`, or profiling enabled
   through `PYPTO_COMPILE_PROFILING`.
-- An explicit `save_kernels_dir`, or a nonempty `PYPTO_PROG_BUILD_DIR`.
+- An explicit `save_kernels_dir`.
+- Explicitly enabled `PYPTO_EMIT_DEBUG_RUNNER` or `PYPTO_REBUILD_FROM_PTO`.
+  Values `0`, `false` and `no` disable the request (case-insensitive, ignoring
+  surrounding whitespace); empty-but-set retains the enabled/default behavior.
 - Explicit diagnostic settings, or an active `PassContext` with instruments
   or verification/diagnostic settings different from the pipeline defaults.
 
@@ -206,6 +209,11 @@ split compilation keys.
 Conflicting explicit settings and an active `PassContext` raise the same error
 on cache hits as on fresh compilation. A plain planner/runtime context can
 still reuse a matching cached artifact.
+
+`PYPTO_PROG_BUILD_DIR` only selects the base for new private build and runtime
+directories; it does not request fresh compilation. Existing cached objects
+retain their directories, and shared artifacts stay in the cache. Use
+`save_kernels_dir` when each call must generate a fresh, inspectable output tree.
 
 ```python
 from pypto.runtime import RunConfig

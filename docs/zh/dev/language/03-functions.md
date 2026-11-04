@@ -149,7 +149,10 @@ JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选�
   以及 `dump_ptoas_passes=True`。
 - `compile_profiling=True`、活跃的 `CompileProfiler`，或通过
   `PYPTO_COMPILE_PROFILING` 启用的编译性能分析。
-- 显式指定 `save_kernels_dir`，或非空的 `PYPTO_PROG_BUILD_DIR`。
+- 显式指定 `save_kernels_dir`。
+- 显式启用 `PYPTO_EMIT_DEBUG_RUNNER` 或 `PYPTO_REBUILD_FROM_PTO`。
+  `0`、`false`、`no` 关闭此请求（忽略大小写和两端空白）；已设置为空字符串时，
+  保留启用/默认行为。
 - 显式诊断设置，或包含 instrument、验证/诊断设置不同于流水线默认值的活跃
   `PassContext`。
 
@@ -159,6 +162,10 @@ JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选�
 诊断控制不进入编译键。
 显式设置与活跃 `PassContext` 冲突时，缓存命中与首次编译都会报告相同错误。
 仅选择规划器或运行时的普通上下文仍能复用匹配的缓存产物。
+
+`PYPTO_PROG_BUILD_DIR` 只指定新建私有构建和运行目录的父目录，不请求重新编译。
+已有缓存对象保留原目录，共享产物仍位于缓存中。如果每次调用都需要生成新的、
+可供检查的输出目录，应使用 `save_kernels_dir`。
 
 ```python
 from pypto.runtime import RunConfig

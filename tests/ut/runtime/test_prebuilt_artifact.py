@@ -1597,6 +1597,15 @@ def test_private_output_base_does_not_change_persistent_artifacts(
     root = tmp_path / "cache"
     run_base = Path("private") if relative else tmp_path / "private"
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(run_base))
+    resolutions = []
+    resolve = Path.resolve
+
+    def track_resolution(path, *args, **kwargs):
+        if path in (run_base, tmp_path / "private", tmp_path / "other"):
+            resolutions.append(path)
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", track_resolution)
     config = RunConfig(
         backend_type=BackendType.Ascend910B,
         execution_mode=ExecutionMode.SIM,
@@ -1627,25 +1636,54 @@ def test_private_output_base_does_not_change_persistent_artifacts(
     assert after.binary_builds == before.binary_builds
     assert files_before == {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
     assert not list((tmp_path / "other").rglob("*.so"))
+    # One traversal per new object, with none on an in-memory hit.
+    assert len(resolutions) == 2
 
 
-@pytest.mark.parametrize("with_parent", [False, True])
+@pytest.mark.parametrize("placement", ["direct", "parent", "cache_symlink", "output_symlink"])
 def test_private_output_base_inside_cache_keeps_runtime_outside(
-    tmp_path, automatic_jit_case, monkeypatch, with_parent
+    tmp_path, automatic_jit_case, fake_runtime, monkeypatch, placement
 ):
-    kernel, _ = automatic_jit_case
+    kernel, builds = automatic_jit_case
     root = tmp_path / "cache"
-    selected = root / "nested" / ".." / "runs" if with_parent else root / "runs"
+    root.mkdir()
+    cache_location = root
+    selected = root / "runs"
+    if placement == "parent":
+        selected = root / "nested" / ".." / "runs"
+    elif placement == "cache_symlink":
+        cache_location = tmp_path / "cache-alias"
+        cache_location.symlink_to(root, target_is_directory=True)
+        selected = cache_location / "runs"
+    elif placement == "output_symlink":
+        selected = tmp_path / "run-alias"
+        selected.symlink_to(root / "runs", target_is_directory=True)
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(selected))
     config = RunConfig(
         backend_type=BackendType.Ascend910B,
         execution_mode=ExecutionMode.SIM,
-        cache_config=CacheConfig(enabled=True, root=root),
+        cache_config=CacheConfig(enabled=True, root=cache_location),
+    )
+    readonly = RunConfig(
+        backend_type=BackendType.Ascend910B,
+        execution_mode=ExecutionMode.SIM,
+        cache_config=CacheConfig(enabled=True, readonly=True, root=cache_location),
     )
     with passes.PassContext([]):
-        compiled = kernel.compile(config=config)
-    runtime_directory = compiled._artifact_runtime.run_directory
-    assert not runtime_directory.is_relative_to(root)
+        compiled = kernel.warmup(config=config)
+        assert kernel.warmup(config=config) is compiled
+        files_before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        kernel._artifact_objects.clear()
+        fake_runtime.runner._compile_and_assemble.side_effect = AssertionError("unexpected rebuild")
+        before = cache_stats()
+        restored = kernel.warmup(config=readonly)
+        after = cache_stats()
+    assert not compiled._artifact_runtime.run_directory.is_relative_to(root)
+    assert not restored._artifact_runtime.run_directory.is_relative_to(root)
+    assert restored._artifact_runtime.handle.directory == compiled._artifact_runtime.handle.directory
+    assert after.ready_hits - before.ready_hits == 1
+    assert len(builds) == 1
+    assert files_before == {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
     assert not (root / "runs").exists()
 
 

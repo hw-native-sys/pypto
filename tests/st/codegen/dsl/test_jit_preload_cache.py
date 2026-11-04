@@ -121,6 +121,7 @@ def test_preloaded_service_reuses_binaries_across_processes(tmp_path, request, p
     assert restored["artifact"] == built["artifact"]
     assert Path(restored["run_base"]) == tmp_path / "private-hit"
     changed = _run_worker(root, "build", "deployment-2", library, True)
+    # The deployment fingerprint changes the artifact key, not the toolchain identity.
     assert changed["identity"] == built["identity"]
     assert changed["artifact"] != built["artifact"]
 

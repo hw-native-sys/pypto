@@ -282,10 +282,13 @@ def resolve_persistent(
         # parent is allocated securely before any runtime output can use it.
         # Placement is not a compilation input. Resolve it only for a new
         # object, after the object hit above, without copying shared artifacts.
-        private_root = Path(os.path.abspath(default_output_root()))
-        if private_root == config.root or config.root in private_root.parents:
-            private_root = _fallback_private_root(config.root, os.getpid())
-        store = JITArtifactStore(config.root, readonly=config.readonly, private_root=private_root)
+        store = JITArtifactStore(config.root, readonly=config.readonly)
+        # Resolve here instead of in ArtifactStore so containment sees symlinks
+        # without adding a second filesystem traversal for the private root.
+        private_root = default_output_root().resolve()
+        if private_root == store.root or store.root in private_root.parents:
+            private_root = _fallback_private_root(store.root, os.getpid())
+        store.private_root = private_root
         spec = ArtifactSpec(
             ArtifactState.GENERATED,
             kind,
