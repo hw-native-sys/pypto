@@ -41,45 +41,18 @@ For example, keep the pass system overview separate from individual pass
 reference pages. Read the index in `docs/en/dev/passes/` for the current
 organization and page names.
 
-**Splitting criteria:**
-
-- File has multiple distinct topics
-- Each section could standalone
-- >1000 lines even after condensing
-- Natural breaking points exist
+Split when a file remains over 1000 lines after condensing, covers distinct
+topics, and has natural boundaries whose sections can stand alone.
 
 ### Condense Files (800-1000 lines — approaching the limit)
 
-**For moderately large files, condense content:**
+For moderately large files, condense content using these techniques:
 
-**Apply techniques:**
-
-- Tables over prose
-- Consolidate similar examples
-- Remove verbose explanations
-- Cross-reference instead of repeating
-
-## Condensing Techniques
-
-### 1. Tables Over Prose
-
-Replace paragraph descriptions with comparison tables.
-
-### 2. Consolidate Examples
-
-Show pattern once, not 5-10 times. One representative example per concept.
-
-### 3. Remove Verbose "Why"
-
-Keep "what" and "how", reduce "why" explanations.
-
-### 4. Cross-Reference Instead of Repeating
-
-Link to other docs instead of duplicating content.
-
-### 5. Eliminate Redundancy
-
-Combine similar sections that repeat the same pattern.
+- Replace paragraph descriptions with comparison tables.
+- Show each pattern once, with one representative example per concept.
+- Keep "what" and "how"; shorten verbose "why" explanations.
+- Cross-reference existing documentation instead of duplicating content.
+- Combine similar sections that repeat the same pattern.
 
 ## File Organization Principles
 
