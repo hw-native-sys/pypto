@@ -221,7 +221,14 @@ def test_signature_only_extern_tuple_outputs_feed_later_kernels(tmp_path, core_t
     for name, declared in zip(["consume_y", "consume_z"], expected, strict=True):
         func = program.get_function(name)
         assert func is not None
-        ir.assert_structural_equal(func.params[0].type, declared)
+        actual = func.params[0].type
+        assert isinstance(actual, ir.TensorType)
+        # The default pipeline adds storage metadata (MemRef) to parameters.
+        # This regression checks the logical type propagated through unpacking.
+        assert actual.dtype == declared.dtype
+        assert len(actual.shape) == len(declared.shape)
+        for actual_dim, declared_dim in zip(actual.shape, declared.shape, strict=True):
+            ir.assert_structural_equal(actual_dim, declared_dim)
 
 
 def test_single_core_extern_include_dirs_reach_kernel_descriptor(tmp_path):
