@@ -870,7 +870,10 @@ def test_legalize_packed_dn_cast_preserves_loop_backedge(dtype, loop_kind):
 
 
 @pytest.mark.parametrize("tile_surface", [False, True])
-def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface):
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface, planner):
     """Aligned ND E2M1 carriers decode without intermediate floating tiles."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
@@ -893,7 +896,8 @@ def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface):
     set_log_level(LogLevel.WARN)
     try:
         capfd.readouterr()
-        after = _run(Before, BackendType.Ascend950)
+        with passes.PassContext([], memory_planner=planner):
+            after = _run(Before, BackendType.Ascend950)
     finally:
         set_log_level(previous)
     assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
@@ -903,7 +907,7 @@ def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface):
         _run(Before, BackendType.Ascend910)
 
 
-@pytest.mark.parametrize("case", ["unaligned", "dynamic_valid", "row_limit", "strided", "ptoas"])
+@pytest.mark.parametrize("case", ["unaligned", "dynamic_valid", "row_limit", "strided"])
 def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
     """The dtype edge must not bypass direct TCVT's packed-axis restrictions."""
     span = ir.Span.unknown()
@@ -929,9 +933,7 @@ def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
         "fallback",
         span,
     )
-    planner = passes.MemoryPlanner.PTOAS if case == "ptoas" else passes.MemoryPlanner.PYPTO
-    with passes.PassContext([], memory_planner=planner):
-        after = _run(before, BackendType.Ascend950)
+    after = _run(before, BackendType.Ascend950)
     assert _cast_pairs(after) == [
         ("fp4e2m1x2", "bfloat16"),
         ("bfloat16", "fp32"),
@@ -962,6 +964,98 @@ def test_e2m1_to_e4m3_type_inference_preserves_carrier_geometry(tile_surface):
     assert [value.value for value in result.shape if isinstance(value, ir.ConstInt)] == [16, 64]
     assert [value.value for value in view.valid_shape if isinstance(value, ir.ConstInt)] == [8, 48]
     assert [value.value for value in view.stride if isinstance(value, ir.ConstInt)] == [64, 1]
+
+
+@pytest.mark.parametrize("placed", [False, True])
+def test_late_cast_bridge_preserves_placement_final_type_and_attrs(placed):
+    """A split carrier row needs fresh Vec bridge storage after memory inference."""
+    span = ir.Span.unknown()
+    memory = ir.MemorySpace.Vec if placed else None
+    source = ir.Var("source", ir.TileType([16, 16], pl.fp4e2m1x2, None, None, memory), span)
+    tmp = ir.Var("tmp", ir.TileType([1, 64], pl.INT8, None, None, memory), span)
+    result_type = ir.TileType([16, 32], pl.FP8E4M3FN, None, None, memory)
+    attrs = {"arg_directions": [ir.ArgDirection.Input, ir.ArgDirection.InOut], "test_metadata": "retained"}
+    kwargs = {"target_type": pl.FP8E4M3FN, "mode": 1, "saturation_mode": 0}
+    call = ir.Call(ir.get_op("tile.cast"), [source, tmp], kwargs, attrs, result_type, span)
+    result = ir.Var("result", result_type, span)
+    before = ir.Program(
+        [
+            ir.Function(
+                "kernel",
+                [source, tmp],
+                [result_type],
+                ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([result], span)], span),
+                span,
+                ir.FunctionType.AIV,
+            )
+        ],
+        "late_bridge",
+        span,
+    )
+    after = _run(before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+    class Collector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.assignments = []
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == _TILE_CAST:
+                self.assignments.append(op)
+            super().visit_assign_stmt(op)
+
+    collector = Collector()
+    collector.visit_program(after)
+    assert len(collector.assignments) == 3
+    for assignment in collector.assignments[:-1]:
+        assert isinstance(assignment.var.type, ir.TileType)
+        assert isinstance(assignment.value.type, ir.TileType)
+        assert assignment.var.type.memory_space == memory
+        assert assignment.value.type.memory_space == memory
+        assert assignment.var.type.memref is None and assignment.value.type.memref is None
+        assert "test_metadata" not in assignment.value.attrs
+        assert "arg_directions" not in assignment.value.attrs
+    final = collector.assignments[-1]
+    assert final.var is result
+    assert final.value.type is result_type
+    assert final.value.attrs == attrs
+    assert final.value.kwargs == kwargs
+    assert final.value.args[1] is tmp
+
+
+def test_native_direct_cast_empty_replay_is_not_expanded():
+    """The late legality check leaves the all-zero replay for no-data emission."""
+    span = ir.Span.unknown()
+    view = ir.TileView(valid_shape=[0, 0])
+    source = ir.Var("source", ir.TileType([16, 32], pl.fp4e2m1x2, None, view, ir.MemorySpace.Vec), span)
+    result_type = ir.TileType([16, 64], pl.FP8E4M3FN, None, view, ir.MemorySpace.Vec)
+    call = ir.Call(
+        ir.get_op("tile.cast"), [source], {"target_type": pl.FP8E4M3FN, "mode": 2}, result_type, span
+    )
+    result = ir.Var("result", result_type, span)
+    before = ir.Program(
+        [
+            ir.Function(
+                "kernel",
+                [source],
+                [result_type],
+                ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([result], span)], span),
+                span,
+                ir.FunctionType.AIV,
+            )
+        ],
+        "empty_replay",
+        span,
+    )
+    after = _run(before, BackendType.Ascend950)
+    ir.assert_structural_equal(after, before)
+    with pytest.raises(ValueError, match="no native cast path"):
+        _run(before, BackendType.Ascend910)
 
 
 if __name__ == "__main__":

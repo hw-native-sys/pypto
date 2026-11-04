@@ -87,7 +87,7 @@ carrier extent without requiring it to be even.
 
 `pl.cast`, `pl.tile.cast`, and InCore `pl.tensor.cast` use a direct
 E2M1x2→FP8E4M3FN `pto.tcvt` on A5 when both tiles are two-dimensional unboxed
-row-major ND Vec with PYPTO/DSA_RP static allocation. Physical dimensions must
+row-major ND Vec. Physical dimensions must
 be static and positive, the packed source row pitch must be a multiple of 32
 bytes, and valid rows and columns must be static positive extents. Tiles must have dense canonical strides and zero UB
 `start_offset`. The destination doubles physical and valid columns; no rounding is
@@ -96,6 +96,12 @@ signed zero. PTOAS v0.72 also requires signed 32-bit byte spans and logical
 columns, at most 65,535 rows, and a source register count (`packed_cols / 256`)
 that fits 16 bits. Unsupported geometry retains the BF16/FP32 legalization
 path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts, or NZ output.
+Static-valid descriptors alias the actual source handle, preserving runtime
+addresses from tile parameters, cross-core pipes, and rotating allocations.
+All three memory planners use this direct ND route. After vector splitting,
+legalization rechecks the final lane geometry and restores the fallback if a
+packed row is no longer aligned or validity becomes dynamic. Empty replay
+lanes retain their storage and issue no conversion.
 GM offsets remain in carrier units; the output uses FP8 element offsets.
 
 All packed casts require `none_box` storage. Wider cast chains require ND.

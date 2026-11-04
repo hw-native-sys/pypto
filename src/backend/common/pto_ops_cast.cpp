@@ -259,8 +259,10 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
     const auto dst_var = codegen.GetCurrentResultVar();
     const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
     INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: direct FP8 cast requires a result TileType";
-    const std::string src_ssa =
-        EnsurePackedFp4StaticView(op->args_[0], codegen, "tcvt_fp4_src", "direct FP8");
+    // PTOAS v0.72 supports same-shape packed TRESHAPE. A descriptor view
+    // preserves the source's actual address, including TPOP/parameter pointers
+    // and rotating slots; rebinding a planned byte offset would lose it.
+    const std::string src_ssa = EnsureStaticViewTileSsa(op->args_[0], codegen, "tcvt_fp4_src");
     const std::string dst_ssa = EnsureStaticViewTileSsa(dst_var, codegen, "tcvt_fp8_dst");
     std::vector<std::pair<std::string, std::string>> ins = {
         {src_ssa, codegen.GetViewTileBufTypeStringFromTileType(src_type)}};

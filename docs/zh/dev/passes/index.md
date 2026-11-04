@@ -46,7 +46,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 15 | [FlattenTileNdTo2D](15-flatten_tile_nd_to_2d.md) | 合并除最后一维外的所有维度，把 3D+ tile 操作拍平为 2D |
 | 16 | [BlockNzTensorViews](16-block_nz_tensor_views.md) | 把逻辑 `pl.NZ` 张量改写为 pto-isa 的分块 rank-5 形式，并同步改写其 `tile.load` 坐标 |
 | 17 | [BlockMxScaleTensorViews](17-block_mx_scale_tensor_views.md) | 将逻辑 MX scale 视图迁移为规范的 rank-5 物理分块形式 |
-| 18 | [LegalizeTileCast](18-legalize_tile_cast.md) | 把 ISA 无法单条指令完成的 `tile.cast` 展开为最短的原生 cast 链 |
+| 18 | [LegalizeTileCast](18-legalize_tile_cast.md) | 把 ISA 无法单条指令完成的 `tile.cast` 展开为最短的原生 cast 链；向量切分后重复执行以重新检查几何约束 |
 | 19 | [AutoTileMatmulL0](19-auto_tile_matmul_l0.md) | 依据后端 L0 容量选择 L0 tile 形状 `(m, n, k)` 并据此分块 matmul |
 | 20 | [CanonicalizeTileSlice](20-canonicalize_tile_slice.md) | 把 `tile.slice` 下降为规范的 `tile.extract` 形式 |
 | 21 | [InferTileMemorySpace](21-infer_tile_memory_space.md) | 推断每个 tile 的片上 `MemorySpace`，并插入 `tile.move` 消解残留不匹配 |

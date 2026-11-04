@@ -2012,8 +2012,7 @@ def cast(
 
     InCore A5 ND E2M1x2-to-FP8E4M3FN casts double the carrier column extent
     and use direct TCVT when the lowered tiles satisfy its static geometry
-    constraints with PYPTO/DSA_RP allocation; otherwise the existing
-    BF16/FP32 chain is used.
+    constraints; otherwise the existing BF16/FP32 chain is used.
 
     Args:
         input: Input tensor

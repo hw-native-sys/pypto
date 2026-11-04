@@ -11,10 +11,10 @@
 ## 在流水线中的位置
 
 ```text
-... -> SplitVectorKernel -> StampTfreeSplit -> NormalizeReturnOrder -> SkewCrossCorePipeline -> ...
+... -> SplitVectorKernel -> LegalizeTileCast -> StampTfreeSplit -> NormalizeReturnOrder -> SkewCrossCorePipeline -> ...
 ```
 
-它紧跟在 `SplitVectorKernel` 把 tpop 的 `split` 定稿之后运行,并在 `SkewCrossCorePipeline` 把
+它在 `SplitVectorKernel` 把 tpop 的 `split` 定稿及 `LegalizeTileCast` 重新检查各 lane 转换后运行,并在 `SkewCrossCorePipeline` 把
 tpop/tfree 配对克隆进软件流水的 prologue/epilogue 之前 —— 这样每个克隆都带上已盖好的 `split`,
 而且查表时每个 `tfree` 的实参仍是它直接的 tpop 结果 var(还没被流水改成循环 carry 值)。
 

@@ -143,7 +143,7 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 
 其他行中的 `fp4` 代表任一打包格式。E2M1x2→E4M3FN 直接边仅在无分块行主序 ND Vec
-二维几何满足约束、有效行列数为静态且使用 PYPTO/DSA_RP 静态分配时选用，
+二维几何满足约束且有效行列数为静态时选用，
 不作为其他转换链的中间步骤。否则该类型对保留三步回退链及警告；成功选择直接转换时
 不发出慢链警告。详见 [FP4 约束](../fp4.md#数值转换限制)。
 
@@ -169,9 +169,13 @@ Default 流水线：
 
 ```text
 lower_composite_ops → flatten_tile_nd_to_2d → legalize_tile_cast → auto_tile_matmul_l0
+... → split_vector_kernel → legalize_tile_cast → stamp_tfree_split
 ```
 
 放在 Flatten 之后以覆盖其新插入的 cast；放在 MatmulL0 之前以免拆开本可 fold 的原生降精度 cast。
+
+第二次执行在向量切分后重新检查有条件的原生转换。新增中间 tile 保留已推导的内存空间，
+不在该后期阶段重新执行内存放置 pass。空 replay lane 保持为空。
 
 ## API
 

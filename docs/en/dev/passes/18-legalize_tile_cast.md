@@ -169,8 +169,7 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 
 The `fp4` shorthand in the other rows denotes either packed format. The
 E2M1x2→E4M3FN direct edge is selected only for compatible unboxed row-major
-2D ND Vec geometry with static valid rows and columns and PYPTO/DSA_RP static
-allocation. It is not used as an intermediate in other cast chains. Otherwise
+2D ND Vec geometry with static valid rows and columns. It is not used as an intermediate in other cast chains. Otherwise
 this pair retains its three-hop fallback and warning; successful direct casts
 emit no slow-chain warning. See [FP4 constraints](../fp4.md#numerical-cast-constraints).
 
@@ -197,7 +196,12 @@ Default pipeline:
 
 ```text
 lower_composite_ops → flatten_tile_nd_to_2d → legalize_tile_cast → auto_tile_matmul_l0
+... → split_vector_kernel → legalize_tile_cast → stamp_tfree_split
 ```
+
+The second invocation revalidates conditional native casts after vector splitting.
+New intermediate tiles retain resolved memory spaces; no memory placement pass
+is rerun at this late stage. Empty replay lanes remain empty.
 
 ## API
 

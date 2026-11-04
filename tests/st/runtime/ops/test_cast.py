@@ -378,7 +378,9 @@ def _fp4_e2m1_to_fp8_bits(packed: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.platforms("a5")
-@pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP], ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS], ids=lambda p: p.name
+)
 @pytest.mark.parametrize("surface", ["tensor", "tile", "unified_tile"])
 @pytest.mark.parametrize(("row_start", "column_start"), [(0, 0), (16, 32)])
 def test_fp4_e2m1_direct_fp8(test_config, planner, surface, row_start, column_start):

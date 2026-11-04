@@ -1668,8 +1668,7 @@ def cast(
     """Type casting, dispatched by input type.
 
     A5 E2M1x2-to-FP8E4M3FN tile and InCore tensor casts use direct ND TCVT
-    for compatible static geometry with PYPTO/DSA_RP allocation, doubling
-    packed columns into FP8 values
+    for compatible static geometry, doubling packed columns into FP8 values
     without BF16/FP32 intermediates. Other packed FP4-to-FP8 cases retain
     the existing legalization chain.
 

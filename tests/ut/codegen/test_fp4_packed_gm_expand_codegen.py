@@ -823,7 +823,9 @@ def test_dense_dn_tensor_slice_cast_preserves_other_consumer_layout(tmp_path, dt
         assert cpp.is_file()
 
 
-@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
 @pytest.mark.parametrize("surface", ["tensor", "unified", "tile"])
 @pytest.mark.parametrize("partial", [False, True])
 def test_e2m1_direct_fp8_cast_emits_one_tcvt(tmp_path, planner, surface, partial):
@@ -857,25 +859,31 @@ def test_e2m1_direct_fp8_cast_emits_one_tcvt(tmp_path, planner, surface, partial
     assert f"dtype=f8E4M3FN, rows=16, cols=64, v_row={valid_rows}, v_col={2 * valid_cols}" in casts[0]
     assert "dtype=bf16" not in mlir and "dtype=f32" not in mlir, mlir
     assert "pto.ttrans" not in mlir, mlir
-    # The additional static descriptor binds the existing FP4 allocation at the
-    # same address, rather than allocating a decode buffer or changing packing.
+    # Same-shape descriptor views preserve the actual source pointer for every
+    # planner, including runtime-owned and rotating addresses. They allocate no
+    # BF16/FP32 intermediate and need no second packed alloc at a planned offset.
     packed_allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line and "f4E2M1x2" in line]
-    packed_addresses = [re.search(r"addr = ([^, ]+)", line) for line in packed_allocs]
-    assert len(packed_addresses) >= 2 and all(match is not None for match in packed_addresses), mlir
-    source_addresses = {match.group(1) for match in packed_addresses if match is not None}
-    assert len(source_addresses) == 1, mlir
-    fp8_allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line and "dtype=f8E4M3FN" in line]
-    result_addresses = {
-        match.group(1) for line in fp8_allocs if (match := re.search(r"addr = ([^, ]+)", line))
-    }
-    # Both carrier dtypes report 8 bits, but decoding expands the byte region;
-    # output must never reuse the packed source's allocation.
-    assert result_addresses and result_addresses.isdisjoint(source_addresses), mlir
+    assert len(packed_allocs) == 1, mlir
+    packed_reshape = [line for line in mlir.splitlines() if "pto.treshape" in line and "f4E2M1x2" in line]
+    assert len(packed_reshape) == 1, mlir
+    if planner != passes.MemoryPlanner.PTOAS:
+        source_addresses = {
+            match.group(1) for line in packed_allocs if (match := re.search(r"addr = ([^, ]+)", line))
+        }
+        fp8_allocs = [
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and "dtype=f8E4M3FN" in line
+        ]
+        result_addresses = {
+            match.group(1) for line in fp8_allocs if (match := re.search(r"addr = ([^, ]+)", line))
+        }
+        # Decoding expands the byte region despite equal carrier dtype widths.
+        assert source_addresses and result_addresses and result_addresses.isdisjoint(source_addresses), mlir
     if find_ptoas_binary() is not None:
         pto = tmp_path / "direct_fp4_fp8.pto"
         cpp = tmp_path / "direct_fp4_fp8.cpp"
         pto.write_text(mlir)
-        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", "--pto-level=level3", "--pto-arch=a5"])
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
         assert cpp.is_file()
 
 
@@ -892,8 +900,8 @@ def test_e2m1_direct_fp8_empty_replay_keeps_storage_without_tcvt():
     source = ir.Var("source", source_type, span)
     result = ir.Var("result", result_type, span)
     # SplitVectorKernel creates this sentinel after legalization. Construct its
-    # lowered state directly: rerunning legalization would select a float bridge
-    # instead of exercising the direct-cast emitter's empty-lane handling.
+    # lowered state directly to exercise the direct-cast emitter's empty-lane
+    # handling independently of pipeline relegalization.
     cast = ir.Call(
         ir.get_op("tile.cast"), [source], {"target_type": pl.FP8E4M3FN, "mode": 2}, result_type, span
     )

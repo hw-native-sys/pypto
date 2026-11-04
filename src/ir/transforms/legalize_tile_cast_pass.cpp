@@ -50,6 +50,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -58,6 +59,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -297,17 +299,20 @@ class LegalizeTileCastMutator : public IRMutator {
 
     auto src_tile = As<TileType>(call->args_[0]->GetType());
     INTERNAL_CHECK_SPAN(src_tile, op->span_) << "tile.cast input must be TileType";
+    const auto result_tile = As<TileType>(call->GetType());
+    INTERNAL_CHECK_SPAN(result_tile, op->span_) << "tile.cast result must be TileType";
     DataType src = src_tile->dtype_;
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    const auto* context = PassContext::Current();
-    const bool addressed = !context || context->GetMemoryPlanner() != MemoryPlanner::PtoAS;
-    // Reuse the existing addressed static-descriptor binding for packed casts.
-    // PTOAS planning has no planned address at this stage and conservatively
-    // retains the ordinary decode chain instead.
+    // Splitting can shrink carrier rows or introduce lane-dependent validity
+    // after the first legalization. Recheck the final descriptor on the late
+    // pipeline run. The all-zero replay is intentionally empty and emitted as
+    // no conversion; widening it through float intermediates is unnecessary.
+    const bool empty_replay = tile_view_semantics::IsZeroValidShapeSentinel(GetValidShape(src_tile)) &&
+                              tile_view_semantics::IsZeroValidShapeSentinel(GetValidShape(result_tile));
     const bool native_geometry =
-        !IsDirectPackedFp4ToFp8Pair(src, dst) || (addressed && IsDirectPackedFp4ToFp8Cast(call));
+        !IsDirectPackedFp4ToFp8Pair(src, dst) || IsDirectPackedFp4ToFp8Cast(call) || empty_replay;
     if (IsNativeCast(adj_, src, dst) && native_geometry) {
       return IRMutator::VisitStmt_(op);
     }
@@ -342,6 +347,19 @@ class LegalizeTileCastMutator : public IRMutator {
 
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
       ExprPtr cast_expr = MakeCast(cur, chain[i], mode, op->span_);
+      if (result_tile->memory_space_) {
+        // The late run follows memory inference and vector splitting. Fresh
+        // intermediate storage inherits the resolved placement, not the old
+        // result's MemRef. Early legalization leaves placement unresolved.
+        const auto hop = As<Call>(cast_expr);
+        const auto hop_type = As<TileType>(cast_expr->GetType());
+        INTERNAL_CHECK_SPAN(hop && hop_type, op->span_)
+            << "Internal error: native cast bridge must produce a tile Call";
+        const auto placed_type = std::make_shared<TileType>(hop_type->shape_, hop_type->dtype_, std::nullopt,
+                                                            hop_type->tile_view_, result_tile->memory_space_);
+        cast_expr =
+            std::make_shared<Call>(hop->op_, hop->args_, hop->kwargs_, hop->attrs_, placed_type, hop->span_);
+      }
       const std::string name =
           auto_name::BuildName(auto_name::GetBaseName(op->var_->name_hint_), "cast_" + chain[i].ToString(),
                                "tmp", static_cast<int>(temp_counter_++));
@@ -362,7 +380,10 @@ class LegalizeTileCastMutator : public IRMutator {
       final_args.push_back(VisitExpr(call->args_[i]));
     }
     auto final_assign = MutableCopy(op);
-    final_assign->value_ = OpRegistry::GetInstance().Create("tile.cast", final_args, final_kwargs, op->span_);
+    // Keep final storage/layout and call-site attrs (including the original
+    // tmp's argument directions). Intermediate calls carry their own schema.
+    final_assign->value_ = std::make_shared<Call>(call->op_, std::move(final_args), std::move(final_kwargs),
+                                                  call->attrs_, call->GetType(), call->span_);
     stmts.push_back(std::move(final_assign));
 
     if (stmts.size() == 1) return stmts.front();
