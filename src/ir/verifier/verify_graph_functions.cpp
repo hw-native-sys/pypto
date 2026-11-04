@@ -156,13 +156,13 @@ class GraphReferenceChecker : public IRVisitor {
     CheckLaunchArity(callee, op->args_.size(), op->span_);
     CheckDirections(callee, op->GetArgDirections(), op->span_);
 
-    if (!op->deps_.empty()) {
+    // Graph replay expands a recorded sub-DAG, not one SPMD kernel launch.
+    if (op->core_num_.has_value() || op->sync_start_) {
       Report(callee, op->span_,
-             "is submitted with explicit dependencies. An explicit dependency edge makes the launch "
-             "uncacheable, so the region would silently run as ordinary tasks with no graph replay. "
-             "Order the graph against its producers through its boundary tensors instead.");
+             "is submitted with an SPMD launch specification. Graph dispatch does not support "
+             "core_num or sync_start; specify them on recorded kernels instead.");
     }
-    if (op->predicate_ != nullptr) {
+    if (op->HasPredicate()) {
       Report(callee, op->span_,
              "is submitted with a dispatch predicate. The runtime neither honours nor rejects a "
              "predicate on a graph launch — it silently zeroes it — so the region would run "
@@ -674,8 +674,9 @@ void VerifyReturns(const FunctionPtr& func, const ProgramPtr& program, std::vect
     diagnostics.emplace_back(
         DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
         "Graph function '" + func->name_ +
-            "' returns a value it computed rather than one of its own parameters. A graph call's "
-            "result is a recording handle, valid only on a cache hit, so nothing can depend on it.",
+            "' returns a value it computed rather than one of its own parameters. The Graph body "
+            "is skipped on a cache hit, so its computed returns are unavailable. The outer completion id is "
+            "separate.",
         return_stmt->span_);
   }
 }

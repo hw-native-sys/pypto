@@ -101,9 +101,9 @@ g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 根本不存在。而 decoder layer 里的每个 projection、MLP 和 attention 循环都是这样索引
 的，所以拒绝它等于把整类写法排除在外。
 
-`DataType::TASK_ID` 操作数直接跳过，不做分类。task id 从来就不是边界标量 —— 录制
-本身捕获的就是依赖结构，而 runtime 会拒绝任何携带显式依赖的 Graph 提交
-（`explicit_dep_count() != 0`），所以区域外产生的 id 根本到不了回放。这一点之所以
+`DataType::TASK_ID` 操作数直接跳过，不做分类。task id 不是回放边界标量：外部前驱
+挂在外层 Graph Submit 上，录制只捕获内部依赖结构。外层完成号在首次录制、录制中
+再次提交和缓存调用时均有效；录制内部的任务号留在函数体内。这一点之所以
 重要，是因为标量检查会扫描*每一个* Call 的实参：于是 `seeds[0] = seed` —— 一次写入
 `TASK_ID` 型 `pl.array` 的 `array.update_element` —— 看起来就像一个任务在消费边界
 标量，而同一个 id 直接写进 `deps=[...]` 却一直是被接受的。
@@ -276,7 +276,7 @@ runtime 中都能直接按类型解码数值。
 | 至多 64 个标量形参 | `GRAPH_MAX_SCALAR_ARGS`。在 Step A 之后检查：Step A 会**新增**标量形参，所以上提前放得下的签名，上提后可能放不下 |
 | 不允许 runtime 分配边界输出 | `Out` 描述只写访问，调用方提供存储时合法。调用方向（call-site direction）支持 `OutputExisting` 和 `InOut`；拒绝请求新分配的 `ArgDirection::Output` |
 | 标量形参必须是 `In` | 边界标量按值传入、由调用点回放 |
-| 只能返回自己的形参 | `rt_submit_graph` 只在缓存**命中**时才返回有效 task id，所以任何东西都不能依赖 graph 调用的结果。`return c`（`c` 为 `InOut` 形参）是原地写的写法，可以；返回计算出的新值不行 |
+| 只能返回自己的形参 | 缓存调用跳过录制函数体，计算返回值因而不可用；`return c`（`c` 为 `InOut` 形参）是合法的别名。外层 Graph 完成号是独立的 Submit 结果，首次和缓存调用均有效 |
 | 被拉起的任务数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点，按**上界**计——通过这项检查即意味着 runtime 会接受该 Graph。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述。与本表其他检查不同，这一项在外提步骤**之后**才计数：Step C 会*移除*分配节点，按外提前的函数体计会拒掉本来放得下的 Graph，也会与 verifier 不一致——后者是从改写后的 IR 重新推导同一个计数的 |
 | 运行时循环 / 分支内不得有分配 | 每次分配都记一个节点，所以数量随调用变化就是拓扑随调用变化 |
 | 分配的 shape 必须是编译期常量 | 录制会把 shape 抄进节点并据此推出缓冲区地址；读取边界标量的 shape 会被冻结在首次调用的值上 |
@@ -285,8 +285,9 @@ runtime 中都能直接按类型解码数值。
 | 任务实参里不得内联计算**逐次变化**的标量 | Step A 只上提**具名**的派生值；写在调用处的内联表达式没有名字可提、也没有边界 slot，会被冻结在首次调用的值上。回放不变的表达式会被接受 —— 冻结它是无害的 |
 | Graph 不能调用 Graph | runtime 无法在正在录制的 graph 内部再录一个 graph |
 | 调用点必须传满全部形参 | `Submit` 通常允许只传前缀、由 runtime 分配尾部 `Out` 形参；Graph 没有这种尾部 |
-| launch 上不能带显式依赖 | runtime 拒绝跨越 Graph 边界的显式依赖 |
+| 显式前驱约束外层 launch | `Submit.deps_` 传给外层 Graph 任务；这些逐次调用的任务号不进入不可变 Definition 或缓存键 |
 | launch 上不能带 dispatch predicate | graph launch 上的 predicate 既不被遵守也不被拒绝 —— runtime 静默清零它，于是区域会无条件执行 |
+| Graph launch 上不能带 SPMD 启动参数 | `core_num` 和 `sync_start` 配置录图内的 kernel，而非整个 Graph；Graph 派发会拒绝它们，避免静默忽略用户指定的启动语义。 |
 
 ## 在流水线中的位置
 

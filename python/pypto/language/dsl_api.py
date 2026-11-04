@@ -819,12 +819,13 @@ class GraphContext:
     a ``GraphScopeStmt``.
     """
 
-    def __init__(self, name: str, *, dumps: list[Any] | None = None) -> None:
+    def __init__(self, name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None = None) -> None:
         self.name = name
+        self.deps = deps
         self.dumps = dumps
 
-    def __enter__(self) -> None:
-        """Enter the Graph scope context."""
+    def __enter__(self) -> Any:
+        """The DSL parser binds an optional outer completion TaskId capture."""
         pass
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -832,14 +833,15 @@ class GraphContext:
         pass
 
 
-def graph(name: str, *, dumps: list[Any] | None = None) -> GraphContext:
+def graph(name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None = None) -> GraphContext:
     """Mark a repeated region of orchestration as one recordable graph.
 
     Under ``runtime="host_build_graph"`` the runtime records the region's task
-    topology the first time it executes and replays the recording on every later
-    execution. A decoder stack of N structurally identical layers therefore costs
-    one graph build instead of N, and occupies N outer task slots instead of
-    N x (tasks per layer).
+    topology on its first execution and reuses the Definition for matching
+    configurations and boundary metadata within the same orchestration run.
+    Repeated layers can then share one build and use N outer task slots instead
+    of N x (tasks per layer). A later program invocation records its own
+    Definitions; reusing a compiled program does not persist this runtime cache.
 
     ``pl.graph`` is the in-place form of ``@pl.jit.graph``: ``OutlineGraphScopes``
     extracts the region into a Graph function named after ``name``, so the two
@@ -857,6 +859,9 @@ def graph(name: str, *, dumps: list[Any] | None = None) -> GraphContext:
         name: Region name. Must be a valid Python identifier; it becomes the
             outlined function's name and hence the runtime's graph key, so keep
             it stable across edits.
+        deps: Optional explicit predecessor TaskIds or TaskId arrays from this
+            orchestration run. They order this invocation's outer Graph task;
+            they do not become recorded-internal edges or cache-key fields.
         dumps: Optional list literal of outer-scope tensor names to mark for
             selective tensor dump on the Graph task itself (distinct from the
             kernel dispatches recorded inside it) — the same surface as
@@ -865,8 +870,12 @@ def graph(name: str, *, dumps: list[Any] | None = None) -> GraphContext:
             dispatches and later consumers. The printer emits ``dumps=`` for
             a scope carrying dump marks.
 
+    ``with pl.graph(..., deps=[ready]) as done:`` binds ``done`` to completion
+    of the entire Graph, including its first recording. Keep internal TaskId
+    arrays local to the region; use this outer completion for later tasks.
+
     Returns:
-        Context manager for the Graph scope.
+        Context manager with an optional outer completion TaskId capture.
 
     Raises:
         ParserSyntaxError: if written in a device-kernel body (InCore / AIC /
@@ -879,7 +888,7 @@ def graph(name: str, *, dumps: list[Any] | None = None) -> GraphContext:
         ...         h = attention(x, wq, h)
         ...         x = mlp(h, w1, x)
     """
-    return GraphContext(name, dumps=dumps)
+    return GraphContext(name, deps=deps, dumps=dumps)
 
 
 class SpmdContext:

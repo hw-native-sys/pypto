@@ -1190,8 +1190,9 @@ void CheckGraphSignature(const FunctionPtr& func) {
 ///
 /// `return c` where `c` is an InOut parameter is the DSL's spelling for writing
 /// in place, and lowers to an alias rather than a value — that is fine. A
-/// genuinely new value is not: `rt_submit_graph` yields a valid task id only on
-/// a cache *hit*, so nothing downstream can depend on a graph call's result.
+/// genuinely new body value is not: the body is skipped on a cache hit, so no
+/// scalar or recorded-local TaskId it computes exists at the replay call site.
+/// A submit's outer completion id is separate from these function returns.
 ///
 /// The parameter is matched by *lineage*, not by pointer identity. By the time
 /// this pass runs, `OutlineIncoreScopes` has rewritten an in-place body into a
@@ -1216,8 +1217,9 @@ void CheckGraphReturns(const FunctionPtr& func, const ProgramPtr& program) {
     const bool writes_back_a_param = i < returned_params.size() && returned_params[i].has_value();
     CHECK_SPAN(writes_back_a_param, return_stmt->span_)
         << "Graph function '" << func->name_ << "' returns a value it computed rather than one of its "
-        << "own parameters. A graph call is a task launch whose result is a recording handle — valid "
-           "only once the graph is already cached — so nothing can depend on it. Write the result "
+        << "own parameters. The Graph body is skipped on a cache hit, so its computed return values are "
+           "unavailable. "
+           "Write the result "
            "into an InOut parameter and return that parameter instead.";
   }
 }
@@ -1244,12 +1246,13 @@ class GraphCallSiteChecker : public IRVisitor {
     CheckArity(op->args_, callee, op->span_);
     CheckDirections(op->GetArgDirections(), callee, op->span_);
 
-    CHECK_SPAN(op->deps_.empty(), op->span_)
+    // Explicit predecessors order the outer shell. SPMD metadata instead
+    // changes a kernel launch and has no meaning for this composite Graph.
+    CHECK_SPAN(!op->core_num_.has_value() && !op->sync_start_, op->span_)
         << "Graph function '" << callee->name_ << "' is submitted from '" << caller_->name_
-        << "' with explicit dependencies. An explicit dependency edge makes the launch uncacheable, "
-           "so the region would silently run as ordinary tasks with no graph replay. Order the graph "
-           "against its producers through its boundary tensors instead.";
-    CHECK_SPAN(op->predicate_ == nullptr, op->span_)
+        << "' with an SPMD launch specification. Graph dispatch does not support core_num or sync_start; "
+           "specify them on the kernels recorded inside the Graph instead.";
+    CHECK_SPAN(!op->HasPredicate(), op->span_)
         << "Graph function '" << callee->name_ << "' is submitted from '" << caller_->name_
         << "' with a dispatch predicate. A predicate on a graph launch is neither honoured nor "
            "rejected by the runtime — it is silently zeroed — so the region would run "

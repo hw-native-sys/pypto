@@ -185,9 +185,8 @@ def test_derived_scalar_is_computed_at_the_call_site(orch):
     assert entry.count("add_scalar") == 2  # layer_idx and the hoisted base
 
 
-def test_graph_result_is_not_chained(orch):
-    # rt_submit_graph yields a valid task id only on a cache hit, so the call
-    # site must not bind or depend on its result.
+def test_unused_graph_completion_is_not_captured(orch):
+    # Plain calls without dependency consumers need no completion handle.
     entry = _entry_body(orch)
     assert "= rt_submit_graph" not in entry
 
@@ -1197,6 +1196,92 @@ class PipeCapacities:
         assert capacity == per_block * core_num, (group, expression, per_block, core_num)
     assert len(allocations) == 2, orch
     _assert_orchestration_compiles(source)
+
+
+def test_graph_submit_keeps_completion_and_manual_dependency_edges(tmp_path):
+    """A manual producer, recorded Graph, and consumer chain through TaskIds.
+
+    The Graph returns an alias of caller-owned storage. Its additional submit
+    result is the OUTER completion id, including on the first recording, so no
+    recorded-internal TaskId or array escapes the region.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def increment(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.load(c, [0, 0], [128, 128])
+            return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(t, 1.0), [0, 0], c)
+            return c
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.manual_scope():
+                c, producer = pl.submit(self.increment, c)
+                c, graph_done = pl.submit(self.layer, c, deps=[producer])
+                c, _ = pl.submit(self.increment, c, deps=[graph_done])
+            return c
+
+    with (
+        mock.patch("pypto.backend.pto_backend._compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT),
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+    ):
+        ir_compile(Before, skip_ptoas=False, platform="a2a3", output_dir=str(tmp_path), dump_passes=False)
+    source = tmp_path / "orchestration/main.cpp"
+    _assert_orchestration_compiles(source)
+    entry = _entry_body(source.read_text())
+    assert "rt_submit_graph(&pypto_graph_layer" in entry
+    assert "TaskOutputTensors task_1_outs;" in entry
+    assert "task_1_outs.set_task_id(rt_submit_graph(" in entry
+    assert "params_t1.set_dependencies(" in entry
+    assert "TaskId graph_done = task_1_outs.task_id();" in entry
+
+
+@pytest.mark.parametrize("arch", ["a2a3", "a5"])
+def test_graph_scope_captures_outer_completion_and_keeps_dependencies(tmp_path, arch):
+    """Scope syntax reaches the existing Graph Submit codegen, not a new ABI."""
+
+    @pl.program
+    class ScopeChain:
+        @pl.function(type=pl.FunctionType.InCore)
+        def increment(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.load(c, [0, 0], [128, 128])
+            return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.manual_scope():
+                c, seed = pl.submit(self.increment, c)
+                with pl.graph("layer", deps=[seed]) as done:
+                    c, first = pl.submit(self.increment, c)
+                    c, second = pl.submit(self.increment, c, deps=[first])
+                c, consumer = pl.submit(self.increment, c, deps=[done])
+            return c
+
+    with (
+        mock.patch("pypto.backend.pto_backend._compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT),
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+    ):
+        ir_compile(
+            ScopeChain,
+            skip_ptoas=False,
+            backend_type=BackendType.Ascend910 if arch == "a2a3" else BackendType.Ascend950,
+            output_dir=str(tmp_path),
+            dump_passes=False,
+        )
+    source = tmp_path / "orchestration/main.cpp"
+    _assert_orchestration_compiles(source, arch=arch)
+    entry = _entry_body(source.read_text())
+    launch = re.search(r"GraphTaskArgs (\w+);(.*?)rt_submit_graph\(&pypto_graph_layer", entry, re.S)
+    assert launch is not None, entry
+    assert f"{launch.group(1)}.set_dependencies(" in launch.group(2), entry
+    assert re.search(r"TaskId done\w* = task_\d+_outs\.task_id\(\);", entry), entry
 
 
 if __name__ == "__main__":

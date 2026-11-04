@@ -6,17 +6,23 @@
 ## 概述
 
 该 Pass 将 `GraphScopeStmt` 节点（由 `with pl.graph("name"):` 生成）变换为
-`Function(Graph)` 定义，并将原作用域替换为对提取函数的调用。
+`Function(Graph)` 定义，并将原作用域替换为对提取函数的 Call 或 Submit。
 
 它存在的全部意义就是**汇聚 (convergence)**。该 Pass 之后，用户就地标记的区域与用户用
 `@pl.jit.graph` 装饰的函数具有相同的形态 —— 一个带编排元数据的 `Function(Graph)` 加一个
-`Call` —— 因此 `LegalizeGraphBoundary`、Graph 验证器与编排代码生成都无需知道用户写的是
+Call/Submit —— 因此 `LegalizeGraphBoundary`、Graph 验证器与编排代码生成都无需知道用户写的是
 哪一种形式。两种形式并存是出于书写习惯而非语义差异：装饰器适合本身已是独立函数的
 layer；作用域适合用户不愿拆分出去的、较大编排函数体中的一段。
 
 唯一**不会**对齐的是形参**顺序**：outliner 按捕获顺序追加形参，而装饰器形式用的是用户
 声明的签名。两者的边界互为排列，而下游不依赖这一点 —— 所有消费方都通过
 `param_directions_` 而非位置来读取形参。
+
+`with pl.graph("layer", deps=[ready]) as done:` 复用通用 scope 的
+`manual_dep_edges` 和 `task_id_var` 属性。outliner 将它们转为外层
+`Submit.deps_` 及末尾的完成号；它们不成为录制函数的形参或计算返回值。
+完成号覆盖整个 Graph，首次调用也有效。内部 TaskId 数组留在范围内；
+`LegalizeGraphBoundary` 仍拒绝内部任务号跨界。
 
 **前置条件**：
 
@@ -84,7 +90,7 @@ program_outlined = outline_pass(program)
    生成而无人察觉。
 4. **提取**：以 `ScopeKind::Graph` / `FunctionType::Graph` / 后缀 `_graph_`
    运行共享的 `outline_utils::ScopeOutliner`。被捕获的值成为形参，区域之后仍被
-   使用的值成为返回值，作用域本身被替换为一个 Call。
+   使用的值成为返回值，作用域被替换为 Call，存在派发元数据时使用 Submit。
 
 提取出的函数不需要额外补 level/role：`Function` 的构造函数会为任何编排类类型推导出
 `Level::CHIP` + `Role::Orchestrator`，因此这里产生的 Graph 天然带着与解析器给

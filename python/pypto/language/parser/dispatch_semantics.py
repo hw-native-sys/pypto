@@ -255,7 +255,9 @@ class DispatchSemantics:
             "or omit it from the inner Submit.",
         )
 
-    def record_scope_producer(self, body: "list[ast.stmt]", tid_var: "ir.Var") -> None:
+    def record_scope_producer(
+        self, body: "list[ast.stmt]", tid_var: "ir.Var", *, recursive: bool = False
+    ) -> None:
         """Record ``body``'s assigned Vars as produced by the scope's ``tid_var``.
 
         The scope-form counterpart of the tracking ``_parse_submit_tuple_lhs``
@@ -269,7 +271,9 @@ class DispatchSemantics:
         Same best-effort scope as the call form: only names bound by a
         top-level assignment in the scope body are tracked (aliases, writes
         through ``pl.Out`` arguments, and rebinds via an intervening call are
-        not). The generation counter mirrors the submit path so a ``tid`` name
+        not). Graph completion also covers nested dispatches, so its caller
+        requests recursive tracking of assignments exported by those regions.
+        The generation counter mirrors the submit path so a ``tid`` name
         rebound by a later scope cannot match by Var identity alone.
         """
         names: list[str] = []
@@ -281,14 +285,13 @@ class DispatchSemantics:
                 for elt in target.elts:
                     collect(elt)
 
-        for node in body:
+        nodes = (node for stmt in body for node in ast.walk(stmt)) if recursive else iter(body)
+        for node in nodes:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     collect(target)
             elif isinstance(node, ast.AnnAssign):
                 collect(node.target)
-        if not names:
-            return
         gen = self.tid_binding_generation.get(tid_var.unique_id, 0) + 1
         self.tid_binding_generation[tid_var.unique_id] = gen
         for name in names:
