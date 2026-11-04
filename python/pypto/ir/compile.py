@@ -30,6 +30,7 @@ from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core import log_debug as _log_debug
 from pypto.pypto_core import passes as _passes
 
 from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
@@ -698,6 +699,13 @@ def _compile_to_files(  # noqa: PLR0913
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)
             prof.write_report(report_dir)
+
+    # Name the artifact root in resolved absolute form so a user at DEBUG can
+    # open the generated .pto / kernels directly. realpath matches
+    # CompiledArtifact's Path.resolve() when the output path contains symlinks.
+    # DEBUG keeps the release default (INFO) unchanged and does not alter the
+    # returned output_dir.
+    _log_debug(f"PyPTO artifacts written to {os.path.realpath(output_dir)}")
 
     return _CompilationResult(
         transformed_program, output_dir, platform, effective_backend_type, logical, aliases
