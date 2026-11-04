@@ -2689,3 +2689,62 @@ def get_block_num(span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.get_block_num", [], {}, actual_span)
+
+
+def subview(
+    source: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    *,
+    steps: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Borrow a strictly contained affine GM window without copying data.
+
+    The source coordinate is ``offsets[i] + index[i] * steps[i]`` on each
+    axis. Result strides multiply the immediate parent's strides by steps;
+    offsets do not change the allocation or create a snapshot. Only an
+    explicit load (or a tensor compute consumer) materializes a Tile.
+
+    Args:
+        source: Ordinary Tensor source; Tile and DistributedTensor are rejected.
+        shape: Positive logical result extents, with the source rank.
+        offsets: Nonnegative origin in immediate parent coordinates.
+        span: Optional source location.
+        steps: Positive sampling steps; defaults to one on every axis.
+
+    Returns:
+        Read-only borrowed tensor descriptor with no MemRef allocation.
+
+    Raises:
+        ValueError: Invalid geometry. Compilation also rejects containment or
+            strict reduction that cannot be proven from dominating facts.
+            Native consumers retain their existing dtype, layout and target
+            restrictions; subview adds no device-specific load limits.
+    """
+    actual_span = _get_span_or_capture(span)
+    for name, values in (("shape", shape), ("offsets", offsets), ("steps", steps)):
+        if values is not None and not isinstance(values, _ir_core.MakeTuple):
+            if any(isinstance(value, bool) for value in values):
+                raise ValueError(f"tensor.subview {name} must contain integer scalars, not bool")
+
+    def index_tuple(values: Sequence[int | Expr] | _ir_core.MakeTuple) -> _ir_core.MakeTuple:
+        normalized: list[Expr] = []
+        for value in _to_make_tuple(values, actual_span).elements:
+            scalar_type = value.type
+            if isinstance(scalar_type, ScalarType) and scalar_type.dtype.is_int():
+                if isinstance(value, ConstInt):
+                    value = ConstInt(value.value, DataType.INDEX, actual_span)
+                elif scalar_type.dtype != DataType.INDEX:
+                    value = _ir_core.Cast(value, DataType.INDEX, actual_span)
+            normalized.append(value)
+        return _ir_core.MakeTuple(normalized, actual_span)
+
+    # Widen device integers before any geometry multiplication. Keeping narrow
+    # arithmetic and widening only the final pointer offset could wrap first.
+    shape_tuple = index_tuple(shape)
+    offsets_tuple = index_tuple(offsets)
+    steps_tuple = index_tuple([1] * len(shape_tuple.elements) if steps is None else steps)
+    return _ir_core.create_op_call(
+        "tensor.subview", [source, shape_tuple, offsets_tuple, steps_tuple], {}, actual_span
+    )

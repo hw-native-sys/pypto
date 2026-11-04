@@ -392,6 +392,8 @@ class IRSerializer::Impl {
     }
     tv_map["stride"] = msgpack::object(stride_vec, zone);
 
+    tv_map["addressing_kind"] = msgpack::object(static_cast<int>(tensor_view->addressing_kind), zone);
+
     // Serialize layout enum
     tv_map["layout"] = msgpack::object(TensorLayoutToString(tensor_view->layout), zone);
 

@@ -92,6 +92,41 @@ with ib.function("tensor_example") as f:
     ib.return_stmt(result)
 ```
 
+### Borrowed GM subviews
+
+`pl.tensor.subview(source, shape, offsets, *, steps=None)` describes a read-only
+window of an ordinary GM Tensor inside an InCore function. It performs no load
+or allocation and retains parent storage pitches. Unlike `view`, it selects a
+strictly smaller window; unlike `slice`, it remains a GM descriptor during
+TensorToTile conversion.
+
+| Parameter | Meaning and constraint |
+| --------- | ---------------------- |
+| `source` | Caller-owned ordinary GM Tensor, or a proven metadata/subview alias; not Tile or DistributedTensor |
+| `shape` | Positive logical extents, with the same rank as the parent |
+| `offsets` | Nonnegative origin in the immediate parent's coordinates |
+| `steps` | Positive sampling steps, defaulting to one on every axis |
+
+For every axis, `offset + (shape - 1) * step` must be inside the parent's valid
+extent, and at least one logical extent must be strictly smaller. The parent's
+valid extents must fit its physical shape. Canonical `view` ancestors must
+preserve element count. All geometry and address arithmetic must be provably
+free of overflow. Dynamic parameters are supported only when the surrounding
+control flow proves these conditions; false and unknown proofs are rejected.
+
+The result keeps the source dtype/layout, multiplies parent strides by `steps`,
+and treats its whole logical shape as valid. Nested subviews are supported.
+Metadata aliases must preserve the address map; `set_validshape` may only narrow
+validity. Descriptor escape, compiler-owned roots, and writes through the
+borrowed descriptor are rejected.
+
+Consumers retain their existing lowering and device restrictions. Existing
+ND/DN loads require a contiguous inner storage axis; a non-unit step on that
+axis needs a consumer that supports it. Scalar `tensor.read` requires loading
+the window into a Tile first. N-D loads retain source coordinates while the
+pipeline flattens the result Tile. Subview itself adds no backend-specific
+dtype, rank, DMA row-count, gap-width, or alignment limits.
+
 ## TileOp: Hardware-Optimized Tile Operations
 
 **Purpose**: Hardware-optimized tile operations with explicit memory management

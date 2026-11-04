@@ -188,6 +188,14 @@ print(pto_code)
 
 ## 操作映射
 
+### 借用的 GM Tensor 描述符
+
+GM `tensor.subview` 使用现有 PTO 操作：`pto.addptr` 将本次 origin 加到当前父指针，
+再由 `pto.make_tensor_view` 记录结果 shape 和采样 pitch；嵌套 origin 只应用一次。
+Metadata `tensor.view`/`tensor.set_validshape` 别名复用当前指针。Codegen 发射前
+重新检查 subview 上下文证明，包括调用方绕过标准 Pass 流水线的情况。不新增 PTO 方言操作或
+描述符分配；一个 TLOAD 本身不能证明一次物理 DMA。
+
 ### Tile 操作到 PTO 指令
 
 | PyPTO 操作 | 生成的 PTO-ISA |

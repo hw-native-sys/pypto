@@ -504,7 +504,10 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
   bool has_non_default_pad = (tensor_view.pad != PadValue::null);
 
   // If all fields are at defaults, skip TensorView entirely
-  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad) return "";
+  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad &&
+      tensor_view.addressing_kind == TensorAddressingKind::Canonical) {
+    return "";
+  }
 
   // When TensorView is non-trivial, always emit both stride and layout to satisfy
   // the C++ constructor signature TensorView(stride, layout, valid_shape=[], pad=null).
@@ -539,6 +542,11 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
         oss << "min";
         break;
     }
+  }
+
+  if (tensor_view.addressing_kind == TensorAddressingKind::AffineSubview) {
+    maybe_comma();
+    oss << "addressing_kind=" << prefix_ << ".TensorAddressingKind.AffineSubview";
   }
 
   oss << ")";

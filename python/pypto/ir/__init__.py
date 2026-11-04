@@ -23,7 +23,7 @@ import shutil as _shutil
 # Re-export all core IR types and functions from native module
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import *  # noqa: F403
-from pypto.pypto_core.ir import IRMutator, IRVisitor
+from pypto.pypto_core.ir import IRMutator, IRVisitor, TensorAddressingKind
 from pypto.pypto_core.passes import (
     DiagnosticCheck,
     DiagnosticCheckSet,
@@ -102,6 +102,7 @@ __all__ = [
     "IRVisitor",
     "TensorType",
     "TensorView",
+    "TensorAddressingKind",
     "TileType",
     "TileView",
     "python_print",

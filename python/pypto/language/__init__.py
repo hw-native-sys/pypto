@@ -55,6 +55,7 @@ from pypto.pypto_core.ir import (
     Role,
     SplitMode,
     STPhase,
+    TensorAddressingKind,
     TensorLayout,
     TileLayout,
 )
@@ -548,6 +549,7 @@ __all__ = [
     "PrefetchAsyncContext",
     "AsyncEvent",
     "AsyncSession",
+    "TensorAddressingKind",
     "TensorLayout",
     "TensorView",
     "TileLayout",

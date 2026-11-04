@@ -29,16 +29,82 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
+
+// Descriptor construction can precede control-flow analysis. Reject provably bad
+// geometry here; the contextual verifier must prove every remaining obligation.
+TypePtr DeduceTensorSubviewType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 4) << "tensor.subview requires source, shape, offsets, steps";
+  auto source = As<TensorType>(args[0]->GetType());
+  CHECK(source) << "tensor.subview requires an ordinary Tensor source";
+  const size_t rank = source->shape_.size();
+  CHECK(rank > 0) << "tensor.subview requires rank >= 1";
+  auto geometry = [&](size_t index) {
+    auto tuple = As<MakeTuple>(args[index]);
+    CHECK(tuple && tuple->elements_.size() == rank) << "tensor.subview geometry rank mismatch";
+    for (const auto& element : tuple->elements_) {
+      auto scalar = As<ScalarType>(element->GetType());
+      CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
+          << "tensor.subview geometry must contain integer scalars";
+    }
+    return tuple->elements_;
+  };
+  auto shape = geometry(1);
+  auto offsets = geometry(2);
+  auto steps = geometry(3);
+  TensorView view = source->tensor_view_.value_or(TensorView{});
+  CHECK(view.layout == TensorLayout::ND || view.layout == TensorLayout::DN)
+      << "tensor.subview supports ND/DN affine semantics only";
+  CHECK(view.pad == PadValue::null) << "tensor.subview cannot borrow a padded source";
+  const auto& extent = view.valid_shape.empty() ? source->shape_ : view.valid_shape;
+  CHECK(extent.size() == rank) << "tensor.subview parent valid shape rank mismatch";
+  if (view.stride.empty()) {
+    view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(source->shape_, view.layout);
+  }
+  CHECK(view.stride.size() == rank) << "tensor.subview parent stride rank mismatch";
+  arith::Analyzer analyzer;
+  bool all_equal = true;
+  for (size_t i = 0; i < rank; ++i) {
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, args[0]->span_);
+    auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[0]->span_);
+    auto last = MakeAdd(offsets[i], MakeMul(MakeSub(shape[i], one), steps[i]));
+    CHECK(!analyzer.CanProve(MakeLe(shape[i], zero))) << "tensor.subview shape must be positive";
+    CHECK(!analyzer.CanProve(MakeLe(steps[i], zero))) << "tensor.subview steps must be positive";
+    CHECK(!analyzer.CanProve(MakeLt(offsets[i], zero))) << "tensor.subview offsets must be nonnegative";
+    CHECK(!analyzer.CanProve(MakeGe(last, extent[i]))) << "tensor.subview exceeds parent window";
+    all_equal &= analyzer.CanProveEqual(shape[i], extent[i]);
+    view.stride[i] = tensor_view_semantics::MakeIndexMul(view.stride[i], steps[i]);
+  }
+  CHECK(!all_equal) << "tensor.subview requires a strictly smaller parent window";
+  view.valid_shape.clear();
+  view.addressing_kind = TensorAddressingKind::AffineSubview;
+  // No allocation identity is attached to a borrowed descriptor.
+  return std::make_shared<TensorType>(shape, source->dtype_, std::nullopt, view);
+}
+
+REGISTER_OP("tensor.subview")
+    .set_op_category("TensorOp")
+    .set_description("Borrow a strictly contained affine GM window without materializing payload")
+    .add_argument("source", "Ordinary GM tensor")
+    .add_argument("shape", "Logical result extents")
+    .add_argument("offsets", "Origin in immediate parent coordinates")
+    .add_argument("steps", "Positive per-axis sampling steps")
+    .set_arg_effect(0, ArgEffect::Read)
+    .set_output_memory_inherit_input()
+    .no_execution_memory_access()
+    .f_deduce_type(DeduceTensorSubviewType);
 
 TypePtr DeduceTensorReadType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {

@@ -2063,11 +2063,22 @@ class TypeResolver:
                 tv.layout = self.resolve_layout(kw.value)
             elif kw.arg == "pad":
                 tv.pad = self._resolve_padvalue(kw.value)
+            elif kw.arg == "addressing_kind":
+                kinds = {
+                    "Canonical": ir.TensorAddressingKind.Canonical,
+                    "AffineSubview": ir.TensorAddressingKind.AffineSubview,
+                }
+                if not isinstance(kw.value, ast.Attribute) or kw.value.attr not in kinds:
+                    raise ParserTypeError(
+                        f"Unknown TensorAddressingKind: {ast.unparse(kw.value)}",
+                        span=self._get_span(kw.value),
+                    )
+                tv.addressing_kind = kinds[kw.value.attr]
             else:
                 raise ParserTypeError(
                     f"Unknown TensorView keyword argument: {kw.arg!r}",
                     span=self._get_span(kw),
-                    hint="Supported: valid_shape, stride, layout, pad",
+                    hint="Supported: valid_shape, stride, layout, pad, addressing_kind",
                 )
         return tv
 

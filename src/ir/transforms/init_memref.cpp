@@ -44,6 +44,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/storage_size.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -739,6 +740,13 @@ class InitMemRefMutator : public IRMutator {
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
+
+    // A borrowed GM descriptor has an origin/pitch but owns no allocation.
+    // Do this before generic inherit-input handling, which would attach the
+    // root's full MemRef and turn a sampled window into an allocation envelope.
+    if (IsAffineSubviewType(op->var_->GetType())) {
+      return MakeMemRefLessAssign(op, new_value);
+    }
 
     // A tile that owns no general-pool buffer — a cross-core tpop result (its
     // data lives in the reserved C2V/V2C slot, addressed via the pipe), or a
