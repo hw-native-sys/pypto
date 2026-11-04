@@ -365,19 +365,25 @@ def broadcast(
     signal: Expr,
     root: int,
     *,
+    core_num: int = 1,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tensor.broadcast(target, signal, root=...)`` Call.
+    """Build a ``pld.tensor.broadcast(target, signal, root=..., core_num=...)`` Call.
 
     Broadcast: replicate root rank's data to every rank in the comm group.
-    ``root`` is a static int selecting the source rank.  The result type is
-    ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
+    ``root`` is a static int selecting the source rank.  ``core_num`` is the
+    number of AIV blocks used by a HOST builtin broadcast (the HOST multi-core
+    path, mirroring allreduce); InCore calls must keep this at 1. The result
+    type is ``target``'s :class:`ir.DistributedTensorType`
+    (in-place rebind).
 
     LowerCompositeOps expands this into notify-all / wait-all + tile.create +
     pld.tile.get; this Call never survives past that pass.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tensor.broadcast", [target, signal], {"root": root}, actual_span)
+    return _ir_core.create_op_call(
+        "pld.tensor.broadcast", [target, signal], {"root": root, "core_num": core_num}, actual_span
+    )
 
 
 def allgather(
@@ -419,22 +425,29 @@ def reduce_scatter(
     signal: Expr,
     op: ReduceOp,
     *,
+    core_num: int = 1,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tensor.reduce_scatter(target, signal, op=...)`` Call.
+    """Build a ``pld.tensor.reduce_scatter(target, signal, op=..., core_num=...)`` Call.
 
     Reduce-scatter: element-wise reduce chunks across all ranks, scatter
     one reduced chunk per rank.  ``op`` (:class:`ir.ReduceOp`) selects the
     reduction operator — Sum, Max, Min, or Prod on the InCore rail; the
-    HOST builtin rail lowers Sum only.  Result type is
-    ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
+    HOST builtin rail lowers Sum only.  ``core_num`` is the number of AIV
+    blocks used by a HOST builtin reduce_scatter (the HOST multi-core path,
+    mirroring allreduce); InCore calls must keep this at 1. Result type is
+    ``target``'s :class:`ir.DistributedTensorType` (in-place
+    rebind).
 
     LowerCompositeOps expands this into a 5-phase decomposition matching
     allreduce; this Call never survives past that pass.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call(
-        "pld.tensor.reduce_scatter", [target, signal], {"op": int(op)}, actual_span
+        "pld.tensor.reduce_scatter",
+        [target, signal],
+        {"op": int(op), "core_num": core_num},
+        actual_span,
     )
 
 

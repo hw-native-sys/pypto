@@ -792,12 +792,23 @@ path; give it its own window.
 ### `pld.tensor.reduce_scatter`
 
 ```text
-pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum,
+                          core_num: int = 1) -> DistributedTensorType(target)
 ```
 
 `target` is `[NR, SIZE]`. Each rank stages all `NR` chunks before the call; after
 it, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r`
-across every rank (Sum/Max/Min/Prod by `ReduceOp`). Signal shape `[NR, 1]`.
+across every rank (Sum/Max/Min/Prod by `ReduceOp`). On the HOST path, the signal
+may be rank-1 `[NR]` only when `core_num == 1`, or rank-2
+`[NR, signal_stride]` with a constant `signal_stride >= core_num`. The InCore
+path requires `[NR, 1]`.
+
+For HOST calls, `core_num` selects the number of AIV blocks used by the
+reduce-scatter builtin (the HOST multi-core launch, mirroring allreduce). It
+must be a positive compile-time int no larger than the configured
+backend's AIV core count; the builtin is submitted with `require_sync_start`, so
+an over-subscribed launch is rejected instead of hanging. InCore calls must keep
+`core_num == 1`; use an enclosing `pl.spmd` for InCore multi-core execution.
 
 The row is walked in UB-sized chunks of at most 16 KiB. A static, 32-byte-aligned
 `SIZE` that fits one chunk keeps the single-tile path (ready barrier, peer loop,

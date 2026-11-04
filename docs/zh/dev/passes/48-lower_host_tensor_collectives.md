@@ -66,7 +66,7 @@ comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生�
 
 每个生成的 builtin call 携带来源 `pld.tensor.*` 调用中 collective 特定的
 参数和 kwarg 属性。窗口绑定的 INOUT tensor 原样传递；标量 kwarg 值
-（`op`、`root`、`dtype`，以及 mesh AllReduce 的 `core_num`）转发给 builtin。
+（`op`、`root`、`dtype`，以及 allreduce、broadcast、reduce_scatter 的 `core_num`）转发给 builtin。
 `all_to_all_v` 的 `MAX_RECV` 不是 lowering 时的属性：HOST 内核在入口把它推导为
 `target.shape[0] / nranks`（运行时通信域大小），因此不再需要按 `MAX_RECV`
 进行代码生成的 variant 混入，块布局也始终与实际运行的设备数一致。
@@ -120,6 +120,14 @@ lane）。`core_num` 还必须不超过所配置 backend 的 AIV 核数——该
 standalone AIV kernel 提交并设置了 `require_sync_start`，超额的 launch 永远无法
 被准入，表现为挂死而非报错。未配置 backend 时（纯 IR 测试）跳过该检查。
 多核仅支持 mesh：`mode="ring"` 要求 `core_num == 1`。
+
+`pld.tensor.broadcast` 与 `pld.tensor.reduce_scatter` 的 HOST builtin 使用相同的
+block-indexed 多核 launch。它们的 `core_num` 同样被转发：rank-1 signal 仅在
+`core_num == 1` 时有效；rank-2 signal 要求第二维是常量且
+`signal_stride >= core_num`（允许更宽的 stride）。它们与 mesh allreduce 一样以
+`require_sync_start` 提交，并受相同的 AIV 容量限制：超额的 launch 会在准入前被
+拒绝，而不是挂死。InCore 调用必须保持 `core_num == 1`；InCore 多核请使用外层
+`pl.spmd`。
 
 Ring allreduce（`mode="ring"`）
 的 signal 为 rank-2，形状为 `[2 * (NR - 1) + 1, NR]`，其

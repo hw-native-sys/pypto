@@ -90,6 +90,34 @@ void CheckSignalDistributedTensor(const DistributedTensorTypePtr& signal_type, c
       << op_name << " signal must be a rank-1 DistributedTensor, got rank " << signal_type->shape_.size();
 }
 
+/// Signal + `core_num` contract shared by every HOST builtin whose kernel
+/// partitions work across `block_idx`/`block_num` the way `#2160`'s mesh
+/// AllReduce does (RFC #2521 lane K's block-indexed signal-lane pattern,
+/// generalized beyond allreduce by plan 85/B6b): signal is INT32, rank-1
+/// `[world_size]` (only valid when `core_num == 1`, one shared lane) or
+/// rank-2 `[world_size, signal_stride]` with `signal_stride >= core_num` (one
+/// lane per block). Originally inlined in `DeduceBuiltinTensorAllReduceType`;
+/// factored out so a collective gaining multicore reuses it instead of
+/// re-deriving it (`core-development.md` DRY).
+void CheckMulticoreCollectiveSignal(const DistributedTensorTypePtr& signal_type, int64_t core_num,
+                                    const std::string& op_name) {
+  CHECK(signal_type) << op_name << " signal must be a DistributedTensor";
+  CHECK(signal_type->dtype_ == DataType::INT32)
+      << op_name << " signal dtype must be INT32, got " << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2)
+      << op_name << " signal must be rank-1 [world_size] or rank-2 [world_size, signal_stride], got rank "
+      << signal_type->shape_.size();
+  CHECK(signal_type->shape_.size() == 2 || core_num == 1)
+      << op_name << " rank-1 signal is valid only when core_num=1, got core_num=" << core_num;
+  if (signal_type->shape_.size() == 2) {
+    auto second_extent = As<ConstInt>(signal_type->shape_[1]);
+    CHECK(second_extent) << op_name << " rank-2 signal shape[1] must be a compile-time constant";
+    CHECK(second_extent->value_ >= core_num)
+        << op_name << " rank-2 signal shape[1] (" << second_extent->value_ << ") must be at least core_num ("
+        << core_num << ")";
+  }
+}
+
 // ============================================================================
 // builtin.tensor.allreduce
 // ============================================================================
@@ -106,24 +134,9 @@ TypePtr DeduceBuiltinTensorAllReduceType(const std::vector<ExprPtr>& args,
   auto src_type = As<DistributedTensorType>(args[0]->GetType());
   CHECK(src_type) << kOpName << " src must be a DistributedTensor, got " << args[0]->GetType()->TypeName();
   auto signal_type = As<DistributedTensorType>(args[1]->GetType());
-  CHECK(signal_type) << kOpName << " signal must be a DistributedTensor, got "
-                     << args[1]->GetType()->TypeName();
-  CHECK(signal_type->dtype_ == DataType::INT32)
-      << kOpName << " signal dtype must be INT32, got " << signal_type->dtype_.ToString();
-  CHECK(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2)
-      << kOpName << " signal must be rank-1 [world_size] or rank-2 [world_size, signal_stride], got rank "
-      << signal_type->shape_.size();
   auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", kOpName);
   CHECK(core_num > 0) << kOpName << " core_num must be positive, got " << core_num;
-  CHECK(signal_type->shape_.size() == 2 || core_num == 1)
-      << kOpName << " rank-1 signal is valid only when core_num=1, got core_num=" << core_num;
-  if (signal_type->shape_.size() == 2) {
-    auto second_extent = As<ConstInt>(signal_type->shape_[1]);
-    CHECK(second_extent) << kOpName << " rank-2 signal shape[1] must be a compile-time constant";
-    CHECK(second_extent->value_ >= core_num)
-        << kOpName << " rank-2 signal shape[1] (" << second_extent->value_ << ") must be at least core_num ("
-        << core_num << ")";
-  }
+  CheckMulticoreCollectiveSignal(signal_type, core_num, kOpName);
 
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", kOpName);
   auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
@@ -293,6 +306,9 @@ TypePtr DeduceTensorBroadcastType(const std::vector<ExprPtr>& args,
   auto root_value = GetRequiredKwarg<int>(kwargs, "root", "pld.tensor.broadcast");
   CHECK(root_value >= 0) << "pld.tensor.broadcast root rank must be non-negative, got " << root_value;
 
+  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", "pld.tensor.broadcast");
+  CHECK(core_num > 0) << "pld.tensor.broadcast core_num must be positive, got " << core_num;
+
   // Result type: same as target (in-place rebind — every rank's slot now
   // holds root's data).
   return args[0]->GetType();
@@ -306,13 +322,16 @@ REGISTER_OP("pld.tensor.broadcast")
         "`target` is a window-bound DistributedTensor (each rank writes its own data before the "
         "call; root's data is read and replicated by all non-root ranks). `signal` is a "
         "window-bound INT32 matrix used as the cross-rank barrier. `root` (int kwarg) selects "
-        "the source rank. InCore path: lowered to notify-all/wait-all + remote_load from root "
-        "by LowerCompositeOps. HOST builtin path: lowered to builtin.tensor.broadcast per chip "
-        "by LowerHostTensorCollectives.")
+        "the source rank. `core_num` (int kwarg, default 1) is the number of AIV blocks used by "
+        "a HOST builtin broadcast (RFC #2521 plan 85/B6b, mirroring allreduce's #2160 multicore); "
+        "InCore calls must keep this at 1. InCore path: lowered to notify-all/wait-all + "
+        "remote_load from root by LowerCompositeOps. HOST builtin path: lowered to "
+        "builtin.tensor.broadcast per chip by LowerHostTensorCollectives.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .set_attr<int>("root")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     // Composite collective — target is read on the root and written on every rank; signal is notify+wait.
     .set_arg_effect(0, ArgEffect::ReadWrite)
@@ -966,6 +985,9 @@ TypePtr DeduceTensorReduceScatterType(const std::vector<ExprPtr>& args,
   CHECK(op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd))
       << "pld.tensor.reduce_scatter op must be ReduceOp.Sum, Max, Min, or Prod (got int " << op_value << ")";
 
+  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", "pld.tensor.reduce_scatter");
+  CHECK(core_num > 0) << "pld.tensor.reduce_scatter core_num must be positive, got " << core_num;
+
   // Result type: same as target (in-place rebind — rank r's row now holds
   // the reduced chunk r).
   return args[0]->GetType();
@@ -979,14 +1001,17 @@ REGISTER_OP("pld.tensor.reduce_scatter")
         "rank receives one reduced chunk. `target` has shape [NR, SIZE] — each rank stages "
         "all NR chunks before the call. After the call, rank r's row [r, 0:SIZE] holds the "
         "reduced value of chunk r. `signal` is a window-bound INT32 matrix for the cross-rank "
-        "barrier. `op` selects the reduction operator (Sum, Max, Min, Prod). "
-        "InCore path: lowered to a 5-phase decomposition by LowerCompositeOps. "
+        "barrier. `op` selects the reduction operator (Sum, Max, Min, Prod). `core_num` (int "
+        "kwarg, default 1) is the number of AIV blocks used by a HOST builtin reduce_scatter "
+        "(RFC #2521 plan 85/B6b, mirroring allreduce's #2160 multicore); InCore calls must keep "
+        "this at 1. InCore path: lowered to a 5-phase decomposition by LowerCompositeOps. "
         "HOST builtin path: lowered to builtin.tensor.reduce_scatter per chip by "
         "LowerHostTensorCollectives.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .set_attr<int>("op")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     // Composite collective — same five-phase shape as allreduce.
     .set_arg_effect(0, ArgEffect::ReadWrite)
@@ -1042,7 +1067,9 @@ TypePtr DeduceBuiltinTensorBroadcastType(const std::vector<ExprPtr>& args,
   auto target_type = As<DistributedTensorType>(args[0]->GetType());
   CHECK(target_type) << kOpName << " target must be a DistributedTensor, got "
                      << args[0]->GetType()->TypeName();
-  CheckSignalDistributedTensor(As<DistributedTensorType>(args[1]->GetType()), kOpName);
+  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", kOpName);
+  CHECK(core_num > 0) << kOpName << " core_num must be positive, got " << core_num;
+  CheckMulticoreCollectiveSignal(As<DistributedTensorType>(args[1]->GetType()), core_num, kOpName);
   auto root_value = GetRequiredKwarg<int>(kwargs, "root", kOpName);
   CHECK(root_value >= 0) << kOpName << " root rank must be non-negative, got " << root_value;
   auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
@@ -1062,6 +1089,7 @@ REGISTER_OP("builtin.tensor.broadcast")
     .add_argument("signal", "Window-bound INT32 DistributedTensor signal buffer")
     .set_attr<int>("root")
     .set_attr<DataType>("dtype")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     .set_internal_only(true)
     .set_template_dir(":pypto.runtime.builtins.collectives.broadcast")
@@ -1091,7 +1119,9 @@ TypePtr DeduceBuiltinTensorReduceScatterType(const std::vector<ExprPtr>& args,
                      << args[0]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << kOpName << " target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
-  CheckSignalDistributedTensor(As<DistributedTensorType>(args[1]->GetType()), kOpName);
+  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", kOpName);
+  CHECK(core_num > 0) << kOpName << " core_num must be positive, got " << core_num;
+  CheckMulticoreCollectiveSignal(As<DistributedTensorType>(args[1]->GetType()), core_num, kOpName);
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", kOpName);
   auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
   CHECK(dtype == target_type->dtype_)
@@ -1110,6 +1140,7 @@ REGISTER_OP("builtin.tensor.reduce_scatter")
     .add_argument("signal", "Window-bound INT32 DistributedTensor signal buffer")
     .set_attr<int>("op")
     .set_attr<DataType>("dtype")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     .set_internal_only(true)
     .set_template_dir(":pypto.runtime.builtins.collectives.reduce_scatter")

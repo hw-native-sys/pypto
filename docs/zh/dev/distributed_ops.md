@@ -666,10 +666,13 @@ InCore 下降在一点上比推导器更严格：其屏障按 rank 索引一格�
 ### `pld.tensor.reduce_scatter`
 
 ```text
-pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum,
+                          core_num: int = 1) -> DistributedTensorType(target)
 ```
 
-`target` 形状为 `[NR, SIZE]`，每个 rank 在调用前暂存全部 `NR` 个 chunk；调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素归约结果（按 `ReduceOp` 取 Sum/Max/Min/Prod）。signal 形状为 `[NR, 1]`。
+`target` 形状为 `[NR, SIZE]`，每个 rank 在调用前暂存全部 `NR` 个 chunk；调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素归约结果（按 `ReduceOp` 取 Sum/Max/Min/Prod）。在 HOST 路径上，signal 可以是 rank-1 `[NR]`（仅当 `core_num == 1`）或 rank-2 `[NR, signal_stride]`（第二维为常量且 `signal_stride >= core_num`）；InCore 路径要求 `[NR, 1]`。
+
+对于 HOST 调用，`core_num` 选择 reduce-scatter builtin 使用的 AIV block 数（HOST 多核 launch，与 allreduce 一致）。它必须是正的编译期 int，且不超过所配置 backend 的 AIV 核数；builtin 以 `require_sync_start` 提交，因此超额 launch 会在准入前被拒绝，而不是挂死。InCore 调用必须保持 `core_num == 1`；InCore 多核请使用外层 `pl.spmd`。
 
 该行按不超过 16 KiB 的 UB chunk 遍历。静态且按 32 字节对齐的 `SIZE` 能放进一个 chunk 时沿用单 tile 路径（ready 屏障、peer 循环、post-reduce 屏障、store、尾声）；更大的 `SIZE`、未按 32 字节对齐的 `SIZE` 或符号化 `SIZE` 走分块路径：一个 ready 屏障，随后每个 chunk 在 generation `2 + chunk_index` 上做一次自己的读完成屏障，末尾不整齐的 chunk 以 `valid_shape = min(chunk_cols, SIZE - offset)` 承载。两种路径都用自清理尾声恢复 signal（见[屏障-信号协议](#屏障-信号协议)），因此同一个 signal 可用于连续调用。
 

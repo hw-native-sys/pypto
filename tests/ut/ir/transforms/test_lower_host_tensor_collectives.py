@@ -863,8 +863,8 @@ def test_host_broadcast_lowers_to_builtin_world_size_loop():
         "builtin.tensor.broadcast",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
-        kwargs={"root": 0, "dtype": pl.FP32},
-        attrs={"root": 0, "dtype": pl.FP32},
+        kwargs={"root": 0, "dtype": pl.FP32, "core_num": 1},
+        attrs={"root": 0, "dtype": pl.FP32, "core_num": 1},
     )
 
 
@@ -932,8 +932,8 @@ def test_host_reduce_scatter_lowers_to_builtin_world_size_loop():
         "builtin.tensor.reduce_scatter",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
-        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
-        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
     )
 
 
