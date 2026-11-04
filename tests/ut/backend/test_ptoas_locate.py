@@ -378,3 +378,35 @@ def test_run_ptoas_reports_process_failure(monkeypatch, returncode, stdout, stde
     with pytest.raises(RuntimeError) as exc:
         pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
     assert str(exc.value) == f"ptoas compilation failed: {expected}"
+
+
+def test_version_probe_omits_runtime_injection_but_assembly_keeps_it(tmp_path, monkeypatch):
+    ptoas = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_AUDIT", "libobserver.so")
+    monkeypatch.setenv("LD_DEBUG", "libs")
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: str(ptoas))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "--version" in command:
+            assert all(name not in kwargs["env"] for name in ("LD_PRELOAD", "LD_AUDIT", "LD_DEBUG"))
+        else:
+            # env=None is subprocess' ordinary inheritance behavior.
+            environment = kwargs.get("env")
+            if environment is None:
+                environment = os.environ
+            assert environment["LD_PRELOAD"] == "liballocator.so:"
+            assert environment["LD_AUDIT"] == "libobserver.so"
+        return SimpleNamespace(returncode=0, stdout=f"ptoas {_PINNED}", stderr="")
+
+    monkeypatch.setattr(pto_backend.subprocess, "run", run)
+    check_ptoas_version(str(ptoas))
+    pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert len(calls) == 2  # One memoized version probe and one actual assembly.
+    assert os.environ["LD_DEBUG"] == "libs"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

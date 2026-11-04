@@ -10,6 +10,7 @@
 """Build ownership, command compatibility and failure cleanup regressions."""
 
 import importlib
+import os
 import struct
 import subprocess
 import sys
@@ -303,6 +304,8 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
 def test_vpto_compilation_links_helpers_and_rejects_bridge(
     compiler_module, monkeypatch, tmp_path, helper_kind
 ):
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_DEBUG", "libs")
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
     # A load-dependent writeback needs no additional frontend synchronization
@@ -328,6 +331,11 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
     commands = []
 
     def run(command, **kwargs):
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        assert environment["LD_PRELOAD"] == "liballocator.so:"
+        assert environment["LD_DEBUG"] == "libs"
         commands.append(command)
         output = Path(command[command.index("-o") + 1])
         if command[0] == "ptoas":
@@ -393,6 +401,38 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     assert len(set(identities)) == 7
 
 
+def test_vpto_identity_excludes_loader_diagnostics(compiler_module, monkeypatch, tmp_path):
+    ignored = ("LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_PROFILE", "LD_PROFILE_OUTPUT")
+    for name in ignored:
+        monkeypatch.setenv(name, "runtime-only")
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path / "libraries"))
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.72")
+    calls = []
+
+    def run(command, **kwargs):
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        calls.append(dict(environment))
+        # Loader tracing includes a child PID, so inherited diagnostics would
+        # give the cache lookup and publication different identities.
+        diagnostics = f"{len(calls)}: loader trace" if environment.get("LD_DEBUG") else ""
+        return SimpleNamespace(stdout="bisheng 1", stderr=diagnostics)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    helper = tmp_path / "helper.pto"
+    helper.write_text("module {}")
+    first = compiler.vpto_cache_identity((str(helper),), "aiv")
+    assert compiler.vpto_cache_identity((str(helper),), "aiv") == first
+    assert len(calls) == 2
+    for environment in calls:
+        assert all(name not in environment for name in ignored)
+        assert environment["LD_LIBRARY_PATH"] == str(tmp_path / "libraries")
+    assert all(os.environ[name] == "runtime-only" for name in ignored)
+
+
 def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, monkeypatch, tmp_path):
     caller = tmp_path / "caller"
     launcher = caller / "tools/ptoas"
@@ -411,6 +451,25 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
         [ptoas, "--version"], cwd=compiler.project_root, capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == version_output
+
+
+def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypatch, tmp_path):
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_AUDIT", "libobserver.so")
+
+    def run(command, **kwargs):
+        # Metadata probes may normalize their environment; compilation may not.
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        assert environment["LD_PRELOAD"] == "liballocator.so:"
+        assert environment["LD_AUDIT"] == "libobserver.so"
+        Path(command[command.index("-o") + 1]).write_bytes(b"binary")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    compiler = compiler_module.KernelCompiler("a2a3")
+    assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == b"binary"
 
 
 if __name__ == "__main__":

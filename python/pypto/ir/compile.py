@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
+from pypto._environment import default_output_root
 from pypto._target import (
     ExecutionMode,
     _platform_string,
@@ -306,7 +307,7 @@ def make_default_output_dir(name: str) -> str:
     # ``or`` (not get's default arg) so an empty-but-set env var
     # (``export PYPTO_PROG_BUILD_DIR=``) still falls back to build_output
     # rather than writing artifacts into the current working directory.
-    base = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
+    base = default_output_root()
     os.makedirs(base, exist_ok=True)
     # The timestamp is for humans (readable, sorts chronologically); mkdtemp's
     # random suffix is what guarantees uniqueness. A bare one-second timestamp

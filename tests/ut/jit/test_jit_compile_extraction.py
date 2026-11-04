@@ -975,7 +975,7 @@ def test_diagnostic_requests_neither_lookup_nor_insert(kernel, compile_calls, mo
         assert kernel.compile() is cached
 
 
-@pytest.mark.parametrize("env_name", ["PYPTO_PROG_BUILD_DIR", "PYPTO_COMPILE_PROFILING"])
+@pytest.mark.parametrize("env_name", ["PYPTO_COMPILE_PROFILING"])
 def test_environment_request_bypasses_warm_cache(kernel, compile_calls, monkeypatch, tmp_path, env_name):
     kernel.compile()
     before = dict(kernel._cache)
@@ -1642,6 +1642,39 @@ def test_deprecated_and_explicit_target_share_cache(kernel, compile_calls, platf
         assert kernel.compile(config=legacy) is artifact
     assert len(compile_calls) == 1
     assert next(iter(kernel._cache)).platform == platform
+
+
+@pytest.mark.parametrize("env_name", ["PYPTO_EMIT_DEBUG_RUNNER", "PYPTO_REBUILD_FROM_PTO"])
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", " no "])
+def test_disabled_debug_request_preserves_warm_cache(kernel, compile_calls, monkeypatch, env_name, value):
+    cached = kernel.compile()
+    monkeypatch.setenv(env_name, value)
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 1
+
+
+@pytest.mark.parametrize("env_name", ["PYPTO_EMIT_DEBUG_RUNNER", "PYPTO_REBUILD_FROM_PTO"])
+@pytest.mark.parametrize("value", ["1", "true", ""])
+def test_explicit_debug_request_still_runs_compilation(kernel, compile_calls, monkeypatch, env_name, value):
+    # Empty-but-set retains the existing consumers' enabled/default spelling.
+    kernel.compile()
+    monkeypatch.setenv(env_name, value)
+    kernel.compile()
+    kernel.compile()
+    assert len(compile_calls) == 3
+
+
+def test_build_directory_selects_placement_without_forcing_compilation(
+    kernel, compile_calls, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "private"))
+    cached = kernel.compile()
+    assert kernel.compile() is cached
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "other"))
+    # Already-created objects keep their placement; there is no directory copy
+    # or recompilation just because a later request selects a different base.
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 1
 
 
 if __name__ == "__main__":

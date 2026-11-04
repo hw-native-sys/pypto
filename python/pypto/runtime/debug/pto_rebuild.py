@@ -32,6 +32,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from pypto._environment import env_flag_disabled
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
@@ -55,11 +56,7 @@ _PTOAS_FUNC_DEF_RE = re.compile(r"(?:__global__\s+)?AICORE\s+void\s+(\w+)\s*\(")
 
 def _disabled_via_env() -> bool:
     """Return True when ``PYPTO_REBUILD_FROM_PTO`` opts out of rebuild."""
-    return os.environ.get("PYPTO_REBUILD_FROM_PTO", "").strip().lower() in (
-        "0",
-        "false",
-        "no",
-    )
+    return env_flag_disabled(os.environ.get("PYPTO_REBUILD_FROM_PTO"))
 
 
 # Matches a `pto.alloc_tile` or `pto.alloc_multi_tile` line that carries a physical `addr =` operand.

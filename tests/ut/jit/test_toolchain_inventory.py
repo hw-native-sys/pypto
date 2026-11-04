@@ -615,7 +615,7 @@ def test_loader_dependencies_include_transitive_libraries(tmp_path, monkeypatch)
         _toolchain._elf_inputs(binary)
 
 
-@pytest.mark.parametrize("name", ["CPATH", "LD_PRELOAD", "GCC_EXEC_PREFIX", "LIBRARY_PATH"])
+@pytest.mark.parametrize("name", ["CPATH", "GCC_EXEC_PREFIX", "LIBRARY_PATH"])
 def test_implicit_dependency_override_bypasses(monkeypatch, name):
     for variable in ("CPATH", "LD_PRELOAD", "GCC_EXEC_PREFIX", "LIBRARY_PATH"):
         monkeypatch.delenv(variable, raising=False)
@@ -851,8 +851,6 @@ _IMPLICIT_DEPENDENCY_OVERRIDES = (
     "COMPILER_PATH",
     "GCC_EXEC_PREFIX",
     "LIBRARY_PATH",
-    "LD_PRELOAD",
-    "LD_AUDIT",
 )
 
 
@@ -1038,6 +1036,80 @@ def test_search_changes_rediscover_but_reuse_identical_evidence(tmp_path, monkey
     assert first.usable and second == first
     assert discoveries == [tmp_path, other if selection == "cwd" else tmp_path]
     assert len(reads) == 1
+
+
+@pytest.mark.usefixtures("compiler_metadata")
+@pytest.mark.parametrize("policy", ["build", "content"])
+@pytest.mark.parametrize("variable", ["LD_PRELOAD", "LD_AUDIT"])
+def test_runtime_injection_preserves_identity_without_rediscovery(tmp_path, monkeypatch, policy, variable):
+    # Runtime-only injection is a deployment contract, not a library-name
+    # allowlist. Changing it must not trigger discovery or another file hash.
+    import pypto._identity as identity_module  # noqa: PLC0415
+
+    payload = tmp_path / "compiler"
+    payload.write_bytes(b"compiler resources")
+    component = _toolchain._component({payload})
+    inputs = ToolchainInputs(component, component, component, component, component)
+    discoveries, reads = [], []
+    fingerprint = identity_module.fingerprint_content
+
+    def discover(*args):
+        discoveries.append(True)
+        return inputs
+
+    def read(roots):
+        reads.append(roots)
+        return fingerprint(roots)
+
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", policy)
+    monkeypatch.setattr(_toolchain, "_selected_compiler", lambda _: None)
+    monkeypatch.setattr(_toolchain, "_discover", discover)
+    monkeypatch.setattr("pypto.jit._build_identity.discover_builds", discover)
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setattr(_toolchain, "_identity_cache", InstallationIdentityCache())
+    monkeypatch.setattr(identity_module, "fingerprint_content", read)
+
+    first = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
+    assert first.usable, first.failures
+    for value in ("", "liballocator.so:", "libfirst.so:libsecond.so", "libsecond.so libfirst.so"):
+        monkeypatch.setenv(variable, value)
+        assert _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer") is first
+    assert len(discoveries) == len(reads) == 1
+    # Independent processes have fresh memos but must compute the same identity.
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    assert _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer") == first
+
+
+@pytest.mark.parametrize("probe", ["metadata", "dependencies", "checkout"])
+def test_identity_probes_exclude_runtime_injection_and_loader_logging(tmp_path, monkeypatch, probe):
+    ignored = ("LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_PROFILE", "LD_PROFILE_OUTPUT")
+    for name in ignored:
+        monkeypatch.setenv(name, "runtime-only")
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path / "libraries"))
+    monkeypatch.setenv("LC_ALL", "zh_CN.UTF-8")
+    calls = []
+
+    def run(command, **kwargs):
+        environment = kwargs["env"]
+        assert all(name not in environment for name in ignored)
+        assert environment["LD_LIBRARY_PATH"] == str(tmp_path / "libraries")
+        if probe != "checkout":
+            assert environment["LC_ALL"] == "C"
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_toolchain.subprocess, "run", run)
+    if probe == "metadata":
+        _toolchain._run(["compiler", "--version"])
+    elif probe == "dependencies":
+        binary = tmp_path / "compiler"
+        binary.write_bytes(b"\x7fELF")
+        assert _toolchain._elf_inputs(binary) == {binary}
+    else:
+        assert _toolchain._unaccounted_checkout_state(tmp_path) == ""
+    assert len(calls) == 1
+    assert all(os.environ[name] == "runtime-only" for name in ignored)
+    assert os.environ["LC_ALL"] == "zh_CN.UTF-8"
 
 
 if __name__ == "__main__":

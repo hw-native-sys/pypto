@@ -25,6 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+from pypto._environment import toolchain_probe_env
 from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
 
@@ -282,7 +283,12 @@ class KernelCompiler:
         _vpto.validate_target(self.platform, core_type)
         ptoas, bisheng = self._vpto_toolchain()
         result = subprocess.run(
-            [bisheng, "--version"], capture_output=True, text=True, check=True, timeout=self._timeout_s
+            [bisheng, "--version"],
+            env=toolchain_probe_env(),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=self._timeout_s,
         )
         assert self.sdk.ccec is not None
         return external_source_digest(

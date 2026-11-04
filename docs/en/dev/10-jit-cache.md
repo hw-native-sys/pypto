@@ -144,13 +144,25 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 Repeat application identity inputs when changing storage policy. A read-only
 miss can build privately, so successful warmup alone does not prove publication.
 Cache policy is consumed by JIT before object selection; it is not forwarded
-to compiler or per-launch options. Private output normally uses `build_output`
-in the working directory. If that is inside the cache, an unpredictable 0700
+to compiler or per-launch options. `PYPTO_PROG_BUILD_DIR` selects the base for
+new private build and runtime directories; unset or empty uses `build_output`
+in the working directory. It does not force compilation or change artifact
+identity. Set it before starting the service: existing cached objects retain
+their run directories. A newly restored object uses the current base without
+copying shared artifacts; its `output_dir` still names the shared artifact.
+If the private base is inside the cache, an unpredictable 0700
 temporary parent isolates both private builds and runtime output, without probing
 `TMPDIR` for writability. The fallback parent may be created on a cache hit.
 Runtime directories and private build trees remain alive with compiled objects;
 there is no online cleanup or eviction API. Stop all consumers before offline
 removal of cache entries or lock files.
+
+Explicit per-call output, dump and compilation-profiling requests still run
+the compiler. `PYPTO_EMIT_DEBUG_RUNNER` and `PYPTO_REBUILD_FROM_PTO` request fresh
+compilation only when explicitly enabled; `0`, `false` and `no` (case-insensitive,
+ignoring surrounding whitespace) disable the request. Empty-but-set retains
+the existing enabled/default behavior. Disabling debug-runner generation does
+not delete scripts already present in an immutable shared artifact.
 
 ## Toolchain support and cost
 
@@ -218,9 +230,29 @@ ELF dependency closures, compiler resources, implicit includes, link inputs and
 Python/native runtime contents. It retains the existing PTOAS/CANN reported
 version and verified PTO-ISA revision shortcuts; it is not a byte audit of every
 vendor installation. Unsupported launchers, sanitizer builds, and unmodeled
-implicit overrides such as `CPATH` or `LD_PRELOAD` bypass persistence. Both
+implicit search overrides such as `CPATH`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`
+or `LIBRARY_PATH` bypass persistence. Both
 policies report bypass reasons in `cache_stats().last_bypass_reason`. The
 policies have separate identities and do not reuse one another's entries.
+
+Both policies support `LD_PRELOAD` and `LD_AUDIT` under a deployment contract:
+injection may provide allocation or observation, but must not change compiler
+selection, compilation inputs, or generated semantics. There is no library-name
+allowlist and no added preload-library discovery or hashing. Metadata probes
+omit these variables and loader tracing/profiling (`LD_DEBUG`, `LD_DEBUG_OUTPUT`,
+`LD_PROFILE`, `LD_PROFILE_OUTPUT`) so injected dependencies and diagnostics do
+not enter toolchain evidence. The service and actual compilation retain their
+original environment. This normalizes probes; it neither unloads libraries
+from the parent process nor isolates arbitrary injected code.
+
+If injection does affect compilation, the deployment must identify all such
+inputs with `CacheConfig.extra_fingerprint` or `PYPTO_CACHE_EPOCH`, updating the
+token whenever they change, or disable caching. Prepare that token outside cache
+lookup. It is a caller declaration, not an automatic dependency audit. Search
+variables such as `CPATH` and `LD_LIBRARY_PATH` cannot be treated as loader
+diagnostics: the former remains unsupported and the latter retains its existing
+selection/identity handling. Extra source files continue to be read per request;
+do not add allocator libraries there merely to enable cache reuse.
 
 Artifact payloads still undergo complete manifest/content validation. Newly
 packaged artifacts carry `kernel_config.json` so READY discovery does not execute
