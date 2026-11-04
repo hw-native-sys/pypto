@@ -402,9 +402,7 @@ def test_fp4_e2m1_direct_fp8(test_config, planner, surface, row_start, column_st
     for repeat in range(3):
         # Every 8x32 carrier window contains all 256 bytes. Row shifts and
         # repeats expose wrong pitches, offsets, nibble order, and stale UB.
-        packed[:] = (
-            torch.arange(48)[:, None] * 32 + torch.arange(96)[None, :] + 37 * repeat
-        ).to(torch.uint8)
+        packed[:] = (torch.arange(48)[:, None] * 32 + torch.arange(96)[None, :] + 37 * repeat).to(torch.uint8)
         expected = torch.full(output.shape, 0xA7, dtype=torch.uint8)
         output.view(torch.uint8).copy_(expected)
         expected[row_start : row_start + 32, column_start * 2 : column_start * 2 + 64] = (
