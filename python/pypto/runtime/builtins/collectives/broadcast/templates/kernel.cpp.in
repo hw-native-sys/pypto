@@ -37,6 +37,9 @@ namespace {
 static constexpr int kRoot = {{root_cpp}};
 static constexpr int64_t kTileCount = 256;
 static constexpr int kMaxSupportedRanks = 16;
+static constexpr int kTransferAlignmentBytes = 32;
+static_assert(kTransferAlignmentBytes % sizeof({{dtype_cpp}}) == 0,
+              "transfer alignment must be a whole number of elements");
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
@@ -116,14 +119,24 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (chunk64 > kTileCount) chunk64 = kTileCount;
     int chunk = static_cast<int>(chunk64);
 
-    ShapeDyn shape(1, 1, 1, 1, chunk);
-    StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-    Global target_g(target + base, shape, stride);
+    const int transfer_chunk =
+        ((chunk * static_cast<int>(sizeof({{dtype_cpp}})) + kTransferAlignmentBytes - 1) /
+         kTransferAlignmentBytes) *
+        (kTransferAlignmentBytes / static_cast<int>(sizeof({{dtype_cpp}})));
+
+    ShapeDyn load_shape(1, 1, 1, 1, transfer_chunk);
+    StrideDyn load_stride(transfer_chunk, transfer_chunk, transfer_chunk, transfer_chunk, 1);
+    ShapeDyn store_shape(1, 1, 1, 1, chunk);
+    StrideDyn store_stride(chunk, chunk, chunk, chunk, 1);
+    Global target_g(target + base, store_shape, store_stride);
 
     if (my_rank == kRoot) {
-      TLOAD(stage_tile, target_g);
+      stage_tile.SetValidShape(1, transfer_chunk);
+      Global target_load_g(target + base, load_shape, load_stride);
+      TLOAD(stage_tile, target_load_g);
       set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
       wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+      stage_tile.SetValidShape(1, chunk);
       TSTORE(target_g, stage_tile);
       set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
@@ -147,10 +160,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     if (my_rank != kRoot) {
       __gm__ {{dtype_cpp}} *root_target = CommRemotePtr(comm_ctx, target + base, kRoot);
-      Global root_g(root_target, shape, stride);
+      Global root_g(root_target, load_shape, load_stride);
+      recv_tile.SetValidShape(1, transfer_chunk);
       TLOAD(recv_tile, root_g);
       set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
       wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+      recv_tile.SetValidShape(1, chunk);
       TSTORE(target_g, recv_tile);
       set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);

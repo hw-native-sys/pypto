@@ -1519,7 +1519,15 @@ def test_backend_materializes_broadcast_next_level_files(tmp_path):
         tmp_path,
         variant="builtin.tensor.broadcast__root0__fp32",
         signature='"signature": [_D.INOUT, _D.INOUT]',
-        kernel_snippet="kRoot = 0",
+        kernel_snippet=(
+            "kRoot = 0",
+            "kTransferAlignmentBytes = 32",
+            "transfer_chunk",
+            "stage_tile.SetValidShape(1, transfer_chunk)",
+            "stage_tile.SetValidShape(1, chunk)",
+            "recv_tile.SetValidShape(1, transfer_chunk)",
+            "recv_tile.SetValidShape(1, chunk)",
+        ),
     )
 
 
@@ -2111,7 +2119,9 @@ def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, sig
     assert signature in kernel_config
 
     kernel_cpp = files[f"{base}/kernels/aiv/{entry}_kernel.cpp"]
-    assert kernel_snippet in kernel_cpp
+    snippets = (kernel_snippet,) if isinstance(kernel_snippet, str) else kernel_snippet
+    for snippet in snippets:
+        assert snippet in kernel_cpp
 
 
 @pytest.mark.parametrize(
