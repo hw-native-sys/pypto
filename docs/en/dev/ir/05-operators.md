@@ -13,7 +13,7 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | Hardware-optimized tile operations | `src/ir/op/tile_ops/` |
 | **BufferOp** | BufferType, VoidType | Internal explicit storage and destination writes | `src/ir/op/buffer_ops/` |
-| **SyncOp** | UnknownType (barriers); ScalarType (task / launch queries) | Pipeline barriers, synchronization, TaskId and SPMD launch-shape queries | `src/ir/op/sync_ops/` |
+| **SyncOp** | SyncTokenType, VoidType, ScalarType; legacy UnknownType | Logical completion dependencies, barriers, TaskId and launch queries | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV cross-core communication | `src/ir/op/sync_ops/cross_core.cpp` |
 | **PrefetchOp** | Opaque handles | Asynchronous GM→L2 cache prefetch | `src/ir/op/prefetch/prefetch_async.cpp` |
 
@@ -152,7 +152,9 @@ auto dynamic_dim = make_int(kDynamicDim);
 | **TensorType** | N-D | General tensors, function params/returns | DDR (optional MemRef) |
 | **TileType** | N-D | Hardware-optimized tiles in unified buffers | Unified buffer (optional MemRef) |
 | **ScalarType** | 0D | Scalar values | Register |
-| **UnknownType** | N/A | No return value (sync ops) | N/A |
+| **SyncTokenType** | N/A | Immutable pipeline completion facts | N/A |
+| **VoidType** | N/A | Declared absence of an SSA result | N/A |
+| **UnknownType** | N/A | Legacy synchronization result placeholder | N/A |
 
 ## REGISTER_OP Fluent API
 
@@ -656,6 +658,16 @@ See [Tensor and Tile Operators](05-tensor-tile-ops.md) for data-operator APIs,
 flat gather, valid-region semantics, tile layouts, and mask patterns.
 
 ## SyncOp: Synchronization Operations
+
+The `sync.*` logical operations use `SyncTokenType` for completion facts,
+`ScalarType(BOOL)` for address-overlap predicates, and `VoidType` for waits and
+VF barriers. Statement-only SyncOps may declare `set_output_arity(0)` even at
+Functional stage; they execute as `EvalStmt`, never as assigned values.
+This exception does not change ordinary Functional data operators' nonzero
+result requirement. See [logical synchronization IR](12-logical-sync.md) for
+the complete contracts. Unlowered logical synchronization cannot be compiled.
+
+The existing `system.*` operations below retain their physical/query contracts:
 
 **Purpose**: Hardware synchronization and barriers, plus the TaskId and SPMD launch-shape queries sharing the `system.` namespace
 **Type**: `UnknownType` (no return, used in `EvalStmt`) for barriers; `ScalarType` for the value-binding query ops (`task_invalid`, `task_is_valid`, `available_cluster_count`, `available_aiv_count`)

@@ -138,7 +138,8 @@ enum class ObjectKind {
 
   // Append new kinds to preserve existing serialized numeric kind values.
   SimtLaunchStmt,
-  SimtScopeStmt
+  SimtScopeStmt,
+  SyncTokenType
 };
 
 /**

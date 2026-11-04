@@ -616,6 +616,7 @@ class Projection {
     PROJECT_TYPE(PrefetchAsyncContextType)
     PROJECT_TYPE(AsyncEventType)
     PROJECT_TYPE(AsyncSessionType)
+    PROJECT_TYPE(SyncTokenType)
     PROJECT_TYPE(ShapedType)
 #undef PROJECT_TYPE
     Unsupported("UnsupportedTypeKind: " + type->TypeName());

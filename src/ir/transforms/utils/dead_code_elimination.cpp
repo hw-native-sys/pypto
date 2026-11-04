@@ -27,6 +27,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/sync.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -40,13 +41,25 @@ namespace dce {
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 using transform_utils::ExprContainsCallLike;
 
+namespace {
+
+/// Extract the statement's evaluated value without treating Submit as Call.
+ExprPtr GetStatementValue(const StmtPtr& stmt) {
+  if (const auto assign = As<AssignStmt>(stmt)) return assign->value_;
+  if (const auto eval = As<EvalStmt>(stmt)) return eval->expr_;
+  return nullptr;
+}
+
+/// Share logical-sync identity with the verifier and codegen boundary.
+LogicalSyncKind GetStatementSyncKind(const StmtPtr& stmt) {
+  const auto call = As<Call>(GetStatementValue(stmt));
+  return GetLogicalSyncKind(call ? call->op_ : nullptr);
+}
+
+}  // namespace
+
 std::string GetStmtOpName(const StmtPtr& stmt) {
-  CallPtr call;
-  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-    call = std::dynamic_pointer_cast<const Call>(assign->value_);
-  } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-    call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-  }
+  const auto call = As<Call>(GetStatementValue(stmt));
   if (call && call->op_) {
     if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
       return op->name_;
@@ -56,8 +69,24 @@ std::string GetStmtOpName(const StmtPtr& stmt) {
 }
 
 bool IsSideEffectOp(const StmtPtr& stmt) {
-  // The operators whose execution is observable, so a statement carrying one is
-  // never a removal candidate.
+  // Record observes position-dependent execution state. Preserve that ordering
+  // classification for motion clients even though unused captures can be DCE'd.
+  // Waits and VF barriers affect later execution and remain observable without
+  // tensor writes. All other logical-sync operations are pure values.
+  switch (GetStatementSyncKind(stmt)) {
+    case LogicalSyncKind::Record:
+    case LogicalSyncKind::Wait:
+    case LogicalSyncKind::VFBarrier:
+      return true;
+    case LogicalSyncKind::Completed:
+    case LogicalSyncKind::Join:
+    case LogicalSyncKind::MemoryOverlaps:
+      return false;
+    case LogicalSyncKind::None:
+      break;
+  }
+
+  // Existing non-logical operators whose execution is observable.
   //
   // Every name is routed through the registry getter instead of being compared
   // as a bare literal: `GetOp` throws on a name no operator registers, so a typo
@@ -92,9 +121,7 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
   // A Submit launches an asynchronous task — intrinsically side-effecting
   // regardless of the kernel's body. Short-circuit so a Submit assignment is
   // never classified as a removal candidate.
-  ExprPtr value;
-  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) value = assign->value_;
-  if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) value = eval->expr_;
+  const auto value = GetStatementValue(stmt);
   if (value && As<Submit>(value)) return true;
   const auto name = GetStmtOpName(stmt);
   const auto& registry = OpRegistry::GetInstance();
@@ -496,10 +523,13 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
   return FilterDeadCodeImpl(stmts, is_removable, live);
 }
 
-/// Predicate for the default `EliminateDeadCode`: any AssignStmt that is not
-/// a known side-effect op is a removal candidate.
+/// An unused capture may disappear: record reads the completion point but does
+/// not block or issue a signal. This exception is specific to liveness-based
+/// deletion and must not weaken IsSideEffectOp's conservative motion protection.
 bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
-  return std::dynamic_pointer_cast<const AssignStmt>(stmt) != nullptr && !IsSideEffectOp(stmt);
+  if (!As<AssignStmt>(stmt)) return false;
+  if (GetStatementSyncKind(stmt) == LogicalSyncKind::Record) return true;
+  return !IsSideEffectOp(stmt);
 }
 
 bool IsTaskIdTupleElement(const AssignStmtPtr& assign) {

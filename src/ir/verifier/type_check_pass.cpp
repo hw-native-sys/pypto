@@ -72,6 +72,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "BUFFER_DESCRIPTOR_MISMATCH";
     case ErrorType::TENSOR_LAYOUT_MISMATCH:
       return "TENSOR_LAYOUT_MISMATCH";
+    case ErrorType::SYNC_TOKEN_SOURCE_MISMATCH:
+      return "SYNC_TOKEN_SOURCE_MISMATCH";
     default:
       return "UNKNOWN";
   }
@@ -589,6 +591,19 @@ void TypeChecker::CheckTypeEquality(const TypePtr& type1, const TypePtr& type2, 
       CheckTypeEquality(tuple1->types_[i], tuple2->types_[i], context,
                         desc1 + " tuple element[" + std::to_string(i) + "]",
                         desc2 + " tuple element[" + std::to_string(i) + "]", span);
+    }
+    return;
+  }
+
+  if (IsA<SyncTokenType>(type1)) {
+    // A phi or loop carry may select different completion points, but all
+    // alternatives must retain the same source pipeline. Matching only
+    // ObjectKind would otherwise silently relabel a completion from another pipe.
+    if (!structural_equal(type1, type2)) {
+      std::ostringstream msg;
+      msg << "SyncToken source-pipeline mismatch in " << context << ": " << desc1 << " type "
+          << PythonPrint(type1) << " != " << desc2 << " type " << PythonPrint(type2);
+      RecordError(typecheck::ErrorType::SYNC_TOKEN_SOURCE_MISMATCH, msg.str(), span);
     }
     return;
   }

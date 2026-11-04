@@ -522,6 +522,8 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
+    } else if (auto token_type = As<SyncTokenType>(type)) {
+      type_map["pipe"] = msgpack::object(static_cast<int>(token_type->pipe_), zone);
     } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<VoidType>(type) || IsA<PtrType>(type) ||
                IsA<WindowBufferType>(type) || IsA<CommCtxType>(type) || IsA<PrefetchAsyncContextType>(type) ||
                IsA<AsyncEventType>(type) || IsA<AsyncSessionType>(type)) {

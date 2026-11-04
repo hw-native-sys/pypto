@@ -15,7 +15,7 @@
 
 - **可插拔规则系统**：可通过自定义验证规则进行扩展
 - **基于属性的验证**：选择性属性集——精确验证所需内容
-- **结构性属性 (Structural Properties)**：TypeChecked、RegScopeValid、BreakContinueValid、NoRedundantBlocks、UseAfterDef、OutParamNotShadowed、NoNestedInCore、InOutUseValid、PipelineLoopValid、ArrayNotEscaped、ManualDepsOnSubmitOnly、AtomicAddDtypeValid、NoScalarKernelReturn 和 AssignTypeSymmetry 由 `VerificationInstrument` 在每个 Pass 执行前后验证；在流水线启动时，`PassPipeline` 仅验证与 `GetVerifiedProperties()` 共有的轻量子集
+- **结构性属性 (Structural Properties)**：TypeChecked、SimtValid、RegScopeValid、LogicalSyncValid、HardwareLoopContractValid、BreakContinueValid、NoRedundantBlocks、UseAfterDef、OutParamNotShadowed、NoNestedInCore、InOutUseValid、PipelineLoopValid、ArrayNotEscaped、ManualDepsOnSubmitOnly、AtomicAddDtypeValid、NoScalarKernelReturn 和 AssignTypeSymmetry 由 `VerificationInstrument` 在每个 Pass 执行前后验证；在流水线启动时，`PassPipeline` 仅验证与 `GetVerifiedProperties()` 共有的轻量子集
 - **双重验证模式**：收集诊断信息或在首个错误时抛出异常
 - **Pass 集成**：可作为优化流水线中的 Pass 使用
 - **全面的诊断信息**：收集所有问题及源码位置
@@ -26,10 +26,10 @@
 
 | 类别 | 示例 | 行为 |
 | ---- | ---- | ---- |
-| **结构性** | TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。不在 PassProperties 中声明。 |
+| **结构性** | TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry | 始终为真。由 `VerificationInstrument` 在每个 Pass 执行前后验证；与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证。不在 PassProperties 中声明。 |
 | **流水线** | SSAForm, NoNestedCalls, HasMemRefs, ... | 由 Pass 产生/失效。按 Pass 声明的契约验证。 |
 
-`GetStructuralProperties()` 返回 `{TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
+`GetStructuralProperties()` 返回 `{TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}`。这些由 `VerificationInstrument` **在每个 Pass 执行前后验证**。在**流水线启动时**，`PassPipeline::Run()` 仅额外验证与 `GetVerifiedProperties()` 共有的轻量子集（`GetStructuralProperties().Intersection(GetVerifiedProperties())`）——因此例如 `ArrayNotEscaped` 会在每个 Pass 前后验证，但不会在流水线启动时验证。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
 
 ### 验证规则系统
 
@@ -65,6 +65,7 @@
 | **SimtValid** | SimtValid | 检查规范 SIMT helper 的签名、借用存储访问、launch 域及 InOut 结果映射。见[标量 SIMT IR](../ir/11-simt.md)。 |
 | **SimtOutputsMaterialized** | SimtOutputsMaterialized | 每个可写 Tile 使用独立的已初始化 SIMT 输出副本。 |
 | **SimtSpecialized** | SimtSpecialized | 每个 launch 的辅助函数资源与块维度及目标匹配。 |
+| **LogicalSyncValid** | LogicalSyncValid | 完成凭证必须留在所属的特化叶 AIC/AIV 函数及词法 SSA 作用域中。检查六个逻辑同步操作的 schema、语句位置、分支/循环携带、token 逃逸限制和 VF 边界；不分配事件，也不证明硬件可实现性。参见[逻辑同步](../ir/12-logical-sync.md)。 |
 | **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性；调用边界 layout 一致性 |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
@@ -327,6 +328,7 @@ Buffer IR 选项。
 | 111 | `TILE_VIEW_MISMATCH` | 有效 TileView 元数据不匹配 |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer 描述符或多缓冲槽位数量不匹配 |
 | 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit 实参的 layout 与被调用函数形参不一致（DN 例外——形参无法声明 DN；`device=` dispatch 的 ND 实参例外——device program 的形参才是声明方——但仅限在发起 dispatch 的函数内部、经由保留最后两个轴完整的 `tensor.slice` 追溯到 host 形参的实参（会跟踪循环携带值和 `if` 结果值）；矩阵内部的窗口，或来自其他任何生产者的值，仍被拒绝） |
+| 114 | `SYNC_TOKEN_SOURCE_MISMATCH` | 完成凭证指向不同的源流水线 |
 
 ### NoNestedCall
 
@@ -385,9 +387,9 @@ Buffer IR 选项。
 
 | 函数 | 返回值 | 描述 |
 | ---- | ------ | ---- |
-| `GetStructuralProperties()` | `{TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
-| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetStructuralProperties()` | `{TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, LogicalSyncValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

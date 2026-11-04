@@ -733,6 +733,12 @@ void BindIR(nb::module_& m) {
   comm_ctx_type_class.def_static("get", &GetCommCtxType, "Get the shared singleton CommCtxType instance.");
   BindFields<CommCtxType>(comm_ctx_type_class);
 
+  // Completion tokens identify the source pipeline; the function owns execution.
+  auto sync_token_type_class = nb::class_<SyncTokenType, Type>(
+      ir, "SyncTokenType", "Immutable completion token for an intra-core pipeline prefix.");
+  sync_token_type_class.def(nb::init<PipeType>(), nb::arg("pipe"));
+  BindFields<SyncTokenType>(sync_token_type_class);
+
   // Async-prefetch handle types - singleton markers for the prefetch.* op family.
   // All three are opaque: the workspace backing a context, the in-flight event and
   // the session are runtime-side values with no compile-time payload.
