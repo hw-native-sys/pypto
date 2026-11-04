@@ -41,6 +41,41 @@ All planners use the existing multi-buffer representation for the two slots.
 Compiler-created pools retain their full allocation capacity and slot identities,
 and participate in lifetime reuse as whole allocations.
 
+### Conditional reset storage
+
+A Vec selection with one Tile result and two compatible producers can use one
+slot when the earlier producer dominates the If and the other producer executes
+inside one arm. The old payload must have no observation reachable at or after
+the replacement producer. For example:
+
+```python
+current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+if flag != 0:
+    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+    selected = reset
+else:
+    selected = current
+saved = pl.tile.store(selected, [0, 0], out)
+```
+
+Here `current`, `reset` and `selected` share one 65536-byte window. With another
+independently live 65536-byte tile, the total is 131072 bytes instead of 196608.
+Both arms yield slot zero, while the reconstructed descriptor has a constant
+offset, `slot_count=1` and no `slot_index`. A barrier immediately before the
+replacement producer retires earlier asynchronous accesses; the If exit barrier
+is retained. This trades an additional synchronization point for lower capacity;
+it does not by itself establish a runtime speedup.
+
+Reads through ordinary SSA renames count as observations of the old value, even
+if the rename is created after the If. Reading the selected result is different:
+it observes the value chosen on that path. A same-arm tail read or independent
+post-If read of `current` blocks coalescing. Loop-touched storage, multiple Tile
+selection results in one component, views, pinned/borrowed storage and pipeline
+membership retain the existing behavior. Operator no-alias rules, written
+workspaces and target hazards remain hard constraints. A failed proof leaves the
+ordinary selection lowering unchanged. Cached logical origins and the existing
+two-order read index keep this additional analysis O(N log N).
+
 ## API
 
 | C++ | Python | Level |

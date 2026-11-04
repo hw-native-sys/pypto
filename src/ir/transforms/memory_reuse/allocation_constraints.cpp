@@ -630,19 +630,12 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
   return pinned_allocations;
 }
 
-}  // namespace
-
-AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
-                                                          const LifetimeAnalysisResult& lifetimes,
-                                                          const char* consumer) {
-  AllocationConstraintAnalysis result;
-  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
-  for (const auto& [base, size] : result.declared_allocation_sizes) {
-    static_cast<void>(size);
-    result.declared_allocation_bases.insert(base);
-  }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
-
+// Share the registry/backend access facts without requiring the lifetime
+// analyzer's per-member copies of complete alias groups. An empty group map
+// retains individual output keys, which selection planning folds by base.
+void CollectAccessConstraints(const FunctionPtr& func,
+                              const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+                              AllocationConstraintAnalysis& result) {
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {
     HazardInputCollector collector;
@@ -660,9 +653,30 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
-  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr);
+  ForbidAliasCollector forbid_collector(sharing_groups, views ? &*views : nullptr);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
+}
+
+}  // namespace
+
+AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
+                                                          const LifetimeAnalysisResult& lifetimes,
+                                                          const char* consumer) {
+  AllocationConstraintAnalysis result;
+  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
+  for (const auto& [base, size] : result.declared_allocation_sizes) {
+    static_cast<void>(size);
+    result.declared_allocation_bases.insert(base);
+  }
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+  CollectAccessConstraints(func, lifetimes.var_sharing_groups, result);
+  return result;
+}
+
+AllocationConstraintAnalysis memory_reuse::CollectStorageSelectionConstraints(const FunctionPtr& function) {
+  AllocationConstraintAnalysis result;
+  CollectAccessConstraints(function, {}, result);
   return result;
 }
 

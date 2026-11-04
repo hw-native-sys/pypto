@@ -47,12 +47,20 @@ struct StorageSelectionPlan {
   std::map<const Var*, VarPtr> tiles;
   std::map<const Var*, ExprPtr> indices;
   std::vector<StmtPtr> allocations;
+  // Original producer statements whose writes reuse a selected input window.
+  // A barrier immediately before each write retires prior asynchronous accesses.
+  std::set<const Stmt*> overwrite_barriers;
 };
 StmtPtr MaterializeStorageSelections(const StmtPtr& body, const std::vector<VarPtr>& parameters,
                                      StorageSelectionPlan plan);
 
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
+
+// Access constraints keyed by individual outputs, before allocation lifetimes
+// exist. The selection planner already excludes declared and pipeline storage;
+// it folds these output constraints by physical base without copying alias groups.
+AllocationConstraintAnalysis CollectStorageSelectionConstraints(const FunctionPtr& function);
 
 // Offsets are bytes relative to the representative's existing MemRef window.
 // The representative owns the physical allocation; members retain their views.

@@ -33,6 +33,35 @@ carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来�
 循环涉及的存储及 Buffer IR 保持原有路径。所有 planner 均复用既有 multi-buffer 表达。
 编译器创建的池保留完整分配容量与各 slot 身份，并以整个 allocation 为单位参与生命周期复用。
 
+### 条件重置存储
+
+当 Vec 选择仅有一个 Tile 结果和两个兼容 producer，较早的 producer 支配 If，
+另一个 producer 在其中一个分支内执行时，可以共享单个槽位。必须证明在覆盖 producer
+执行时及之后，所有可达路径都不会观察旧数据。例如：
+
+```python
+current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+if flag != 0:
+    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+    selected = reset
+else:
+    selected = current
+saved = pl.tile.store(selected, [0, 0], out)
+```
+
+这里 `current`、`reset` 和 `selected` 共享一个 65536 字节窗口。若另有一个独立存活的
+65536 字节 Tile，总容量由 196608 降为 131072 字节。两支均 yield 槽位零，重建的描述符
+使用常量偏移、`slot_count=1`，且不带 `slot_index`。覆盖 producer 前紧邻的 barrier
+确保此前的异步访问完成，If 出口的 barrier 继续保留。这用额外同步换取容量降低，
+本身不代表运行时间改善。
+
+普通 SSA 重命名上的读取仍算作对旧值的观察，即使重命名在 If 之后创建。读取选择结果
+则观察当前执行路径选中的值。同分支尾部或 If 之后独立读取 `current` 都会阻止合并。
+循环涉及的存储、同一分量内多个 Tile 选择结果、视图、固定/借用存储和流水线成员关系
+保持现有处理。算子 no-alias、写入工作区（written workspace）和目标 hazard 仍是硬约束。
+证明失败时保持原有选择降级。缓存逻辑来源并复用双遍历顺序的读取索引，使新增分析保持
+O(N log N)。
+
 ## API
 
 | C++ | Python | 级别 |
