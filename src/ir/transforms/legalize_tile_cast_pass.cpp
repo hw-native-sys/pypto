@@ -56,6 +56,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -263,7 +264,7 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
 
 bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
 
-/// Packed FP4 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
+/// Report only fallback chains; a supported native FP4 -> FP8 cast is silent.
 void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
   if (!diags || !src.IsPackedFp4() || !IsFp8DataCastTarget(dst)) return;
   diags->emplace_back(DiagnosticSeverity::Warning, "LegalizeTileCast", 0,
@@ -277,7 +278,13 @@ class LegalizeTileCastMutator : public IRMutator {
  public:
   LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name,
                           std::vector<Diagnostic>* diags)
-      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)), diags_(diags) {}
+      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)), fallback_adj_(adj_), diags_(diags) {
+    // The direct edge has geometry requirements. Do not let BFS select it as
+    // an intermediate for an unrelated conversion without validating that
+    // intermediate's descriptor; those routes keep their existing BF16 bridge.
+    auto& neighbors = fallback_adj_[DataType::FP4E2M1X2.Code()];
+    neighbors.erase(std::remove(neighbors.begin(), neighbors.end(), DataType::FP8E4M3FN), neighbors.end());
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -294,13 +301,19 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
-
-    if (IsNativeCast(adj_, src, dst)) {
+    const auto* context = PassContext::Current();
+    const bool addressed = !context || context->GetMemoryPlanner() != MemoryPlanner::PtoAS;
+    // Reuse the existing addressed static-descriptor binding for packed casts.
+    // PTOAS planning has no planned address at this stage and conservatively
+    // retains the ordinary decode chain instead.
+    const bool native_geometry =
+        !IsDirectPackedFp4ToFp8Pair(src, dst) || (addressed && IsDirectPackedFp4ToFp8Cast(call));
+    if (IsNativeCast(adj_, src, dst) && native_geometry) {
       return IRMutator::VisitStmt_(op);
     }
 
-    std::vector<DataType> chain = FindCastChain(adj_, src, dst);
+    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
+    std::vector<DataType> chain = FindCastChain(fallback_adj_, src, dst);
     CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)
         << "LegalizeTileCast: no lossless cast path from " << src.ToString() << " to " << dst.ToString()
         << "; the required BF16 intermediate can double-round. Cast to BF16 explicitly before FP4 "
@@ -359,6 +372,7 @@ class LegalizeTileCastMutator : public IRMutator {
  private:
   std::string arch_name_;
   AdjList adj_;
+  AdjList fallback_adj_;
   std::size_t temp_counter_ = 0;
   std::vector<Diagnostic>* diags_;
 };

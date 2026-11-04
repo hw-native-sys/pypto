@@ -130,7 +130,8 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
 | `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
 | `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3`（满足 ND 几何约束） | `fp8e4m3`(3，回退), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e1m2x2` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
 | `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
@@ -140,6 +141,11 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+
+其他行中的 `fp4` 代表任一打包格式。E2M1x2→E4M3FN 直接边仅在无分块行主序 ND Vec
+二维几何满足约束、有效行列数为静态且使用 PYPTO/DSA_RP 静态分配时选用，
+不作为其他转换链的中间步骤。否则该类型对保留三步回退链及警告；成功选择直接转换时
+不发出慢链警告。详见 [FP4 约束](../fp4.md#数值转换限制)。
 
 ### Ascend910 (a2a3)
 

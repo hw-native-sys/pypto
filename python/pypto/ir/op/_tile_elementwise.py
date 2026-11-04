@@ -977,6 +977,11 @@ def cast(
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
+    On A5, unboxed row-major E2M1x2 tiles with compatible static geometry
+    and PYPTO/DSA_RP allocation convert directly to FP8E4M3FN. Packed physical and valid columns double
+    (e.g. [16,32] carriers become [16,64] values). Other packed FP4-to-FP8
+    cases retain BF16/FP32 legalization.
+
     Args:
         tile: Input tile (TileType)
         target_type: Target data type (DataType)

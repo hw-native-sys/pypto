@@ -201,8 +201,11 @@ def test_a5_packed_fp4_encoding_keeps_lossless_bf16_bridges(source, target):
     assert pairs[-1] == ("bfloat16", str(target))
 
 
-@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
+@pytest.mark.parametrize(
+    "dtype,target",
+    [(pl.fp4e1m2x2, pl.FP8E4M3FN), (pl.fp4e2m1x2, pl.FP8E5M2), (pl.fp4e1m2x2, pl.FP8E5M2)],
+)
+def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype, target):
     """Packed FP4→FP8 is legalized with a warning about the three-hop bridge."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
@@ -212,10 +215,10 @@ def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
         def kernel(
             self,
             x: pl.Tensor[[16, 32], dtype],
-            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
-        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            out: pl.Out[pl.Tensor[[16, 64], target]],
+        ) -> pl.Tensor[[16, 64], target]:
             t = pl.load(x, [0, 0], [16, 32])
-            c = pl.cast(t, pl.FP8E4M3FN)
+            c = pl.cast(t, target)
             return pl.store(c, [0, 0], out)
 
     prev = get_log_level()
@@ -228,7 +231,7 @@ def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
     assert _cast_pairs(after) == [
         (str(dtype), "bfloat16"),
         ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
+        ("fp32", str(target)),
     ]
     err = capfd.readouterr().err
     assert "LegalizeTileCast" in err
@@ -254,11 +257,14 @@ def test_a5_packed_fp4_cast_expands_last_dim_valid_shape(dtype):
 
     after = _run(Before, BackendType.Ascend950)
 
-    assert _cast_pairs(after) == [
-        (str(dtype), "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
+    # E2M1 now decodes directly, including partial static validity. E1M2
+    # retains the existing BF16/FP32 bridge; both must expand carrier columns.
+    expected = (
+        [(str(dtype), "fp8e4m3fn")]
+        if dtype == pl.fp4e2m1x2
+        else [(str(dtype), "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+    )
+    assert _cast_pairs(after) == expected
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -861,6 +867,101 @@ def test_legalize_packed_dn_cast_preserves_loop_backedge(dtype, loop_kind):
     binding = packed_loop.body.stmts[0]
     assert isinstance(binding, ir.AssignStmt)
     assert binding.value is binder
+
+
+@pytest.mark.parametrize("tile_surface", [False, True])
+def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface):
+    """Aligned ND E2M1 carriers decode without intermediate floating tiles."""
+    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tensor[[16, 32], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            packed = pl.load(source, [0, 0], [16, 32])
+            if tile_surface:
+                decoded = pl.tile.cast(packed, pl.FP8E4M3FN)
+            else:
+                decoded = pl.cast(packed, pl.FP8E4M3FN)
+            return pl.store(decoded, [0, 0], output)
+
+    previous = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        after = _run(Before, BackendType.Ascend950)
+    finally:
+        set_log_level(previous)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    ir.assert_structural_equal(after, Before)
+    assert "FP4→BF16→FP32→FP8" not in capfd.readouterr().err
+    with pytest.raises(ValueError, match="no native cast path"):
+        _run(Before, BackendType.Ascend910)
+
+
+@pytest.mark.parametrize("case", ["unaligned", "dynamic_valid", "row_limit", "strided", "ptoas"])
+def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
+    """The dtype edge must not bypass direct TCVT's packed-axis restrictions."""
+    span = ir.Span.unknown()
+    rows, cols = (65536, 32) if case == "row_limit" else (16, 16 if case == "unaligned" else 32)
+    valid = [rows, ir.Var("valid_cols", ir.ScalarType(pl.INDEX), span)] if case == "dynamic_valid" else []
+    stride = [cols + 32, 1] if case == "strided" else []
+    source_type = ir.TileType([rows, cols], pl.fp4e2m1x2, None, ir.TileView(valid_shape=valid, stride=stride))
+    source = ir.Var("source", source_type, span)
+    cast = ir.op.tile.cast(source, pl.FP8E4M3FN)
+    decoded = ir.Var("decoded", cast.type, span)
+    parameters = [source] + [value for value in valid if isinstance(value, ir.Var)]
+    before = ir.Program(
+        [
+            ir.Function(
+                "kernel",
+                parameters,
+                [cast.type],
+                ir.SeqStmts([ir.AssignStmt(decoded, cast, span), ir.ReturnStmt([decoded], span)], span),
+                span,
+                ir.FunctionType.Opaque,
+            )
+        ],
+        "fallback",
+        span,
+    )
+    planner = passes.MemoryPlanner.PTOAS if case == "ptoas" else passes.MemoryPlanner.PYPTO
+    with passes.PassContext([], memory_planner=planner):
+        after = _run(before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+
+@pytest.mark.parametrize("tile_surface", [False, True])
+def test_e2m1_to_e4m3_type_inference_preserves_carrier_geometry(tile_surface):
+    span = ir.Span.unknown()
+    if tile_surface:
+        source_type = ir.TileType(
+            [16, 32], pl.fp4e2m1x2, None, ir.TileView(valid_shape=[8, 24], stride=[32, 1])
+        )
+        source = ir.Var("source", source_type, span)
+        result = ir.op.tile.cast(source, pl.FP8E4M3FN).type
+        assert isinstance(result, ir.TileType)
+        view = result.get_effective_tile_view()
+    else:
+        source_type = ir.TensorType(
+            [16, 32], pl.fp4e2m1x2, None, ir.TensorView([32, 1], ir.TensorLayout.ND, valid_shape=[8, 24])
+        )
+        source = ir.Var("source", source_type, span)
+        result = ir.op.tensor.cast(source, pl.FP8E4M3FN).type
+        assert isinstance(result, ir.TensorType)
+        view = result.tensor_view
+        assert view is not None
+    assert [value.value for value in result.shape if isinstance(value, ir.ConstInt)] == [16, 64]
+    assert [value.value for value in view.valid_shape if isinstance(value, ir.ConstInt)] == [8, 48]
+    assert [value.value for value in view.stride if isinstance(value, ir.ConstInt)] == [64, 1]
 
 
 if __name__ == "__main__":

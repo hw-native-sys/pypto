@@ -55,21 +55,22 @@ using pto_ops_detail::round_modes;
 // Target differences belong to this operator and are captured at registration.
 enum class CastTarget { A2A3, A5 };
 
-std::string EnsurePackedFp4DnStaticView(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
-                                        const std::string& name_hint) {
+std::string EnsurePackedFp4StaticView(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
+                                      const std::string& name_hint, const std::string& cast_kind) {
   const auto tile_type = As<ir::TileType>(expr->GetType());
-  INTERNAL_CHECK_SPAN(tile_type, expr->span_) << "Internal error: dense DN cast view requires a TileType";
+  INTERNAL_CHECK_SPAN(tile_type, expr->span_) << "Internal error: packed cast view requires a TileType";
   if (!tile_type->dtype_.IsPackedFp4()) {
     return EnsureStaticViewTileSsa(expr, codegen, name_hint);
   }
-  // PTOAS treshape does not accept custom FP4 types. Bind a descriptor with
-  // static valid dimensions to the existing planned address instead: TCVT's
-  // contiguous DN implementation is selected by the descriptor's static type.
+  // Reuse the packed DN cast's planned-address alias for static validity. DN
+  // uses it to select the contiguous conversion; direct FP8 requires static
+  // columns. This descriptor aliases storage and allocates no intermediate.
   const auto memref = ir::GetDefinedMemRef(tile_type);
   const auto offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr;
   CHECK_SPAN(codegen.EmitTileAddr() && offset, expr->span_)
-      << "Packed FP4 DN cast requires static PYPTO or DSA_RP memory allocation; "
-         "use ND storage with the PTOAS memory planner";
+      << "Packed FP4 " << cast_kind
+      << " cast requires static PYPTO or DSA_RP memory allocation; "
+         "select an addressed planner for this static descriptor";
   const std::string view = codegen.NewNamedTemp(name_hint);
   const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(tile_type);
   const std::string address = codegen.GetOrEmitConstant(offset->value_, DataType::INT64);
@@ -175,6 +176,18 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
   INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
       << "tile.cast requires 1 or 2 arguments (src[, tmp]), but got " << op->args_.size();
 
+  const auto replay_source = As<ir::TileType>(op->args_[0]->GetType());
+  const auto replay_result = As<ir::TileType>(op->GetType());
+  if (target == CastTarget::A5 && replay_source && replay_result &&
+      ir::IsDirectPackedFp4ToFp8Pair(replay_source->dtype_, replay_result->dtype_) &&
+      ir::tile_view_semantics::IsZeroValidShapeSentinel(ir::GetValidShape(replay_source)) &&
+      ir::tile_view_semantics::IsZeroValidShapeSentinel(ir::GetValidShape(replay_result))) {
+    // SplitVectorKernel creates an empty replay after cast legalization. Its
+    // allocated result still supplies downstream handshakes, but direct TCVT
+    // cannot form static zero columns and has no data to convert on this lane.
+    return "";
+  }
+
   if (codegen.EmitTileAddr() && ir::op_predicates::CastRequiresDisjointSource(
                                     op, codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3")) {
     const auto source_type = As<ir::TileType>(op->args_[0]->GetType());
@@ -232,11 +245,29 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
     const auto dst_var = codegen.GetCurrentResultVar();
     const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
     INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: dense DN cast requires a result TileType";
-    const std::string src_ssa = EnsurePackedFp4DnStaticView(op->args_[0], codegen, "tcvt_dn_src");
-    const std::string dst_ssa = EnsurePackedFp4DnStaticView(dst_var, codegen, "tcvt_dn_dst");
+    const std::string src_ssa = EnsurePackedFp4StaticView(op->args_[0], codegen, "tcvt_dn_src", "DN");
+    const std::string dst_ssa = EnsurePackedFp4StaticView(dst_var, codegen, "tcvt_dn_dst", "DN");
     EmitInsOutsWithViewTypes(codegen, "pto.tcvt",
                              {{src_ssa, codegen.GetViewTileBufTypeStringFromTileType(src_type)}}, dst_ssa,
                              dst_type, config_attr);
+    return "";
+  }
+  if (ir::IsDirectPackedFp4ToFp8Pair(src_type->dtype_, op->GetKwarg<DataType>("target_type"))) {
+    CHECK_SPAN(target == CastTarget::A5 && ir::IsDirectPackedFp4ToFp8Cast(op), op->span_)
+        << "Direct packed FP4/FP8 cast requires A5, static dense ND tiles and 32-byte carrier rows; "
+           "run LegalizeTileCast to select a supported conversion chain";
+    const auto dst_var = codegen.GetCurrentResultVar();
+    const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
+    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: direct FP8 cast requires a result TileType";
+    const std::string src_ssa =
+        EnsurePackedFp4StaticView(op->args_[0], codegen, "tcvt_fp4_src", "direct FP8");
+    const std::string dst_ssa = EnsureStaticViewTileSsa(dst_var, codegen, "tcvt_fp8_dst");
+    std::vector<std::pair<std::string, std::string>> ins = {
+        {src_ssa, codegen.GetViewTileBufTypeStringFromTileType(src_type)}};
+    if (op->args_.size() == 2) {
+      ins.emplace_back(codegen.GetExprAsCode(op->args_[1]), codegen.GetExprTypeAnnotation(op->args_[1]));
+    }
+    EmitInsOutsWithViewTypes(codegen, "pto.tcvt", ins, dst_ssa, dst_type, config_attr);
     return "";
   }
   const bool explicit_tmp = op->args_.size() == 2;

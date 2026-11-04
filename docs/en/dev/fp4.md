@@ -57,7 +57,8 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
 | Either packed format ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
-| Either packed format → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1x2 → FP8E4M3FN cast | Direct ND Vec TCVT for compatible geometry; `[16,32]` carriers become `[16,64]` values without BF16/FP32 intermediates |
+| Other packed FP4 → FP8 casts | Legalized through BF16 and FP32, with a warning; incompatible direct-cast geometry also uses this fallback |
 | E2M1↔E1M2 conversion | Numerical cast through BF16; carrier shape is unchanged |
 | Other wider-type casts | Existing legalization with lossless intermediates; see the encoding constraint below |
 | Packed Vec layout conversion | ND→NZ; carrier geometry changes with the packing axis while preserving the value geometry |
@@ -83,6 +84,19 @@ BF16 encoding supports `rint`, `round`, `floor`, `ceil`, and `trunc`; `odd` is
 rejected. Packing requires complete pairs: a positive even source extent or a
 provably even dynamic `valid_shape`, such as `2 * n`. Decoding expands the
 carrier extent without requiring it to be even.
+
+`pl.cast`, `pl.tile.cast`, and InCore `pl.tensor.cast` use a direct
+E2M1x2→FP8E4M3FN `pto.tcvt` on A5 when both tiles are two-dimensional unboxed
+row-major ND Vec with PYPTO/DSA_RP static allocation. Physical dimensions must
+be static and positive, the packed source row pitch must be a multiple of 32
+bytes, and valid rows and columns must be static positive extents. Tiles must have dense canonical strides and zero UB
+`start_offset`. The destination doubles physical and valid columns; no rounding is
+needed because every E2M1 value is exactly representable in E4M3FN, including
+signed zero. PTOAS v0.72 also requires signed 32-bit byte spans and logical
+columns, at most 65,535 rows, and a source register count (`packed_cols / 256`)
+that fits 16 bits. Unsupported geometry retains the BF16/FP32 legalization
+path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts, or NZ output.
+GM offsets remain in carrier units; the output uses FP8 element offsets.
 
 All packed casts require `none_box` storage. Wider cast chains require ND.
 Decoding through BF16 preserves every FP4 value exactly. Implicit encoding chains must also preserve

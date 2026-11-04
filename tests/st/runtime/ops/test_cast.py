@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Runtime tests for tile.cast (pto.tcvt) narrowing conversions.
+Runtime tests for tile.cast (pto.tcvt) conversions.
 
 Regression for #1549: pto.tcvt mis-orders elements when its source tile is
 col_major. A [1, N] -> [N, 1] reshape yields a col_major [N, 1] tile; narrowing
@@ -16,12 +16,16 @@ that view i32 -> i16 used to reverse the elements (silent wrong output). The
 tile.cast row_major layout spec lets ResolveBackendOpLayouts repair col_major
 sources by reshaping [N, 1] -> [1, N] row_major around the cast.
 
+The A5 direct FP4 E2M1 -> E4M3FN cases additionally check exact encodings,
+nonzero GM offsets, reused buffers, and the emitted conversion chain.
+
   TileCastColMajorNarrowTestCase : narrow a col_major [N, 1] view i32 -> i16
                                    (the regression — must preserve element order).
   TileCastRowMajorNarrowTestCase : narrow a row_major [1, N] tile i32 -> i16
                                    (always-correct control / baseline).
 """
 
+from dataclasses import replace
 from typing import Any
 
 import pypto.language as pl
@@ -311,6 +315,106 @@ def test_issue_2973_isolate_alias(case_run):
 )
 def test_issue_2973_planners(case_run):
     case_run.assert_passed()
+
+
+def _make_fp4_e2m1_direct_fp8(surface: str, row_start: int, column_start: int):
+    """Convert two packed tiles with offsets, reusing the loop's UB buffers."""
+
+    @pl.jit(auto_scope=False)
+    def convert(
+        packed: pl.Tensor[[48, 96], pl.fp4e2m1x2],
+        output: pl.InOut[pl.Tensor[[48, 192], pl.INT8]],
+    ):
+        with pl.spmd(1, sync_start=False):
+            worker = pl.tile.get_block_idx()
+            for row in pl.range(row_start + worker * 32, row_start + 32, 16):
+                if surface == "tensor":
+                    source = pl.tensor.slice(packed, [16, 32], [row, column_start])
+                    converted = pl.cast(source, pl.FP8E4M3FN)
+                    result = pl.reinterpret_view(converted, pl.INT8)
+                    output = pl.tensor.assemble(output, result, [row, column_start * 2])
+                else:
+                    source = pl.tile.load(packed, [row, column_start], [16, 32])
+                    if surface == "tile":
+                        converted = pl.tile.cast(source, pl.FP8E4M3FN)
+                    else:
+                        converted = pl.cast(source, pl.FP8E4M3FN)
+                    result = pl.reinterpret_view(converted, pl.INT8)
+                    pl.tile.store(result, [row, column_start * 2], output)
+        return output
+
+    return convert
+
+
+def _fp4_e2m1_to_fp8_bits(packed: torch.Tensor) -> torch.Tensor:
+    """Decode low nibble first into independent E4M3FN encodings.
+
+    All sixteen E2M1 values are exact in E4M3FN. Comparing encodings also
+    checks negative zero, which a floating-point equality check would miss.
+    """
+    encodings = torch.tensor(
+        [
+            0x00,  # +0
+            0x30,  # +0.5
+            0x38,  # +1
+            0x3C,  # +1.5
+            0x40,  # +2
+            0x44,  # +3
+            0x48,  # +4
+            0x4C,  # +6
+            0x80,  # -0
+            0xB0,  # -0.5
+            0xB8,  # -1
+            0xBC,  # -1.5
+            0xC0,  # -2
+            0xC4,  # -3
+            0xC8,  # -4
+            0xCC,  # -6
+        ],
+        dtype=torch.uint8,
+    )
+    codes = torch.stack((packed & 15, packed >> 4), dim=-1).long()
+    return encodings[codes].reshape(packed.shape[0], packed.shape[1] * 2)
+
+
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP], ids=lambda p: p.name)
+@pytest.mark.parametrize("surface", ["tensor", "tile", "unified_tile"])
+@pytest.mark.parametrize(("row_start", "column_start"), [(0, 0), (16, 32)])
+def test_fp4_e2m1_direct_fp8(test_config, planner, surface, row_start, column_start):
+    """A5 uses one direct TCVT and preserves every nibble, sign, and GM offset."""
+    convert = _make_fp4_e2m1_direct_fp8(surface, row_start, column_start)
+    packed = torch.empty((48, 96), dtype=torch.uint8)
+    output = torch.empty((48, 192), dtype=torch.int8)
+    config = replace(test_config, memory_planner=planner)
+    compiled = convert.compile(packed, output, config=config)
+
+    sources = list((compiled.output_dir / "ptoas").glob("*.pto"))
+    assert sources, "compilation did not produce the executed PTO kernel"
+    pto = "\n".join(source.read_text() for source in sources)
+    conversions = [line for line in pto.splitlines() if "pto.tcvt " in line]
+    assert len(conversions) == 1, f"expected one direct cast, got {conversions}"
+    assert "f4E2M1x2" in conversions[0] and "f8E4M3FN" in conversions[0], conversions[0]
+    assert "bf16" not in pto and "f32" not in pto, "direct cast allocated an intermediate type"
+    if config.codegen_only:
+        return
+
+    for repeat in range(3):
+        # Every 8x32 carrier window contains all 256 bytes. Row shifts and
+        # repeats expose wrong pitches, offsets, nibble order, and stale UB.
+        packed[:] = (
+            torch.arange(48)[:, None] * 32 + torch.arange(96)[None, :] + 37 * repeat
+        ).to(torch.uint8)
+        expected = torch.full(output.shape, 0xA7, dtype=torch.uint8)
+        output.view(torch.uint8).copy_(expected)
+        expected[row_start : row_start + 32, column_start * 2 : column_start * 2 + 64] = (
+            _fp4_e2m1_to_fp8_bits(packed[row_start : row_start + 32, column_start : column_start + 32])
+        )
+        compiled(packed, output, config=config)
+        assert torch.equal(output.view(torch.uint8), expected), (
+            f"{planner.name}/{surface}: FP8 encoding mismatch at row={row_start}, "
+            f"column={column_start}, repeat={repeat}"
+        )
 
 
 if __name__ == "__main__":

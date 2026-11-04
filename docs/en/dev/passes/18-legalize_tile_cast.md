@@ -155,7 +155,8 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
 | `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
 | `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3` (compatible ND geometry) | `fp8e4m3`(3, fallback), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e1m2x2` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
 | `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
@@ -165,6 +166,13 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+
+The `fp4` shorthand in the other rows denotes either packed format. The
+E2M1x2→E4M3FN direct edge is selected only for compatible unboxed row-major
+2D ND Vec geometry with static valid rows and columns and PYPTO/DSA_RP static
+allocation. It is not used as an intermediate in other cast chains. Otherwise
+this pair retains its three-hop fallback and warning; successful direct casts
+emit no slow-chain warning. See [FP4 constraints](../fp4.md#numerical-cast-constraints).
 
 ### Ascend910 (a2a3)
 
