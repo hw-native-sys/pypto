@@ -454,7 +454,7 @@ class TestMakeCacheKey:
         assert off != on
         assert off.compile_opts is not None and on.compile_opts is not None
         assert ("buffer_ir_version", 0) in off.compile_opts
-        assert ("buffer_ir_version", 8) in on.compile_opts
+        assert ("buffer_ir_version", 9) in on.compile_opts
 
     def test_software_pipeline_splits_key(self):
         assert self._make_key() != self._make_key(enable_software_pipeline=True)

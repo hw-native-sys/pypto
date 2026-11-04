@@ -1309,5 +1309,98 @@ class StandaloneSetter:
         )
 
 
+def _softmax_program(shape, valid, dtype="FP32"):
+    rows, cols = shape
+    valid_rows, valid_cols = valid
+    scalar_param = "cols: pl.Scalar[pl.INDEX], " if isinstance(valid_cols, str) else ""
+    return pl.parse_program(f"""
+@pl.program
+class Softmax:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, {scalar_param}a: pl.Tensor[[{rows}, {cols}], pl.{dtype}],
+               out: pl.InOut[pl.Tensor[[{2 * rows}, {cols}], pl.{dtype}]]
+               ) -> pl.Tensor[[{2 * rows}, {cols}], pl.{dtype}]:
+        source = pl.load(a, [0, 0], [{rows}, {cols}], valid_shape=[{valid_rows}, {valid_cols}])
+        scratch = pl.create_tile([{rows}, {cols}], dtype=pl.{dtype}, target_memory=pl.MemorySpace.Vec)
+        maximum = pl.row_max(source, scratch)
+        shifted = pl.row_expand_sub(source, maximum)
+        exponent = pl.exp(shifted)
+        total = pl.row_sum(exponent, scratch)
+        result = pl.row_expand_div(exponent, total)
+        out = pl.store(result, [0, 0], out)
+        return pl.store(source, [{rows}, 0], out)
+""")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("shape,valid", [((64, 64), (64, 64)), ((16, 128), (13, 117)), ((16, 64), (1, 1))])
+def test_default_fp32_softmax_preserves_live_input_and_partial_output(tmp_path, planner, shape, valid):
+    rows, cols = shape
+    valid_rows, valid_cols = valid
+    program = _softmax_program(shape, valid)
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    restored = ir.deserialize(ir.serialize(lowered))
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
+    # The input remains live across both reductions; scratch is reused only
+    # between instructions. Partial output and the second store expose clobbers.
+    source = torch.randn((rows, cols), generator=torch.Generator().manual_seed(19)) * 4
+    output = torch.full((2 * rows, cols), -777.0)
+    expected = output.clone()
+    expected[:valid_rows, :valid_cols] = torch.softmax(source[:valid_rows, :valid_cols], dim=-1)
+    expected[rows : rows + valid_rows, :valid_cols] = source[:valid_rows, :valid_cols]
+    namespace = {}
+    exec(torch_codegen(restored), namespace)  # noqa: S102
+    namespace["kernel"](source, output)
+    torch.testing.assert_close(output, expected)
+    text = codegen.PTOCodegen().generate(
+        restored, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    for operation in ("trowmax", "trowsum", "trowexpandsub", "trowexpanddiv"):
+        assert text.count(f"pto.{operation} ins(") == 1
+    if find_ptoas_binary() is not None:
+        path = tmp_path / "softmax.pto"
+        path.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(path), str(tmp_path / "softmax.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["off", "fp16", "dynamic"])
+def test_softmax_selection_preserves_unopened_forms(planner, kind):
+    program = _softmax_program(
+        (16, 64), (16, "cols" if kind == "dynamic" else 64), "FP16" if kind == "fp16" else "FP32"
+    )
+    lowered = _lower(program, planner, False if kind == "off" else None)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_softmax_default_a5_boundary_is_unchanged(ascend_backend, planner):
+    assert ascend_backend == BackendType.Ascend950
+    lowered = _lower(_softmax_program((16, 64), (16, 64)), planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_reduction_column_store_remains_tile(planner):
+    # A contiguous column cannot use the dense matrix GM transfer recipe: its
+    # destination has a row stride of 64 rather than contiguous scalar rows.
+    program = pl.parse_program("""
+@pl.program
+class ColumnStore:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 64], pl.FP32],
+               out: pl.InOut[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        source = pl.load(a, [0, 0], [16, 64])
+        scratch = pl.create_tile([16, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        maximum = pl.row_max(source, scratch)
+        return pl.store(maximum, [0, 0], out)
+""")
+    assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

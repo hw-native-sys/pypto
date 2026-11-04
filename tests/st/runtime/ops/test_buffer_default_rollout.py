@@ -348,5 +348,134 @@ def test_default_typed_arithmetic(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
+@pl.jit.incore
+def _softmax_full(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    source = pl.load(a, [0, 0], [64, 64])
+    scratch = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    maximum = pl.row_max(source, scratch)
+    shifted = pl.row_expand_sub(source, maximum)
+    exponent = pl.exp(shifted)
+    total = pl.row_sum(exponent, scratch)
+    result = pl.row_expand_div(exponent, total)
+    out = pl.store(result, [0, 0], out)
+    return pl.store(source, [64, 0], out)
+
+
+@pl.jit.incore
+def _softmax_partial(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    source = pl.load(a, [0, 0], [16, 128], valid_shape=[13, 117])
+    scratch = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    maximum = pl.row_max(source, scratch)
+    shifted = pl.row_expand_sub(source, maximum)
+    exponent = pl.exp(shifted)
+    total = pl.row_sum(exponent, scratch)
+    result = pl.row_expand_div(exponent, total)
+    out = pl.store(result, [0, 0], out)
+    return pl.store(source, [16, 0], out)
+
+
+@pl.jit
+def _softmax_core_group(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    # Match the public softmax example's outlining and lane-splitting path.
+    with pl.at(level=pl.Level.CORE_GROUP):
+        source = pl.load(a, [0, 0], [64, 64])
+        scratch = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        maximum = pl.row_max(source, scratch)
+        shifted = pl.row_expand_sub(source, maximum)
+        exponent = pl.exp(shifted)
+        total = pl.row_sum(exponent, scratch)
+        result = pl.row_expand_div(exponent, total)
+        out = pl.store(result, [0, 0], out)
+        out = pl.store(source, [64, 0], out)
+    return out
+
+
+def _softmax_entry(kernel):
+    @pl.jit
+    def entry(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(a, out)
+
+    return entry
+
+
+def _softmax_golden(tensors, valid):
+    source, output = tensors["a"], tensors["out"].clone()
+    rows, cols = valid
+    output[:rows, :cols] = torch.softmax(source[:rows, :cols], dim=-1)
+    start = source.shape[0]
+    output[start : start + rows, :cols] = source[:rows, :cols]
+    return output
+
+
+@st.cases(
+    *[
+        st.case(
+            kernel,
+            torch.randn(shape, generator=torch.Generator().manual_seed(19)) * 4,
+            torch.full((2 * shape[0], shape[1]), -777.0),
+            name=f"buffer_softmax_{name}_{planner.name.lower()}",
+            golden=lambda tensors, valid=valid: _softmax_golden(tensors, valid),
+            memory_planner=planner,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for kernel, name, shape, valid in (
+            (_softmax_entry(_softmax_full), "full", (64, 64), (64, 64)),
+            (_softmax_entry(_softmax_partial), "partial", (16, 128), (13, 117)),
+            (_softmax_core_group, "core_group", (64, 64), (64, 64)),
+        )
+        for planner in _PLANNERS
+    ]
+)
+def test_default_softmax_device_results(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+@pl.jit.incore
+def _row_vector_states(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    source = pl.load(a, [0, 0], [16, 64])
+    scratch = pl.create_tile([16, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    maximum = pl.row_max(source, scratch)
+    narrowed = pl.tile.set_validshape(maximum, 13, 1)
+    partial = pl.tile.set_validshape(source, 13, 64)
+    shifted_partial = pl.row_expand_sub(partial, narrowed)
+    out = pl.store(shifted_partial, [0, 0], out)
+    shifted = pl.row_expand_sub(source, maximum)
+    out = pl.store(shifted, [16, 0], out)
+    total = pl.row_sum(source, scratch)
+    scaled = pl.row_expand_div(source, total)
+    return pl.store(scaled, [32, 0], out)
+
+
+def _row_vector_golden(tensors):
+    source, output = tensors["a"], tensors["out"].clone()
+    maximum = torch.amax(source, dim=-1, keepdim=True)
+    output[:13] = source[:13] - maximum[:13]
+    output[16:32] = source - maximum
+    output[32:] = source / torch.sum(source, dim=-1, keepdim=True)
+    return output
+
+
+@st.cases(
+    *[
+        st.case(
+            _softmax_entry(_row_vector_states),
+            torch.randn((16, 64), generator=torch.Generator().manual_seed(37)) + 4,
+            torch.full((48, 64), -777.0),
+            name=f"buffer_row_vectors_{planner.name.lower()}",
+            golden=_row_vector_golden,
+            memory_planner=planner,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for planner in _PLANNERS
+    ]
+)
+def test_default_row_vector_states(case_run, request):
+    # A narrowed column descriptor must not change the original value's valid
+    # rows; matrix broadcasts expose the values and preserve untouched GM rows.
+    _assert_buffer_result(case_run, request)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -22,6 +22,7 @@
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -54,7 +55,8 @@ namespace {
 using ir::As;
 
 // BufferType is already a physical descriptor; no logical shape, layout, or
-// packing is inferred. Vec descriptors are dense row-major; Mat/Left/Right/Acc
+// packing is inferred. Vec descriptors are dense row-major or FP32 reduction
+// column vectors; Mat/Left/Right/Acc
 // descriptors carry their resolved fractal layout and must be whole boxes.
 std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span) {
   CHECK_SPAN(type->shape_.size() == 1 || type->shape_.size() == 2, span)
@@ -68,7 +70,7 @@ std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span
            "FP32/INT32 "
            "accumulators in "
         << ir::MemorySpaceToString(space);
-  } else {
+  } else if (!backend::IsColumnVectorBuffer(type)) {
     CHECK_SPAN(space == ir::MemorySpace::Vec &&
                    (backend::IsDenseBufferTransferDtype(type->dtype_) || type->dtype_ == DataType::UINT8 ||
                     type->dtype_ == DataType::INT16) &&
@@ -365,17 +367,20 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     uses_spmd_blocks |= ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num");
     uses_spmd_subblock |= ir::IsOp(call, "buffer.get_subblock_idx");
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
-                   ir::IsOp(call, "buffer.subview") || ir::IsOp(call, "buffer.reshape") ||
-                   ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
-                   ir::IsOp(call, "buffer.set_validshape") || ir::IsOp(call, "buffer.get_block_idx") ||
-                   ir::IsOp(call, "buffer.get_block_num") || ir::IsOp(call, "buffer.get_subblock_idx") ||
-                   ir::IsOp(call, "buffer.matmul") || ir::IsOp(call, "buffer.matmul_acc") ||
-                   ir::IsOp(call, "buffer.extract"),
+    CHECK_SPAN(recipe || backend::FindBufferRowRecipe(call->op_->name_) || ir::IsOp(call, "buffer.alloc") ||
+                   ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.subview") ||
+                   ir::IsOp(call, "buffer.reshape") || ir::IsOp(call, "buffer.load") ||
+                   ir::IsOp(call, "buffer.store") || ir::IsOp(call, "buffer.set_validshape") ||
+                   ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num") ||
+                   ir::IsOp(call, "buffer.get_subblock_idx") || ir::IsOp(call, "buffer.matmul") ||
+                   ir::IsOp(call, "buffer.matmul_acc") || ir::IsOp(call, "buffer.extract"),
                call->span_)
         << "Operation '" << call->op_->name_ << "' is not supported by direct Buffer IR codegen";
     if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
       const bool load = ir::IsOp(call, "buffer.load");
+      const auto buffer = As<ir::BufferType>(call->args_[load ? 3 : 0]->GetType());
+      CHECK_SPAN(!backend::IsColumnVectorBuffer(buffer), call->span_)
+          << "Direct Buffer IR GM transfers do not support reduction column vectors";
       auto tensor = ir::AsVarLike(call->args_[load ? 0 : 3]);
       auto parameter = tensor_parameters_.find(tensor.get());
       CHECK_SPAN(parameter != tensor_parameters_.end(), call->span_)
@@ -685,11 +690,15 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
          " : " + GetExprTypeAnnotation(call->args_[3]) + ")");
   } else {
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    INTERNAL_CHECK_SPAN(recipe || ir::IsOp(call, "buffer.copy"), call->span_)
+    const auto* row_recipe = backend::FindBufferRowRecipe(call->op_->name_);
+    INTERNAL_CHECK_SPAN(recipe || row_recipe || ir::IsOp(call, "buffer.copy"), call->span_)
         << "Internal error: missing preflighted buffer emitter for " << call->op_->name_;
-    const size_t input_count = recipe ? recipe->inputs.size() : 1;
+    const size_t input_count = recipe ? recipe->inputs.size() : row_recipe ? 2 : 1;
     std::ostringstream line;
-    line << (recipe ? recipe->native_op : "pto.tmov") << " "
+    line << (recipe       ? recipe->native_op
+             : row_recipe ? row_recipe->native_op
+                          : "pto.tmov")
+         << " "
          << BufferInsOutsClause(
                 {call->args_.begin(), call->args_.begin() + static_cast<std::ptrdiff_t>(input_count)},
                 call->args_.back());

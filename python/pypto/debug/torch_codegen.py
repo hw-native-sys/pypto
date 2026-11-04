@@ -1323,6 +1323,14 @@ def _register_ops() -> None:  # noqa: PLR0915
             f"{fn([f'_buffer_active({a[0]})', f'torch.as_tensor({a[1]}, dtype={a[0]}.dtype)'], kw)})"
         )
     m["buffer.full"] = lambda a, _kw: f"_buffer_active({a[1]}).fill_({a[0]})"
+    for suffix, reduction in (("row_max", "amax"), ("row_sum", "sum")):
+        m[f"buffer.{suffix}"] = lambda a, _kw, fn=reduction: (
+            f"_buffer_write({a[2]}, torch.{fn}(_buffer_active({a[0]}), dim=-1, keepdim=True))"
+        )
+    for suffix, operation in (("row_expand_sub", "-"), ("row_expand_div", "/")):
+        m[f"buffer.{suffix}"] = lambda a, _kw, op=operation: (
+            f"_buffer_write({a[2]}, _buffer_active({a[0]}) {op} _buffer_active({a[1]}))"
+        )
 
     m["buffer.get_block_idx"] = lambda _a, _kw: "0"
     m["buffer.get_block_num"] = lambda _a, _kw: "1"
@@ -1687,11 +1695,20 @@ class TorchCodegen(_ir.IRVisitor):
         if not isinstance(descriptor, _ir.BufferType):
             raise ValueError("torch_codegen requires a Buffer descriptor")
         if descriptor.memory_space == _ir.MemorySpace.Vec:
+            # A single physical column is contiguous in both tensor views;
+            # retaining its descriptor layout still matters to native codegen.
+            column_vector = (
+                descriptor.dtype == DataType.FP32
+                and len(descriptor.shape) == 2
+                and descriptor.shape[1] == 1
+                and descriptor.blayout == _ir.TileLayout.col_major
+            )
             if (
-                descriptor.blayout != _ir.TileLayout.row_major
-                or descriptor.slayout != _ir.TileLayout.none_box
-            ):
-                raise ValueError("torch_codegen requires dense row-major Vec Buffer descriptors")
+                descriptor.blayout != _ir.TileLayout.row_major and not column_vector
+            ) or descriptor.slayout != _ir.TileLayout.none_box:
+                raise ValueError(
+                    "torch_codegen requires dense row-major Vec or FP32 column-vector descriptors"
+                )
         elif (
             descriptor.memory_space
             not in (_ir.MemorySpace.Mat, _ir.MemorySpace.Left, _ir.MemorySpace.Right, _ir.MemorySpace.Acc)

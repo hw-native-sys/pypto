@@ -30,6 +30,8 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.extract` | source buffer, row offset, column offset, destination buffer | Void |
 | `buffer.matmul` | Left buffer, Right buffer, Acc destination | Void |
 | `buffer.matmul_acc` | Left buffer, Right buffer, Acc buffer read and written | Void |
+| `buffer.row_max`, `buffer.row_sum` | FP32 matrix, explicit scratch, column-vector destination | Void |
+| `buffer.row_expand_sub`, `buffer.row_expand_div` | FP32 matrix, column vector, matrix destination | Void |
 
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.

@@ -27,6 +27,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/core/logging.h"
@@ -93,18 +94,23 @@ void CheckDenseVecTile(const TileTypePtr& tile, const TileView& view, const Span
 
 BufferTypePtr DenseDescriptor(const TileTypePtr& tile, const Span& span) {
   const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-  CheckDenseVecTile(tile, view, span);
+  const bool column = backend::IsColumnVectorBufferTile(tile, view);
+  if (!column) CheckDenseVecTile(tile, view, span);
   const auto view_offset = As<ConstInt>(view.start_offset);
   CHECK_SPAN(!view.start_offset || (view_offset && view_offset->value_ == 0), span)
       << "LowerTileToBuffer: nonzero tile view offsets require an explicit Buffer view recipe";
   const auto shape = StaticExtents(tile->shape_, span);
   if (!view.stride.empty()) {
     const auto strides = StaticExtents(view.stride, span);
-    CHECK_SPAN(strides == std::vector<int64_t>({shape[1], 1}), span)
+    const std::vector<int64_t> expected =
+        column ? std::vector<int64_t>{1, shape[0]} : std::vector<int64_t>{shape[1], 1};
+    CHECK_SPAN(strides == expected, span)
         << "LowerTileToBuffer: strided tiles require an explicit Buffer view recipe";
   }
   const auto valid = DescriptorValid(view.valid_shape.empty() ? tile->shape_ : view.valid_shape, shape);
-  return std::make_shared<BufferType>(shape, tile->dtype_, MemorySpace::Vec, valid);
+  CHECK_SPAN(!column || (valid[0] > 0 && valid[1] == 1), span)
+      << "LowerTileToBuffer: column vectors require positive static valid extents";
+  return std::make_shared<BufferType>(shape, tile->dtype_, MemorySpace::Vec, valid, view.blayout);
 }
 
 // A use-site window of another handle. Its row pitch and offset belong to the
@@ -321,8 +327,11 @@ class StorageIndex : public IRVisitor {
           << "LowerTileToBuffer: full-capacity storage members disagree on the allocation origin";
       origin = address;
     }
-    if (backend::IsMatrixBufferSpace(*memory_space)) {
-      FinalizeMatrixRoot(base, storage, capacity, origin, span);
+    const bool has_column =
+        std::any_of(storage.members.begin(), storage.members.end(),
+                    [](const auto& member) { return backend::IsColumnVectorBuffer(member.descriptor); });
+    if (backend::IsMatrixBufferSpace(*memory_space) || has_column) {
+      FinalizeTypedRoot(base, storage, capacity, origin, span);
       return;
     }
     CHECK_SPAN(origin, span) << "LowerTileToBuffer: addressed storage needs a full-capacity MemRef anchor; "
@@ -483,10 +492,10 @@ class StorageIndex : public IRVisitor {
   }
 
   // Every descriptor field except the root's shared memory space.
-  using MatrixKey = std::tuple<uint64_t, std::string, std::vector<int64_t>, std::vector<int64_t>, int, int,
-                               uint64_t, int, int>;
+  using TypedKey = std::tuple<uint64_t, std::string, std::vector<int64_t>, std::vector<int64_t>, int, int,
+                              uint64_t, int, int>;
 
-  static MatrixKey MakeMatrixKey(uint64_t address, const BufferTypePtr& type) {
+  static TypedKey MakeTypedKey(uint64_t address, const BufferTypePtr& type) {
     return {address,
             type->dtype_.ToString(),
             type->shape_,
@@ -498,15 +507,16 @@ class StorageIndex : public IRVisitor {
             static_cast<int>(type->compact_)};
   }
 
-  // Fractal descriptors have no byte-view form. Addressed planners already
+  // Fractal descriptors and reduction column vectors have no row-major
+  // byte-view form. Addressed planners already
   // placed every window, so each distinct window is its own allocation at its
   // final effective address; windows sharing an address alias exactly as the
   // planner decided. Without addresses, one allocation can carry only one
   // window, relabelled in place by same-size reshapes (NZ <-> ZN).
-  void FinalizeMatrixRoot(const Var* base, BufferStorage& storage, uint64_t capacity,
-                          std::optional<int64_t> origin, const Span& span) {
-    std::map<MatrixKey, VarPtr> handles_by_window;
-    std::vector<std::pair<MatrixKey, BufferTypePtr>> member_keys;
+  void FinalizeTypedRoot(const Var* base, BufferStorage& storage, uint64_t capacity,
+                         std::optional<int64_t> origin, const Span& span) {
+    std::map<TypedKey, VarPtr> handles_by_window;
+    std::vector<std::pair<TypedKey, BufferTypePtr>> member_keys;
     for (const auto& member : storage.members) {
       const auto address = As<ConstInt>(member.memory->byte_offset_)->value_;
       const auto bytes = backend::PhysicalBufferBytes(member.descriptor);
@@ -519,7 +529,7 @@ class StorageIndex : public IRVisitor {
                    member.span)
             << "LowerTileToBuffer: descriptor window exceeds the planned allocation capacity";
       }
-      member_keys.emplace_back(MakeMatrixKey(static_cast<uint64_t>(address), member.descriptor),
+      member_keys.emplace_back(MakeTypedKey(static_cast<uint64_t>(address), member.descriptor),
                                member.descriptor);
     }
     VarPtr root;
@@ -528,6 +538,8 @@ class StorageIndex : public IRVisitor {
       const auto& [key, descriptor] = member_keys[i];
       auto [entry, inserted] = handles_by_window.emplace(key, nullptr);
       if (inserted) {
+        CHECK_SPAN(!HasDynamicValid(descriptor), storage.members[i].span)
+            << "LowerTileToBuffer: typed storage windows require static valid extents";
         if (addressed_ || !root) {
           std::vector<ExprPtr> args{std::make_shared<MakeTuple>(std::vector<ExprPtr>{}, span)};
           if (addressed_) {
@@ -1044,6 +1056,12 @@ class TileToBufferMutator : public IRMutator {
     // it). Every other attribute still needs an explicit conversion contract.
     CHECK_SPAN(StripAttr(call->attrs_, kPipelineMembershipAttr).empty(), call->span_)
         << "LowerTileToBuffer: device-call attributes require an explicit conversion contract";
+    if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
+      CHECK_SPAN(result && backend::SupportsLogicalBufferRow(*row_recipe, call), call->span_)
+          << "LowerTileToBuffer: row recipes require supported static FP32 operands";
+      return Operation(row_recipe->buffer_op,
+                       {Handle(call->args_[0]), Handle(call->args_[1]), Handle(result)}, call->span_);
+    }
     for (const auto& [logical, physical] : {std::pair{"tile.get_block_idx", "buffer.get_block_idx"},
                                             std::pair{"tile.get_block_num", "buffer.get_block_num"},
                                             std::pair{"tile.get_subblock_idx", "buffer.get_subblock_idx"}}) {

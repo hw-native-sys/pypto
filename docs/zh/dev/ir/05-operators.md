@@ -30,6 +30,8 @@
 | `buffer.extract` | 源 buffer、行偏移、列偏移、目标 buffer | Void |
 | `buffer.matmul` | Left buffer、Right buffer、Acc 目标 | Void |
 | `buffer.matmul_acc` | Left buffer、Right buffer、被读写的 Acc buffer | Void |
+| `buffer.row_max`、`buffer.row_sum` | FP32 矩阵、显式 scratch、列向量目的地 | Void |
+| `buffer.row_expand_sub`、`buffer.row_expand_div` | FP32 矩阵、列向量、矩阵目的地 | Void |
 
 这些算子分别声明数据/元数据效应。形状、dtype、valid 状态和别名要求见
 [Buffer 契约](02-types.md#buffer-算子契约)。
