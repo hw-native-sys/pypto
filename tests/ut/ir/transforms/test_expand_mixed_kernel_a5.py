@@ -5289,8 +5289,8 @@ class TestManualPipeVtoCFractalAdapt:
 def test_multiple_gm_stores_fence_the_whole_consumer_loop(backend_name, read_rows):
     """Issue #2745: four writes need one fence outside the eight-read loop.
 
-    The barriers make the GM completion/read ordering explicit even when the
-    backend's C2V token waits on a pipe other than the GM load pipe.
+    Expansion expresses the dependency with tpush/tpop only; PTOAS owns
+    pipeline ordering. Structural equality also rejects any inserted barriers.
     """
     backend.reset_for_testing()
     backend.set_backend_type(getattr(backend.BackendType, backend_name))
@@ -5338,7 +5338,6 @@ def test_multiple_gm_stores_fence_the_whole_consumer_loop(backend_name, read_row
             scratch = pl.tile.store(acc, [32, 0], scratch)
             scratch = pl.tile.store(acc, [64, 0], scratch)
             scratch = pl.tile.store(acc, [96, 0], scratch)
-            pl.system.barrier(pipe=pl.PipeType.ALL)
             pl.tile.tpush_to_aiv(acc, split=0)
 
         @pl.function(type=pl.FunctionType.AIV)
@@ -5350,7 +5349,6 @@ def test_multiple_gm_stores_fence_the_whole_consumer_loop(backend_name, read_row
             out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             _token: pl.Tile[[32, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.tpop_from_aic(split=0)
-            pl.system.barrier(pipe=pl.PipeType.ALL)
             for row in pl.range(0, read_rows, 16):
                 chunk = pl.tile.load(scratch, [row, 0], [16, 128], target_memory=pl.Mem.Vec)
                 out = pl.tile.store(pl.tile.adds(chunk, 1.0), [row, 0], out)
@@ -5458,7 +5456,7 @@ def test_multi_store_gm_rejects_interleaved_read():
     ],
 )
 def test_multi_store_gm_checks_earlier_reverse_event_waits(backend_name, schedule):
-    """The producer barrier must not wait for a signal behind the consumer fence."""
+    """A new GM wait must not introduce a cycle through an authored event."""
     backend.reset_for_testing()
     backend.set_backend_type(getattr(backend.BackendType, backend_name))
     signal_id = 6 if schedule == "wrong_signal" else 5
@@ -5489,8 +5487,8 @@ def test_multi_store_gm_checks_earlier_reverse_event_waits(backend_name, schedul
             return out
 
     # Event 4 protects the partition that AIV actually reads, so the original
-    # event schedule need not wait for the second store. Adding bar_all + a GM
-    # push/pop would cycle through event 5, even though the final store-to-load
+    # event schedule need not wait for the second store. Adding a whole-phase GM
+    # push/pop could cycle through event 5, even though the final store-to-load
     # interval contains no explicit communication.
     func = next(iter(Before.functions.values()))
     stmts = _flatten_top_level_stmts(func.body)
@@ -5729,8 +5727,8 @@ def test_multi_store_gm_rejects_enclosing_c2v_handshake(pipe_id):
             out = pl.tile.store(manual, [16, 0], out)
             return out
 
-    # Other pipe IDs cannot steal the GM token, but their pushes can still
-    # backpressure the producer barrier. Conservatively finish the handshake.
+    # Other pipe IDs cannot steal the GM token. Conservatively finish all
+    # authored handshakes before adding a new cross-lane dependency.
     with pytest.raises(ValueError, match="outstanding or nested explicit C2V handshake"):
         _expand_raw(Before)
 

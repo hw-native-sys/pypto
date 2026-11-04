@@ -1351,7 +1351,6 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
 struct GmSyncPush {
   CoreSide producer_side;
   ExprPtr push_tile;
-  bool fence_gm_phase = false;
 };
 
 struct GmSyncPop {
@@ -1696,10 +1695,10 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   int next_body_id = 1;  // 0 == function top level
   std::unordered_map<const Stmt*, size_t> statement_order;
   std::vector<size_t> communication_order;
-  // A generated GM token must not overtake C2V transfers, and its producer
-  // barrier must not wait for a V2C pop or a backpressured C2V push whose peer
-  // sits behind the new consumer fence. Require completed explicit handshakes
-  // in both directions, including non-default pipes: bar_all drains every pipe.
+  // A generated GM token must not overtake C2V transfers or introduce cycles
+  // with authored FIFO operations whose peers sit behind the new consumer wait.
+  // Conservatively require completed explicit handshakes in both directions
+  // and on every pipe; this pass does not analyze PTOAS pipeline scheduling.
   // Keep counts per ID so an endpoint on another FIFO cannot cancel a wait.
   // Maintaining the number of nonzero balances makes each prefix query O(1).
   struct ManualFifoBalance {
@@ -1724,9 +1723,9 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   bool has_nested_c2v_boundary = false;
   std::unordered_set<const Stmt*> unmatched_manual_c2v_at_stmt;
   std::unordered_set<const Stmt*> unmatched_manual_v2c_at_stmt;
-  // A producer barrier also drains earlier AIC event waits, including waits
-  // before the first GM store. A matching AIV signal after the new consumer
-  // fence would form a cycle. Track top-level MTE3 -> MTE2 event occurrences
+  // Earlier AIC event waits can depend on an AIV signal behind the new GM
+  // consumer wait. Conservatively require these authored events to complete,
+  // including those before the first GM store. Track MTE3 -> MTE2 occurrences
   // across the entire prefix; an earlier signal can supply a credit, but one
   // occurrence must not discharge two waits reusing the same event ID.
   // Nested/dynamic waits and other pipe pairs cannot be proven complete here.
@@ -2028,7 +2027,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
                                                     std::nullopt, std::nullopt, consumer_mem);
     std::string token_name = origin->name_hint_ + "_gm_sync";
 
-    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0], requires_fifo_checks};
+    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
     // A vector per stmt: several GM dependencies can hoist to the same enclosing
     // stmt (e.g. two scratch loads in one outer loop) — each needs its own fence.
     gm_sync_pops[pop_stmt].push_back(
@@ -2265,6 +2264,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       if (superseded_tpop_vars.count(assign->var_.get()) > 0) continue;
     }
 
+    // Express GM cross-lane dependencies with tpush/tpop only. PTOAS owns
+    // pipeline ordering and barrier insertion; this pass must not add barriers.
     // GM cross-lane sync (issue #1433): on the consumer lane, emit a fence tpop
     // just before the keyed stmt. That stmt is the load itself when producer and
     // consumer share a body, or the loop/branch enclosing the load (so the fence
@@ -2278,12 +2279,6 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         const auto& pop_var = info.token_var;
         result.push_back(std::make_shared<AssignStmt>(
             pop_var, CreateTpop(pop_op, pop_var->GetType(), stmt->span_, /*kwargs=*/{}), stmt->span_));
-        if (info.fence_gm_phase) {
-          // A5 C2V-UB tokens wait on PIPE_V, while the following GM loads use
-          // MTE2. Drain the wait before allowing any load pipe to proceed.
-          result.push_back(std::make_shared<EvalStmt>(
-              OpRegistry::GetInstance().Create("system.bar_all", {}, {}, stmt->span_), stmt->span_));
-        }
       }
     }
 
@@ -2293,12 +2288,6 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       // after the store that writes the shared GM tensor.
       if (auto push_it = gm_sync_pushes.find(stmt.get());
           push_it != gm_sync_pushes.end() && side == push_it->second.producer_side) {
-        if (push_it->second.fence_gm_phase) {
-          // The token's payload is incidental: all preceding GM writes must
-          // complete before the notification, including earlier partitions.
-          result.push_back(std::make_shared<EvalStmt>(
-              OpRegistry::GetInstance().Create("system.bar_all", {}, {}, stmt->span_), stmt->span_));
-        }
         result.push_back(std::make_shared<EvalStmt>(
             CreateTpush(push_op, push_it->second.push_tile, stmt->span_), stmt->span_));
       }
