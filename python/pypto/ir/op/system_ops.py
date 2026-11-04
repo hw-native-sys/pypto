@@ -384,6 +384,15 @@ def sync_wait(
     )
 
 
+def bar_all(*, span: Span | None = None) -> Call:
+    """Compatibility spelling for a local all-pipeline barrier.
+
+    Keep the canonical IR operation and its validation identical to
+    ``barrier(pipe=PipeType.ALL)``; this is not a cross-core barrier.
+    """
+    return barrier(pipe=PipeType.ALL, span=_get_span_or_capture(span))
+
+
 def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
     """Order work across a vector, matrix, or all-pipeline barrier on one core.
 
@@ -409,6 +418,58 @@ def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
     }
     _check_enum(pipe, PipeType, "pipe", "system.barrier", allowed=tuple(op_names))
     return _create_barrier_op(op_names[pipe], span=span)
+
+
+def _local_signal_call(
+    name: str,
+    signal: Expr,
+    offsets: Sequence[int | Expr],
+    value: int | Expr,
+    span: Span | None,
+    *,
+    attributes: dict[str, int] | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    if isinstance(value, int):
+        if not -(1 << 31) <= value < (1 << 31):
+            raise ValueError(f"{name} value is outside INT32: {value}")
+        value = ConstInt(value, DataType.INT32, actual_span)
+    return _ir_core.create_op_call(
+        name, [signal, _to_make_tuple(offsets, actual_span), value], attributes or {}, actual_span
+    )
+
+
+def signal_notify(
+    signal: Expr, offsets: Sequence[int | Expr], value: int | Expr, *, span: Span | None = None
+) -> Call:
+    """Publish a single-writer local GM signal using TNOTIFY(Set).
+
+    The signal must be a one-dimensional INT32 tensor with one writer per dedicated cache line.
+    The caller owns payload completion, cache publication, and generation overflow handling.
+    Use explicit AIC/AIV kernels; this operation does not infer an automatic MIX publisher lane.
+    """
+    return _local_signal_call("system.signal_notify", signal, offsets, value, span)
+
+
+def signal_wait(
+    signal: Expr,
+    offsets: Sequence[int | Expr],
+    expected: int | Expr,
+    *,
+    backoff_ticks: int = 0,
+    span: Span | None = None,
+) -> Call:
+    """Wait for a local GM threshold using TWAIT(Ge), without consuming the signal.
+
+    The signal is one-dimensional INT32; expected is INT32. Consumers must not write its cache line.
+    The caller must maintain consumer payload caches and ordering after the wait returns.
+    """
+    if type(backoff_ticks) is not int or not 0 <= backoff_ticks < (1 << 31):
+        raise ValueError(
+            f"backoff_ticks must be a compile-time integer in [0, INT32_MAX], got {backoff_ticks!r}"
+        )
+    attributes = {"backoff_ticks": backoff_ticks} if backoff_ticks else {}
+    return _local_signal_call("system.signal_wait", signal, offsets, expected, span, attributes=attributes)
 
 
 def fence(*, span: Span | None = None) -> Call:

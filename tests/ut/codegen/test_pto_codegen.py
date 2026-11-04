@@ -4570,7 +4570,7 @@ def test_compound_internal_tensor_scope_compiles(tmp_path, platform):
     assert ".add_scalar(COMPOUND_T)" in orch
 
 
-@pytest.mark.parametrize("kind,limit", [("tensor", 32), ("scalar", 16)])
+@pytest.mark.parametrize("kind,limit", [("tensor", 256), ("scalar", 16)])
 @pytest.mark.parametrize("overflow", [False, True])
 def test_wrapper_diagnoses_runtime_payload_capacity(kind, limit, overflow):
     """Additional captured symbols must fail compilation instead of overrunning dispatch storage."""

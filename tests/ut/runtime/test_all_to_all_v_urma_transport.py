@@ -323,7 +323,7 @@ void async_invoke(dim3 threads, Args... args) {
     for (threadIdx.x = 0; threadIdx.x < threads.x; ++threadIdx.x) F(args...);
 }
 }
-struct CommContext { uint64_t windowsIn[2]; uint64_t workSpace; uint32_t rankId; };
+#include "platform_comm/comm_context.h"
 #define TASSIGN(tile, offset) (tile).address = (offset)
 namespace pto {
 constexpr int DYNAMIC = -1;
@@ -415,7 +415,8 @@ bool UrmaPollCqAt(AsyncSession, int, int, uint32_t head, uint32_t completions, b
 }
 }
 template <DmaEngine>
-bool BuildAsyncSession(uint8_t *, int, AsyncSession &s) {
+bool BuildAsyncSession(uint8_t *workspace, int, AsyncSession &s) {
+    if (workspace != reinterpret_cast<uint8_t *>(&urma::info)) return false;
     s.contextGm = reinterpret_cast<uint64_t>(&urma::info);
     return true;
 }
@@ -463,7 +464,10 @@ int main(int argc, char **argv) {
     uint64_t eid[2] = {1, 2};
     mem.eidAddr = reinterpret_cast<uint64_t>(eid);
     std::vector<int32_t> indices(rows, 0);
-    CommContext ctx{{0x200000000ULL, 0}, reinterpret_cast<uint64_t>(&info), 0};
+    CommContext ctx{};
+    ctx.windowsIn[0] = 0x200000000ULL;
+    set_comm_workspace(ctx, CommWorkspaceKind::SDMA, 1, 16);
+    set_comm_workspace(ctx, CommWorkspaceKind::URMA, reinterpret_cast<uint64_t>(&info), sizeof(info));
     try {
         for (int round = 0; round < 3; ++round) {
             const int before = polls;
@@ -490,7 +494,11 @@ int main(int argc, char **argv) {
 """
     )
     binary = folder / "probe"
-    subprocess.run([compiler, "-std=c++17", "-O2", str(source), "-o", str(binary)], check=True)
+    runtime_include = Path(__file__).resolve().parents[3] / "runtime" / "src" / "common"
+    subprocess.run(
+        [compiler, "-std=c++17", "-O2", "-I", str(runtime_include), str(source), "-o", str(binary)],
+        check=True,
+    )
     return binary
 
 

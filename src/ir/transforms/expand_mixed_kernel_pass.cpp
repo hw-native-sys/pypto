@@ -2530,6 +2530,18 @@ Pass ExpandMixedKernel() {
         continue;
       }
 
+      // Accumulator narrowing can replace a Vec declaration with an Acc
+      // declaration while leaving its unused set_validshape behind. Counting
+      // that metadata as vector work falsely splits a pure cube function and
+      // adds an unintended AIV member to a hand-written mixed Group.
+      const auto original_stmts = FlattenBody(func->body_);
+      auto cleaned_stmts = dce::EliminateDeadTileMetadata(original_stmts);
+      if (cleaned_stmts != original_stmts) {
+        auto cleaned = MutableCopy(func);
+        cleaned->body_ = MakeBody(cleaned_stmts, func->span_);
+        func = cleaned;
+      }
+
       PackedFp4CrossCoreTransferValidator packed_transfer_validator;
       packed_transfer_validator.VisitStmt(func->body_);
 

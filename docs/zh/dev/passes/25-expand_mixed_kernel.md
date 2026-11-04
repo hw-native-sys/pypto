@@ -19,6 +19,12 @@
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
+在判断 InCore 函数的核心类型之前，Pass 会清理无用的 `tile.create` 和
+`tile.set_validshape` 链，包括嵌套控制流中的声明。累加器收窄将存储替换为 Acc
+后可能留下旧的 Vec 元数据；这些元数据不能导致纯 Cube 函数被误拆为混合核。
+清理会保留实际执行的操作和同步，即使其返回值没有被使用；没有删除声明时，
+原函数体的对象身份也保持不变。
+
 ### 手写 Group 的共享参数 ABI
 
 一次运行时 `MixedKernels` 提交会创建一个协同调度的 AIC/AIV task，其中所有

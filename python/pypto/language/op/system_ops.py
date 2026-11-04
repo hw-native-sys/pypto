@@ -28,6 +28,7 @@ from pypto.ir.op.system_ops import (
     _check_enum,
     aic_initialize_pipe,
     aiv_initialize_pipe,
+    bar_all,
     barrier,
     fence,
     sync_dst,
@@ -50,6 +51,9 @@ __all__ = [
     "sync_set",
     "sync_wait",
     "set_ffts",
+    "signal_notify",
+    "signal_wait",
+    "bar_all",
     "barrier",
     "fence",
     "cacheinvalid",
@@ -164,6 +168,44 @@ def sync_wait(
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     kernel = _kernel_or_none(core_type, "sync_wait")
     return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=kernel, span=span)
+
+
+def signal_notify(
+    signal: Tensor,
+    offsets: Sequence[IntLike],
+    value: IntLike,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Publish a single-writer local GM signal using TNOTIFY(Set).
+
+    The signal must be a one-dimensional INT32 tensor with one writer per dedicated cache line.
+    The caller owns payload completion, cache publication, and generation overflow handling.
+    Use explicit AIC/AIV kernels; this operation does not infer an automatic MIX publisher lane.
+    """
+    index_exprs = [item.unwrap() if isinstance(item, Scalar) else item for item in offsets]
+    value_expr = value.unwrap() if isinstance(value, Scalar) else value
+    return _ir_ops.signal_notify(signal.unwrap(), index_exprs, value_expr, span=span)
+
+
+def signal_wait(
+    signal: Tensor,
+    offsets: Sequence[IntLike],
+    expected: IntLike,
+    *,
+    backoff_ticks: int = 0,
+    span: Span | None = None,
+) -> Call:
+    """Wait for a local GM threshold using TWAIT(Ge), without consuming the signal.
+
+    The signal is one-dimensional INT32; expected is INT32. Consumers must not write its cache line.
+    The caller must maintain consumer payload caches and ordering after the wait returns.
+    """
+    index_exprs = [item.unwrap() if isinstance(item, Scalar) else item for item in offsets]
+    expected_expr = expected.unwrap() if isinstance(expected, Scalar) else expected
+    return _ir_ops.signal_wait(
+        signal.unwrap(), index_exprs, expected_expr, backoff_ticks=backoff_ticks, span=span
+    )
 
 
 def set_ffts(workspace: object, *, span: Span | None = None) -> Call:

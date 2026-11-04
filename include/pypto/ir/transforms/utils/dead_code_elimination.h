@@ -40,6 +40,10 @@ void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
 /// used by any return, yield, or side-effect statement.
 std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts);
 
+/// Remove unused tile.create/set_validshape chains before core classification.
+/// Preserve all executable operations, including calls with unused results.
+std::vector<StmtPtr> EliminateDeadTileMetadata(const std::vector<StmtPtr>& stmts);
+
 /// Conservative scalar-only DCE.
 ///
 /// Removes every `AssignStmt` that satisfies ALL of:

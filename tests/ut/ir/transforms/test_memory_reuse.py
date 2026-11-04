@@ -17,6 +17,7 @@ DefFields always alpha-map; open references retain their identity by default.
 
 import re
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
@@ -27,6 +28,18 @@ from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 from .storage_test_utils import without_call_memrefs
+
+
+def test_reused_accumulator_phi_initializes_a_later_nested_loop():
+    """Reused phi metadata must propagate before a later nested K-loop binds it."""
+    fixture = Path(__file__).with_name("memory_reuse_fixtures") / "accumulator_reused_phi.txt"
+    before = pl.parse_program(fixture.read_text(), filename=str(fixture))
+    after = passes.memory_reuse()(before)
+    _assert_if_phi_arms_write_the_phi_buffer(after)
+    bases = {base for base in _collect_tile_memref_bases(after).values() if "acc" in base}
+    assert bases == {"mem_acc_probe"}, "Every small accumulator must retain the reused large allocation"
+    assert "tile.move" not in after.as_python()
+
 
 # Tile-producing reads from GM. Built through the getter so a renamed operator fails at import
 # rather than silently dropping out of the membership test below.
@@ -6088,6 +6101,62 @@ class TestL0CrossShapeReuse:
     This is what lets fused-attention reuse the QK Right buffer ([k, SEQ]) for
     the PV Right buffer ([k', HEAD]) (issue #1595)."""
 
+    @pytest.mark.parametrize("first_rows", [192, 256])
+    def test_capacity_overflow_grows_phase_arena(self, first_rows):
+        """48+12 then 32+32 KiB fits; a genuinely co-live 64+12 KiB does not."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        total_rows = first_rows + 48 + 256
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(
+                self,
+                x: pl.Tensor[[total_rows, 128], pl.FP16],
+                w: pl.Tensor[[128, 32], pl.FP16],
+                out: pl.Out[pl.Tensor[[total_rows, 32], pl.FP32]],
+            ) -> pl.Tensor[[total_rows, 32], pl.FP32]:
+                weight = pl.tile.load(w, [0, 0], [128, 32], target_memory=pl.Mem.Mat)
+                right = pl.tile.move(weight, target_memory=pl.Mem.Right)
+                a_mat = pl.tile.load(x, [0, 0], [first_rows, 128], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(x, [first_rows, 0], [48, 128], target_memory=pl.Mem.Mat)
+                a = pl.tile.move(a_mat, target_memory=pl.Mem.Left)
+                b = pl.tile.move(b_mat, target_memory=pl.Mem.Left)
+                a_out = pl.tile.matmul(a, right)
+                out_a = pl.tile.store(a_out, [0, 0], out)
+                b_out = pl.tile.matmul(b, right)
+                out_b = pl.tile.store(b_out, [first_rows, 0], out_a)
+                pl.system.fence()
+                c_mat = pl.tile.load(x, [first_rows + 48, 0], [128, 128], target_memory=pl.Mem.Mat)
+                d_mat = pl.tile.load(x, [first_rows + 176, 0], [128, 128], target_memory=pl.Mem.Mat)
+                c = pl.tile.move(c_mat, target_memory=pl.Mem.Left)
+                d = pl.tile.move(d_mat, target_memory=pl.Mem.Left)
+                c_out = pl.tile.matmul(c, right)
+                out_c = pl.tile.store(c_out, [first_rows + 48, 0], out_b)
+                d_out = pl.tile.matmul(d, right)
+                out_d = pl.tile.store(d_out, [first_rows + 176, 0], out_c)
+                return out_d
+
+        after = _run_pipeline(Before)
+        if first_rows == 256:
+            with pytest.raises(ValueError, match="exceeds.*capacity|exceeds.*limit"):
+                passes.allocate_memory_addr()(after)
+            return
+        ranges = _collect_named_tile_memrefs(after, {"a", "b", "c", "d"})
+        assert all(ref.base_ is ranges["a"].base_ for ref in ranges.values())
+        expected = {"a": (0, 49152), "b": (49152, 12288), "c": (0, 32768), "d": (32768, 32768)}
+        for name, ref in ranges.items():
+            assert isinstance(ref.byte_offset_, ir.ConstInt)
+            assert (ref.byte_offset_.value, ref.size_) == expected[name]
+        allocated = passes.allocate_memory_addr()(after)
+        physical = _collect_named_tile_memrefs(allocated, set(ranges))
+        ends = []
+        for ref in physical.values():
+            assert isinstance(ref.byte_offset_, ir.ConstInt)
+            ends.append(ref.byte_offset_.value + ref.size_)
+        assert max(ends) == 65536
+
     def test_capacity_overflow_subdivides_dead_right_buffer(self):
         """A dead 64 KiB L0B panel backs two later co-live 32 KiB panels."""
         backend.reset_for_testing()
@@ -7254,6 +7323,50 @@ class TestForbidOutputAlias:
         assert bases["dst"] == bases["tmp"]
         assert bases["dst"] != bases["src"]
         assert bases["dst"] != bases["mask"]
+
+    @pytest.mark.parametrize(
+        ("barrier", "observe_after", "can_reuse"),
+        [
+            ("pl.system.barrier(pipe=pl.PipeType.ALL)", False, True),
+            ("pl.system.barrier(pipe=pl.PipeType.V)", False, False),
+            ("if cond:\n    pl.system.barrier(pipe=pl.PipeType.ALL)", False, False),
+            ("for _ in pl.range(1):\n    pl.system.barrier(pipe=pl.PipeType.ALL)", False, False),
+            ("", False, False),
+            ("pl.system.barrier(pipe=pl.PipeType.ALL)", True, False),
+        ],
+    )
+    def test_workspace_reuse_requires_an_unconditional_full_barrier(self, barrier, observe_after, can_reuse):
+        """Hidden workspace writes may reuse only fully retired allocation regions."""
+        source = """
+import pypto.language as pl
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def main(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[16, 16], pl.FP32],
+             sink: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+             output: pl.Out[pl.Tensor[[16, 16], pl.FP32]], cond: pl.Scalar[pl.BOOL]):
+        dead = pl.tile.load(a, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+        sink0 = pl.tile.store(dead, [0, 0], sink)
+        BARRIER
+        for i, (dest,) in pl.range(4, init_values=(output,)):
+            src = pl.tile.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            tmp = pl.tile.create([128, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            mask = pl.tile.cmps(src, 0.0, cmp_type=4)
+            dst = pl.tile.sels(mask, src, tmp, -1.0)
+            stored = pl.tile.store(dst, [0, 0], dest)
+            result = pl.yield_(stored)
+        OBSERVE
+        return
+"""
+        source = source.replace("BARRIER", barrier.replace("\n", "\n        "))
+        source = source.replace(
+            "OBSERVE", "later = pl.tile.store(dead, [0, 0], sink0)" if observe_after else ""
+        )
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        after = _run_pipeline(pl.parse_program(source))
+        bases = _collect_tile_memref_bases(after)
+        assert (bases["dead"] == bases["tmp"]) == can_reuse
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_written_workspace_does_not_inherit_a_buffer_a_preceding_op_reads(self, backend_type):
@@ -9341,6 +9454,139 @@ class TestAliasingOutputPropagation:
             for name, memref in memrefs.items():
                 assert _same_base_address(memref, memrefs["seed"]), f"{name} left the written L1 buffer"
         assert "pl.tile.move(" not in after.as_python(), "phi repair emitted an unlowerable Mat->Mat move"
+
+
+class TestBranchOrderCapacity:
+    """Port CSA capacity regressions while preserving real old-value conflicts."""
+
+    def test_branch_local_gather_loop_reuses_sibling_storage(self, ascend_backend):
+        """A fresh gather destination in one arm is dead on the sibling path."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 512], pl.BF16],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[64, 512], pl.BF16]],
+                state: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 512], pl.BF16], pl.Tensor[[64, 256], pl.FP32]]:
+                first = pl.tile.full([32, 256], dtype=pl.FP32, value=0.0)
+                second = pl.tile.full([32, 256], dtype=pl.FP32, value=0.0)
+                flag = pl.tensor.read(flags, [0])
+                for i, (s0, s1) in pl.range(2, init_values=(first, second)):
+                    seed = pl.tile.full([64, 512], dtype=pl.BF16, value=0.0)
+                    if flag != 0:
+                        filled = pl.tile.gather_row(seed, pool, [0, 0], [0, 0], [64, 512])
+                        selected = filled
+                    else:
+                        fresh = pl.tile.full([64, 512], dtype=pl.BF16, value=0.0)
+                        for j, (carry,) in pl.range(64, init_values=(fresh,)):
+                            if j < flag:
+                                next_value = pl.tile.gather_row(carry, pool, [j, 0], [j, 0], [1, 512])
+                            else:
+                                next_value = carry
+                            gathered = pl.yield_(next_value)
+                        selected = gathered
+                    out = pl.tile.store(selected, [0, 0], out)
+                    next0 = pl.tile.add(s0, 1.0)
+                    next1 = pl.tile.add(s1, 2.0)
+                    result0, result1 = pl.yield_(next0, next1)
+                state0 = pl.tile.store(result0, [0, 0], state)
+                state1 = pl.tile.store(result1, [32, 0], state0)
+                return out, state1
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        passes.allocate_memory_addr()(after)
+
+    def test_branch_gather_keeps_independently_observed_outer_seed(self, ascend_backend):
+        """A branch-local alias must not hide a surviving pre-if allocation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[64, 512], pl.BF16],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[128, 512], pl.BF16]],
+            ) -> pl.Tensor[[128, 512], pl.BF16]:
+                seed = pl.tile.full([64, 512], dtype=pl.BF16, value=0.0)
+                flag = pl.tensor.read(flags, [0])
+                if flag != 0:
+                    selected = pl.tile.gather_row(seed, pool, [0, 0], [0, 0], [64, 512])
+                else:
+                    fresh = pl.tile.full([64, 512], dtype=pl.BF16, value=1.0)
+                    for j, (carry,) in pl.range(64, init_values=(fresh,)):
+                        updated = pl.tile.gather_row(carry, pool, [j, 0], [j, 0], [1, 512])
+                        gathered = pl.yield_(updated)
+                    selected = gathered
+                saved = pl.tile.store(selected, [0, 0], out)
+                original = pl.tile.store(seed, [64, 0], saved)
+                return original
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        allocated = passes.allocate_memory_addr()(after)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        seed, fresh = ranges["seed__ssa_v0"], ranges["fresh__ssa_v0"]
+        assert seed[0] + seed[1] <= fresh[0] or fresh[0] + fresh[1] <= seed[0]
+
+    def test_conditional_reset_preserves_same_branch_tail_read(self, ascend_backend):
+        """Reversing sibling order must preserve reads after a same-arm write."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 256], pl.FP32],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[192, 256], pl.FP32]],
+            ) -> pl.Tensor[[192, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
+                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+                flag = pl.tensor.read(flags, [0])
+                if flag != 0:
+                    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+                    out = pl.tile.store(current, [64, 0], out)
+                    selected = reset
+                else:
+                    selected = current
+                saved = pl.tile.store(selected, [0, 0], out)
+                result = pl.tile.store(held, [128, 0], saved)
+                return result
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        with pytest.raises(ValueError, match="exceeds"):
+            passes.allocate_memory_addr()(after)
+
+    def test_conditional_reset_preserves_loop_invariant(self, ascend_backend):
+        """A sibling-only read can recur on a later loop iteration."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
+                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+                for i in pl.range(2):
+                    if i == 0:
+                        reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+                        selected = reset
+                    else:
+                        selected = current
+                    out = pl.tile.store(selected, [0, 0], out)
+                result = pl.tile.store(held, [64, 0], out)
+                return result
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        with pytest.raises(ValueError, match="exceeds"):
+            passes.allocate_memory_addr()(after)
 
 
 class TestChainedInPlaceIfPhis:

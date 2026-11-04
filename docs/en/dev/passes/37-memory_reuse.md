@@ -33,6 +33,10 @@ both would erase alternatives before DSA-RP can evaluate them. Correctness
 facts collected for this pass—lifetime interference, semantic no-alias rules,
 and target hazards—remain hard constraints in the DSA-RP problem.
 
+When whole-buffer packing exceeds the hardware capacity, the planner also checks lifetimes with sibling `if` arms visited in reverse order. A pair is considered interfering only if its lifetimes overlap in both traversals. Statement order within each arm and loop lifetime extension are preserved. This bounded retry retains alias, pipeline and hardware hazard constraints, and keeps the previous packing if the new footprint is larger.
+
+This retry operates on separate allocations; it does not merge slots inside a materialized multi-slot storage-selection pool. The stronger conditional-reset reuse optimization is tracked separately in [#3256](https://github.com/hw-native-sys/pypto/issues/3256). Old-value observations and loop recurrence remain hard constraints.
+
 ## API
 
 | C++ | Python | Level |
@@ -376,3 +380,9 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 - Tests semantic alias chains after writeback retargeting, including view offsets, same-allocation window changes, pipeline slots, unresolved if-phis, and normalization idempotence
 - Tests redundant alloc statement removal
 - Tests control flow lifetime analysis (nested IfStmt in ForStmt, branch variable sharing)
+
+When fixed-size subdivision still exceeds capacity, the legacy Tile planner also tries growing a compiler-owned, zero-based, single-slot arena within the real hardware limit. All lifetime, hazard, pinned-allocation and pipeline checks still apply. Each tile keeps its original byte window; the allocation and address-assignment footprint cover the union of those windows. Typed Buffer IR roots are excluded. This bounded retry can fit phases such as 48+12 KiB followed by 32+32 KiB in 64 KiB, while a genuinely concurrent 64+12 KiB remains an overflow.
+
+After reuse, a branch whose two arms already yield the same physical window propagates that window to its result before later loops bind their initializers. This avoids stale phi metadata splitting one L0C accumulator family and requesting an unsupported Acc-to-Acc move. Divergent arms still require the existing coalescing or yield reconciliation.
+
+Written workspaces retain their conservative isolation within a region, including across loop back edges. Reuse across regions is allowed only when an unconditional top-level `system.bar_all` separates every reference to both allocation roots. Single-pipe barriers, conditional barriers and barriers inside loops do not establish this proof. A root observed on both sides remains isolated.

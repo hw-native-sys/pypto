@@ -104,3 +104,11 @@ Python 提供后端目录的查询，不能构造或注册自定义目录。
 此组件为后续同步工作提供资源事实，尚未包含宏注册表或资源分配器。
 ISA 宏的隐藏占用、事件 ID 分配和资源压力修复均不属于当前接口的职责。
 默认自动插同步路径继续使用 PTOAS。
+
+### 本地信号兼容接口
+
+`pl.system.bar_all()` 与 `pl.system.barrier(pipe=pl.PipeType.ALL)`
+生成相同的核内 barrier IR。
+`signal_wait(..., backoff_ticks=N)` 将非负 INT32 设备时钟 tick 数保留为
+PTO `backoffTicks`；非零值需要 PTOAS 的 A3 本地信号退避扩展，零值使用普通
+TWAIT。无需改写算子前端源码。

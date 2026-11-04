@@ -1,0 +1,861 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Reduced lowered-IR fixture: reused accumulator passes through successive K-block phis."""
+
+import pypto.language as pl
+
+CSA_FULL_MPROJ = pl.dynamic("CSA_FULL_MPROJ")
+CSA_FULL_T = pl.dynamic("CSA_FULL_T")
+
+
+@pl.program
+class AccumulatorRepro:
+    @pl.function(type=pl.FunctionType.AIC, level=pl.Level.AIC, role=pl.Role.SubWorker)
+    def cube_schedule_aic(
+        normed_ssa_v0: pl.InOut[
+            pl.Tensor[[CSA_FULL_T, 4096], pl.BF16, pl.MemRef("mem_ddr_4", pl.const(0, pl.INT64), 0)]
+        ],
+        main_wkv__ssa_v0: pl.Tensor[
+            [1024, 4096], pl.BF16, pl.MemRef("mem_ddr_12", pl.const(0, pl.INT64), 8388608)
+        ],
+        main_value_ssa_v0: pl.InOut[
+            pl.Tensor[[CSA_FULL_MPROJ, 1024], pl.FP32, pl.MemRef("mem_ddr_14", pl.const(0, pl.INT64), 0)]
+        ],
+        probe_out: pl.Out[pl.Tensor[[64, 128], pl.FP32, pl.MemRef("probe_ddr", 0, 32768)]],
+    ):
+        pl.func_attr(
+            {"nz_tensor_views_blocked": True, "mx_tensor_views_blocked": True, "buffer_ir_selected": False}
+        )
+        mem_acc_probe: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 32768)
+        probe_acc: pl.Tile[[64, 128], pl.FP32, pl.MemRef(mem_acc_probe, 0, 32768), pl.Mem.Acc] = (
+            pl._dump.call(
+                "tile.create",
+                [[64, 128]],
+                pl.Tile[[64, 128], pl.FP32, pl.Mem.Acc],
+                kwargs={"dtype": pl.FP32, "target_memory": pl.Mem.Acc},
+            )
+        )
+        _probe_result: pl.Tensor[[64, 128], pl.FP32, pl.MemRef("probe_ddr", 0, 32768)] = pl._dump.call(
+            "tile.store", [probe_acc, [0, 0], probe_out], pl.Tensor[[64, 128], pl.FP32]
+        )
+        mem_acc_256: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 16384)
+        mem_mat_258: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 65536)
+        mem_mat_259: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 65536)
+        mem_mat_261: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 65536)
+        mem_mat_262: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 65536)
+        mem_left_265: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_266: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_267: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_268: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_276: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_277: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_278: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_279: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_289: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_290: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_291: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_292: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_300: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_301: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        mem_left_302: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 32768)
+        mem_right_303: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 32768)
+        worker__ssa_v0: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+        bs_ssa_v0: pl.Scalar[pl.INDEX] = pl._dump.call("tensor.dim", [normed_ssa_v0, 0], pl.Scalar[pl.INDEX])
+        t_matmul_ssa_v0: pl.Scalar[pl.INDEX] = (bs_ssa_v0 + 63) // 64 * 64
+        for idx_idx_v0, (main_value__iter_v1,) in pl.range(
+            worker__ssa_v0, t_matmul_ssa_v0 // 4, 24, init_values=(main_value_ssa_v0,)
+        ):
+            global_row0_ssa_v0: pl.Scalar[pl.INDEX] = idx_idx_v0 // 16 * 64
+            o0_ssa_v0: pl.Scalar[pl.INDEX] = idx_idx_v0 % 16 * 64
+            x_rows_ssa_v0: pl.Scalar[pl.INDEX] = pl.min(bs_ssa_v0 - global_row0_ssa_v0, 64)
+            kv_acc_tile_narrowed_storage: pl.Tile[
+                [64, 64],
+                pl.FP32,
+                pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                pl.Mem.Acc,
+                pl.TileView(compact=pl.CompactMode.normal),
+            ] = pl._dump.call(
+                "tile.create",
+                [[64, 64]],
+                pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc, pl.TileView(compact=pl.CompactMode.normal)],
+                kwargs={"dtype": pl.FP32, "target_memory": pl.Mem.Acc, "compact": True},
+            )
+            kv_acc_tile_narrowed: pl.Tile[
+                [64, 64],
+                pl.FP32,
+                pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                pl.Mem.Acc,
+                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+            ] = pl._dump.call(
+                "tile.set_validshape",
+                [kv_acc_tile_narrowed_storage, x_rows_ssa_v0, 64],
+                pl.Tile[
+                    [64, 64],
+                    pl.FP32,
+                    pl.Mem.Acc,
+                    pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                ],
+            )
+            for kb_idx_v0, (kv_acc_iter_v1,) in pl.range(0, 8, 2, init_values=(kv_acc_tile_narrowed,)):
+                k0_ssa_v0: pl.Scalar[pl.INDEX] = kb_idx_v0 * 512
+                k0_ssa_v0_1: pl.Scalar[pl.INDEX] = (kb_idx_v0 + 1) * 512
+                x_tile_tile: pl.Tile[
+                    [64, 512],
+                    pl.BF16,
+                    pl.MemRef(mem_mat_258, pl.const(0, pl.INT64), 65536),
+                    pl.Mem.Mat,
+                    pl.TileView(valid_shape=[x_rows_ssa_v0, 512]),
+                ] = pl._dump.call(
+                    "tile.load",
+                    [normed_ssa_v0, [global_row0_ssa_v0, k0_ssa_v0], [64, 512], [x_rows_ssa_v0, 512]],
+                    pl.Tile[[64, 512], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[x_rows_ssa_v0, 512])],
+                    kwargs={"target_memory": pl.Mem.Mat},
+                    attrs={"pipeline_membership": "15:0"},
+                )
+                wkv_tile_tile: pl.Tile[
+                    [64, 512], pl.BF16, pl.MemRef(mem_mat_259, pl.const(0, pl.INT64), 65536), pl.Mem.Mat
+                ] = pl._dump.call(
+                    "tile.load",
+                    [main_wkv__ssa_v0, [o0_ssa_v0, k0_ssa_v0], [64, 512], [64, 512]],
+                    pl.Tile[[64, 512], pl.BF16, pl.Mem.Mat],
+                    kwargs={"target_memory": pl.Mem.Mat},
+                    attrs={"pipeline_membership": "15:0"},
+                )
+                x_tile_tile_1: pl.Tile[
+                    [64, 512],
+                    pl.BF16,
+                    pl.MemRef(mem_mat_261, pl.const(0, pl.INT64), 65536),
+                    pl.Mem.Mat,
+                    pl.TileView(valid_shape=[x_rows_ssa_v0, 512]),
+                ] = pl._dump.call(
+                    "tile.load",
+                    [normed_ssa_v0, [global_row0_ssa_v0, k0_ssa_v0_1], [64, 512], [x_rows_ssa_v0, 512]],
+                    pl.Tile[[64, 512], pl.BF16, pl.Mem.Mat, pl.TileView(valid_shape=[x_rows_ssa_v0, 512])],
+                    kwargs={"target_memory": pl.Mem.Mat},
+                    attrs={"pipeline_membership": "15:1"},
+                )
+                wkv_tile_tile_1: pl.Tile[
+                    [64, 512], pl.BF16, pl.MemRef(mem_mat_262, pl.const(0, pl.INT64), 65536), pl.Mem.Mat
+                ] = pl._dump.call(
+                    "tile.load",
+                    [main_wkv__ssa_v0, [o0_ssa_v0, k0_ssa_v0_1], [64, 512], [64, 512]],
+                    pl.Tile[[64, 512], pl.BF16, pl.Mem.Mat],
+                    kwargs={"target_memory": pl.Mem.Mat},
+                    attrs={"pipeline_membership": "15:1"},
+                )
+                if kb_idx_v0 == 0:
+                    wkv_tile_tile_t: pl.Tile[
+                        [512, 64],
+                        pl.BF16,
+                        pl.MemRef(mem_mat_259, pl.const(0, pl.INT64), 65536),
+                        pl.Mem.Mat,
+                        pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                    ] = pl._dump.call(
+                        "tile.transpose_view",
+                        [wkv_tile_tile],
+                        pl.Tile[
+                            [512, 64],
+                            pl.BF16,
+                            pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                        ],
+                        attrs={"pipeline_membership": "15:0"},
+                    )
+                    kv_acc_tile_l0_init_storage: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                        pl.Mem.Acc,
+                        pl.TileView(compact=pl.CompactMode.normal),
+                    ] = pl._dump.call(
+                        "tile.create",
+                        [[64, 64]],
+                        pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc, pl.TileView(compact=pl.CompactMode.normal)],
+                        kwargs={"dtype": pl.FP32, "target_memory": pl.Mem.Acc, "compact": True},
+                        attrs={"pipeline_membership": "15:0"},
+                    )
+                    kv_acc_tile_l0_init: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                        pl.Mem.Acc,
+                        pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                    ] = pl._dump.call(
+                        "tile.set_validshape",
+                        [kv_acc_tile_l0_init_storage, x_rows_ssa_v0, 64],
+                        pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ],
+                        attrs={"pipeline_membership": "15:0"},
+                    )
+                    for kv_acc_tile_l0_ko, (kv_acc_tile_l0_c,) in pl.range(
+                        0, 512, 512, init_values=(kv_acc_tile_l0_init,)
+                    ):
+                        kv_acc_tile_l0_a: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_265, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile, 0, kv_acc_tile_l0_ko, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "11:0;15:0"},
+                        )
+                        kv_acc_tile_l0_b: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_266, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t, kv_acc_tile_l0_ko, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "11:0;15:0"},
+                        )
+                        kv_acc_tile_l0_a_1: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_267, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile, 0, kv_acc_tile_l0_ko + 256, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "11:1;15:0"},
+                        )
+                        kv_acc_tile_l0_b_1: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_268, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t, kv_acc_tile_l0_ko + 256, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "11:1;15:0"},
+                        )
+                        kv_acc_tile_l0_c_acc: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [kv_acc_tile_l0_c, kv_acc_tile_l0_a, kv_acc_tile_l0_b, kv_acc_tile_l0_ko == 0],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_l0_c_acc_1: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [
+                                kv_acc_tile_l0_c_acc,
+                                kv_acc_tile_l0_a_1,
+                                kv_acc_tile_l0_b_1,
+                                kv_acc_tile_l0_ko + 256 == 0,
+                            ],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl.yield_(kv_acc_tile_l0_c_acc_1)
+                    (kv_acc_phi_v5,) = pl._dump.yield_(
+                        kv_acc_tile,
+                        types=[
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ]
+                        ],
+                    )
+                else:
+                    wkv_tile_tile_t_1: pl.Tile[
+                        [512, 64],
+                        pl.BF16,
+                        pl.MemRef(mem_mat_259, pl.const(0, pl.INT64), 65536),
+                        pl.Mem.Mat,
+                        pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                    ] = pl._dump.call(
+                        "tile.transpose_view",
+                        [wkv_tile_tile],
+                        pl.Tile[
+                            [512, 64],
+                            pl.BF16,
+                            pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                        ],
+                        attrs={"pipeline_membership": "15:0"},
+                    )
+                    for kv_acc_tile_l0_ko_1, (kv_acc_tile_l0_c_1,) in pl.range(
+                        0, 512, 512, init_values=(kv_acc_iter_v1,)
+                    ):
+                        kv_acc_tile_l0_a_2: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_276, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile, 0, kv_acc_tile_l0_ko_1, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "13:0;15:0"},
+                        )
+                        kv_acc_tile_l0_b_2: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_277, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t_1, kv_acc_tile_l0_ko_1, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "13:0;15:0"},
+                        )
+                        kv_acc_tile_l0_a_3: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_278, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile, 0, kv_acc_tile_l0_ko_1 + 256, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "13:1;15:0"},
+                        )
+                        kv_acc_tile_l0_b_3: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_279, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t_1, kv_acc_tile_l0_ko_1 + 256, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "13:1;15:0"},
+                        )
+                        kv_acc_tile_l0_c_acc_2: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [kv_acc_tile_l0_c_1, kv_acc_tile_l0_a_2, kv_acc_tile_l0_b_2],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_l0_c_acc_3: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [kv_acc_tile_l0_c_acc_2, kv_acc_tile_l0_a_3, kv_acc_tile_l0_b_3],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_1: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl.yield_(kv_acc_tile_l0_c_acc_3)
+                    kv_acc_tile_2: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                        pl.Mem.Acc,
+                        pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                    ] = kv_acc_tile_1
+                    (kv_acc_phi_v5,) = pl._dump.yield_(
+                        kv_acc_tile_2,
+                        types=[
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ]
+                        ],
+                    )
+                if kb_idx_v0 + 1 == 0:
+                    wkv_tile_tile_t_2: pl.Tile[
+                        [512, 64],
+                        pl.BF16,
+                        pl.MemRef(mem_mat_262, pl.const(0, pl.INT64), 65536),
+                        pl.Mem.Mat,
+                        pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                    ] = pl._dump.call(
+                        "tile.transpose_view",
+                        [wkv_tile_tile_1],
+                        pl.Tile[
+                            [512, 64],
+                            pl.BF16,
+                            pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                        ],
+                        attrs={"pipeline_membership": "15:1"},
+                    )
+                    kv_acc_tile_l0_init_storage_1: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                        pl.Mem.Acc,
+                        pl.TileView(compact=pl.CompactMode.normal),
+                    ] = pl._dump.call(
+                        "tile.create",
+                        [[64, 64]],
+                        pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc, pl.TileView(compact=pl.CompactMode.normal)],
+                        kwargs={"dtype": pl.FP32, "target_memory": pl.Mem.Acc, "compact": True},
+                        attrs={"pipeline_membership": "15:1"},
+                    )
+                    kv_acc_tile_l0_init_1: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                        pl.Mem.Acc,
+                        pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                    ] = pl._dump.call(
+                        "tile.set_validshape",
+                        [kv_acc_tile_l0_init_storage_1, x_rows_ssa_v0, 64],
+                        pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ],
+                        attrs={"pipeline_membership": "15:1"},
+                    )
+                    for kv_acc_tile_l0_ko_2, (kv_acc_tile_l0_c_2,) in pl.range(
+                        0, 512, 512, init_values=(kv_acc_tile_l0_init_1,)
+                    ):
+                        kv_acc_tile_l0_a_4: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_289, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile_1, 0, kv_acc_tile_l0_ko_2, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "11:0;15:1"},
+                        )
+                        kv_acc_tile_l0_b_4: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_290, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t_2, kv_acc_tile_l0_ko_2, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "11:0;15:1"},
+                        )
+                        kv_acc_tile_l0_a_5: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_291, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile_1, 0, kv_acc_tile_l0_ko_2 + 256, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "11:1;15:1"},
+                        )
+                        kv_acc_tile_l0_b_5: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_292, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t_2, kv_acc_tile_l0_ko_2 + 256, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "11:1;15:1"},
+                        )
+                        kv_acc_tile_l0_c_acc_4: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [
+                                kv_acc_tile_l0_c_2,
+                                kv_acc_tile_l0_a_4,
+                                kv_acc_tile_l0_b_4,
+                                kv_acc_tile_l0_ko_2 == 0,
+                            ],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_l0_c_acc_5: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [
+                                kv_acc_tile_l0_c_acc_4,
+                                kv_acc_tile_l0_a_5,
+                                kv_acc_tile_l0_b_5,
+                                kv_acc_tile_l0_ko_2 + 256 == 0,
+                            ],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_3: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl.yield_(kv_acc_tile_l0_c_acc_5)
+                    (kv_acc_phi_v5_1,) = pl._dump.yield_(
+                        kv_acc_tile_3,
+                        types=[
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ]
+                        ],
+                    )
+                else:
+                    wkv_tile_tile_t_3: pl.Tile[
+                        [512, 64],
+                        pl.BF16,
+                        pl.MemRef(mem_mat_262, pl.const(0, pl.INT64), 65536),
+                        pl.Mem.Mat,
+                        pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                    ] = pl._dump.call(
+                        "tile.transpose_view",
+                        [wkv_tile_tile_1],
+                        pl.Tile[
+                            [512, 64],
+                            pl.BF16,
+                            pl.Mem.Mat,
+                            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                        ],
+                        attrs={"pipeline_membership": "15:1"},
+                    )
+                    for kv_acc_tile_l0_ko_3, (kv_acc_tile_l0_c_3,) in pl.range(
+                        0, 512, 512, init_values=(kv_acc_phi_v5,)
+                    ):
+                        kv_acc_tile_l0_a_6: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_300, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile_1, 0, kv_acc_tile_l0_ko_3, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "13:0;15:1"},
+                        )
+                        kv_acc_tile_l0_b_6: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_301, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t_3, kv_acc_tile_l0_ko_3, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "13:0;15:1"},
+                        )
+                        kv_acc_tile_l0_a_7: pl.Tile[
+                            [64, 256],
+                            pl.BF16,
+                            pl.MemRef(mem_left_302, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Left,
+                            pl.TileView(
+                                valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                blayout=pl.TileLayout.row_major,
+                                compact=pl.CompactMode.normal,
+                            ),
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [x_tile_tile_1, 0, kv_acc_tile_l0_ko_3 + 256, [64, 256]],
+                            pl.Tile[
+                                [64, 256],
+                                pl.BF16,
+                                pl.Mem.Left,
+                                pl.TileView(
+                                    valid_shape=[pl.min(x_rows_ssa_v0, pl.const(64, pl.INDEX)), 256],
+                                    blayout=pl.TileLayout.row_major,
+                                    compact=pl.CompactMode.normal,
+                                ),
+                            ],
+                            kwargs={"target_memory": pl.Mem.Left},
+                            attrs={"pipeline_membership": "13:1;15:1"},
+                        )
+                        kv_acc_tile_l0_b_7: pl.Tile[
+                            [256, 64],
+                            pl.BF16,
+                            pl.MemRef(mem_right_303, pl.const(0, pl.INT64), 32768),
+                            pl.Mem.Right,
+                        ] = pl._dump.call(
+                            "tile.extract",
+                            [wkv_tile_tile_t_3, kv_acc_tile_l0_ko_3 + 256, 0, [256, 64]],
+                            pl.Tile[[256, 64], pl.BF16, pl.Mem.Right],
+                            kwargs={"target_memory": pl.Mem.Right},
+                            attrs={"pipeline_membership": "13:1;15:1"},
+                        )
+                        kv_acc_tile_l0_c_acc_6: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [kv_acc_tile_l0_c_3, kv_acc_tile_l0_a_6, kv_acc_tile_l0_b_6],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_l0_c_acc_7: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl._dump.call(
+                            "tile.matmul_acc",
+                            [kv_acc_tile_l0_c_acc_6, kv_acc_tile_l0_a_7, kv_acc_tile_l0_b_7],
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ],
+                        )
+                        kv_acc_tile_4: pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ] = pl.yield_(kv_acc_tile_l0_c_acc_7)
+                    kv_acc_tile_5: pl.Tile[
+                        [64, 64],
+                        pl.FP32,
+                        pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                        pl.Mem.Acc,
+                        pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                    ] = kv_acc_tile_4
+                    (kv_acc_phi_v5_1,) = pl._dump.yield_(
+                        kv_acc_tile_5,
+                        types=[
+                            pl.Tile[
+                                [64, 64],
+                                pl.FP32,
+                                pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                                pl.Mem.Acc,
+                                pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                            ]
+                        ],
+                    )
+                (kv_acc_rv_v2,) = pl._dump.yield_(
+                    kv_acc_phi_v5_1,
+                    types=[
+                        pl.Tile[
+                            [64, 64],
+                            pl.FP32,
+                            pl.MemRef(mem_acc_256, pl.const(0, pl.INT64), 16384),
+                            pl.Mem.Acc,
+                            pl.TileView(valid_shape=[x_rows_ssa_v0, 64], compact=pl.CompactMode.normal),
+                        ]
+                    ],
+                )
+            main_value__tile: pl.Tensor[
+                [CSA_FULL_MPROJ, 1024], pl.FP32, pl.MemRef("mem_ddr_14", pl.const(0, pl.INT64), 0)
+            ] = pl._dump.call(
+                "tile.store",
+                [kv_acc_rv_v2, [global_row0_ssa_v0, o0_ssa_v0], main_value__iter_v1],
+                pl.Tensor[[CSA_FULL_MPROJ, 1024], pl.FP32],
+            )
+            (main_value__rv_v2,) = pl._dump.yield_(
+                main_value__tile,
+                types=[
+                    pl.Tensor[
+                        [CSA_FULL_MPROJ, 1024], pl.FP32, pl.MemRef("mem_ddr_14", pl.const(0, pl.INT64), 0)
+                    ]
+                ],
+            )
+        return  # noqa: PLR1711 -- explicit return in a lowered-IR fixture

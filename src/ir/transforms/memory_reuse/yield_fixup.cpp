@@ -80,6 +80,37 @@ namespace {
  */
 class AlignLoopCarriesToInitMutator : public IRMutator {
  public:
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto visited = As<IfStmt>(IRMutator::VisitStmt_(op));
+    if (!visited->else_body_) return visited;
+    auto then_yield = FindYieldStmt(visited->then_body_);
+    auto else_yield = FindYieldStmt(*visited->else_body_);
+    if (!then_yield || !else_yield) return visited;
+    auto returns = visited->return_vars_;
+    bool changed = false;
+    for (size_t i = 0; i < returns.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
+         ++i) {
+      auto lhs = GetTileTypeWithMemRef(then_yield->value_[i]->GetType());
+      auto rhs = GetTileTypeWithMemRef(else_yield->value_[i]->GetType());
+      auto result = GetTileTypeWithMemRef(returns[i]->GetType());
+      // Reuse does not visit phi definitions. Propagate an already-agreed
+      // branch window before a later loop uses this phi as its initializer.
+      // Divergent arms still belong to accumulator coalescing / YieldFixup.
+      if (!SameKnownTileMemorySpace(lhs, rhs) || !SameKnownTileMemorySpace(lhs, result) ||
+          !SamePhysicalWindow(GetDefinedMemRef(lhs), GetDefinedMemRef(rhs)) ||
+          SamePhysicalWindow(GetDefinedMemRef(result), GetDefinedMemRef(lhs)))
+        continue;
+      auto type = CloneTypeWithMemRef(result, GetDefinedMemRef(lhs), lhs->GetMemorySpace());
+      returns[i] = std::make_shared<Var>(returns[i]->name_hint_, type, returns[i]->span_);
+      var_remap_[op->return_vars_[i].get()] = returns[i];
+      changed = true;
+    }
+    if (!changed) return visited;
+    auto updated = MutableCopy(visited);
+    updated->return_vars_ = std::move(returns);
+    return updated;
+  }
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     if (op->iter_args_.empty()) return IRMutator::VisitStmt_(op);
 

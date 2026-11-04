@@ -1879,6 +1879,41 @@ def test_accumulator_with_tile_create_classifies_as_pure_aic():
     )
 
 
+def test_dead_vec_metadata_does_not_split_cube_kernel():
+    """Acc narrowing leaves obsolete Vec declarations inside the original loop.
+
+    They must not create a second AIV member in an authored AIC/AIV group.
+    Keep executable operations and loop structure; remove only the dead handles.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, a: pl.Tensor[[16, 16], pl.BF16], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+            for _i in pl.range(2):
+                _unused = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                _refined = pl.tile.set_validshape(_unused, 16, 16)
+                _tail = pl.tile.set_validshape(_refined, 8, 16)
+                left = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                right = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(left, right)
+                pl.tile.store(result, [0, 0], out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel(self, a: pl.Tensor[[16, 16], pl.BF16], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+            for _i in pl.range(2):
+                left = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                right = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(left, right)
+                pl.tile.store(result, [0, 0], out)
+
+    ir.assert_structural_equal(
+        _run_pipeline(Before), passes.infer_tile_memory_space()(passes.convert_to_ssa()(Expected))
+    )
+
+
 def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
     """Regression for issue #1413.
 

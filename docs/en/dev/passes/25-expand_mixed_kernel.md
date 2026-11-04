@@ -19,6 +19,13 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+Before classifying an InCore body, the pass removes unused `tile.create` and
+`tile.set_validshape` chains, including nested ones. Accumulator narrowing can
+leave obsolete Vec metadata after replacing its storage with Acc storage; that
+metadata must not turn a pure Cube function into a mixed kernel. This cleanup
+preserves executable operations and synchronization, even with unused results,
+and preserves the original body identity when no declaration is removed.
+
 ### Shared argument ABI for hand-written Groups
 
 One runtime `MixedKernels` submission creates a co-scheduled AIC/AIV task whose
