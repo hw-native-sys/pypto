@@ -35,25 +35,22 @@ def _emit(program: ir.Program, planner: passes.MemoryPlanner, compile_dir=None) 
     """Use the production pipeline, including legalization after vector splitting."""
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
-    sources = []
-    for function in optimized.functions.values():
-        if ir.is_incore_type(function.func_type):
-            single = ir.Program([function], function.name, optimized.span)
-            source = codegen.PTOCodegen().generate(
-                single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS
-            )
-            sources.append(source)
-            if compile_dir is not None and find_ptoas_binary() is not None:
-                pto = compile_dir / f"{function.name}.pto"
-                cpp = compile_dir / f"{function.name}.cpp"
-                pto.write_text(source)
-                level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
-                _run_ptoas(
-                    str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"]
-                )
-                assert cpp.is_file()
-    assert sources, "Expected an emitted InCore kernel"
-    return "\n".join(sources)
+    functions = [
+        function for function in optimized.functions.values() if ir.is_incore_type(function.func_type)
+    ]
+    assert functions, "Expected an emitted InCore kernel"
+    # Mixed kernels reference their peer's reserved buffers. Assemble both
+    # sides in one module so PTOAS can resolve every peer_func symbol.
+    kernels = ir.Program(functions, optimized.name, optimized.span)
+    source = codegen.PTOCodegen().generate(kernels, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    if compile_dir is not None and find_ptoas_binary() is not None:
+        pto = compile_dir / "kernels.pto"
+        cpp = compile_dir / "kernels.cpp"
+        pto.write_text(source)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
+        assert cpp.is_file()
+    return source
 
 
 def _casts(mlir: str) -> list[str]:

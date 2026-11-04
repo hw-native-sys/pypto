@@ -213,6 +213,9 @@ The successful rule also selects descriptor preparation and whether layout
 repair must preserve the current layout. Dense DN and direct packed-FP4-to-FP8
 conversions are table entries, not predicates maintained by individual passes.
 Ordinary unconstrained edges retain the existing backend layout-repair pipeline.
+Ordinary TCVT uses the destination's valid rectangle, allowing a full-box
+cross-core source and a consumer with narrower runtime validity. Packed edges
+set `matching_valid_shape` to require equal logical valid extents after unpacking.
 Scratch synthesis and post-allocation address-overlap checks remain separate
 because they need planning information unavailable to a pure native-rule query.
 BFS validates the inferred IR of each candidate hop through the same query.

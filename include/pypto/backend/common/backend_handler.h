@@ -47,6 +47,7 @@ struct TcvtConditions {
   bool null_compact = false;
   bool static_shape = false;
   bool static_valid = false;
+  bool matching_valid_shape = false;
   bool full_valid = false;
   bool dense_stride = false;
   bool zero_start_offset = false;

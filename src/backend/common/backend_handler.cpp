@@ -83,6 +83,10 @@ bool LogicalExtentsMatch(const ir::TileTypePtr& source, const ir::TileTypePtr& r
 
 bool CheckConditions(const TcvtConditions& rule, const ir::TileTypePtr& source, const ir::TileTypePtr& result,
                      DirectCastInfo& info) {
+  if (rule.matching_valid_shape &&
+      !LogicalExtentsMatch(source, result, ir::GetValidShape(source), ir::GetValidShape(result))) {
+    return Reject(info, "cast source/result logical valid extents disagree");
+  }
   const bool empty = ir::tile_view_semantics::IsZeroValidShapeSentinel(ir::GetValidShape(source)) &&
                      ir::tile_view_semantics::IsZeroValidShapeSentinel(ir::GetValidShape(result));
   // This is an internal no-data replay after splitting, not a relaxation for
@@ -191,10 +195,12 @@ bool BackendHandler::IsDirectCast(const ir::CallPtr& call, DirectCastInfo* detai
   if (mode < 0 || mode > 6 || (result->dtype_.IsPackedFp4() && mode == 6)) {
     return Reject(info, "cast rounding mode is unsupported");
   }
-  if (!LogicalExtentsMatch(source, result, source->shape_, result->shape_) ||
-      !LogicalExtentsMatch(source, result, ir::GetValidShape(source), ir::GetValidShape(result))) {
-    return Reject(info, "cast source/result logical shapes or valid extents disagree");
+  if (!LogicalExtentsMatch(source, result, source->shape_, result->shape_)) {
+    return Reject(info, "cast source/result logical shapes disagree");
   }
+  // Ordinary TCVT iterates the destination's valid rectangle. A cross-core
+  // transport can expose a full source box while the consumer keeps its
+  // runtime lane extent; equal validity is an edge-specific requirement.
   for (const auto& tile : {source, result}) {
     const auto valid = ir::GetValidShape(tile);
     if (valid.size() != tile->shape_.size()) return Reject(info, "cast valid rank mismatch");

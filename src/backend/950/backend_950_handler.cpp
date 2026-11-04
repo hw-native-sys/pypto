@@ -90,6 +90,7 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
           TcvtConditions nd;
           nd.layout = ir::TileLayout::row_major;
           nd.unboxed = true;
+          nd.matching_valid_shape = true;
           TcvtConditions dn = nd;
           dn.layout = ir::TileLayout::col_major;
           dn.static_shape = true;
@@ -109,6 +110,7 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
           direct.null_compact = true;
           direct.static_shape = true;
           direct.static_valid = true;
+          direct.matching_valid_shape = true;
           direct.dense_stride = true;
           direct.zero_start_offset = true;
           direct.vec_only = true;

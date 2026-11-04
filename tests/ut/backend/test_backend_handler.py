@@ -321,6 +321,23 @@ def test_direct_cast_dense_dn_rule_and_full_validity(source_dtype, result_dtype,
     assert not handler.is_direct_cast(partial)
 
 
+@pytest.mark.parametrize("target", [_backend_core.BackendType.Ascend910, _backend_core.BackendType.Ascend950])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_direct_cast_accepts_transport_box_with_narrowed_consumer(target, dynamic):
+    """Ordinary TCVT uses destination validity after a full-box cross-core pop."""
+    span = _ir_core.Span.unknown()
+    rows = _ir_core.Var("lane_rows", _ir_core.ScalarType(pl.INDEX), span) if dynamic else 20
+    call = _direct_cast_query(
+        pl.INT32,
+        pl.FP32,
+        [32, 128],
+        [32, 128],
+        result_view=_ir_core.TileView(valid_shape=[rows, 128]),
+    )
+    handler = _backend_core.get_backend_instance(target).get_handler()
+    assert handler.is_direct_cast(call)
+
+
 @pytest.mark.parametrize("case", ["shape", "valid", "round_mode", "saturation", "attribute_type"])
 def test_direct_cast_common_checks_also_apply_to_ordinary_types(case):
     """A native dtype edge alone does not validate malformed ordinary casts."""
