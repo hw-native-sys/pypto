@@ -2346,7 +2346,7 @@ jobs:
         shell: bash
         timeout-minutes: 125
         # Compile without reserving an NPU. Execution below consumes these
-        # production artifacts and checks all 18 ops across 126 numerical cases.
+        # production artifacts and checks all 18 ops across 154 numerical cases.
         run: |
           source activate.sh
           mkdir -p build
