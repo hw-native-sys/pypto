@@ -92,6 +92,42 @@ with ib.function("tensor_example") as f:
     ib.return_stmt(result)
 ```
 
+### GM subviews
+
+`pl.tensor.subview(source, shape, offsets, *, steps=None)` describes a window
+of an ordinary GM Tensor. It performs no load or allocation and retains parent
+storage pitches. Unlike `view`, it selects a strictly smaller window; unlike
+`slice`, it remains a GM descriptor during TensorToTile conversion.
+
+| Parameter | Meaning and constraint |
+| --------- | ---------------------- |
+| `source` | Ordinary GM Tensor; not Tile or DistributedTensor |
+| `shape` | Positive logical extents, with the same rank as the parent |
+| `offsets` | Nonnegative origin in the immediate parent's coordinates |
+| `steps` | Positive sampling steps, defaulting to one on every axis |
+
+For every axis, `offset + (shape - 1) * step` must be inside the parent's valid
+extent, and at least one logical extent must be strictly smaller. Statically
+invalid geometry is rejected; unknown dynamic bounds are allowed and remain
+the caller's responsibility. There is no control-flow proof requirement.
+
+The result keeps the source dtype/layout, multiplies parent strides by `steps`,
+and treats its whole logical shape as valid. Nested subviews are supported.
+The origin is recorded by a MemRef alias sharing the source allocation.
+Subview introduces no separate ownership, read-only or escape rules; consumers,
+metadata aliases and control flow follow the existing ordinary Tensor rules.
+An InCore source must remain a GM Tensor during conversion, just as for `view`;
+a computation already converted to Tile cannot be the source.
+
+Subview requires a contiguous inner storage axis: stride[-1] must be 1 for ND,
+and stride[-2] must be 1 for DN. Non-unit or unproven inner strides are rejected
+at construction, including descriptor-only uses. Outer-axis sampling remains
+supported when result strides satisfy the ordinary canonical layout relations;
+results use the ordinary TensorView canonical verifier. N-D loads retain source
+coordinates while the pipeline flattens the result Tile. Native consumers keep
+their existing dtype, rank, layout and device restrictions; subview itself adds
+no backend-specific DMA row-count, gap-width or alignment limits.
+
 ## TileOp: Hardware-Optimized Tile Operations
 
 **Purpose**: Hardware-optimized tile operations with explicit memory management

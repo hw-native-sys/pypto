@@ -415,6 +415,11 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   when loads/slices read outside the `valid_shape`. Peer of `TileView.pad`;
   `tensor.slice(..., pad_value=PadValue.zero)` writes this field.
 
+`tensor.subview` keeps its affine element strides in `TensorView`; its origin
+and allocation identity are resolved as a MemRef alias by `InitMemRef`.
+The result uses ordinary TensorView/MemRef semantics, without a separate
+ownership or provenance classification.
+
 #### Canonical TensorView form (RFC #1300)
 
 Per RFC #1300, the `(shape, stride, layout)` triple has a single canonical

@@ -27,6 +27,7 @@ __all__ = [
     "write",
     "dim",
     "slice",
+    "subview",
     "fillpad",
     "fillpad_expand",
     "full",
@@ -2757,3 +2758,46 @@ def get_block_num() -> Scalar:
     """
     call_expr = _ir_ops.get_block_num()
     return Scalar(expr=call_expr)
+
+
+def subview(
+    source: Tensor,
+    shape: Sequence[IntLike],
+    offsets: Sequence[IntLike],
+    *,
+    steps: Sequence[IntLike] | None = None,
+) -> Tensor:
+    """Describe a strictly contained affine GM window without copying data.
+
+    The source coordinate is ``offsets[i] + index[i] * steps[i]`` on each
+    axis. Result strides multiply the immediate parent's strides by steps;
+    offsets do not change the allocation or create a snapshot. Only an
+    explicit load (or a tensor compute consumer) materializes a Tile.
+
+    Args:
+        source: Ordinary Tensor source; Tile and DistributedTensor are rejected.
+        shape: Positive logical result extents, with the source rank.
+        offsets: Nonnegative origin in immediate parent coordinates.
+        steps: Positive sampling steps; defaults to one on every axis.
+            The inner storage axis must retain stride 1 (ND: last axis;
+            DN: second-to-last axis); non-unit or unproven inner strides are rejected.
+            Result strides must also satisfy the ordinary canonical layout relations.
+
+    Returns:
+        Ordinary Tensor descriptor sharing the source storage, with no new allocation.
+
+    Raises:
+        ValueError: Statically invalid geometry or noncanonical addressing.
+            Unknown dynamic bounds are allowed and remain the caller's responsibility.
+            Native consumers retain their existing dtype, layout and target
+            restrictions; subview adds no device-specific load limits.
+    """
+    if type(source) is not Tensor:
+        raise ValueError("tensor.subview requires an ordinary Tensor source")
+    call = _ir_ops.subview(
+        source.unwrap(),
+        _normalize_intlike(shape),
+        _normalize_intlike(offsets),
+        steps=None if steps is None else _normalize_intlike(steps),
+    )
+    return Tensor(expr=call)

@@ -95,6 +95,15 @@ For each `FunctionType::InCore` function:
 
    An operator that never declared its effects still counts as reading every argument. That default is now confined to operators the registry has nothing to say about — most of them functional — rather than being the fallback for a hand-maintained list that a new write operator silently escaped.
 
+### GM descriptors
+
+`tensor.subview` remains an ordinary GM Tensor descriptor. Its defining geometry
+is checked before conversion; unknown dynamic bounds are deferred. No ownership
+or read-only provenance is tracked. Metadata needed by a GM-only consumer, such
+as an explicit load or view construction, stays Tensor; purely computational
+metadata uses retain the existing Tile conversion. Consumer `tensor.slice` and
+compute conversions load from the descriptor using its actual pitch.
+
 ### GM Identity and Read/Write Ordering
 
 Loading a GM tensor for computation creates a tile value, not an alias that can

@@ -81,6 +81,36 @@ with ib.function("tensor_example") as f:
     ib.return_stmt(result)
 ```
 
+### GM 子视图（Subview）
+
+`pl.tensor.subview(source, shape, offsets, *, steps=None)` 描述普通 GM Tensor 的窗口，
+不执行 load 或分配，并保留父存储 pitch。与 `view` 不同，它选择严格更小的窗口；
+与 `slice` 不同，它在 TensorToTile 转换期间保持 GM 描述符。
+
+| 参数 | 含义及约束 |
+| ---- | ---------- |
+| `source` | 普通 GM Tensor；不支持 Tile、DistributedTensor |
+| `shape` | 正的逻辑长度，rank 与父视图一致 |
+| `offsets` | 在直接父视图坐标系中的非负起点 |
+| `steps` | 正的采样步长，省略时每一维均为 1 |
+
+每一维的 `offset + (shape - 1) * step` 必须位于父有效窗口内，至少一维逻辑长度
+严格缩小。静态可确定的非法几何参数拒绝；未知动态边界放行，由调用者保证正确。
+不要求通过控制流证明动态范围。
+
+结果保留来源 dtype/layout，将父 stride 乘以 `steps`，整个逻辑 shape 均有效。
+支持嵌套 subview，原点由共享来源分配的 MemRef 别名记录。
+Subview 不引入独立的所有权、只读或逃逸规则；消费者、元数据别名和控制流沿用
+普通 Tensor 的现有规则。与 `view` 相同，InCore 来源在转换后必须仍是 GM Tensor；
+已转换为 Tile 的计算结果不能作为来源。
+
+最内层存储轴必须连续：ND 的 stride[-1]、DN 的 stride[-2] 必须为 1。
+非 1 或无法证明为 1 的内层 stride 在构造时拒绝，即使没有 load 消费者也是如此。
+外层轴采样后的 stride 必须满足已有 canonical 布局关系，结果统一使用
+TensorView canonical 校验。N-D load 保留来源坐标，由流水线展平结果 Tile。
+原生消费者保留已有 dtype、rank、layout 和设备约束；subview 本身不增加
+后端专属 DMA 行数、行间隔位宽或对齐限制。
+
 ## TileOp：硬件优化 Tile 操作
 
 **用途**：带有显式内存管理的硬件优化 Tile 操作

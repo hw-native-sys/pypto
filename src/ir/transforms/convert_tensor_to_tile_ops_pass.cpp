@@ -26,6 +26,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tensor_subview.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -74,6 +75,7 @@ Pass ConvertTensorToTileOps() {
       // metadata effects; functional tensor-to-tile conversion must leave
       // their bodies and signatures intact.
       if (ShouldConvertTensorToTileOps(func)) {
+        VerifyTensorSubviews(func);
         auto result = TransformIncoreFunction(func);
         all_added_outputs.emplace(func->name_, std::move(result.added_outputs));
         all_transformed_funcs.emplace(func->name_, result.func);
@@ -381,6 +383,12 @@ class IncoreTileOpsVerifier : public IRVisitor {
       // conversion registry above keeps as ``tensor.read`` / ``tensor.write`` so the
       // PTO codegen can lower it as a local-rank ``pto.load`` / ``pto.store``.
       if ((IsOp(call, "tensor.read") || IsOp(call, "tensor.write")) && !call->args_.empty() &&
+          AsTensorTypeLike(call->args_[0]->GetType())) {
+        return;
+      }
+      // GM validity is descriptor metadata; only Tile operands must have
+      // converted to tile.set_validshape. No defining-op provenance is needed.
+      if (IsOp(call, "tensor.set_validshape") && !call->args_.empty() &&
           AsTensorTypeLike(call->args_[0]->GetType())) {
         return;
       }

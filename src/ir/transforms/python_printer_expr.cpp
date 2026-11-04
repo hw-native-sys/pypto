@@ -877,8 +877,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool mgather_kw_valid = mgather && ((mgather_coalesce == 0 && op->args_.size() == 3) ||
                                             (mgather_coalesce == 1 && op->args_.size() == 4));
 
+  const bool subview_kw_steps = IsOp(op, "tensor.subview") && op->args_.size() == 4;
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (subview_kw_steps && i == 3) continue;
     if (gather_row_kw_valid && i == 5) continue;
     if (acc_kw_init_cond && i == 3) continue;
     if (ci_kw_tmp && i == 2) continue;
@@ -904,6 +907,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
+  if (subview_kw_steps) {
+    stream_ << ", steps=";
+    VisitExpr(op->args_[3]);
+  }
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);
