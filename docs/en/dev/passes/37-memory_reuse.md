@@ -24,6 +24,11 @@ skips it so independent buffers remain visible to the DSA-RP solver;
 Semantics-required loop-carry and in-place aliases are already materialized by
 `MaterializeSemanticAliases` in all three modes.
 
+The preceding pass also chooses the capacity of compiler-created selection
+pools. A proven-safe [conditional reset](36-materialize_semantic_aliases.md#conditional-reset-storage)
+can enter planning as one shared static slot. Otherwise the two-slot pool retains
+its complete capacity; whole-allocation reuse never discards a live slot.
+
 ## Planner boundary
 
 `MemoryReuse` selects shared MemRef identities before address assignment.

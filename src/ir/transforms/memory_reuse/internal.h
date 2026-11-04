@@ -54,6 +54,11 @@ StmtPtr MaterializeStorageSelections(const StmtPtr& body, const std::vector<VarP
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
 
+// Access constraints keyed by individual outputs, before allocation lifetimes
+// exist. The selection planner already excludes declared and pipeline storage;
+// it folds these output constraints by physical base without copying alias groups.
+AllocationConstraintAnalysis CollectStorageSelectionConstraints(const FunctionPtr& function);
+
 // Offsets are bytes relative to the representative's existing MemRef window.
 // The representative owns the physical allocation; members retain their views.
 struct ReusePlacement {

@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
@@ -544,18 +545,27 @@ class DefMapVisitor : public IRVisitor {
   size_t next_order_ = 0;
 };
 
+using SelectionComponents = std::map<const Var*, std::vector<VarPtr>>;
+
+std::set<const Var*> FindSingleSlotSelections(const FunctionPtr& function, const DefMapVisitor& index,
+                                              const SelectionComponents& components,
+                                              const std::set<const Var*>& protected_bases);
+
 // Plan uniform compiler-owned storage selections before YieldFixup. The plan
 // separates slot ownership/lifetime decisions from the structured-SSA rewrite.
 // Definitions and binding edges are indexed once; union/find and cached slot
 // resolution keep the analysis O(N log N). Loop storage retains its existing
 // path; this repair only selects between two existing producer windows.
-StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
+StorageSelectionPlan BuildStorageSelectionPlan(const FunctionPtr& function) {
+  const auto& body = function->body_;
+  const auto& parameters = function->params_;
   DefMapVisitor index;
   index.Run(body);
   StorageNameSupply names;
   names.Collect(body, parameters);
   struct StorageContracts : IRVisitor {
     std::set<const Var*> bases;
+    std::set<const Var*> pipeline_bases;
     std::set<const Var*> written_values;
     void VisitExpr_(const IterArgPtr&) override {}
     // Protect every window touched by a loop. Do not recurse again here:
@@ -579,6 +589,12 @@ StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::v
       IRVisitor::VisitExpr_(call);
     }
     void VisitStmt_(const AssignStmtPtr& assign) override {
+      if (const auto call = As<Call>(assign->value_);
+          call && !call->GetAttr<std::string>(kPipelineMembershipAttr, std::string()).empty()) {
+        if (const auto memory = GetTypeMemRef(assign->var_->GetType())) {
+          pipeline_bases.insert((*memory)->base_.get());
+        }
+      }
       if (const auto call = As<Call>(assign->value_); call && IsOp(call, "tile.alloc")) {
         for (const auto& [name, value] : call->kwargs_) {
           if (name == "pinned" && AnyCast<bool>(value, "pinned")) bases.insert(assign->var_.get());
@@ -615,7 +631,7 @@ StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::v
       join(value.get(), source.get());
     }
   }
-  std::map<const Var*, std::vector<VarPtr>> components;
+  SelectionComponents components;
   std::map<const Var*, const Var*> storage_owners;
   for (const auto& [value, definition] : index.defs) {
     (void)definition;
@@ -630,6 +646,9 @@ StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::v
     }
   }
 
+  auto reuse_protected_bases = contracts.bases;
+  reuse_protected_bases.insert(contracts.pipeline_bases.begin(), contracts.pipeline_bases.end());
+  const auto single_slot = FindSingleSlotSelections(function, index, components, reuse_protected_bases);
   StorageSelectionPlan plan;
   const auto integer = [](uint64_t value, const Span& span) -> ExprPtr {
     return std::make_shared<ConstInt>(static_cast<int64_t>(value), DataType::INDEX, span);
@@ -652,7 +671,6 @@ StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::v
     return position->second;
   };
   for (const auto& [root, members] : components) {
-    (void)root;
     bool valid = true;
     bool selection = false;
     bool divergent = false;
@@ -742,10 +760,11 @@ StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::v
     std::sort(producers.begin(), producers.end(), [&](const VarPtr& a, const VarPtr& b) {
       return index.defs.at(a).order < index.defs.at(b).order;
     });
-    constexpr uint64_t count = 2;
+    const bool share = single_slot.count(root) != 0;
+    const uint64_t count = share ? 1 : 2;
     if (first->size_ > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / count) continue;
     std::map<const Var*, uint64_t> producer_slots;
-    for (size_t i = 0; i < producers.size(); ++i) producer_slots[producers[i].get()] = i;
+    for (size_t i = 0; i < producers.size(); ++i) producer_slots[producers[i].get()] = share ? 0 : i;
     const auto bytes = first->size_;
     const auto base =
         std::make_shared<Var>(names.Fresh("mem_storage_selection_"), GetPtrType(), first->span_);
@@ -773,8 +792,14 @@ StorageSelectionPlan BuildStorageSelectionPlan(const StmtPtr& body, const std::v
     };
     for (const auto& value : members) {
       const auto selected = slot(value);
-      auto memory = std::make_shared<MemRef>(base, MulByteOffsets(selected, integer(bytes, value->span_)),
-                                             bytes, value->span_, false, count, selected);
+      // A coalesced selection has one ordinary static window. Keep the scalar
+      // yields for the existing SSA rewrite, but never use their result as an
+      // address or as multi-slot metadata for this single-slot allocation.
+      // PTOAS inserts synchronization for accesses to the shared window.
+      auto memory =
+          share ? std::make_shared<MemRef>(base, int64_t{0}, bytes, value->span_)
+                : std::make_shared<MemRef>(base, MulByteOffsets(selected, integer(bytes, value->span_)),
+                                           bytes, value->span_, false, count, selected);
       auto tile = std::make_shared<Var>(value->name_hint_, CloneTypeWithMemRef(value->GetType(), memory),
                                         value->span_);
       plan.indices[tile.get()] = selected;
@@ -966,6 +991,135 @@ class ReachableEventIndex {
   std::vector<size_t> max_reverse_;
   size_t size_ = 0;
 };
+
+// Prove an optional overwrite before fixing the pool's capacity. This deliberately
+// handles one Tile-valued If and two fresh producers per component. Loop-touched
+// storage, views and other existing selection exclusions stay conservative.
+// A renamed old value retains its origin even when the rename is after the If;
+// the selected result is a distinct logical value, whose post-If reads are safe.
+// Fixed traversals, cached origins and indexed queries keep the work O(N log N).
+std::set<const Var*> FindSingleSlotSelections(const FunctionPtr& function, const DefMapVisitor& index,
+                                              const SelectionComponents& components,
+                                              const std::set<const Var*>& protected_bases) {
+  ReverseBranchOrderVisitor reverse;
+  reverse.Run(function->body_);
+  std::map<const Var*, const Var*> origins;
+  std::function<const Var*(const VarPtr&)> origin = [&](const VarPtr& value) -> const Var* {
+    const auto [position, fresh] = origins.emplace(value.get(), value.get());
+    if (!fresh) return position->second;
+    const auto definition = index.defs.find(value);
+    if (definition != index.defs.end() && definition->second.kind == VarDef::kAssign) {
+      if (auto source = AsVarLike(As<AssignStmt>(definition->second.assign_stmt)->value_)) {
+        position->second = origin(source);
+      }
+    }
+    return position->second;
+  };
+  std::map<const Var*, std::vector<std::pair<size_t, size_t>>> events;
+  for (const auto& [statement, values] : index.observation_reads) {
+    for (const auto& value : values) {
+      if (!As<TileType>(value->GetType())) continue;
+      // One-based event coordinates also let the query include reads in the
+      // overwriting producer itself, which still requires the old payload.
+      events[origin(value)].emplace_back(index.stmt_order.at(statement) + 1,
+                                         reverse.stmt_order.at(statement) + 1);
+    }
+  }
+  std::map<const Var*, ReachableEventIndex> reads;
+  for (auto& [value, observations] : events) reads[value].Build(std::move(observations));
+
+  // Consume the same correctness facts as the allocation planners. Build them
+  // lazily once, only when a candidate passes the control-flow/liveness proof.
+  bool constraints_ready = false;
+  std::set<const Var*> blocked_bases;
+  std::set<const Var*> load_bases;
+  std::set<const Var*> tpop_bases;
+  std::map<const Var*, std::set<const Var*>> forbidden;
+  const auto base_of = [](const Var* value) -> const Var* {
+    const auto memory = GetTypeMemRef(value->GetType());
+    return memory ? (*memory)->base_.get() : nullptr;
+  };
+  auto prepare_constraints = [&]() {
+    if (constraints_ready) return;
+    constraints_ready = true;
+    const auto constraints = CollectStorageSelectionConstraints(function);
+    const auto& hazards = constraints.target_hazard_inputs;
+    blocked_bases.insert(hazards.written_workspace_bases.begin(), hazards.written_workspace_bases.end());
+    for (const auto* value : hazards.load_derived) load_bases.insert(base_of(value));
+    for (const auto* value : hazards.reads_tpop) tpop_bases.insert(base_of(value));
+    for (const auto& [writer, operands] : constraints.forbid_alias) {
+      for (const auto& operand : operands) forbidden[base_of(writer)].insert(base_of(operand.get()));
+    }
+  };
+
+  std::set<const Var*> result;
+  for (const auto& [root, members] : components) {
+    VarPtr selected;
+    std::vector<VarPtr> producers;
+    std::set<const Var*> bases;
+    bool eligible = true;
+    for (const auto& value : members) {
+      const auto& definition = index.defs.at(value);
+      const auto tile = GetTileTypeWithMemRef(value->GetType());
+      if (!tile || tile->GetMemorySpace() != MemorySpace::Vec ||
+          protected_bases.count(base_of(value.get()))) {
+        eligible = false;
+        break;
+      }
+      bases.insert(base_of(value.get()));
+      if (definition.kind == VarDef::kIfReturn) {
+        if (selected) {
+          eligible = false;
+          break;
+        }
+        selected = value;
+      } else if (definition.kind == VarDef::kAssign) {
+        if (!AsVarLike(As<AssignStmt>(definition.assign_stmt)->value_)) producers.push_back(value);
+      } else {
+        eligible = false;
+        break;
+      }
+    }
+    if (!eligible || !selected || producers.size() != 2) continue;
+    if (index.defs.at(producers[0]).order > index.defs.at(producers[1]).order) {
+      std::swap(producers[0], producers[1]);
+    }
+    const auto& previous = index.defs.at(producers[0]);
+    const auto& overwrite = index.defs.at(producers[1]);
+    const auto* branch = index.defs.at(selected).control_stmt.get();
+    const auto branch_begin = index.stmt_order.at(branch);
+    // The old producer must precede the If in BOTH traversals. The replacement
+    // must be inside it. Merely appearing earlier in a sibling arm is not enough.
+    if (previous.order >= branch_begin || overwrite.order <= branch_begin ||
+        overwrite.order > index.stmt_end_order.at(branch) ||
+        reverse.stmt_order.at(previous.definition_stmt.get()) >= reverse.stmt_order.at(branch)) {
+      continue;
+    }
+    const auto observations = reads.find(producers[0].get());
+    if (observations != reads.end() &&
+        observations->second.HasAfter(overwrite.order + 1, index.stmt_end_order.at(index.root.get()) + 1,
+                                      reverse.stmt_order.at(overwrite.definition_stmt.get()))) {
+      continue;
+    }
+    prepare_constraints();
+    bool has_load = false;
+    bool has_tpop = false;
+    for (const auto* base : bases) {
+      if (blocked_bases.count(base)) eligible = false;
+      has_load |= load_bases.count(base) != 0;
+      has_tpop |= tpop_bases.count(base) != 0;
+      if (const auto found = forbidden.find(base); found != forbidden.end()) {
+        for (const auto* operand : found->second) {
+          if (bases.count(operand)) eligible = false;
+        }
+      }
+    }
+    // This optional optimization never relaxes a target separation based on
+    // a different lifetime interpretation from the ordinary allocator.
+    if (eligible && !(has_load && has_tpop)) result.insert(root);
+  }
+  return result;
+}
 
 /// Range-minimum index over read events and their logical definition versions.
 /// Aliases can share a physical allocation while naming different values over
@@ -2974,7 +3128,9 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // Resolve storage choices before fixed-buffer yield repair. Functions already
   // selected for Buffer IR retain their existing storage legalization path.
   if (ctx == nullptr || !ctx->GetEnableBufferIR()) {
-    auto plan = BuildStorageSelectionPlan(new_body, func->params_);
+    auto selection_function = MutableCopy(func);
+    selection_function->body_ = new_body;
+    auto plan = BuildStorageSelectionPlan(selection_function);
     new_body = MaterializeStorageSelections(new_body, func->params_, std::move(plan));
   }
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
