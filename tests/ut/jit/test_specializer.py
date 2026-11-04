@@ -1826,6 +1826,60 @@ class TestInferReturnType:
         assert ann == "pl.Tensor[[32, 32], pl.FP32]"
 
 
+class TestSpecializerExternReturnTypes:
+    """Extern declarations keep complete types without changing ordinary DSL inference."""
+
+    @staticmethod
+    def _specialize(annotation: str, body: str = "...", func_type: str = "extern") -> str:
+        ctx = _make_ctx(
+            source=f"def kernel(y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]){annotation}:\n    {body}",
+            func_type=func_type,
+            param_names=["y", "z"],
+            tensor_meta={
+                "y": TensorMeta((16, 16), DataType.INT8),
+                "z": TensorMeta((16, 1), DataType.FP32),
+            },
+        )
+        ctx.external_core_type = "aiv"
+        ctx.external_aiv_source = "kernel.cpp"
+        return Specializer("Generated", [ctx]).specialize()
+
+    @pytest.mark.parametrize("tuple_name", ["tuple", "Tuple", "typing.Tuple"])
+    def test_complete_tuple_preserves_declared_order(self, tuple_name):
+        # Reverse declaration order to ensure the annotation is not reconstructed
+        # by simply collecting Out params or duplicating the first Out's type.
+        source = self._specialize(
+            f" -> {tuple_name}[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 16], pl.INT8]]"
+        )
+        assert "-> tuple[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 16], pl.INT8]]:" in source
+
+    def test_complete_single_return_is_not_replaced_by_first_out(self):
+        source = self._specialize(" -> pl.Tensor[[16, 1], pl.FP32]")
+        assert "-> pl.Tensor[[16, 1], pl.FP32]:" in source
+
+    @pytest.mark.parametrize("annotation", ["", " -> pl.Tensor"])
+    def test_legacy_single_output_inference(self, annotation):
+        source = self._specialize(annotation)
+        assert "-> pl.Tensor[[16, 16], pl.INT8]:" in source
+
+    @pytest.mark.parametrize(
+        "annotation",
+        [
+            " -> tuple[pl.Tensor, pl.Tensor]",
+            " -> tuple[pl.Tensor[[16, 16], pl.INT8], pl.Tensor]",
+        ],
+    )
+    def test_incomplete_tuple_still_uses_return_statement(self, annotation):
+        source = self._specialize(annotation, body="return y, z")
+        assert "-> tuple[pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]]:" in source
+
+    def test_ordinary_dsl_return_still_uses_runtime_metadata(self):
+        # An ordinary DSL function specializes its body and return from the
+        # actual call metadata, even when a static annotation says otherwise.
+        source = self._specialize(" -> pl.Tensor[[32, 32], pl.FP32]", body="return y", func_type="incore")
+        assert "-> pl.Tensor[[16, 16], pl.INT8]:" in source
+
+
 class TestSpecializerInlineDeprecation:
     """`@pl.jit.inline` should emit bare `pl.Tensor[...]` and warn on `pl.Out`."""
 

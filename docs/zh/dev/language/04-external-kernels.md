@@ -105,6 +105,27 @@ def decode(query: pl.Tensor, ..., out: pl.Out[pl.Tensor]):
 
 单核写法：`@pl.jit.extern(core_type="aic"|"aiv", source="k.cpp")`。
 
+多输出时，用 tuple 声明每个返回值的完整形状和数据类型。JIT 会为 AIC、AIV 和 mixed
+extern 保留该返回类型注解，并折叠类型中的模块或闭包常量。stub 函数体保持为 `...`，
+无需编写 Python `return` 语句：
+
+```python
+@pl.jit.extern(core_type="aiv", source="kernels/pair.cpp")
+def pair(a: pl.Tensor, y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]) -> tuple[
+    pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]
+]:
+    ...
+
+@pl.jit
+def entry(a: pl.Tensor, y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]):
+    y, z = pair(a, y, z)
+    return y, z
+```
+
+拆包后的输出也可以传给后续 JIT kernel。裸的 `tuple[pl.Tensor, pl.Tensor]` 无法为
+仅签名声明提供完整返回类型。已有的单输出 stub 在未提供完整返回类型注解时，仍可从
+第一个 `pl.Out` 参数推断返回类型。
+
 对于无法通过入口源码相对引用找到的头文件，使用 `include_dirs=[...]`。与 `source`
 相同，每个目录既可以是绝对路径，也可以相对于定义 `@pl.jit.extern` stub 的 Python
 文件。解析后的目录会按给定顺序传给 CCEC；被引用头文件的内容和解析后的 include

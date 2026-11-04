@@ -1345,6 +1345,40 @@ def _specialize_eager_tile_annotation(
     return ast.unparse(node)
 
 
+def _render_complete_return_annotation(
+    annotation: ast.expr | None, py_globals: Mapping[str, Any]
+) -> str | None:
+    """Render a shaped tensor or tuple of shaped tensors; defer incomplete types to inference.
+
+    Extern declarations have no DSL return statement to infer from. Their
+    complete declared types are the contract, including element order. Check
+    every tuple element so ``tuple[pl.Tensor, pl.Tensor]`` still takes the
+    inference path. Type validity itself remains the parser's responsibility.
+    """
+    if not isinstance(annotation, ast.Subscript):
+        return None
+    if _is_tuple_annotation(annotation.value):
+        elements = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+        if not elements:
+            return None
+        rendered: list[str] = []
+        for element in elements:
+            element_type = _render_complete_return_annotation(element, py_globals)
+            if element_type is None:
+                return None
+            rendered.append(element_type)
+        # Normalize typing.Tuple too, just like the body-based return inferer.
+        return f"tuple[{', '.join(rendered)}]"
+    if (
+        _is_tensor_annotation(annotation.value)
+        and isinstance(annotation.slice, ast.Tuple)
+        and len(annotation.slice.elts) >= 2
+        and not any(isinstance(elt, ast.Constant) and elt.value is None for elt in annotation.slice.elts[:2])
+    ):
+        return ast.unparse(_fold_const_names(annotation, py_globals))
+    return None
+
+
 def _infer_return_type(
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
@@ -2018,10 +2052,13 @@ class Specializer:
             extra_anns=extra_param_anns,
         )
 
-        # Infer return type
-        ret_type = _infer_return_type(
-            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
-        )
+        # A signature-only extern has no Return node. Preserve its complete
+        # declaration before the legacy first-Out fallback can erase outputs.
+        ret_type = (
+            _render_complete_return_annotation(func_def.returns, ctx.py_globals)
+            if ctx.func_type == "extern"
+            else None
+        ) or _infer_return_type(func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals)
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # External C++ kernel: emit header-only declaration(s) backed by the

@@ -30,6 +30,9 @@ from pypto.jit.specializer import Specializer
 from pypto.pypto_core import codegen, ir
 
 _KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
+_PAIR_ROWS = 16
+_PAIR_COLS = 16
+_PAIR_DTYPE = pl.INT8
 
 
 def _write_kernel(tmp_path: Path, name: str = "ext.cpp") -> Path:
@@ -159,6 +162,66 @@ def test_single_core_extern(tmp_path):
     assert "FunctionType.Group" not in src
     assert "relu_aic" not in src
     assert "self.relu(a, out)" in src
+
+
+@pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
+def test_signature_only_extern_tuple_outputs_feed_later_kernels(tmp_path, core_type):
+    """Two declared results must survive specialization without a Python return (#3249)."""
+    cpp = _write_kernel(tmp_path)
+
+    @pl.jit.extern(core_type=core_type, source=cpp, aic_source=cpp, aiv_source=cpp)
+    def pair(
+        a: pl.Tensor,
+        y: pl.Out[pl.Tensor],
+        z: pl.Out[pl.Tensor],
+    ) -> tuple[pl.Tensor[[_PAIR_ROWS, _PAIR_COLS], _PAIR_DTYPE], pl.Tensor[[_PAIR_ROWS, 1], pl.FP32]]: ...
+
+    @pl.jit.extern(core_type="aiv", source=cpp)
+    def consume_y(a: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+
+    @pl.jit.extern(core_type="aiv", source=cpp)
+    def consume_z(a: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+
+    @pl.jit
+    def entry(
+        a: pl.Tensor,
+        y: pl.Out[pl.Tensor],
+        z: pl.Out[pl.Tensor],
+        y_result: pl.Out[pl.Tensor],
+        z_result: pl.Out[pl.Tensor],
+    ):
+        quantized, scales = pair(a, y, z)
+        y_result = consume_y(quantized, y_result)
+        z_result = consume_z(scales, z_result)
+        return y_result, z_result
+
+    # Different shapes and dtypes expose loss, duplication, or reordering of a
+    # tuple element. Module constants in the declared types must also be folded.
+    a = torch.empty(_PAIR_ROWS, _PAIR_COLS, dtype=torch.float32)
+    y = torch.empty(_PAIR_ROWS, _PAIR_COLS, dtype=torch.int8)
+    z = torch.empty(_PAIR_ROWS, 1, dtype=torch.float32)
+    config, program = _generate_external_config(
+        entry, (a, y, z, torch.empty_like(y), torch.empty_like(z)), tmp_path
+    )
+    assert config
+
+    expected = [ir.TensorType([16, 16], pl.INT8), ir.TensorType([16, 1], pl.FP32)]
+    names = ["pair", "entry"]
+    if core_type == "mixed":
+        names += ["pair_aic", "pair_aiv"]
+    for name in names:
+        func = program.get_function(name)
+        assert func is not None
+        assert len(func.return_types) == 2
+        for actual, declared in zip(func.return_types, expected, strict=True):
+            ir.assert_structural_equal(actual, declared)
+
+    # The consumer input types verify propagation through freshly unpacked
+    # names, rather than only reusing metadata on the original Out arguments.
+    for name, declared in zip(["consume_y", "consume_z"], expected, strict=True):
+        func = program.get_function(name)
+        assert func is not None
+        ir.assert_structural_equal(func.params[0].type, declared)
 
 
 def test_single_core_extern_include_dirs_reach_kernel_descriptor(tmp_path):
