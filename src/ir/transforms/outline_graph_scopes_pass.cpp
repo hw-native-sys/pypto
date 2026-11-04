@@ -82,7 +82,8 @@ namespace pass {
  * @brief Pass to outline Graph scopes into separate Graph functions
  *
  * Transforms `GraphScopeStmt` (`with pl.graph("name"):`) into a
- * `FunctionType::Graph` definition plus a `Call` to it — the same shape a
+ * `FunctionType::Graph` definition plus a Call (or Submit for explicit deps /
+ * completion capture) — the same shape a
  * hand-written `@pl.jit.graph` function reaches this point in. The scope form is
  * therefore sugar: no downstream pass, verifier or codegen path needs to know
  * which surface the user wrote. Parameter *order* is the one thing that differs
@@ -106,7 +107,7 @@ namespace pass {
  * 2. Reject a surviving Graph scope in a function this pass does not outline,
  *    rather than skipping it and still advertising GraphOutlined.
  * 3. For each `GraphScopeStmt`, extract the body into a `Function(Graph)` named
- *    after the region, and replace the scope with a Call plus output bindings.
+ *    after the region, and replace the scope with a Call/Submit plus output bindings.
  * 4. Stamp the orchestration level/role on the outlined function, matching what
  *    the parser gives a `@pl.jit.graph` function.
  * 5. The parent function type is preserved — a Graph region does not change what

@@ -467,6 +467,12 @@ void OrchestrationStmtCodegen::VisitStmt_(const ForStmtPtr& for_stmt) {
   }
 }
 
+void OrchestrationStmtCodegen::VisitStmt_(const WhileStmtPtr& while_stmt) {
+  CHECK_SPAN(false, while_stmt->span_)
+      << "While loops are not supported in orchestration codegen; use pl.range for bounded "
+         "orchestration loops or move the dynamic loop into an InCore kernel.";
+}
+
 void OrchestrationStmtCodegen::VisitStmt_(const RuntimeScopeStmtPtr& scope) {
   DeclareCompilerDepTaskIdsAtFirstScope();
   DeclareHoistedTaskIdsForScope(scope.get());
