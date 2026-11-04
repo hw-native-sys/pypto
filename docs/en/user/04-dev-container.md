@@ -669,11 +669,29 @@ exceed the execution cap; the initial limits allow 3600 seconds total and 1800
 seconds of device execution for each case. Cleanup steps remove
 only this run's containers/tasks, without pruning shared caches.
 
-Before uploading and again immediately before promotion, publication verifies that
-the recipe commit is still the current upstream `main`. A stale rerun or an
-unavailable upstream check fails without changing current/previous. This check
-uses the recipe commit, so an explicitly pinned PyPTO source remains supported.
-To retry, build the latest `main`; rollback is a separate, explicit operation.
+Before uploading, publication verifies that the recipe is still in upstream `main`
+history and does not precede the currently published recipe. Normal commits landing
+on `main` during the build do not block publication. The checkout's shallow history
+is completed when necessary to verify ancestry; network or history lookup failures
+block publication. The comparison uses the recipe commit, preserving explicitly
+pinned PyPTO source revisions.
+
+The published image's config digest is verified before reading its
+`org.pypto.image.recipe` label. Older or divergent recipes are rejected. When both
+images use the same recipe, `org.pypto.image.run-number` orders daily builds that may
+contain different library revisions: an older workflow run cannot replace a newer
+one, even when rerun later. The same run may retry; an identical image is idempotent. The label uses
+`GITHUB_RUN_NUMBER`, which increments for each new run of this workflow and stays
+unchanged on reruns ([GitHub variables reference](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)).
+Missing or invalid provenance fails closed. Existing images without a run-number label
+can be replaced by a strictly newer recipe; same-recipe replacement requires a
+known run number. Manual rollback remains a separate, explicit operation.
+
+Immediately before promotion, publication checks upstream ancestry again and
+verifies that current/previous tags have not changed during upload. A conflicting
+writer aborts promotion and the candidate tag is cleaned up. Per-image workflow
+concurrency serializes CI publications; the registry rotation still spans multiple
+requests, so external tag writers must not race it.
 
 After validation, the exact tested image ID is pushed to a temporary
 `arm-a2a3-cann9.2-dist-<run_id>-<attempt>` tag. Its manifest and config digest must

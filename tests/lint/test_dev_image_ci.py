@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import urllib.error
+import urllib.request
 from email.message import Message
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -44,6 +45,7 @@ def state(ci: ModuleType, tmp_path: Path) -> dict:
     data = {
         "image": ci.load_config()["images"]["arm-a2a3"],
         "identity": "arm-a2a3-123-1",
+        "run_number": "123",
         "image_id": "sha256:" + "a" * 64,
         "local": "pypto-ci:arm-a2a3-123-1",
         "pypto": "b" * 40,
@@ -161,6 +163,7 @@ def test_build_freezes_refs_and_base_digest(
     monkeypatch.setattr(ci.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.delenv("RUNNER_NAME", raising=False)
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "123")
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
     monkeypatch.setenv("GITHUB_EVENT_NAME", event)
     fork_repository = "https://github.com/contributor/pypto.git"
@@ -200,6 +203,8 @@ def test_build_freezes_refs_and_base_digest(
         if event == "pull_request" and pypto_ref == "main"
         else config["sources"]["pypto"]["repository"]
     )
+    assert "org.pypto.image.run-number=123" in build
+    assert f"org.pypto.image.recipe={recipe}" in build
     assert f"PYPTO_REF={expected_sha}" in build
     assert f"PYPTO_REPO={expected_repository}" in build
     assert f"PYPTO_LIB_REF={library}" in build
@@ -365,19 +370,22 @@ def publication(
         mutations.append(("DELETE", tag))
         tags.pop(tag, None)
 
-    registry = SimpleNamespace(get=tags.get, put=put, delete_tag=delete_tag)
+    registry = SimpleNamespace(
+        get=tags.get,
+        put=put,
+        delete_tag=delete_tag,
+        publication_metadata=lambda manifest: ("e" * 40, "100"),
+    )
     monkeypatch.setattr(ci, "Registry", lambda *args: registry)
 
     def command(argv: list[str], *args: object, **kwargs: object) -> str:
         calls.append(argv)
         if argv[0] == "git":
-            assert argv[1:] == [
-                "ls-remote",
-                "--exit-code",
-                "https://github.com/hw-native-sys/pypto.git",
-                "refs/heads/main",
-            ]
-            return f"{state['recipe']}\trefs/heads/main"
+            if argv[3] == "merge-base":
+                return argv[4]
+            if argv[3:5] == ["rev-parse", "FETCH_HEAD"]:
+                return "9" * 40  # Main has advanced beyond the candidate recipe.
+            return "false" if argv[3] == "rev-parse" else ""
         if argv[1] == "push":
             assert kwargs.get("direct") is True
             tags[state["unique"].rsplit(":", 1)[1]] = candidate
@@ -390,7 +398,7 @@ def publication(
 
 
 @pytest.mark.parametrize("stage", [1, 2])
-@pytest.mark.parametrize("failure", ["stale", "unreachable", "missing-branch"])
+@pytest.mark.parametrize("failure", ["rewritten", "unreachable"])
 def test_publication_preserves_retained_tags_when_main_cannot_be_verified(
     ci: ModuleType,
     state: dict,
@@ -401,8 +409,12 @@ def test_publication_preserves_retained_tags_when_main_cannot_be_verified(
     failure: str,
 ) -> None:
     retained = {
-        state["rolling"].rsplit(":", 1)[1]: SimpleNamespace(digest="old", content=b"old"),
-        state["previous"].rsplit(":", 1)[1]: SimpleNamespace(digest="older", content=b"older"),
+        state["rolling"].rsplit(":", 1)[1]: SimpleNamespace(
+            digest="old", content=b"old", config_digest="sha256:" + "e" * 64
+        ),
+        state["previous"].rsplit(":", 1)[1]: SimpleNamespace(
+            digest="older", content=b"older", config_digest="sha256:" + "e" * 64
+        ),
     }
     publication.tags.update(retained)
     command = ci.run
@@ -412,27 +424,150 @@ def test_publication_preserves_retained_tags_when_main_cannot_be_verified(
 
     def run(argv: list[str], *args: object, **kwargs: object) -> str:
         nonlocal checks
-        if argv[0] == "git":
+        if argv[0] == "git" and argv[3] == "fetch":
             checks += 1
-            if checks == stage:
-                if failure == "unreachable":
-                    raise RuntimeError("git failed: upstream unreachable")
-                return "" if failure == "missing-branch" else f"{'e' * 40}\trefs/heads/main"
+            if checks == stage and failure == "unreachable":
+                raise RuntimeError("git failed: upstream unreachable")
+        if argv[0] == "git" and argv[3] == "merge-base" and argv[-1] == "9" * 40:
+            if checks == stage and failure == "rewritten":
+                return "e" * 40
         return command(argv, *args, **kwargs)
 
     monkeypatch.setattr(ci, "run", run)
-    with pytest.raises((ValueError, RuntimeError), match="upstream"):
+    with pytest.raises((ValueError, RuntimeError), match="upstream|stale"):
         ci.publish(tmp_path)
     assert checks == stage
     assert publication.tags == retained
     assert not (tmp_path / "published.json").exists()
     if stage == 1:
         assert not logins
-        assert not publication.calls
+        assert not any(argv[0] == "docker" for argv in publication.calls)
         assert not publication.mutations
     else:
         assert logins == [state["registry"]]
         assert publication.mutations == [("DELETE", state["unique"].rsplit(":", 1)[1])]
+
+
+@pytest.mark.parametrize("reason", ["older-recipe", "unknown-recipe", "older-run", "unknown-run"])
+def test_publication_rejects_rollback_before_upload(
+    ci: ModuleType,
+    state: dict,
+    tmp_path: Path,
+    publication: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    current = SimpleNamespace(digest="current", content=b"current", config_digest="sha256:" + "e" * 64)
+    latest = state["rolling"].rsplit(":", 1)[1]
+    publication.tags[latest] = current
+    recipe = "" if reason == "unknown-recipe" else state["recipe"]
+    run_number = "" if reason == "unknown-run" else "124"
+    if reason == "older-recipe":
+        recipe = "9" * 40
+    publication.registry.publication_metadata = lambda manifest: (recipe, run_number)
+    command = ci.run
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> str:
+        if argv[0] == "git" and argv[3:] == ["merge-base", "9" * 40, state["recipe"]]:
+            return state["recipe"]
+        return command(argv, *args, **kwargs)
+
+    monkeypatch.setattr(ci, "run", run)
+    with pytest.raises(ValueError):
+        ci.publish(tmp_path)
+    assert publication.tags == {latest: current}
+    assert not publication.mutations
+    assert not any(argv[0] == "docker" for argv in publication.calls)
+
+
+@pytest.mark.parametrize("run_number", ["122", "123"])
+def test_same_recipe_accepts_newer_runs_and_retries(
+    ci: ModuleType, state: dict, tmp_path: Path, publication: SimpleNamespace, run_number: str
+) -> None:
+    latest = state["rolling"].rsplit(":", 1)[1]
+    publication.tags[latest] = SimpleNamespace(
+        digest="current", content=b"current", config_digest="sha256:" + "e" * 64
+    )
+    publication.registry.publication_metadata = lambda manifest: (state["recipe"], run_number)
+    ci.publish(tmp_path)
+    assert publication.tags[latest] is publication.candidate
+
+
+@pytest.mark.parametrize("changed", ["rolling", "previous"])
+def test_competing_publisher_cannot_be_overwritten_during_upload(
+    ci: ModuleType,
+    state: dict,
+    tmp_path: Path,
+    publication: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    command = ci.run
+    replacement = SimpleNamespace(digest="other-publisher")
+    tag = state[changed].rsplit(":", 1)[1]
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> str:
+        result = command(argv, *args, **kwargs)
+        if argv[:2] == ["docker", "push"]:
+            publication.tags[tag] = replacement
+        return result
+
+    monkeypatch.setattr(ci, "run", run)
+    with pytest.raises(ValueError, match="changed during upload"):
+        ci.publish(tmp_path)
+    assert publication.tags == {tag: replacement}
+    assert publication.mutations == [("DELETE", state["unique"].rsplit(":", 1)[1])]
+
+
+@pytest.mark.parametrize("shallow", [False, True])
+def test_recipe_ancestry_uses_complete_main_history(
+    ci: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shallow: bool
+) -> None:
+    upstream = tmp_path / "upstream"
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", str(upstream)], check=True)
+    git = [
+        "git",
+        "-C",
+        str(upstream),
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+    ]
+    revisions = []
+    for subject in ("published", "candidate", "main advanced"):
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", subject], check=True)
+        revisions.append(subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip())
+    checkout = tmp_path / "checkout"
+    subprocess.run(
+        ["git", "clone", "-q", *(["--depth=1"] if shallow else []), upstream.as_uri(), str(checkout)],
+        check=True,
+    )
+    monkeypatch.setattr(ci, "ROOT", checkout)
+    command = ci.run
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> str:
+        argv = [
+            upstream.as_uri() if item == "https://github.com/hw-native-sys/pypto.git" else item
+            for item in argv
+        ]
+        return command(argv, *args, **kwargs)
+
+    monkeypatch.setattr(ci, "run", run)
+    ci.require_upstream_recipe(revisions[1])
+    ci.require_recipe_ancestor(revisions[0], revisions[1])
+    ci.require_recipe_ancestor(revisions[1], revisions[1])
+    with pytest.raises(ValueError, match="stale"):
+        ci.require_recipe_ancestor(revisions[2], revisions[1])
+    # A force push removes the candidate from main; previously fetched objects
+    # must not make a stale recipe pass the upstream membership check.
+    subprocess.run(git + ["update-ref", "refs/heads/main", revisions[0]], check=True)
+    with pytest.raises(ValueError, match="stale"):
+        ci.require_upstream_recipe(revisions[1])
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -441,7 +576,7 @@ def test_only_latest_and_previous_remain_after_publication(
 ) -> None:
     latest = state["rolling"].rsplit(":", 1)[1]
     previous = state["previous"].rsplit(":", 1)[1]
-    old = SimpleNamespace(digest="sha256:" + "e" * 64, content=b"old")
+    old = SimpleNamespace(digest="sha256:" + "e" * 64, content=b"old", config_digest="sha256:" + "e" * 64)
     if existing:
         publication.tags[latest] = old
     ci.publish(tmp_path)
@@ -489,7 +624,7 @@ def test_retry_does_not_rotate_previous_and_legacy_tags_are_untouched(
 ) -> None:
     latest = state["rolling"].rsplit(":", 1)[1]
     previous = state["previous"].rsplit(":", 1)[1]
-    old = SimpleNamespace(digest="sha256:" + "e" * 64, content=b"old")
+    old = SimpleNamespace(digest="sha256:" + "e" * 64, content=b"old", config_digest="sha256:" + "e" * 64)
     publication.tags.update({latest: publication.candidate, previous: old, "a3-dist": old})
     ci.publish(tmp_path)
     assert publication.tags == {latest: publication.candidate, previous: old, "a3-dist": old}
@@ -500,7 +635,7 @@ def test_failed_previous_promotion_preserves_latest(
     ci: ModuleType, state: dict, tmp_path: Path, publication: SimpleNamespace
 ) -> None:
     latest = state["rolling"].rsplit(":", 1)[1]
-    old = SimpleNamespace(digest="sha256:" + "e" * 64, content=b"old")
+    old = SimpleNamespace(digest="sha256:" + "e" * 64, content=b"old", config_digest="sha256:" + "e" * 64)
     publication.tags[latest] = old
 
     def fail(tag: str, manifest: object) -> None:
@@ -526,6 +661,51 @@ def test_publication_checks_retained_tags_after_cleanup(
     with pytest.raises(ValueError, match="Latest tag changed"):
         ci.publish(tmp_path)
     assert not (tmp_path / "published.json").exists()
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_registry_publication_metadata_verifies_config_digest(
+    ci: ModuleType, monkeypatch: pytest.MonkeyPatch, corrupt: bool
+) -> None:
+    registry = ci.Registry.__new__(ci.Registry)
+    registry.base, registry.repository, registry.token = "https://registry.example", "pypto", "secret"
+    content = json.dumps(
+        {
+            "config": {
+                "Labels": {
+                    "org.pypto.image.recipe": "a" * 40,
+                    "org.pypto.image.run-number": "123",
+                }
+            }
+        }
+    ).encode()
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    manifest = SimpleNamespace(config_digest=digest)
+    requests = []
+
+    def open_config(request: urllib.request.Request, timeout: int) -> io.BytesIO:
+        requests.append(request)
+        return io.BytesIO(b"bad" if corrupt else content)
+
+    monkeypatch.setattr("urllib.request.build_opener", lambda *args: SimpleNamespace(open=open_config))
+    if corrupt:
+        with pytest.raises(ValueError, match="config digest mismatch"):
+            registry.publication_metadata(manifest)
+    else:
+        assert registry.publication_metadata(manifest) == ("a" * 40, "123")
+    assert requests[0].full_url == f"https://registry.example/v2/pypto/blobs/{digest}"
+
+
+def test_config_redirect_drops_credentials_and_rejects_http(ci: ModuleType) -> None:
+    registry_module = load_module("swr_registry")
+    handler = registry_module.ConfigRedirect()
+    request = urllib.request.Request(
+        "https://registry.example/blob", headers={"Authorization": "Bearer secret"}
+    )
+    redirected = handler.redirect_request(request, None, 307, "", {}, "https://storage.example/signed")
+    assert redirected.get_header("Authorization") is None
+    with pytest.raises(ValueError, match="HTTPS"):
+        handler.redirect_request(request, None, 307, "", {}, "http://storage.example/blob")
 
 
 def test_swr_subprocess_environment_bypasses_proxy(ci: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:

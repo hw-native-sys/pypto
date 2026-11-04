@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from dist_state import PATCH_FILES
-from swr_registry import Registry
+from swr_registry import Manifest, Registry
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "docker/images.json"
@@ -213,6 +213,7 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         base = digests[0]
     run_id = os.environ.get("GITHUB_RUN_ID", datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
     attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+    run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
     if not re.fullmatch(r"[0-9]+", run_id) or not re.fullmatch(r"[0-9]+", attempt):
         raise ValueError("Run ID and attempt must be numeric")
     identity = f"{name}-{run_id}-{attempt}"
@@ -223,6 +224,7 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         "name": name,
         "image": image,
         "identity": identity,
+        "run_number": run_number,
         "local": local,
         "registry": config["registry"],
         "unique": unique,
@@ -273,6 +275,8 @@ def build(config: dict[str, Any], name: str, directory: Path) -> None:
         f"org.opencontainers.image.revision={pypto_sha}",
         "--label",
         f"org.pypto.image.recipe={recipe_sha}",
+        "--label",
+        f"org.pypto.image.run-number={run_number}",
     ]
     for key, value in arguments.items():
         command += ["--build-arg", f"{key}={value}"]
@@ -389,15 +393,48 @@ def login(registry: str) -> None:
     )
 
 
-def require_current_recipe(recipe: str) -> None:
-    """Reject stale recipes and fail closed when upstream main cannot be verified."""
-    if not SHA.fullmatch(recipe):
-        raise ValueError(f"Invalid image recipe revision: {recipe!r}")
-    upstream = run(
-        ["git", "ls-remote", "--exit-code", "https://github.com/hw-native-sys/pypto.git", "refs/heads/main"]
-    ).split()
-    if upstream != [recipe, "refs/heads/main"]:
-        raise ValueError(f"Image recipe {recipe} is not the current upstream main; build the latest main")
+def require_recipe_ancestor(ancestor: str, descendant: str) -> None:
+    """Require a forward or identical recipe, failing closed on unknown history."""
+    if not SHA.fullmatch(ancestor) or not SHA.fullmatch(descendant):
+        raise ValueError("Image recipe revisions must be full commit SHAs")
+    common = run(["git", "-C", str(ROOT), "merge-base", ancestor, descendant])
+    if common != ancestor:
+        raise ValueError(f"Recipe {descendant} does not descend from {ancestor}; refusing stale publication")
+
+
+def require_upstream_recipe(recipe: str) -> None:
+    """Accept any recipe still in main history, including while main advances."""
+    git = ["git", "-C", str(ROOT)]
+    shallow = run(git + ["rev-parse", "--is-shallow-repository"])
+    fetch = git + ["fetch", "--no-tags", "--filter=blob:none"]
+    if shallow == "true":
+        fetch.append("--unshallow")
+    run(fetch + ["https://github.com/hw-native-sys/pypto.git", "refs/heads/main"])
+    upstream = run(git + ["rev-parse", "FETCH_HEAD"])
+    require_recipe_ancestor(recipe, upstream)
+
+
+def require_forward_publication(state: dict[str, Any], registry: Registry, current: Manifest | None) -> None:
+    if not re.fullmatch(r"[1-9][0-9]*", state.get("run_number", "")):
+        raise ValueError("Image build record lacks a numeric run number; rebuild before publishing")
+    if current is None or current.config_digest == state["image_id"]:
+        return
+    recipe, run_number = registry.publication_metadata(current)
+    require_recipe_ancestor(recipe, state["recipe"])
+    # Same-recipe daily builds may contain different library revisions. Use the
+    # original run number, not the rerun time, so an old run cannot roll them back.
+    if recipe == state["recipe"] and (
+        not re.fullmatch(r"[1-9][0-9]*", run_number) or int(state["run_number"]) < int(run_number)
+    ):
+        raise ValueError(
+            "Published image has a newer or unknown run number for this recipe; refusing rollback"
+        )
+
+
+def require_unchanged_tag(registry: Registry, tag: str, expected: Manifest | None) -> None:
+    actual = registry.get(tag)
+    if (actual.digest if actual else None) != (expected.digest if expected else None):
+        raise ValueError(f"SWR tag {tag} changed during upload; retry publication against the current image")
 
 
 def publish(directory: Path) -> None:
@@ -411,7 +448,7 @@ def publish(directory: Path) -> None:
         or os.environ.get("GITHUB_REPOSITORY") != "hw-native-sys/pypto"
     ):
         raise ValueError("Publish is restricted to the upstream main branch")
-    require_current_recipe(state.get("recipe", ""))
+    require_upstream_recipe(state.get("recipe", ""))
     login(state["registry"])
     repository = state["rolling"].removeprefix(state["registry"] + "/").rsplit(":", 1)[0]
     registry = Registry(state["registry"], repository, os.environ["SWR_USERNAME"], os.environ["SWR_PASSWORD"])
@@ -420,6 +457,7 @@ def publish(directory: Path) -> None:
     previous_tag = state["previous"].rsplit(":", 1)[1]
     current = registry.get(latest_tag)
     previous = registry.get(previous_tag)
+    require_forward_publication(state, registry, current)
     # Keep the exact pre-promotion manifests in the evidence for recovery if a
     # registry/network failure interrupts the two-tag rotation.
     for name, manifest in (("latest", current), ("previous", previous)):
@@ -434,8 +472,11 @@ def publish(directory: Path) -> None:
         local_digests = json.loads(run(["docker", "image", "inspect", state["unique"]]))[0]["RepoDigests"]
         if f"{state['registry']}/{repository}@{candidate.digest}" not in local_digests:
             raise ValueError("Published digest does not match the tested local image")
-        # Main may have advanced while the image was uploading.
-        require_current_recipe(state["recipe"])
+        # Main may advance normally, but a force push must not publish a recipe
+        # no longer in its history. Detect competing tag writers before rotating.
+        require_upstream_recipe(state["recipe"])
+        require_unchanged_tag(registry, latest_tag, current)
+        require_unchanged_tag(registry, previous_tag, previous)
         # Rerunning promotion for the same digest must not overwrite rollback.
         if current is None or current.digest != candidate.digest:
             if current is not None:
