@@ -476,10 +476,6 @@ def test_register_control_flow_requires_unpacked_values(control_flow, nested, pa
         assert diagnostics == []
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 @pytest.mark.parametrize(
     "dtype,value", [(DataType.UINT32, -1), (DataType.UINT8, 256), (DataType.UINT32, 65536)]
 )
@@ -577,3 +573,7 @@ def test_hardware_loop_rejects_break_continue_even_when_empty(stmt_type, stop):
     )
     diagnostics = verify(region(loop))
     assert any("is not supported inside hardware_loop" in d.message for d in diagnostics)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
