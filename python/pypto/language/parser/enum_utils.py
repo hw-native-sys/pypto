@@ -56,12 +56,8 @@ SCOPE_MODE_MAP: dict[str, bool] = {
 }
 
 # Maps pl.CachePolicy names to the enum, for the ``pl.set_cache_policy(t, policy)``
-# marker statement. Only the two declared policies exist — the policy is a
-# contract the author states, never something the compiler infers.
-CACHE_POLICY_MAP: dict[str, ir.CachePolicy] = {
-    "DEFAULT": ir.CachePolicy.DEFAULT,
-    "BYPASS": ir.CachePolicy.BYPASS,
-}
+# marker statement. Backend lowering determines each policy's implementation.
+CACHE_POLICY_MAP: dict[str, ir.CachePolicy] = dict(ir.CachePolicy.__members__)
 
 # Reverse of CACHE_POLICY_MAP, keyed by the underlying int the IR carries, for
 # naming a policy back to the user in a diagnostic. Derived rather than written

@@ -425,22 +425,20 @@ class PadValue(enum.Enum):
     """Min value padding."""
 
 class CachePolicy(enum.IntEnum):
-    """GM cache-access policy declared for a tensor read.
+    """GM cache policy. Supported modes depend on target and transfer direction.
 
-    A semantic contract the author states, never a hint the compiler invents.
-    Stored as ``int`` in the ``tile.load`` ``cache`` kwarg.
+    DEFAULT/BYPASS retain IDs 0/1. The six A5 modes use semantic IDs,
+    not raw ISA encodings. KEEP and DROP are load-only.
     """
 
     DEFAULT = 0
-    """Ordinary cached GM access."""
-
     BYPASS = 1
-    """Streaming access declared to bypass the cache.
-
-    Asserts this tensor has no reuse worth caching and that nothing writes
-    those bytes while the kernel runs — mixing a cached write and a bypassing
-    read of the same bytes is a coherency bug.
-    """
+    NORMAL_FIRST_VICTIM = 2
+    NORMAL_LAST_VICTIM = 3
+    NORMAL_PERSISTENT = 4
+    NOT_ALLOC_KEEP = 5
+    NOT_ALLOC_CLEAN = 6
+    NOT_ALLOC_DROP = 7
 
 class CompactMode(enum.Enum):
     """Partial-tile compact mode enumeration."""

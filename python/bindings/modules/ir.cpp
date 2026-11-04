@@ -516,15 +516,19 @@ void BindIR(nb::module_& m) {
       .value("min", PadValue::min, "Min value padding")
       .export_values();
 
-  // CachePolicy enum - declared GM cache-access policy for a tensor read.
-  // nb::is_arithmetic like AtomicType: the policy rides the `tile.load` "cache"
+  // CachePolicy enum - semantic GM cache-access policy for reads and writes.
+  // nb::is_arithmetic like AtomicType: the policy rides the transfer's "cache"
   // kwarg as a plain `int`, so the DSL needs `int(policy)` to work.
   nb::enum_<CachePolicy>(ir, "CachePolicy", nb::is_arithmetic(),
-                         "GM cache-access policy declared for a tensor read")
-      .value("DEFAULT", CachePolicy::kDefault, "Ordinary cached GM access")
-      .value("BYPASS", CachePolicy::kBypass,
-             "Streaming access declared to bypass the cache: asserts this tensor has no reuse "
-             "worth caching and that nothing writes those bytes while the kernel runs")
+                         "GM cache policy; supported modes depend on target and transfer direction")
+      .value("DEFAULT", CachePolicy::kDefault)
+      .value("BYPASS", CachePolicy::kBypass)
+      .value("NORMAL_FIRST_VICTIM", CachePolicy::kNormalFirstVictim)
+      .value("NORMAL_LAST_VICTIM", CachePolicy::kNormalLastVictim)
+      .value("NORMAL_PERSISTENT", CachePolicy::kNormalPersistent)
+      .value("NOT_ALLOC_KEEP", CachePolicy::kNotAllocKeep)
+      .value("NOT_ALLOC_CLEAN", CachePolicy::kNotAllocClean)
+      .value("NOT_ALLOC_DROP", CachePolicy::kNotAllocDrop)
       .export_values();
 
   // TensorView - struct for tensor view information - must be before TensorType

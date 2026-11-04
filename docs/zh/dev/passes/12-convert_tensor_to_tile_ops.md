@@ -169,7 +169,8 @@ body 中本就存在的任何 `tile.load`（用户手写的，或更早的 pass 
 
 优先级按单次访问判定：load 上已有的显式 `pl.load(..., cache=...)` kwarg 在两个方向上
 都优先于作用域声明，因此 `cache=pl.CachePolicy.DEFAULT` 可以在 bypass 作用域内把某一次
-读取单独放回缓存。从这里开始，该 kwarg 只是像 `target_memory` 一样随 op 穿过剩余的
+读取单独放回缓存。A5 上单次 load 的显式 `cache` 也优先，因此本 pass 不会对该 load
+添加作用域的 `cache` kwarg。从这里开始，该 kwarg 只是像 `target_memory` 一样随 op 穿过剩余的
 pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy.md)。
 
 ### 阶段二a：通过 Spmd/Group 包装函数转发新增 Out 参数
