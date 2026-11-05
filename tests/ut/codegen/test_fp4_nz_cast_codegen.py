@@ -31,6 +31,8 @@ product the allocator already computes -- there is no boxed-padding term to
 add, and `test_nz_destination_allocation_size_is_unchanged` pins that.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend, ir
@@ -45,6 +47,12 @@ _PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.Mem
 M = 32
 PACKED_K = 128  # packed FP4 bytes; 2 * PACKED_K logical FP8 columns
 N = 64
+
+_VEC_ALLOC = re.compile(
+    r"pto\.alloc_tile addr = %c(?P<addr>\d+)_i64.*?"
+    r"loc=vec, dtype=(?P<dtype>[^,]+), rows=(?P<rows>\d+), cols=(?P<cols>\d+).*?"
+    r"blayout=(?P<bl>\w+), slayout=(?P<sl>\w+)"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -204,25 +212,68 @@ def test_omitting_the_keyword_reproduces_todays_lowering(planner):
     assert "slayout=none_box" in destination, cast[0]
 
 
+def _vec_allocations(mlir: str) -> list[tuple[int, int, str, str, str]]:
+    """Parse every Vec `pto.alloc_tile` as (addr, bytes, dtype, blayout, slayout).
+
+    The size is derived from the *emitted* rows/cols rather than from the
+    constants this file defines, so a wrong emitted geometry changes the numbers
+    the assertions see. Both dtypes here are one byte per element -- FP8E4M3FN
+    natively, and packed FP4 because its extents count byte carriers.
+    """
+    allocations = []
+    for line in mlir.splitlines():
+        match = _VEC_ALLOC.search(line)
+        if match:
+            fields = match.groupdict()
+            rows, cols = int(fields["rows"]), int(fields["cols"])
+            allocations.append(
+                (int(fields["addr"]), rows * cols, fields["dtype"], fields["bl"], fields["sl"])
+            )
+    return allocations
+
+
 def test_nz_destination_allocation_size_is_unchanged():
     """A whole number of boxes occupies exactly `rows * cols` bytes.
 
     The allocator sizes a non-accumulator tile from its logical element count
     and is layout-blind. That is correct here *because* the NZ contract forces
     `rows % 16 == 0` and `cols % 32 == 0`, so there is no fractal padding to
-    account for. If either granularity were relaxed, this assertion is the one
-    that should fail first.
+    account for. If either granularity were relaxed, this is the assertion that
+    should fail first.
+
+    Everything below is derived from the emitted text. An earlier version of
+    this test computed the expected byte count from this file's own constants
+    and compared it against itself, which made the headline assertion
+    tautological -- it would have passed for any emitted geometry at all.
     """
     nz = _emit(_nz_matmul_program(), passes.MemoryPlanner.PYPTO)
     nd = _emit(_nd_matmul_program(), passes.MemoryPlanner.PYPTO)
 
-    def fp8_cast_destination_bytes(mlir):
-        cast = _casts(mlir)[0]
-        destination = cast.partition(") outs(")[2]
-        assert f"rows={M}, cols={2 * PACKED_K}" in destination, cast
-        return M * 2 * PACKED_K  # FP8 is one byte per element
+    def boxed_fp8_destination(allocations):
+        boxed = [a for a in allocations if a[2] == "f8E4M3FN" and (a[3], a[4]) == ("col_major", "row_major")]
+        assert len(boxed) == 1, boxed
+        return boxed[0]
 
-    assert fp8_cast_destination_bytes(nz) == fp8_cast_destination_bytes(nd) == M * 2 * PACKED_K
+    nz_allocations = _vec_allocations(nz)
+    nd_allocations = _vec_allocations(nd)
+
+    # One fewer Vec buffer with the keyword: the ND form needs a separate
+    # destination for the relayout move.
+    assert len(nz_allocations) == 2, nz_allocations
+    assert len(nd_allocations) == 3, nd_allocations
+
+    # The boxed FP8 tile gets the plain row-column product either way -- no
+    # fractal-padding term is added for the NZ one.
+    nz_boxed = boxed_fp8_destination(nz_allocations)
+    nd_boxed = boxed_fp8_destination(nd_allocations)
+    assert nz_boxed[1] == nd_boxed[1] == M * 2 * PACKED_K, (nz_boxed, nd_boxed)
+
+    # And the saving is real at the allocator level, not just one fewer handle:
+    # peak Vec footprint drops by exactly the packed source tile's size, because
+    # memory reuse had already overlapped the ND form's relayout buffer with it.
+    nz_peak = max(addr + size for addr, size, *_ in nz_allocations)
+    nd_peak = max(addr + size for addr, size, *_ in nd_allocations)
+    assert nd_peak - nz_peak == M * PACKED_K, (nz_peak, nd_peak)
 
 
 if __name__ == "__main__":
