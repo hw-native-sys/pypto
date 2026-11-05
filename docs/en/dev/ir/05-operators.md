@@ -437,9 +437,12 @@ these dimensions through JIT and compiled calls without unit conversion.
 
 On A5, E2M1x2→FP8E4M3FN casts use a direct ND Vec TCVT when shape and
 layout satisfy the [direct-cast constraints](../fp4.md#numerical-cast-constraints).
-Other packed FP4→FP8 casts retain BF16/FP32 legalization. That conversion also
-accepts optional `blayout` / `slayout` attributes (spelled as on `tile.move`)
-requesting a standard NZ destination; omitting them inherits the source layout. Scale values are unchanged because this numerically converts
+Other packed FP4→FP8 casts retain BF16/FP32 legalization. That direct
+E2M1x2→FP8E4M3FN cast — and only it — also accepts optional `blayout` /
+`slayout` attributes (spelled as on `tile.move`) requesting a standard NZ
+destination from an ND source; omitting them inherits the source layout.
+
+Scale values are unchanged because this numerically converts
 only the data operand. Native packed-FP4 matmul remains unsupported.
 `pl.quant_mx` supports MXFP8 and E2M1 MXFP4 quantization from FP16/BF16;
 only FP8 results can feed `matmul_mx` directly. See [FP4](../fp4.md) for
