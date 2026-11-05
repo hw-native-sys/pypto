@@ -902,6 +902,7 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::FloatDivPtr& op) override;
   void VisitExpr_(const ir::MinPtr& op) override;
   void VisitExpr_(const ir::MaxPtr& op) override;
+  void VisitExpr_(const ir::PowPtr& op) override;
   // Unary
   void VisitExpr_(const ir::NotPtr& op) override;
   void VisitExpr_(const ir::NegPtr& op) override;

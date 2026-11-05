@@ -172,7 +172,21 @@ def test_hardware_loop_depth_and_dynamic_capture(depth, stop_dtype, tmp_path):
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
     "feature",
-    ["dependent_stop", "offset_add", "scalar_compare", "unsigned_add", "unsigned_div", "unsigned_mod"],
+    [
+        "dependent_stop",
+        "offset_add",
+        "scalar_compare",
+        "unsigned_add",
+        "unsigned_div",
+        "unsigned_mod",
+        "unsigned_not",
+        "unsigned_neg",
+        "unsigned_abs",
+        "unsigned_logical_not",
+        "unsigned_compare",
+        "unsigned_eq",
+        "power",
+    ],
 )
 def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
     """Former LLVM rewrites confused body adds/comparisons and dependent bounds."""
@@ -182,9 +196,26 @@ def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
         stop = f.param("stop", ir.ScalarType(dtype))
         if feature.startswith("unsigned_"):
             stop = ir.Add(stop, ir.ConstInt(1, dtype, SPAN), dtype, SPAN)
-            if feature != "unsigned_add":
+            if feature in ("unsigned_div", "unsigned_mod"):
                 operation = ir.FloorDiv if feature == "unsigned_div" else ir.FloorMod
                 stop = operation(stop, ir.ConstInt(2, dtype, SPAN), dtype, SPAN)
+            elif feature == "unsigned_not":
+                stop = ir.BitNot(stop, dtype, SPAN)
+            elif feature == "unsigned_neg":
+                stop = ir.Neg(stop, dtype, SPAN)
+            elif feature == "unsigned_abs":
+                stop = ir.Abs(stop, dtype, SPAN)
+            elif feature == "unsigned_logical_not":
+                stop = ir.cast(ir.Not(stop, DataType.BOOL, SPAN), DataType.INT32, SPAN)
+            elif feature in ("unsigned_compare", "unsigned_eq"):
+                comparison = ir.Lt if feature == "unsigned_compare" else ir.Eq
+                stop = ir.cast(
+                    comparison(stop, ir.ConstInt(65535, dtype, SPAN), DataType.BOOL, SPAN),
+                    DataType.INT32,
+                    SPAN,
+                )
+        elif feature == "power":
+            stop = ir.Pow(stop, ir.ConstInt(2, dtype, SPAN), dtype, SPAN)
         dst = builder.let("dst", tile.full([192], dtype=DataType.FP32, value=0))
         outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), SPAN)
         with (
@@ -228,12 +259,18 @@ def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
     if feature.startswith("unsigned_"):
         assert re.search(r"arith.addi .* : i32", bundle.helpers[0].source)
         assert not re.search(r"arith\.\w+ .* : ui32", bundle.helpers[0].source)
-        assert "arith.index_castui" in bundle.helpers[0].source
+        if feature not in ("unsigned_compare", "unsigned_eq", "unsigned_logical_not"):
+            assert "arith.index_castui" in bundle.helpers[0].source
+    if feature == "power":
+        assert bundle.helpers[0].source.count("arith.muli") >= 2
+    if feature == "unsigned_compare":
+        assert "arith.cmpi ult" in bundle.helpers[0].source
     compile_vf_bundle(bundle, tmp_path)
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("dtype", [DataType.INT8, DataType.INT16, DataType.INT64, DataType.UINT64])
-def test_hardware_loop_unsupported_dynamic_stop_reports_capture_contract(dtype):
+def test_hardware_loop_dynamic_integer_stop_needs_no_range_proof(dtype, tmp_path):
     builder = IRBuilder()
     with builder.function("bad_stop", span=SPAN, type=ir.FunctionType.AIV) as f:
         stop = f.param("stop", ir.ScalarType(dtype))
@@ -248,8 +285,8 @@ def test_hardware_loop_unsupported_dynamic_stop_reports_capture_contract(dtype):
             ),
         ):
             builder.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN)
-    with pytest.raises(ValueError, match="dynamic hardware loop stop supports INT32, UINT32 and INDEX"):
-        codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "BadStop", SPAN))
+    bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "DynamicStop", SPAN))
+    compile_vf_bundle(bundle, tmp_path)
 
 
 @pytest.mark.ptoas_compile

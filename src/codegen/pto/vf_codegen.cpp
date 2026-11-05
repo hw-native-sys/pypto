@@ -80,17 +80,6 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   }
 };
 
-class HardwareLoopStopChecker : public IRVisitor {
- public:
-  bool has_power = false;
-
- protected:
-  void VisitExpr_(const PowPtr& op) override {
-    has_power = true;
-    IRVisitor::VisitExpr_(op);
-  }
-};
-
 }  // namespace
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
@@ -110,18 +99,10 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   if (!operands.loops.empty()) {
     for (const auto& loop : operands.loops) {
       const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
-      HardwareLoopStopChecker stop_checker;
-      stop_checker.VisitExpr(loop->stop_);
-      CHECK_SPAN(!stop_checker.has_power, loop->span_)
-          << "VF hardware loop stop does not support power expressions";
       CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
                      stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
                  loop->span_)
           << "VF hardware loop lowering requires canonical integer loops without loop-carried values";
-      CHECK_SPAN(ir::As<ir::ConstInt>(loop->stop_) || stop_type->dtype_ == DataType::INT32 ||
-                     stop_type->dtype_ == DataType::UINT32 || stop_type->dtype_ == DataType::INDEX,
-                 loop->span_)
-          << "VF dynamic hardware loop stop supports INT32, UINT32 and INDEX only";
     }
   }
 
@@ -261,10 +242,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     auto scalar = ir::As<ir::ScalarType>(var->GetType());
     CHECK_SPAN(scalar, var->span_) << "VF captures must be UB views or supported scalars";
     const auto dtype = scalar->dtype_;
-    CHECK_SPAN(dtype == DataType::INT32 || dtype == DataType::UINT32 || dtype == DataType::FP32 ||
-                   dtype == DataType::INDEX,
-               var->span_)
-        << "VF scalar capture supports i32, u32, f32 and index only";
+    CHECK_SPAN(dtype.IsInt() || dtype == DataType::FP32 || dtype == DataType::INDEX, var->span_)
+        << "VF scalar capture supports integers, f32 and index only";
     // Reserve manually spelled parameters before body emission, just as the
     // normal function emitter does. Local DSL names may also be argN/captureN.
     const auto argument_name = "arg" + std::to_string(artifact.parameter_types.size());

@@ -104,7 +104,8 @@ def test_hardware_loop_policy_requires_lexical_reg_scope(placement, stop):
 
 @pytest.mark.parametrize("depth", [1, 4, 5])
 @pytest.mark.parametrize("stop", [65535, 65536])
-def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop):
+@pytest.mark.parametrize("computed", [False, True])
+def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop, computed):
     # Reject invalid loops during IR verification, without invoking codegen or
     # a target profile. Dynamic integer counts need no compile-time range proof.
     body = sequence()
@@ -112,7 +113,7 @@ def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop):
         body = ir.ForStmt(
             scalar(f"i{level}"),
             integer(0),
-            integer(stop),
+            ir.Add(integer(stop - 1), integer(1), DataType.INDEX, SPAN) if computed else integer(stop),
             integer(1),
             [],
             body,

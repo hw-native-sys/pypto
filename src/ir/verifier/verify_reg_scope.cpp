@@ -19,6 +19,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -246,7 +247,12 @@ class RegionChecker : public IRVisitor {
         if (hardware_loop_depth_ > 4) {
           Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
         }
-        if (stop && stop->value_ > 65535) {
+        const auto bound = arith::ConstIntBoundAnalyzer()(op->stop_);
+        if ((stop && stop->value_ > 65535) ||
+            (bound.is_const() && bound.min_value != arith::ConstIntBound::kPosInf &&
+             bound.min_value > 65535 &&
+             IsRepresentableLoopLiteral(
+                 std::make_shared<ConstInt>(bound.min_value, GetScalarDtype(op->stop_), op->span_)))) {
           Error("Hardware loop stop must not exceed 65535", op->span_);
         }
       }

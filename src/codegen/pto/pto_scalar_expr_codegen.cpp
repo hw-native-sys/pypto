@@ -618,6 +618,33 @@ void PTOCodegen::VisitExpr_(const ir::MaxPtr& op) {
   VisitBinaryArithExpr(op, int_op, "arith.maximumf");
 }
 
+void PTOCodegen::VisitExpr_(const ir::PowPtr& op) {
+  const auto exponent = As<ir::ConstInt>(op->right_);
+  const auto dtype = ir::GetScalarDtype(op);
+  CHECK_SPAN(exponent && exponent->value_ >= 0 && (dtype.IsInt() || dtype == DataType::INDEX), op->span_)
+      << "PTO integer power requires a nonnegative constant integer exponent";
+  const auto result_type = GetTypeString(dtype);
+  const auto arithmetic_type = dtype.IsUnsignedInt() ? result_type.substr(1) : result_type;
+  auto base = EmitArithOperand(op->left_, arithmetic_type);
+  auto value = NewTemp();
+  Emit(value + " = arith.constant 1 : " + arithmetic_type);
+  auto remaining = static_cast<uint64_t>(exponent->value_);
+  // Exponentiation by squaring emits O(log exponent) scalar operations without
+  // adding a loop or changing hardware-loop nesting.
+  while (remaining != 0) {
+    if ((remaining & 1U) != 0) value = EmitArithBinaryOp("arith.muli", value, base, arithmetic_type);
+    remaining >>= 1;
+    if (remaining != 0) base = EmitArithBinaryOp("arith.muli", base, base, arithmetic_type);
+  }
+  if (dtype.IsUnsignedInt()) {
+    const auto converted = NewTemp();
+    Emit(converted + " = builtin.unrealized_conversion_cast " + value + " : " + arithmetic_type + " to " +
+         result_type);
+    value = converted;
+  }
+  fs_.current_expr_value = value;
+}
+
 // ========================================================================
 // Expression visitors - Unary
 // ========================================================================
@@ -679,6 +706,7 @@ void PTOCodegen::VisitExpr_(const ir::AbsPtr& op) {
   VisitExpr(op->operand_);
   std::string src = fs_.current_expr_value;
   ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  if (dtype.IsUnsignedInt()) return;
   std::string type_str = GetTypeString(dtype);
   std::string result = NewTemp();
   if (dtype.IsFloat()) {

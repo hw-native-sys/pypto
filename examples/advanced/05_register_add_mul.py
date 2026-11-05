@@ -16,8 +16,8 @@ Run in an activated PyPTO/PTOAS environment:
     python examples/advanced/05_register_add_mul.py --save-kernels-dir build/reg-add-mul
 
 Use --save-kernels-dir to retain generated sources and pass dumps for inspection.
-This example demonstrates hardware-loop PTO codegen. The unchanged runtime
-compiler emits the helper and caller PTO for inspection.
+This example generates hardware-loop helper and caller PTO for inspection.
+PTOAS owns subsequent lowering and synchronization.
 """
 
 import argparse
