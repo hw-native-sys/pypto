@@ -2151,8 +2151,10 @@ jobs:
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
     # npu-a5 card. Three steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
-    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
-    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
+    #   2. gemv-tests-a5         — the ordinary (non-MX) GEMV family over its FP8 and
+    #                              wide operand pairs, in its own session (see the step)
+    #   3. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   4. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2208,6 +2210,21 @@ jobs:
     # whose test cases hardcode `get_backend_type() -> Ascend910`, so under
     # --platform=a5 it would compile for 910B and run on A5 silicon. Widen this
     # list once those are made arch-agnostic.
+    #
+    # --- gemv-tests-a5 ---
+    # Scope — tests/st/runtime/ops/test_gemv_a5.py: tile.gemv / _acc / _bias over
+    # the four FP8 operand pairs and over FP16 / BF16 / FP32 / INT8, plus
+    # segmented-K accumulation and an `init_cond` split-K loop. The whole file is
+    # the target rather than node IDs, because all 10 cases are harness-based
+    # (`st.case` / `case_run`, no direct `compiled()`) so they share one Worker
+    # across the forks, and enumerating node IDs would only create a way to
+    # silently drop a case added later.
+    #
+    # It is the ONLY CI coverage of `pto.tgemv` / `.acc` / `.bias` on silicon at
+    # ANY dtype: `system-tests*` run --platform=a2a3, and until the static-valid
+    # accumulator view in `EmitStaticValidGemvAccView` PTOAS rejected every
+    # ordinary GEMV for a5, so the wide-dtype cases here are the regression guard
+    # for that view and the FP8 cases are the operand pairs riding on it.
     #
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
@@ -2296,6 +2313,53 @@ jobs:
               tests/st/runtime/cross_core/test_cross_core.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               tests/st/runtime/ops/test_rsqrt.py::test_a5_rsqrt_precision_ulp \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: gemv-tests-a5
+        # Its own task-submit session, and `OMP_NUM_THREADS: 1`.
+        #
+        # The ST hung twice before this env var was set: appended to
+        # mixed-kernel-tests-a5 it ate that step's whole 3600 s cap, and alone in
+        # this step it ate 900 s. Both times 8 of 10 cases passed on device and the
+        # 9th -- the segmented-K case, the largest kernel here -- stopped before
+        # its `[DEVICE] ... -> device N` line and was killed. Reproduced locally
+        # and bisected to one variable: the identical command with
+        # `OMP_NUM_THREADS` unset hangs at the 9th case, and with
+        # `OMP_NUM_THREADS=1` the same two cases run to a verdict in 14.8 s.
+        #
+        # The mechanism is fork-after-threads. `pytest-forked` imports the module
+        # in the parent and forks per test, torch defaults to one intraop thread
+        # per core (384 on the a5 pool), and a child inheriting a thread pool whose
+        # threads did not come across the fork deadlocks the first time it needs
+        # them. The small kernels stay under torch's parallelisation threshold and
+        # survive; the 1024-long contraction does not. So this is a property of the
+        # job's environment, not of the ST: `pypto-lib-compile` already pins
+        # OMP_NUM_THREADS for the same reason, and this job never did.
+        #
+        # Scope note: set per-step rather than on the job, because the other a5
+        # steps pass as they are and this change does not need to touch them.
+        # Setting it job-wide is the likely fix for the sibling hangs on
+        # mx-tests-a5 / gemv-mx-tests-a5, which run without it too -- but that is
+        # a change for whoever owns those steps, measured against their own runs.
+        #
+        # The step stays separate even though session sharing turned out not to be
+        # the cause: the hang reproduced in isolation, so isolation is not what
+        # fixes it. It is kept because a 900 s cap bounds any recurrence to 15
+        # minutes instead of the hour, and because a red step skips every step
+        # below it. --max-time 900 against ~2 min of real device time.
+        timeout-minutes: 30
+        env:
+          # See the comment above: without this, --forked children inherit a torch
+          # thread pool whose threads did not survive the fork and deadlock.
+          OMP_NUM_THREADS: 1
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              OMP_NUM_THREADS=1 python -m pytest \
+              tests/st/runtime/ops/test_gemv_a5.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5

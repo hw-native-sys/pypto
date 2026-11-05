@@ -168,9 +168,9 @@ output elements outside the valid rectangle.
 | pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST; FP4 input is limited to FP4×FP8 with an explicit lhs FP4→FP8 cast; native FP4×FP4 is deferred; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
 | pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.matmul_mx_acc`) |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_bias`); ST pending |
-| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
+| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Shares `pto.tmatmul`'s operand-pair table, so A5 also accepts the four FP8 pairs (E4M3FN / E5M2, either order) and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs). A5 ST covers every dtype (the static-valid Acc bridge is what makes a5 GEMV assemble at all) |
+| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; acc_in stays FP32. A5 ST covers every dtype, split-K and `init_cond` |
+| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; bias stays FP32. A5 ST covers every dtype |
 | pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
