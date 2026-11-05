@@ -437,6 +437,28 @@ def test_foreign_call_infers_outputs_and_emits_task(tmp_path, core):
         assert "MixedKernels mixed_0 = {0, 1, 1}" in generated
 
 
+@pytest.mark.parametrize("core", ["aiv", "aic", "mixed"])
+def test_foreign_workspace_writeback_preserves_shape_expression(tmp_path, core):
+    """内部工作区的 tensor.dim 表达式不能被提供方特化后的常量形状替换。"""
+
+    def foreign_body(workspace, output):
+        pass
+
+    leaf = _ForeignKernel(
+        foreign_body, _write_kernel(tmp_path), {"workspace": "read_write", "output": "write"}, core=core
+    )
+
+    @pl.jit
+    def entry(source: pl.Tensor, output: pl.Out[pl.Tensor]):
+        rows = pl.tensor.dim(source, 0)
+        workspace = pl.create_tensor([rows, 32], dtype=pl.FP32)
+        leaf(workspace, output)
+        return output
+
+    args = (torch.empty(6, 32), torch.empty(6, 32))
+    _generate_external_config(entry, args, tmp_path)
+
+
 def test_foreign_inout_call_is_loop_carried(tmp_path):
     def foreign_body(out):
         pass

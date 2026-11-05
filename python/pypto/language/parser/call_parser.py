@@ -12,6 +12,7 @@
 import ast
 from typing import TYPE_CHECKING, Any
 
+from pypto._function_attrs import EXTERNAL_SOURCE_ATTR
 from pypto.language import _dump
 from pypto.pypto_core import DataType, ir
 
@@ -65,6 +66,7 @@ class CallParser:
         # object (not id()) keeps a strong reference, so there is no id-reuse
         # hazard from a collected-and-reallocated Function.
         self.derived_return_types_cache: dict[ir.Function, list[ir.Type]] = {}
+        self.writeback_parameters_cache: dict[ir.Function, list[int | None]] = {}
         self.inline_return_provenance_cache: dict[
             ir.Function, tuple[tuple[ir.Expr, ...], frozenset[int], dict[int, ir.Expr]]
         ] = {}
@@ -531,6 +533,7 @@ class CallParser:
                 is_inline=bool(return_types) and func_obj.func_type == ir.FunctionType.Inline,
             )
             return_types = self.inline_argument_return_types(func_obj, args, return_types)
+            return_types = self.external_argument_return_types(func_obj, args, return_types)
         return self.make_call_with_return_type(
             gvar,
             args,
@@ -607,6 +610,31 @@ class CallParser:
         return [
             inline_argument_return_type(v, t, argument_types, assigned_ids, aliases) or t
             for v, t in zip(values, return_types)
+        ]
+
+    def external_argument_return_types(
+        self, func: ir.Function, args: list[ir.Expr], return_types: list[ir.Type]
+    ) -> list[ir.Type]:
+        """外部核及 MIX 包装的显式参数回写保留调用方的形状表达式。"""
+        if len(args) != len(func.params) or not return_types:
+            return return_types
+        if EXTERNAL_SOURCE_ATTR not in func.attrs and func.func_type != ir.FunctionType.Group:
+            return return_types
+        indices = self.writeback_parameters_cache.get(func)
+        if indices is None:
+            # 复用 IR 的返回值追踪，既处理单核的 return out，也处理 MIX 的元组转发；
+            # 禁止仅凭位置或相同形状猜测输出。已完成的声明在解析期间不会再变更。
+            functions = {f.name: f for f in self.bindings.gvar_to_func.values()}
+            functions.update({f.name: f for f in self.bindings.external_funcs.values()})
+            functions[func.name] = func
+            program = ir.Program(list(functions.values()), "_writeback_contract", func.span)
+            indices = ir.returned_param_indices(func, program)
+            self.writeback_parameters_cache[func] = indices
+        if len(indices) != len(return_types):
+            return return_types
+        return [
+            args[index].type if index is not None and isinstance(t, ir.TensorType) else t
+            for index, t in zip(indices, return_types)
         ]
 
     def make_call_with_return_type(  # noqa: PLR0913, PLR0912 — cohesive call-builder; bundling args/branches hurts clarity
@@ -1066,6 +1094,7 @@ class CallParser:
             is_inline=bool(return_types) and ext_func.func_type == ir.FunctionType.Inline,
         )
         return_types = self.inline_argument_return_types(ext_func, args, return_types)
+        return_types = self.external_argument_return_types(ext_func, args, return_types)
         return self.make_call_with_return_type(gvar, args, return_types, span)
 
     @staticmethod
