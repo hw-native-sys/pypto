@@ -18,9 +18,11 @@
 #include "src/ir/arith/rewrite_simplify.h"
 
 #include <algorithm>  // NOLINT(misc-include-cleaner) required by cpplint for pattern-match max()
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -62,9 +64,27 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr(const ExprPtr& expr) {
   }
   // Comparisons return BOOL, so the result-type guard above does not cover them.
   // ConstFloat stores a double that may round differently in its declared dtype;
-  // preserve these comparisons until format-aware rounding is modeled. Negation
+  // preserve comparisons requiring rounding until it is modeled. Negation
   // patterns can also construct and fold comparisons, and must preserve NaNs.
   auto binary = As<BinaryExpr>(expr);
+  if (binary &&
+      (As<Eq>(expr) || As<Ne>(expr) || As<Lt>(expr) || As<Le>(expr) || As<Gt>(expr) || As<Ge>(expr)) &&
+      GetScalarDtype(expr) == DataType::BOOL) {
+    const auto lhs = As<ConstFloat>(binary->left_);
+    const auto rhs = As<ConstFloat>(binary->right_);
+    // An exactly representable FP32 literal needs no unmodeled rounding.
+    // Folding guards such as 10.0 > 0.0 before allocation planning removes
+    // unreachable Tile choices and their otherwise conservatively live buffers.
+    // Keep NaNs, other formats and rounded literals on the guarded path below.
+    const auto exact_fp32 = [](const ConstFloatPtr& value) {
+      return value && value->dtype() == DataType::FP32 && std::isfinite(value->value_) &&
+             std::abs(value->value_) <= std::numeric_limits<float>::max() &&
+             static_cast<double>(static_cast<float>(value->value_)) == value->value_;
+    };
+    if (exact_fp32(lhs) && exact_fp32(rhs)) {
+      if (auto folded = TryConstFoldBinary(expr->GetKind(), binary->left_, binary->right_)) return folded;
+    }
+  }
   if (auto negation = As<Not>(expr)) binary = As<BinaryExpr>(negation->operand_);
   if (binary) {
     auto lhs_type = As<ScalarType>(binary->left_->GetType());

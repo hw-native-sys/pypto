@@ -67,6 +67,22 @@ struct AllocationHazardInputs {
   std::unordered_map<const Var*, std::pair<int, int>> allocation_loop_ranges;
 };
 
+// Resolve only requested descriptor roots, sharing the same cycle-safe source
+// expansion between no-alias constraints and recurrent-payload legalization.
+// Intermediate root sets are not materialized: storage is output-sensitive in
+// the candidate facts requested by consumers, rather than a transitive closure.
+class TileStorageRootResolver {
+ public:
+  explicit TileStorageRootResolver(const TileStorageSources& sources) : sources_(sources) {}
+  const std::vector<VarPtr>& Roots(const VarPtr& value);
+
+ private:
+  VarPtr Source(const VarPtr& value);
+  const TileStorageSources& sources_;
+  std::map<const Var*, VarPtr> source_cache_;
+  std::map<const Var*, std::vector<VarPtr>> roots_cache_;
+};
+
 using AllocationForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;
 
 /**
@@ -77,6 +93,11 @@ struct AllocationConstraintAnalysis {
   std::set<const Var*> declared_allocation_bases;
   AllocationHazardInputs target_hazard_inputs;
   AllocationForbidAliasMap forbid_alias;
+  // Fresh outputs whose forbidden dynamic inputs can denote that same output
+  // on a later iteration. Snapshot those operands before the non-inplace op;
+  // assigning descriptors alone cannot make a single allocation disjoint from
+  // itself across a backedge. Keyed by output Var, values are operand Vars.
+  std::map<const Var*, std::vector<VarPtr>> recurrent_inputs;
   bool needs_load_tpop_hazard_guard = false;
 };
 

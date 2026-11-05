@@ -52,6 +52,20 @@ def library(tmp_path):
     return lib
 
 
+@pytest.mark.parametrize("entry", sorted(audit.PTOAS_BLOCKED_ENTRIES))
+def test_ptoas_blocked_entry_is_reported_as_skipped(library, tmp_path, entry):
+    """A backend exclusion must stay visible and must never count as a passing compile."""
+    source = library / entry
+    source.parent.mkdir()
+    source.write_text("raise AssertionError('temporarily excluded entry executed')\n")
+    output = tmp_path / "out"
+    result = audit.run_case(library, entry, "a2a3", output, 10)
+    assert result["skipped"] is True
+    assert result["passed"] is False
+    assert result["compilations"] == []
+    assert "PTOAS/issues/1708" in (output / result["log"]).read_text()
+
+
 @pytest.mark.parametrize(
     ("body", "passed", "count"),
     [
@@ -381,7 +395,10 @@ def test_cpu_prefill_entry_without_compilations_still_fails(library, tmp_path):
 
 
 @pytest.mark.parametrize("entry", ["hc", "prefill_fwd", "sparse_attention"])
-def test_compile_does_not_enable_replay_or_checkpoint_arguments(library, tmp_path, entry):
+def test_compile_does_not_enable_replay_or_checkpoint_arguments(library, tmp_path, entry, monkeypatch):
+    # This synthetic entry tests CLI adaptation rather than the real model's
+    # backend limitation. Do not let a temporary exclusion hide that coverage.
+    monkeypatch.delitem(audit.PTOAS_BLOCKED_ENTRIES, f"models/deepseek_v4_1_flash/{entry}.py", raising=False)
     # Mirror the A5 contracts: replay arguments change the default all-cases
     # mode, while prefill declares runtime-dir only in an inactive CLI branch.
     directory = library / "models/deepseek_v4_1_flash"

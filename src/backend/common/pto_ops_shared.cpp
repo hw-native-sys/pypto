@@ -506,6 +506,18 @@ std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, codegen::
          "would produce an unsupported Mat->Mat pto.textract (no L1->L1 DMA); "
          "the consumer should accept the subview SSA directly";
 
+  if (codegen.IsSelectedTileName(mat->source_ssa)) {
+    // A representative MemRef is not the selected runtime allocation. Only
+    // tile.slice's proved dense addressed alias is a legal no-copy operand;
+    // uncertain windows must receive independent storage before allocation.
+    INTERNAL_CHECK_SPAN(!mat->materialize_target_ssa.empty(), expr->span_)
+        << "Internal error: a selected tile.slice requiring materialization must be canonicalized "
+           "to tile.extract with independent storage, or have a proved contiguous runtime alias";
+    // No payload was moved, so leave emitted false: assemble can still recognize
+    // the original window and elide a write back onto exactly the same bytes.
+    return mat->materialize_target_ssa;
+  }
+
   // The materialize target is the slice's own buffer, which inherits — and sits
   // inside — the source allocation. The pto.textract therefore repacks in place
   // over its own still-live input, and only survives that when it is an identity

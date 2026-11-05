@@ -377,8 +377,11 @@ def test_fillpad_inplace_then_set_validshape(tmp_path: Path, dynamic_bounds, bac
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
 )
+@pytest.mark.skip(
+    reason="PTOAS set_validshape on native scf.if Tile results: https://github.com/hw-native-sys/PTOAS/issues/1708"
+)
 def test_fillpad_branch_result_then_set_validshape(tmp_path: Path, backend_type, planner):
-    """A phi buffer declared at function entry must retain mutable validity."""
+    """A selected Tile must support padding followed by mutable validity."""
 
     @pl.program
     class BranchResult:

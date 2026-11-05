@@ -289,8 +289,8 @@ class ForbidAliasCollector : public IRVisitor {
   // *values* need no such mapping: enforcement compares physical MemRef bases,
   // which every group member already shares.
   ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
-                       const BufferViewAnalysis* views)
-      : views_(views) {
+                       const BufferViewAnalysis* views, const TileStorageSources& storage_sources)
+      : views_(views), roots_(storage_sources) {
     for (const auto& [var, group] : sharing_groups) {
       if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
     }
@@ -354,7 +354,16 @@ class ForbidAliasCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  ForbidAliasMap Take() { return std::move(forbidden_); }
+  std::map<const Var*, std::vector<VarPtr>> TakeRecurrentInputs() { return std::move(recurrent_inputs_); }
+
+  ForbidAliasMap Take() {
+    for (auto& [output, inputs] : forbidden_) {
+      static_cast<void>(output);
+      std::sort(inputs.begin(), inputs.end());
+      inputs.erase(std::unique(inputs.begin(), inputs.end()), inputs.end());
+    }
+    return std::move(forbidden_);
+  }
 
  private:
   void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& forbidden_inputs) {
@@ -364,14 +373,33 @@ class ForbidAliasCollector : public IRVisitor {
       return;
     }
     if (!As<TileType>(output->GetType())) return;
-    const auto rep_it = member_to_rep_.find(output.get());
-    const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
-    auto& recorded = forbidden_[out_key];
-    recorded.insert(recorded.end(), forbidden_inputs.begin(), forbidden_inputs.end());
+    // A descriptor phi's MemRef can name its then-arm geometry. Compare against
+    // every real input root instead of treating that hint as a unique buffer.
+    // Registered writeback results may themselves select several destinations,
+    // so apply the output constraint to every possible destination as well.
+    std::set<VarPtr> inputs;
+    for (const auto& input : forbidden_inputs) {
+      const auto& roots = roots_.Roots(input);
+      inputs.insert(roots.begin(), roots.end());
+      const auto source_type = As<TileType>(input->GetType());
+      const auto output_type = GetTileTypeWithMemRef(output->GetType());
+      if (source_type && !source_type->memref_ && output_type &&
+          std::binary_search(roots.begin(), roots.end(), output)) {
+        recurrent_inputs_[output.get()].push_back(input);
+      }
+    }
+    for (const auto& root : roots_.Roots(output)) {
+      const auto rep_it = member_to_rep_.find(root.get());
+      const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : root.get();
+      auto& recorded = forbidden_[out_key];
+      recorded.insert(recorded.end(), inputs.begin(), inputs.end());
+    }
   }
 
+  std::map<const Var*, std::vector<VarPtr>> recurrent_inputs_;
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
+  TileStorageRootResolver roots_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
@@ -652,6 +680,9 @@ class ScratchRetirementCollector : public IRVisitor {
 /// PyPTO has no way to know which pipe a given intrinsic writes from.
 class WrittenWorkspaceCollector : public IRVisitor {
  public:
+  explicit WrittenWorkspaceCollector(const TileStorageSources& storage_sources)
+      : storage_sources_(storage_sources) {}
+
   void VisitExpr_(const CallPtr& op) override {
     Record(op->op_, op->args_, true);
     IRVisitor::VisitExpr_(op);
@@ -689,6 +720,25 @@ class WrittenWorkspaceCollector : public IRVisitor {
   std::unordered_set<const Var*> TakePipelineScratchBases() { return std::move(pipeline_scratch_bases_); }
 
  private:
+  void Mark(const VarPtr& workspace, bool looping) {
+    auto& variables = looping ? looping_workspaces_ : workspaces_;
+    auto& bases = looping ? looping_bases_ : bases_;
+    std::vector<VarPtr> pending{workspace};
+    while (!pending.empty()) {
+      const auto value = pending.back();
+      pending.pop_back();
+      if (!variables.insert(value.get()).second) continue;
+      if (const auto* base = TileMemRefBase(value)) bases.insert(base);
+      // A native If workspace can write either candidate, while its MemRef
+      // carries only then's geometry hint. Propagate the hazard to all sources,
+      // including aliases/views. Each graph node is visited once per flag over
+      // the entire collection; no transitive root sets are materialized.
+      if (auto sources = storage_sources_.find(value.get()); sources != storage_sources_.end()) {
+        pending.insert(pending.end(), sources->second.begin(), sources->second.end());
+      }
+    }
+  }
+
   void Record(const OpPtr& op, const std::vector<ExprPtr>& args, bool ordinary_call) {
     // LookupOpEntry, not a name lookup: a Submit's callee is a GlobalVar naming
     // a *function*, and resolving that against the operator registry would hand
@@ -708,24 +758,17 @@ class WrittenWorkspaceCollector : public IRVisitor {
       // when the call sits inside a loop body.
       auto workspace = AsVarLike(args[index]);
       if (!workspace) continue;
-      workspaces_.insert(workspace.get());
-      // Record the allocation base as well -- see `written_workspace_bases`.
-      const Var* base = TileMemRefBase(workspace);
-      if (base != nullptr) {
-        bases_.insert(base);
-        if (pipeline_scratch && !explicit_workspace && ordinary_call) {
-          pipeline_scratch_bases_.insert(base);
-        }
-      }
-      if (loop_depth_ > 0) {
-        looping_workspaces_.insert(workspace.get());
-        if (base != nullptr) looping_bases_.insert(base);
+      Mark(workspace, /*looping=*/false);
+      if (loop_depth_ > 0) Mark(workspace, /*looping=*/true);
+      if (pipeline_scratch && !explicit_workspace && ordinary_call) {
+        if (const auto* base = TileMemRefBase(workspace)) pipeline_scratch_bases_.insert(base);
       }
     }
   }
 
   int loop_depth_ = 0;
   int software_pipeline_depth_ = 0;
+  const TileStorageSources& storage_sources_;
   std::unordered_set<const Var*> workspaces_;
   std::unordered_set<const Var*> bases_;
   std::unordered_set<const Var*> looping_workspaces_;
@@ -901,11 +944,7 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
   return pinned_allocations;
 }
 
-// Share the registry/backend access facts without requiring the lifetime
-// analyzer's per-member copies of complete alias groups. An empty group map
-// retains individual output keys, which selection planning folds by base.
-void CollectAccessConstraints(const FunctionPtr& func,
-                              const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+void CollectAccessConstraints(const FunctionPtr& func, const LifetimeAnalysisResult& lifetimes,
                               AllocationConstraintAnalysis& result) {
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {
@@ -914,7 +953,7 @@ void CollectAccessConstraints(const FunctionPtr& func,
     result.target_hazard_inputs = collector.Take();
   }
 
-  WrittenWorkspaceCollector workspace_collector;
+  WrittenWorkspaceCollector workspace_collector(lifetimes.storage_sources);
   workspace_collector.VisitStmt(func->body_);
   result.target_hazard_inputs.written_workspaces = workspace_collector.TakeVars();
   result.target_hazard_inputs.written_workspace_bases = workspace_collector.TakeBases();
@@ -926,12 +965,61 @@ void CollectAccessConstraints(const FunctionPtr& func,
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
-  ForbidAliasCollector forbid_collector(sharing_groups, views ? &*views : nullptr);
+  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr,
+                                        lifetimes.storage_sources);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
+  result.recurrent_inputs = forbid_collector.TakeRecurrentInputs();
 }
 
 }  // namespace
+
+VarPtr TileStorageRootResolver::Source(const VarPtr& value) {
+  auto current = value;
+  std::vector<const Var*> aliases;
+  std::set<const Var*> seen;
+  while (seen.insert(current.get()).second) {
+    if (auto known = source_cache_.find(current.get()); known != source_cache_.end()) {
+      current = known->second;
+      break;
+    }
+    const auto binding = sources_.find(current.get());
+    if (binding == sources_.end() || binding->second.size() != 1) break;
+    aliases.push_back(current.get());
+    current = binding->second.front();
+  }
+  for (const auto* alias : aliases) source_cache_[alias] = current;
+  return current;
+}
+
+const std::vector<VarPtr>& TileStorageRootResolver::Roots(const VarPtr& value) {
+  // Compress single-source aliases, then visit each reachable choice once per
+  // queried operand. Cache only actual queries, not every intermediate root
+  // set: growing nested choices otherwise materialize a quadratic closure
+  // even when the consumer asks for only the final set. Candidate expansion
+  // and emitted constraints remain output-sensitive, unlike scalar liveness.
+  const auto source = Source(value);
+  if (auto known = roots_cache_.find(source.get()); known != roots_cache_.end()) {
+    return known->second;
+  }
+  std::vector<VarPtr> pending{source};
+  std::set<const Var*> visited;
+  std::set<VarPtr> roots;
+  while (!pending.empty()) {
+    const auto current = Source(pending.back());
+    pending.pop_back();
+    if (!visited.insert(current.get()).second) continue;
+    const auto binding = sources_.find(current.get());
+    if (auto known = roots_cache_.find(current.get()); known != roots_cache_.end()) {
+      roots.insert(known->second.begin(), known->second.end());
+    } else if (binding == sources_.end()) {
+      roots.insert(current);
+    } else {
+      pending.insert(pending.end(), binding->second.begin(), binding->second.end());
+    }
+  }
+  return roots_cache_.emplace(source.get(), std::vector<VarPtr>(roots.begin(), roots.end())).first->second;
+}
 
 AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
                                                           const LifetimeAnalysisResult& lifetimes,
@@ -943,19 +1031,13 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     result.declared_allocation_bases.insert(base);
   }
   ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
-  CollectAccessConstraints(func, lifetimes.var_sharing_groups, result);
+  CollectAccessConstraints(func, lifetimes, result);
   // Retirement needs tracked lifetimes and declared-allocation exclusions.
   // Keep this proof out of the shared, lifetime-free storage-selection path.
   if (!result.target_hazard_inputs.retirable_pipeline_scratch_bases.empty()) {
     ScratchRetirementCollector retirement(result.target_hazard_inputs, lifetimes);
     retirement.Run(func, result.declared_allocation_bases);
   }
-  return result;
-}
-
-AllocationConstraintAnalysis memory_reuse::CollectStorageSelectionConstraints(const FunctionPtr& function) {
-  AllocationConstraintAnalysis result;
-  CollectAccessConstraints(function, {}, result);
   return result;
 }
 

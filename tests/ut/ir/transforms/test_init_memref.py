@@ -34,7 +34,13 @@ from pypto.backend import BackendType
 from pypto.ir import MemorySpace
 from pypto.ir.op import tile as tile_ops
 
-from .storage_test_utils import without_call_memrefs
+from .storage_test_utils import (
+    _assert_descriptor_carries,
+    _assert_dynamic_if_results,
+    _Nodes,
+    _program,
+    without_call_memrefs,
+)
 
 
 class TestBasic:
@@ -1097,7 +1103,7 @@ class TestYieldMemRef:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
-    def test_if_yield_return_var_shares_memref(self):
+    def test_if_yield_return_var_has_dynamic_storage(self):
         """IfStmt: return_var shares MemRef with the then-branch yield value."""
 
         @pl.program
@@ -1122,10 +1128,8 @@ class TestYieldMemRef:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
                 return result
 
-        # then-yield (tile_a) uses mem_vec_2; return_var (if_result) also uses
-        # mem_vec_2 — shared per InitMemRef's phi-resolution rule. The else-
-        # branch yield (tile_b) uses a separate mem_vec_3 — it's a distinct
-        # temporary that MemoryReuse will later merge.
+        # Each arm owns its allocation. The region result has only descriptor
+        # metadata and no fixed MemRef, regardless of which arm runs.
         @pl.program
         class Expected:
             @pl.function
@@ -1147,9 +1151,7 @@ class TestYieldMemRef:
                             target_memory=pl.Mem.Vec,
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_a)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_a)
                 else:
                     tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.load(
@@ -1160,9 +1162,7 @@ class TestYieldMemRef:
                             target_memory=pl.Mem.Vec,
                         )
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     if_result, [0, 0], output
                 )
@@ -1197,7 +1197,7 @@ class TestYieldMemRef:
 
         # tile_a → alias_a → then-yield all share mem_vec_2 (alias chain).
         # The else-branch computation (tile_b) uses a fresh mem_vec_3.
-        # The phi return_var (if_result) picks up the then-branch's mem_vec_2.
+        # The region result remains dynamic even when its then source is an alias.
         @pl.program
         class Expected:
             @pl.function
@@ -1214,16 +1214,12 @@ class TestYieldMemRef:
                 )
                 if cond < 2:
                     alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = tile_a
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(alias_a)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(alias_a)
                 else:
                     tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(tile_a, tile_a)
                     )
-                    if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_b)
-                    )
+                    if_result: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(tile_b)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     if_result, [0, 0], output
                 )
@@ -1866,6 +1862,105 @@ class TestMultiOutputElements:
         memrefs = self._tuple_element_memrefs(after)
         assert len(memrefs) == 2, f"a dropped output lost its binding: {sorted(memrefs)}"
         assert all(m is not None for m in memrefs.values())
+
+
+@pytest.mark.parametrize("scope", ["runtime", "split", "nested"])
+def test_init_memref_finds_branch_yields_inside_transparent_scopes(scope, ascend_backend):
+    """A wrapper must not hide the Tile source or expose an unrelated inner yield."""
+    program = _program(
+        """
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        return pl.store(selected, [0, 0], out)
+""",
+    )
+
+    class WrapArms(ir.IRMutator):
+        def visit_if_stmt(self, op):
+            def wrap(body):
+                # The inner If's empty yield is unrelated to the outer result.
+                inner = ir.IfStmt(
+                    op.condition, ir.YieldStmt([], op.span), ir.YieldStmt([], op.span), [], op.span
+                )
+                body = ir.SeqStmts([inner, body], op.span)
+                if scope in ("split", "nested"):
+                    body = ir.SplitAivScopeStmt(ir.SplitMode.UP_DOWN, count=2, body=body, span=op.span)
+                if scope in ("runtime", "nested"):
+                    body = ir.RuntimeScopeStmt(manual=True, body=body, span=op.span)
+                return ir.SeqStmts([body], op.span)
+
+            return ir.IfStmt(op.condition, wrap(op.then_body), wrap(op.else_body), op.return_vars, op.span)
+
+    with passes.PassContext([], enable_buffer_ir=False):
+        initialized = passes.init_mem_ref()(WrapArms().visit_program(program))
+    _assert_dynamic_if_results(initialized)
+
+
+@pytest.mark.parametrize("same_source", [False, True])
+def test_init_memref_keeps_selected_storage_dynamic(same_source, ascend_backend):
+    """An If and its aliases own no payload, including identical branch sources."""
+    other = "a" if same_source else "b"
+    program = _program(
+        f"""
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_({other})
+        alias = selected
+        viewed = pl.tile.reshape(alias, [2, 16])
+        updated = pl.tile.assemble(viewed, viewed, [0, 0])
+        fresh = pl.tile.adds(updated, 1.0)
+        return pl.store(fresh, [0, 0], out)
+""",
+        output_shape="[2, 16]",
+    )
+    with passes.PassContext(
+        [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)], enable_buffer_ir=False
+    ):
+        initialized = passes.init_mem_ref()(program)
+        _assert_dynamic_if_results(initialized)
+
+    variables = {a.var.name_hint: a.var.type for a in _Nodes(initialized).assignments}
+    for name in ("alias", "viewed", "updated"):
+        assert variables[name].memref is None, f"{name} must follow the dynamic descriptor"
+        assert variables[name].memory_space == pl.Mem.Vec
+    for name in ("a", "b", "fresh"):
+        assert variables[name].memref is not None, f"{name} owns actual payload storage"
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_init_memref_preserves_dynamic_storage_through_identity_loop(count, ascend_backend):
+    program = _program(
+        f"""
+        a = pl.load(x, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+        b = pl.load(x, [4, 0], [4, 8], target_memory=pl.Mem.Vec)
+        if flag > 0:
+            selected = pl.yield_(a)
+        else:
+            selected = pl.yield_(b)
+        for i, (carry,) in pl.range({count}, init_values=(selected,)):
+            alias = carry
+            viewed = pl.tile.reshape(alias, [4, 8])
+            result = pl.yield_(viewed)
+        after = result
+        return pl.store(after, [0, 0], out)
+""",
+    )
+    with passes.PassContext(
+        [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)], enable_buffer_ir=False
+    ):
+        initialized = passes.init_mem_ref()(program)
+
+    _assert_descriptor_carries(initialized, 1)
+    for assign in _Nodes(initialized).assignments:
+        if assign.var.name_hint in ("alias", "viewed", "after"):
+            assert isinstance(assign.var.type, ir.TileType) and assign.var.type.memref is None
 
 
 if __name__ == "__main__":

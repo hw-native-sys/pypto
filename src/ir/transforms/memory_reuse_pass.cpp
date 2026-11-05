@@ -13,7 +13,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -63,7 +62,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   StmtPtr new_body = func->body_;
 
   // Step 1: Compute lifetimes by walking full IR tree
-  auto analysis_result = AnalyzeAllocationLifetimes(new_body);
+  // Include on-chip storage already live at function entry, not only
+  // AssignStmt-defined allocations.
+  auto analysis_result = AnalyzeAllocationLifetimes(func);
 
   if (analysis_result.lifetimes.empty()) {
     LOG_DEBUG << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
@@ -80,7 +81,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
       auto updated = MutableCopy(func);
       updated->body_ = new_body;
       planned_func = updated;
-      analysis_result = AnalyzeAllocationLifetimes(new_body);
+      analysis_result = AnalyzeAllocationLifetimes(planned_func);
       constraint_analysis = AnalyzeAllocationConstraints(planned_func, analysis_result, "MemoryReuse");
     }
   }
@@ -90,9 +91,6 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
-  const memory_reuse::HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
-  const memory_reuse::ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
-
   // Per-space reserved end (the SpaceFootprint reserved_start for the exact fit check). Only meaningful
   // with a configured backend; empty otherwise ⇒ reserved_start defaults to 0.
   std::map<MemorySpace, uint64_t> reserved_end_by_space;
@@ -111,14 +109,16 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  const std::set<const Var*>& pinned_bases = constraint_analysis.declared_allocation_bases;
-
+  // Native selections retain every candidate until its final use. Reuse only
+  // dead storage under the normal lifetime, hazard and no-alias constraints;
+  // do not insert branch copies or retarget producers to force a capacity fit.
   std::vector<Diagnostic> hints;
-  auto reuse_map = memory_reuse::IdentifyReuseOpportunities(
-      analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
-      analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles, analysis_result.subrange_unsafe_groups, reserved_end_by_space,
-      pinned_bases, planned_func, &hints);
+  const auto reuse_map = memory_reuse::IdentifyReuseOpportunities(
+      analysis_result.lifetimes, constraint_analysis.target_hazard_inputs, constraint_analysis.forbid_alias,
+      analysis_result.phi_family_ids, analysis_result.var_sharing_groups, analysis_result.var_liveness,
+      analysis_result.pipeline_membership, analysis_result.pipeline_load_tiles,
+      analysis_result.subrange_unsafe_groups, reserved_end_by_space,
+      constraint_analysis.declared_allocation_bases, planned_func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");
@@ -161,21 +161,20 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   //    the pre-normalization buffers every rename still sits on a buffer of its
   //    own, so no conflict is visible and a shift register silently collapses
   //    ([#2481]).
-  //  - after, because YieldFixup's own IfStmt fixup repoints a phi return_var
-  //    onto the canonical branch buffer, which strands that phi's downstream
-  //    `c = c_phi` rename in exactly the same way.
+  //  - after, because carry writebacks can replace their output bindings.
+  //    Required aliases follow those bindings, while native If results and
+  //    their aliases retain dynamic storage without a fixed MemRef.
   //
   // The mutator is idempotent, so the second run is a no-op whenever the first
   // already settled everything.
   new_body = memory_reuse::NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
-  // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
+  // Step 4: Reconcile fixed carry storage; native If descriptors remain dynamic.
   const auto* ctx = PassContext::Current();
   // A carry-copy cycle needs a scratch buffer; its alloc belongs on the body head
   // like every other allocation, and Step 5 below keeps it because it is in use.
-  new_body =
-      memory_reuse::FixupYields(new_body, func->params_, /*fixup_if_stmts=*/true,
-                                /*canonical_branch_storage=*/ctx != nullptr && ctx->GetEnableBufferIR());
+  new_body = memory_reuse::FixupYields(
+      new_body, func->params_, /*canonical_branch_storage=*/ctx != nullptr && ctx->GetEnableBufferIR());
 
   // Step 4.5: the second half of the bracket described at Step 3.9.
   new_body = memory_reuse::NormalizeIdentityCopyBuffers(new_body);

@@ -86,6 +86,7 @@ struct FinalProducer {
   std::string op_name;
   Span span;
   MemRefPtr storage;
+  bool dynamic_storage = false;
 };
 
 bool IsPhasedAccumulatorProducer(const CallPtr& call) {
@@ -114,6 +115,25 @@ class AccStorePhaseVisitor : public IRVisitor {
       : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
 
   void Run(const StmtPtr& body) {
+    class ResolvedStorageFinder : public IRVisitor {
+     public:
+      bool found = false;
+      void VisitStmt(const StmtPtr& stmt) override {
+        if (!found) IRVisitor::VisitStmt(stmt);
+      }
+      void VisitExpr(const ExprPtr& expr) override {
+        if (!found) IRVisitor::VisitExpr(expr);
+      }
+
+     protected:
+      void VisitVarLike_(const VarPtr& var) override {
+        const auto storage = GetTypeMemRef(var->GetType()).value_or(nullptr);
+        found |= storage && !storage->is_pinned_ && storage->size_ > 0;
+      }
+      void VisitExpr_(const IterArgPtr& arg) override { VisitVarLike_(arg); }
+    } finder;
+    if (body) finder.VisitStmt(body);
+    storage_initialized_ = finder.found;
     if (body) VisitStmt(body);
     FlushPending("before leaving function '" + func_name_ + "'");
   }
@@ -251,7 +271,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       if ((!source_token || pending_.count(*source_token) == 0) && !call->args_.empty() &&
           call->GetKwarg<int>("st_phase", static_cast<int>(STPhase::kUnspecified)) ==
               static_cast<int>(STPhase::kUnspecified)) {
-        CheckUndrainedStorage(call, AccumulatorStorage(call->args_[0]->GetType()));
+        CheckAccumulatorAccess(call, call->args_[0]->GetType());
       }
       CheckStore(call, source_token);
       return std::nullopt;
@@ -263,7 +283,7 @@ class AccStorePhaseVisitor : public IRVisitor {
       // Earlier aliases are checked later using canonical storage, not a
       // second pre-SSA provenance analysis.
       if (token && pending_.count(*token) != 0) ReportUnsafeUse(call);
-      CheckUndrainedStorage(call, AccumulatorStorage(arg->GetType()));
+      CheckAccumulatorAccess(call, arg->GetType());
     }
     if (!destination) {
       if (const auto reused = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
@@ -271,14 +291,18 @@ class AccStorePhaseVisitor : public IRVisitor {
       }
     }
     if (!destination) destination = AccumulatorStorage(call->GetType());
+    const auto tile = As<TileType>(call->GetType());
+    const bool dynamic_destination =
+        storage_initialized_ && !destination && tile && tile->GetMemorySpace() == MemorySpace::Acc;
     // Also guard an explicitly bound output: fresh producers need not read
     // the Acc window they overwrite.
-    CheckUndrainedStorage(call, destination);
+    CheckUndrainedStorage(call, destination, dynamic_destination);
     if (!IsFinalAccumulatorProducer(call)) return std::nullopt;
 
     const TokenId token = producers_.size();
-    producers_.push_back(FinalProducer{call->op_->name_, call->span_, destination});
+    producers_.push_back(FinalProducer{call->op_->name_, call->span_, destination, dynamic_destination});
     pending_.insert(token);
+    if (dynamic_destination && !storage_error_) ++pending_dynamic_;
     if (destination && !storage_error_) {
       auto& windows = pending_storage_[destination->base_.get()];
       if (const auto offset = As<ConstInt>(destination->byte_offset_)) {
@@ -303,6 +327,14 @@ class AccStorePhaseVisitor : public IRVisitor {
     return storage && !storage->is_pinned_ && storage->size_ > 0 ? storage : nullptr;
   }
 
+  void CheckAccumulatorAccess(const CallPtr& call, const TypePtr& type) {
+    const auto storage = AccumulatorStorage(type);
+    const auto tile = As<TileType>(type);
+    const bool dynamic =
+        storage_initialized_ && !storage && tile && tile->GetMemorySpace() == MemorySpace::Acc;
+    CheckUndrainedStorage(call, storage, dynamic);
+  }
+
   void ReportUnsafeUse(const CallPtr& call) {
     if (storage_error_) return;
     diagnostics_.emplace_back(
@@ -317,10 +349,19 @@ class AccStorePhaseVisitor : public IRVisitor {
     // so missing and double drains are still diagnosed independently.
     storage_error_ = true;
     pending_storage_.clear();
+    pending_dynamic_ = 0;
   }
 
-  void CheckUndrainedStorage(const CallPtr& call, const MemRefPtr& storage) {
-    if (!storage || storage_error_) return;
+  void CheckUndrainedStorage(const CallPtr& call, const MemRefPtr& storage, bool dynamic = false) {
+    if (storage_error_) return;
+    // A runtime-selected window can overlap any live Acc window. Keep the
+    // descriptor dynamic and conservatively require the Final to be drained;
+    // choosing either arm's MemRef here would miss accesses to the other arm.
+    if ((dynamic && !pending_.empty()) || ((storage || dynamic) && pending_dynamic_ != 0)) {
+      ReportUnsafeUse(call);
+      return;
+    }
+    if (!storage) return;
     const auto found = pending_storage_.find(storage->base_.get());
     if (found == pending_storage_.end()) return;
     const auto& windows = found->second;
@@ -343,6 +384,7 @@ class AccStorePhaseVisitor : public IRVisitor {
 
   bool ConsumePending(TokenId token) {
     if (pending_.erase(token) == 0) return false;
+    if (producers_[token].dynamic_storage && !storage_error_) --pending_dynamic_;
     if (const auto& storage = producers_[token].storage; storage && !storage_error_) {
       const auto found = pending_storage_.find(storage->base_.get());
       INTERNAL_CHECK_SPAN(found != pending_storage_.end(), producers_[token].span)
@@ -424,12 +466,15 @@ class AccStorePhaseVisitor : public IRVisitor {
   void AnalyzeIsolatedRegion(const StmtPtr& body, const std::string& exit_description) {
     auto outer_pending = std::move(pending_);
     auto outer_storage = std::move(pending_storage_);
+    const auto outer_dynamic = pending_dynamic_;
     pending_.clear();
     pending_storage_.clear();
+    pending_dynamic_ = 0;
     if (body) VisitStmt(body);
     FlushPending(exit_description);
     pending_ = std::move(outer_pending);
     pending_storage_ = std::move(outer_storage);
+    pending_dynamic_ = outer_dynamic;
   }
 
   void BreakRegion(const std::string& description) { FlushPending(description); }
@@ -451,6 +496,7 @@ class AccStorePhaseVisitor : public IRVisitor {
     }
     pending_.clear();
     pending_storage_.clear();
+    pending_dynamic_ = 0;
   }
 
   std::vector<Diagnostic>& diagnostics_;
@@ -467,6 +513,8 @@ class AccStorePhaseVisitor : public IRVisitor {
     std::optional<TokenId> symbolic;
   };
   std::unordered_map<const Var*, PendingStorage> pending_storage_;
+  size_t pending_dynamic_ = 0;
+  bool storage_initialized_ = false;
   bool storage_error_ = false;
 };
 

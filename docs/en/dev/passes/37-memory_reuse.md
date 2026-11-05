@@ -31,6 +31,13 @@ its complete capacity; whole-allocation reuse never discards a live slot.
 
 ## Planner boundary
 
+On the legacy Tile path, a native If selects a yielded descriptor. All possible
+source allocations remain live through uses of that descriptor. Storage is
+eligible for ordinary reuse only after its lifetime ends, subject to existing
+no-alias, target-hazard, pinned-storage and reservation constraints. MemoryReuse
+does not insert branch copies or retarget producers merely to make Vec fit;
+genuine capacity overflow retains its normal diagnostic.
+
 `MemoryReuse` selects shared MemRef identities before address assignment.
 `DSA_RP` instead keeps those identities separate and jointly chooses their
 addresses under capacity and reuse penalties in `AllocateMemoryAddr`. Running

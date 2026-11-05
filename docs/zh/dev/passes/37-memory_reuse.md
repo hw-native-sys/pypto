@@ -28,6 +28,12 @@
 
 ## 规划器边界
 
+在 legacy Tile 路径上，原生 If 选择实际 yield 的描述符。该描述符仍被使用时，
+其所有可能来源的 allocation 都必须保持活跃。只有活跃期结束后的存储才能参与普通复用，
+并继续遵守 no-alias、目标 hazard、固定归属存储和保留区域等约束。
+MemoryReuse 不会仅为使 Vec 能装入而插入分支复制或重定向生产者；
+真实的容量不足仍按正常路径报错。
+
 `MemoryReuse` 在地址分配前先选择共享的 MemRef 身份。`DSA_RP` 则保留这些独立
 身份，并在 `AllocateMemoryAddr` 中结合容量与复用惩罚联合选择地址。二者同时运行
 会在 DSA-RP 评估之前删除候选方案。生命周期干涉、语义 no-alias 规则与目标

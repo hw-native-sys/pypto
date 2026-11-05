@@ -53,7 +53,8 @@ program_with_memrefs = init_pass(program)
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
-   - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
+   - **循环参数及返回值**：原生 While 的 Tile slot，以及与运行时选择相连的 For Tile slot 不具有固定 MemRef；固定存储的 For slot 保留既有优化
+   - **IfStmt Tile 结果**：保留共同的 shape、dtype、memory space，但没有固定 MemRef；两支返回同一来源时也统一如此。其必需别名及视图同样保持动态存储，真正产生数据的算子仍有自己的 MemRef
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
 6. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 7. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
@@ -245,23 +246,24 @@ PTO 由该 `rows` 推导块列步长，因此只有当窗口保留父张量的�
   PTO 为其设定 `rowStride = innerCols`、`colStride = rows`，与累加器具有同样形态的分块结构。
   它们的切片偏移存在同样的潜在不匹配，此处刻意不作改动；对其建模属于另一项工作。
 
-## ForStmt 循环携带变量
+## 循环携带的 Tile
 
-ForStmt 有四个循环携带相关变量，遵循特定的 MemRef 共享规则：
+原生 Tile 路径中，While 参数和结果表示描述符，不表示 allocation。For 的
+initializer 或回边与 If 选择相连时，对应 slot 也遵循此规则。入口和回边的
+操作数分别拥有实际存储；循环入口及 yield 不要求复制到统一 carry buffer。
+`InitMemRef` 保留 shape、dtype、memory space 和 view 元数据，但不给这些区域参数
+和结果绑定 MemRef。别名算子在循环体内继续跟随动态存储。
 
-| 角色 | 描述 | MemRef 来源 |
-| ---- | ---- | ----------- |
-| initValue | 首次迭代前的初始值 | 来自产生该值的操作 |
-| iter_arg | 循环体内变量 | 继承自 initValue |
-| yield value | 每次迭代结束时产出的值 | 来自产生该值的操作（独立分配） |
-| return_var | 循环结束后接收最终 yield 值 | 继承自 yield value |
+原生选择判据与 `SelectBufferIRFunctions` 共用，因此全局启用 Buffer IR、但
+Tile-valued If 强制函数使用原生路径时，也遵循这一规则。能力选择仍在 MemRef
+初始化之后执行，以便检查具体的 view/stride 元数据。
 
-**共享组**：
+固定存储的 For slot 保留既有优化：参数初始时共享 initializer 的 MemRef，结果
+跟随 yield 值；`MaterializeSemanticAliases` 和 yield fixup 协调固定目标存储。
+Buffer IR 保留既有固定 window 规则。
 
-- 组 A：initValue + iter_arg（共享同一 MemRef）
-- 组 B：yield value + return_var（共享同一 MemRef）
-
-组 A 和组 B 可能有不同的 MemRef。yield 与 iter_arg 之间的 MemRef 不一致由后续的 MemoryReuse 解决（必要时插入 `tile.move`）。
+IR 重建在循环体构造完毕后，根据带类型的循环结果确定区域参数类型。即使
+initializer 有固定 MemRef，普通 IR 打印及重新解析也不会恢复描述符参数的固定存储。
 
 ## 实现
 

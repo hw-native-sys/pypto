@@ -40,6 +40,11 @@ views are reconstructed from one common UB base with constant displacements.
 This retains overlap information across the separate compilation boundary.
 Tile parameters and their derived views are rejected: their runtime UB pointers
 cannot be related using the planner offsets assigned to local allocations.
+Tiles selected at runtime by an If, including aliases and derived views, are
+also rejected by executable VF helpers. Their representative MemRef offsets
+do not establish a static displacement from another capture. Materialize the
+selected payload into independent fixed storage before entering RegScope.
+An If yielding the same actual Tile descriptor in both arms remains supported.
 
 ## Two synchronization boundaries
 

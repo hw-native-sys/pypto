@@ -3133,12 +3133,10 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
 
 
 def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
-    """Test that tile-typed iter_args are excluded from PTO scf.for iter_args/yield.
+    """Tile carries use typed SSA descriptors without allocating GM payloads.
 
-    In PTO, tile buffers are mutable references written in-place via outs().
-    Only scalar types need iter_args/yield for loop-carried value semantics.
-    Tile-typed iter_args should be mapped directly to their init values, and
-    the generated scf.for should not contain iter_args or scf.yield for tiles.
+    Payload operations still write Vec storage through outs(); scf.for forwards
+    the resulting descriptor explicitly, including for fixed-storage slots.
     """
 
     @pl.program
@@ -3175,13 +3173,10 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
         assert "loc=vec" in alloc_line, f"Expected loc=vec in alloc_tile, got: {alloc_line}"
         assert "loc=gm" not in alloc_line, f"Unexpected loc=gm in alloc_tile: {alloc_line}"
 
-    # scf.for should NOT have iter_args (all iter_args are tile type)
     for_line = _single_line(lines, "scf.for")
-    assert "iter_args(" not in for_line, f"scf.for should not have iter_args for tile types: {for_line}"
-
-    # No scf.yield should be present (tile yields are excluded)
-    yield_lines = _find_lines(lines, "scf.yield")
-    assert len(yield_lines) == 0, f"No scf.yield expected for tile-only iter_args: {yield_lines}"
+    assert "iter_args(" in for_line and "!pto.tile_buf<loc=vec" in for_line
+    yield_line = _single_line(lines, "scf.yield")
+    assert "!pto.tile_buf<loc=vec" in yield_line
 
     # pto.tadd (the accumulation op) must have loc=vec for all tile_buf operands
     tadd_line = _single_line(lines, "pto.tadd")
@@ -3408,96 +3403,6 @@ def test_pto_codegen_reshaped_row_slice_in_spmd_body_gets_constant_row_address()
 
     mlir_code = _generate_mlir(ir.Program([kernel], kernel.name, lowered.span))
     assert "pto.tmul" in mlir_code
-
-
-def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
-    """IfStmt should materialize tile phi values via branch-local copies, not scf.if results."""
-
-    @pl.program
-    class IfTilePhiProgram:
-        @pl.function(type=pl.FunctionType.InCore)
-        def repro(
-            self,
-            flag: pl.Scalar[pl.INDEX],
-            out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-        ) -> pl.Tensor[[16, 1], pl.FP32]:
-            seed: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
-                [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-            )
-            partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(seed, 0.0)
-            updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(seed, 2.0)
-            if flag == 0:
-                result = partial
-            else:
-                result = updated
-            final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
-            return final
-
-    mlir_code = _generate_default_mlir(IfTilePhiProgram)
-    lines = _get_mlir_lines(mlir_code)
-
-    if_line = _single_line(lines, "scf.if")
-    assert "tile_buf" not in if_line, f"IfStmt should not return tile_buf values: {if_line}"
-    assert "-> (" not in if_line, f"IfStmt should not expose non-scalar results: {if_line}"
-
-    tmov_lines = _find_lines(lines, "pto.tmov")
-    assert any("rows=16, cols=1" in line for line in tmov_lines), (
-        f"Expected branch-local tile materialization for the tile phi, got: {tmov_lines}"
-    )
-
-    phi_tmov_line = next(
-        (line for line in tmov_lines if "rows=16, cols=1" in line),
-        None,
-    )
-    assert phi_tmov_line is not None, f"Expected a tile-phi tmov, got: {tmov_lines}"
-
-    match = re.search(r"outs\((%[\w\d_]+) :", phi_tmov_line)
-    assert match is not None, f"Expected tmov outs target in line: {phi_tmov_line}"
-    phi_target = match.group(1)
-    phi_alloc_line = _single_line(lines, f"{phi_target} = pto.alloc_tile", startswith=True)
-    assert "addr =" in phi_alloc_line, f"Expected IfStmt tile phi alloc to carry addr: {phi_alloc_line}"
-
-
-def test_pto_codegen_if_stmt_tile_phi_preserves_dynamic_valid_shape():
-    """IfStmt tile phi alloc should preserve dynamic valid_shape operands."""
-
-    @pl.program
-    class IfDynamicTilePhiProgram:
-        @pl.function(type=pl.FunctionType.InCore)
-        def repro(
-            self,
-            flag: pl.Scalar[pl.INDEX],
-            input: pl.Tensor[[1, 120], pl.FP32],
-            ctx_len: pl.Scalar[pl.INDEX],
-            out: pl.Out[pl.Tensor[[1, 120], pl.FP32]],
-        ) -> pl.Tensor[[1, 120], pl.FP32]:
-            valid_len: pl.Scalar[pl.INDEX] = ctx_len + 0
-            seed: pl.Tile[[1, 120], pl.FP32] = pl.tile.load(
-                input,
-                [0, 0],
-                [1, 120],
-                [1, valid_len],
-                target_memory=pl.MemorySpace.Vec,
-            )
-            updated: pl.Tile[[1, 120], pl.FP32] = pl.tile.muls(seed, 1.0)
-            if flag == 0:
-                result = seed
-            else:
-                result = updated
-            final: pl.Tensor[[1, 120], pl.FP32] = pl.tile.store(result, [0, 0], out)
-            return final
-
-    mlir_code = _generate_default_mlir(IfDynamicTilePhiProgram)
-    lines = _get_mlir_lines(mlir_code)
-    phi_tmov_line = next(line for line in _find_lines(lines, "pto.tmov") if "rows=1, cols=120" in line)
-    match = re.search(r"outs\((%[\w\d_]+) :", phi_tmov_line)
-    assert match is not None, f"Expected tmov outs target in line: {phi_tmov_line}"
-    phi_target = match.group(1)
-    phi_alloc_line = _single_line(lines, f"{phi_target} = pto.alloc_tile", startswith=True)
-    assert "valid_col = %" in phi_alloc_line, (
-        f"Expected IfStmt tile phi alloc to carry dynamic valid_col, got: {phi_alloc_line}"
-    )
-    assert "v_col=?" in phi_alloc_line, f"Expected dynamic v_col in tile phi alloc, got: {phi_alloc_line}"
 
 
 def test_pto_codegen_if_stmt_scalar_result_preserves_integer_dtype():

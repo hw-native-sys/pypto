@@ -693,9 +693,14 @@ class LoopAlias:
     assert "undrained final accumulator producer" in diagnostics[0].message
 
 
-def test_branch_result_preserves_a_shared_input_storage_alias():
-    # Both branches select aliases of the same canonical Acc window.
-    program = pl.parse_program("""
+@pytest.mark.parametrize("same_source", [False, True])
+@pytest.mark.parametrize("drain_first", [False, True])
+def test_dynamic_branch_result_cannot_bypass_final_drain(same_source, drain_first):
+    seed = "seed0" if same_source else "pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.Partial)"
+    update = "pl.tile.matmul_acc(seed0, lhs, rhs, acc_phase=pl.AccPhase.Partial)"
+    store = "out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)"
+    tail = "\n".join(f"        {stmt}" for stmt in ([store, update] if drain_first else [update, store]))
+    program = pl.parse_program(f"""
 @pl.program
 class BranchAlias:
     @pl.function(type=pl.FunctionType.InCore)
@@ -704,18 +709,20 @@ class BranchAlias:
         lhs = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
         rhs = pl.load(b, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
         seed0 = pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.Partial)
-        seed1 = seed0
+        seed1 = {seed}
         if choose_first:
             selected = pl.yield_(seed0)
         else:
             selected = pl.yield_(seed1)
         final = pl.tile.matmul_acc(selected, lhs, rhs, acc_phase=pl.AccPhase.Final)
-        pl.tile.matmul_acc(seed0, lhs, rhs, acc_phase=pl.AccPhase.Partial)
-        out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)
+{tail}
 """)
     diagnostics = _verify_storage(program)
-    assert len(diagnostics) == 1
-    assert "undrained final accumulator producer" in diagnostics[0].message
+    if drain_first:
+        assert not diagnostics
+    else:
+        assert len(diagnostics) == 1
+        assert "undrained final accumulator producer" in diagnostics[0].message
 
 
 @pytest.mark.parametrize("drain_first", [False, True])

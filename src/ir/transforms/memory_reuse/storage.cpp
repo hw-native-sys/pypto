@@ -66,9 +66,9 @@ std::pair<VarPtr, StmtPtr> CreateStorageMove(const VarPtr& source, const MemRefP
                                              const std::string& name) {
   INTERNAL_CHECK_SPAN(target_memory.has_value(), source->span_)
       << "Internal error: target TileType must have memory_space for tile.move";
-  auto source_tile = GetTileTypeWithMemRef(source->GetType());
+  auto source_tile = As<TileType>(source->GetType());
   INTERNAL_CHECK_SPAN(source_tile, source->span_)
-      << "Internal error: YieldFixup tile.move source must be a TileType with MemRef";
+      << "Internal error: YieldFixup tile.move source must be a TileType";
   INTERNAL_CHECK_SPAN(
       !(source_tile->GetMemorySpace() == MemorySpace::Acc && target_memory.value() == MemorySpace::Acc),
       source->span_)

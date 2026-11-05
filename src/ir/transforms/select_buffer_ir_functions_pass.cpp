@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -715,6 +716,11 @@ FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper
     support.CheckType(type);
   }
   support.VisitStmt(function->body_);
+  // Buffer lowering erases Tile region results and requires fixed destinations.
+  // Preserve native Tile SSA selection for every Tile-valued If. Loops in the
+  // same function do not change this route; their fixed carry storage is
+  // legalized separately on the Tile path.
+  if (RequiresNativeTileSelection(function)) support.supported = false;
   if (support.supported) support.supported = BufferValidAnalysis(function->body_).supported();
   auto selected = std::make_shared<Function>(*function);
   selected->attrs_.emplace_back(kAttrBufferIrSelected, support.supported &&
