@@ -116,8 +116,11 @@ for dtype, mask and indexed-access contracts.
 A5 PTO codegen accepts canonical `pl.hardware_loop(stop)` inside `pl.reg_scope()`
 with nesting up to four levels and no loop-carried values. `start` is zero and
 `step` is one. Integer stops may be static or dynamic (external dynamic captures support INT32, UINT32 and INDEX); the u16 range includes
-65535. Unproven dynamic bounds are admitted; callers must keep counts and memory
-accesses within their valid ranges. Runtime branches and while loops are rejected.
+65535. A statically proven stop outside that range is rejected; otherwise the
+bound is passed through without a range proof. Unproven dynamic bounds are
+admitted; callers must keep counts and memory accesses within their valid ranges.
+Runtime branches and while loops are rejected, and power expressions are not
+supported as hardware-loop stops.
 
 Codegen preserves these loops as `scf.for` with `index` induction variables inside
 `pto.vecscope`. A runtime `i32` stop is captured as a scalar parameter and converted

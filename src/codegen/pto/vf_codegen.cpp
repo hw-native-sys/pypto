@@ -80,6 +80,17 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   }
 };
 
+class HardwareLoopStopChecker : public IRVisitor {
+ public:
+  bool has_power = false;
+
+ protected:
+  void VisitExpr_(const PowPtr& op) override {
+    has_power = true;
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
 }  // namespace
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
@@ -99,6 +110,10 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   if (!operands.loops.empty()) {
     for (const auto& loop : operands.loops) {
       const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
+      HardwareLoopStopChecker stop_checker;
+      stop_checker.VisitExpr(loop->stop_);
+      CHECK_SPAN(!stop_checker.has_power, loop->span_)
+          << "VF hardware loop stop does not support power expressions";
       CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
                      stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
                  loop->span_)

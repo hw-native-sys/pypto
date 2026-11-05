@@ -80,6 +80,12 @@ std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::str
   if (have_mlir == wanted_mlir_type) {
     return ssa;
   }
+  if (dt.IsUnsignedInt() && wanted_mlir_type == GetTypeString(dt).substr(1)) {
+    const auto signless = NewTemp();
+    Emit(signless + " = builtin.unrealized_conversion_cast " + ssa + " : " + have_mlir + " to " +
+         wanted_mlir_type);
+    return signless;
+  }
   if (wanted_mlir_type == "index") {
     return EmitCastToIndex(expr, ssa);
   }
@@ -182,9 +188,13 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
     Emit(result + " = arith.cmpf " + float_pred + ", " + lhs + ", " + rhs + " : " + operand_type);
     fs_.current_expr_value = result;
   } else {
+    const auto unsigned_operands = ir::GetScalarDtype(op->left_).IsUnsignedInt();
+    if (unsigned_operands) operand_type = operand_type.substr(1);
     std::string lhs = EmitArithOperand(op->left_, operand_type);
     std::string rhs = EmitArithOperand(op->right_, operand_type);
-    fs_.current_expr_value = EmitArithCmpi(predicate, lhs, rhs, operand_type);
+    auto unsigned_predicate = predicate;
+    if (unsigned_operands && unsigned_predicate[0] == 's') unsigned_predicate[0] = 'u';
+    fs_.current_expr_value = EmitArithCmpi(unsigned_predicate, lhs, rhs, operand_type);
   }
 }
 
@@ -617,6 +627,13 @@ void PTOCodegen::VisitExpr_(const ir::NotPtr& op) {
   std::string src = fs_.current_expr_value;
   ::pypto::DataType src_dtype = ir::GetScalarDtype(op->operand_);
   std::string src_type = GetTypeString(src_dtype);
+  if (src_dtype.IsUnsignedInt()) {
+    const auto converted = NewTemp();
+    Emit(converted + " = builtin.unrealized_conversion_cast " + src + " : " + src_type + " to " +
+         src_type.substr(1));
+    src = converted;
+    src_type = src_type.substr(1);
+  }
   std::string zero = NewTemp();
   std::string result = NewTemp();
   if (src_dtype.IsFloat()) {
@@ -635,6 +652,19 @@ void PTOCodegen::VisitExpr_(const ir::NegPtr& op) {
   ::pypto::DataType dtype = ir::GetScalarDtype(op);
   std::string type_str = GetTypeString(dtype);
   std::string result = NewTemp();
+  if (dtype.IsUnsignedInt()) {
+    const auto converted = NewTemp();
+    Emit(converted + " = builtin.unrealized_conversion_cast " + src + " : " + type_str + " to " +
+         type_str.substr(1));
+    const auto zero = NewTemp();
+    const auto negated = NewTemp();
+    Emit(zero + " = arith.constant 0 : " + type_str.substr(1));
+    Emit(negated + " = arith.subi " + zero + ", " + converted + " : " + type_str.substr(1));
+    Emit(result + " = builtin.unrealized_conversion_cast " + negated + " : " + type_str.substr(1) + " to " +
+         type_str);
+    fs_.current_expr_value = result;
+    return;
+  }
   if (dtype.IsFloat()) {
     Emit(result + " = arith.negf " + src + " : " + type_str);
   } else {
@@ -664,10 +694,24 @@ void PTOCodegen::VisitExpr_(const ir::BitNotPtr& op) {
   std::string src = fs_.current_expr_value;
   ::pypto::DataType dtype = ir::GetScalarDtype(op);
   std::string type_str = GetTypeString(dtype);
+  const bool unsigned_value = dtype.IsUnsignedInt();
+  const auto arithmetic_type = unsigned_value ? type_str.substr(1) : type_str;
+  if (unsigned_value) {
+    const auto signless = NewTemp();
+    Emit(signless + " = builtin.unrealized_conversion_cast " + src + " : " + type_str + " to " +
+         arithmetic_type);
+    src = signless;
+  }
   std::string all_ones = NewTemp();
-  Emit(all_ones + " = arith.constant -1 : " + type_str);
+  Emit(all_ones + " = arith.constant -1 : " + arithmetic_type);
   std::string result = NewTemp();
-  Emit(result + " = arith.xori " + src + ", " + all_ones + " : " + type_str);
+  Emit(result + " = arith.xori " + src + ", " + all_ones + " : " + arithmetic_type);
+  if (unsigned_value) {
+    const auto converted = NewTemp();
+    Emit(converted + " = builtin.unrealized_conversion_cast " + result + " : " + arithmetic_type + " to " +
+         type_str);
+    result = converted;
+  }
   fs_.current_expr_value = result;
 }
 

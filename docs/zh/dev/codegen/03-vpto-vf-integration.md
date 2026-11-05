@@ -105,7 +105,8 @@ Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用及一般 
 A5 PTO codegen 支持 `pl.reg_scope()` 内的规范 `pl.hardware_loop(stop)`，
 最多嵌套四层，不支持 loop-carried value。`start` 固定为 0，`step` 固定为 1。
 整数 stop 可以是静态或动态值（外部动态参数支持 INT32、UINT32 和 INDEX），u16 范围包含 65535。无需证明动态范围；
-调用方需要保证计数和内存访问处于有效范围。运行时分支和 while 会被拒绝。
+只有静态分析明确超出该范围的 stop 才会被拒绝，其余值不做范围拦截；调用方需要保证计数和内存访问处于有效范围。
+运行时分支和 while 会被拒绝，hardware loop 的 stop 不支持幂表达式。
 
 Codegen 在 `pto.vecscope` 内生成使用 `index` 归纳变量的 `scf.for`。
 运行时 `i32` stop 作为标量参数捕获，通过 `arith.index_cast` 转换。

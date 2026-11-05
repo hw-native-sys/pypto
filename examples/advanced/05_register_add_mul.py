@@ -17,7 +17,7 @@ Run in an activated PyPTO/PTOAS environment:
 
 Use --save-kernels-dir to retain generated sources and pass dumps for inspection.
 This example demonstrates hardware-loop PTO codegen. The unchanged runtime
-synchronization admission rejects loop CFGs; this example only generates PTO.
+compiler emits the helper and caller PTO for inspection.
 """
 
 import argparse
@@ -76,7 +76,7 @@ def main() -> None:
         save_kernels_dir=args.save_kernels_dir,
         dump_passes=bool(args.save_kernels_dir),
     )
-    # Generate caller/helper PTO; runtime admission does not support loop CFGs.
+    # Generate caller/helper PTO and retain the generated sources when requested.
     add_mul.compile(config=config)
     print("OK: generated reg_scope hardware-loop add + mul PTO (codegen only)")
 
