@@ -1705,11 +1705,25 @@ void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& h
 }
 
 std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
-  // Most dtype names match torch directly; only fp16/fp32/fp64 differ.
+  // The emitted host code is `torch.zeros(..., dtype=torch.<name>)`, so <name>
+  // must be torch's own spelling. Integer and bfloat16 names already match, but
+  // every float whose IR name is an abbreviation needs translating -- an
+  // untranslated name reaches the generated `host_orch.py` as a torch attribute
+  // that does not exist and raises AttributeError before the kernel ever runs.
   static const std::unordered_map<std::string, std::string> kRenames = {
       {"fp16", "float16"},
       {"fp32", "float32"},
       {"fp64", "float64"},
+      {"fp8e4m3fn", "float8_e4m3fn"},
+      {"fp8e5m2", "float8_e5m2"},
+      {"fp8e8m0", "float8_e8m0fnu"},
+      {"fp4e2m1x2", "float4_e2m1fn_x2"},
+      // Torch has no hifloat8 and no packed E1M2 dtype. Both are byte-sized
+      // carriers whose IR shape is already the physical byte extent, so a uint8
+      // host buffer holds exactly the same bytes -- the same substitution
+      // CodegenBase::GetRuntimeDataTypeString makes for the runtime enum.
+      {"fp4e1m2x2", "uint8"},
+      {"hf8", "uint8"},
   };
   std::string name = dtype.ToString();
   auto it = kRenames.find(name);
