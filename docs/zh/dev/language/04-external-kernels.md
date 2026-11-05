@@ -182,6 +182,8 @@ def producer(
 这条 return 用于声明别名，不会作为 kernel 计算在 Python 中执行。JIT 将参数引用
 保存在函数属性 `external_return_params` 中，保证删除未使用的返回值或提取 SPMD
 wrapper 后，后续消费者仍然读取正确的输出 buffer。重复返回同一个参数也会保留。
+调用方特化下游 kernel 时，形状、数据类型和布局的传播也遵循这些别名，
+包括带有可写临时参数的 extern 返回只读参数的情况。
 返回计算表达式、局部变量或通过控制流选择返回值的写法会被拒绝。
 
 在原始 `@pl.function` IR 中，可用函数体开头的

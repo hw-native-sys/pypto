@@ -964,6 +964,73 @@ def entry(first: pl.Out[pl.Tensor], second: pl.Out[pl.Tensor]):
         entry.compile(*args, config=RunConfig(save_kernels_dir=str(tmp_path / "generated")))
 
 
+@pytest.mark.parametrize("core_type", ["aiv", "aic", "mixed"])
+@pytest.mark.parametrize("keyword_args", [False, True])
+@pytest.mark.parametrize("case", ["reordered", "readonly-scratch", "subset", "repeated"])
+def test_extern_return_metadata_reaches_incore_consumer(tmp_path, core_type, keyword_args, case):
+    """Returned aliases must carry their own shape/dtype into downstream specialization."""
+    cpp = _write_kernel(tmp_path)
+    source_arg = (
+        f"aic_source={str(cpp)!r}, aiv_source={str(cpp)!r}"
+        if core_type == "mixed"
+        else f"source={str(cpp)!r}"
+    )
+    returned = {
+        "reordered": ("second", "first"),
+        "readonly-scratch": ("second",),
+        "subset": ("second",),
+        "repeated": ("second", "second"),
+    }[case]
+    second_annotation = "pl.Tensor" if case == "readonly-scratch" else "pl.Out[pl.Tensor]"
+    call_args = "second=second, first=first" if keyword_args else "first, second"
+    targets = [f"result{i}" for i in range(len(returned))]
+    consumers = "\n".join(
+        f"    output{i} = consume{i}({target}, output{i})" for i, target in enumerate(targets)
+    )
+    # Each heterogeneous result feeds a distinct dependency so this exercises
+    # return propagation without requiring dtype polymorphism within one kernel.
+    consumer_defs = "\n".join(
+        f"""@pl.jit.incore
+def consume{i}(value: pl.Tensor, output: pl.Out[pl.Tensor]):
+    rows, columns = value.shape
+    tile = pl.load(value, [0, 0], [rows, columns])
+    pl.store(tile, [0, 0], output)
+    return output
+"""
+        for i in range(len(returned))
+    )
+    outputs = ", ".join(f"output{i}: pl.Out[pl.Tensor]" for i in range(len(returned)))
+    module_path = tmp_path / "extern_return_metadata.py"
+    module_path.write_text(
+        f"""import pypto.language as pl
+@pl.jit.extern(core_type={core_type!r}, {source_arg})
+def producer(first: pl.Out[pl.Tensor], second: {second_annotation}):
+    return {", ".join(returned)}
+{consumer_defs}
+@pl.jit
+def entry(first: pl.Out[pl.Tensor], second: {second_annotation}, {outputs}):
+    {", ".join(targets)} = producer({call_args})
+{consumers}
+    return {", ".join(f"output{i}" for i in range(len(returned)))}
+"""
+    )
+    entry = _load_jit_module(module_path).entry
+    first, second = torch.empty(16, 32, dtype=torch.int8), torch.empty(32, 32)
+    expected = {"first": ir.TensorType([16, 32], pl.INT8), "second": ir.TensorType([32, 32], pl.FP32)}
+    buffers = {"first": first, "second": second}
+    args = (first, second, *(torch.empty_like(buffers[name]) for name in returned))
+    program = pl.parse(_specialize(entry, *args))
+    assert isinstance(program, ir.Program)
+    # A positional Out/InOut guess gives result0 the INT8 scratch buffer's
+    # metadata. Equal-shaped outputs would hide this even when buffers are right.
+    for i, name in enumerate(returned):
+        fn = program.get_function(f"consume{i}")
+        assert fn is not None
+        ir.assert_structural_equal(fn.params[0].type, expected[name])
+        ir.assert_structural_equal(fn.params[0].type, fn.params[1].type)
+    entry.compile(*args, config=RunConfig(save_kernels_dir=str(tmp_path / "generated")))
+
+
 @pytest.mark.parametrize(
     "body",
     ["return pl.add(output, output)", "alias = output\n    return alias", "if True:\n        return output"],

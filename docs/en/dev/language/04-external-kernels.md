@@ -202,8 +202,10 @@ This return declares aliases; Python does not execute it as kernel computation.
 The JIT preserves the names in the `external_return_params` function attribute,
 so dropping an unused result or outlining a SPMD wrapper cannot shift later
 consumers onto a different output buffer. Repeated parameter returns are also
-preserved. Return expressions that compute a value, return a local variable, or
-select a result through control flow are rejected.
+preserved. Caller-side shape, dtype, and layout propagation follows the same
+aliases when specializing downstream kernels, including readonly returns from
+externs with writable scratch parameters. Return expressions that compute a
+value, return a local variable, or select a result through control flow are rejected.
 
 In raw `@pl.function` IR, declare the same mapping with a prologue such as
 `pl.func_attr({"external_return_params": [second, third]})`, followed by `...`.
