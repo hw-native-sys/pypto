@@ -39,6 +39,8 @@ class ExternalKernelSpec:
     dual_aiv_dispatch: bool = False
     backend: str | None = None
     runtime: str | None = None
+    # 外部源码中的硬件全核屏障参与方；None 表示没有全核驻留要求。
+    hard_syncall: str | None = None
 
 
 def apply_external_spec(ctx: SpecializeContext, spec: object) -> None:
@@ -49,6 +51,11 @@ def apply_external_spec(ctx: SpecializeContext, spec: object) -> None:
         raise ValueError(f"External kernel {ctx.func_name!r}: invalid core type {spec.core_type!r}")
     if spec.dual_aiv_dispatch and spec.core_type != "mixed":
         raise ValueError("dual_aiv_dispatch requires a mixed external kernel")
+    expected_syncall = {"aic": "aic_only", "aiv": "aiv_only", "mixed": "mix"}[spec.core_type]
+    if spec.hard_syncall is not None and spec.hard_syncall != expected_syncall:
+        raise ValueError(f"External {spec.core_type} kernel requires hard_syncall={expected_syncall!r}")
+    if spec.hard_syncall == "mix" and not spec.dual_aiv_dispatch:
+        raise ValueError("Mixed hard_syncall requires dual_aiv_dispatch=True")
     unknown = [
         name for name in ctx.param_names if name not in ctx.tensor_meta and name not in ctx.scalar_dtypes
     ]
@@ -75,6 +82,7 @@ def apply_external_spec(ctx: SpecializeContext, spec: object) -> None:
     ctx.external_parameter_access = dict(spec.parameter_access)
     ctx.external_backend = spec.backend
     ctx.external_runtime = spec.runtime
+    ctx.external_hard_syncall = spec.hard_syncall
 
 
 def external_context_digest(contexts: list[SpecializeContext], backend: str, runtime: str) -> str:
@@ -100,6 +108,7 @@ def external_context_digest(contexts: list[SpecializeContext], backend: str, run
                     ctx.func_name,
                     str(ctx.external_core_type),
                     str(ctx.external_dual_aiv_dispatch),
+                    str(ctx.external_hard_syncall),
                     repr(sorted(ctx.external_parameter_access.items())),
                     *ctx.external_include_dirs,
                 ),

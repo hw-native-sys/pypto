@@ -160,8 +160,8 @@ def test_external_source_requires_aic_or_aiv(tmp_path):
                 return out
 
 
-def test_external_kernel_requires_empty_body(tmp_path):
-    """An external kernel with a non-``...`` body is rejected."""
+def test_external_kernel_rejects_executable_body(tmp_path):
+    """外部核声明不能包含计算，即使末尾有合法的输出写回。"""
     cpp = _write_kernel(tmp_path)
     with pytest.raises(ParserSyntaxError, match="must have an empty"):
 
@@ -208,6 +208,40 @@ def test_external_source_not_found(tmp_path):
             ) -> pl.Tensor[[16, 16], pl.FP16]:
                 out = self.K(a, out)
                 return out
+
+
+def test_external_kernel_preserves_explicit_output_aliases(tmp_path):
+    cpp = _write_kernel(tmp_path)
+
+    @pl.program
+    class ExplicitWritebacks:
+        @pl.function(type=pl.FunctionType.AIV, external_source=cpp)
+        def kernel(
+            self,
+            first: pl.Out[pl.Tensor[[16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+            return second, first
+
+    # 同类型输出仍按明确的参数顺序保留别名，且经打印、重解析后不丢失。
+    text = ExplicitWritebacks.as_python()
+    assert "return second, first" in text
+    assert "return second, first" in pl.parse(text).as_python()
+
+
+@pytest.mark.parametrize("expression", ["source", "output[0]", "pl.add(output, 1.0)", "()"])
+def test_external_kernel_rejects_non_writeback_returns(tmp_path, expression):
+    cpp = _write_kernel(tmp_path)
+    source = f"""import pypto.language as pl
+@pl.program
+class InvalidWriteback:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(cpp)!r})
+    def kernel(self, source: pl.Tensor[[16], pl.FP32],
+               output: pl.Out[pl.Tensor[[16], pl.FP32]]) -> pl.Tensor[[16], pl.FP32]:
+        return {expression}
+"""
+    with pytest.raises(ParserSyntaxError, match="return only Out/InOut"):
+        pl.parse(source)
 
 
 if __name__ == "__main__":

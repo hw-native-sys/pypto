@@ -286,6 +286,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void EmitLaunchSpec(const std::string& task_var, const ir::ExprPtr& core_num_expr, bool sync_start);
 
+  void AppendExternalSyncallCheck(std::vector<std::string>& pre_lines, const ir::CallPtr& call,
+                                  const ir::FunctionPtr& kernel, const ir::ExprPtr& core_num, bool sync_start,
+                                  const std::string& task_var, const ir::FunctionPtr& paired_aiv = nullptr);
+
   void EmitEarlyResolveHint(const std::string& task_var, const ir::CallPtr& call);
 
   // Selective device timing (pl.submit(..., timing_slot=N)). The runtime folds
@@ -382,6 +386,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   TaskDispatchPlan BuildMixedGroupDispatchPlan(const ir::CallPtr& call, const ir::FunctionPtr& launch_func,
                                                const std::string& group_name, int aic_id, int aiv_id,
+                                               const ir::FunctionPtr& aic_func,
                                                const ir::FunctionPtr& aiv_func,
                                                std::vector<ParamEntry>&& params, bool capture_plain_task_id);
 

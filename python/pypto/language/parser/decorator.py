@@ -935,8 +935,9 @@ def function(
                    If False (default), allow variable reassignment (non-SSA mode).
         external_source: Path to a hand-written C++ kernel ``.cpp`` that backs
                    this function. Only valid on ``FunctionType.AIC`` /
-                   ``FunctionType.AIV`` functions, whose body must be a bare
-                   ``...`` (signature only). The orchestration calls the kernel
+                   ``FunctionType.AIV`` functions.
+                   函数体只允许 ``...`` 或返回 Out/InOut Tensor 参数的单条 return，
+                   后者仅声明写回别名关系。The orchestration calls the kernel
                    as usual, but the compiler skips PyPTO codegen for it and
                    compiles the referenced source as the InCore kernel instead.
                    Relative paths resolve against the defining file's directory.

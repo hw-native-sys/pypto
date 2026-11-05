@@ -45,6 +45,7 @@ def write_wrapper(exported: "SourceBundle", directory: str | Path) -> Path:
     lines = [
         '#include "c_api/asc_simd.h"',
         '#include "tensormap_and_ringbuffer/tensor.h"',
+        '#include "intrinsic.h"',
     ]
     # 将提供方启动入口嵌入为内联设备函数。
     # 计算与同步逻辑保留在提供方生成的源码中。
@@ -91,6 +92,16 @@ def write_wrapper(exported: "SourceBundle", directory: str | Path) -> Path:
                 lines.append(
                     f"    {local}.{member}[{field['slot']}] = t{index}->{member}s[{field['dimension']}];"
                 )
+        elif parameter["kind"] == "context":
+            name = parameter["name"]
+            if name in ("get_block_idx", "get_block_num"):
+                lines.append(f"    {cpp_type} {local} = {name}(args);")
+            else:
+                # 单核任务没有配对向量通道；MIX 的两条 AIV 使用调度器的通道编号。
+                lines.append(f"    {cpp_type} {local} = {1 if name == 'get_subblock_dim' else 0};")
+                if manifest["core_type"] == "mixed":
+                    value = "2" if name == "get_subblock_dim" else "get_sub_block_id(args)"
+                    lines += ["#if defined(__DAV_VEC__)", f"    {local} = {value};", "#endif"]
         else:
             lines.append(f"    {cpp_type} {local} = *reinterpret_cast<__gm__ {cpp_type}*>(&args[{index}]);")
         arguments.append(local)
@@ -222,6 +233,7 @@ def _build(kernel: Any, ctx: "SpecializeContext") -> "ExternalKernelSpec":
         },
         include_dirs=include_directories(),
         dual_aiv_dispatch=manifest["core_type"] == "mixed",
+        hard_syncall=manifest["hard_syncall"],
         backend="Ascend950",
         runtime="tensormap_and_ringbuffer",
     )

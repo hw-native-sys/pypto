@@ -20,7 +20,10 @@ PyPTO 生成 kernel 相同的 ABI：
   —— orchestration 会依据声明构建任务负载（`add_input` / `add_inout` /
   `add_output`）。
 
-声明只携带签名，函数体为一个裸的 `...`。
+函数体可以是裸的 `...`，也可以是单条 `return out` / `return first, second`，
+返回已声明的 `Out`/`InOut` Tensor 参数。该 return 仅声明输出别名，不包含设备计算。
+显式写回关系使动态 SPMD 的空任务分支能够保留调用者预分配的输出。
+CANNBotDSL 适配器自动生成此契约。
 
 ### 多文件 kernel
 
@@ -240,7 +243,39 @@ CANNBotDSL 是可选依赖，仅在使用此适配器时导入。
 打包的 MX scale 布局需使用显式、等大小的 ND 存储视图；此操作只改元数据，保留原始
 scale 字节，不重新编码。CANNBotDSL 接入目前支持 A5/TMR、最内层连续的
 ND Tensor、显式 runtime Scalar、AIV/AIC/MIX 和基本动态形状。
-该设备调用 ABI 不支持读取硬件 block 索引/数量或 launch 范围的同步；任务索引应作为
-runtime Scalar 显式传入。不支持的启动操作会在编译器优化前被拒绝。
+`cb.get_block_idx()` 和 `cb.get_block_num()` 对应当前 simpler 任务的逻辑 SPMD
+编号及数量。PyPTO 在提供方编译器折叠占位启动维度之前，将查询替换为隐藏运行时参数，
+用户签名无需增加参数。MIX 向量代码中的 `cb.get_subblock_id()` 为 0 或 1，
+`cb.get_subblock_dim()` 为 2；AIC 和独立 AIV 分别得到 0 和 1。
+
+`cb.global_sync_all()` 和 mode-0 block 屏障要求全核同时驻留，并设置
+`sync_start=True`。AIC/MIX 使用 `pl.system.available_cluster_count()`，
+独立 AIV 使用 `pl.system.available_aiv_count()`。假定已有名为 `mixed_kernel`
+的 MIX `@cb.kernel`：
+
+```python
+@pl.jit
+def program(x: pl.Tensor, scratch: pl.Tensor, out: pl.Out[pl.Tensor]):
+    count = pl.system.available_cluster_count()
+    with pl.spmd(count, sync_start=True):
+        mixed_kernel(x, scratch, out)
+    return out
+
+
+# CPU 缓冲区及 config 的准备方式见上面的完整示例。
+program(x, scratch, out, config=config)
+```
+
+PyPTO 通过 `external_hard_syncall` 保留外部源码的屏障约束，复用已有占用校验，
+并在任务提交前核对实际运行时核数。部分核启动或缺少 `sync_start` 会被拒绝。
+其他提供方可用 `ExternalKernelSpec.hard_syncall` 声明 `"aic_only"`、`"aiv_only"`
+或 `"mix"`，其中 MIX 必须启动两条向量通道。所有参与核必须按相同顺序到达屏障；
+启动检查无法证明外部代码内部的控制流一致。跨卡通信、SIMT、隐式 GM 工作空间和
+提供方管理的 debug buffer 仍不支持。
+
+可运行的 A5 用例位于 `tests/st/runtime/external_kernel/test_cannbotdsl.py`，
+覆盖部分核 SPMD 上下文映射，以及全核 AIV/MIX 的多轮邻核数据交换。用例使用
+提供方的 Buffer 路径；CANNBotDSL 0.8.1 的 Buffer 校验可能拒绝纯标量核中的
+`global_sync_all()`，PyPTO 保留该错误，不关闭提供方校验。
 SDK 安装若缺少可选的 CPU-debug 条件头文件，可能使持久缓存保守跳过；
 默认的进程内缓存仍可使用。

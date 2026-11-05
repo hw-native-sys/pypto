@@ -87,23 +87,25 @@ def _parameters(device: Any, contract: Any, access: list[int]) -> list[dict[str,
     return parameters
 
 
-def _validate_external_ops(module: Any) -> None:
-    """在优化可能消除相关操作之前，拒绝宿主启动语义。"""
+def _validate_external_ops(module: Any, *, allow_subblocks: bool = False) -> None:
+    """拒绝尚未适配的宿主管理资源和通信操作。"""
     errors: list[str] = []
 
     def check(operation: Any) -> Any:
         name = operation.name
+        if allow_subblocks and name in ("cannir.get_subblock_id", "cannir.get_subblock_dim"):
+            return ir.WalkResult.ADVANCE
         unsupported = (
             "debug",
             "dump",
             "hcomm",
             "write_nbi",
             "read_nbi",
-            "sync_block",
             "global_sync",
             "get_block_idx",
             "get_block_num",
             "get_subblock_dim",
+            "get_subblock_id",
         )
         if name.startswith("ascsimt.") or any(part in name for part in unsupported):
             errors.append(name)
@@ -112,6 +114,79 @@ def _validate_external_ops(module: Any) -> None:
     module.operation.walk(check)
     if errors:
         raise ValueError(f"Unsupported CANNBotDSL external-call operations: {sorted(set(errors))}")
+
+
+def _bind_launch_context(devices: list[Any], host: Any, supported: set[str]) -> list[dict[str, Any]]:
+    """将硬件查询改为隐藏参数；拆核后的 AIC/AIV 保持相同的设备 ABI。"""
+    queries: dict[str, list[tuple[Any, Any]]] = {}
+    for device in devices:
+
+        def collect(operation: Any) -> Any:
+            dialect, _, name = operation.name.partition(".")
+            if dialect in ("cannir", "ascscalar") and name in supported:
+                queries.setdefault(name, []).append((device, operation))
+            return ir.WalkResult.ADVANCE
+
+        device.operation.walk(collect)
+    parameters: list[dict[str, Any]] = []
+    for name, operations in sorted(queries.items()):
+        dtype = operations[0][1].results[0].type
+        index = len(host.type.inputs)
+        for function in (*devices, host):
+            function.entry_block.add_argument(dtype, ir.Location.unknown())
+            function.attributes["function_type"] = ir.TypeAttr.get(
+                ir.FunctionType.get([*function.type.inputs, dtype], list(function.type.results))
+            )
+            if "arg_attrs" in function.attributes:
+                function.attributes["arg_attrs"] = ir.ArrayAttr.get(
+                    [*ir.ArrayAttr(function.attributes["arg_attrs"]), ir.DictAttr.get()]
+                )
+        for device, operation in operations:
+            argument = device.entry_block.arguments[index]
+            operation.results[0].replace_all_uses_with(argument)
+            operation.erase()
+        parameters.append({"logical_index": index, "name": name, "kind": "context"})
+    return parameters
+
+
+def _bind_lowered_subblocks(module: Any) -> list[dict[str, Any]]:
+    """保留 subblock 的范围信息完成布局推导，再接入 simpler 的向量通道编号。"""
+    devices = [entry for entry in module.body.operations if "cannir.device" in entry.attributes]
+    host = next(entry for entry in module.body.operations if "cannir.host" in entry.attributes)
+    parameters = _bind_launch_context(devices, host, {"get_subblock_id", "get_subblock_dim"})
+    if parameters:
+        # 提供方的 ABI 报告从虚拟宿主入口收集参数；在拆核后同步扩展其唯一启动点。
+        for operation in list(host.entry_block.operations):
+            if operation.operation.name == "cannir.kernel_launch":
+                with ir.InsertionPoint(operation):
+                    cannir.KernelLaunchOp(
+                        operation.attributes["callee"],
+                        operation.operands[0],
+                        [ir_transport.unwrap_operand(argument) for argument in host.entry_block.arguments],
+                        thread_dim=0,
+                        dyn_ub_buf=0,
+                        simt_kernel=False,
+                    )
+                operation.operation.erase()
+    return parameters
+
+
+def _hard_syncall_requirement(module: Any, core: str) -> str | None:
+    """从拆核后的同步操作识别实际参与核；核内屏障不要求全设备驻留。"""
+    global_barrier = False
+
+    def check(operation: Any) -> Any:
+        nonlocal global_barrier
+        if "sync_block" in operation.name:
+            attrs = operation.attributes
+            mode = int(ir.IntegerAttr(attrs["mode"]).value) if "mode" in attrs else 2
+            if mode not in (0, 2):
+                raise ValueError(f"Unsupported CANNBotDSL external-call sync mode: {mode}")
+            global_barrier |= mode == 0
+        return ir.WalkResult.ADVANCE
+
+    module.operation.walk(check)
+    return {"aic": "aic_only", "aiv": "aiv_only", "mixed": "mix"}[core] if global_barrier else None
 
 
 def _validate_lowered(module: Any) -> str:
@@ -186,6 +261,11 @@ def export_source_bundle(kernel: Any, arguments: list[Any]) -> SourceBundle:
                 )
                 if debug is not None:
                     raise ValueError("CANNBotDSL external calls do not support host-managed debug buffers")
+                host_schema.apply_physical_shape_upper_bound_attributes(device, bound.contract)
+                access: list[int] = list(cannir.infer_kernel_argument_access(device.operation))
+                parameters = _parameters(device, bound.contract, access)
+                # block 数量的占位值为 1，必须在常量折叠之前换成逻辑启动信息。
+                parameters.extend(_bind_launch_context([device], host, {"get_block_idx", "get_block_num"}))
                 i64 = ir.IntegerType.get_signless(64)
                 one = arith.ConstantOp(i64, ir.IntegerAttr.get(i64, 1))
                 cannir.KernelLaunchOp(
@@ -197,14 +277,14 @@ def export_source_bundle(kernel: Any, arguments: list[Any]) -> SourceBundle:
                     simt_kernel=False,
                 )
                 func.ReturnOp([])
-            host_schema.apply_physical_shape_upper_bound_attributes(device, bound.contract)
-            access: list[int] = list(cannir.infer_kernel_argument_access(device.operation))
-            parameters = _parameters(device, bound.contract, access)
             module.operation.verify()
-            _validate_external_ops(module)
+            _validate_external_ops(module, allow_subblocks=True)
             passes._verify_array_contracts(module)
             passes._run_cannir_passes(module)
+            parameters.extend(_bind_lowered_subblocks(module))
+            module.operation.verify()
             core = _validate_lowered(module)
+            hard_syncall = _hard_syncall_requirement(module, core)
             source, abi_json = cannir.translate_to_source_bundle(module.operation)
         finally:
             lowering_state._CURRENT_LOWERING_STATE.reset(token)
@@ -221,6 +301,7 @@ def export_source_bundle(kernel: Any, arguments: list[Any]) -> SourceBundle:
             "export_backend": "source_bundle",
             "symbol": abi["symbol"],
             "core_type": core,
+            "hard_syncall": hard_syncall,
             "arch": "dav-3510",
             "parameters": parameters,
             "device_abi": abi,

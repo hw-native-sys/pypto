@@ -22,7 +22,11 @@ so the hand-written source must meet the same ABI PyPTO-generated kernels do:
   match how the kernel reads its arguments — the orchestration builds the task
   payload (`add_input` / `add_inout` / `add_output`) from the declaration.
 
-The declaration carries only the signature; its body is a bare `...`.
+The body may be a bare `...`, or a single `return out` / `return first, second`
+that names declared `Out`/`InOut` tensor parameters. This return declares output
+aliasing, without executable device code. Explicit writebacks let dynamic SPMD
+launches preserve preallocated outputs when the launch is empty. The CANNBotDSL
+adapter generates this contract automatically.
 
 ### Multi-file kernels
 
@@ -269,8 +273,44 @@ type. Packed MX scale layouts require an explicit equal-size ND storage view;
 this changes metadata only and preserves the scale bytes without re-encoding.
 The CANNBotDSL integration currently supports A5/TMR, ND tensors with a contiguous
 innermost axis, explicit runtime scalars, AIV/AIC/MIX and basic dynamic shapes.
-Hardware block indices/counts and launch-wide synchronization are not part of
-this device-call ABI; pass task indices explicitly as runtime scalar arguments.
-Unsupported launch operations are rejected before compiler optimization.
+`cb.get_block_idx()` and `cb.get_block_num()` refer to the current simpler task's
+logical SPMD block index and count. PyPTO replaces these queries with hidden
+runtime arguments before the provider compiler can fold its placeholder launch
+dimensions. User signatures need no extra parameters. In MIX vector code,
+`cb.get_subblock_id()` is 0 or 1 and `cb.get_subblock_dim()` is 2; AIC and standalone
+AIV code see 0 and 1 respectively.
+
+`cb.global_sync_all()` and mode-0 block barriers require a full, co-resident
+launch with `sync_start=True`. Use `pl.system.available_cluster_count()` for AIC
+or MIX, and `pl.system.available_aiv_count()` for standalone AIV. For example,
+given a MIX `@cb.kernel` named `mixed_kernel`:
+
+```python
+@pl.jit
+def program(x: pl.Tensor, scratch: pl.Tensor, out: pl.Out[pl.Tensor]):
+    count = pl.system.available_cluster_count()
+    with pl.spmd(count, sync_start=True):
+        mixed_kernel(x, scratch, out)
+    return out
+
+
+# CPU 缓冲区及 config 的准备方式见上面的完整示例。
+program(x, scratch, out, config=config)
+```
+
+PyPTO carries the opaque kernel's barrier requirement in `external_hard_syncall`,
+reuses the occupancy verifier, and checks the actual runtime core count before
+submission. A partial launch or missing `sync_start` is rejected. Other producers
+can declare the same requirement with `ExternalKernelSpec.hard_syncall`, using
+`"aic_only"`, `"aiv_only"`, or `"mix"`; MIX requires both vector lanes. Every
+participant must reach the same barriers in the same order; launch checks cannot
+prove uniform control flow inside external code. Cross-card communication,
+SIMT, implicit GM workspaces, and provider-managed debug buffers remain unsupported.
+
+The runnable A5 cases in `tests/st/runtime/external_kernel/test_cannbotdsl.py`
+cover partial SPMD context mapping and repeated full-grid AIV/MIX neighbor
+exchanges. They use the provider's Buffer path; CANNBotDSL 0.8.1 may reject a
+scalar-only kernel followed by `global_sync_all()` in its own Buffer verifier.
+PyPTO retains that provider diagnostic and does not disable its checks.
 An SDK installation missing optional CPU-debug headers can make the persistent
 cache bypass conservatively; the default in-process cache still works.

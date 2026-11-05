@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""检查代码和英文文档的语言，允许 Python 注释及 docstring 使用中文。"""
+"""检查代码和英文文档的语言，允许中英文注释及 Python docstring。"""
 
 import argparse
 import ast
@@ -58,10 +58,26 @@ def mask_chinese_python_annotations(source: str) -> str:
     return source
 
 
+def mask_chinese_cpp_comments(source: str) -> str:
+    """跳过普通及原始字符串，只屏蔽 C/C++ 注释中的中文，保留诊断行号。"""
+    tokens = re.compile(
+        r'R"(?P<delimiter>[^ ()\\\t\r\n]{0,16})\([\s\S]*?\)(?P=delimiter)"'
+        r'|"(?:\\[\s\S]|[^"\\])*"'
+        r"|'(?:\\[\s\S]|[^'\\])*'"
+        r"|//(?:[^\n]*\\\n)*[^\n]*|/\*[\s\S]*?\*/"
+    )
+    chinese = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e]")
+    return tokens.sub(
+        lambda match: chinese.sub(" ", match[0]) if match[0].startswith("/") else match[0], source
+    )
+
+
 def mask_chinese_annotations(source: str, suffix: str) -> str:
     """英文文档正文仍受检查，仅允许 Python 示例中的中文注释和 docstring。"""
     if suffix in {".py", ".pyi"}:
         return mask_chinese_python_annotations(source)
+    if suffix in {".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hxx"}:
+        return mask_chinese_cpp_comments(source)
     if suffix == ".md":
         pattern = re.compile(r"(^```(?:python|py)[ \t]*\n)([\s\S]*?)(^```[ \t]*$)", re.MULTILINE)
         return pattern.sub(
@@ -205,7 +221,7 @@ def main() -> int:
         print("No source files found to check")
         return 0
 
-    print(f"Checking {len(files_to_check)} file(s); Chinese Python comments/docstrings are allowed...")
+    print(f"Checking {len(files_to_check)} file(s); Chinese comments/Python docstrings are allowed...")
     if excluded_patterns:
         print(f"Excluded patterns: {', '.join(excluded_patterns)}")
 
@@ -236,7 +252,7 @@ def main() -> int:
             print(f"  - {file_path.relative_to(root_path)}")
         print(
             "\n⚠ Code strings and English documentation must remain English. "
-            "Chinese is allowed in Python comments and docstrings."
+            "Chinese is allowed in Python/C/C++ comments and Python docstrings."
         )
         print("\nTip: Use --exclude to exclude specific directories (e.g., --exclude docs/zh)")
         return 1

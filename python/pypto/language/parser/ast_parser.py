@@ -96,9 +96,8 @@ OMIT_ATTR: Any = object()
 # declaration would arrive too late to have any effect. These keep their
 # dedicated ``@pl.function(...)`` keyword and are rejected in ``pl.func_attr``:
 #   - ``auto_scope``      gates implicit scope insertion during the body walk
-#   - ``external_source`` selects the no-DSL-body path entirely (the body must
-#                         be a bare ``...``, so there is nowhere to put a
-#                         prologue in the first place)
+#   - ``external_source`` 在解析函数体前确定外部核声明；函数体仅允许空声明
+#                         或写回参数的 return 契约。
 DECORATOR_ONLY_FUNC_ATTRS: frozenset[str] = frozenset({AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR})
 
 
@@ -372,6 +371,7 @@ class ASTParser:
             # A scalar parameter shadowing one of these arrives too late to bind it.
             symbols_used_so_far: set[int] = set()
 
+            external_outputs: set[str] = set()
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
                 param_name = arg.arg
@@ -388,6 +388,11 @@ class ASTParser:
                     )
 
                 param_type, param_direction = self.type_resolver.resolve_param_type(arg.annotation)
+                if isinstance(param_type, ir.TensorType) and param_direction in (
+                    ir.ParamDirection.Out,
+                    ir.ParamDirection.InOut,
+                ):
+                    external_outputs.add(param_name)
                 param_span = self.span_tracker.get_span(arg)
 
                 # Add parameter to function with direction
@@ -432,10 +437,7 @@ class ASTParser:
             # via ``inline_body`` and are not parsed as DSL.
             external_source = (func_attrs or {}).get(EXTERNAL_SOURCE_ATTR)
             if external_source is not None:
-                # Header-only external C++ kernel: no DSL body to parse. The
-                # signature (params + directions + return types) is the contract
-                # the orchestration submits against; the backend compiles the
-                # referenced ``.cpp`` as the InCore kernel by func_id.
+                # 外部核只解析签名及可选的写回契约；设备实现仍完全来自引用的 C++。
                 if func_type not in (ir.FunctionType.AIC, ir.FunctionType.AIV):
                     raise ParserTypeError(
                         f"external_source is only valid on FunctionType.AIC or "
@@ -443,14 +445,7 @@ class ASTParser:
                         span=func_span,
                         hint="Declare the external kernel as pl.FunctionType.AIC or pl.FunctionType.AIV.",
                     )
-                if not is_empty_body(body_stmts):
-                    raise ParserSyntaxError(
-                        f"External kernel '{func_name}' must have an empty '...' body "
-                        "(signature only) — its implementation is the C++ source "
-                        "given by external_source.",
-                        span=func_span,
-                        hint="Replace the function body with a bare '...'.",
-                    )
+                self._parse_external_contract(body_stmts, func_name, func_span, external_outputs)
             elif inline_body is not None:
                 self.builder.inline_stmt(inline_body, ir.InlineLanguage.Python, func_span)
             else:
@@ -461,6 +456,33 @@ class ASTParser:
         self.scope_manager.exit_scope()
 
         return f.get_result()
+
+    def _parse_external_contract(
+        self, body: list[ast.stmt], name: str, span: ir.Span, outputs: set[str]
+    ) -> None:
+        """外部核的 return 仅声明写回别名，供动态 SPMD 及依赖分析使用。"""
+        if is_empty_body(body):
+            return
+        # 与普通函数一致，允许说明字符串位于声明之前。
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        contract = body[0] if len(body) == 1 else None
+        value = contract.value if isinstance(contract, ast.Return) else None
+        names = value.elts if isinstance(value, ast.Tuple) else [value]
+        if not names or not all(isinstance(item, ast.Name) and item.id in outputs for item in names):
+            raise ParserSyntaxError(
+                f"External kernel '{name}' must have an empty '...' body "
+                "or return only Out/InOut tensor parameters; its implementation "
+                "is the C++ source given by external_source.",
+                span=span,
+                hint="Use '...' or a single 'return output' / 'return first, second'.",
+            )
+        self._parse_body_siblings(body)
 
     def _consume_func_attr_prologue(self, body: list[ast.stmt], func_name: str) -> list[ast.stmt]:
         """Merge leading ``pl.func_attr({...})`` directives, return the rest of the body.

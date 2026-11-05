@@ -160,7 +160,7 @@ def test_optional_provider_is_not_imported_for_other_callables(monkeypatch):
 
 
 @pytest.mark.parametrize("query", ["get_block_idx", "get_block_num"])
-def test_launch_queries_rejected_before_constant_folding(query):
+def test_launch_queries_use_logical_context_before_constant_folding(query, tmp_path):
     cb = pytest.importorskip("cannbotdsl")
 
     source_bundle = importlib.import_module("pypto.jit._cannbotdsl_source")
@@ -174,8 +174,67 @@ def test_launch_queries_rejected_before_constant_folding(query):
         output[0] = cb.get_block_num()
 
     kernel = {"get_block_idx": block_index, "get_block_num": block_count}[query]
-    with pytest.raises(ValueError, match=f"Unsupported.*cannir.{query}"):
-        source_bundle.export_source_bundle(kernel, [cb.TensorSpec((1,), cb.dtypes.int64)])
+    exported = source_bundle.export_source_bundle(kernel, [cb.TensorSpec((1,), cb.dtypes.int64)])
+    assert exported.manifest["parameters"][1] == {
+        "logical_index": 1,
+        "name": query,
+        "kind": "context",
+    }
+    # 导出时的占位 block_dim=1 不能把运行时核数折叠掉。
+    wrapper = adapter.write_wrapper(exported, tmp_path).read_text()
+    assert f"Arg1 arg1 = {query}(args);" in wrapper
+    assert f"{query}()" not in exported.source
+
+
+@pytest.mark.parametrize("core", ["aiv", "aic", "mixed"])
+def test_global_syncall_declares_external_launch_requirement(core):
+    cb = pytest.importorskip("cannbotdsl")
+    source_bundle = importlib.import_module("pypto.jit._cannbotdsl_source")
+    cube_fill_l1_zero = importlib.import_module("cannbotdsl.ops.memcpy").cube_fill_l1_zero
+    cube = core in ("aic", "mixed")
+    vector = core in ("aiv", "mixed")
+
+    @cb.kernel
+    def barrier(source, output):
+        if cube:
+            l1 = cb.Buffer(cb.MemLoc.L1, cb.dtypes.float32, cb.make_layout((1, 8)))
+            cube_fill_l1_zero(l1)
+        if vector:
+            data = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((1, 32)))
+            cb.mem_copy(data, source)
+            cb.mem_copy(output, data)
+        cb.global_sync_all()
+
+    spec = cb.TensorSpec((1, 32), cb.dtypes.float32)
+    exported = source_bundle.export_source_bundle(barrier, [spec, spec])
+    assert exported.manifest["core_type"] == core
+    assert exported.manifest["hard_syncall"] == {"mixed": "mix", "aiv": "aiv_only", "aic": "aic_only"}[core]
+    assert "ffts_cross_core_sync" in exported.source
+
+
+def test_subblock_binding_preserves_static_partition_shapes(tmp_path):
+    cb = pytest.importorskip("cannbotdsl")
+    source_bundle = importlib.import_module("pypto.jit._cannbotdsl_source")
+    cube_fill_l1_zero = importlib.import_module("cannbotdsl.ops.memcpy").cube_fill_l1_zero
+
+    @cb.kernel
+    def split_copy(source, output):
+        l1 = cb.Buffer(cb.MemLoc.L1, cb.dtypes.float32, cb.make_layout((1, 8)))
+        cube_fill_l1_zero(l1)
+        lane = cb.get_subblock_id()
+        data = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((1, 32)))
+        cb.mem_copy(data, cb.tile_slice(source, (1, 32), (0, lane)))
+        cb.mem_copy(cb.tile_slice(output, (1, 32), (lane, 0)), data)
+
+    # 提前把 lane 替换为无范围的 Scalar，会把每条通道的静态 32 列误推为动态列。
+    exported = source_bundle.export_source_bundle(
+        split_copy,
+        [cb.TensorSpec((1, 64), cb.dtypes.float32), cb.TensorSpec((2, 32), cb.dtypes.float32)],
+    )
+    assert exported.manifest["core_type"] == "mixed"
+    assert exported.manifest["parameters"][-1]["name"] == "get_subblock_id"
+    assert "get_subblockid()" not in exported.source
+    assert "get_sub_block_id(args)" in adapter.write_wrapper(exported, tmp_path).read_text()
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)

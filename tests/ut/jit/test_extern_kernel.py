@@ -23,7 +23,7 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 import torch
-from pypto import CacheConfig
+from pypto import CacheConfig, Error
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import generate
@@ -394,7 +394,7 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
 class _ForeignKernel:
     """不带 PyPTO 注解，且不强制依赖第三方包的提供方。"""
 
-    def __init__(self, func, source, access, *, core="aiv"):
+    def __init__(self, func, source, access, *, core="aiv", hard_syncall=None):
         self.jit = JITFunction(
             func,
             func_type="extern",
@@ -403,6 +403,7 @@ class _ForeignKernel:
                 core_type=core,
                 parameter_access=access,
                 dual_aiv_dispatch=core == "mixed",
+                hard_syncall=hard_syncall,
             ),
         )
 
@@ -782,6 +783,79 @@ def test_foreign_hook_rejects_invalid_result():
 
     with pytest.raises(TypeError, match="must return a JITFunction"):
         entry.specialize(torch.zeros(1, 32))
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
+@pytest.mark.parametrize(
+    "launch", ["query", "scalar", "submit", "partial", "plain", "no_sync", "wrong_query"]
+)
+def test_foreign_hard_syncall_launch_contract(tmp_path, ascend_backend, core, launch):
+    def foreign_body(output):
+        pass
+
+    leaf = _ForeignKernel(
+        foreign_body,
+        _write_kernel(tmp_path),
+        {"output": "write"},
+        core=core,
+        hard_syncall={"aic": "aic_only", "aiv": "aiv_only", "mixed": "mix"}[core],
+    )
+    is_aiv = core == "aiv"
+    plain = launch == "plain"
+    partial = launch == "partial"
+    no_sync = launch == "no_sync"
+    scalar = launch == "scalar"
+    submit = launch == "submit"
+    wrong_query = launch == "wrong_query"
+
+    @pl.jit
+    def entry(output: pl.Out[pl.Tensor], n: pl.Scalar[pl.INDEX]):
+        if is_aiv:
+            count = pl.system.available_aiv_count()
+            wrong = pl.system.available_cluster_count()
+        else:
+            count = pl.system.available_cluster_count()
+            wrong = pl.system.available_aiv_count()
+        if plain:
+            leaf(output)
+        elif partial:
+            with pl.spmd(4, sync_start=True):
+                leaf(output)
+        elif no_sync:
+            with pl.spmd(count):
+                leaf(output)
+        elif scalar:
+            with pl.spmd(n, sync_start=True):
+                leaf(output)
+        elif submit:
+            with pl.spmd(count, sync_start=True) as _task:
+                leaf(output)
+        elif wrong_query:
+            with pl.spmd(wrong, sync_start=True):
+                leaf(output)
+        else:
+            with pl.spmd(count, sync_start=True):
+                leaf(output)
+        return output
+
+    args = (torch.zeros(1, 32), 4)
+    if launch in ("partial", "plain", "no_sync", "wrong_query"):
+        with pytest.raises(RuntimeError if launch == "plain" else Error, match="(?:syncall|sync_start)"):
+            _generate_external_config(entry, args, tmp_path)
+        return
+    _, after = _generate_external_config(entry, args, tmp_path)
+    orch = after.get_function("entry")
+    assert orch is not None
+    generated = codegen.generate_orchestration(after, orch).code
+    query = "rt_available_aiv_count()" if core == "aiv" else "rt_available_cluster_count()"
+    assert f"!= {query}" in generated
+    assert '.set_error("External hard syncall requires full runtime core occupancy")' in generated
+    assert ".set_require_sync_start(true)" in generated
+    assert generated.index(".set_error(") < generated.index("rt_submit_")
+    # 不透明函数的屏障属性经过完整降级后仍然存在，不能被空函数体消除。
+    kernels = [f for f in after.functions.values() if f.attrs.get("external_source")]
+    assert all(f.attrs.get("external_hard_syncall") for f in kernels)
 
 
 if __name__ == "__main__":

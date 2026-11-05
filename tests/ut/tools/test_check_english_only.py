@@ -42,7 +42,12 @@ def lint() -> ModuleType:
         (".md", "\u4e2d\u6587\n```python\n# \u4e2d\u6587\n```\n", [1]),
         (".md", '```python\nvalue = "\u4e2d\u6587"\n```\n', [2]),
         (".md", "```text\n# \u4e2d\u6587\n```\n", [2]),
-        (".cpp", "// \u4e2d\u6587\n", [1]),
+        (".cpp", "// \u4e2d\u6587\n", []),
+        (".h", "/* \u4e2d\u6587\n * \u6ce8\u91ca */\n", []),
+        (".cpp", 'const char* text = "// \u4e2d\u6587";\n', [1]),
+        (".cpp", 'auto text = R"tag(/* \u4e2d\u6587 */)tag";\n', [1]),
+        (".cpp", '// \u4e2d\u6587\nconst char* text = "\u4e2d\u6587";\n', [2]),
+        (".cpp", "// \u3042\u3044\u3046\n", [1]),
     ],
 )
 def test_annotation_language_boundary(

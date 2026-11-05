@@ -713,6 +713,35 @@ void OrchestrationStmtCodegen::EmitLaunchSpec(const std::string& task_var, const
   }
 }
 
+void OrchestrationStmtCodegen::AppendExternalSyncallCheck(std::vector<std::string>& pre_lines,
+                                                          const CallPtr& call, const FunctionPtr& kernel,
+                                                          const ExprPtr& core_num, bool sync_start,
+                                                          const std::string& task_var,
+                                                          const FunctionPtr& paired_aiv) {
+  if (!kernel->HasAttr(kAttrExternalHardSyncall)) return;
+  const auto kind = kernel->GetAttr<std::string>(kAttrExternalHardSyncall);
+  CHECK_SPAN(kind == "mix" || kind == "aic_only" || kind == "aiv_only", call->span_)
+      << "Invalid external_hard_syncall: " << kind;
+  CHECK_SPAN(core_num && sync_start, call->span_)
+      << "External hard syncall requires an explicit full-occupancy SPMD launch with sync_start=True";
+  if (paired_aiv) {
+    CHECK_SPAN(kind == "aic_only" || RequiresDualAivDispatch(paired_aiv), call->span_)
+        << "External hard syncall involving AIV cores requires both vector lanes in a mixed launch";
+  } else {
+    const std::string expected = kernel->func_type_ == FunctionType::AIC ? "aic_only" : "aiv_only";
+    CHECK_SPAN(kind == expected, call->span_)
+        << "External hard syncall participant type does not match the standalone kernel launch";
+  }
+  // 编译期校验只能识别部分核数表达式；在提交前用实际设备规模检查动态值和常量。
+  // 将错误交给正常提交路径处理，避免任何参与核在不完整的屏障前等待。
+  const bool clusters = paired_aiv || kind == "aic_only" || RequiresDualAivDispatch(kernel);
+  const std::string query = clusters ? "rt_available_cluster_count()" : "rt_available_aiv_count()";
+  pre_lines.push_back("if (" + RenderLaunchCoreNum(core_num) + " != " + query + ") {");
+  pre_lines.push_back("    " + task_var +
+                      ".set_error(\"External hard syncall requires full runtime core occupancy\");");
+  pre_lines.push_back("}");
+}
+
 // Speculative early-dispatch opt-in (pl.submit(..., allow_early_resolve=True)).
 // The flag rides on the Submit and is surfaced as the ``allow_early_resolve``
 // Call attr by SubmitToCallView; a plain submit / call lacks it, so this is a
@@ -959,6 +988,8 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildDirect
   std::string task_var = CurrentTaskVarName();
   auto submit = BuildSingleKernelSubmit(core_type, callee_func, func_id, task_var);
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
+  AppendExternalSyncallCheck(submit.pre_lines, call, callee_func, launch_core_num, launch_sync_start,
+                             task_var);
   TaskDispatchPlan plan = BuildTaskDispatchPlan(
       "// Task " + std::to_string(task_counter_) + ": " + callee_name, call, std::move(params),
       launch_core_num, launch_sync_start, submit.expr, ShouldCaptureTaskOutputs(call, capture_plain_task_id),
@@ -977,6 +1008,8 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildSpmdCa
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
   auto submit = BuildSingleKernelSubmit(core_type, kernel_func, func_id, task_var);
+  AppendExternalSyncallCheck(submit.pre_lines, call, kernel_func, launch_core_num, launch_sync_start,
+                             task_var);
   return BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call, std::move(params),
                                launch_core_num, launch_sync_start, submit.expr,
                                ShouldCaptureTaskOutputs(call, capture_plain_task_id),
@@ -989,6 +1022,7 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildAivOnl
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
   auto submit = BuildSingleKernelSubmit(CoreType::VECTOR, aiv_func, aiv_id, task_var);
+  AppendExternalSyncallCheck(submit.pre_lines, call, aiv_func, launch_core_num, launch_sync_start, task_var);
   return BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
                                launch_core_num, launch_sync_start, submit.expr,
                                ShouldCaptureTaskOutputs(call, capture_plain_task_id),
@@ -997,7 +1031,8 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildAivOnl
 
 OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildMixedGroupDispatchPlan(
     const CallPtr& call, const FunctionPtr& launch_func, const std::string& group_name, int aic_id,
-    int aiv_id, const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params, bool capture_plain_task_id) {
+    int aiv_id, const FunctionPtr& aic_func, const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params,
+    bool capture_plain_task_id) {
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
   std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
@@ -1006,6 +1041,13 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildMixedG
   std::vector<std::string> pre_lines{"MixedKernels mixed_" + std::to_string(task_counter_) + " = {" +
                                      std::to_string(aic_id) + ", " + std::to_string(aiv_id) + ", " +
                                      third_id + "};"};
+  AppendExternalSyncallCheck(pre_lines, call, aic_func, launch_core_num, launch_sync_start, task_var,
+                             aiv_func);
+  if (aiv_func->GetAttr<std::string>(kAttrExternalHardSyncall, "") !=
+      aic_func->GetAttr<std::string>(kAttrExternalHardSyncall, "")) {
+    AppendExternalSyncallCheck(pre_lines, call, aiv_func, launch_core_num, launch_sync_start, task_var,
+                               aiv_func);
+  }
   return BuildTaskDispatchPlan("// Group " + group_name + ": MixedKernels (AIC + AIV lanes)", call,
                                std::move(params), launch_core_num, launch_sync_start, submit_expr,
                                ShouldCaptureTaskOutputs(call, capture_plain_task_id), std::move(pre_lines));
@@ -1204,8 +1246,8 @@ void OrchestrationStmtCodegen::GenerateGroupCallCode(const CallPtr& call, const 
   int aic_id = RegisterKernel(info.aic_name, CoreType::CUBE, params);
   int aiv_id = RegisterKernel(info.aiv_name, CoreType::VECTOR, params);
 
-  BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aiv_func, std::move(params),
-                              capture_plain_task_id)
+  BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aic_func, aiv_func,
+                              std::move(params), capture_plain_task_id)
       .Emit(*this);
 }
 

@@ -36,6 +36,9 @@ SPLIT_AIV_ATTR = "split_aiv"
 # (see pto_backend).
 EXTERNAL_SOURCE_ATTR = "external_source"
 
+# 外部源码中的全核硬件屏障参与方：mix、aic_only 或 aiv_only。
+EXTERNAL_HARD_SYNCALL_ATTR = "external_hard_syncall"
+
 # Package-resource handle (":pypto.runtime.builtins.collectives.<op>") naming the
 # builtin template package that supplies a compiler-synthesized kernel's C++
 # source (str). Written by LowerL2TensorCollectives on the AIV function it
@@ -57,6 +60,7 @@ __all__ = [
     "BUILTIN_TEMPLATE_DIR_ATTR",
     "BUILTIN_TEMPLATE_VARS_ATTR",
     "DUAL_AIV_DISPATCH_ATTR",
+    "EXTERNAL_HARD_SYNCALL_ATTR",
     "EXTERNAL_SOURCE_ATTR",
     "SPLIT_AIV_ATTR",
 ]

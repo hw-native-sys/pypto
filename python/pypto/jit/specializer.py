@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
-from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_HARD_SYNCALL_ATTR
 from pypto.language.typing.array import Array as _LangArray
 from pypto.language.typing.dynamic import DynVar as _LangDynVar
 from pypto.language.typing.scalar import Scalar as _LangScalar
@@ -215,6 +215,8 @@ class SpecializeContext:
     external_parameter_access: dict[str, str] | None = None
     external_backend: str | None = None
     external_runtime: str | None = None
+    # 外部源码不具有可遍历的函数体，通过属性保留全核屏障的启动约束。
+    external_hard_syncall: str | None = None
 
     @property
     def source_def_name(self) -> str:
@@ -2277,11 +2279,18 @@ class Specializer:
                 function_attrs.append(f'"{EXTERNAL_INCLUDE_DIRS_ATTR}": {encoded_include_dirs!r}')
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
+            if ctx.external_hard_syncall is not None:
+                function_attrs.append(f'"{EXTERNAL_HARD_SYNCALL_ATTR}": {ctx.external_hard_syncall!r}')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
+            body = "..."
+            if ctx.external_parameter_access is not None and ret_ann:
+                # 以普通 ReturnStmt 声明提供方输出与参数的别名关系，避免动态 SPMD
+                # 和多输出调用退回按类型或位置猜测写回对象。
+                body = f"return {', '.join(self._dep_mutated_params[ctx.func_name])}"
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
-                "    ...",
+                f"    {body}",
             ]
 
         # The @pl.jit.extern decorator guarantees the source(s) for the selected
