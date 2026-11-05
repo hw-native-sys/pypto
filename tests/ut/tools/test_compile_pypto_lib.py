@@ -101,7 +101,10 @@ def test_compile_receipts_gate_success(library, tmp_path, body, passed, count):
         "subprocess.Popen(command).wait()",
     ],
 )
-def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, passed, count, launch):
+@pytest.mark.parametrize("python_flags", [[], ["-u"]])
+def test_python_subprocess_compilations_are_audited(
+    library, tmp_path, cases, passed, count, launch, python_flags
+):
     # Formal entries can isolate cases in fresh interpreters to own runtime lifetimes.
     (library / "models/case.py").write_text(
         "import argparse, json, subprocess, sys\n"
@@ -115,7 +118,7 @@ def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, pa
         "if args.case in ('all', 'nested'):\n"
         f"    cases = {cases!r} if args.case == 'all' else ['ok']\n"
         "    for case in cases:\n"
-        "        command = [sys.executable, __file__, '-p', args.p, '-d', '0',\n"
+        f"        command = [sys.executable, *{python_flags!r}, __file__, '-p', args.p, '-d', '0',\n"
         "                   '--case', case, '--compile-only']\n"
         f"        {launch}\n"
         "else:\n"
@@ -137,6 +140,26 @@ def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, pa
     result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
     assert result["passed"] is passed
     assert len(result["compilations"]) == count
+
+
+@pytest.mark.parametrize("python_flags", [["-u"], [b"-u", b"-u"]])
+def test_self_dispatch_preserves_unbuffered_output(library, tmp_path, python_flags):
+    # Finding the script is insufficient: the replacement interpreter must keep
+    # unbuffered output, and a script argument spelled -u must remain an argument.
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from golden import run\n"
+        "if '--child' not in sys.argv:\n"
+        f"    command = [sys.executable, *{python_flags!r}, __file__, '--child', '-u']\n"
+        "    subprocess.run(args=command, check=True)\n"
+        "else:\n"
+        "    assert sys.stdout.write_through and sys.stderr.write_through\n"
+        "    assert sys.argv[1:] == ['--child', '-u']\n"
+        "    run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
 
 
 def test_python_subprocess_preserves_other_commands(library, tmp_path):
@@ -283,11 +306,19 @@ def test_self_dispatch_cannot_hide_failed_or_unobserved_child(library, tmp_path,
     assert any(record["passed"] for record in result["compilations"])
 
 
-def test_unrelated_subprocess_preserves_arguments_and_output(library, tmp_path):
+@pytest.mark.parametrize("python_flags", [[], ["-u"]])
+@pytest.mark.parametrize(
+    ("invocation", "stdin"),
+    [(["-c", "print(42)"], ""), (["-m", "json.tool"], "42"), ([], "print(42)\n")],
+)
+def test_unrelated_subprocess_preserves_arguments_and_output(
+    library, tmp_path, python_flags, invocation, stdin
+):
+    # -u must not turn command/module/stdin execution into a script launch.
     (library / "models/case.py").write_text(
         "import subprocess, sys\n"
-        "result = subprocess.run([sys.executable, '-c', 'print(42)'],\n"
-        "                        check=True, capture_output=True, text=True)\n"
+        f"result = subprocess.run([sys.executable, *{python_flags!r}, *{invocation!r}],\n"
+        f"                        input={stdin!r}, check=True, capture_output=True, text=True)\n"
         "assert result.stdout == '42\\n'\n"
         "from golden import run\n"
         "run('ok', [])\n"

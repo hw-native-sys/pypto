@@ -139,6 +139,8 @@ compilations fail the job. Malformed or unreadable receipts fail their entry
 without aborting the remaining entries or losing the matrix summary.
 When an entry dispatches cases by launching its own script with the current
 Python interpreter, each child runs through the same compile-only adapter.
+Leading `-u` interpreter flags are supported and preserved so child logs remain
+unbuffered. Other interpreter options are not intercepted.
 Child environment, working directory, and process isolation are preserved,
 and the parent combines their compilation records. The compile-output allowlist
 is currently empty, so the adapter does not inject or rewrite runtime directories.

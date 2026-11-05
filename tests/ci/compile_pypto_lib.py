@@ -150,17 +150,28 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
                 and Path(os.fsdecode(command[0])).resolve() == Path(sys.executable).resolve()
             ):
                 options = popen_signature.bind(args, *popenargs, **kwargs).arguments
-                script = Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[1])
+                # DSpark launches children with `python -u script.py`. Only skip
+                # known flags: -c/-m select other execution modes, and options
+                # such as -W/-X consume values that must not be treated as scripts.
+                script_index = 1
+                while script_index < len(command) and os.fsdecode(command[script_index]) == "-u":
+                    script_index += 1
+                script = (
+                    Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[script_index])
+                    if script_index < len(command)
+                    else None
+                )
                 if (
                     not options.get("shell")
                     and not options.get("executable")
+                    and script is not None
                     and script.resolve() == entry_path
                 ):
                     # Self-dispatching entries need the same audit in each fresh interpreter.
                     child_receipt = receipt.with_name(f"{receipt.stem}.{next(child_ids)}.json")
                     child_receipt.unlink(missing_ok=True)
                     command = [
-                        command[0],
+                        *command[:script_index],
                         str(Path(__file__).resolve()),
                         "--lib",
                         str(lib),
@@ -171,7 +182,7 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
                         "--receipt",
                         str(child_receipt),
                         "--entry-args",
-                        json.dumps([os.fsdecode(arg) for arg in command[2:]]),
+                        json.dumps([os.fsdecode(arg) for arg in command[script_index + 1 :]]),
                     ]
             try:
                 super().__init__(command, *popenargs, **kwargs)
