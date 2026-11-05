@@ -20,7 +20,6 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -45,18 +44,25 @@ std::optional<int64_t> ExactHardwareLoopConstant(const ExprPtr& expr) {
     return IsRepresentableLoopLiteral(value) ? std::optional<int64_t>(value->value_) : std::nullopt;
   }
   if (auto binary = As<BinaryExpr>(expr)) {
-    if (!ExactHardwareLoopConstant(binary->left_) || !ExactHardwareLoopConstant(binary->right_))
+    if (!ExactHardwareLoopConstant(binary->left_) || !ExactHardwareLoopConstant(binary->right_)) {
       return std::nullopt;
+    }
   } else if (auto unary = As<UnaryExpr>(expr)) {
-    if (!ExactHardwareLoopConstant(unary->operand_)) return std::nullopt;
+    if (!ExactHardwareLoopConstant(unary->operand_)) {
+      return std::nullopt;
+    }
   } else if (auto cast = As<Cast>(expr)) {
-    if (!ExactHardwareLoopConstant(cast->operand_)) return std::nullopt;
+    if (!ExactHardwareLoopConstant(cast->operand_)) {
+      return std::nullopt;
+    }
   } else {
     return std::nullopt;
   }
   auto folded = arith::TryConstFold(expr);
   auto value = As<ConstInt>(folded);
-  if (!value || !IsRepresentableLoopLiteral(value)) return std::nullopt;
+  if (!value || !IsRepresentableLoopLiteral(value)) {
+    return std::nullopt;
+  }
   return value->value_;
 }
 
