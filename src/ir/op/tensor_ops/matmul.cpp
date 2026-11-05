@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -129,6 +130,11 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   CHECK(lhs_shape.size() >= 1) << "tensor.matmul requires lhs to have at least 1 dimension";
   CHECK(rhs_shape.size() >= 1) << "tensor.matmul requires rhs to have at least 1 dimension";
 
+  // Operand dtypes need not be identical: A5 multiplies the mixed FP8 orders.
+  // This also yields the accumulator the Cube produces for the pair.
+  const DataType accumulator =
+      ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, "tensor.matmul");
+
   // Read kwargs (with defaults)
   DataType out_dtype;
   bool out_dtype_requested = false;
@@ -136,9 +142,19 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     out_dtype = GetKwarg<DataType>(kwargs, "out_dtype");
     out_dtype_requested = true;
   } catch (const ValueError& e) {
-    auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-    CHECK(promoted) << "Cannot promote data types for tensor.matmul";
-    out_dtype = *promoted;
+    // A 1-byte float operand pair defaults to the accumulator, not to a promoted
+    // operand dtype: the unscaled FIXPIPE writeback cannot reproduce FP8 / HF8
+    // (CheckTensorMatmulOutDataType below rejects it when asked explicitly), and
+    // promotion of a mixed pair would additionally depend on operand order --
+    // E4M3FN for E4M3FN x E5M2 but E5M2 for the reverse. Wider operand pairs keep
+    // their historical promoted default.
+    if (backend::IsCubeFloat8Operand(lhs_type->dtype_) || backend::IsCubeFloat8Operand(rhs_type->dtype_)) {
+      out_dtype = accumulator;
+    } else {
+      auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
+      CHECK(promoted) << "Cannot promote data types for tensor.matmul";
+      out_dtype = *promoted;
+    }
   } catch (const TypeError& e) {
     throw TypeError("Invalid kwarg type for out_dtype: " + std::string(e.what()));
   }
@@ -477,12 +493,9 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   CHECK(rhs_shape.size() >= 2) << "tensor.matmul_acc requires rhs to be at least 2D, but got "
                                << rhs_shape.size() << "D";
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "tensor.matmul_acc requires identical lhs and rhs dtypes, but got " << lhs_type->dtype_.ToString()
-      << " and " << rhs_type->dtype_.ToString();
-
-  auto result_dtype =
-      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
+  // Operand dtypes need not be identical: A5 multiplies the mixed FP8 orders.
+  // The shared check also answers which dtype the Cube accumulates them in.
+  auto result_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, "tensor.matmul_acc");
   CHECK(acc_type->dtype_ == result_dtype)
       << "tensor.matmul_acc requires accumulator dtype " << result_dtype.ToString() << ", but got "
       << acc_type->dtype_.ToString();
