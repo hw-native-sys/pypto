@@ -596,11 +596,16 @@ require packed-storage proof before merging their leading dimensions.
 Full-shape packed local rank-3 operands are reshaped directly: the source's
 original proof avoids an extra packing copy of the synthesized 2D view, keeping
 the emitted allocations consistent with the capacity estimate.
+Partial leading-dimension windows of packed local rank-3 sources always use
+the row path, even when they fit Vec, so slicing follows flattening the parent.
 The converter receives a read-only `ConversionContext` containing packed-storage
 facts collected from earlier lowered producers in one SSA traversal. A separate
 allocation-origin fact follows aliases and views so capacity checks count the
 full backing storage of local source/index windows, plus required source copies
-when direct parent addressing is unavailable and the requested shape differs. Registered
+when direct parent addressing is unavailable and the requested shape differs.
+Current allocation versions propagate through aliases independently of window
+geometry, including reinterpret views. Writebacks create distinct versions for
+capacity accounting even when index layout or INT16 range disables direct addressing. Registered
 functional tile results with fresh storage are proven packed; plain aliases and
 `tile.set_validshape`, full-shape zero-offset slices, and reshapes with 32-byte-aligned
 source and destination rows preserve that proof. Other views, parameters, and control-flow

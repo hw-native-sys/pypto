@@ -1840,8 +1840,8 @@ void OpConversionRegistry::RegisterGatherOps() {
         std::optional<GatherSourceWindow> direct_source;
         int64_t direct_stride = 0;
         int64_t direct_offset = 0;
-        // Local indices also need a current-producer fact for safe backing
-        // deduplication. Unknown index views retain the original lowering.
+        // Unknown local index views retain the established lowering. Capacity
+        // accounting uses independent allocation/version facts for all layouts.
         const bool known_index_storage =
             !As<TileType>(index->GetType()) || context.gather_source_windows.count(index) != 0;
         if (rank == 2 && norm_dim == 1 && known_index_storage) {
@@ -1880,7 +1880,6 @@ void OpConversionRegistry::RegisterGatherOps() {
         // estimate covers the source, output, and the flat-index working tiles;
         // surrounding live values can still require a smaller user tile.
         auto needs_row_gather = [&](int64_t rows, int64_t source_cols, int64_t index_cols) {
-          if (!backend::BackendConfig::IsConfigured()) return false;
           // Collapsing local ND rows requires proof that no hidden pitch or
           // offset will be lost. A 2D source can be sliced one row at a time.
           if (rank == 3) {
@@ -1892,7 +1891,12 @@ void OpConversionRegistry::RegisterGatherOps() {
                 if (view.start_offset && (!offset || offset->value_ != 0)) return false;
               }
             }
+            // A partial local ND window cannot use tile.slice before flattening.
+            // The row path flattens the packed parent first and preserves its
+            // original row coordinates, even when the full working set fits.
+            if (As<TileType>(input->GetType()) && !reuse_packed_source) return true;
           }
+          if (!backend::BackendConfig::IsConfigured()) return false;
           // Flat indices use the logical row width; physical row padding
           // would otherwise shift every row after the first.
           if (!direct_source && (source_cols % 32) * input_dtype.GetByte() % 32 != 0) return true;
@@ -1913,16 +1917,12 @@ void OpConversionRegistry::RegisterGatherOps() {
             auto origin = context.storage_origins.find(operand);
             // Unknown local storage cannot safely be sized by its view shape.
             if (origin == context.storage_origins.end()) return true;
-            ExprPtr backing = origin->second;
-            if (direct_source) {
-              auto window = context.gather_source_windows.find(operand);
-              if (window != context.gather_source_windows.end()) backing = window->second.base;
-            }
             // A functional writeback may copy its target when an older value
-            // remains live. Deduplicate known windows by current SSA producer,
-            // not the pre-write logical allocation shared by those versions.
-            if (!charged.insert(backing).second) continue;
-            auto bytes = utils::StaticPhysicalAllocationBytes(As<TileType>(backing->GetType()),
+            // remains live. Views retain that version even when reinterpretation
+            // loses the window layout proof; charge its full allocation extent.
+            const auto& storage = origin->second;
+            if (!charged.insert(storage.version).second) continue;
+            auto bytes = utils::StaticPhysicalAllocationBytes(As<TileType>(storage.allocation->GetType()),
                                                               MemorySpace::Vec, target->GetHandler());
             if (!bytes) return true;
             const uint64_t aligned = policy->AlignAddress(*bytes, MemorySpace::Vec);

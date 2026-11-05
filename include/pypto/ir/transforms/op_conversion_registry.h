@@ -73,12 +73,20 @@ struct GatherSourceWindow {
   int64_t col_offset = 0;
 };
 
+/// Allocation geometry and current value identity are independent: views can
+/// change shape/dtype while retaining a version, and writebacks create versions
+/// whose old values may need separate storage. Neither fact proves a layout.
+struct TileStorageOrigin {
+  ExprPtr allocation;
+  ExprPtr version;
+};
+
 /// Facts about already-lowered values. Absence means unknown, not strided.
 /// Keep owning references so replaced SSA values cannot leave recycled pointer keys.
 struct ConversionContext {
   std::unordered_set<ExprPtr> packed_tiles;
-  // Views retain their allocation's full extent even when their shape shrinks.
-  std::unordered_map<ExprPtr, ExprPtr> storage_origins;
+  // Views retain their full allocation extent and current writeback version.
+  std::unordered_map<ExprPtr, TileStorageOrigin> storage_origins;
   // Static slice windows retain their original pitch and current SSA producer.
   std::unordered_map<ExprPtr, GatherSourceWindow> gather_source_windows;
 };

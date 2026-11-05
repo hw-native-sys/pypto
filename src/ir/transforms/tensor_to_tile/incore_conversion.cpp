@@ -1179,25 +1179,30 @@ class TensorToTileMutator : public TypePropagatingMutator {
     if (!type) return;
     // Record backing storage independently of packing: a narrow/strided view
     // still keeps its full parent allocation live beside a materialized copy.
-    ExprPtr origin;
+    std::optional<TileStorageOrigin> origin;
     auto known = conversion_context_.storage_origins.find(value);
     if (known != conversion_context_.storage_origins.end()) origin = known->second;
     if (auto call = As<Call>(value)) {
       const auto* entry = LookupOpEntry(call->op_);
       if (entry && entry->GetOpCategory() == "TileOp") {
         auto source = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+        // Assemble inherits a target buffer but has no registered reuse arg.
+        // Functional writebacks may need a copy when an older value stays live.
+        if (IsOp(call, "tile.assemble")) source = 0;
+        const bool writeback = source.has_value();
         if (!source && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
           source = 0;
         }
         if (source) {
           auto backing = conversion_context_.storage_origins.find(call->args_[*source]);
           if (backing != conversion_context_.storage_origins.end()) origin = backing->second;
+          if (origin && writeback) origin->version = var;
         } else if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
-          origin = var;
+          origin = TileStorageOrigin{var, var};
         }
       }
     }
-    if (origin) conversion_context_.storage_origins.emplace(var, origin);
+    if (origin) conversion_context_.storage_origins.emplace(var, *origin);
     const auto view = tile_view_semantics::GetEffectiveTileView(*type);
     if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
         !view.stride.empty()) {

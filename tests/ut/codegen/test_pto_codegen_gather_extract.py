@@ -145,6 +145,84 @@ class Program:
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("writeback", [False, True])
+def test_gather_charges_parent_versions_when_int16_requires_packing(ascend_backend, writeback):
+    # Parent-relative INT16 offsets exceed 32767, disabling direct addressing.
+    # Two 101376-byte parents plus a 49152-byte packed source exceed A5 Vec
+    # even before scratch. A single parent fits, so only the writeback needs rows.
+    source = "pl.assemble(original,patch,[0,0])" if writeback else "original"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        output: pl.Out[pl.Tensor[[48,64],pl.INT16]],
+        echo: pl.Out[pl.Tensor[[48,1056],pl.INT16]],
+    ) -> tuple[pl.Tensor[[48,64],pl.INT16],pl.Tensor[[48,1056],pl.INT16]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            original = pl.full([48,1056],dtype=pl.INT16,value=0)
+            indices = original[:,:64]
+            patch = pl.full([1,16],dtype=pl.INT16,value=1)
+            updated = {source}
+            window = updated[:,:512]
+            picked = pl.tensor.gather(window,dim=-1,index=indices)
+            output = pl.assemble(output,picked,[0,0])
+            echo = pl.assemble(echo,original,[0,0])
+        return output,echo
+""")
+    mlir = _codegen(program)
+    assert ("scf.for" in mlir) == writeback
+    assert mlir.count("pto.tgather ins(") == 1
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910], indirect=True)
+@pytest.mark.parametrize("writeback", [False, True])
+@pytest.mark.parametrize("reinterpreted_operand", ["source", "index"])
+def test_gather_charges_parent_versions_with_reinterpreted_views(
+    ascend_backend, writeback, reinterpreted_operand
+):
+    # Reinterpreted sources/indices have no window fact and disable direct reads.
+    # Old parent, updated parent and extract destination total 192 KiB, exceeding
+    # A2/A3's 184 KiB Vec. Without a writeback, the full gather still fits.
+    # A full slice and plain alias must preserve the updated storage version too.
+    source = "pl.assemble(original,patch,[0,0])" if writeback else "original"
+    dtype = "pl.INT32" if reinterpreted_operand == "source" else "pl.FP32"
+    index_parent = (
+        "original" if reinterpreted_operand == "source" else "pl.tensor.reinterpret_view(original,pl.INT32)"
+    )
+    gather_source = (
+        "pl.tensor.reinterpret_view(updated,pl.FP32)" if reinterpreted_operand == "source" else "updated"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        output: pl.Out[pl.Tensor[[32,8],pl.FP32]],
+        echo: pl.Out[pl.Tensor[[32,512],{dtype}]],
+    ) -> tuple[pl.Tensor[[32,8],pl.FP32],pl.Tensor[[32,512],{dtype}]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            original = pl.full([32,512],dtype={dtype},value=0)
+            index_parent = {index_parent}
+            indices = index_parent[:,:8]
+            patch = pl.full([1,8],dtype={dtype},value=1)
+            updated = {source}
+            source_view = {gather_source}
+            window = source_view[:,:512]
+            alias = window
+            picked = pl.tensor.gather(alias,dim=-1,index=indices)
+            output = pl.assemble(output,picked,[0,0])
+            echo = pl.assemble(echo,original,[0,0])
+        return output,echo
+""")
+    mlir = _codegen(program)
+    assert ("scf.for" in mlir) == writeback
+    assert mlir.count("pto.tgather ins(") == 1
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("rows,parent_cols,needs_copy", [(16, 256, False), (64, 1024, True)])
 def test_gather_int16_offsets_use_parent_only_when_representable(
     ascend_backend, rows, parent_cols, needs_copy
@@ -377,6 +455,38 @@ class Program:
     gathers = [line for line in mlir.splitlines() if "pto.tgather ins(" in line]
     assert len(gathers) == 1
     assert f"rows=32, cols={source_cols}" in gathers[0]
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("source_shape", [[2, 16, 64], [4, 8, 64]])
+@pytest.mark.parametrize("local_index", [False, True])
+def test_small_rank3_local_gather_uses_rows_for_partial_windows(ascend_backend, source_shape, local_index):
+    # Both sources have only 8 KiB of packed storage, so capacity alone would
+    # select full-tile lowering and emit an unsupported live ND slice. Flatten
+    # the whole parent before selecting rows, including a partial middle axis.
+    index_init = "indices = pl.full([2, 8, 32], dtype=pl.INT32, value=0)" if local_index else "indices = idx"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        idx: pl.Tensor[[2,8,32],pl.INT32],
+        output: pl.Out[pl.Tensor[[2,8,32],pl.FP32]],
+    ) -> pl.Tensor[[2,8,32],pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            local = pl.full({source_shape},dtype=pl.FP32,value=1.0)
+            {index_init}
+            picked = pl.tensor.gather(local,dim=-1,index=indices)
+            output = pl.assemble(output,picked,[0,0,0])
+        return output
+""")
+    mlir = _codegen(program)
+    assert "scf.for" in mlir
+    assert "rows=32, cols=64" in mlir
+    assert mlir.count("pto.tgather ins(") == 1
+    if source_shape[1] != 8:
+        assert "arith.muli" in mlir
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
