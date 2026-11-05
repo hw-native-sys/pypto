@@ -92,6 +92,7 @@ from .specializer import (
     TensorMeta,
     _classify_params,
     build_specialize_context,
+    extern_return_annotation_fingerprint,
     free_name_source,
     func_name_lookup,
     tile_annotation_fingerprints,
@@ -657,6 +658,16 @@ class JITFunction:
                     records.append(
                         (index, func.__module__, func.__qualname__, f"<annotation:{name}>", source)
                     )
+            if jit_func._func_type == "extern":
+                records.append(
+                    (
+                        index,
+                        func.__module__,
+                        func.__qualname__,
+                        "<extern-return>",
+                        extern_return_annotation_fingerprint(func),
+                    )
+                )
         return compute_source_hash([source_hash, json.dumps(records, separators=(",", ":"))])
 
     def _resolve_constexpr_bindings(self, entry_constexpr: Mapping[str, str]) -> _call_binding.VariantPlan:
@@ -1209,6 +1220,7 @@ class JITFunction:
                 for name, source in tile_annotation_fingerprints(fn._func).items():
                     values.append((index, f"<annotation:{name}>", source))
             if fn._func_type == "extern":
+                values.append((index, "<extern-return>", extern_return_annotation_fingerprint(fn._func)))
                 external = external_source_digest(
                     fn._external_source_paths(),
                     include_dirs=fn._external_include_dirs,
