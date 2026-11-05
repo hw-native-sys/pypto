@@ -411,6 +411,7 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.matmul_mx` / `pl.tile.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；两侧 FP8 操作数各自支持 FP8E4M3FN 或 FP8E5M2。打包 FP4 的两侧可分别选用任一格式，FP4/FP8 混合需显式 cast。FP4 shape 使用载体单位，推导沿连续轴展开为逻辑 M/K/N。FP8E8M0 scale 为 `[M, ceil(K/32)]` / `[ceil(K/32), N]`，FP32 Acc 为 `[M, N]`；两侧 scale 必须为不同 tile。物理逻辑维度要求 `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`（FP4 为 N % 64），并满足分块 tile 对齐。valid K 须保持物理 scale 组数。常量维执行数值检查，符号维后续由 PTOAS 验证。原生 FP4 依赖 PTOAS #1700，见 [FP4](../fp4.md)。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
+| `tensor.matmul_mx` / `pl.matmul_mx` | 返回形状为 `[M, N]` 的 FP32 GM tensor。两侧 data 各自支持 FP8E4M3FN 或 FP8E5M2。A 侧 FP8E8M0 scale 使用 `MX_A_ZZ` 或 `MX_A_ND`，B 侧使用 `MX_B_NN`。Tensor 降级到 Tile 时加载完整张量，并保留两侧的数据类型。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
 
 规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
