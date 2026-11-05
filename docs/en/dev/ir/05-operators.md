@@ -438,8 +438,8 @@ these dimensions through JIT and compiled calls without unit conversion.
 Explicit casts from either packed FP4 format to FP8 are legalized on A5 through
 BF16 and FP32. Scale values are unchanged because this numerically converts
 only the data operand. Native packed-FP4 matmul remains unsupported.
-`pl.quant_mx` supports MXFP8 and E2M1 MXFP4 quantization from FP16/BF16;
-only FP8 results can feed `matmul_mx` directly. See [FP4](../fp4.md) for
+`pl.quant_mx` quantizes to MXFP8 from FP16, BF16 or FP32, and to E2M1 MXFP4
+from FP16 or BF16; only FP8 results can feed `matmul_mx` directly. See [FP4](../fp4.md) for
 quantization alignment and memory-planner requirements.
 
 #### MX / Ascend950: pto-isa constraints

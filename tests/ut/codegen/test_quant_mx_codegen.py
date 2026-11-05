@@ -17,6 +17,7 @@ import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.runtime import RunConfig
 
 _TQUANT_MX_RAW = ir.get_op("tile.tquant_mx_raw").name
@@ -236,6 +237,58 @@ class TestQuantMxCodegen:
         ranges = [_allocation_range(mlir, name) for name in ("tq_max", "tq_scaling", "tq_dst", "tq_exp")]
         for index, lhs in enumerate(ranges):
             assert all(lhs[1] <= rhs[0] or rhs[1] <= lhs[0] for rhs in ranges[index + 1 :])
+
+    @pytest.mark.parametrize("source", [pl.FP32, pl.FP16, pl.BF16])
+    @pytest.mark.parametrize(
+        ("group_axis", "algorithm"),
+        # Every combination PTOAS v0.72 accepts for MXFP8: axis0 takes both
+        # algorithms for all three source dtypes, axis1 takes NV only for FP32
+        # (its B16 flat NV path does not exist in the pinned pto-isa).
+        [(1, "ocp"), (0, "ocp"), (0, "nv"), (1, "nv")],
+    )
+    def test_mxfp8_source_and_algorithm_matrix(self, source, group_axis, algorithm):
+        src_rows, src_cols = (16, 64) if group_axis == 1 else (32, 64)
+        out_rows, out_cols = (16, 64) if group_axis == 1 else (64, 32)
+
+        def build():
+            @pl.program
+            class Program:
+                @pl.function(type=pl.FunctionType.InCore)
+                def main(
+                    self,
+                    src: pl.Tensor[[src_rows, src_cols], source],
+                    out: pl.Tensor[[out_rows, out_cols], pl.FP8E4M3FN],
+                ):
+                    quant, _scale = pl.quant_mx(
+                        pl.load(src, [0, 0], [src_rows, src_cols]),
+                        group_axis=group_axis,
+                        quant_scale_alg=algorithm,
+                    )
+                    pl.store(quant, [0, 0], out)
+
+            return Program
+
+        if algorithm == "nv" and group_axis == 1 and source != pl.FP32:
+            # The parser rejects it while deducing the op, before any codegen.
+            with pytest.raises(InvalidOperationError, match="axis1 FP16/BF16 NV"):
+                build()
+            return
+
+        mlir = _generate_mlir(build())
+        tquant = next(line for line in mlir.splitlines() if "pto.tquant.mx" in line)
+        assert "quant_type MXFP8" in tquant
+        assert f"grpAxis = #pto<mx_group_axis axis{group_axis}>" in tquant
+        assert ("quant_scale_alg nv" in tquant) == (algorithm == "nv")
+        # The max / scaling scratch carries the source dtype, and FP32 axis1
+        # rounds the scaling buffer to 64 elements against B16's 128.
+        dtype_str = {pl.FP32: "f32", pl.FP16: "f16", pl.BF16: "bf16"}[source]
+        scaling = next(line for line in mlir.splitlines() if "tq_scaling" in line and "alloc_tile" in line)
+        assert f"dtype={dtype_str}" in scaling
+        if group_axis == 1:
+            groups = src_rows * src_cols // 32
+            alignment = 64 if source == pl.FP32 else 128
+            expected = (groups + alignment - 1) // alignment * alignment
+            assert f"rows=1, cols={expected}" in scaling
 
     def test_raw_is_value_returning_after_optimization(self):
         @pl.program

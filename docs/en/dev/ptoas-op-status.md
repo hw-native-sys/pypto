@@ -296,7 +296,7 @@ output elements outside the valid rectangle.
 | pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; Mat→scale `tmov` emitted in source order, PTOAS `PTOA5NormalizeTMovPass` reorders bind-before-fill; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
 | pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 MXFP8-only standalone quantization frontend+codegen+hardware ST (`group_axis` A/B); MXFP4 quant deferred |
+| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 standalone quantization frontend+codegen+hardware ST (`group_axis` A/B), MXFP8 from FP16/BF16/FP32 and MXFP4_E2M1 from FP16/BF16; `pl.tile.quant_mx_raw` also covers the raw TQUANT form. Native packed FP4 `matmul_mx` stays unsupported |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | the current backend emits `pto.tstore.fp` |
 | pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | **Synchronization (8)** |  |  |  |  |  |  |  |  |
