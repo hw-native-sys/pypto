@@ -287,6 +287,8 @@ def test_indexed_view_origin_and_scatter_alias_compile(tmp_path):
     source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
     assert source.count("pto.tile_buf_addr") == 1
     assert source.count("pto.addptr") == 3  # Each access adds its view origin once.
+    # The pinned PTOAS handles unknown indexed dependencies, including aliases.
+    assert 'pto.mem_bar "VV_ALL"' not in source
     compiler = find_ptoas_binary()
     if compiler is None:
         pytest.skip("PTOAS is unavailable")

@@ -298,10 +298,12 @@ scatter 的值必须匹配 Tile dtype。已有的连续 Vec Tile 几何约束仍
 不构成静态初始化证明。VF helper 保守捕获整个 Tile：gather 为 `read`，scatter 为
 `readwrite`。不同 dtype 的捕获通过同一 UB 基址派生出的对应类型指针访问。
 
-索引 codegen 在每次 gather/scatter 前后发射 `VV_ALL` 屏障，临时处理
-[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 中已复现的
-scatter 到 gather 自动屏障缺失问题。VF 依赖分析由 PTOAS 负责，PyPTO 不再
-检查生成 LLVM 中的屏障覆盖情况。
+索引 codegen 依赖 PTOAS 0.72 或更新版本，对同一 vecscope 内未知的索引访存
+范围进行同步，包括 RAW、WAR 和 WAW 依赖。该版本包含
+[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
+因此 PyPTO 不再为每次索引访问发射 `VV_ALL` 屏障。VF 依赖分析由 PTOAS 负责；
+PyPTO 不会在生成的 LLVM 中重新检查屏障覆盖。Caller/helper 边界与 GM 同步
+保留已有机制。
 
 ```python
 with pl.reg_scope():
