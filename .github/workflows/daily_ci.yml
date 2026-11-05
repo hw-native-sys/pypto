@@ -92,6 +92,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-daily-a5
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5;build_package_sim
           # Python and GCC come from the pypto-toolchain bundle, like every
           # other self-hosted job. The npu-a5 pool is provisioned with the
           # bundle and carries no conda env, so this is not optional here.
@@ -178,6 +179,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-perf
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
           toolchain: bundle
 
       - name: Clone pypto-lib (Qwen3-14B decode forward)

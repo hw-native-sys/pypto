@@ -92,6 +92,14 @@ inputs:
       enables install-ptoas separately.
     required: false
     default: 'true'
+  runtime-targets:
+    description: >-
+      Semicolon-separated scikit-build targets for the runtime wheel, e.g.
+      'build_package_a2a3;build_package_sim'. Empty builds every platform the
+      host detects, which requires an A5-capable CANN on the runner. Set this
+      on jobs that must not build the A5 onboard runtime.
+    required: false
+    default: ''
   install-ptoas:
     description: >-
       Install ptoas independently of the full runtime toolchain. When
@@ -678,6 +686,7 @@ runs:
       env:
         INSTALL_TOOLCHAIN: ${{ inputs.install-toolchain }}
         PTO_ISA_COMMIT: ${{ inputs.pto-isa-commit }}
+        RUNTIME_TARGETS: ${{ inputs.runtime-targets }}
       run: |
         source activate.sh
         rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
@@ -696,11 +705,26 @@ runs:
           fi
         }
         # Same split, for producing a wheel instead of installing one.
-        py_build_wheel() {  # <out-dir> <source-dir>
+        py_build_wheel() {  # <out-dir> <source-dir> [extra build args...]
+          _out="$1"
+          _src="$2"
+          shift 2
           if [ "${PYPTO_USE_UV:-false}" = "true" ]; then
-            uv build --wheel --no-build-isolation --out-dir "$1" "$2"
+            uv build --wheel --no-build-isolation --out-dir "$_out" "$@" "$_src"
           else
-            pip wheel --no-build-isolation --no-deps --wheel-dir "$1" "$2"
+            pip wheel --no-build-isolation --no-deps --wheel-dir "$_out" "$@" "$_src"
+          fi
+        }
+
+        # Install ./runtime, selecting only the targets this job needs when
+        # RUNTIME_TARGETS is set. Without it the runtime builds every platform
+        # the host detects, including A5, which fails on a CANN that predates
+        # HcclChannelAcquireWithConfig.
+        py_install_runtime() {
+          if [ -n "${RUNTIME_TARGETS:-}" ]; then
+            py_install --no-build-isolation --config-settings "build.targets=${RUNTIME_TARGETS}" ./runtime
+          else
+            py_install --no-build-isolation ./runtime
           fi
         }
         if [ "${PYPTO_USE_UV:-false}" != "true" ]; then
@@ -880,6 +904,12 @@ runs:
           fi
           simpler_rt="sim-onboard-$cann_id"
         fi
+        if [ -n "${RUNTIME_TARGETS:-}" ]; then
+          # The target set changes what the wheel contains, so it is part of its
+          # identity: an a2a3-only wheel must never serve an A5 job.
+          _targets_id="$(printf '%s' "$RUNTIME_TARGETS" | tr ';' '_' | tr -cd 'A-Za-z0-9_.-')"
+          simpler_rt="${simpler_rt}-t${_targets_id}"
+        fi
         if [ -z "$pypto_tree" ] || [ -z "$simpler_tree" ] ||
            [ -z "$toolchain_prefix" ] || [ -z "$build_inputs" ]; then
           echo "::warning::a key input is unresolvable (tree hash, toolchain" \
@@ -933,7 +963,11 @@ runs:
             # from the copy onwards is a caching problem and degrades.
             _build="$(mktemp -d "${RUNNER_TEMP:-/tmp}/pypto-wheel-XXXXXX")" ||
               { umask "$_old_umask"; flock -u 9; return 1; }
-            if ! py_build_wheel "$_build" "$2"; then
+            _target_args=()
+            if [ "$2" = "./runtime" ] && [ -n "${RUNTIME_TARGETS:-}" ]; then
+              _target_args=(--config-settings "build.targets=${RUNTIME_TARGETS}")
+            fi
+            if ! py_build_wheel "$_build" "$2" "${_target_args[@]}"; then
               rm -rf "$_build"
               umask "$_old_umask"
               flock -u 9
@@ -1037,11 +1071,11 @@ runs:
             0) echo "wheel cache: simpler <- $simpler_key"
                install_slot "$simpler_slot" 'simpler' || {
                  echo "::warning::wheel cache slot vanished — installing simpler in place"
-                 py_install --no-build-isolation ./runtime
+                 py_install_runtime
                } ;;
             2) exit 1 ;;
             *) echo "::warning::wheel cache unusable — installing simpler in place"
-               py_install --no-build-isolation ./runtime ;;
+               py_install_runtime ;;
           esac
           # Fail fast if the venv can't import our freshly-built packages (catches
           # a stale conda shadow or a broken venv here, not 10 min later in the
