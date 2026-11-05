@@ -305,6 +305,13 @@ def test_host_tensor_delegates_to_simpler():
     assert result is sentinel
 
 
+# ``torch.float8_e5m2`` needs torch >= 2.1; the production helper probes it with
+# getattr, so the tests must skip rather than fail on an older torch.
+_HAS_E5M2 = isinstance(getattr(torch, "float8_e5m2", None), torch.dtype)
+_requires_e5m2 = pytest.mark.skipif(not _HAS_E5M2, reason="torch.float8_e5m2 is unavailable")
+
+
+@_requires_e5m2
 def test_fp8e5m2_host_tensor_crosses_as_uint8_byte_view():
     """The runtime has no E5M2 DataType; the host tensor is passed as a zero-copy byte view."""
     host = torch.tensor([[1.0, -2.0], [0.5, 57344.0]], dtype=torch.float8_e5m2)
@@ -325,6 +332,7 @@ def test_fp8e5m2_host_tensor_crosses_as_uint8_byte_view():
     assert torch.equal(passed, host.view(torch.uint8))
 
 
+@_requires_e5m2
 def test_fp8e5m2_device_tensor_uses_uint8_runtime_dtype():
     buffer = _RecordingBuffer()
     dt = DeviceTensor(buffer.base, (8, 16), torch.float8_e5m2, buffer=buffer)
@@ -337,6 +345,7 @@ def test_fp8e5m2_device_tensor_uses_uint8_runtime_dtype():
     assert buffer.tensor_calls == [((8, 16), task_interface.DataType.UINT8)]
 
 
+@_requires_e5m2
 def test_byte_carrier_policy_covers_only_e5m2():
     from pypto.runtime.tensor_arg import is_byte_carrier_dtype, runtime_host_tensor  # noqa: PLC0415
 

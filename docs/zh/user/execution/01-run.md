@@ -105,6 +105,28 @@ finally:
 | **显式释放** | `w.free_tensor(t)`；`close()` 是兜底，不是方案 |
 | **绑定在它的 worker 上** | 不能移交给另一个 `ChipWorker` |
 
+### Host 张量 dtype 与 FP8E5M2 字节载体
+
+Host 端 `torch.Tensor` 实参在传输时按其 dtype 命名，因此固定版本的 runtime 必须有对应的
+`DataType`。常规 dtype 以及 MX 格式 `float8_e4m3fn`、`float8_e8m0fnu`、
+`float4_e2m1fn_x2` 都有，但 **没有** `float8_e5m2`：runtime 有意省略它，因为其 MX 路径
+是按 E4M3FN 加 E8M0 scale 设计的。
+
+然而 A5 MX 矩阵乘的任一操作数都可以是 E5M2，所以 PyPTO 不会拒绝这种张量，而是按原始字节搬运：
+
+| 你传入的 | 实际传输的 | kernel 看到的 |
+| -------- | ---------- | ------------- |
+| `torch.float8_e5m2` host 张量 | 零拷贝 `view(torch.uint8)`，命名为 `DataType::UINT8` | `pl.FP8E5M2` |
+| `float8_e5m2` 的 `DeviceTensor` | wire descriptor 命名为 `DataType::UINT8` | `pl.FP8E5M2` |
+| runtime 分配的 E5M2 输出 | `TensorCreateInfo` 命名为 `DataType::UINT8` | `pl.FP8E5M2` |
+
+该载体只是命名替换：字节数与字节内容完全一致，不会对数据做任何重新解释，kernel 签名仍是
+`pl.FP8E5M2`。在 host 侧（torch）完成量化后直接传入即可；输出仍按 kernel 声明的 dtype 返回。
+`pl.FP4E1M2X2` 也以同样方式传输，因为 torch 同样无法命名它。（`pl.HF8` 并非如此：它在 runtime `DataType` 中没有对应分支，因此 runtime 分配的 HF8 张量会被命名为 `DataType::UNKNOWN`，而不是按字节载体传输。）
+
+这一行为无需显式开启，也没有可配置项。唯一可见的影响是：在 runtime 级别的日志与 descriptor 中，
+E5M2 张量会被描述为 UINT8。
+
 ### 影响派发的 `RunConfig` 字段
 
 `RunConfig` 同时携带编译侧与运行时侧设置；编译侧那些见[上一页](00-compile.md)。派发时要紧的是：
