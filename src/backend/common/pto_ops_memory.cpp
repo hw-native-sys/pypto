@@ -35,13 +35,16 @@
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -247,6 +250,37 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   return "";
 }
 
+// The destination of an MX scale store needs its own ND view of the pointer.
+// The tensor's cached `pto.make_tensor_view` carries the MX layout, which the
+// Cube-side `pto.tload` needs to gather 16x2 boxes into a Mat tile -- but the
+// pinned pto-isa TSTORE has no MX-layout GlobalTensor overload (ND, DN and NZ
+// only), so reusing that view emits a module which assembles and then fails a
+// static assertion in pto/npu/a5/TStore.hpp. Both views describe the same
+// memory and neither owns it, so a tensor that is loaded as MX and stored here
+// keeps one allocation and two descriptors.
+//
+// The view is flat -- `[1, 1, 1, 1, elements]`, innermost stride 1 -- because
+// the ZZ bytes already sit in the destination's SFractal order, so this store is
+// one contiguous run, and `pto.tstore` is row-oriented (see the call site).
+static std::string EmitFlatMxScaleStoreView(const ir::VarPtr& tensor, const std::string& view_type,
+                                            int64_t elements, codegen::PTOCodegen& codegen) {
+  const std::string view = codegen.NewNamedTemp(tensor->name_hint_ + "_mx_nd_view");
+  const std::string one = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+  const std::string extent = codegen.GetOrEmitConstant(elements, DataType::INDEX);
+  std::ostringstream line;
+  // GetTensorBasePtr, not GetVarName: once an earlier `tile.store` or a loop
+  // iter arg rebinds the tensor var, GetVarName is the `!pto.tensor_view` SSA
+  // that store built, and passing a view where `pto.make_tensor_view` wants a
+  // `!pto.ptr` emits unassemblable PTO. The base pointer is registered
+  // separately for exactly this case (issue #1493).
+  line << view << " = pto.make_tensor_view " << codegen.GetTensorBasePtr(tensor) << ", shape = [" << one
+       << ", " << one << ", " << one << ", " << one << ", " << extent << "], strides = [" << extent << ", "
+       << extent << ", " << extent << ", " << extent << ", " << one
+       << "] {layout = #pto.layout<nd>} : " << view_type;
+  codegen.Emit(line.str());
+  return view;
+}
+
 // tile.store: emit pto.partition_view + pto.tstore
 static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -394,35 +428,234 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
   } else if (mx_destination) {
-    // An MX scale tile is logically [M,G] / [G,N] over a GM destination that
-    // BlockMxScaleTensorViews has already turned into the rank-5 SFractal view,
-    // so a store would be a DMA straight into that physical box.
+    // MX scale tiles are logically [M,G] / [G,N], while their GM destination
+    // is the rank-5 SFractal view made explicit by BlockMxScaleTensorViews.
+    // A DMA store addresses that physical box directly. Each source scale
+    // tile must cover complete 16x2 boxes, so its logical valid extents map
+    // one-to-one onto a rank-5 partition with the same byte count.
+    auto height = As<ir::ConstInt>(valid_shape[0]);
+    auto width = As<ir::ConstInt>(valid_shape[1]);
+    INTERNAL_CHECK_SPAN(height && width && height->value_ > 0 && width->value_ > 0, op->span_)
+        << "MX tile.store requires static positive scale-tile valid dimensions";
+    const bool is_a = tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ;
+    const int64_t row_extent = is_a ? height->value_ : width->value_;
+    const int64_t group_extent = is_a ? width->value_ : height->value_;
+    INTERNAL_CHECK_SPAN(row_extent % 16 == 0 && group_extent % 2 == 0, op->span_)
+        << "MX tile.store requires complete 16x2 scale boxes";
+    const int64_t box_rows = row_extent / ir::tile_view_semantics::kMXSFractalRows;
+    const int64_t box_groups = group_extent / ir::tile_view_semantics::kMXSFractalCols;
+    const int64_t scale_elements = height->value_ * width->value_;
+
+    // The four-argument `pl.store(tile, offsets, tensor, shapes)` supplies an
+    // explicit window, which BlockMxScaleTensorViews rewrites to rank 5 like
+    // the rest. This branch derives its single flat run from the tile's own
+    // valid shape, so a window that asks for LESS than the tile would be
+    // silently ignored and the store would overwrite rows the caller excluded
+    // (measured: a `[64, 4]` scale with `shapes=[32, 4]` emitted the full
+    // 256-element run). Require the rewritten tuple to describe exactly this
+    // tile's boxes; a narrower window is a different store, and supporting one
+    // means narrowing the source alias to match, which has no user today.
+    if (shapes_tuple) {
+      const std::vector<int64_t> expected_window = {1, box_rows, box_groups,
+                                                    ir::tile_view_semantics::kMXSFractalRows,
+                                                    ir::tile_view_semantics::kMXSFractalCols};
+      bool window_matches = shapes_tuple->elements_.size() == expected_window.size();
+      std::string window_text;
+      for (size_t axis = 0; window_matches && axis < expected_window.size(); ++axis) {
+        auto extent = As<ir::ConstInt>(shapes_tuple->elements_[axis]);
+        window_matches = extent && extent->value_ == expected_window[axis];
+      }
+      for (size_t axis = 0; axis < shapes_tuple->elements_.size(); ++axis) {
+        auto extent = As<ir::ConstInt>(shapes_tuple->elements_[axis]);
+        window_text += (axis ? ", " : "") + (extent ? std::to_string(extent->value_) : std::string("?"));
+      }
+      CHECK_SPAN(window_matches, op->span_)
+          << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor writes the whole scale tile, so an "
+          << "explicit store shape must describe exactly that tile's boxes [1, " << box_rows << ", "
+          << box_groups << ", " << ir::tile_view_semantics::kMXSFractalRows << ", "
+          << ir::tile_view_semantics::kMXSFractalCols << "], but this one is [" << window_text
+          << "]. Drop the shapes argument, or slice the scale before storing it.";
+    }
+
+    // Describe both sides of this store as ONE CONTIGUOUS RUN, not as the
+    // rank-5 box window. `pto.tstore` is row-oriented: pairing a single flat
+    // source row with a window whose innermost extent is 2 moves only the first
+    // destination row (measured on A5: 4 of 32 bytes landed, the rest stayed
+    // garbage), and the row-matched `[elements/2, 2]` source that would fix that
+    // is itself illegal -- ptoas requires a row-major none_box Vec tile's row to
+    // be 32-byte aligned, and 2 bytes is not ("expects result row-major none_box
+    // tile row byte size (cols * sizeof(dtype)) to be 32-byte aligned").
     //
-    // The destination descriptor is what blocks it: a store reuses the tensor's
-    // single `pto.make_tensor_view`, which carries the MX layout the Cube-side
-    // load needs, and the pinned pto-isa TSTORE has no overload for an
-    // MX-layout GlobalTensor. Reject it here rather than emitting a module that
-    // assembles and then fails a static assertion in pto/npu/a5/TStore.hpp,
-    // which reports the instantiated template instead of the unsupported store.
+    // A flat run is exact ONLY when the window is contiguous in that order. The
+    // ZZ bytes sit in the destination's `[rows/16][groups/2][16][2]` SFractal
+    // order, so box rows are adjacent only when this store covers every group
+    // box of each row it touches. Covering a subset of the group boxes (say a
+    // `[32, 2]` scale into a `[32, 4]` MX_A_ZZ tensor) selects boxes 0 and 2,
+    // which a flat run would write as boxes 0 and 1 -- silently corrupting the
+    // scales. Reject that rather than emit it; a strided or per-box-row store
+    // is the follow-up, and this path has no user today that needs it.
+    const auto& blocked = tensor_type->shape_;
+    auto dest_box_groups = As<ir::ConstInt>(blocked[2]);
+    CHECK_SPAN(dest_box_groups && dest_box_groups->value_ == box_groups, op->span_)
+        << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor requires the store to cover every "
+        << "scale group of the rows it writes: this tile covers " << box_groups << " of the destination's "
+        << (dest_box_groups ? std::to_string(dest_box_groups->value_) : std::string("?"))
+        << " group boxes, and the selected boxes are not contiguous in the packed order. Store the "
+        << "full group extent (all " << (dest_box_groups ? dest_box_groups->value_ : 0)
+        << " group boxes) in one call, or stage the scale through a plain FP8E8M0 tensor.";
+    const std::vector<int64_t> physical_dims = {1, 1, 1, 1, scale_elements};
+    std::vector<std::string> physical_shape;
+    physical_shape.reserve(physical_dims.size());
+    // pto.partition_view `sizes` is an index-typed *operand* list, not part of
+    // the result type: every entry must be an SSA value (arith.constant for a
+    // static extent). Emitting the bare integers here produced
+    // `sizes = [1, 4, ...]`, which PTOAS rejects with "expected ']'".
+    std::vector<std::string> size_codes;
+    size_codes.reserve(physical_dims.size());
+    for (int64_t dim : physical_dims) {
+      physical_shape.push_back(std::to_string(dim));
+      size_codes.push_back(codegen.GetOrEmitConstant(dim, DataType::INDEX));
+    }
+    INTERNAL_CHECK_SPAN(box_rows > 0 && box_groups > 0, op->span_)
+        << "Internal error: an MX scale store must cover at least one 16x2 box";
+
+    // The whole tensor as one run, so the offsets collapse to a byte index.
+    int64_t tensor_elements = 1;
+    for (const auto& dim_expr : tensor_type->shape_) {
+      auto dim = As<ir::ConstInt>(dim_expr);
+      CHECK_SPAN(dim && dim->value_ > 0, op->span_)
+          << "Storing into an MX_A_ZZ / MX_B_NN tensor requires static positive extents: its flat "
+          << "store view needs a compile-time element count, which a dynamic blocked extent cannot "
+          << "supply.";
+      INTERNAL_CHECK_SPAN(tensor_elements <= std::numeric_limits<int64_t>::max() / dim->value_, op->span_)
+          << "Internal error: MX scale tensor element count overflows int64";
+      tensor_elements *= dim->value_;
+    }
+    const std::string nd_view =
+        EmitFlatMxScaleStoreView(output_tensor, tensor_view_type, tensor_elements, codegen);
+    // Box coordinates -> one flat element index. Row-major over the blocked
+    // shape is exactly the SFractal byte order, which is what makes the flat
+    // description valid in the first place.
+    const std::string flat_offset =
+        EmitFlatOffsetSSAFromValues(GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
+                                    tensor_type->shape_, codegen, output_tensor->name_hint_ + "_mx_off");
+    const std::string zero_index = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+    const std::vector<std::string> flat_offsets = {zero_index, zero_index, zero_index, zero_index,
+                                                   flat_offset};
+    partition_type = MakePartitionTensorViewType(physical_shape, dtype_str);
+    partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, nd_view, tensor_view_type,
+                                          partition_type, flat_offsets, size_codes, codegen);
+
+    // PTOAS accepts only ND / DN / NZ Vec sources for pto.tstore (plus a single
+    // row or column special case), and an MX scale tile is the boxed ZZ layout
+    // (row_major / row_major, fractal 32), which matches none of them.
+    // pto.treshape cannot re-describe it either — it refuses to cross the
+    // boxed / non-boxed boundary. The ZZ bytes are already laid out in the
+    // destination's SFractal order ([rows/16][groups/2][16][2]), the same order
+    // the rank-5 partition above walks, so aliasing the tile's address as one
+    // flat ND row makes the DMA a plain linear copy. Only the descriptor
+    // changes; no data moves and no extra buffer is allocated.
+    auto physical_rows = As<ir::ConstInt>(tile_type->shape_[0]);
+    auto physical_cols = As<ir::ConstInt>(tile_type->shape_[1]);
+    INTERNAL_CHECK_SPAN(physical_rows && physical_cols && physical_rows->value_ == height->value_ &&
+                            physical_cols->value_ == width->value_,
+                        op->span_)
+        << "Internal error: MX tile.store requires a tight scale tile, but the physical shape ["
+        << (physical_rows ? std::to_string(physical_rows->value_) : "?") << ", "
+        << (physical_cols ? std::to_string(physical_cols->value_) : "?") << "] does not match the valid ["
+        << height->value_ << ", " << width->value_ << "]; padded ZZ storage would leave the valid "
+        << "boxes non-contiguous";
+    // The alias re-declares the source's address as a Vec tile, so the source
+    // has to *be* in Vec: naming an L1/scaling offset in a Vec descriptor would
+    // make TSTORE read unrelated UB bytes. Defence in depth rather than a
+    // reachable path today -- a Mat-loaded MX scale reaches here already typed
+    // Vec and without a planned address, so the static-address check below
+    // rejects it first (measured). Validation upstream checks dtype and layout
+    // but never the memory space, so state the requirement here.
+    const auto scale_space = tile_type->GetMemorySpace();
+    CHECK_SPAN(scale_space.has_value() && *scale_space == ir::MemorySpace::Vec, op->span_)
+        << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor requires the source to be in Vec, but "
+        << "got " << (scale_space ? ir::MemorySpaceToString(*scale_space) : std::string("no"))
+        << " memory. Move it to Vec first; a quantized scale is already there.";
+    const auto scale_memref = tile_type->memref_.has_value() ? ir::GetDefinedMemRef(tile_type) : nullptr;
+    const auto byte_offset = scale_memref ? As<ir::ConstInt>(scale_memref->byte_offset_) : nullptr;
+    CHECK_SPAN(codegen.EmitTileAddr() && byte_offset, op->span_)
+        << "Storing an MX scale tile into an MX_A_ZZ / MX_B_NN tensor requires a static PYPTO or "
+        << "DSA_RP memory allocation: PTOAS cannot reshape the boxed ZZ scale layout into the ND "
+        << "descriptor its tstore needs.";
+    // The alias is built at the source tile's own recorded address, so that
+    // address has to be the physical one. For a view of a boxed scale,
+    // `InitMemRef` records a *logical* row-major offset, which is not the
+    // packed box offset.
     //
-    // Lifting this needs three things, none of which exist yet: index-typed
-    // `sizes` operands on the rank-5 `pto.partition_view` (bare integers do not
-    // parse), an ND alias of the boxed ZZ source tile (`pto.tstore` takes
-    // ND/DN/NZ Vec sources and `pto.treshape` refuses to cross the boxed
-    // boundary), and a store-local ND view of the destination pointer -- the
-    // rank-5 shape and strides already describe the box layout, so ND is an
-    // honest description of a byte-wise store of already-boxed data.
-    UNREACHABLE_SPAN(op->span_)
-        << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor is not supported: the pinned pto-isa "
-        << "TSTORE accepts only ND, DN and NZ GlobalTensor layouts, so an MX-layout destination "
-        << "cannot be written. Keep the scale on-chip and feed it to matmul_mx directly, or stage "
-        << "it through a plain tensor: flatten the whole scale -- "
-        << "`pl.reshape(scale, [1, M * (K // 32)])` on axis1, `[1, (K // 32) * N]` on axis0 -- "
-        << "floor division, since a float extent is rejected -- not just the "
-        << "group count -- store that into an unannotated FP8E8M0 tensor, then read it back with "
-        << "`pl.tensor.view(..., layout=pl.MX_A_ZZ)` (or `pl.MX_B_NN`) where the matmul loads it. "
-        << "That staging route needs the PYPTO or DSA_RP memory planner: flattening a boxed scale "
-        << "resolves to an addressed alias, which PTOAS-side planning cannot emit.";
+    // The correctness guarantee for that now lives at `tile.slice`, which
+    // admits only whole-tile windows of an MX scale tile (see
+    // DeduceTileSliceType in src/ir/op/tile_ops/transform.cpp, and the list of
+    // weaker rules measured and discarded there). Nothing with a logical
+    // address that differs from its packed one can reach this point any more.
+    // The two tests below are therefore REDUNDANT BACKSTOPS, kept deliberately
+    // and labelled as such:
+    //
+    // (a) The MemRef's span must equal this tile's own bytes. No construction
+    //     is known to reach it today -- every window that used to is rejected
+    //     at the slice -- but it is read off the MemRef, which travels with the
+    //     value, so it would still fire through a bare alias or a
+    //     `tile.reshape` if the slice rule were ever relaxed. Do not treat its
+    //     silence as proof that a sub-window is safe.
+    //
+    // (b) The value must not be one codegen knows to be a tile view. This one
+    //     does fire -- on a whole-tile `tile.slice` of a scale, which is
+    //     byte-identical to the tile and would in fact store correctly. It is a
+    //     scope restriction, not a correctness test: it keeps the supported
+    //     surface to the tile the quantizer produced, which is the only shape
+    //     with on-board coverage. Relax it when a caller needs a view and the
+    //     case gets its own device test. It runs AFTER the static-address check
+    //     above, because under PTOAS-side planning every scale tile is a view
+    //     SSA and that case has its own, more specific error.
+    //
+    // What is deliberately NOT here: a test of the byte offset against
+    // `box_groups * 32`. It looks like the natural completion of (a), and it
+    // was measured to reject legitimate whole scale tiles whenever the planner
+    // places them 32-byte but not 64-byte aligned (a live FP8 tile of 32 / 96 /
+    // 160 / 224 / 288 bytes ahead of the scale reproduces it every time). A
+    // root tile's recorded address IS its packed base, so its alignment says
+    // nothing about correctness, and the store cannot tell a root from a view.
+    const auto scale_bytes =
+        ir::storage_size::StaticStorageBytes(static_cast<uint64_t>(scale_elements), tile_type->dtype_);
+    INTERNAL_CHECK_SPAN(scale_bytes.has_value(), op->span_)
+        << "Internal error: MX scale tile byte size overflows";
+    CHECK_SPAN(scale_memref->size_ == *scale_bytes, op->span_)
+        << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor requires the whole scale tile, not a "
+        << "view of one: this source spans " << scale_memref->size_ << " bytes for its " << *scale_bytes
+        << " bytes of scale codes, so it is a sub-rectangle of a larger boxed "
+        << "scale and its recorded address is a logical row-major offset rather than the packed "
+        << "box offset. Store the scale tile the quantizer produced, or stage the scale through a "
+        << "plain FP8E8M0 tensor.";
+    CHECK_SPAN(!codegen.IsTileViewName(tile_buf), op->span_)
+        << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor requires the whole scale tile the "
+        << "quantizer produced, not a view of one: a view of a boxed scale records a logical "
+        << "row-major address rather than its packed box address, so the flat store would read "
+        << "from the wrong boxes. Store the scale tile itself, or stage the scale through a plain "
+        << "FP8E8M0 tensor.";
+    // One flat ND row, matching the flat destination window. Its byte count is
+    // a multiple of 32 by construction (whole 16x2 boxes), which is what ptoas
+    // requires of a row-major none_box Vec tile's row.
+    // Default-constructed TileView is plain ND: row_major / none_box / fractal 512.
+    ir::TileView flat_view;
+    auto make_dim = [&](int64_t value) {
+      return std::make_shared<ir::ConstInt>(value, DataType::INDEX, op->span_);
+    };
+    std::vector<ExprPtr> flat_shape = {make_dim(1), make_dim(scale_elements)};
+    flat_view.valid_shape = flat_shape;
+    auto flat_type = std::make_shared<ir::TileType>(flat_shape, tile_type->dtype_, std::nullopt, flat_view,
+                                                    ir::MemorySpace::Vec);
+    const std::string flat_type_str = codegen.GetViewTileBufTypeStringFromTileType(flat_type);
+    const std::string flat_alias = codegen.NewNamedTemp(tile->name_hint_ + "_mx_nd");
+    codegen.Emit(flat_alias + " = pto.alloc_tile addr = " +
+                 codegen.GetOrEmitConstant(byte_offset->value_, DataType::INT64) + " : " + flat_type_str);
+    codegen.RegisterTileBufType(flat_alias, flat_type_str, flat_type);
+    tile_buf = flat_alias;
+    tile_buf_type = flat_type_str;
   } else {
     // Standard 1D/2D path
     std::string height_dim = "?", width_dim = "?";
