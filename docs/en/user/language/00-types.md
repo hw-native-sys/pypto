@@ -305,8 +305,10 @@ subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`) and MX `remote_lo
 rejected. Exception: FP8E8M0 `pl.tensor.view` may alias packed ND
 backing to `MX_A_ZZ` / `MX_B_NN` as a logical rank-2 view (`layout=mx_*`; PTOAS v0.60 packs
 physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
-`_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
-the op must be `FP8E4M3FN`. Either packed FP4 format may supply the left operand
+`_bias` variants, which take a data tile and a scale tile per operand. Each data tile reaching
+the op is `FP8E4M3FN` or `FP8E5M2`, chosen independently per side, so E4M3xE4M3, E5M2xE5M2,
+E4M3xE5M2 and E5M2xE4M3 all run; the scales stay `FP8E8M0` and the result FP32. Either packed
+FP4 format may supply the left operand
 after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
 legalization pass expands that request to packed FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
 reverse FP8×FP4 form are not supported. `pl.quant_mx` supports MXFP8 and native

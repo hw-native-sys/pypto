@@ -70,8 +70,11 @@ inline constexpr uint8_t kMatmulMx =
  * f16 / bf16 / f32 same-type pairs -> f32; A5 additionally multiplies any FP8
  * (E4M3FN / E5M2) pair, including the mixed orders, and HiF8 x HiF8 -> f32.
  *
- * Family bits record what PyPTO currently exposes for each pair (ordinary GEMV
- * accepts only the four common pairs; MX data only E4M3FN x E4M3FN).
+ * Family bits record what PyPTO currently exposes for each pair. Ordinary GEMV
+ * accepts only the four common pairs. The MX family covers every FP8 pair --
+ * PTOAS gates it separately in ``isA5MxFp8InputType``
+ * (lib/PTO/IR/PTOTile/PTOInsertAndFillPad.cpp), which admits E4M3FN and E5M2 per
+ * side but *not* HiF8, so HF8 x HF8 stays out of kMx while remaining in kMatmul.
  */
 inline constexpr CubeOperandPair kCubeOperandPairs[] = {
     {DataType::INT8, DataType::INT8, DataType::INT32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
@@ -79,9 +82,9 @@ inline constexpr CubeOperandPair kCubeOperandPairs[] = {
     {DataType::BF16, DataType::BF16, DataType::FP32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
     {DataType::FP32, DataType::FP32, DataType::FP32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
     {DataType::FP8E4M3FN, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulMx},
-    {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
-    {DataType::FP8E5M2, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
-    {DataType::FP8E5M2, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
+    {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulMx},
+    {DataType::FP8E5M2, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulMx},
+    {DataType::FP8E5M2, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulMx},
     {DataType::HF8, DataType::HF8, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
 };
 
