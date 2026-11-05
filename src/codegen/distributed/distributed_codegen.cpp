@@ -2540,7 +2540,19 @@ std::string DistributedCodegen::EmbeddedWindowViewArgs(const ir::DistributedTens
   }
   if (type->memref_) {
     const auto& memref = *type->memref_;
-    CHECK_SPAN(memref->base_.get() == (*type->window_buffer_)->base_.get() || IsWholeWindowSlot(type), span)
+    const bool from_slot = memref->base_.get() == (*type->window_buffer_)->base_.get();
+    // A received window formal uses a function-local base for the named slot.
+    // Recognize that base independently of the slot's runtime capacity.
+    const bool from_formal =
+        !from_slot &&
+        std::any_of(embedded_windows_.begin(), embedded_windows_.end(), [&](const auto& binding) {
+          const auto formal = ir::As<ir::DistributedTensorType>(binding.param->GetType());
+          if (formal->window_buffer_ != type->window_buffer_ || !formal->memref_) return false;
+          const auto& origin = *formal->memref_;
+          const auto offset = ir::As<ir::ConstInt>(origin->byte_offset_);
+          return origin->base_ == memref->base_ && offset && offset->value_ == 0;
+        });
+    CHECK_SPAN(from_slot || from_formal || IsWholeWindowSlot(type), span)
         << "Embedded distributed window MemRef origin is not the named WindowBuffer slot; "
            "function-local allocation offsets cannot be interpreted as slot-relative geometry";
     const auto offset = ir::As<ir::ConstInt>(memref->byte_offset_);

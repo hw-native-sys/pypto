@@ -346,8 +346,8 @@ class RunConfig:
         cluster_config: Optional POD/CLUSTER_0 launch configuration, forwarded
             through :meth:`compile_options` and :meth:`compile_kwargs` as a
             validated snapshot of the nested node/device lists. Cannot be
-            combined with ``distributed_config``. Full POD compilation is
-            still unsupported pending cluster codegen and runner integration.
+            combined with ``distributed_config``. POD entries use synchronous
+            direct MPI execution with a static cluster topology.
         analyze_auto_scopes_for_deps: If ``True``, enable compiler-derived task
             dependency analysis for AUTO runtime scopes during compilation.
             Defaults to ``False`` so existing runs keep using TensorMap fallback

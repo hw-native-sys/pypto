@@ -923,6 +923,7 @@ class DispatchSemantics:
         keywords: list[ast.keyword],
         extra_attrs: dict[str, Any],
         func_obj: ir.Function | None,
+        span: ir.Span,
     ) -> ir.Expr | None:
         """Extract the logical immediate-child selector for a Call or Submit.
 
@@ -934,13 +935,13 @@ class DispatchSemantics:
         """
         placement_kwargs = [kw for kw in keywords if kw.arg in {"worker", "device"}]
         placement_attrs = [key for key in ("worker", "device") if key in extra_attrs]
-        if placement_attrs and (func_obj is None or func_obj.role != ir.Role.Orchestrator):
+        if placement_attrs and func_obj is not None and func_obj.role != ir.Role.Orchestrator:
             # Printed attrs must obey the same role restriction as worker=/device=.
             # Otherwise a plain kernel call could acquire the dispatch-only layout
             # exemption simply by hiding its placement metadata in attrs.
             raise ParserTypeError(
                 f"Placement attrs {placement_attrs} require an Orchestrator callee",
-                span=func_obj.span if func_obj is not None else None,
+                span=span,
             )
         if len(placement_kwargs) + len(placement_attrs) > 1:
             raise ParserTypeError(

@@ -11,6 +11,8 @@
 
 import ast
 from collections.abc import Sequence
+from inspect import getattr_static
+from types import ModuleType
 from typing import Any, NoReturn, cast
 
 from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
@@ -82,7 +84,7 @@ from .type_semantics import (
 # Resolve callable aliases once, then validate the operation produced by the
 # wrapper. Looking up a callable here does not decide its IR operator identity.
 _DISTRIBUTED_DSL_CALLABLES = {
-    getattr(module, name): (module, prefix, name)
+    id(target): (target, (module, prefix, name))
     for module, prefix in (
         (_dsl_pld, "pld"),
         (_dsl_pld.system, "pld.system"),
@@ -90,7 +92,8 @@ _DISTRIBUTED_DSL_CALLABLES = {
         (_dsl_pld.tile, "pld.tile"),
     )
     for name in module.__all__
-    if callable(getattr(module, name))
+    for target in (getattr(module, name),)
+    if callable(target)
 }
 
 # ``pl.func_attr({...})`` — the body-prologue directive carrying function-level
@@ -2094,10 +2097,11 @@ class ASTParser:
             return None
         value = self.expr_evaluator.closure_vars.get(node.id)
         for segment in reversed(segments):
-            value = getattr(value, segment, None)
-        if not callable(value):
-            return None
-        return _DISTRIBUTED_DSL_CALLABLES.get(value)
+            if not isinstance(value, (ModuleType, type)):
+                return None
+            value = getattr_static(value, segment, None)
+        entry = _DISTRIBUTED_DSL_CALLABLES.get(id(value))
+        return entry[1] if entry is not None and entry[0] is value else None
 
 
 __all__ = ["ASTParser"]

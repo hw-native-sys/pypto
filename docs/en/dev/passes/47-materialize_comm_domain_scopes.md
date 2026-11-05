@@ -89,8 +89,9 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    structurally equal to the Var's, so a genuine shape / dtype / view
    disagreement is left for the verifier to report. Two `pld.tensor.window`
    views over the same allocation share the same
-   `shared_ptr<const WindowBuffer>`. Chip-orch / InCore parameter types are
-   not touched.
+   `shared_ptr<const WindowBuffer>`. An unbound CHIP orchestrator parameter
+   gets a concrete window identity only when all callers supply the same
+   known window. Each call retains its own argument's window identity.
 
 7. **Cluster into comm domains.** Walk the allocation list in source order;
    append a slot to the first existing comm domain whose merged device

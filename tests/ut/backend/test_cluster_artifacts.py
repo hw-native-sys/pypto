@@ -1048,6 +1048,7 @@ def test_i2_aggregate_is_deterministic_plain_ustar_and_program_qualified(i2_prog
             with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
                 names = archive.getnames()
                 assert names == sorted(set(names))
+                assert "__init__.py" not in names
                 assert "session_manifest.json" in names
                 for program in ("p0", "p1"):
                     base = f"programs/{program}"

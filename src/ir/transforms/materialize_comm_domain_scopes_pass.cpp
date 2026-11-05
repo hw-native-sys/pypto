@@ -65,6 +65,8 @@ namespace {
 // merge; it is not a universal O(N log N) bound.
 using ValueId = size_t;
 
+[[nodiscard]] bool IsChipOrch(const FunctionPtr& func);
+
 // Window identity follows storage, never an arbitrary tensor computation.
 // Registry-backed helpers are shared with the other alias/return analyses.
 std::optional<size_t> WindowSourceArg(const CallPtr& call) {
@@ -140,8 +142,15 @@ class WindowIdentityGraph : public IRVisitor {
       for (ValueId target : values_[source].users) Set(target, window);
       for (size_t join_id : values_[source].joins) {
         auto& join = joins_[join_id];
-        CHECK_SPAN(!join.window || join.window.get() == window.get(), values_[join.target].span)
-            << "MaterializeCommDomainScopes: conflicting WindowBuffer identities at a branch/loop merge";
+        if (!join.remaining) continue;
+        if (join.window && join.window.get() != window.get()) {
+          CHECK_SPAN(join.call_binding, values_[join.target].span)
+              << "MaterializeCommDomainScopes: conflicting WindowBuffer identities at a branch/loop merge";
+          // CHIP consumes the caller's tensor and CommCtx. Distinct call-site
+          // windows leave the formal generic, while each call keeps its own slot.
+          join.remaining = 0;
+          continue;
+        }
         join.window = window;
         if (--join.remaining == 0) Set(join.target, window);
       }
@@ -233,6 +242,7 @@ class WindowIdentityGraph : public IRVisitor {
     ValueId target;
     size_t remaining;
     WindowBufferPtr window;
+    bool call_binding = false;
   };
   struct Facts {
     FunctionPtr func;
@@ -296,13 +306,20 @@ class WindowIdentityGraph : public IRVisitor {
     }
   }
 
-  void Connect(ValueId source, ValueId target) {
+  void Connect(ValueId source, ValueId target, bool chip_formal = false) {
     if (As<DistributedTensorType>(values_[source].type) && As<DistributedTensorType>(values_[target].type)) {
-      values_[source].users.push_back(target);
+      if (chip_formal && !values_[target].window) {
+        auto [binding, inserted] = chip_formal_joins_.try_emplace(target, joins_.size());
+        if (inserted) joins_.push_back({target, 0, nullptr, true});
+        ++joins_[binding->second].remaining;
+        values_[source].joins.push_back(binding->second);
+      } else {
+        values_[source].users.push_back(target);
+      }
     } else {
       for (const auto& [position, child] : values_[source].fields) {
         auto found = values_[target].fields.find(position);
-        if (found != values_[target].fields.end()) Connect(child, found->second);
+        if (found != values_[target].fields.end()) Connect(child, found->second, chip_formal);
       }
     }
   }
@@ -379,7 +396,7 @@ class WindowIdentityGraph : public IRVisitor {
     // have no caller provenance and cannot consume an argument from the suffix.
     for (size_t i = 0; i < supplied; ++i) {
       auto actual = transform_utils::CallerSuppliedArg(call, callee, i, facts.ctx);
-      Connect(Value(actual), Value(callee->params_[i]));
+      Connect(Value(actual), Value(callee->params_[i]), IsChipOrch(callee));
     }
     auto outputs = Results(expr, facts.returns.size());
     for (const auto& [i, output] : outputs) {
@@ -487,6 +504,7 @@ class WindowIdentityGraph : public IRVisitor {
 
   std::vector<ValueInfo> values_;
   std::vector<Join> joins_;
+  std::unordered_map<ValueId, size_t> chip_formal_joins_;
   std::vector<ValueId> ready_;
   std::unordered_map<const Expr*, ValueId> expr_values_;
   std::unordered_set<const Expr*> visited_;

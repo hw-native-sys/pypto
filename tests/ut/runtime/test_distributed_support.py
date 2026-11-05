@@ -59,8 +59,7 @@ def mixed_embedded_source():
 
 @pytest.fixture
 def canonical_support_path(mixed_embedded_source):
-    # Native generation and its full verification context must succeed before
-    # a missing canonical helper can be classified as the intended RED failure.
+    # Validate the generated entry before exercising the canonical helper.
     assert mixed_embedded_source
     path = Path(__file__).resolve().parents[3] / "python/pypto/runtime/_distributed_support.py"
     return path
@@ -259,8 +258,7 @@ finally:
 def test_c3b_return_copy_uses_real_cpu_dag_and_mapped_views(
     view, normalized_return_copy_program, canonical_support_path, tmp_path, monkeypatch
 ):
-    # This check follows normalized, verified native caller generation. Its
-    # current missing callable is a feature RED, not an invalid IR fixture.
+    # The generated entry's implicit output ABI requires this SUB callable.
     name = "_c3b_return_copy_support_contract"
     spec = importlib.util.spec_from_file_location(name, canonical_support_path)
     assert spec is not None and spec.loader is not None

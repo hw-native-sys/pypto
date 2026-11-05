@@ -187,7 +187,7 @@ def _match_builtin_dispatch(
     * every argument as the expected window-bound DistributedTensor, in order
       (a reordered arg or a wrong window view for an arg fails),
     * the exact arg directions, and
-    * the complete kwarg dict and attr set, with ``device`` bound to the loop
+    * the complete kwarg dict and attr set, with ``worker`` bound to the loop
       var.
     """
 
@@ -221,7 +221,7 @@ def _match_builtin_dispatch(
     assert isinstance(body, ir.EvalStmt)
     call = _as_call(body.expr)
 
-    # device attr is bound to the loop induction var
+    # The worker attr binds the loop induction variable.
     assert call.attrs["worker"] is loop.loop_var
 
     # every leading argument is the expected window-bound DistributedTensor, in
@@ -252,7 +252,7 @@ def _match_builtin_dispatch(
     # complete kwarg dict
     assert dict(call.kwargs) == kwargs, f"kwargs mismatch: {dict(call.kwargs)} != {kwargs}"
 
-    # exact attr key set plus op-specific values (device / arg_directions above)
+    # Exact attr key set plus op-specific values (worker / arg_directions above).
     expected_attr_keys = {"worker", "arg_directions", *(attrs or {})}
     assert set(call.attrs.keys()) == expected_attr_keys, (
         f"attr key mismatch: {set(call.attrs.keys())} != {expected_attr_keys}"

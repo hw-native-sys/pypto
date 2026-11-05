@@ -322,6 +322,8 @@ def _cluster_source_payloads(directory: Path, budget: int) -> tuple[str, dict[st
 def _encode_cluster_payloads(entry_name: str, sources: dict[str, bytes]) -> tuple[str, bytes]:
     """Own a plain USTAR closure and stream it into a bounded gzip sink."""
     payloads = dict(sources)
+    # Simpler installs the archive root as a namespace package.
+    payloads.pop("__init__.py", None)
     _check_cluster_member_paths(set(payloads) | {"bundle_manifest.json"})
     total = sum(len(data) for data in payloads.values())
     # This manifest owns every selected relative member and its exact bytes.

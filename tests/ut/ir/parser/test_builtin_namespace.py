@@ -25,9 +25,13 @@ End-to-end coverage of the printed lowering (kwargs, ``device`` /
 module covers the namespace's own parse behaviour and diagnostics.
 """
 
+import ast
+from dataclasses import dataclass
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.ast_parser import ASTParser
 from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir
 
@@ -196,6 +200,23 @@ def test_public_collective_still_lowers_through_pld_surface():
     }
     assert _BUILTIN_BARRIER not in op_names
     assert ir.get_op("pld.tensor.barrier").name in op_names
+
+
+def test_distributed_alias_lookup_does_not_probe_user_instances():
+    @dataclass
+    class CallableValue:
+        value: int
+
+        def __call__(self):
+            return self.value
+
+        @property
+        def collective(self):
+            pytest.fail("Distributed alias lookup evaluated an instance property")
+
+    parser = ASTParser("<test>", [], closure_vars={"closure_value": CallableValue(1)})
+    for expression in ("closure_value", "closure_value.collective"):
+        assert parser._resolve_distributed_callable(ast.parse(expression, mode="eval").body) is None
 
 
 if __name__ == "__main__":

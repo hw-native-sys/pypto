@@ -428,10 +428,6 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch_other(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
-
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             buf_a = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
@@ -440,8 +436,8 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
             data_b = pld.window(buf_b, [256], dtype=pl.FP32)
             self.chip_orch(data_a, device=0)
             self.chip_orch(data_a, device=1)
-            self.chip_orch_other(data_b, device=2)
-            self.chip_orch_other(data_b, device=3)
+            self.chip_orch(data_b, device=2)
+            self.chip_orch(data_b, device=3)
             data_a = pld.tensor.allreduce(data_a, op=pld.ReduceOp.Sum)
             data_b = pld.tensor.allreduce(data_b, op=pld.ReduceOp.Sum)
             return data_a
@@ -476,6 +472,7 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
 
     # After materialization, each (data, signal) pair lands in its own
     # comm-domain scope: {0,1} for buf_a and {2,3} for buf_b.
+    assert _get_func(result, "chip_orch").params[0].type.window_buffer is None
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 2
     assert list(scopes[0].devices) == [0, 1]

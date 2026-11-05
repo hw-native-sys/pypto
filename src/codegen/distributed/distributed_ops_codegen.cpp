@@ -199,8 +199,12 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       const std::string view_args = codegen.IsEmbedded()
                                         ? codegen.EmbeddedWindowViewArgs(dist_type, call->span_)
                                         : "shapes=" + shape + ", dtype=" + dtype_enum;
-      codegen.Emit(ta_var + ".add_tensor(" + arg_handle + "[" + rank_expr + "].buffers[\"" + name +
-                   "\"].tensor(" + view_args + "), " + tag + ")");
+      const std::string window_tensor =
+          codegen.IsEmbedded()
+              ? "_frame.window_tensor(" + arg_handle + ", " + rank_expr + ", \"" + name + "\", " + view_args +
+                    ")"
+              : arg_handle + "[" + rank_expr + "].buffers[\"" + name + "\"].tensor(" + view_args + ")";
+      codegen.Emit(ta_var + ".add_tensor(" + window_tensor + ", " + tag + ")");
       continue;
     }
     if (ir::As<ir::TileType>(call->args_[i]->GetType())) {

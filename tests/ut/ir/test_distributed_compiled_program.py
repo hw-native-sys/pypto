@@ -538,6 +538,11 @@ def test_c1d1_cluster_rank_order_and_defaults_do_not_probe_network(monkeypatch):
     assert config.aicpu_thread_num == 0
 
 
+def test_cluster_config_rejects_unequal_device_counts():
+    with pytest.raises(ValueError, match="requires equal device counts per node"):
+        _c1d1_cluster(nodes=[ir.ClusterNodeSpec("node-a", [0]), ir.ClusterNodeSpec("node-b", [0, 1])])
+
+
 def _c1d2_cluster_config():
     return ir.ClusterConfig(
         [ir.ClusterNodeSpec("node-a", [2, 3]), ir.ClusterNodeSpec("node-b", [4, 5])],

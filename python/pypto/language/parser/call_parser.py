@@ -258,7 +258,7 @@ class CallParser:
             allowed_kwargs.add("timing_slot")
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
-        if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
+        if func_obj is None or func_obj.role == ir.Role.Orchestrator:
             allowed_kwargs.update({"worker", "device"})
         for kw in keywords:
             if kw.arg in allowed_kwargs:
@@ -474,7 +474,9 @@ class CallParser:
                 dump_vars.append(arg)
         # Placement is the logical immediate-child selector, including legacy
         # device spellings recovered from dispatch attrs.
-        worker_expr = self.dispatch.parse_dispatch_worker_kwarg(keywords, extra_attrs, func_obj)
+        worker_expr = self.dispatch.parse_dispatch_worker_kwarg(keywords, extra_attrs, func_obj, span)
+        if worker_expr is not None and func_obj is None:
+            self.bindings.pending_placements.append((gvar, span))
         # ``pl.spmd_submit`` parses the SPMD launch spec (``core_num=`` /
         # ``sync_start=``) into a (positive int Expr, bool) pair recorded on
         # the resulting Submit.

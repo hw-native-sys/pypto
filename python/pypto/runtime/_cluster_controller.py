@@ -304,7 +304,9 @@ class ClusterController:
                 raise ValueError(f"Native global domain request {name!r} is absent from cold metadata")
             plan = by_name[name]
             if not plan["static"]:
-                raise ValueError("Persistent cluster domain requires a static cold slot layout")
+                if self._persistent:
+                    raise ValueError("Persistent cluster domain requires a static cold slot layout")
+                return orch.allocate_global_domain(**kwargs)
             expected = (
                 tuple((self._nodes[node], local_worker) for node, local_worker, _ in plan["members"]),
                 sum(slot["allocated_nbytes"] for slot in plan["domain"]["slots"]),

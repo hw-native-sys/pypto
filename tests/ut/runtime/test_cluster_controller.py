@@ -219,6 +219,54 @@ def test_json_pool_keys_are_recursively_hashable(controller_module):
     assert controller_module._freeze(["shared", ["nested", 1]]) == ("shared", ("nested", 1))
 
 
+def test_nonpersistent_programs_allocate_dynamic_windows_on_each_run(
+    controller_module, setup_controller, monkeypatch
+):
+    first, worker, _, spec = setup_controller
+    first.close()
+    spec["persistent"] = False
+    plan = {"static": False, "domain": {"generated_name": "dynamic"}, "pool_key": ["isolated", 0, 0]}
+    spec["programs"][0]["plans"] = [plan]
+    spec["programs"].append(dict(spec["programs"][0], module_prefix="bundle.programs.p1"))
+    topology = SimpleNamespace(executors=[SimpleNamespace(worker_id=7), SimpleNamespace(worker_id=9)])
+    context = SimpleNamespace(topology=topology, create_worker=lambda **kwargs: worker)
+    controller = controller_module.ClusterController(context, spec)
+    events = []
+
+    @contextmanager
+    def allocate_global_domain(**kwargs):
+        events.append(("allocate", kwargs["window_size"]))
+        try:
+            yield
+        finally:
+            events.append(("release", kwargs["window_size"]))
+
+    def run(callback, *, config):
+        callback(SimpleNamespace(allocate_global_domain=allocate_global_domain), None, config)
+
+    def entry(*args, tensors, _domain_provider, **kwargs):
+        with _domain_provider(name="dynamic", window_size=tensors["count"], retain_after_run=False):
+            pass
+
+    monkeypatch.setattr(worker, "run", run)
+    for state in controller._states.values():
+        state["entry"] = entry
+    try:
+        controller.run(0, [64], {})
+        controller.run(1, [128], {})
+        controller.run(0, [256], {})
+        assert events == [
+            ("allocate", 64),
+            ("release", 64),
+            ("allocate", 128),
+            ("release", 128),
+            ("allocate", 256),
+            ("release", 256),
+        ]
+    finally:
+        controller.close()
+
+
 def test_call_config_restores_native_runtime_environment(setup_controller, monkeypatch):
     import simpler.task_interface as interface  # noqa: PLC0415
 

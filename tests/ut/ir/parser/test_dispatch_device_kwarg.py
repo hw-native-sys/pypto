@@ -63,6 +63,35 @@ def _find_callee_call(func: ir.Function, callee_name: str) -> ir.Call:
 # ---------------------------------------------------------------------------
 
 
+def test_forward_dispatch_accepts_printed_placement_attrs():
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self):
+            self.chip(attrs={"worker": 0})
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self):
+            return
+
+    placement = _find_callee_call(_get_func(P, "host"), "chip").attrs["worker"]
+    assert placement.value == 0
+
+
+def test_forward_placement_rejects_non_orchestrator():
+    with pytest.raises(ParserTypeError, match="Placement requires an Orchestrator callee"):
+
+        @pl.program
+        class P:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self):
+                self.kernel(attrs={"worker": 0})
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self):
+                return
+
+
 def test_device_int_literal():
     """``device=0`` lifts to a ConstInt stored on call.attrs['worker']."""
 

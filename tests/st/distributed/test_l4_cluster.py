@@ -41,7 +41,7 @@ def _cluster_config() -> ClusterConfig:
     return config
 
 
-def _program(local_devices: int, *, mixed: bool):
+def _program(local_devices: int, *, mixed: bool, dynamic_window: bool = False):
     nd = local_devices
     count_rows = 2 if mixed else 1
 
@@ -141,6 +141,23 @@ def _program(local_devices: int, *, mixed: bool):
 
     host = mixed_host if mixed else global_host
 
+    if dynamic_window:
+
+        @pl.jit.pod
+        def dynamic_pod(
+            inputs: pl.Tensor[[2, nd, 1, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, nd, 1, SIZE], pl.FP32]],
+            counts: pl.Out[pl.Tensor[[2, nd, count_rows, 1], pl.INT32]],
+            window_bytes: pl.Scalar[pl.INDEX],
+        ):
+            global_buffer = pld.alloc_window_buffer(window_bytes)
+            for node in pl.range(pld.num_workers()):
+                data = pld.window(global_buffer, [1, SIZE], dtype=pl.FP32)
+                host(inputs[node], outputs[node], counts[node], data, worker=node)
+            return outputs, counts
+
+        return dynamic_pod
+
     @pl.jit.pod
     def pod(
         inputs: pl.Tensor[[2, nd, 1, SIZE], pl.FP32],
@@ -188,6 +205,39 @@ def test_l4_global_window_stage_through(test_config, mixed, tmp_path):
             worker(current, outputs, counts)
             assert torch.equal(outputs, current)
             assert torch.equal(counts, expected_counts)
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+def test_l4_nonpersistent_multi_program_dynamic_windows(test_config, tmp_path):
+    cluster = _cluster_config()
+    if test_config.codegen_only:
+        pytest.skip("This test requires real CHIP execution, not --codegen-only")
+    nd = cluster.node_device_counts()[0]
+    inputs = torch.arange(2 * nd * SIZE, dtype=torch.float32).reshape(2, nd, 1, SIZE)
+    outputs = torch.empty_like(inputs)
+    counts = torch.empty((2, nd, 1, 1), dtype=torch.int32)
+    config = RunConfig(
+        backend_type=BackendType.Ascend910,
+        execution_mode=test_config.execution_mode,
+        cluster_config=cluster,
+        save_kernels=True,
+    )
+    programs = [
+        _program(nd, mixed=False, dynamic_window=True).compile(
+            inputs, outputs, counts, 256, config=replace(config, save_kernels_dir=str(tmp_path / f"p{i}"))
+        )
+        for i in range(2)
+    ]
+    for program in programs:
+        assert program.comm_domains[0]["slots"][0]["logical_nbytes"] is None
+    with programs[0].prepare(extra_compiled=[programs[1]], persistent=False) as worker:
+        for i, (index, size) in enumerate(((0, 256), (1, 512), (0, 768))):
+            current = inputs + i * 1000
+            outputs.fill_(-1)
+            counts.fill_(-1)
+            worker.run(programs[index], current, outputs, counts, size)
+            assert torch.equal(outputs, current)
+            assert torch.all(counts == sum(cluster.node_device_counts()))
 
 
 def _shared_programs(local_devices: int, rank_count: int):

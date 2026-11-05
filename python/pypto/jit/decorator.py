@@ -75,7 +75,6 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
 from pypto.ir.compile import (
-    _check_supported_orchestration_level,
     _validate_pass_context_conflicts,
     make_default_output_dir,
 )
@@ -1095,12 +1094,6 @@ class JITFunction:
         """
         import pypto.language as pl  # noqa: PLC0415
 
-        # A restored HOST artifact cannot execute a POD entry. Keep this check
-        # before every cache path, including object hits and diagnostic rebuilds;
-        # specialize()/parse/serialization remain available for frontend work.
-        if self._func_type == "pod":
-            _check_supported_orchestration_level(_ir.Level.CLUSTER_0)
-
         specialization, run_config = self._resolve_specialization(
             args,
             kwargs,
@@ -1109,8 +1102,6 @@ class JITFunction:
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
         cluster_config = compile_kwargs.get("cluster_config")
-        if cluster_config is not None:
-            _check_supported_orchestration_level(_ir.Level.CLUSTER_0)
         if self._func_type == "pod" and cluster_config is None:
             raise ValueError("POD entry requires ClusterConfig in cluster_config")
 
@@ -1972,8 +1963,8 @@ class _SubFunctionDecorator:
     there; ``incore``/``opaque`` outline into separate kernels and reject it.
 
     See `_JITDecorator` for the kind semantics:
-      - ``pod``     → CLUSTER_0 Orchestrator frontend entry; full compilation
-        waits for cluster codegen and runner integration.
+      - ``pod``     → CLUSTER_0 Orchestrator for direct MPI execution.
+        Compilation requires ``cluster_config``.
       - ``host``    → HOST Orchestrator entry (specialized to
         ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)``).
       - ``incore``  → ``FunctionType.InCore`` (separate IR function, ``level`` selectable).
@@ -2143,7 +2134,7 @@ class _JITDecorator:
 
         @pl.jit                               # entry-point (Orchestration)
         @pl.jit.host                          # entry-point (HOST Orchestrator)
-        @pl.jit.pod                           # frontend entry (CLUSTER_0 Orchestrator)
+        @pl.jit.pod                           # CLUSTER_0 Orchestrator
         @pl.jit.incore                        # InCore sub-function
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
