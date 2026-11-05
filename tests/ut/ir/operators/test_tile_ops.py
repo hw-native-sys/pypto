@@ -9860,7 +9860,8 @@ def test_tile_cast_accepts_integer_destination_code():
 # (PTO_IR_manual.md, the `f4E2M1x2 -> f8E4M3FN` paragraph).
 # ---------------------------------------------------------------------------
 
-_NZ_LAYOUT = {"blayout": ir.TileLayout.col_major, "slayout": ir.TileLayout.row_major}
+_NZ_BLAYOUT = ir.TileLayout.col_major
+_NZ_SLAYOUT = ir.TileLayout.row_major
 
 
 def _packed_fp4_source(rows=16, packed_cols=32):
@@ -9900,8 +9901,11 @@ def test_tile_cast_omitted_layout_stays_absent_and_inherits_source():
     # one for this shape collapses to the canonical sparse form -- while the
     # result's view is non-None only because a packed FP4 cast records the
     # doubled-column stride, which is pre-existing and unrelated to layout.
+    assert isinstance(source.type, ir.TileType)
+    assert isinstance(call.type, ir.TileType)
     assert source.type.tile_view is None
     result_view = call.type.tile_view
+    assert result_view is not None
     assert result_view.blayout == ir.TileLayout.row_major
     assert result_view.slayout == ir.TileLayout.none_box
     assert result_view.fractal == 512
@@ -9910,16 +9914,18 @@ def test_tile_cast_omitted_layout_stays_absent_and_inherits_source():
 def test_tile_cast_nz_request_boxes_the_result():
     """An NZ request lands on the result view, and the packed columns still double."""
     source, span = _packed_fp4_source(rows=16, packed_cols=32)
-    call = tile.cast(source, DataType.FP8E4M3FN, span=span, **_NZ_LAYOUT)
+    call = tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
 
     assert sorted(dict(call.kwargs)) == ["blayout", "mode", "slayout", "target_type"]
+    assert isinstance(call.type, ir.TileType)
     view = call.type.tile_view
+    assert view is not None
     assert view.blayout == ir.TileLayout.col_major
     assert view.slayout == ir.TileLayout.row_major
     # fractal is inherited, not a kwarg: an ND source carries the TileView
     # default, which is the one value the native NZ destination accepts.
     assert view.fractal == 512
-    assert [dim.value for dim in call.type.shape] == [16, 64]
+    assert [cast(ir.ConstInt, dim).value for dim in call.type.shape] == [16, 64]
 
 
 def test_tile_cast_layout_request_equal_to_the_source_is_a_no_op():
@@ -9932,7 +9938,9 @@ def test_tile_cast_layout_request_equal_to_the_source_is_a_no_op():
         blayout=ir.TileLayout.row_major,
         slayout=ir.TileLayout.none_box,
     )
+    assert isinstance(call.type, ir.TileType)
     view = call.type.tile_view
+    assert view is not None
     assert view.blayout == ir.TileLayout.row_major
     assert view.slayout == ir.TileLayout.none_box
 
@@ -9966,14 +9974,14 @@ def test_tile_cast_nz_rejects_rows_that_are_not_whole_boxes():
     """
     source, span = _packed_fp4_source(rows=8)
     with pytest.raises(ValueError, match=r"physical rows \(8\) must be a multiple of 16"):
-        tile.cast(source, DataType.FP8E4M3FN, span=span, **_NZ_LAYOUT)
+        tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
 
 
 def test_tile_cast_nz_rejects_columns_that_are_not_whole_boxes():
     """One FP8 NZ box is 16x32, so the 32-column granularity is on columns too."""
     source, span = _packed_fp4_source(rows=16, packed_cols=8)
     with pytest.raises(ValueError, match=r"physical columns \(16\) must be a multiple of 32"):
-        tile.cast(source, DataType.FP8E4M3FN, span=span, **_NZ_LAYOUT)
+        tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
 
 
 def test_tile_cast_nz_rejects_a_non_nd_source():
@@ -9989,7 +9997,7 @@ def test_tile_cast_nz_rejects_a_non_nd_source():
     # the narrower packed-FP4 DN endpoint check, which would mask this rule.
     source = ir.Var("source", ir.TileType([16, 32], DataType.FP32, tile_view=dn_view), span)
     with pytest.raises(ValueError, match="requires an ND source"):
-        tile.cast(source, DataType.FP16, span=span, **_NZ_LAYOUT)
+        tile.cast(source, DataType.FP16, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
 
 
 def test_tile_cast_nz_rejects_a_dynamic_shape():
@@ -9999,7 +10007,7 @@ def test_tile_cast_nz_rejects_a_dynamic_shape():
     nd_view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box)
     source = ir.Var("source", ir.TileType([rows, cols], DataType.FP4E2M1X2, tile_view=nd_view), span)
     with pytest.raises(ValueError, match="static positive 2D shape"):
-        tile.cast(source, DataType.FP8E4M3FN, span=span, **_NZ_LAYOUT)
+        tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
 
 
 def test_tensor_cast_rejects_the_tile_layout_kwargs():
@@ -10013,7 +10021,8 @@ def test_tensor_cast_rejects_the_tile_layout_kwargs():
     span = ir.Span.unknown()
     source = ir.Var("source", ir.TensorType([16, 32], DataType.FP4E2M1X2), span)
     for key in ("blayout", "slayout"):
-        kwargs = {"target_type": DataType.FP8E4M3FN, "mode": 2, key: ir.TileLayout.col_major}
+        kwargs: dict[str, Any] = {"target_type": DataType.FP8E4M3FN, "mode": 2}
+        kwargs[key] = ir.TileLayout.col_major
         with pytest.raises(ValueError, match=f"Unknown kwarg '{key}' for operator 'tensor.cast'"):
             ir.create_op_call("tensor.cast", [source], kwargs, span)
 

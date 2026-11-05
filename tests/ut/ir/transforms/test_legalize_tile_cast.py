@@ -1220,6 +1220,7 @@ def test_an_incidentally_boxed_cast_is_not_caught_by_the_nz_gate():
     result = call.type
     assert isinstance(result, ir.TileType)
     # Inherited, not requested: the gate must ignore it.
+    assert result.tile_view is not None
     assert result.tile_view.slayout == ir.TileLayout.row_major
 
 

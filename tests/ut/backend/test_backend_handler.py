@@ -375,14 +375,15 @@ def test_direct_cast_accepts_transport_box_with_narrowed_consumer(target, dynami
 # confirmed against the pinned assembler.
 # ---------------------------------------------------------------------------
 
-_NZ_VIEW_KWARGS = {
-    "blayout": _ir_core.TileLayout.col_major,
-    "slayout": _ir_core.TileLayout.row_major,
-}
+# Named separately rather than held in a dict: unpacking a dict of TileLayout
+# with ** makes a type checker test the value type against every parameter,
+# since it cannot know which keys are present.
+_NZ_BLAYOUT = _ir_core.TileLayout.col_major
+_NZ_SLAYOUT = _ir_core.TileLayout.row_major
 
 
 def _nz_view():
-    return _ir_core.TileView(**_NZ_VIEW_KWARGS)
+    return _ir_core.TileView(blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
 
 
 def _nz_cast_query(
@@ -395,7 +396,12 @@ def _nz_cast_query(
         list(result_shape), target_dtype, None, _nz_view(), _ir_core.MemorySpace.Vec
     )
     source = _ir_core.Var("source", source_type, span)
-    kwargs = {"target_type": target_dtype, "mode": 2, **_NZ_VIEW_KWARGS}
+    kwargs = {
+        "target_type": target_dtype,
+        "mode": 2,
+        "blayout": _NZ_BLAYOUT,
+        "slayout": _NZ_SLAYOUT,
+    }
     return _ir_core.Call(_ir_core.get_op("tile.cast"), [source], kwargs, result_type, span)
 
 
@@ -450,7 +456,12 @@ def test_a5_nz_destination_rejects_a_boxed_source():
     call = _ir_core.Call(
         _ir_core.get_op("tile.cast"),
         [_ir_core.Var("source", source_type, span)],
-        {"target_type": pl.FP8E4M3FN, "mode": 2, **_NZ_VIEW_KWARGS},
+        {
+            "target_type": pl.FP8E4M3FN,
+            "mode": 2,
+            "blayout": _NZ_BLAYOUT,
+            "slayout": _NZ_SLAYOUT,
+        },
         result_type,
         span,
     )
