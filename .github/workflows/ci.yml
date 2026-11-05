@@ -123,40 +123,33 @@ jobs:
             exit 0
           }
 
-          # `changed_files` is the PR's own count, used below to detect a
-          # truncated file list. Read before the list so a failure here fails
-          # open too.
-          if ! expected="$(gh api "repos/$REPO/pulls/$PR_NUMBER" \
-                             --jq '.changed_files')"; then
-            fail_open 'PR metadata request failed'
+          # Classify the immutable revisions selected by prepare. The mutable
+          # pulls/{number}/files endpoint can describe another head after a push.
+          if [[ ! "$PR_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ ! "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            fail_open 'missing or invalid pinned comparison revisions'
+          fi
+          if ! comparison="$(gh api "repos/$REPO/compare/$PR_BASE_SHA...$PR_HEAD_SHA?per_page=1")"; then
+            fail_open 'pinned comparison request failed'
+          fi
+          if ! expected="$(jq -er '.files | if type == "array" then length else error("missing files") end' \
+                               <<< "$comparison")"; then
+            fail_open 'pinned comparison did not return a file list'
           fi
 
-          # The PR files API instead of a `git diff`: it needs no checkout at all
-          # (let alone the fetch-depth: 0 clone a base..head diff would need) and
-          # already reports the merge-base diff GitHub shows in the PR.
-          #
-          # One TSV row per file, carrying BOTH names: a rename reports its
-          # destination in `filename` and its source in `previous_filename`, and
-          # classifying only the destination would read `src/foo.cpp` renamed to
-          # `docs/foo.md` as documentation while the build-relevant source path
-          # disappeared.
-          if ! files="$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
-                          --jq '.[] | [.filename, (.previous_filename // "")] | @tsv')"; then
-            fail_open 'PR files request failed'
+          # Compare returns files only on page one, capped at 300 even when the
+          # commits are paginated. At the cap we cannot prove completeness, so
+          # enable all checks rather than trusting a possibly truncated list.
+          if [ "$expected" -eq 0 ] || [ "$expected" -ge 300 ]; then
+            fail_open 'pinned comparison file list is empty or potentially truncated'
           fi
 
-          # Empty list -> nothing to classify.
-          if [ -z "$files" ]; then
-            fail_open 'no changed files reported'
-          fi
-
-          # The endpoint caps out at 3000 files, and a truncated list is still
-          # non-empty: every entry returned could be documentation while the code
-          # change sits past the cap. Trust the list only when it accounts for
-          # every file the PR reports.
-          retrieved="$(printf '%s\n' "$files" | wc -l)"
-          if [ "$retrieved" -ne "$expected" ]; then
-            fail_open "file list truncated ($retrieved of $expected files)"
+          # Keep BOTH names: renaming src/foo.cpp to docs/foo.md still removes
+          # a build-relevant path. TSV escaping keeps unusual filenames on one
+          # row without interpreting repository-controlled text as shell code.
+          if ! files="$(jq -er '.files[] | [.filename, (.previous_filename // "")] | @tsv' \
+                            <<< "$comparison")"; then
+            fail_open 'pinned comparison files could not be decoded'
           fi
 
           # Allowlist. Every entry must be incapable of affecting a build or a

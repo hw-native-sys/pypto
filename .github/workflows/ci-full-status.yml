@@ -12,35 +12,35 @@ jobs:
   route:
     if: >-
       github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main' &&
       startsWith(github.event.workflow_run.display_title, 'CI full PR #')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       key: ${{ steps.route.outputs.key }}
+    permissions:
+      contents: read
     steps:
-      - name: Group all bases and attempts for the same PR head
+      - name: Checkout trusted status router
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Validate origin before joining the status writer queue
         id: route
-        env:
-          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          match = re.fullmatch(r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})", os.environ["RUN_TITLE"])
-          if not match:
-              raise SystemExit("Invalid full CI run title")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"key={match[1]}-{match[2]}\n")
-          PY
+        run: python .github/scripts/ci_control.py route
 
   publish:
     needs: route
+    if: needs.route.outputs.key != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
-      # All attempts and requests for this PR/head share one writer. The helper
-      # re-reads current state and ignores older requests and obsolete heads.
+      # Commands and publishers share one writer; queued events cannot replace
+      # a pending completion writer. State is re-read after acquiring the slot.
       group: ci-full-status-${{ needs.route.outputs.key }}
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read

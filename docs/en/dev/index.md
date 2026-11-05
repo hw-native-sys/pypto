@@ -69,6 +69,17 @@ verifies both GitHub's current test-merge SHA and its parents before any tests s
 A conflicting PR, or one whose merge is still being computed, must be resolved
 or retried. The command's Actions summary records acceptance or rejection.
 An identical request already queued/running is not dispatched again.
+After authorization and revision checks, the command writes `ci/full=pending`
+before dispatching, clearing any previous success while the publisher is queued.
+A read-only admission job authorizes the comment and pins the head before joining
+the publisher's PR/head queue. Inside that queue, the command checks permission
+and the head again, writes pending, dispatches, and binds the pending status to
+the returned run ID. A moved head is rejected rather than written under the wrong lock.
+If the initial status write fails, no run is dispatched. If dispatch or run-ID
+binding fails, the unbound pending marker is retained and older publishers cannot
+clear it. Retry `/ci full`; if a run was accepted despite a lost response, wait for
+that run to finish before retrying. Publishers preserve the bound newer run even
+when run-history searches have not yet indexed it.
 
 Full includes lint, wheel warm-up, unit, example, codegen, system, distributed,
 pypto-lib and A5/simulator tests. Core tests execute even for documentation-only
@@ -78,11 +89,18 @@ jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
 
-`ci/full` is a commit status on the PR head, published by `CI Full Status`.
+`ci/full` is a commit status on the PR head, initialized by `CI Command` and
+updated by `CI Full Status`.
 It stays pending while full runs and succeeds only after the `full-result`
 job confirms all applicable tests passed. Skipped, missing, failed or cancelled
 required tests cannot satisfy it. The publisher runs on a fresh GitHub-hosted
 runner, reads GitHub metadata, and never executes PR code or downloads artifacts.
+Before joining the status writer concurrency group, the router validates the
+event's main branch, workflow identity, repository and full-run title. Unrelated
+runs cannot displace a pending publisher. Commands and publishers use the same
+`queue: max` concurrency group, so older events cannot replace an already queued
+completion writer. GitHub permits 100 waiting jobs per group; excess arrivals are
+cancelled, and a cancelled command or completion publisher must be retried.
 Test jobs do not hold status-write or Actions-write tokens. The entire `CI`
 workflow declares `cache-mode: read`: GitHub's cache service prevents cache
 writes, including direct API calls from PR code. Hosted wheel sharing uses
@@ -94,13 +112,35 @@ retain their existing policies.
 Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
 revision is preserved; the finalizer combines successful dependencies from the
 previous attempt with rerun results. If only the finalizer is missing, rerun that
-job too. The status publisher handles rerun events and ignores older requests
-and results for obsolete PR heads. A rerun of an old request cannot cancel a
+job too. The status publisher handles rerun events and ignores superseded requests.
+If publication finds that the PR has moved to another head, closed, or changed
+its target, it invalidates the original tested head unless a verified newer request owns its
+status. Resetting or reopening the PR cannot revive an old green rerun result.
+Only dispatches from `main` can block a
+duplicate request or supersede an earlier one; feature-ref dispatches are ignored.
+Duplicate detection scans all statuses together from the PR creation time, splitting
+creation-time ranges at GitHub’s search limit. Moving between unfinished statuses
+cannot hide an existing request from that scan.
+A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances
 before result publication, the old-base result fails and requires `/ci full`
 again. This check is made at publication time; an already published success
 is not automatically invalidated by a later main push. Requiring an up-to-date
 branch at merge time is a separate ruleset policy, unchanged by this PR.
+Changed-path classification compares the pinned base and head SHAs, so later
+PR pushes cannot change which conditional tests run. If the comparison fails
+or reaches GitHub’s 300-file limit, all conditional checks are enabled.
+
+If the live-run lookup fails, the publisher validates the GitHub event’s workflow,
+repository, branch, and run identity before invalidating the gate. Event data
+can never grant success; a verified newer published request or later attempt of
+the same run is still preserved. Later attempts are verified through their exact
+attempt metadata, not trusted solely from the status URL.
+If a run-history lookup hits GitHub's search limit, or workflow/PR/job metadata cannot
+be read, the publisher preserves a verifiably newer published request or attempt; otherwise
+it marks `ci/full` failed. An old
+green result must not survive an unverifiable rerun. Post `/ci full` again to
+create a recent request with a small history window.
 The external `pr-rerun` service remains unchanged: it can still rerun eligible
 ordinary PR CI, but does not discover/authorize these dispatched full runs.
 

@@ -9,19 +9,45 @@ on:
 permissions: {}
 
 jobs:
-  dispatch:
+  route:
     if: >-
       github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/ci full')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      key: ${{ steps.route.outputs.key }}
+      head: ${{ steps.route.outputs.head }}
+    steps:
+      - name: Checkout trusted command router
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Authorize before joining the status writer queue
+        id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/ci_control.py command-route
+
+  dispatch:
+    needs: route
+    if: needs.route.outputs.key != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     concurrency:
-      group: ci-command-${{ github.event.issue.number }}
+      group: ci-full-status-${{ needs.route.outputs.key }}
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
       pull-requests: read
       actions: write
+      statuses: write
     steps:
       - name: Checkout trusted command handler
         uses: actions/checkout@v4
@@ -31,5 +57,6 @@ jobs:
           persist-credentials: false
       - name: Authorize and dispatch full CI
         env:
+          CI_ROUTED_HEAD: ${{ needs.route.outputs.head }}
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/ci_control.py dispatch
