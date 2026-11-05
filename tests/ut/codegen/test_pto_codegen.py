@@ -1542,9 +1542,9 @@ def test_signed_floor_div_uses_floor_semantics(dtype):
     assert "arith.remsi" in mlir
 
 
-@pytest.mark.parametrize("dtype, opcode", [(DataType.FP32, "arith.divf"), (DataType.UINT32, "arith.divsi")])
+@pytest.mark.parametrize("dtype, opcode", [(DataType.FP32, "arith.divf"), (DataType.UINT32, "arith.divui")])
 def test_floor_div_preserves_float_and_unsigned_paths(dtype, opcode):
-    """Signed floor rounding must not alter the existing float and unsigned paths."""
+    """Float division and unsigned floor division retain their respective semantics."""
     span = ir.Span.unknown()
     ib = IRBuilder()
     with ib.function("scalar_division", type=ir.FunctionType.InCore) as f:
@@ -1555,6 +1555,10 @@ def test_floor_div_preserves_float_and_unsigned_paths(dtype, opcode):
     mlir = _generate_mlir(ir.Program([f.get_result()], "ScalarDivision", span))
     assert opcode in mlir
     assert "arith.floordivsi" not in mlir
+    if dtype == DataType.UINT32:
+        assert re.search(r"arith.divui .* : i32", mlir)
+        assert "ui32 to i32" in mlir
+        assert "arith.divsi" not in mlir
 
 
 @pytest.mark.parametrize(
