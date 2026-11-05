@@ -879,10 +879,6 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // Generate entry and GenerateFunction
 // ========================================================================
 
-void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& op) {
-  CHECK_SPAN(false, op->span_) << "SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet";
-}
-
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   separate_vf_ = false;
   return GenerateImpl(program, emit_tile_addr, emit_source_loc);
@@ -897,10 +893,16 @@ PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit
 
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   vf_helpers_.clear();
+  simt_functions_.clear();
+  simt_effects_.clear();
+  simt_artifacts_.clear();
+  used_simt_functions_.clear();
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   inside_reg_scope_ = false;
-  single_vf_function_ = program->functions_.size() == 1;
+  single_vf_function_ =
+      std::count_if(program->functions_.begin(), program->functions_.end(),
+                    [](const auto& entry) { return ir::IsInCoreType(entry.second->func_type_); }) == 1;
   VerifyVFInfrastructureCodegenPreconditions(program);
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
@@ -915,20 +917,20 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   needs_deferred_completion_adapter_ = false;
   reported_precision_sites_.clear();
   for (const auto& [_, function] : program->functions_) {
-    CHECK_SPAN(function->func_type_ != ir::FunctionType::SIMT, function->span_)
-        << "SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet";
+    if (function->func_type_ == ir::FunctionType::SIMT) simt_functions_.emplace(function->name_, function);
   }
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
   // Select the compiler from structured IR, before serializing it. EmitC cannot
   // legalize vecscope; PTOAS honors this attribute without a global CLI override.
-  class RegScopeDetector : public ir::IRVisitor {
+  class NativeHelperDetector : public ir::IRVisitor {
    public:
     bool found = false;
 
    protected:
     void VisitStmt_(const ir::RegScopeStmtPtr&) override { found = true; }
+    void VisitStmt_(const ir::SimtLaunchStmtPtr&) override { found = true; }
   } detector;
   detector.VisitProgram(program);
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"";
@@ -936,10 +938,14 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   stream_ << "} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
+    if (func->func_type_ == ir::FunctionType::SIMT) continue;
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
+  }
+  if (!separate_vf_) {
+    for (const auto& name : used_simt_functions_) stream_ << GenerateSimtFunction(simt_functions_.at(name));
   }
 
   if (needs_deferred_completion_adapter_) {
@@ -2976,6 +2982,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitExpr_(const CallPtr& op) {
+  if (TryEmitSimtCall(op)) return;
   if (TryEmitRegCall(op, nullptr)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(op)) return;
   const std::string& op_name = op->op_->name_;

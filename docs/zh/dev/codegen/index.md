@@ -11,6 +11,8 @@
 | [编排代码生成](01-orchestration_codegen.md) | 生成向运行时提交任务的主机侧 C++ |
 | [PTO 内核包装器生成](02-kernel_wrapper.md) | 将 ptoas 生成的内核连接到运行时派发 |
 | [EmitC 与 VPTO VF 执行接入](03-vpto-vf-integration.md) | 独立 VF helper、同步契约与 A5 常驻执行 |
+| [原生 SIMT runtime 验证](04-simt-native-validation.md) | P0 GM-copy ABI、链接设备产物与 A5 常驻执行验收 |
+| [SIMT lowering 与执行](05-simt-lowering.md) | P3 显式 IR、GM/UB 寻址、同步及 A5 验收 |
 
 ## 另请参阅
 

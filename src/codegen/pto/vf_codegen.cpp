@@ -307,6 +307,13 @@ void PTOCodegen::EmitVFAdapter(const VFHelper& helper) {
     const auto caller = helper.parameter_indices[i];
     INTERNAL_CHECK(caller < caller_count) << "Invalid VF adapter argument mapping";
     if (helper.caller_parameter_types[caller] != helper.parameter_types[i]) {
+      if (helper.caller_parameter_types[caller].rfind("!pto.ptr<", 0) == 0) {
+        // The EmitC caller's default GM space and the native SIMT ABI's
+        // explicit GM space denote the same address, including its view origin.
+        stream_ << "    %ptr" << caller << " = pto.castptr %arg" << caller << " : "
+                << helper.caller_parameter_types[caller] << " -> " << helper.parameter_types[i] << "\n";
+        continue;
+      }
       // Tile storage spells signed integers as signless iN. Extract that
       // storage pointer first, then bridge the explicitly signed VMI ABI.
       const auto& parameter_type = helper.parameter_types[i];

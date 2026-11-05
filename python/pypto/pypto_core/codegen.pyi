@@ -12,8 +12,10 @@
 from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
 
 class VFHelper:
-    """No-Bridge VF helper and Tile adapter with ordered, whole-Tile effects."""
+    """No-Bridge VF/SIMT helper and adapter with ordered storage effects."""
 
+    @property
+    def kind(self) -> str: ...
     @property
     def symbol(self) -> str: ...
     @property

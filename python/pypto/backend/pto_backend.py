@@ -1356,6 +1356,10 @@ class _CallCollector(_ir_core.IRVisitor):
             self.callee_names.append(op.op.name)
         super().visit_call(op)
 
+    def visit_simt_launch_stmt(self, op: _ir_core.SimtLaunchStmt) -> None:
+        self.callee_names.append(op.callee.name)
+        super().visit_simt_launch_stmt(op)
+
     def visit_expr(self, expr: _ir_core.Expr) -> None:
         # ``Submit`` has no dedicated Python visitor hook, so collect its callee
         # here on the generic expr dispatch before delegating. ``super()`` routes
@@ -1750,9 +1754,12 @@ def _emit_unit(
                     "core_type": "aiv",
                     "bridge": False,
                     "synchronization": "ptoas-insert-sync",
-                    "effect_scope": "whole-tile",
+                    "effect_scope": "whole-storage"
+                    if any(h.kind == "simt" for h in unit.helpers)
+                    else "whole-tile",
                     "helpers": [
                         {
+                            "kind": h.kind,
                             "symbol": h.symbol,
                             "adapter_symbol": h.adapter_symbol,
                             "parameter_types": h.parameter_types,
@@ -1775,7 +1782,7 @@ def _emit_unit(
         if unit.helpers and not skip_ptoas:
             ptoas_bin = _find_ptoas_binary()
             if ptoas_bin is None:
-                raise RuntimeError("VF Tile adapter compilation requires PTOAS; set PTOAS_ROOT.")
+                raise RuntimeError("VF/SIMT adapter compilation requires PTOAS; set PTOAS_ROOT.")
             _check_ptoas_version(ptoas_bin)
         if unit.is_group:
             _emit_group_output(
@@ -1938,8 +1945,6 @@ def generate(
     Returns:
         Dict mapping relative file paths to their content.
     """
-    if any(f.func_type == _ir_core.FunctionType.SIMT for f in transformed_program.functions.values()):
-        raise NotImplementedError("SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet")
     if memory_planner is None:
         memory_planner = _passes.MemoryPlanner.PYPTO
     if emit_source_loc is None:
@@ -2214,6 +2219,7 @@ def _collect_chip_task_functions(
         _ir_core.FunctionType.Group,
         _ir_core.FunctionType.Spmd,
         _ir_core.FunctionType.Graph,
+        _ir_core.FunctionType.SIMT,
     )
 
     result: list[_ir_core.Function] = [orch_func]
@@ -2295,10 +2301,35 @@ def _generate_pto_bundle(
     )
     if bundle.helpers:
         if is_group:
-            raise ValueError("VF execution does not yet support grouped functions")
-        if memory_planner != _passes.MemoryPlanner.PYPTO:
+            raise ValueError("VF/SIMT execution does not yet support grouped functions")
+        if any(h.kind == "vf" for h in bundle.helpers) and memory_planner != _passes.MemoryPlanner.PYPTO:
             raise ValueError("VF execution requires the PyPTO Tile memory planner")
     return bundle.caller_source, tuple(bundle.helpers)
+
+
+def _with_simt_helpers(
+    entries: list[_ir_core.Function], program: _ir_core.Program
+) -> list[_ir_core.Function]:
+    """Keep reachable device helpers in a unit without registering runtime tasks.
+
+    One body walk per entry/helper and a visited set give stable deduplication;
+    unused original helpers left behind by specialization need not be emitted.
+    """
+    functions = list(entries)
+    visited = {function.name for function in entries}
+    index = 0
+    while index < len(functions):
+        collector = _CallCollector()
+        collector.visit_stmt(functions[index].body)
+        index += 1
+        for name in collector.callee_names:
+            if name in visited:
+                continue
+            callee = program.get_function(name)
+            if callee is not None and callee.func_type == _ir_core.FunctionType.SIMT:
+                visited.add(name)
+                functions.append(callee)
+    return functions
 
 
 def _generate_single_chip(
@@ -2385,7 +2416,9 @@ def _generate_single_chip(
                         f"(DSL members: {dsl}). A group must be all-external or all-DSL."
                     )
                 continue
-            grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
+            grouped_program = _ir_core.Program(
+                _with_simt_helpers(members, transformed_program), group_name, transformed_program.span
+            )
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code, _ = _generate_pto_bundle(
@@ -2416,7 +2449,11 @@ def _generate_single_chip(
                 peer_func = transformed_program.get_function(name)
                 if peer_func is not None:
                     peer_funcs.append(peer_func)
-            single_program = _ir_core.Program([*peer_funcs, func], func.name, transformed_program.span)
+            single_program = _ir_core.Program(
+                _with_simt_helpers([*peer_funcs, func], transformed_program),
+                func.name,
+                transformed_program.span,
+            )
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code, helpers = _generate_pto_bundle(

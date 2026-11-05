@@ -119,7 +119,9 @@ product of all three dimensions, and derives these limits:
 Users do not provide `simt_max_threads` or `simt_max_regs`. Other backends report
 SIMT resource inference as unsupported.
 
-Canonical IR, validation, storage preparation, memory-planner integration, and
-resource specialization are implemented. PTOAS lowering and device execution
-remain separate stages. PTO codegen still rejects SIMT explicitly; successful
-pipeline verification does not establish executable kernel support.
+Canonical IR, validation, storage preparation, memory-planner integration,
+resource specialization and the A5 executable subset are implemented.
+[SIMT lowering and execution](../codegen/05-simt-lowering.md) describes its ABI,
+synchronization, supported types and acceptance tests. The independent
+[native SIMT probe](../codegen/04-simt-native-validation.md) retains the earlier
+P0 ABI fixture. Higher-level authoring and outlining remain separate work.
