@@ -1039,11 +1039,15 @@ def test_late_cast_bridge_preserves_placement_final_type_and_attrs(placed):
     collector = Collector()
     collector.visit_program(after)
     assert len(collector.assignments) == 3
+    # A bridge hop lands in Vec either way: the pass copies a resolved placement
+    # onto it, and ``tile.cast``'s registered output memory supplies Vec when the
+    # final result is still unplaced (early legalization).
+    bridge_memory = memory or ir.MemorySpace.Vec
     for assignment in collector.assignments[:-1]:
         assert isinstance(assignment.var.type, ir.TileType)
         assert isinstance(assignment.value.type, ir.TileType)
-        assert assignment.var.type.memory_space == memory
-        assert assignment.value.type.memory_space == memory
+        assert assignment.var.type.memory_space == bridge_memory
+        assert assignment.value.type.memory_space == bridge_memory
         assert assignment.var.type.memref is None and assignment.value.type.memref is None
         assert "test_metadata" not in assignment.value.attrs
         assert "arg_directions" not in assignment.value.attrs

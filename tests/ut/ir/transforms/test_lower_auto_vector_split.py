@@ -201,12 +201,72 @@ def test_c2v_boundary_becomes_aiv_shard_and_vector_region_is_halved():
     assert _split_region_count(expanded) == 0
 
 
+def _dense_pitch_expected(split_mode, rows, cols, layout, storage_layout, row_stride, col_stride):
+    """Expected program for the lowered shard, one per split mode.
+
+    Two things force a body per mode rather than one parametrized body: the
+    outlined ``split=`` form only accepts an integer LITERAL (that is all the
+    printer ever emits), and the store offset is localized on the split axis,
+    which differs between the two modes.
+    """
+    if split_mode == pl.SplitMode.UP_DOWN:
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": split_mode, "split_aiv": True})
+            def kernel(
+                cube_seed: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx = pl.tile.get_subblock_idx()
+                popped = pl.tile.aiv_shard(cube_seed, split=1)
+                value: pl.Tile[
+                    [rows, cols],
+                    pl.FP32,
+                    pl.Mem.Vec,
+                    pl.TileView(
+                        valid_shape=[rows, cols],
+                        stride=[row_stride, col_stride],
+                        blayout=layout,
+                        slayout=storage_layout,
+                    ),
+                ] = pl.tile.add(popped, popped)
+                out_store = pl.tile.store(value, [0 + subblock_idx * rows, 0], out_0)
+                return out_store
+
+        return Expected
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": split_mode, "split_aiv": True})
+        def kernel(
+            cube_seed: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped = pl.tile.aiv_shard(cube_seed, split=2)
+            value: pl.Tile[
+                [rows, cols],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(
+                    valid_shape=[rows, cols],
+                    stride=[row_stride, col_stride],
+                    blayout=layout,
+                    slayout=storage_layout,
+                ),
+            ] = pl.tile.add(popped, popped)
+            out_store = pl.tile.store(value, [0, 0 + subblock_idx * cols], out_0)
+            return out_store
+
+    return Expected
+
+
 @pytest.mark.parametrize("split_mode", [pl.SplitMode.UP_DOWN, pl.SplitMode.LEFT_RIGHT])
 @pytest.mark.parametrize("layout", [pl.TileLayout.row_major, pl.TileLayout.col_major])
 @pytest.mark.parametrize("stride_kind", ["dense", "padded", "boxed"])
 def test_auto_split_updates_only_contiguous_unboxed_strides(split_mode, layout, stride_kind):
     """An allocated tile's dense pitch follows its new box, preserving other layouts."""
-    split_code = int(split_mode.value)
     rows, cols = (8, 128) if split_mode == pl.SplitMode.UP_DOWN else (16, 64)
     column_major = layout == pl.TileLayout.col_major
     old_row_stride, old_col_stride = (1, 16) if column_major else (128, 1)
@@ -220,12 +280,19 @@ def test_auto_split_updates_only_contiguous_unboxed_strides(split_mode, layout, 
         new_row_stride, new_col_stride = (1, rows) if column_major else (cols, 1)
     storage_layout = pl.TileLayout.row_major if stride_kind == "boxed" else pl.TileLayout.none_box
 
+    # The store keeps a statement OUTSIDE the lowered split region: a function
+    # body that is nothing but the region prints as a bare ``pl.split_aiv`` loop
+    # and reparses without the one-element ``SeqStmts`` wrapper, which the
+    # roundtrip instrument reports as a mismatch.
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore, attrs={"split": split_mode})
-        def kernel(cube_seed: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat]):
-            _popped = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)
-            _value: pl.Tile[
+        def kernel(
+            cube_seed: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            popped = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)
+            value: pl.Tile[
                 [16, 128],
                 pl.FP32,
                 pl.Mem.Vec,
@@ -235,27 +302,14 @@ def test_auto_split_updates_only_contiguous_unboxed_strides(split_mode, layout, 
                     blayout=layout,
                     slayout=storage_layout,
                 ),
-            ] = pl.tile.add(_popped, _popped)
+            ] = pl.tile.add(popped, popped)
+            out_store = pl.tile.store(value, [0, 0], out_0)
+            return out_store
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": split_mode, "split_aiv": True})
-        def kernel(cube_seed: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat]):
-            _subblock_idx = pl.tile.get_subblock_idx()
-            _popped = pl.tile.aiv_shard(cube_seed, split=split_code)
-            _value: pl.Tile[
-                [rows, cols],
-                pl.FP32,
-                pl.Mem.Vec,
-                pl.TileView(
-                    valid_shape=[rows, cols],
-                    stride=[new_row_stride, new_col_stride],
-                    blayout=layout,
-                    slayout=storage_layout,
-                ),
-            ] = pl.tile.add(_popped, _popped)
-
-    ir.assert_structural_equal(_lower(Before), Expected)
+    expected = _dense_pitch_expected(
+        split_mode, rows, cols, layout, storage_layout, new_row_stride, new_col_stride
+    )
+    ir.assert_structural_equal(_lower(Before), expected)
 
 
 def test_auto_c2v_boundary_localizes_a_ragged_split_axis():

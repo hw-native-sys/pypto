@@ -777,12 +777,14 @@ def test_type_check_cast_proves_equivalent_symbolic_packed_shapes(surface):
     packed_cols = n + _idx(1)
     # Inference and later simplification may spell the same extent differently.
     unpacked_cols = n * _idx(2) + _idx(2)
+    # The shape bindings accept all-int or all-Expr lists, so the static row
+    # extent must be spelled as a ConstInt beside the symbolic column extent.
     if surface == "tile":
-        source_type = ir.TileType([16, packed_cols], DataType.FP4E2M1X2)
-        result_type = ir.TileType([16, unpacked_cols], DataType.FP8E4M3FN)
+        source_type = ir.TileType([_idx(16), packed_cols], DataType.FP4E2M1X2)
+        result_type = ir.TileType([_idx(16), unpacked_cols], DataType.FP8E4M3FN)
     else:
-        source_type = ir.TensorType([16, packed_cols], DataType.FP4E2M1X2)
-        result_type = ir.TensorType([16, unpacked_cols], DataType.FP8E4M3FN)
+        source_type = ir.TensorType([_idx(16), packed_cols], DataType.FP4E2M1X2)
+        result_type = ir.TensorType([_idx(16), unpacked_cols], DataType.FP8E4M3FN)
     source = ir.Var("source", source_type, span)
     call = ir.Call(
         ir.get_op(f"{surface}.cast"),
