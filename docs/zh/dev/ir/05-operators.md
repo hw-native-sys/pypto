@@ -239,6 +239,44 @@ REGISTER_OP("tensor.matmul")
 M/N/K 装箱严格兼容，同时允许累加器的有效 M/N 矩形以及 rhs 的有效 K 包含 PTO 根据
 lhs M/K 与 rhs N 实际计算的较小矩形。
 
+#### Cube 操作数类型配对（operand dtype pairs）
+
+Cube 能相乘的元素类型是一张硬件表，而不是“两边必须相同”的对称规则：
+`backend::kCubeOperandPairs`（`include/pypto/backend/common/cube_operand_types.h`）
+即 PyPTO 对 PTOAS `verifyMatmulTypeTriple` 与 pto-isa `npu/a5/TMatmul.hpp` 的复刻。
+
+| lhs x rhs | 累加器 | A2/A3 | A5 | 算子族 |
+| --------- | ------ | ----- | -- | ------ |
+| INT8 x INT8 | INT32 | 支持 | 支持 | matmul、gemv |
+| FP16 x FP16 | FP32 | 支持 | 支持 | matmul、gemv |
+| BF16 x BF16 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP32 x FP32 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul |
+| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul |
+| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul |
+| HF8 x HF8 | FP32 | 不支持 | 支持 | matmul |
+
+因此在 Ascend950 上，`tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、
+`tile.batch_matmul*`、`tensor.matmul` 与 `tensor.matmul_acc` 接受**两种顺序的
+FP8 混合操作数**；累加器、`matmul_acc` 的输入以及 `matmul_bias` 的 bias 仍为 FP32。
+`tf32_mode` 仍只支持 FP32，因此 FP8 操作数对会拒绝该参数。
+
+该契约分两层实现，因为合法集合取决于编译目标，而类型推导看不到目标：类型推导
+（`ValidateMatmulOperandDataTypes`，`src/ir/op/type_inference.cpp`）接受表中的配对
+**或**两边 dtype 相同的配对——后者保留历史上“lhs 与 rhs 相同”的契约，使那些
+PTOAS 本来就会拒绝的类型仍像以前一样下达到后端；随后矩阵乘代码生成
+（`CheckMatmulOperandArch`，`src/backend/common/pto_ops_elementwise.cpp`）在 PTOAS
+之前拒绝当前目标不具备的表内配对（`a2a3` 上的 FP8 或 HF8 操作数），表外配对保持原样
+交给 PTOAS。
+
+当任一操作数为 FP8 或 HF8 时，`tensor.matmul` 省略 `out_dtype` 的默认值取累加器类型：
+类型提升会给出 FP8，而无缩放的 FIXPIPE 写回无法产生该类型，且混合配对的提升结果还会
+依赖操作数顺序。更宽的操作数配对保持原有的提升默认值。
+
+1 字节操作数的物理 K 必须是 32 的倍数（Left/Right fractal 沿 K 打包 32 字节）；
+有效 K 没有该限制。
+
 对于 Ascend950 上的二维 FP32 操作数，`matmul`、`matmul_acc` 和
 `tile.matmul_bias` 支持仅限关键字参数 `tf32_mode="round_even"` 或
 `tf32_mode="round_away"`。两者将输入舍入为 HF32（e8m10），仍使用 FP32 累加；

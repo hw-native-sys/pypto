@@ -400,6 +400,118 @@ def test_tensor_matmul_acc():
     assert len(result_type.shape) == 2
 
 
+# --- A5 mixed FP8 operand pairs on the Tensor surface ------------------------
+# `tensor.matmul` / `tensor.matmul_acc` lower to `tile.matmul` / `tile.matmul_acc`,
+# so they share the operand-pair contract: PTOAS v0.72 accepts any
+# (E4M3FN | E5M2) pair with an f32 destination on A5.
+_TENSOR_FP8_PAIRS = [
+    (DataType.FP8E4M3FN, DataType.FP8E5M2),
+    (DataType.FP8E5M2, DataType.FP8E4M3FN),
+    (DataType.FP8E5M2, DataType.FP8E5M2),
+    (DataType.FP8E4M3FN, DataType.FP8E4M3FN),
+    (DataType.HF8, DataType.HF8),
+]
+
+
+def _fp8_matmul_operands(lhs_dtype, rhs_dtype, span):
+    """[64, 64] x [64, 64] FP8 operand pair (physical K a multiple of 32)."""
+    dim = ir.ConstInt(64, DataType.INT32, span)
+    lhs = ir.Var("lhs", ir.TensorType([dim, dim], lhs_dtype), span)
+    rhs = ir.Var("rhs", ir.TensorType([dim, dim], rhs_dtype), span)
+    return lhs, rhs
+
+
+@pytest.mark.parametrize("lhs_dtype,rhs_dtype", _TENSOR_FP8_PAIRS)
+def test_tensor_matmul_fp8_pair_defaults_to_fp32_result(lhs_dtype, rhs_dtype):
+    """An omitted out_dtype follows the accumulator, not a promoted operand dtype.
+
+    Promotion would answer FP8 -- which the unscaled FIXPIPE writeback cannot
+    produce -- and for a mixed pair the answer would additionally depend on
+    operand order (E4M3FN for E4M3FN x E5M2, E5M2 for the reverse).
+    """
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(lhs_dtype, rhs_dtype, span)
+
+    call = tensor.matmul(lhs, rhs)
+
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == DataType.FP32
+
+
+@pytest.mark.parametrize("lhs_dtype,rhs_dtype", _TENSOR_FP8_PAIRS)
+def test_tensor_matmul_fp8_pair_accepts_explicit_fp32_out_dtype(lhs_dtype, rhs_dtype):
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(lhs_dtype, rhs_dtype, span)
+
+    call = tensor.matmul(lhs, rhs, out_dtype=DataType.FP32)
+
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == DataType.FP32
+
+
+@pytest.mark.parametrize("out_dtype", [DataType.FP8E4M3FN, DataType.FP8E5M2, DataType.INT32])
+def test_tensor_matmul_fp8_pair_rejects_unreachable_out_dtype(out_dtype):
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(DataType.FP8E4M3FN, DataType.FP8E5M2, span)
+
+    with pytest.raises(ValueError, match="is not supported for"):
+        tensor.matmul(lhs, rhs, out_dtype=out_dtype)
+
+
+@pytest.mark.parametrize(
+    "lhs_dtype,rhs_dtype",
+    [
+        (DataType.FP8E4M3FN, DataType.FP16),
+        (DataType.FP16, DataType.FP8E5M2),
+        (DataType.FP8E4M3FN, DataType.HF8),
+    ],
+)
+def test_tensor_matmul_rejects_unpaired_operand_dtypes(lhs_dtype, rhs_dtype):
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(lhs_dtype, rhs_dtype, span)
+
+    with pytest.raises(ValueError, match="identical lhs and rhs data types"):
+        tensor.matmul(lhs, rhs)
+
+
+@pytest.mark.parametrize(
+    "lhs_dtype,rhs_dtype",
+    [(DataType.FP16, DataType.FP16), (DataType.INT8, DataType.INT8), (DataType.FP32, DataType.FP32)],
+)
+def test_tensor_matmul_wide_pair_keeps_promoted_default_out_dtype(lhs_dtype, rhs_dtype):
+    """Only 1-byte float pairs change: every other pair keeps its historical default."""
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(lhs_dtype, rhs_dtype, span)
+
+    call = tensor.matmul(lhs, rhs)
+
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == lhs_dtype
+
+
+@pytest.mark.parametrize("lhs_dtype,rhs_dtype", _TENSOR_FP8_PAIRS)
+def test_tensor_matmul_acc_accepts_fp8_pairs(lhs_dtype, rhs_dtype):
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(lhs_dtype, rhs_dtype, span)
+    dim = ir.ConstInt(64, DataType.INT32, span)
+    acc = ir.Var("acc", ir.TensorType([dim, dim], DataType.FP32), span)
+
+    call = tensor.matmul_acc(acc, lhs, rhs)
+
+    assert isinstance(call.type, ir.TensorType)
+    assert call.type.dtype == DataType.FP32
+
+
+def test_tensor_matmul_acc_fp8_pair_requires_fp32_accumulator():
+    span = ir.Span.unknown()
+    lhs, rhs = _fp8_matmul_operands(DataType.FP8E5M2, DataType.FP8E4M3FN, span)
+    dim = ir.ConstInt(64, DataType.INT32, span)
+    acc = ir.Var("acc", ir.TensorType([dim, dim], DataType.FP16), span)
+
+    with pytest.raises(ValueError, match="requires accumulator dtype fp32"):
+        tensor.matmul_acc(acc, lhs, rhs)
+
+
 def test_tensor_matmul_acc_with_transpose():
     """Test tensor.matmul_acc with a_trans=True."""
     span = ir.Span.unknown()
