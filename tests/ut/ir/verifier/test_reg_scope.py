@@ -131,6 +131,25 @@ def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop, computed):
         assert diagnostics == []
 
 
+def test_hardware_loop_does_not_prove_wrapping_intermediate_bound():
+    wrapped = ir.Add(
+        ir.ConstInt(32767, DataType.INT16, SPAN), ir.ConstInt(1, DataType.INT16, SPAN), DataType.INT16, SPAN
+    )
+    widened = ir.Cast(wrapped, DataType.INT64, SPAN)
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        widened,
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert verify(region(loop)) == []
+
+
 def test_auto_loop_outside_reg_scope_remains_legal():
     loop = ir.ForStmt(scalar("i"), integer(0), integer(8), integer(1), [], sequence(), [], SPAN)
     assert verify(loop) == []

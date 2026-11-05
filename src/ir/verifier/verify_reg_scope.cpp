@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +21,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -36,6 +38,28 @@
 
 namespace pypto::ir {
 namespace {
+bool IsRepresentableLoopLiteral(const ConstIntPtr& literal);
+
+std::optional<int64_t> ExactHardwareLoopConstant(const ExprPtr& expr) {
+  if (auto value = As<ConstInt>(expr)) {
+    return IsRepresentableLoopLiteral(value) ? std::optional<int64_t>(value->value_) : std::nullopt;
+  }
+  if (auto binary = As<BinaryExpr>(expr)) {
+    if (!ExactHardwareLoopConstant(binary->left_) || !ExactHardwareLoopConstant(binary->right_))
+      return std::nullopt;
+  } else if (auto unary = As<UnaryExpr>(expr)) {
+    if (!ExactHardwareLoopConstant(unary->operand_)) return std::nullopt;
+  } else if (auto cast = As<Cast>(expr)) {
+    if (!ExactHardwareLoopConstant(cast->operand_)) return std::nullopt;
+  } else {
+    return std::nullopt;
+  }
+  auto folded = arith::TryConstFold(expr);
+  auto value = As<ConstInt>(folded);
+  if (!value || !IsRepresentableLoopLiteral(value)) return std::nullopt;
+  return value->value_;
+}
+
 // A malformed builder/deserialized literal must not prove an ancestor empty:
 // codegen narrows literals to their declared dtype before executing the loop.
 bool IsRepresentableLoopLiteral(const ConstIntPtr& literal) {
@@ -247,12 +271,8 @@ class RegionChecker : public IRVisitor {
         if (hardware_loop_depth_ > 4) {
           Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
         }
-        const auto bound = arith::ConstIntBoundAnalyzer()(op->stop_);
-        if ((stop && stop->value_ > 65535) ||
-            (bound.is_const() && bound.min_value != arith::ConstIntBound::kPosInf &&
-             bound.min_value > 65535 &&
-             IsRepresentableLoopLiteral(
-                 std::make_shared<ConstInt>(bound.min_value, GetScalarDtype(op->stop_), op->span_)))) {
+        const auto exact_stop = ExactHardwareLoopConstant(op->stop_);
+        if ((stop && stop->value_ > 65535) || (exact_stop && *exact_stop > 65535)) {
           Error("Hardware loop stop must not exceed 65535", op->span_);
         }
       }
