@@ -6,19 +6,68 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""
-Script to check that all source files and documentation are in English only.
-Detects non-English text (e.g., Chinese, Japanese, Korean, etc.) in source files.
-"""
+"""检查代码和英文文档的语言，允许 Python 注释及 docstring 使用中文。"""
 
 import argparse
+import ast
+import io
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 # Default excluded directories (can be overridden via --exclude)
 DEFAULT_EXCLUDED_PATTERNS = ["3rdparty", "reference", "docs/zh", "README.zh-CN.md"]
+
+
+def mask_chinese_python_annotations(source: str) -> str:
+    """仅屏蔽注释和真正 docstring 中的中文，保留代码字符串和诊断行号。"""
+    try:
+        tree = ast.parse(source)
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError):
+        return source
+
+    docstrings: set[tuple[int, int]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                if isinstance(first.value.value, str):
+                    docstrings.add((first.value.lineno, first.value.col_offset))
+
+    lines = source.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    chinese = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e]")
+    edits: list[tuple[int, int, str]] = []
+    for token in tokens:
+        row, column = token.start
+        # AST 列偏移以 UTF-8 字节计数，tokenize 列偏移以字符计数。
+        byte_column = len(lines[row - 1][:column].encode("utf-8")) if row <= len(lines) else 0
+        if token.type == tokenize.COMMENT or (
+            token.type == tokenize.STRING and (row, byte_column) in docstrings
+        ):
+            start = offsets[row - 1] + column
+            end = offsets[token.end[0] - 1] + token.end[1]
+            edits.append((start, end, chinese.sub(" ", token.string)))
+    for start, end, replacement in reversed(edits):
+        source = source[:start] + replacement + source[end:]
+    return source
+
+
+def mask_chinese_annotations(source: str, suffix: str) -> str:
+    """英文文档正文仍受检查，仅允许 Python 示例中的中文注释和 docstring。"""
+    if suffix in {".py", ".pyi"}:
+        return mask_chinese_python_annotations(source)
+    if suffix == ".md":
+        pattern = re.compile(r"(^```(?:python|py)[ \t]*\n)([\s\S]*?)(^```[ \t]*$)", re.MULTILINE)
+        return pattern.sub(
+            lambda match: match[1] + mask_chinese_python_annotations(match[2]) + match[3], source
+        )
+    return source
 
 
 def get_git_tracked_files(root_dir: Path) -> list[Path]:
@@ -97,7 +146,7 @@ def check_file_english_only(file_path: Path) -> tuple[bool, list[tuple[int, str]
         print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
         return True, []  # Skip files we can't read
 
-    has_non_english, violations = contains_non_english(content)
+    has_non_english, violations = contains_non_english(mask_chinese_annotations(content, file_path.suffix))
 
     return not has_non_english, violations
 
@@ -156,7 +205,7 @@ def main() -> int:
         print("No source files found to check")
         return 0
 
-    print(f"Checking {len(files_to_check)} file(s) for English-only content...")
+    print(f"Checking {len(files_to_check)} file(s); Chinese Python comments/docstrings are allowed...")
     if excluded_patterns:
         print(f"Excluded patterns: {', '.join(excluded_patterns)}")
 
@@ -186,13 +235,13 @@ def main() -> int:
         for file_path, _ in failed_files:
             print(f"  - {file_path.relative_to(root_path)}")
         print(
-            "\n⚠ Please ensure all source files and documentation are written in English "
-            "to maintain consistency and accessibility for all contributors."
+            "\n⚠ Code strings and English documentation must remain English. "
+            "Chinese is allowed in Python comments and docstrings."
         )
         print("\nTip: Use --exclude to exclude specific directories (e.g., --exclude docs/zh)")
         return 1
 
-    print("\n✓ All source files and documentation are in English!")
+    print("\n✓ Language checks passed!")
     return 0
 
 
