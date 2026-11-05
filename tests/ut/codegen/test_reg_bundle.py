@@ -502,7 +502,8 @@ def test_bundle_rejects_dynamic_register_offset():
 
 
 @pytest.mark.ptoas_compile
-def test_capture_offsets_exclude_tile_view_origin(tmp_path):
+@pytest.mark.parametrize("origin", [None, 32])
+def test_capture_offsets_exclude_tile_view_origin(origin, tmp_path):
     """The adapter extracts MemRef bases; VMI adds each view origin once."""
     builder = IRBuilder()
     with builder.function("view_origin", span=SPAN, type=ir.FunctionType.AIV) as f:
@@ -513,7 +514,7 @@ def test_capture_offsets_exclude_tile_view_origin(tmp_path):
                 [128],
                 DataType.FP32,
                 ir.MemRef("first_storage", 128, 512),
-                tile_view=ir.TileView([128], [1], ir.ConstInt(32, DataType.INDEX, SPAN)),
+                tile_view=ir.TileView([128], [1], origin),
                 memory_space=ir.MemorySpace.Vec,
             ),
         )
@@ -538,18 +539,19 @@ def test_capture_offsets_exclude_tile_view_origin(tmp_path):
     assert helper.capture_byte_offsets == [0, 640]
     assert helper.parameter_indices == [0]
     assert "arith.constant 160 : index" in helper.source
-    assert "arith.constant 32 : index" in helper.source
-    assert helper.source.count("arith.addi") == 1
+    assert ("arith.constant 32 : index" in helper.source) == (origin is not None)
+    assert helper.source.count("arith.addi") == (origin is not None)
 
 
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("store", [False, True])
-def test_loop_captures_dynamic_view_origin_from_tile_type(store, tmp_path):
+@pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.UINT32])
+def test_loop_captures_dynamic_view_origin_from_tile_type(store, dtype, tmp_path):
     # origin is deliberately absent from the scope's ordinary expressions:
     # only the TileView type exposes the scalar needed by VMI addressing.
     builder = IRBuilder()
     with builder.function("dynamic_view_origin", span=SPAN, type=ir.FunctionType.AIV) as f:
-        origin = f.param("origin", ir.ScalarType(DataType.INDEX))
+        origin = f.param("origin", ir.ScalarType(dtype))
         view = builder.let(
             "view",
             tile.full([128], dtype=DataType.FP32, value=1),
@@ -576,7 +578,10 @@ def test_loop_captures_dynamic_view_origin_from_tile_type(store, tmp_path):
     bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "DynamicOrigin", SPAN))
     compile_vf_bundle(bundle, tmp_path)
     helper = bundle.helpers[0]
-    assert helper.parameter_types == ["!pto.ptr<f32, ub>", "index"]
+    assert helper.parameter_types == ["!pto.ptr<f32, ub>", "index" if dtype == DataType.INDEX else "ui32"]
+    if dtype == DataType.UINT32:
+        assert "ui32 to i32" in helper.source
+        assert "arith.index_castui" in helper.source
     assert "scf.for" in helper.source
     assert "%arg1" in helper.source
     assert "pto.vmi.vload" in helper.source

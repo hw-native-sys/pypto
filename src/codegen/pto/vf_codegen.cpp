@@ -72,7 +72,9 @@ class VFOperands : public var_collectors::VarDefUseCollector {
       // dependencies live in the Tile type, so ordinary operand traversal
       // would otherwise omit them from the helper's scalar captures.
       const auto tile = As<TileType>(call->args_[0]->GetType());
-      if (tile && tile->tile_view_) VisitExpr(tile->tile_view_->start_offset);
+      if (tile && tile->tile_view_ && tile->tile_view_->start_offset) {
+        VisitExpr(tile->tile_view_->start_offset);
+      }
     }
     IRVisitor::VisitExpr_(call);
   }

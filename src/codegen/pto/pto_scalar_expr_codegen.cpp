@@ -80,14 +80,13 @@ std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::str
   if (have_mlir == wanted_mlir_type) {
     return ssa;
   }
+  if (wanted_mlir_type == "index") {
+    return EmitCastToIndex(expr, ssa);
+  }
 
   std::string casted = NewTemp();
   if (have_mlir == "index") {
     Emit(casted + " = arith.index_cast " + ssa + " : index to " + wanted_mlir_type);
-    return casted;
-  }
-  if (wanted_mlir_type == "index") {
-    Emit(casted + " = arith.index_cast " + ssa + " : " + have_mlir + " to index");
     return casted;
   }
   if (have_mlir == "i32" && wanted_mlir_type == "i64") {
