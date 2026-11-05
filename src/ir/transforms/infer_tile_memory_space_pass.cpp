@@ -1091,12 +1091,15 @@ class TileMemorySpaceMutator : public IRMutator {
 
     // Look up backend layout spec so tile.move carries the correct layout for the consumer.
     // This avoids a later ResolveBackendOpLayouts repair pass needing to insert tile.reshape.
+    // Only the *input* exemption applies here: the moves emitted below stage
+    // operands, so an implementation that merely writes a native non-row-major
+    // result still wants its operands relaid out.
     const backend::BackendTileLayoutSpec* layout_spec = nullptr;
     if (backend::BackendConfig::IsConfigured()) {
       const auto* target = backend::GetBackend();
       backend::DirectCastInfo cast_info;
       if (!backend::IsDirectCast(call, target->GetHandler()->GetTcvtAdjacency(), &cast_info) ||
-          !cast_info.preserve_layout) {
+          !cast_info.preserve_input_layout) {
         layout_spec = target->GetTileLayoutSpec(call->op_->name_);
       }
     }

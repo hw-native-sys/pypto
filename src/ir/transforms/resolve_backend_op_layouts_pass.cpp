@@ -124,10 +124,23 @@ CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, Ti
   return call;
 }
 
-bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
+/// Layout repairs the native implementation of @p call already satisfies and so
+/// must not be wrapped in a relayout `tile.move`.
+///
+/// The two halves are independent: the A5 packed FP4 decode writing an NZ
+/// destination needs its *result* left alone while still requiring an ND
+/// *operand*, so collapsing them would silently admit a col-major source that
+/// the native rule then rejects.
+backend::DirectCastInfo NativeLayoutExemptions(const CallPtr& call) {
   backend::DirectCastInfo cast_info;
-  if (backend::IsDirectCast(call, backend::GetBackend()->GetHandler()->GetTcvtAdjacency(), &cast_info) &&
-      cast_info.preserve_layout) {
+  if (!backend::IsDirectCast(call, backend::GetBackend()->GetHandler()->GetTcvtAdjacency(), &cast_info)) {
+    return {};
+  }
+  return cast_info;
+}
+
+bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
+  if (NativeLayoutExemptions(call).preserve_input_layout) {
     return false;
   }
   for (size_t i = 0; i < spec.input_layouts.size() && i < call->args_.size(); ++i) {
@@ -146,18 +159,17 @@ bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec&
   return false;
 }
 
-bool NeedsOutputRepair(const TileTypePtr& result_tile_type, const backend::BackendTileLayoutSpec& spec) {
+bool NeedsOutputRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
+                       const backend::BackendTileLayoutSpec& spec) {
+  if (NativeLayoutExemptions(call).preserve_output_layout) {
+    return false;
+  }
   return RequiresRowMajor(spec.output_layout) && result_tile_type && !IsRowMajor(result_tile_type);
 }
 
 bool NeedsRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
                  const backend::BackendTileLayoutSpec& spec) {
-  backend::DirectCastInfo cast_info;
-  if (backend::IsDirectCast(call, backend::GetBackend()->GetHandler()->GetTcvtAdjacency(), &cast_info) &&
-      cast_info.preserve_layout) {
-    return false;
-  }
-  return NeedsInputRepair(call, spec) || NeedsOutputRepair(result_tile_type, spec);
+  return NeedsInputRepair(call, spec) || NeedsOutputRepair(call, result_tile_type, spec);
 }
 
 /// Shape the repaired call must still produce for the restoration below to be
@@ -205,7 +217,7 @@ class BackendLayoutRepairMutator : public IRMutator {
         << "ResolveBackendOpLayouts expects constrained op assignment targets to be TileType";
 
     const bool restoration_reshapes_result =
-        NeedsOutputRepair(result_tile_type, *layout_spec) && IsColumnVector(result_tile_type);
+        NeedsOutputRepair(call, result_tile_type, *layout_spec) && IsColumnVector(result_tile_type);
     const std::vector<ExprPtr> expected_result_shape =
         ExpectedRepairedResultShape(result_tile_type, restoration_reshapes_result);
 
@@ -270,7 +282,7 @@ class BackendLayoutRepairMutator : public IRMutator {
              "declaration and its type deduction disagree.";
     }
 
-    if (NeedsOutputRepair(result_tile_type, *layout_spec)) {
+    if (NeedsOutputRepair(call, result_tile_type, *layout_spec)) {
       auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_, {"row_major"}),
                                                  repaired_call->GetType(), call->span_);
       rewritten.push_back(std::make_shared<AssignStmt>(row_major_var, repaired_call, op->span_));

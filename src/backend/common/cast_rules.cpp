@@ -32,6 +32,65 @@ bool Reject(DirectCastInfo& info, const std::string& reason) {
   return false;
 }
 
+/// Check one endpoint against its own conditions. `role` only names the
+/// endpoint in the diagnostic, so a rejection says which side failed.
+bool CheckEndpoint(const TcvtEndpointConditions& rule, const ir::TileTypePtr& tile, const char* role,
+                   DirectCastInfo& info) {
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
+  const std::string prefix = std::string("direct cast ") + role + " ";
+  if (rule.blayout && view.blayout != *rule.blayout) {
+    return Reject(info, prefix + "block layout is unsupported");
+  }
+  if (rule.slayout && view.slayout != *rule.slayout) {
+    return Reject(info, prefix + "scatter layout is unsupported");
+  }
+  if (rule.fractal && view.fractal != *rule.fractal) {
+    return Reject(info, prefix + "boxing granularity is unsupported");
+  }
+  if (rule.null_compact && view.compact != ir::CompactMode::null) {
+    return Reject(info, prefix + "requires compact=null");
+  }
+  if (rule.vec_only && tile->memory_space_ && *tile->memory_space_ != ir::MemorySpace::Vec) {
+    return Reject(info, prefix + "requires Vec memory");
+  }
+  if (rule.static_shape || rule.row_alignment != 1) {
+    if (tile->shape_.size() != 2) return Reject(info, prefix + "requires static 2D geometry");
+    const auto rows = ir::As<ir::ConstInt>(tile->shape_[0]);
+    const auto cols = ir::As<ir::ConstInt>(tile->shape_[1]);
+    if (!rows || !cols || rows->value_ <= 0 || cols->value_ <= 0 || rows->value_ > rule.max_rows ||
+        cols->value_ > rule.max_columns ||
+        rows->value_ > rule.max_byte_span / cols->value_ / tile->dtype_.GetByte()) {
+      return Reject(info, prefix + "physical shape exceeds its static dimension or byte-span limits");
+    }
+    // A boxed endpoint addresses whole fractal boxes, so a partial row of boxes
+    // has no representable storage. Checked on the *physical* shape: PTOAS pads
+    // the tile up to the box grid and tracks the narrower extent as the valid
+    // region, which `static_valid` covers separately.
+    if (rows->value_ % rule.row_alignment != 0) {
+      return Reject(info, prefix + "physical rows are not a whole number of boxes");
+    }
+  }
+  if (rule.static_valid) {
+    for (const auto& dim : view.valid_shape) {
+      const auto valid = ir::As<ir::ConstInt>(dim);
+      if (!valid || valid->value_ <= 0) {
+        return Reject(info, prefix + "requires static positive valid extents");
+      }
+    }
+  }
+  if (rule.full_valid && !ir::tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, tile->shape_)) {
+    return Reject(info, prefix + "requires full static validity");
+  }
+  if (rule.dense_stride && !ir::tile_view_semantics::HasCanonicalDenseStrides(*tile, view)) {
+    return Reject(info, prefix + "requires canonical dense 2D strides");
+  }
+  if (rule.zero_start_offset && view.start_offset) {
+    const auto offset = ir::As<ir::ConstInt>(view.start_offset);
+    if (!offset || offset->value_ != 0) return Reject(info, prefix + "requires zero tile start_offset");
+  }
+  return true;
+}
+
 bool CheckConditions(const TcvtConditions& rule, const ir::TileTypePtr& source, const ir::TileTypePtr& result,
                      DirectCastInfo& info) {
   if (rule.matching_valid_shape &&
@@ -45,51 +104,12 @@ bool CheckConditions(const TcvtConditions& rule, const ir::TileTypePtr& source, 
   if (rule.allow_empty_replay && empty) {
     info.empty_replay = true;
     info.descriptor = rule.descriptor;
-    info.preserve_layout = rule.preserve_layout;
+    info.preserve_input_layout = rule.preserve_input_layout;
+    info.preserve_output_layout = rule.preserve_output_layout;
     return true;
   }
-  for (const auto& tile : {source, result}) {
-    const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
-    if (rule.layout && view.blayout != *rule.layout) return Reject(info, "cast layout is unsupported");
-    if (rule.unboxed && view.slayout != ir::TileLayout::none_box) {
-      return Reject(info, "packed cast requires none_box storage");
-    }
-    if (rule.null_compact && view.compact != ir::CompactMode::null) {
-      return Reject(info, "direct cast requires compact=null");
-    }
-    if (rule.vec_only && tile->memory_space_ && *tile->memory_space_ != ir::MemorySpace::Vec) {
-      return Reject(info, "direct cast requires Vec memory");
-    }
-    if (rule.static_shape) {
-      if (tile->shape_.size() != 2) return Reject(info, "direct cast requires static 2D geometry");
-      const auto rows = ir::As<ir::ConstInt>(tile->shape_[0]);
-      const auto cols = ir::As<ir::ConstInt>(tile->shape_[1]);
-      if (!rows || !cols || rows->value_ <= 0 || cols->value_ <= 0 || rows->value_ > rule.max_rows ||
-          cols->value_ > rule.max_columns ||
-          rows->value_ > rule.max_byte_span / cols->value_ / tile->dtype_.GetByte()) {
-        return Reject(info, "direct cast physical shape exceeds its static dimension or byte-span limits");
-      }
-    }
-    if (rule.static_valid) {
-      for (const auto& dim : view.valid_shape) {
-        const auto valid = ir::As<ir::ConstInt>(dim);
-        if (!valid || valid->value_ <= 0) {
-          return Reject(info, "direct cast requires static positive valid extents");
-        }
-      }
-    }
-    if (rule.full_valid &&
-        !ir::tile_view_semantics::ShapeExprListsEquivalent(view.valid_shape, tile->shape_)) {
-      return Reject(info, "direct DN cast requires full static validity");
-    }
-    if (rule.dense_stride && !ir::tile_view_semantics::HasCanonicalDenseStrides(*tile, view)) {
-      return Reject(info, "direct cast requires canonical dense 2D strides");
-    }
-    if (rule.zero_start_offset && view.start_offset) {
-      const auto offset = ir::As<ir::ConstInt>(view.start_offset);
-      if (!offset || offset->value_ != 0) return Reject(info, "direct cast requires zero tile start_offset");
-    }
-  }
+  if (!CheckEndpoint(rule.source, source, "source", info)) return false;
+  if (!CheckEndpoint(rule.result, result, "result", info)) return false;
   if (rule.source_col_alignment != 1 || rule.max_source_registers != std::numeric_limits<int64_t>::max()) {
     if (source->shape_.size() != 2) return Reject(info, "direct cast requires 2D source geometry");
     const auto cols = ir::As<ir::ConstInt>(source->shape_[1]);
@@ -99,7 +119,8 @@ bool CheckConditions(const TcvtConditions& rule, const ir::TileTypePtr& source, 
     }
   }
   info.descriptor = rule.descriptor;
-  info.preserve_layout = rule.preserve_layout;
+  info.preserve_input_layout = rule.preserve_input_layout;
+  info.preserve_output_layout = rule.preserve_output_layout;
   info.reason.clear();
   return true;
 }

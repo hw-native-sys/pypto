@@ -46,6 +46,16 @@ inline constexpr int64_t kMXSFractalCols = 2;
 /// Acc (L0C) fractal size: the accumulator is NZ-boxed at 1024 bytes.
 inline constexpr uint64_t kAccFractal = 1024;
 
+/// Standard NZ/ZN fractal size: the 16x32-byte matrix-operand box (Mat / Left /
+/// Right). Also the TileView default, so a plain tile that is given a boxed
+/// slayout is already at this granularity.
+inline constexpr uint64_t kStandardNzFractalBytes = 512;
+
+/// Row granularity of one standard NZ box. A boxed tile's *physical* rows must
+/// be a whole multiple of this, or its fractal grid has a partial row of boxes
+/// that no address arithmetic can reach.
+inline constexpr int64_t kNzFractalRows = 16;
+
 /// Static row/column granularity of one boxed tile storage unit.
 struct BoxedTileAlignment {
   int64_t rows = 1;

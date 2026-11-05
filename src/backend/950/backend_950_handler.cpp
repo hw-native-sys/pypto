@@ -22,6 +22,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/sync/resource_catalog.h"
 #include "src/backend/common/sync_resources.h"
@@ -89,41 +90,66 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
         TcvtRule rule{from, to, {}};
         if (from.IsPackedFp4() || to.IsPackedFp4()) {
           TcvtConditions nd;
-          nd.layout = ir::TileLayout::row_major;
-          nd.unboxed = true;
+          nd.source.blayout = ir::TileLayout::row_major;
+          nd.source.slayout = ir::TileLayout::none_box;
+          nd.result = nd.source;
           nd.matching_valid_shape = true;
           TcvtConditions dn = nd;
-          dn.layout = ir::TileLayout::col_major;
-          dn.static_shape = true;
-          dn.full_valid = true;
-          dn.dense_stride = true;
-          dn.zero_start_offset = true;
-          dn.preserve_layout = true;
+          dn.source.blayout = ir::TileLayout::col_major;
+          dn.source.static_shape = true;
+          dn.source.full_valid = true;
+          dn.source.dense_stride = true;
+          dn.source.zero_start_offset = true;
+          dn.result = dn.source;
+          dn.preserve_input_layout = true;
+          dn.preserve_output_layout = true;
           dn.descriptor = CastDescriptor::StaticPlannedAddress;
           rule.alternatives = {nd, dn};
         }
         if (from == DataType::FP4E2M1X2 && to == DataType::FP8E4M3FN) {
-          // PTOAS v0.72 direct packed decode: ND only for this frontend path.
-          // All values/strides count byte carriers on the packed side.
+          // PTOAS v0.72 direct packed decode (PTO_IR_manual.md "f4E2M1x2 ->
+          // f8E4M3FN"). All values/strides count byte carriers on the packed
+          // side. The source is always ND; the destination is either ND or the
+          // standard 512-byte NZ box grid, and PTOAS accepts no other boxing.
           TcvtConditions direct;
-          direct.layout = ir::TileLayout::row_major;
-          direct.unboxed = true;
-          direct.null_compact = true;
-          direct.static_shape = true;
-          direct.static_valid = true;
+          direct.source.blayout = ir::TileLayout::row_major;
+          direct.source.slayout = ir::TileLayout::none_box;
+          direct.source.null_compact = true;
+          direct.source.static_shape = true;
+          direct.source.static_valid = true;
+          direct.source.dense_stride = true;
+          direct.source.zero_start_offset = true;
+          direct.source.vec_only = true;
+          direct.source.max_rows = std::numeric_limits<uint16_t>::max();
+          direct.source.max_columns = std::numeric_limits<int32_t>::max();
+          direct.source.max_byte_span = std::numeric_limits<int32_t>::max();
+          direct.result = direct.source;
           direct.matching_valid_shape = true;
-          direct.dense_stride = true;
-          direct.zero_start_offset = true;
-          direct.vec_only = true;
           direct.allow_empty_replay = true;
           direct.source_col_alignment = 32;
-          direct.max_rows = std::numeric_limits<uint16_t>::max();
-          direct.max_columns = std::numeric_limits<int32_t>::max();
-          direct.max_byte_span = std::numeric_limits<int32_t>::max();
           direct.source_register_bytes = 256;
           direct.max_source_registers = std::numeric_limits<uint16_t>::max();
           direct.descriptor = CastDescriptor::StaticValidShape;
-          rule.alternatives = {direct};
+
+          // NZ destination: same decode, boxed result. `dense_stride` and
+          // `zero_start_offset` do not apply -- HasCanonicalDenseStrides is
+          // defined for none_box views only, and a boxed tile's addressing is
+          // the fractal grid rather than a 2D pitch. The 16-row granularity is
+          // the ISA's own requirement on the *physical* rows, which also keeps
+          // the tile a whole number of boxes so its byte footprint stays the
+          // plain row*col product the allocator already computes.
+          TcvtConditions direct_nz = direct;
+          direct_nz.result.blayout = ir::TileLayout::col_major;
+          direct_nz.result.slayout = ir::TileLayout::row_major;
+          direct_nz.result.fractal = ir::tile_view_semantics::kStandardNzFractalBytes;
+          direct_nz.result.dense_stride = false;
+          direct_nz.result.zero_start_offset = false;
+          direct_nz.result.row_alignment = ir::tile_view_semantics::kNzFractalRows;
+          // The native write already lands in NZ, so the backend's row-major
+          // result repair must not wrap it in a relayout tile.move. The ND
+          // *source* requirement stands, so input repair is left enabled.
+          direct_nz.preserve_output_layout = true;
+          rule.alternatives = {direct, direct_nz};
         }
         t.edges.push_back(std::move(rule));
       }

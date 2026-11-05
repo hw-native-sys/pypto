@@ -214,8 +214,22 @@ saturation semantics in `cast_saturation.h`. TypeCheck checks transformed casts'
 result dtype and logical physical shape, alongside its existing valid-shape
 bounds checks. Ordinary casts may retain a narrower destination valid region.
 
-The successful rule also selects descriptor preparation and whether layout
-repair must preserve the current layout. Dense DN and direct packed-FP4-to-FP8
+Each alternative states its conditions **per endpoint** (`TcvtEndpointConditions`
+for `source` and for `result`) rather than once for both, because the
+implementations are asymmetric: the A5 packed FP4 decode reads an ND source and
+may write either an ND or a standard NZ destination, which a single shared
+layout field cannot describe. An endpoint left at its defaults imposes nothing.
+
+The successful rule also selects descriptor preparation and which layout repairs
+it already satisfies. Those are two independent flags, not one:
+`preserve_input_layout` exempts the operands and `preserve_output_layout` the
+result. The NZ destination needs only the second — it writes a boxed result
+natively, so the backend must not wrap it in a relayout `tile.move`, while the
+rule's own ND source requirement means operand repair must stay enabled.
+`preserve_output_layout` is also what LegalizeTileCast consults to decide
+whether an explicitly requested boxed destination is genuinely native; an
+unconstrained dtype edge states no layout opinion and therefore never sets it.
+Python can read both through `pypto_core.backend.query_direct_cast(call, handler)`. Dense DN and direct packed-FP4-to-FP8
 conversions are table entries, not predicates maintained by individual passes.
 Ordinary unconstrained edges retain the existing backend layout-repair pipeline.
 Ordinary TCVT uses the destination's valid rectangle, allowing a full-box
