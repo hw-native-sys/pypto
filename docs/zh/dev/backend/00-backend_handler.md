@@ -194,10 +194,14 @@ PTOAS 校验。生命周期和复用决策仍由现有内存分配与 IR workspa
 
 ## 直接转换规则
 
-`GetTcvtAdjacency()` 保存 `TcvtRule`：源/目标 dtype 及备选 `TcvtConditions`。
-`IsDirectCast(call, info)` 先统一检查逻辑 shape、有效范围与模式，再检查对应边的布局、
-静态尺寸、步长、偏移、对齐及硬件范围约束。Python 布尔接口为
-`handler.is_direct_cast(call)`。几何变化后须重新查询，结果不能作为仅由 dtype 决定的缓存。
+`GetTcvtAdjacency()` 提供各目标的 `TcvtRule`。规则类型与独立匹配器放在
+`backend/common/cast_rules.h/.cpp`。`IsDirectCast(call, rules, info)` 只查询合法 IR 的
+原生实现条件，不再是 `BackendHandler` 成员。Python 使用显式目标接口
+`pypto_core.backend.is_direct_cast(call, handler)`。几何变化后须重新查询。
+
+构造阶段复用 `type_inference.h/.cpp` 中的属性检查和 `cast_saturation.h` 中的饱和语义。
+TypeCheck 检查变换后 cast 的结果 dtype 与逻辑物理形状，并沿用既有的有效范围边界检查。
+普通转换允许目标保留较小的有效范围。
 
 命中的规则还指定描述符准备方式及是否保留当前布局。连续 DN 与直接 FP4→FP8
 均由规则表表达，各 pass 不再维护单独 predicate。普通无额外条件的边沿用既有后端布局修正。

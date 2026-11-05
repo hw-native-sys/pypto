@@ -202,12 +202,17 @@ The runtime layer (`pypto.runtime.runner`, `pypto.ir.compiled_program`,
 
 ## Direct cast rules
 
-`GetTcvtAdjacency()` contains `TcvtRule` entries with source/destination dtypes
-and alternative `TcvtConditions`. `IsDirectCast(call, info)` performs the shared
-logical-shape, validity and mode checks, then evaluates that edge's layout,
-static-extent, stride, offset, alignment and hardware-limit conditions. Python
-exposes the boolean query as `handler.is_direct_cast(call)`. Requery after any
-geometry-changing transformation; the result is not a cached dtype fact.
+`GetTcvtAdjacency()` supplies each target's `TcvtRule` entries. Their types and
+independent matcher live in `backend/common/cast_rules.h/.cpp`.
+`IsDirectCast(call, rules, info)` checks native implementation conditions on
+well-typed IR; it is not a `BackendHandler` member. Python exposes
+`pypto_core.backend.is_direct_cast(call, handler)` with an explicit target.
+Requery after geometry changes; the result is not a cached dtype fact.
+
+Construction shares cast attribute checks in `type_inference.h/.cpp` and
+saturation semantics in `cast_saturation.h`. TypeCheck checks transformed casts'
+result dtype and logical physical shape, alongside its existing valid-shape
+bounds checks. Ordinary casts may retain a narrower destination valid region.
 
 The successful rule also selects descriptor preparation and whether layout
 repair must preserve the current layout. Dense DN and direct packed-FP4-to-FP8

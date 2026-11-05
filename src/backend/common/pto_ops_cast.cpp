@@ -19,6 +19,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
@@ -174,7 +175,7 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
       << "tile.cast requires 1 or 2 arguments (src[, tmp]), but got " << op->args_.size();
 
   DirectCastInfo cast_info;
-  CHECK_SPAN(codegen.GetBackendHandler()->IsDirectCast(op, &cast_info), op->span_)
+  CHECK_SPAN(IsDirectCast(op, codegen.GetBackendHandler()->GetTcvtAdjacency(), &cast_info), op->span_)
       << "tile.cast has no direct TCVT implementation: " << cast_info.reason
       << "; run LegalizeTileCast after geometry-changing transformations";
   if (cast_info.empty_replay) return "";  // Keep allocated storage and downstream handshakes.

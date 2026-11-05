@@ -9,7 +9,7 @@
 1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换规则表（转录自 pto-isa `tcvt`
    Supported Conversions）。本 Pass 自身不含任何架构知识，新增后端只需提供自己的表，
    无需改动此处；未配置 backend 时本 Pass 不做任何事。
-2. 调用 `BackendHandler::IsDirectCast(call)`，检查当前类型、逻辑尺寸及规则中的实现条件；支持则原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
+2. 调用 `backend::IsDirectCast(call, handler.GetTcvtAdjacency())`，检查当前类型、逻辑尺寸及规则中的实现条件；支持则原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
 3. 否则在邻接图上 BFS 求最短路径。每个候选 hop 均推导自己的类型并调用同一个 `IsDirectCast`，排除几何不合法的边；等长路径优先「同字节转浮点 → 再调宽度」。
 
 典型结果（A5）：

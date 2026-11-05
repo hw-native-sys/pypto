@@ -41,6 +41,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -252,7 +253,7 @@ std::vector<DataType> FindCastChain(const AdjList& adj, const backend::BackendHa
       } catch (const TypeError&) {
         continue;
       }
-      if (!handler.IsDirectCast(As<Call>(candidate))) continue;
+      if (!backend::IsDirectCast(As<Call>(candidate), handler.GetTcvtAdjacency())) continue;
       const int edge_cost = EdgePreferenceCost(cur_info.via, nxt);
       const int new_dist = cur_info.dist + 1;
       const int new_pref = cur_info.pref + edge_cost;
@@ -324,7 +325,7 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType dst = result_tile->dtype_;
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    if (handler_.IsDirectCast(call)) {
+    if (backend::IsDirectCast(call, handler_.GetTcvtAdjacency())) {
       return IRMutator::VisitStmt_(op);
     }
 

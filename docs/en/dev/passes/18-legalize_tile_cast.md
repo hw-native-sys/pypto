@@ -10,7 +10,7 @@ For each `var = tile.cast(...)`:
    (transcribed from pto-isa `tcvt` Supported Conversions). The pass holds no per-architecture
    knowledge of its own, so a new backend ships its own table and needs no change here.
    With no backend configured the pass is a no-op.
-2. Query `BackendHandler::IsDirectCast(call)` for the current dtype, logical extents, and registered implementation conditions. If supported, leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
+2. Query `backend::IsDirectCast(call, handler.GetTcvtAdjacency())` for the current dtype, logical extents, and registered implementation conditions. If supported, leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
 3. Otherwise, BFS for a shortest path. Each candidate hop gets its own inferred type and calls the same `IsDirectCast` query; invalid geometry is excluded. Among equal-length paths prefer "same byte-width → float, then adjust width".
 
 Typical A5 results: `INT32→FP16` → `INT32→FP32→FP16`; `FP16→BF16` → `FP16→FP32→BF16`.

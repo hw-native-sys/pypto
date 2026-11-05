@@ -107,14 +107,6 @@ class BackendHandler:
     branching on :class:`BackendType` directly.
     """
 
-    def is_direct_cast(self, call: ir.Call) -> bool:
-        """Check native dtype, logical geometry and backend implementation conditions.
-
-        Requery after changing tile shapes or layouts. This pure query also
-        accepts ordinary casts whose layouts the backend pipeline will repair.
-        """
-        ...
-
     def get_pto_target_arch(self) -> str: ...
     def has_hardware_loop_evidence(self, qualification: ir.HardwareLoopQualification, artifact: str) -> bool:
         """Check final artifact evidence; unsupported targets return false."""
@@ -286,6 +278,14 @@ def get_backend_type() -> BackendType:
 
     Raises:
         ValueError: If backend type has not been configured
+    """
+    ...
+
+def is_direct_cast(call: ir.Call, handler: BackendHandler) -> bool:
+    """Query native conditions for a well-typed cast using the supplied target.
+
+    Requery after changing shape or layout. IR construction and TypeCheck
+    validate the operator contract; this query only selects a native rule.
     """
     ...
 

@@ -14,13 +14,11 @@
 
 #include <array>
 #include <cstdint>
-#include <limits>
-#include <optional>
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
-#include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/type.h"
@@ -34,58 +32,6 @@ class ResourceCatalog;
 namespace backend {
 
 class Backend;
-
-/// Descriptor preparation selected by the same rule that admits a direct cast.
-enum class CastDescriptor { Default, StaticValidShape, StaticPlannedAddress };
-
-/// An alternative implementation of a dtype edge. Missing layout permits the
-/// ordinary backend layout-repair pipeline; constrained variants must already
-/// satisfy their layouts and can request that those layouts be preserved.
-struct TcvtConditions {
-  std::optional<ir::TileLayout> layout;
-  bool unboxed = false;
-  bool null_compact = false;
-  bool static_shape = false;
-  bool static_valid = false;
-  bool matching_valid_shape = false;
-  bool full_valid = false;
-  bool dense_stride = false;
-  bool zero_start_offset = false;
-  bool vec_only = false;
-  bool preserve_layout = false;
-  bool allow_empty_replay = false;
-  int64_t source_col_alignment = 1;
-  int64_t max_rows = std::numeric_limits<int64_t>::max();
-  int64_t max_columns = std::numeric_limits<int64_t>::max();
-  int64_t max_byte_span = std::numeric_limits<int64_t>::max();
-  int64_t source_register_bytes = 1;
-  int64_t max_source_registers = std::numeric_limits<int64_t>::max();
-  CastDescriptor descriptor = CastDescriptor::Default;
-};
-
-struct TcvtRule {
-  DataType source;
-  DataType destination;
-  // Empty means the ordinary implementation, with shared semantic checks.
-  // Alternatives describe e.g. ND and dense DN implementations of one edge.
-  std::vector<TcvtConditions> alternatives;
-};
-
-/// Optional diagnostics and emission requirements from IsDirectCast. Queries
-/// never mutate IR; unknown extents are accepted only by unconstrained rules.
-struct DirectCastInfo {
-  std::string reason;
-  CastDescriptor descriptor = CastDescriptor::Default;
-  bool preserve_layout = false;
-  bool empty_replay = false;
-};
-
-/// Single source of truth for native dtype edges and implementation conditions.
-/// BFS uses these edges, then queries each concrete candidate hop; codegen and
-/// layout passes use the identical query on their current IR.
-struct TcvtAdjacency {
-  std::vector<TcvtRule> edges;
-};
 
 /**
  * @brief Closed-form GEMM cost-model parameters consumed by ChooseL0Tile.
@@ -644,18 +590,13 @@ class BackendHandler {
    * no INT32 -> FP16 deq, a2a3 is the reverse). LegalizeTileCast treats this as
    * a directed graph and expands any cast whose pair is absent into the
    * shortest chain of native hops. Each edge also owns alternative shape and
-   * layout conditions; IsDirectCast validates concrete IR against those rules.
+   * layout conditions; the free IsDirectCast query matches concrete IR against those rules.
    * The table is the single source of truth for direct-conversion eligibility.
    *
    * Returned by reference from a handler-owned static — callers may hold the
    * reference for the duration of a pass.
    */
   [[nodiscard]] virtual const TcvtAdjacency& GetTcvtAdjacency() const = 0;
-
-  /// Check native dtype support, logical extents, and the edge's layout/shape
-  /// conditions. Ordinary layout requirements remain repairable by the backend
-  /// layout pipeline. Optional info explains a rejection or descriptor recipe.
-  [[nodiscard]] bool IsDirectCast(const ir::CallPtr& call, DirectCastInfo* info = nullptr) const;
 
  protected:
   /// The backend must outlive this handler. Built-in handlers bind to their

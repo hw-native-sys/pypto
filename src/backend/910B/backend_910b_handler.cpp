@@ -15,6 +15,7 @@
 
 #include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"

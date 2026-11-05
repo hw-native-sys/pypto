@@ -421,6 +421,7 @@ set(PYPTO_SOURCES
     src/backend/common/backend.cpp
     src/backend/common/backend_config.cpp
     src/backend/common/backend_handler.cpp
+    src/backend/common/cast_rules.cpp
     src/backend/common/backend_registry.cpp
     src/backend/common/isa_macro_resources.cpp
     src/backend/common/isa_macro_resources_validation.cpp

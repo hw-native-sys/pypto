@@ -20,6 +20,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -125,7 +126,8 @@ CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, Ti
 
 bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
   backend::DirectCastInfo cast_info;
-  if (backend::GetBackend()->GetHandler()->IsDirectCast(call, &cast_info) && cast_info.preserve_layout) {
+  if (backend::IsDirectCast(call, backend::GetBackend()->GetHandler()->GetTcvtAdjacency(), &cast_info) &&
+      cast_info.preserve_layout) {
     return false;
   }
   for (size_t i = 0; i < spec.input_layouts.size() && i < call->args_.size(); ++i) {
@@ -151,7 +153,8 @@ bool NeedsOutputRepair(const TileTypePtr& result_tile_type, const backend::Backe
 bool NeedsRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
                  const backend::BackendTileLayoutSpec& spec) {
   backend::DirectCastInfo cast_info;
-  if (backend::GetBackend()->GetHandler()->IsDirectCast(call, &cast_info) && cast_info.preserve_layout) {
+  if (backend::IsDirectCast(call, backend::GetBackend()->GetHandler()->GetTcvtAdjacency(), &cast_info) &&
+      cast_info.preserve_layout) {
     return false;
   }
   return NeedsInputRepair(call, spec) || NeedsOutputRepair(result_tile_type, spec);

@@ -183,7 +183,7 @@ def _direct_cast_query(
     source_memory=None,
     result_memory=None,
 ):
-    """Build typed IR directly so negative cases exercise backend rules, not frontend rejection."""
+    """Build typed calls to test native descriptor constraints independently of frontend inference."""
     span = _ir_core.Span.unknown()
     source_type = _ir_core.TileType(source_shape, source_dtype, None, source_view, source_memory)
     result_type = _ir_core.TileType(result_shape, target_dtype, None, result_view, result_memory)
@@ -208,22 +208,16 @@ def test_direct_cast_queries_own_backend_without_global_configuration(
     """Native rules are owned by the queried target, independent of ambient configuration."""
     handler = _backend_core.get_backend_instance(target).get_handler()
     call = _direct_cast_query(source_dtype, result_dtype, [16, 32], [16, 32])
-    assert handler.is_direct_cast(call) == expected
+    assert _backend_core.is_direct_cast(call, handler) == expected
 
 
-@pytest.mark.parametrize("target_code", [pl.FP16.code(), pl.FP16.code() + 256, -1])
-def test_direct_cast_accepts_integer_target_dtype_codes(target_code):
-    """The native query accepts the same integer dtype form as cast inference."""
-    original = _direct_cast_query(pl.FP32, pl.FP16, [16, 32], [16, 32])
-    call = _ir_core.Call(
-        original.op,
-        original.args,
-        {"target_type": target_code, "mode": 2},
-        original.type,
-        original.span,
-    )
+def test_direct_cast_accepts_integer_target_dtype_code():
+    """Integer codes are normalized by the IR contract, not by native matching."""
+    span = _ir_core.Span.unknown()
+    source = _ir_core.Var("source", _ir_core.TileType([16, 32], pl.FP32), span)
+    call = _ir_core.create_op_call("tile.cast", [source], {"target_type": pl.FP16.code(), "mode": 2}, span)
     handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
-    assert handler.is_direct_cast(call) == (target_code == pl.FP16.code())
+    assert _backend_core.is_direct_cast(call, handler)
 
 
 @pytest.mark.parametrize("target", [_backend_core.BackendType.Ascend950, _backend_core.BackendType.Ascend910])
@@ -231,8 +225,8 @@ def test_direct_cast_requeries_changed_packed_geometry(target):
     handler = _backend_core.get_backend_instance(target).get_handler()
     aligned = _direct_cast_query(pl.FP4E2M1X2, pl.FP8E4M3FN, [16, 32], [16, 64])
     split = _direct_cast_query(pl.FP4E2M1X2, pl.FP8E4M3FN, [16, 16], [16, 32])
-    assert handler.is_direct_cast(aligned) == (target == _backend_core.BackendType.Ascend950)
-    assert not handler.is_direct_cast(split)
+    assert _backend_core.is_direct_cast(aligned, handler) == (target == _backend_core.BackendType.Ascend950)
+    assert not _backend_core.is_direct_cast(split, handler)
 
 
 @pytest.mark.parametrize("packed_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
@@ -260,17 +254,17 @@ def test_direct_packed_cast_normalizes_both_dynamic_valid_extents(packed_dtype, 
         result_view=unpacked_view if decode else packed_view,
     )
     handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
-    assert handler.is_direct_cast(call) == matching
+    assert _backend_core.is_direct_cast(call, handler) == matching
 
 
 @pytest.mark.parametrize(
-    "case", ["logical_shape", "valid_shape", "dynamic_valid", "stride", "offset", "memory", "rows", "compact"]
+    "case", ["valid_shape", "dynamic_valid", "stride", "offset", "memory", "rows", "compact"]
 )
 def test_direct_cast_rule_rejects_invalid_packed_descriptors(case):
     """Every descriptor constraint is queried through the same public boolean API."""
     rows = 65536 if case == "rows" else 16
     source_shape = [rows, 32]
-    result_shape = [rows, 63 if case == "logical_shape" else 64]
+    result_shape = [rows, 64]
     source_valid: list[int | _ir_core.Expr] = [8, 24]
     result_valid: list[int | _ir_core.Expr] = [8, 47 if case == "valid_shape" else 48]
     if case == "dynamic_valid":
@@ -294,7 +288,7 @@ def test_direct_cast_rule_rejects_invalid_packed_descriptors(case):
         source_memory=_ir_core.MemorySpace.Mat if case == "memory" else _ir_core.MemorySpace.Vec,
     )
     handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
-    assert not handler.is_direct_cast(call)
+    assert not _backend_core.is_direct_cast(call, handler)
 
 
 @pytest.mark.parametrize(
@@ -318,7 +312,7 @@ def test_direct_cast_dense_dn_rule_and_full_validity(source_dtype, result_dtype,
         source_view=source_view,
         result_view=result_view,
     )
-    assert handler.is_direct_cast(call)
+    assert _backend_core.is_direct_cast(call, handler)
     partial_source = _ir_core.TileView(
         blayout=_ir_core.TileLayout.col_major, valid_shape=[source_rows, 8], stride=[1, source_rows]
     )
@@ -333,7 +327,7 @@ def test_direct_cast_dense_dn_rule_and_full_validity(source_dtype, result_dtype,
         source_view=partial_source,
         result_view=partial_result,
     )
-    assert not handler.is_direct_cast(partial)
+    assert not _backend_core.is_direct_cast(partial, handler)
 
 
 @pytest.mark.parametrize("target", [_backend_core.BackendType.Ascend910, _backend_core.BackendType.Ascend950])
@@ -350,27 +344,7 @@ def test_direct_cast_accepts_transport_box_with_narrowed_consumer(target, dynami
         result_view=_ir_core.TileView(valid_shape=[rows, 128]),
     )
     handler = _backend_core.get_backend_instance(target).get_handler()
-    assert handler.is_direct_cast(call)
-
-
-@pytest.mark.parametrize("case", ["shape", "valid", "round_mode", "saturation", "attribute_type"])
-def test_direct_cast_common_checks_also_apply_to_ordinary_types(case):
-    """A native dtype edge alone does not validate malformed ordinary casts."""
-    span = _ir_core.Span.unknown()
-    source_type = _ir_core.TileType([16, 32], pl.FP32)
-    view = _ir_core.TileView(valid_shape=[16, 33]) if case == "valid" else None
-    result_type = _ir_core.TileType([16, 31 if case == "shape" else 32], pl.FP16, None, view)
-    source = _ir_core.Var("source", source_type, span)
-    kwargs: dict[str, object] = {"target_type": pl.FP16, "mode": 2}
-    if case == "round_mode":
-        kwargs["mode"] = 7
-    elif case == "saturation":
-        kwargs["saturation_mode"] = 2
-    elif case == "attribute_type":
-        kwargs["mode"] = "round"
-    call = _ir_core.Call(_ir_core.get_op("tile.cast"), [source], kwargs, result_type, span)
-    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
-    assert not handler.is_direct_cast(call)
+    assert _backend_core.is_direct_cast(call, handler)
 
 
 if __name__ == "__main__":

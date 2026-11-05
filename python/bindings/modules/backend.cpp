@@ -32,6 +32,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/core/dtype.h"
@@ -145,12 +146,6 @@ void BindBackend(nb::module_& m) {
   // Per-backend behaviour dispatch. Passes / codegen / Python all consume this
   // interface rather than branching on BackendType.
   nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
-      .def(
-          "is_direct_cast",
-          [](const BackendHandler& handler, const pypto::ir::CallPtr& call) {
-            return handler.IsDirectCast(call);
-          },
-          nb::arg("call"), "Check native cast dtype, shape and layout conditions on the current IR")
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
       .def("has_hardware_loop_evidence", &BackendHandler::HasHardwareLoopEvidence, nb::arg("qualification"),
@@ -207,6 +202,14 @@ void BindBackend(nb::module_& m) {
            "Physical M-row alignment of one L0C accumulator allocation")
       .def("get_min_l0_tile_dim", &BackendHandler::GetMinL0TileDim,
            "Minimum legal value for L0 tile dimensions m, n, k");
+
+  backend_mod.def(
+      "is_direct_cast",
+      [](const pypto::ir::CallPtr& call, const BackendHandler& handler) {
+        return backend::IsDirectCast(call, handler.GetTcvtAdjacency());
+      },
+      nb::arg("call"), nb::arg("handler"),
+      "Query native implementation conditions for a well-typed cast using an explicit target");
 
   nb::enum_<backend::OpScratchStatus>(backend_mod, "OpScratchStatus")
       .value("Required", backend::OpScratchStatus::Required)

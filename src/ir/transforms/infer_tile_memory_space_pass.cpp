@@ -24,6 +24,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -1094,7 +1095,8 @@ class TileMemorySpaceMutator : public IRMutator {
     if (backend::BackendConfig::IsConfigured()) {
       const auto* target = backend::GetBackend();
       backend::DirectCastInfo cast_info;
-      if (!target->GetHandler()->IsDirectCast(call, &cast_info) || !cast_info.preserve_layout) {
+      if (!backend::IsDirectCast(call, target->GetHandler()->GetTcvtAdjacency(), &cast_info) ||
+          !cast_info.preserve_layout) {
         layout_spec = target->GetTileLayoutSpec(call->op_->name_);
       }
     }
