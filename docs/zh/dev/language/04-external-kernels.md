@@ -106,7 +106,9 @@ def decode(query: pl.Tensor, ..., out: pl.Out[pl.Tensor]):
 单核写法：`@pl.jit.extern(core_type="aic"|"aiv", source="k.cpp")`。
 
 多输出时，用 tuple 声明每个返回值的完整形状和数据类型。JIT 会为 AIC、AIV 和 mixed
-extern 保留该返回类型注解，并折叠类型中的模块或闭包常量。stub 函数体保持为 `...`，
+extern 保留该返回类型注解，解析张量类型别名，并折叠模块常量、闭包常量或调用时绑定的
+`pl.constexpr` 值。已求值的注解还会保留仅用于签名的工厂函数局部变量，其值参与内存和
+磁盘缓存键（cache key）的计算。stub 函数体保持为 `...`，
 无需编写 Python `return` 语句：
 
 ```python
@@ -125,6 +127,17 @@ def entry(a: pl.Tensor, y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]):
 拆包后的输出也可以传给后续 JIT kernel。裸的 `tuple[pl.Tensor, pl.Tensor]` 无法为
 仅签名声明提供完整返回类型。已有的单输出 stub 在未提供完整返回类型注解时，仍可从
 第一个 `pl.Out` 参数推断返回类型。
+
+完整的显式返回类型注解必须按声明顺序匹配**全部** `pl.Out` 和 `pl.InOut` 参数，包括每个输出特化后的
+形状和数据类型。外部 ABI 将返回值映射到这些缓冲区，无法表达重排或仅返回部分输出；
+不兼容的声明会在特化时报错。多个返回值应使用 Python `tuple[...]`（或
+`typing.Tuple[...]`）。`pl.Tuple[...]` 表示单个元组值（tuple-valued result），无法映射到
+各个张量输出缓冲区，因此 extern 不支持这种返回类型。
+显式 `tuple[()]`（或 `typing.Tuple[()]`）声明零个返回结果，仅在没有
+`pl.Out`/`pl.InOut` 参数时有效。`pl.Tuple[()]` 和旧式 `pl.Tuple([...])`
+仍表示单个 tuple 值，因此不支持。
+该校验不适用于缺失或裸返回注解的旧有推断路径。仅通过副作用写入多个缓冲区的 kernel
+仍可省略返回类型注解。
 
 对于无法通过入口源码相对引用找到的头文件，使用 `include_dirs=[...]`。与 `source`
 相同，每个目录既可以是绝对路径，也可以相对于定义 `@pl.jit.extern` stub 的 Python

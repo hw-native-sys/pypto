@@ -13,6 +13,7 @@ import ast
 import math
 import textwrap
 import types
+import typing
 import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -1830,11 +1831,14 @@ class TestSpecializerExternReturnTypes:
     """Extern declarations keep complete types without changing ordinary DSL inference."""
 
     @staticmethod
-    def _specialize(annotation: str, body: str = "...", func_type: str = "extern") -> str:
+    def _specialize(
+        annotation: str, body: str = "...", func_type: str = "extern", one_output: bool = False
+    ) -> str:
+        params = "y: pl.Out[pl.Tensor]" if one_output else "y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]"
         ctx = _make_ctx(
-            source=f"def kernel(y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]){annotation}:\n    {body}",
+            source=f"def kernel({params}){annotation}:\n    {body}",
             func_type=func_type,
-            param_names=["y", "z"],
+            param_names=["y"] if one_output else ["y", "z"],
             tensor_meta={
                 "y": TensorMeta((16, 16), DataType.INT8),
                 "z": TensorMeta((16, 1), DataType.FP32),
@@ -1842,24 +1846,75 @@ class TestSpecializerExternReturnTypes:
         )
         ctx.external_core_type = "aiv"
         ctx.external_aiv_source = "kernel.cpp"
+        ctx.py_globals = {"Tuple": vars(typing)["Tuple"], "typing": typing, "pl": pl}
         return Specializer("Generated", [ctx]).specialize()
 
     @pytest.mark.parametrize("tuple_name", ["tuple", "Tuple", "typing.Tuple"])
-    def test_complete_tuple_preserves_declared_order(self, tuple_name):
-        # Reverse declaration order to ensure the annotation is not reconstructed
-        # by simply collecting Out params or duplicating the first Out's type.
+    def test_complete_tuple_preserves_output_order(self, tuple_name):
         source = self._specialize(
-            f" -> {tuple_name}[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 16], pl.INT8]]"
+            f" -> {tuple_name}[pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]]"
         )
-        assert "-> tuple[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 16], pl.INT8]]:" in source
+        assert "-> tuple[pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]]:" in source
 
-    def test_complete_single_return_is_not_replaced_by_first_out(self):
-        source = self._specialize(" -> pl.Tensor[[16, 1], pl.FP32]")
-        assert "-> pl.Tensor[[16, 1], pl.FP32]:" in source
+    def test_reordered_outputs_are_rejected(self):
+        # A signature-only declaration has no return-to-parameter mapping. The
+        # consumer metadata and runtime aliases must agree on parameter order.
+        with pytest.raises(ValueError, match="result 0 must match output parameter 'y'"):
+            self._specialize(" -> tuple[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 16], pl.INT8]]")
 
-    @pytest.mark.parametrize("annotation", ["", " -> pl.Tensor"])
-    def test_legacy_single_output_inference(self, annotation):
-        source = self._specialize(annotation)
+    def test_partial_output_return_is_rejected(self):
+        with pytest.raises(ValueError, match="1 results for 2 Out/InOut"):
+            self._specialize(" -> pl.Tensor[[16, 1], pl.FP32]")
+
+    @pytest.mark.parametrize("shape, dtype", [("[32, 16]", "INT8"), ("[16, 16]", "FP32")])
+    def test_incompatible_single_output_type_is_rejected(self, shape, dtype):
+        with pytest.raises(ValueError, match="result 0 must match output parameter 'y'"):
+            self._specialize(f" -> pl.Tensor[{shape}, pl.{dtype}]", one_output=True)
+
+    def test_nested_tuple_value_is_not_flattened(self):
+        with pytest.raises(ValueError, match="single tuple-valued result"):
+            self._specialize(" -> tuple[pl.Tuple[pl.Tensor[[16, 16], pl.INT8]]]")
+
+    @pytest.mark.parametrize("constructor", [False, True])
+    def test_dynamic_inout_and_out_keep_parameter_order(self, constructor):
+        ctx = _make_ctx(
+            source="""
+                def kernel(y: pl.InOut[pl.Tensor], z: pl.Out[pl.Tensor]) -> tuple[
+                    pl.Tensor[[ROWS, 16], pl.INT8], pl.Tensor[[ROWS, 1], pl.FP32]
+                ]: ...
+            """,
+            func_type="extern",
+            param_names=["y", "z"],
+            tensor_meta={
+                "y": TensorMeta((DynDim("ROWS", "rows", 16), 16), DataType.INT8),
+                "z": TensorMeta((DynDim("ROWS", "rows", 16), 1), DataType.FP32),
+            },
+        )
+        ctx.external_core_type = "aiv"
+        ctx.external_aiv_source = "kernel.cpp"
+        if constructor:
+            ctx.source = ctx.source.replace(
+                "pl.Tensor[[ROWS, 16], pl.INT8]", "pl.Tensor([ROWS, 16], pl.INT8)"
+            )
+            ctx.source = ctx.source.replace("pl.Tensor[[ROWS, 1], pl.FP32]", "pl.Tensor([ROWS, 1], pl.FP32)")
+        # The emitted dynamic label must not fold to the unrelated global.
+        ctx.py_globals = {"ROWS": pl.dynamic("rows"), "rows": 128}
+        source = Specializer("Generated", [ctx]).specialize()
+        assert "-> tuple[pl.Tensor[[rows, 16], pl.INT8], pl.Tensor[[rows, 1], pl.FP32]]:" in source
+
+    def test_single_tuple_value_is_not_flattened_into_results(self):
+        with pytest.raises(ValueError, match="single tuple-valued result"):
+            self._specialize(" -> pl.Tuple[pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]]")
+
+    @pytest.mark.parametrize("elements", ["", "pl.Tensor([16, 16], pl.INT8), pl.Tensor([16, 1], pl.FP32)"])
+    def test_legacy_tuple_constructor_is_not_inferred_as_tensor(self, elements):
+        with pytest.raises(ValueError, match="single tuple-valued result"):
+            self._specialize(f" -> 'pl.Tuple([{elements}])'")
+
+    @pytest.mark.parametrize("annotation", ["", " -> pl.Tensor", " -> typing.Tuple"])
+    @pytest.mark.parametrize("one_output", [False, True])
+    def test_legacy_output_inference(self, annotation, one_output):
+        source = self._specialize(annotation, one_output=one_output)
         assert "-> pl.Tensor[[16, 16], pl.INT8]:" in source
 
     @pytest.mark.parametrize(

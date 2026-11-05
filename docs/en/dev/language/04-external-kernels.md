@@ -112,8 +112,10 @@ Single-core form: `@pl.jit.extern(core_type="aic"|"aiv", source="k.cpp")`.
 
 For multiple outputs, declare a tuple with the complete shape and dtype of each
 result. The JIT preserves this return annotation for AIC, AIV, and mixed
-externs, folding module or closure constants in the types. Keep the stub body
-as `...`; no Python `return` statement is needed:
+externs, resolving tensor aliases and folding module, closure, or call-bound
+`pl.constexpr` values. Evaluated annotations also retain factory locals that
+appear only in the signature; their values participate in the memory and disk
+cache keys. Keep the stub body as `...`; no Python `return` statement is needed:
 
 ```python
 @pl.jit.extern(core_type="aiv", source="kernels/pair.cpp")
@@ -133,6 +135,20 @@ The unpacked outputs can also feed later JIT kernels. A bare
 signature-only declaration. Existing single-output stubs can still infer their
 return type from the first `pl.Out` parameter when no complete return annotation
 is supplied.
+
+Complete explicit return annotations must match **all** `pl.Out` and `pl.InOut` parameters in
+declaration order, including each output's specialized shape and dtype. The
+external ABI aliases results to these buffers; it cannot express a reordered
+or partial output list. Incompatible declarations fail during specialization.
+Use Python `tuple[...]` (or `typing.Tuple[...]`) for multiple results.
+`pl.Tuple[...]` denotes a single tuple-valued result and is rejected for externs,
+because it cannot alias the individual tensor output buffers.
+An explicit `tuple[()]` (or `typing.Tuple[()]`) declares zero results and is
+valid only without `pl.Out`/`pl.InOut` parameters. `pl.Tuple[()]` and legacy
+`pl.Tuple([...])` still denote a single tuple-valued result and are rejected.
+This validation does not apply to legacy inference from missing or bare return
+annotations. Kernels that write several buffers and are called only for their
+side effects can continue to omit the return annotation.
 
 Use `include_dirs=[...]` for headers that are not reachable through quoted
 includes relative to the entry source. Like `source`, each directory may be

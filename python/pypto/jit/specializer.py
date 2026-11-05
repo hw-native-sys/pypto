@@ -41,15 +41,16 @@ import importlib
 import inspect
 import keyword
 import textwrap
-import types
 import unicodedata
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from typing import Any, cast, get_args, get_origin
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto.language.parser.expr_evaluator import ExprEvaluator
+from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
 from pypto.language.typing.dynamic import DynVar as _LangDynVar
 from pypto.language.typing.scalar import Scalar as _LangScalar
@@ -140,7 +141,7 @@ class SpecializeContext:
             for cache-key construction and annotation resolution. The specializer
             inlines referenced int/float/bool constants at their use sites.
         eager_tile_annotations: Read-only request snapshot of eager inline Tile
-            sources, deferred metadata and fresh parameter names. Independent
+            parameters or extern returns, deferred metadata and fresh parameter names. Independent
             factory values come from Python's evaluated annotations; call-owned
             expressions are substituted separately for each specialization.
         annotation_dynvars: Scalar symbols used by Tile annotation shapes or
@@ -567,6 +568,7 @@ def _fold_const_names(
     node: ast.expr,
     py_globals: Mapping[str, Any],
     constexpr_values: Mapping[str, str] | None = None,
+    annotation_renderer: Callable[[Any], ast.expr | None] | None = None,
 ) -> ast.expr:
     """Replace ``Name`` nodes bound to renderable free values with their source form.
 
@@ -590,12 +592,14 @@ def _fold_const_names(
     ``func_def`` is shared with the body specialization pass.
     """
 
+    renderer = annotation_renderer or _render_annotation_value
+
     class _Folder(ast.NodeTransformer):
         def visit_Name(self, node: ast.Name) -> ast.expr:
             if constexpr_values and node.id in constexpr_values:
                 return ast.copy_location(ast.parse(constexpr_values[node.id], mode="eval").body, node)
             value = py_globals.get(node.id, _UNBOUND)
-            folded = _render_annotation_value(value)
+            folded = renderer(value)
             if folded is not None:
                 return ast.copy_location(folded, node)
             path = _annotation_symbol_index().get(id(value))
@@ -646,8 +650,13 @@ def _tuple_annotation_elements(annotation: Any) -> tuple[Any, ...] | None:
     """Read the DSL Tuple wrapper or Python's built-in tuple annotation."""
     if isinstance(annotation, _LangTuple):
         return cast("tuple[Any, ...]", getattr(cast("Any", annotation), "_types", ()))
-    if isinstance(annotation, types.GenericAlias) and annotation.__origin__ is tuple:
-        return annotation.__args__
+    if get_origin(annotation) is tuple and hasattr(annotation, "__args__"):
+        elements = get_args(annotation)
+        # typing.Tuple[()] can expose ((),), whereas tuple[()] exposes ().
+        # Bare typing.Tuple has no __args__ and remains incomplete.
+        if len(elements) == 1 and isinstance(elements[0], tuple) and not elements[0]:
+            return ()
+        return elements
     return None
 
 
@@ -1345,38 +1354,244 @@ def _specialize_eager_tile_annotation(
     return ast.unparse(node)
 
 
+def _extern_annotation_source(annotation: Any) -> str | None:
+    """Snapshot eager tensors without conflating a result list with a tuple value."""
+    elements = _tuple_annotation_elements(annotation)
+    if elements is not None:
+        children = [_extern_annotation_source(element) for element in elements]
+        if any(child is None for child in children):
+            return None
+        head = "pl.Tuple" if isinstance(annotation, _LangTuple) else "tuple"
+        return f"{head}[{', '.join(cast('list[str]', children)) if children else '()'}]"
+    distributed_tensor = importlib.import_module("pypto.language.distributed.typing").DistributedTensor
+    if type(annotation) is distributed_tensor:
+        # Reuse shape/view normalization without erasing the distributed kind.
+        plain = _LangTensor(
+            annotation.shape,
+            annotation.dtype,
+            layout=annotation.layout,
+            memref=annotation.memref,
+            _annotation_only=True,
+        )
+        tensor_type = _inline_annotation_ir_type(plain)
+        if tensor_type is None:
+            return None
+        assert isinstance(tensor_type, _ir.TensorType)
+        distributed_type = _ir.DistributedTensorType(
+            tensor_type.shape,
+            tensor_type.dtype,
+            memref=tensor_type.memref,
+            tensor_view=tensor_type.tensor_view,
+        )
+        return _ir.python_print_type(distributed_type, format=False)
+    return _tile_annotation_source(annotation) if isinstance(annotation, _LangTensor) else None
+
+
+def _render_extern_annotation_value(value: Any) -> ast.expr | None:
+    """Keep tuple aliases distinct and let incomplete extern contracts decline."""
+    if isinstance(value, _LangTensor) or _tuple_annotation_elements(value) is not None:
+        source = _extern_annotation_source(value)
+        return ast.parse(source, mode="eval").body if source is not None else None
+    return _render_annotation_value(value)
+
+
+@cache_in_snapshot
+def _eager_extern_return_data(func: Any) -> _EagerTileAnnotations:
+    """Share an extern's evaluated return contract between emission and cache keys.
+
+    Annotation-only factory locals have no closure cells. Recover those values
+    from __annotations__, but use the existing eager-template machinery to
+    retain call-owned constexpr expressions instead of freezing ambient values.
+    """
+    data = _EagerTileAnnotations()
+    definition = _find_func_def(ast.parse(textwrap.dedent(inspect.getsource(func))), func.__name__)
+    assert definition is not None
+    original = definition.returns
+    if original is None:
+        return data
+    if isinstance(original, ast.Constant) and isinstance(original.value, str):
+        original = ast.parse(original.value, mode="eval").body
+    param_names = set(inspect.signature(func).parameters)
+    namespace = {name: value for name, value in func_name_lookup(func).items() if name not in param_names}
+    original = _normalize_extern_return_calls(original, namespace)
+    data.fingerprints["return"] = ast.unparse(
+        _fold_const_names(original, namespace, annotation_renderer=_render_extern_annotation_value)
+    )
+    annotation = inspect.get_annotations(func, eval_str=False).get("return")
+    if isinstance(annotation, str) and not _annotation_names(original) & param_names:
+        # Resolve whole return aliases with extern tuple semantics before the
+        # generic annotation renderer can turn Python tuples into pl.Tuple.
+        annotation = _eval_annotation(annotation, namespace)
+    source = _extern_annotation_source(annotation)
+    if source is None:
+        return data
+    overrides: tuple[_TileMetadataOverride, ...] = ()
+    placeholders: dict[str, str] = {}
+    if _annotation_names(original) & param_names:
+        merged = _parameterized_eager_tile_source(original, source, annotation, namespace, param_names)
+        if merged is None:
+            raise ValueError(
+                f"Cannot recover parameter-dependent extern return annotation for '{func.__name__}'"
+            )
+        source, overrides, placeholders = merged
+    data.sources["return"] = source
+    data.overrides["return"] = overrides
+    data.parameter_placeholders["return"] = placeholders
+    data.fingerprints["return"] = repr(
+        (source, tuple((o.path, o.kind, o.canonical_source) for o in overrides), tuple(placeholders.items()))
+    )
+    used_names = _unreplaced_template_names(source, overrides)
+    data.dynvars.update(
+        {
+            name: literal
+            for name, literal in _tile_annotation_dynvars(annotation).items()
+            if name in used_names and name not in param_names
+        }
+    )
+    return data
+
+
+def extern_return_annotation_fingerprint(func: Any) -> str:
+    """Return the same canonical extern contract used by source specialization."""
+    return repr(_eager_extern_return_data(func).fingerprints)
+
+
+def _normalize_extern_return_calls(node: ast.expr, namespace: Mapping[str, Any]) -> ast.expr:
+    """Normalize legacy Tensor/Tuple calls before classifying extern contracts."""
+
+    class Normalizer(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.expr:
+            self.generic_visit(node)
+            constructor = _eval_annotation(ast.unparse(node.func), namespace)
+            if constructor is _LangTensor and len(node.args) >= 2:
+                elements = node.args[:2]
+            elif constructor is _LangTuple and len(node.args) == 1 and isinstance(node.args[0], ast.List):
+                elements = node.args[0].elts
+            else:
+                return node
+            return ast.copy_location(
+                ast.Subscript(
+                    value=node.func,
+                    slice=ast.Tuple(elts=elements, ctx=ast.Load()),
+                    ctx=ast.Load(),
+                ),
+                node,
+            )
+
+    return Normalizer().visit(copy.deepcopy(node))
+
+
 def _render_complete_return_annotation(
+    annotation: ast.expr | None,
+    py_globals: Mapping[str, Any],
+    constexpr_values: Mapping[str, str] | None = None,
+) -> str | None:
+    """Render complete return types after resolving aliases and call-owned constants."""
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        annotation = ast.parse(annotation.value, mode="eval").body
+    if annotation is not None:
+        annotation = _fold_const_names(
+            annotation, py_globals, constexpr_values, annotation_renderer=_render_extern_annotation_value
+        )
+        annotation = _normalize_extern_return_calls(
+            annotation, {**py_globals, "pl": importlib.import_module("pypto.language")}
+        )
+    return _render_folded_return_annotation(annotation, py_globals)
+
+
+def _render_folded_return_annotation(
     annotation: ast.expr | None, py_globals: Mapping[str, Any]
 ) -> str | None:
-    """Render a shaped tensor or tuple of shaped tensors; defer incomplete types to inference.
-
-    Extern declarations have no DSL return statement to infer from. Their
-    complete declared types are the contract, including element order. Check
-    every tuple element so ``tuple[pl.Tensor, pl.Tensor]`` still takes the
-    inference path. Type validity itself remains the parser's responsibility.
-    """
+    """Classify folded types without substituting emitted DynVar labels again."""
     if not isinstance(annotation, ast.Subscript):
         return None
-    if _is_tuple_annotation(annotation.value):
+    head = _eval_annotation(ast.unparse(annotation.value), {"tuple": tuple, **py_globals})
+    is_tuple_value = head is _LangTuple or ast.unparse(annotation.value) == "pl.Tuple"
+    if is_tuple_value or head is tuple or get_origin(head) is tuple:
         elements = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
-        if not elements:
-            return None
         rendered: list[str] = []
         for element in elements:
-            element_type = _render_complete_return_annotation(element, py_globals)
+            # The whole annotation is already folded. A second namespace fold
+            # could replace an emitted DynVar label with a same-named global.
+            element_type = _render_folded_return_annotation(element, py_globals)
             if element_type is None:
                 return None
             rendered.append(element_type)
-        # Normalize typing.Tuple too, just like the body-based return inferer.
-        return f"tuple[{', '.join(rendered)}]"
+        head_name = "pl.Tuple" if is_tuple_value else "tuple"
+        return f"{head_name}[{', '.join(rendered) if rendered else '()'}]"
     if (
         _is_tensor_annotation(annotation.value)
         and isinstance(annotation.slice, ast.Tuple)
         and len(annotation.slice.elts) >= 2
         and not any(isinstance(elt, ast.Constant) and elt.value is None for elt in annotation.slice.elts[:2])
     ):
-        return ast.unparse(_fold_const_names(annotation, py_globals))
+        return ast.unparse(annotation)
     return None
+
+
+def _extern_return_type(
+    definition: ast.FunctionDef, ctx: SpecializeContext, ann_globals: dict[str, Any], params: list[str]
+) -> str | None:
+    """Specialize the snapshot, retaining the ordinary inference fallback for bare types."""
+    if "return" in ctx.eager_tile_annotations.sources:
+        source = _specialize_eager_tile_annotation(ctx, "return", ann_globals, set(ctx.scalar_dtypes))
+        result = _render_complete_return_annotation(ast.parse(source, mode="eval").body, {})
+    else:
+        result = _render_complete_return_annotation(definition.returns, ctx.py_globals, ctx.constexpr_values)
+    if "return" not in ctx.eager_tile_annotations.sources and definition.returns is not None:
+        original = definition.returns
+        spelling = (
+            original.value
+            if isinstance(original, ast.Constant) and isinstance(original.value, str)
+            else ast.unparse(original)
+        )
+        normalized = _normalize_extern_return_calls(ast.parse(spelling, mode="eval").body, ann_globals)
+        ctx.annotation_dynvars.update(
+            _tile_annotation_dynvars(_eval_annotation(ast.unparse(normalized), ann_globals))
+        )
+    if result is not None:
+        _validate_extern_return_mapping(ctx, params, f" -> {result}")
+    return result
+
+
+def _validate_extern_return_mapping(ctx: SpecializeContext, params: list[str], ret_ann: str) -> None:
+    """Reject declarations the header-only output-buffer ABI cannot represent.
+
+    Both caller metadata propagation and orchestration aliases map returns to
+    Out/InOut parameters in declaration order. Types alone cannot encode a
+    permutation or subset, so require matching arity and logical tensor types.
+    Use the parser's resolver for tuple semantics and symbolic dimensions.
+    """
+    if not ret_ann:
+        return
+    namespace = {name: _LangDynVar(literal) for name, literal in ctx.dynvar_literals().items()}
+    resolver = TypeResolver(ExprEvaluator(namespace))
+    signature = ast.parse(f"def kernel({', '.join(params)}){ret_ann}: pass").body[0]
+    assert isinstance(signature, ast.FunctionDef) and signature.returns is not None
+    outputs: list[tuple[str, _ir.Type]] = []
+    for arg in signature.args.args:
+        assert arg.annotation is not None
+        typ, direction = resolver.resolve_param_type(arg.annotation)
+        if direction in (_ir.ParamDirection.Out, _ir.ParamDirection.InOut):
+            outputs.append((arg.arg, typ))
+    resolved = resolver.resolve_type(signature.returns)
+    returns = resolved if isinstance(resolved, list) else [resolved]
+    if any(isinstance(typ, _ir.TupleType) for typ in returns):
+        raise ValueError(
+            f"Extern '{ctx.source_def_name}' declares a single tuple-valued result (pl.Tuple), "
+            "which cannot alias tensor output parameters; use Python tuple[...] for multiple results"
+        )
+    if len(returns) != len(outputs):
+        raise ValueError(
+            f"Extern '{ctx.source_def_name}' declares {len(returns)} results for {len(outputs)} Out/InOut "
+            "parameters; return every output exactly once in parameter declaration order"
+        )
+    for index, (actual, (name, expected)) in enumerate(zip(returns, outputs, strict=True)):
+        if not _ir.structural_equal(actual, expected):
+            raise ValueError(
+                f"Extern '{ctx.source_def_name}' result {index} must match output parameter '{name}' "
+                "in declaration order; return reordering or incompatible output types are unsupported"
+            )
 
 
 def _infer_return_type(
@@ -2055,9 +2270,7 @@ class Specializer:
         # A signature-only extern has no Return node. Preserve its complete
         # declaration before the legacy first-Out fallback can erase outputs.
         ret_type = (
-            _render_complete_return_annotation(func_def.returns, ctx.py_globals)
-            if ctx.func_type == "extern"
-            else None
+            _extern_return_type(func_def, ctx, ann_globals, params) if ctx.func_type == "extern" else None
         ) or _infer_return_type(func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals)
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
@@ -2228,7 +2441,7 @@ class Specializer:
         # AIV lanes never capture a return; the AIC lane echoes the outputs, so
         # a value-returning kernel threads through the AIC member (matching the
         # @pl.program group example). A void kernel emits both calls uncaptured.
-        if ret_ann:
+        if ret_ann and ret_ann != " -> tuple[()]":
             lines.append(f"    _r = self.{name}_aic({call_args})")
             lines.append(f"    self.{name}_aiv({call_args})")
             lines.append("    return _r")
@@ -2434,7 +2647,13 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
     param_names = [p for p in inspect.signature(func).parameters if p != "self"]
-    eager_data = _eager_tile_annotation_data(func) if func_type == "inline" else _EagerTileAnnotations()
+    eager_data = (
+        _eager_tile_annotation_data(func)
+        if func_type == "inline"
+        else _eager_extern_return_data(func)
+        if func_type == "extern"
+        else _EagerTileAnnotations()
+    )
 
     return SpecializeContext(
         func_name=func_name,
