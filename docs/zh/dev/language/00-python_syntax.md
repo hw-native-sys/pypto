@@ -213,7 +213,6 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
 
 `blayout` 和 `slayout` 接受外围 Python 作用域中的 `pl.TileLayout` 常量。
 
-
 ```python
 # Create TileView
 valid_shape = [pl.ConstInt(16, pl.INT64, span)] * 2
