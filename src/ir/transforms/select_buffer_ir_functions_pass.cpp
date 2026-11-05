@@ -334,6 +334,9 @@ class BufferKernelSupport : public IRVisitor {
       supported &= GetIntKwarg(call->kwargs_, "cache", 0) == 0;
     } else if (IsOp(call, "tile.store")) {
       has_store = true;
+      // The Buffer store recipe accepts only the three-operand form. Keep
+      // explicit partition shapes on Tile IR before any storage is rewritten.
+      supported &= call->args_.size() == 3;
       CheckTransferParameter(call, 2, false);
       CheckTransferTypes(call, false);
       supported &=

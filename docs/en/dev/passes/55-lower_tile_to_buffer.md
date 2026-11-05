@@ -23,6 +23,10 @@ valid extents may be static partial rectangles or supported runtime rectangles w
 Elementwise Tile operands and their destination must have matching physical shapes
 and valid extents; matching valid extents alone do not qualify.
 
+Stores with an explicit `shapes` operand retain Tile IR. The default Buffer
+store recipe accepts only the three-operand form; selection rejects the explicit
+partition form before storage planning rather than failing during final lowering.
+
 | Operations | Element types |
 | ---------- | ------------- |
 | Ordinary packed ND GM load/store | FP16, BF16, FP32, INT32 |
