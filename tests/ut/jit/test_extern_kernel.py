@@ -885,7 +885,7 @@ def entry(output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
     ("shape", "dtype", "layout"),
     [
         ([1, 32], pl.FP32, pl.ND),
-        ([16, 32], pl.FP32, pl.DN),
+        ([16, 32], pl.FP32, pl.TensorView(stride=[], layout=pl.DN)),
         ([16, 32], pl.FP32, pl.NZ),
         ([32, 4], pl.FP8E8M0, pl.MX_A_ZZ),
         ([4, 32], pl.FP8E8M0, pl.MX_B_NN),
