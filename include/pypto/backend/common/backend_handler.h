@@ -14,7 +14,9 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/cast_rules.h"
