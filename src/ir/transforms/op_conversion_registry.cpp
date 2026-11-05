@@ -1840,7 +1840,11 @@ void OpConversionRegistry::RegisterGatherOps() {
         std::optional<GatherSourceWindow> direct_source;
         int64_t direct_stride = 0;
         int64_t direct_offset = 0;
-        if (rank == 2 && norm_dim == 1) {
+        // Local indices also need a current-producer fact for safe backing
+        // deduplication. Unknown index views retain the original lowering.
+        const bool known_index_storage =
+            !As<TileType>(index->GetType()) || context.gather_source_windows.count(index) != 0;
+        if (rank == 2 && norm_dim == 1 && known_index_storage) {
           auto known = context.gather_source_windows.find(input);
           if (known != context.gather_source_windows.end()) {
             const auto& window = known->second;
@@ -1909,8 +1913,16 @@ void OpConversionRegistry::RegisterGatherOps() {
             auto origin = context.storage_origins.find(operand);
             // Unknown local storage cannot safely be sized by its view shape.
             if (origin == context.storage_origins.end()) return true;
-            if (!charged.insert(origin->second).second) continue;
-            auto bytes = utils::StaticPhysicalAllocationBytes(As<TileType>(origin->second->GetType()),
+            ExprPtr backing = origin->second;
+            if (direct_source) {
+              auto window = context.gather_source_windows.find(operand);
+              if (window != context.gather_source_windows.end()) backing = window->second.base;
+            }
+            // A functional writeback may copy its target when an older value
+            // remains live. Deduplicate known windows by current SSA producer,
+            // not the pre-write logical allocation shared by those versions.
+            if (!charged.insert(backing).second) continue;
+            auto bytes = utils::StaticPhysicalAllocationBytes(As<TileType>(backing->GetType()),
                                                               MemorySpace::Vec, target->GetHandler());
             if (!bytes) return true;
             const uint64_t aligned = policy->AlignAddress(*bytes, MemorySpace::Vec);

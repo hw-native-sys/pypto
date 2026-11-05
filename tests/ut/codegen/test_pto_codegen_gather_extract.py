@@ -110,6 +110,40 @@ class Program:
         assert any("pto.tmuls ins(" in line and "%c256_i32" in line for line in mlir.splitlines())
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("writeback", [False, True])
+def test_gather_charges_distinct_parent_versions(ascend_backend, writeback):
+    # A partial writeback produces a distinct source while indices and the echo
+    # keep the original 64 KiB parent live. Counting the logical allocation only
+    # once would select a full gather whose two parents and working tiles exceed
+    # A2/A3 Vec. Row lowering fits; A5 has room for the full working set.
+    source = "pl.assemble(original,patch,[0,0])" if writeback else "original"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        output: pl.Out[pl.Tensor[[32,160],pl.INT32]],
+        echo: pl.Out[pl.Tensor[[32,512],pl.INT32]],
+    ) -> tuple[pl.Tensor[[32,160],pl.INT32],pl.Tensor[[32,512],pl.INT32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            original = pl.full([32,512],dtype=pl.INT32,value=0)
+            indices = original[:,:160]
+            patch = pl.full([1,8],dtype=pl.INT32,value=1)
+            updated = {source}
+            picked = pl.tensor.gather(updated,dim=-1,index=indices)
+            output = pl.assemble(output,picked,[0,0])
+            echo = pl.assemble(echo,original,[0,0])
+        return output,echo
+""")
+
+    mlir = _codegen(program)
+    capacity = backend.get_backend_instance(ascend_backend).get_mem_size(ir.MemorySpace.Vec)
+    assert ("scf.for" in mlir) == (writeback and capacity < 2 * 32 * 512 * 4 + 5 * 32 * 160 * 4)
+    assert mlir.count("pto.tgather ins(") == 1
+
+
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("rows,parent_cols,needs_copy", [(16, 256, False), (64, 1024, True)])
 def test_gather_int16_offsets_use_parent_only_when_representable(
