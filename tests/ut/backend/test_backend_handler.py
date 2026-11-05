@@ -172,6 +172,20 @@ class TestGlobalHandlerAccessor:
             assert _backend_core.get_backend_type() == configured_backend
 
 
+def _direct_tile_view(**kwargs):
+    """Build a view with Expr extents, including mixed static/dynamic inputs."""
+    span = _ir_core.Span.unknown()
+    for key in ("valid_shape", "stride"):
+        if key in kwargs:
+            kwargs[key] = [
+                _ir_core.ConstInt(value, pl.INDEX, span) if isinstance(value, int) else value
+                for value in kwargs[key]
+            ]
+    if isinstance(kwargs.get("start_offset"), int):
+        kwargs["start_offset"] = _ir_core.ConstInt(kwargs["start_offset"], pl.INDEX, span)
+    return _ir_core.TileView(**kwargs)
+
+
 def _direct_cast_query(
     source_dtype,
     target_dtype,
@@ -236,15 +250,15 @@ def test_direct_packed_cast_normalizes_both_dynamic_valid_extents(packed_dtype, 
     """Affine packed extents must compare by value in either conversion direction."""
     span = _ir_core.Span.unknown()
     n = _ir_core.Var("n", _ir_core.ScalarType(pl.INDEX), span)
-    packed_cols = _ir_core.Add(n, _ir_core.ConstInt(1, pl.INDEX), pl.INDEX, span)
+    packed_cols = _ir_core.Add(n, _ir_core.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
     unpacked_cols = _ir_core.Mul(
-        _ir_core.Add(n, _ir_core.ConstInt(1 if matching else 2, pl.INDEX), pl.INDEX, span),
-        _ir_core.ConstInt(2, pl.INDEX),
+        _ir_core.Add(n, _ir_core.ConstInt(1 if matching else 2, pl.INDEX, span), pl.INDEX, span),
+        _ir_core.ConstInt(2, pl.INDEX, span),
         pl.INDEX,
         span,
     )
-    packed_view = _ir_core.TileView(valid_shape=[16, packed_cols])
-    unpacked_view = _ir_core.TileView(valid_shape=[16, unpacked_cols])
+    packed_view = _direct_tile_view(valid_shape=[16, packed_cols])
+    unpacked_view = _direct_tile_view(valid_shape=[16, unpacked_cols])
     call = _direct_cast_query(
         packed_dtype if decode else pl.BF16,
         pl.BF16 if decode else packed_dtype,
@@ -270,14 +284,19 @@ def test_direct_cast_rule_rejects_invalid_packed_descriptors(case):
     if case == "dynamic_valid":
         n = _ir_core.Var("n", _ir_core.ScalarType(pl.INDEX), _ir_core.Span.unknown())
         source_valid = [8, n]
-        result_valid = [8, _ir_core.Mul(n, _ir_core.ConstInt(2, pl.INDEX), pl.INDEX, _ir_core.Span.unknown())]
-    source_view = _ir_core.TileView(
+        result_valid = [
+            8,
+            _ir_core.Mul(
+                n, _ir_core.ConstInt(2, pl.INDEX, _ir_core.Span.unknown()), pl.INDEX, _ir_core.Span.unknown()
+            ),
+        ]
+    source_view = _direct_tile_view(
         valid_shape=source_valid,
         stride=[64, 1] if case == "stride" else [32, 1],
         start_offset=1 if case == "offset" else 0,
         compact=_ir_core.CompactMode.normal if case == "compact" else _ir_core.CompactMode.null,
     )
-    result_view = _ir_core.TileView(valid_shape=result_valid, stride=[64, 1])
+    result_view = _direct_tile_view(valid_shape=result_valid, stride=[64, 1])
     call = _direct_cast_query(
         pl.FP4E2M1X2,
         pl.FP8E4M3FN,
@@ -302,8 +321,8 @@ def test_direct_cast_rule_rejects_invalid_packed_descriptors(case):
 def test_direct_cast_dense_dn_rule_and_full_validity(source_dtype, result_dtype, source_rows, result_rows):
     """DN uses the same lookup as ND and rejects partial rectangles without a special predicate."""
     handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
-    source_view = _ir_core.TileView(blayout=_ir_core.TileLayout.col_major, stride=[1, source_rows])
-    result_view = _ir_core.TileView(blayout=_ir_core.TileLayout.col_major, stride=[1, result_rows])
+    source_view = _direct_tile_view(blayout=_ir_core.TileLayout.col_major, stride=[1, source_rows])
+    result_view = _direct_tile_view(blayout=_ir_core.TileLayout.col_major, stride=[1, result_rows])
     call = _direct_cast_query(
         source_dtype,
         result_dtype,
@@ -313,10 +332,10 @@ def test_direct_cast_dense_dn_rule_and_full_validity(source_dtype, result_dtype,
         result_view=result_view,
     )
     assert _backend_core.is_direct_cast(call, handler)
-    partial_source = _ir_core.TileView(
+    partial_source = _direct_tile_view(
         blayout=_ir_core.TileLayout.col_major, valid_shape=[source_rows, 8], stride=[1, source_rows]
     )
-    partial_result = _ir_core.TileView(
+    partial_result = _direct_tile_view(
         blayout=_ir_core.TileLayout.col_major, valid_shape=[result_rows, 8], stride=[1, result_rows]
     )
     partial = _direct_cast_query(
@@ -341,7 +360,7 @@ def test_direct_cast_accepts_transport_box_with_narrowed_consumer(target, dynami
         pl.FP32,
         [32, 128],
         [32, 128],
-        result_view=_ir_core.TileView(valid_shape=[rows, 128]),
+        result_view=_direct_tile_view(valid_shape=[rows, 128]),
     )
     handler = _backend_core.get_backend_instance(target).get_handler()
     assert _backend_core.is_direct_cast(call, handler)

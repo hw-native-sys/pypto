@@ -831,6 +831,8 @@ def test_dense_dn_tensor_slice_cast_preserves_other_consumer_layout(tmp_path, dt
 def test_e2m1_direct_fp8_cast_emits_one_tcvt(tmp_path, planner, surface, partial):
     """Tensor lowering and both Tile APIs must reach the direct A5 instruction."""
     valid_rows, valid_cols = (8, 24) if partial else (16, 32)
+    # The DSL accepts integer closure values, not Python strings.
+    surface_code = {"tensor": 0, "unified": 1, "tile": 2}[surface]
 
     @pl.program
     class Direct:
@@ -840,13 +842,13 @@ def test_e2m1_direct_fp8_cast_emits_one_tcvt(tmp_path, planner, surface, partial
             source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
             output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
         ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
-            if surface == "tensor":
+            if surface_code == 0:
                 packed = pl.tensor.slice(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
                 decoded = pl.cast(packed, pl.FP8E4M3FN)
                 return pl.assemble(output, decoded, [16, 64])
             else:
                 packed = pl.load(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
-                if surface == "tile":
+                if surface_code == 2:
                     decoded = pl.tile.cast(packed, pl.FP8E4M3FN)
                 else:
                     decoded = pl.cast(packed, pl.FP8E4M3FN)
@@ -892,8 +894,8 @@ def test_e2m1_direct_fp8_empty_replay_keeps_storage_without_tcvt():
     reset_for_testing()
     set_backend_type(BackendType.Ascend950)
     span = ir.Span.unknown()
-    source_storage = ir.MemRef(ir.MemorySpace.Vec, 0, 512, 0)
-    result_storage = ir.MemRef(ir.MemorySpace.Vec, 1024, 1024, 1)
+    source_storage = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 512, 0)
+    result_storage = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(1024, pl.INT64, span), 1024, 1)
     empty = ir.TileView(valid_shape=[0, 0])
     source_type = ir.TileType([16, 32], pl.fp4e2m1x2, source_storage, empty, ir.MemorySpace.Vec)
     result_type = ir.TileType([16, 64], pl.FP8E4M3FN, result_storage, empty, ir.MemorySpace.Vec)

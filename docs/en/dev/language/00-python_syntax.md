@@ -235,6 +235,9 @@ See [InitMemRef](../passes/37-init_memref.md#declared-allocations) and
 
 ### Tile Views (TileView)
 
+`blayout` and `slayout` accept `pl.TileLayout` constants from the enclosing Python scope.
+
+
 ```python
 # Create TileView
 valid_shape = [pl.ConstInt(16, pl.INT64, span)] * 2

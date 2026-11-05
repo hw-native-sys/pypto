@@ -13,6 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import InvalidOperationError
 
 _TILE_CAST = ir.get_op("tile.cast").name
@@ -48,6 +49,12 @@ def _run(program, backend_type: BackendType):
         return passes.legalize_tile_cast()(program)
     finally:
         backend.reset_for_testing()
+
+
+def _assert_recorded_cast_roundtrip(program):
+    printed = python_print(program, format=False)
+    assert 'pl._dump.call("tile.cast"' in printed
+    ir.assert_structural_equal(program, pl.parse_program(printed), enable_auto_mapping=True)
 
 
 def test_legalize_tile_cast_pass_factory_exists():
@@ -897,14 +904,17 @@ def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface, planner)
     try:
         capfd.readouterr()
         with passes.PassContext([], memory_planner=planner):
-            after = _run(Before, BackendType.Ascend950)
+            # Resolve the compile-time surface choice before counting casts: the
+            # parser otherwise retains both branches of the authored conditional.
+            before = passes.simplify()(Before)
+            after = _run(before, BackendType.Ascend950)
     finally:
         set_log_level(previous)
     assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
-    ir.assert_structural_equal(after, Before)
+    ir.assert_structural_equal(after, before)
     assert "FP4→BF16→FP32→FP8" not in capfd.readouterr().err
     with pytest.raises(ValueError, match="no native cast path"):
-        _run(Before, BackendType.Ascend910)
+        _run(before, BackendType.Ascend910)
 
 
 @pytest.mark.parametrize(
@@ -917,7 +927,10 @@ def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
     valid_cols = ir.Var("valid_cols", ir.ScalarType(pl.INDEX), span)
     valid = [rows, valid_cols] if case == "dynamic_valid" else []
     if case == "dynamic_affine_valid":
-        valid = [rows, ir.Add(valid_cols, ir.ConstInt(1, pl.INDEX), pl.INDEX, span)]
+        valid = [
+            ir.ConstInt(rows, pl.INDEX, span),
+            ir.Add(valid_cols, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span),
+        ]
     stride = [cols + 32, 1] if case == "strided" else []
     source_type = ir.TileType([rows, cols], pl.fp4e2m1x2, None, ir.TileView(valid_shape=valid, stride=stride))
     source = ir.Var("source", source_type, span)
@@ -928,7 +941,7 @@ def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
         )
         cast = ir.Call(cast.op, cast.args, cast.kwargs, result_type, span)
     decoded = ir.Var("decoded", cast.type, span)
-    parameters = [source, valid_cols] if case in ("dynamic_valid", "dynamic_affine_valid") else [source]
+    parameters = [valid_cols, source] if case in ("dynamic_valid", "dynamic_affine_valid") else [source]
     before = ir.Program(
         [
             ir.Function(
@@ -949,6 +962,8 @@ def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
         ("bfloat16", "fp32"),
         ("fp32", "fp8e4m3fn"),
     ]
+    if case == "narrowed_result":
+        _assert_recorded_cast_roundtrip(after)
 
 
 @pytest.mark.parametrize("tile_surface", [False, True])
@@ -983,6 +998,8 @@ def test_late_cast_bridge_preserves_placement_final_type_and_attrs(placed):
     memory = ir.MemorySpace.Vec if placed else None
     source = ir.Var("source", ir.TileType([16, 16], pl.fp4e2m1x2, None, None, memory), span)
     tmp = ir.Var("tmp", ir.TileType([1, 64], pl.INT8, None, None, memory), span)
+    # An absent view is the canonical implicit layout; legalization must
+    # preserve it even when the final hop's inferred input has explicit stride.
     result_type = ir.TileType([16, 32], pl.FP8E4M3FN, None, None, memory)
     attrs = {"arg_directions": [ir.ArgDirection.Input, ir.ArgDirection.InOut], "test_metadata": "retained"}
     kwargs = {"target_type": pl.FP8E4M3FN, "mode": 1, "saturation_mode": 0}
@@ -1036,6 +1053,7 @@ def test_late_cast_bridge_preserves_placement_final_type_and_attrs(placed):
     assert final.value.attrs == attrs
     assert final.value.kwargs == kwargs
     assert final.value.args[1] is tmp
+    _assert_recorded_cast_roundtrip(after)
 
 
 def test_native_direct_cast_empty_replay_is_not_expanded():

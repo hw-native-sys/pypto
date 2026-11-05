@@ -724,7 +724,9 @@ def test_type_check_rejects_rewritten_cast_contract(surface, case, message):
         result_type = ir.TileType(shape, result_dtype, None, ir.TileView(valid_shape=valid))
     else:
         source_type = ir.TensorType([16, 32], source_dtype)
-        result_type = ir.TensorType(shape, result_dtype, None, ir.TensorView(valid_shape=valid))
+        result_type = ir.TensorType(
+            shape, result_dtype, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=valid)
+        )
     source = ir.Var("source", source_type, span)
     kwargs: dict[str, Any] = {"target_type": result_dtype, "mode": 2}
     if case == "target_dtype":
