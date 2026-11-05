@@ -12,13 +12,22 @@ surface and automatic outlining are separate work.
 - Borrowed GM Tensor and UB Vec Tile storage with FP32 or INT32 elements.
   Tiles require affine, unboxed layouts. Physical strides and Tile start offsets
   determine addressing; logical `valid_shape` never replaces the physical stride.
+  Borrowed `tile.slice`/reshape view handles are rejected because their types
+  may omit the parent's physical pitch. Materialize the window into independent
+  storage with `tile.extract` before launching. View provenance follows aliases,
+  conditional results, and loop carries, including loop backedges. Planner-inserted
+  `tile.move` operations do not establish independent dense storage.
+  In-place `tile.assemble` results inherit their destination's provenance, so
+  updates to dense storage remain supported while updates to views remain rejected.
+  Explicit strides on supported storage take precedence; dense DN Tensor fallback transposes only the trailing
+  two axes and keeps batch axes outermost.
 - FP32, INT32, INDEX and BOOL scalar values; structured `if`, `for`, and `while`.
   Signed integer floor division/modulo retain floor semantics. FP32 inequality
   treats NaN as unequal, and numeric-to-BOOL conversion compares against zero.
 - Thread/block/grid coordinates and extents, lane ID, and scalar loads/stores.
   GM cache policies pass through unchanged to native PTOAS operations.
 
-Unsigned arithmetic, other storage dtypes, floating-point floor division/modulo,
+Unsigned arithmetic, other storage dtypes, scalar exponentiation (`**`), floating-point floor division/modulo,
 early return, break/continue, boxed Tile layouts and grouped kernel execution
 currently produce explicit diagnostics. CPU simulation (`a5sim`) and other device
 backends cannot execute these native helpers. As in canonical IR, indexing must
@@ -63,7 +72,10 @@ the callee symbol size. No instruction bytes are patched by PyPTO.
 
 `tests/st/runtime/vpto/test_simt_ir_onboard.py` compiles canonical IR directly,
 without substituting generated sources. This compiler-facing test uses the IR
-text form because the SIMT JIT authoring surface is not yet available.
+text form because the SIMT JIT authoring surface is not yet available. This is
+an approved P3-specific exception to the ST JIT authoring policy, limited to this
+compiler acceptance test. It validates canonical IR execution, not public JIT
+support, and must migrate when SIMT JIT authoring/outlining is implemented.
 
 - GM copy covers Tensor subviews with nonzero origins, guards, inactive elements,
   and a downstream Tile load consuming the SIMT result.

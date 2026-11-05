@@ -9,13 +9,19 @@ P3 将显式 `FunctionType.SIMT` helper 和 `SimtLaunchStmt` 接入正式 A5 编
 - A5 AIV 调用方，由 `SpecializeSimtHelpers` 特化常量三维 block 大小，最多 2,048 线程。
 - 借用的 GM Tensor 和 UB Vec Tile，元素类型为 FP32 或 INT32。Tile 需要仿射、
   非分形布局。寻址使用物理 stride 和 Tile 起始偏移，逻辑 `valid_shape` 不替代物理 stride。
+  借用的 `tile.slice`/reshape 视图句柄会被拒绝，因为其类型可能缺少父存储的物理行跨度。
+  Launch 前须通过 `tile.extract` 将窗口物化到独立存储。视图来源会沿别名、条件分支结果
+  和循环携带值传播，包括循环回边；内存规划插入的 `tile.move` 不能证明存储独立且稠密。
+  原地 `tile.assemble` 的结果继承目标存储的来源：更新稠密存储仍受支持，更新视图仍会被拒绝。
+  受支持存储的显式 stride 优先；
+  稠密 DN Tensor 的后备 stride 仅交换末尾两个轴，批次轴保持在最外层。
 - FP32、INT32、INDEX、BOOL 标量及结构化 `if`、`for`、`while`。
   有符号整数整除和取模保留向下取整语义；FP32 不等比较将 NaN 视为不等；
   数值转 BOOL 通过与零比较实现。
 - 线程、block、grid 坐标和维度，lane ID，以及标量读写。
   GM 缓存策略原样传递到原生 PTOAS 操作。
 
-无符号运算、其他存储类型、浮点向下整除/取模、提前 return、break/continue、
+无符号运算、其他存储类型、标量幂运算（`**`）、浮点向下整除/取模、提前 return、break/continue、
 分形 Tile 布局和分组内核执行目前会给出明确诊断。CPU 仿真（`a5sim`）和其他
 设备后端不能执行这些原生 helper。与规范 IR 一致，调用方必须保证索引不越界，
 并发写入没有数据竞争。
@@ -50,7 +56,9 @@ LLVM 导出绕过 PTOAS 对象级 SIMT 大小修复。当前子集使用内建�
 ## 定向验收
 
 `tests/st/runtime/vpto/test_simt_ir_onboard.py` 直接编译规范 IR，不替换生成源码。
-该面向编译器的测试使用 IR 文本形式，因为 SIMT JIT 编写入口尚未提供。
+该面向编译器的测试使用 IR 文本形式，因为 SIMT JIT 编写入口尚未提供。这是已获准的
+P3 专用 ST JIT 编写规范例外，仅限此编译器验收测试。它验证规范 IR 执行，不代表
+公共 JIT 接口已支持 SIMT；实现 SIMT JIT 编写入口和 outlining 后必须迁移。
 
 - GM copy 覆盖非零起点 Tensor 子视图、保护区域、非活动元素，以及消费 SIMT
   结果的后续 Tile load。

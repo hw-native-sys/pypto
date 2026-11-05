@@ -7,7 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""P3 explicit SIMT IR through production lowering, linking and persistent A5."""
+"""P3 explicit SIMT IR through production lowering, linking and persistent A5.
+
+Approved P3 exception to the ST JIT authoring policy: this compiler acceptance
+test exercises canonical IR because SIMT JIT authoring/outlining is a separate
+milestone. It does not establish public JIT support. Migrate to that surface
+when available; see docs/en/dev/codegen/05-simt-lowering.md.
+"""
 
 import json
 import os

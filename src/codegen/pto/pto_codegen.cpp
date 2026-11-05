@@ -51,6 +51,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
@@ -90,6 +91,110 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// Validate the borrowed-Tile ABI using IR value flow, before allocation and phi
+// handles erase view identity. Each dependency edge is visited once by a
+// monotone worklist; ordered lookups keep the analysis O(N log N), including
+// loop backedges. Fresh producers such as tile.extract end view provenance.
+class SimtTileProvenanceChecker : public ir::IRVisitor {
+ public:
+  void Check(const StmtPtr& body) {
+    VisitStmt(body);
+    std::vector<const ir::Var*> worklist(views_.begin(), views_.end());
+    for (size_t i = 0; i < worklist.size(); ++i) {
+      const auto users = users_.find(worklist[i]);
+      if (users == users_.end()) continue;
+      for (const auto* user : users->second) {
+        if (views_.insert(user).second) worklist.push_back(user);
+      }
+    }
+    for (const auto& launch : launches_) {
+      for (const auto& arg : launch->args_) {
+        if (!As<TileType>(arg->GetType())) continue;
+        const auto var = ir::AsVarLike(arg);
+        CHECK_SPAN(var && !views_.count(var.get()), launch->span_)
+            << "SIMT cannot borrow a Tile view with unproven physical strides; "
+               "materialize the window with tile.extract before launching";
+      }
+    }
+  }
+
+ protected:
+  // Only statements define edges. Do not recursively revisit IterArg init
+  // chains or type expressions at every use of a value.
+  void VisitExpr(const ExprPtr&) override {}
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!As<TileType>(op->var_->GetType())) return;
+    if (ir::AsVarLike(op->value_)) {
+      AddEdge(op->value_, op->var_);
+    } else if (auto call = As<ir::Call>(op->value_)) {
+      // YieldFixup may insert tile.move into the canonical branch storage;
+      // it is not proof of an independent dense allocation. Require explicit
+      // tile.extract for materialization of an otherwise unsupported view.
+      // assemble updates input 0 without changing its physical layout. The
+      // inserted source's view provenance does not describe the destination.
+      if (ir::IsOp(call, "tile.move") || ir::IsOp(call, "tile.set_validshape") ||
+          ir::IsOp(call, "tile.assemble")) {
+        AddEdge(call->args_[0], op->var_);
+      } else if (ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        views_.insert(op->var_.get());
+      } else if (const auto* entry = ir::LookupOpEntry(call->op_)) {
+        if (const auto input = entry->GetOutputReusesInputArg()) {
+          AddEdge(call->args_[*input], op->var_);
+        }
+      }
+    }
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    yield_targets_.push_back(op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override { VisitLoop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitLoop(op); }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    if (yield_targets_.empty()) return;
+    const auto& targets = yield_targets_.back();
+    INTERNAL_CHECK_SPAN(op->value_.size() == targets.size(), op->span_)
+        << "Internal error: SIMT provenance yield arity mismatch";
+    for (size_t i = 0; i < targets.size(); ++i) AddEdge(op->value_[i], targets[i]);
+  }
+
+  void VisitStmt_(const ir::SimtLaunchStmtPtr& op) override {
+    launches_.push_back(op);
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      AddEdge(op->args_[op->result_param_indices_[i]], op->results_[i]);
+    }
+  }
+
+ private:
+  void AddEdge(const ExprPtr& source, const VarPtr& target) {
+    if (!As<TileType>(target->GetType())) return;
+    const auto var = ir::AsVarLike(source);
+    INTERNAL_CHECK_SPAN(var, target->span_) << "Internal error: Tile storage source must be a Var";
+    users_[var.get()].push_back(target.get());
+  }
+
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& op) {
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      AddEdge(op->iter_args_[i]->initValue_, op->iter_args_[i]);
+      AddEdge(op->iter_args_[i], op->return_vars_[i]);
+    }
+    yield_targets_.emplace_back(op->iter_args_.begin(), op->iter_args_.end());
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  std::map<const ir::Var*, std::vector<const ir::Var*>> users_;
+  std::set<const ir::Var*> views_;
+  std::vector<std::vector<VarPtr>> yield_targets_;
+  std::vector<ir::SimtLaunchStmtPtr> launches_;
+};
 
 // Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
 // this name reserved in modules that use deferred completion so a user kernel
@@ -1108,6 +1213,7 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
+  if (!simt_functions_.empty()) SimtTileProvenanceChecker().Check(func->body_);
   parameter_backed_tile_bases_.clear();
   if (UsesBufferIR(func)) {
     GenerateBufferFunction(func);

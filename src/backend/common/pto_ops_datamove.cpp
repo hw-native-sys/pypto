@@ -1075,14 +1075,20 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
 // A fixed-address result declaration already carries the view over the inherited
 // storage. Without addresses, only the actual source handle can stand in for it:
 // a same-typed MemRef representative may have become stale after an if-phi rebind.
-static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
+static bool TryReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
                                const std::string& target, const std::string& result_type,
                                bool result_has_memref, bool parameter_backed) {
   const auto existing_type = codegen.GetSSATileBufType(target);
   // Distinct handles alias only when compiler-owned addresses were emitted.
   // PTOAS-planned and caller-backed views must follow the actual source SSA.
-  return result_has_memref && !existing_type.empty() && existing_type == result_type &&
-         ((codegen.EmitTileAddr() && !parameter_backed) || source == target);
+  const bool reuse = result_has_memref && !existing_type.empty() && existing_type == result_type &&
+                     ((codegen.EmitTileAddr() && !parameter_backed) || source == target);
+  // An addressed declaration still represents a view even when no treshape
+  // is emitted. Preserve that provenance for consumers such as SIMT, which
+  // cannot reconstruct a sliced parent's physical pitch from the result type.
+  // An identical source handle is an identity view and needs no new marker.
+  if (reuse && source != target) codegen.RegisterTileViewName(target, source);
+  return reuse;
 }
 
 // Same, resolving the source SSA and its type from the IR operand.
@@ -1560,7 +1566,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // The no-op check compares against the pre-declared alloc_tile, whose type is
     // always the dynamic-valid form — so it must use `result_type`, not `view_type`.
     const std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
-    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref,
+    if (TryReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref,
                            parameter_backed)) {
       return std::string("");
     }
@@ -1630,6 +1636,10 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // so it must materialize a typed SSA view below.
     if (codegen.EmitTileAddr() && result_has_memref && !existing_type.empty() &&
         existing_type == result_type) {
+      // This is a typed view even though the inherited address avoids emitting
+      // treshape. Keep the same provenance as the SSA-view fallback below.
+      const auto source = codegen.GetExprAsCode(op->args_[0]);
+      if (source != result_target) codegen.RegisterTileViewName(result_target, source);
       return std::string("");
     }
 
@@ -1726,7 +1736,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     // A matching declaration is sufficient only at a fixed inherited address
     // or when it is the actual source handle. Mirrors tile.reshape's no-op check.
-    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref,
+    if (TryReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref,
                            parameter_backed)) {
       return std::string("");
     }

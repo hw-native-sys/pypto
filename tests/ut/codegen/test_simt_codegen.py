@@ -9,6 +9,7 @@
 
 """SIMT pointer ABI, physical addressing and module reachability from explicit IR."""
 
+import re
 import textwrap
 
 import pytest
@@ -299,6 +300,335 @@ def test_numeric_bool_conversion_compares_with_zero(dtype, predicate):
     source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
     assert predicate in source
     assert "arith.trunci" not in source and "arith.fptosi" not in source
+
+
+@pytest.mark.parametrize("dtype,exponent", [("FP32", "2.0"), ("INT32", "2")])
+def test_runtime_scalar_power_is_rejected(dtype, exponent):
+    # A nonconstant base survives Simplify. The generic visitor used to leave
+    # the exponent as the result, silently storing 2 instead of the square.
+    program = scalar_program(
+        f"""
+        value = pl.simt.load(dst, [0, 0])
+        squared = value ** pl.const({exponent}, pl.{dtype})
+        pl.simt.store(dst, [0, 0], squared)
+        """,
+        dtype=dtype,
+    )
+    with pytest.raises(ValueError, match="SIMT scalar exponentiation.*explicit multiplication"):
+        codegen.PTOCodegen().generate_bundle(program)
+
+
+@pytest.mark.parametrize(
+    "shape,layout,expected",
+    [
+        ([3, 4], ir.TensorLayout.DN, [1, 3]),
+        ([2, 3, 4], ir.TensorLayout.DN, [12, 1, 3]),
+        ([2, 3, 4, 5], ir.TensorLayout.DN, [60, 20, 1, 4]),
+        ([2, 3, 4], ir.TensorLayout.ND, [12, 4, 1]),
+    ],
+)
+def test_tensor_fallback_strides_keep_batch_axes_outermost(shape, layout, expected):
+    # Deliberately bypass MaterializeTensorStrides: generate_bundle accepts
+    # specialized IR directly and must agree with the caller's tensor view.
+    tensor = ir.TensorType(shape, DataType.FP32, tensor_view=ir.TensorView(layout=layout))
+    src = ir.Var("src", tensor, SPAN)
+    indices = [ir.Var(f"i{i}", ir.ScalarType(DataType.INDEX), SPAN) for i in range(len(shape))]
+    helper = ir.Function(
+        "read", [src, *indices], [], ir.EvalStmt(simt.load(src, indices), SPAN), SPAN, ir.FunctionType.SIMT
+    )
+    args = [ir.Var("arg", tensor, SPAN), *[ir.Var(v.name_hint, v.type, SPAN) for v in indices]]
+    launch = ir.SimtLaunchStmt(
+        ir.GlobalVar("read"), [ir.ConstInt(1, DataType.INT32, SPAN)] * 3, [*args], [], [], SPAN
+    )
+    caller = ir.Function("kernel", args, [], launch, SPAN, ir.FunctionType.AIV)
+    program = passes.specialize_simt_helpers()(ir.Program([helper, caller], "Strides", SPAN))
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    constants = {
+        int(value): name for name, value in re.findall(r"(%\w+) = arith.constant (\d+) : index", source)
+    }
+    for axis, stride in enumerate(expected):
+        assert f"arith.muli %arg{axis + 1}, {constants[stride]} : index" in source
+
+
+@pytest.mark.parametrize("offset", [0, 8])
+@pytest.mark.parametrize("alias_depth", [0, 1, 2])
+@pytest.mark.parametrize("local_tile,emit_tile_addr", [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("materialized", [False, True])
+def test_borrowed_ub_slice_requires_materialization(
+    offset, alias_depth, local_tile, emit_tile_addr, materialized
+):
+    # A [4, 32] window of [4, 64] retains row pitch 64. Its specialized
+    # TileType has no stride, so deriving pitch 32 from shape would misread it.
+    # Local aliases get separate alloc_tile handles with emit_tile_addr=True;
+    # unlike parameter aliases, they must be traced through IR provenance.
+    aliases = ["window", *[f"borrowed{i}" for i in range(alias_depth)]]
+    alias_stmt = "\n        ".join(f"{right} = {left}" for left, right in zip(aliases, aliases[1:]))
+    source_param = (
+        "input: pl.Tensor[[4, 64], pl.FP32]" if local_tile else "src: pl.Tile[[4, 64], pl.FP32, pl.Mem.Vec]"
+    )
+    source_stmt = "src = pl.tile.load(input, [0, 0], [4, 64], target_memory=pl.Mem.Vec)" if local_tile else ""
+    window = (
+        f"pl.tile.extract(src, 0, {offset}, [4, 32], target_memory=pl.Mem.Vec)"
+        if materialized
+        else f"pl.tile.slice(src, [4, 32], [0, {offset}])"
+    )
+    program = parse_program(f"""
+@pl.program
+class Sliced:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def read(self, src: pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec],
+             dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]]):
+        value = pl.simt.load(src, [1, 0])
+        pl.simt.store(dst, [0, 0], value)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, {source_param},
+               dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]]):
+        {source_stmt}
+        window = {window}
+        {alias_stmt}
+        result = pl.simt.launch(self.read, {aliases[-1]}, dst,
+                               block_dims=(1, 1, 1), result_param_indices=(1,))
+        return result
+""")
+    program = passes.init_mem_ref()(passes.specialize_simt_helpers()(passes.convert_to_ssa()(program)))
+    if local_tile and emit_tile_addr:
+        program = passes.allocate_memory_addr()(passes.flatten_tile_nd_to_2d()(program))
+    if materialized:
+        bundle = codegen.PTOCodegen().generate_bundle(program, emit_tile_addr=emit_tile_addr)
+        assert "pto.textract" in bundle.caller_source
+        assert "pto.load" in bundle.helpers[0].source
+    else:
+        with pytest.raises(ValueError, match="SIMT cannot borrow a Tile view.*tile.extract"):
+            codegen.PTOCodegen().generate_bundle(program, emit_tile_addr=emit_tile_addr)
+
+
+@pytest.mark.parametrize("view_op", ["reshape", "reinterpret_view"])
+@pytest.mark.parametrize("alias", [False, True])
+@pytest.mark.parametrize("emit_tile_addr", [False, True])
+@pytest.mark.parametrize("offset", [0, 8])
+def test_borrowed_reshaped_ub_slice_is_rejected(view_op, alias, emit_tile_addr, offset):
+    # Fixed-address reshape/reinterpret can reuse an alloc_tile without emitting
+    # treshape. The view still has the sliced parent's pitch: logical [0, 32]
+    # names parent [1, offset], not parent [0, offset + 32].
+    dtype = "FP32" if view_op == "reshape" else "INT32"
+    view = (
+        "pl.tile.reshape(window, [2, 64])"
+        if view_op == "reshape"
+        else "pl.tile.reinterpret_view(window, pl.INT32, shape=[2, 64])"
+    )
+    alias_stmt = "borrowed = view" if alias else ""
+    argument = "borrowed" if alias else "view"
+    program = parse_program(f"""
+@pl.program
+class Reshaped:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def read(self, src: pl.Tile[[2, 64], pl.{dtype}, pl.Mem.Vec],
+             dst: pl.InOut[pl.Tensor[[1, 1], pl.{dtype}]]):
+        value = pl.simt.load(src, [0, 32])
+        pl.simt.store(dst, [0, 0], value)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, input: pl.Tensor[[4, 64], pl.FP32],
+               dst: pl.InOut[pl.Tensor[[1, 1], pl.{dtype}]]):
+        src = pl.tile.load(input, [0, 0], [4, 64], target_memory=pl.Mem.Vec)
+        window = pl.tile.slice(src, [4, 32], [0, {offset}])
+        view = {view}
+        {alias_stmt}
+        result = pl.simt.launch(self.read, {argument}, dst,
+                               block_dims=(1, 1, 1), result_param_indices=(1,))
+        return result
+""")
+    program = passes.init_mem_ref()(passes.specialize_simt_helpers()(passes.convert_to_ssa()(program)))
+    if emit_tile_addr:
+        program = passes.allocate_memory_addr()(passes.flatten_tile_nd_to_2d()(program))
+    with pytest.raises(ValueError, match="SIMT cannot borrow a Tile view.*tile.extract"):
+        codegen.PTOCodegen().generate_bundle(program, emit_tile_addr=emit_tile_addr)
+
+
+def prepare_control_flow_storage(program, reuse):
+    program = passes.convert_to_ssa()(program)
+    program = passes.specialize_simt_helpers()(program)
+    program = passes.init_mem_ref()(program)
+    program = passes.flatten_tile_nd_to_2d()(program)
+    if reuse:
+        program = passes.memory_reuse()(program)
+    return passes.allocate_memory_addr()(program)
+
+
+@pytest.mark.parametrize("view_branch", ["none", "then", "else", "both"])
+@pytest.mark.parametrize("forward", ["direct", "nested", "loop"])
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("offset", [0, 8])
+def test_conditional_tile_views_require_materialization(view_branch, forward, reuse, offset):
+    # The addressed phi may share the then branch's strided storage while
+    # having a fresh, unmarked SSA handle. Either branch can introduce a view.
+    def window(source, branch):
+        if view_branch in (branch, "both"):
+            return f"pl.tile.slice({source}, [4, 32], [0, {offset}])"
+        return f"pl.tile.extract({source}, 0, {offset}, [4, 32], target_memory=pl.Mem.Vec)"
+
+    forwarding = {
+        "direct": "forwarded = selected",
+        "nested": """
+        if n > 1:
+            forwarded = pl.yield_(selected)
+        else:
+            forwarded = pl.yield_(selected)
+        """,
+        "loop": """
+        for i, (carry,) in pl.range(n, init_values=(selected,)):
+            forwarded = pl.yield_(carry)
+        """,
+    }[forward]
+    forwarding = textwrap.indent(textwrap.dedent(forwarding).strip(), "        ")
+    program = parse_program(f"""
+@pl.program
+class Conditional:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def read(self, src: pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec],
+             dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]]):
+        value = pl.simt.load(src, [1, 0])
+        pl.simt.store(dst, [0, 0], value)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, a: pl.Tensor[[4, 64], pl.FP32], b: pl.Tensor[[4, 64], pl.FP32],
+               dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        left = pl.tile.load(a, [0, 0], [4, 64], target_memory=pl.Mem.Vec)
+        right = pl.tile.load(b, [0, 0], [4, 64], target_memory=pl.Mem.Vec)
+        if n > 0:
+            then_window = {window("left", "then")}
+            selected = pl.yield_(then_window)
+        else:
+            else_window = {window("right", "else")}
+            selected = pl.yield_(else_window)
+{forwarding}
+        result = pl.simt.launch(self.read, forwarded, dst,
+                               block_dims=(1, 1, 1), result_param_indices=(1,))
+        return result
+""")
+    if reuse and offset == 0 and view_branch == "then":
+        # YieldFixup already rejects this mixed view/materialized destination
+        # before codegen. Keep that earlier fail-closed boundary covered too.
+        with pytest.raises(ValueError, match="cannot reconcile ambiguous views of one destination"):
+            prepare_control_flow_storage(program, reuse)
+        return
+    program = prepare_control_flow_storage(program, reuse)
+    if view_branch == "none":
+        bundle = codegen.PTOCodegen().generate_bundle(program)
+        assert "scf.if" in bundle.caller_source
+        assert "pto.textract" in bundle.caller_source
+        assert "pto.load" in bundle.helpers[0].source
+    else:
+        with pytest.raises(ValueError, match="SIMT cannot borrow a Tile view.*tile.extract"):
+            codegen.PTOCodegen().generate_bundle(program)
+
+
+@pytest.mark.parametrize("loop", ["for", "while"])
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("reuse", [False, True])
+def test_loop_backedge_tile_view_requires_materialization(loop, materialized, reuse):
+    # The init value is dense. A later iteration can replace it with a view,
+    # so checking only the iter_arg's init chain cannot prove the result safe.
+    window = (
+        "pl.tile.extract(src, 0, 8, [4, 32], target_memory=pl.Mem.Vec)"
+        if materialized
+        else "pl.tile.slice(src, [4, 32], [0, 8])"
+    )
+    loop_body = (
+        f"for i in pl.range(n):\n    carried = {window}"
+        if loop == "for"
+        else (
+            f"i = pl.const(0, pl.INT32)\nwhile i < n:\n    carried = {window}\n"
+            "    i = i + pl.const(1, pl.INT32)"
+        )
+    )
+    program = parse_program(f"""
+@pl.program
+class Backedge:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def read(self, src: pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec],
+             dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]]):
+        value = pl.simt.load(src, [1, 0])
+        pl.simt.store(dst, [0, 0], value)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, a: pl.Tensor[[4, 64], pl.FP32],
+               dst: pl.InOut[pl.Tensor[[1, 1], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        src = pl.tile.load(a, [0, 0], [4, 64], target_memory=pl.Mem.Vec)
+        carried = pl.tile.extract(src, 0, 0, [4, 32], target_memory=pl.Mem.Vec)
+{textwrap.indent(loop_body, "        ")}
+        result = pl.simt.launch(self.read, carried, dst,
+                               block_dims=(1, 1, 1), result_param_indices=(1,))
+        return result
+""")
+    program = prepare_control_flow_storage(program, reuse)
+    if materialized:
+        bundle = codegen.PTOCodegen().generate_bundle(program)
+        assert f"scf.{loop}" in bundle.caller_source
+        assert "pto.load" in bundle.helpers[0].source
+    else:
+        with pytest.raises(ValueError, match="SIMT cannot borrow a Tile view.*tile.extract"):
+            codegen.PTOCodegen().generate_bundle(program)
+
+
+@pytest.mark.parametrize("dtype", ["FP32", "INT32"])
+@pytest.mark.parametrize("emit_tile_addr", [False, True])
+@pytest.mark.parametrize("target_view", [False, True])
+@pytest.mark.parametrize("source_view", [False, True])
+@pytest.mark.parametrize("conditional", [False, True])
+def test_assemble_inherits_destination_provenance(
+    dtype, emit_tile_addr, target_view, source_view, conditional
+):
+    target = (
+        "pl.tile.slice(parent, [4, 32], [0, 8])"
+        if target_view
+        else "pl.tile.extract(parent, 0, 8, [4, 32], target_memory=pl.Mem.Vec)"
+    )
+    source = (
+        "pl.tile.slice(patch_parent, [2, 32], [0, 8])"
+        if source_view
+        else "pl.tile.extract(patch_parent, 0, 8, [2, 32], target_memory=pl.Mem.Vec)"
+    )
+    forwarding = (
+        "if n > 0:\n    selected = pl.yield_(updated)\nelse:\n    selected = pl.yield_(updated)"
+        if conditional
+        else "selected = updated"
+    )
+    program = parse_program(f"""
+@pl.program
+class Assembled:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def read(self, src: pl.Tile[[4, 32], pl.{dtype}, pl.Mem.Vec],
+             dst: pl.InOut[pl.Tensor[[1, 1], pl.{dtype}]]):
+        value = pl.simt.load(src, [1, 0])
+        pl.simt.store(dst, [0, 0], value)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, a: pl.Tensor[[4, 64], pl.{dtype}], b: pl.Tensor[[4, 64], pl.{dtype}],
+               dst: pl.InOut[pl.Tensor[[1, 1], pl.{dtype}]], n: pl.Scalar[pl.INT32]):
+        parent = pl.tile.load(a, [0, 0], [4, 64], target_memory=pl.Mem.Vec)
+        patch_parent = pl.tile.load(b, [0, 0], [4, 64], target_memory=pl.Mem.Vec)
+        target = {target}
+        source = {source}
+        updated = pl.tile.assemble(target, source, [1, 0])
+{textwrap.indent(forwarding, "        ")}
+        result = pl.simt.launch(self.read, selected, dst,
+                               block_dims=(1, 1, 1), result_param_indices=(1,))
+        return result
+""")
+    program = prepare_control_flow_storage(program, reuse=True)
+    if target_view:
+        with pytest.raises(ValueError, match="SIMT cannot borrow a Tile view.*tile.extract"):
+            codegen.PTOCodegen().generate_bundle(program, emit_tile_addr=emit_tile_addr)
+    else:
+        bundle = codegen.PTOCodegen().generate_bundle(program, emit_tile_addr=emit_tile_addr)
+        if dtype == "FP32":
+            assert "pto.tinsert" in bundle.caller_source
+        else:
+            assert "pto.subview" in bundle.caller_source
+            assert "pto.tmov" in bundle.caller_source
+        assert "pto.load" in bundle.helpers[0].source
 
 
 if __name__ == "__main__":

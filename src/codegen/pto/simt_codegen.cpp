@@ -31,6 +31,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::codegen {
@@ -65,6 +66,10 @@ class ScalarSubsetChecker : public IRVisitor {
   void VisitExpr(const ExprPtr& expr) override {
     if (auto scalar = As<ScalarType>(expr->GetType())) {
       CheckScalar(scalar->dtype_, expr->span_);
+      // The generic IR visitor only traverses Pow operands; without a PTO
+      // emitter it would leave the exponent as the expression's result.
+      CHECK_SPAN(!IsA<Pow>(expr), expr->span_)
+          << "SIMT scalar exponentiation is not yet supported; use explicit multiplication";
       CHECK_SPAN(!scalar->dtype_.IsFloat() || (!IsA<FloorDiv>(expr) && !IsA<FloorMod>(expr)), expr->span_)
           << "SIMT floating-point floor division/modulo is not yet supported";
     }
@@ -170,7 +175,37 @@ void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& launch) {
       arguments.push_back(GetTensorBasePtr(ir::AsVarLike(arg)));
       artifact.caller_parameter_types.push_back("!pto.ptr<" + GetTypeString(tensor->dtype_) + ">");
     } else {
-      arguments.push_back(GetExprAsCode(arg));
+      const auto argument = GetExprAsCode(arg);
+      auto source = argument;
+      if (ir::IsA<ir::TileType>(arg->GetType())) {
+        auto var = ir::AsVarLike(arg);
+        std::vector<const ir::Var*> aliases;
+        // Address-based allocation can give a local alias its own SSA handle.
+        // Follow IR provenance as well, compressing paths so repeated launches
+        // over long alias chains do not repeatedly traverse the same suffix.
+        while (var) {
+          const auto alias = fs_.tile_aliases.find(var.get());
+          if (alias == fs_.tile_aliases.end()) break;
+          aliases.push_back(var.get());
+          INTERNAL_CHECK_SPAN(aliases.size() <= fs_.tile_aliases.size(), launch->span_)
+              << "Internal error: cyclic SIMT Tile alias";
+          var = alias->second;
+        }
+        for (const auto* alias : aliases) fs_.tile_aliases[alias] = var;
+        if (var) source = GetExprAsCode(var);
+      }
+      // A pto.subview retains its parent's pitch, but the specialized slice
+      // type may have an empty stride and only the smaller logical shape.
+      // Reinterpreting that handle as a dense pointer silently misaddresses
+      // later rows. Reshapes of views are equally unsafe without provenance.
+      // Require an independently materialized Tile until that provenance is
+      // carried through specialization; never repack over the live parent.
+      CHECK_SPAN(
+          !ir::IsA<ir::TileType>(arg->GetType()) || (!IsTileViewName(argument) && !IsTileViewName(source)),
+          launch->span_)
+          << "SIMT cannot borrow a Tile view with unproven physical strides; "
+             "materialize the window with tile.extract before launching";
+      arguments.push_back(argument);
       artifact.caller_parameter_types.push_back(GetExprTypeAnnotation(arg));
     }
   }
@@ -264,13 +299,11 @@ std::string PTOCodegen::SimtElementOffset(const ir::ExprPtr& storage, const ir::
   } else {
     // Dense fallback follows physical layout, not logical valid_shape. Explicit
     // view strides (including dynamically captured metadata) take precedence.
-    auto stride = GetOrEmitConstant(int64_t{1}, DataType::INDEX);
-    for (size_t j = 0; j < shape.size(); ++j) {
-      const auto i = column_major ? j : shape.size() - 1 - j;
-      physical_strides[i] = stride;
-      if (j + 1 < shape.size()) {
-        stride = EmitArithBinaryOp("arith.muli", stride, EmitArithOperand(shape[i], "index"), "index");
-      }
+    // DN transposes only the trailing matrix axes; batch axes stay outermost.
+    const auto layout = column_major ? ir::TensorLayout::DN : ir::TensorLayout::ND;
+    strides = ir::tensor_view_semantics::BuildLogicalStridesFromLayout(shape, layout);
+    for (size_t i = 0; i < shape.size(); ++i) {
+      physical_strides[i] = EmitArithOperand(strides[i], "index");
     }
   }
   auto offset = origin ? EmitArithOperand(origin, "index") : GetOrEmitConstant(int64_t{0}, DataType::INDEX);
