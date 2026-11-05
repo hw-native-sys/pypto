@@ -23,7 +23,7 @@ import re
 import pypto
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import backend, ir, passes
 
 # ---------------------------------------------------------------------------
 # Shared helpers: program builders and pass invocation
@@ -5282,6 +5282,1661 @@ class TestManualPipeVtoCFractalAdapt:
 
         Once = _expand_raw(Before)
         ir.assert_structural_equal(passes.expand_mixed_kernel()(Once), Once)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize("read_rows", [0, 128])
+def test_multiple_gm_stores_fence_the_whole_consumer_loop(backend_name, read_rows):
+    """Issue #2745: four writes need one fence outside the eight-read loop.
+
+    Expansion expresses the dependency with tpush/tpop only; PTOAS owns
+    pipeline ordering. Structural equality also rejects any inserted barriers.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[32, 32], pl.BF16],
+            b: pl.Tensor[[32, 128], pl.BF16],
+            scratch: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            a_mat = pl.tile.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            b_mat = pl.tile.load(b, [0, 0], [32, 128], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(a_mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(b_mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [32, 0], scratch)
+            scratch = pl.tile.store(acc, [64, 0], scratch)
+            scratch = pl.tile.store(acc, [96, 0], scratch)
+            for row in pl.range(0, read_rows, 16):
+                chunk = pl.tile.load(scratch, [row, 0], [16, 128], target_memory=pl.Mem.Vec)
+                out = pl.tile.store(pl.tile.adds(chunk, 1.0), [row, 0], out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def relay_aic(
+            self,
+            a: pl.Tensor[[32, 32], pl.BF16],
+            b: pl.Tensor[[32, 128], pl.BF16],
+            scratch: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ):
+            a_mat = pl.tile.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+            b_mat = pl.tile.load(b, [0, 0], [32, 128], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(a_mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(b_mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [32, 0], scratch)
+            scratch = pl.tile.store(acc, [64, 0], scratch)
+            scratch = pl.tile.store(acc, [96, 0], scratch)
+            pl.tile.tpush_to_aiv(acc, split=0)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def relay_aiv(
+            self,
+            a: pl.Tensor[[32, 32], pl.BF16],
+            b: pl.Tensor[[32, 128], pl.BF16],
+            scratch: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            _token: pl.Tile[[32, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.tpop_from_aic(split=0)
+            for row in pl.range(0, read_rows, 16):
+                chunk = pl.tile.load(scratch, [row, 0], [16, 128], target_memory=pl.Mem.Vec)
+                out = pl.tile.store(pl.tile.adds(chunk, 1.0), [row, 0], out)
+            return out
+
+    After = _expand(Before)
+    _assert_function_equal(After, Expected, "relay_aic")
+    _assert_function_equal(After, Expected, "relay_aiv")
+
+
+@pytest.mark.parametrize("trip_count", [0, 2])
+def test_multi_store_gm_loop_requires_explicit_task_dependency(trip_count):
+    """A token per store iteration cannot pair with one wait after the loop."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            for i in pl.range(trip_count):
+                scratch = pl.tile.store(acc, [0, 0], scratch)
+                scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [32, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="GM.*multiple stores.*deps"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_branch_requires_explicit_task_dependency():
+    """Do not silently lose the GM origin at an if-result SSA merge."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+            condition: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            if condition:
+                scratch = pl.tile.store(acc, [0, 0], scratch)
+                scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [32, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="GM.*multiple stores.*deps"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_rejects_interleaved_read():
+    """Waiting only after the final store must not discard an earlier read."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            return out
+
+    with pytest.raises(ValueError, match="GM.*multiple stores.*deps"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "straddle_between",
+        "straddle_before",
+        "balanced_before",
+        "balanced_between",
+        "wrong_signal",
+        "reused_event",
+        "conditional_signal",
+        "dynamic_wait",
+    ],
+)
+def test_multi_store_gm_checks_earlier_reverse_event_waits(backend_name, schedule):
+    """A new GM wait must not introduce a cycle through an authored event."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+    signal_id = 6 if schedule == "wrong_signal" else 5
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+            event: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            pl.system.sync_wait(5, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            pl.system.sync_set(signal_id, pipe=pl.PipeType.MTE3, ffts_mode=2, core_type=pl.KernelType.AIV)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    # Event 4 protects the partition that AIV actually reads, so the original
+    # event schedule need not wait for the second store. Adding a whole-phase GM
+    # push/pop could cycle through event 5, even though the final store-to-load
+    # interval contains no explicit communication.
+    func = next(iter(Before.functions.values()))
+    stmts = _flatten_top_level_stmts(func.body)
+    stores = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("tile.store").name]
+    waits = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("system.sync_wait").name]
+    signals = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("system.sync_set").name]
+    wait, signal = waits[-1], signals[-1]
+    assert isinstance(wait, ir.EvalStmt) and isinstance(signal, ir.EvalStmt)
+
+    def move_before(stmt, target):
+        stmts.remove(stmt)
+        stmts.insert(stmts.index(target), stmt)
+
+    if schedule == "straddle_before":
+        move_before(wait, stores[0])
+    elif schedule == "balanced_before":
+        move_before(signal, stores[0])
+        move_before(wait, stores[0])
+    elif schedule in ("balanced_between", "wrong_signal", "reused_event"):
+        move_before(signal, stores[1])
+        if schedule == "reused_event":
+            # One earlier signal cannot complete both occurrences of event 5.
+            stmts.insert(stmts.index(stores[1]), ir.EvalStmt(wait.expr, wait.span))
+            stmts.insert(stmts.index(stores[-1]), ir.EvalStmt(signal.expr, signal.span))
+    elif schedule == "conditional_signal":
+        stmts.remove(signal)
+        stmts.insert(stmts.index(stores[1]), ir.IfStmt(func.params[-2], signal, None, [], signal.span))
+    elif schedule == "dynamic_wait":
+        stmts[stmts.index(wait)] = ir.EvalStmt(
+            pl.system.sync_wait(func.params[-1], pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIC),
+            wait.span,
+        )
+
+    before = ir.Program(
+        [
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions)),
+                func.return_types,
+                _make_stmt_body(stmts, func.body.span),
+                func.span,
+                func.func_type,
+                func.level,
+                func.role,
+            )
+        ],
+        Before.name,
+        Before.span,
+    )
+    if schedule.startswith("balanced"):
+        after = _expand_raw(before)
+        assert "_gm_sync" in ir.python_print(after)
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+    else:
+        with pytest.raises(ValueError, match="outstanding or unproven AIC event wait"):
+            _expand_raw(before)
+
+
+def test_multi_store_gm_rejects_intervening_boundary_transfer():
+    """A new token must not overtake a tile.move transfer on the same pipe."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            vec = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            out = pl.tile.store(vec, [0, 0], out)
+            chunk = pl.tile.load(scratch, [16, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [16, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="crosses other core communication"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_rejects_overlapping_handshakes():
+    """One-store and multi-store tokens must not be popped in reverse order."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            other: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            other = pl.tile.store(acc, [0, 0], other)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            chunk = pl.tile.load(other, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [16, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="overlaps another GM handshake"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize("pipe_id", [0, 1])
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "straddle_between",
+        "straddle_before",
+        "balanced_before",
+        "balanced_between",
+        "wrong_pipe",
+        "nested_push",
+        "push_before_late_pop",
+    ],
+)
+def test_multi_store_gm_checks_reverse_fifo_prefix(backend_name, pipe_id, schedule):
+    """A reverse FIFO peer behind the new GM fence can block its producer."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+    push_id = pipe_id + 1 if schedule == "wrong_pipe" else pipe_id
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            seed = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            _received: pl.Tile[[16, 16], pl.BF16, pl.Mem.Mat] = pl.tile.tpop_from_aiv(id=pipe_id, split=0)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            pl.tile.tpush_to_aic(seed, id=push_id, split=0)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    # The first partition has its own event, but the added whole-phase fence
+    # would prevent AIV from reaching the push that lets AIC finish its pop.
+    func = next(iter(Before.functions.values()))
+    stmts = _flatten_top_level_stmts(func.body)
+    stores = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("tile.store").name]
+    pop = next(stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("tile.tpop_from_aiv").name)
+    push = next(stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("tile.tpush_to_aic").name)
+
+    def move_before(stmt, target):
+        stmts.remove(stmt)
+        stmts.insert(stmts.index(target), stmt)
+
+    if schedule == "straddle_before":
+        move_before(pop, stores[0])
+    elif schedule == "balanced_before":
+        move_before(push, stores[0])
+        move_before(pop, stores[0])
+    elif schedule in ("balanced_between", "wrong_pipe"):
+        move_before(push, stores[1])
+    elif schedule == "nested_push":
+        stmts.remove(push)
+        stmts.insert(stmts.index(stores[1]), ir.IfStmt(func.params[-1], push, None, [], push.span))
+    elif schedule == "push_before_late_pop":
+        move_before(push, stores[0])
+        move_before(pop, stores[-1])
+
+    before = ir.Program(
+        [
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions)),
+                func.return_types,
+                _make_stmt_body(stmts, func.body.span),
+                func.span,
+                func.func_type,
+                func.level,
+                func.role,
+            )
+        ],
+        Before.name,
+        Before.span,
+    )
+    if schedule.startswith("balanced"):
+        after = _expand_raw(before)
+        assert "_gm_sync" in ir.python_print(after)
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+    else:
+        with pytest.raises(ValueError, match="outstanding or nested explicit V2C handshake"):
+            _expand_raw(before)
+
+
+@pytest.mark.parametrize("pipe_id", [0, 1])
+def test_multi_store_gm_rejects_enclosing_c2v_handshake(pipe_id):
+    """An earlier manual token must not be consumed by the generated GM pop."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, id=pipe_id, split=0)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            manual: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(id=pipe_id, split=0)
+            out = pl.tile.store(manual, [16, 0], out)
+            return out
+
+    # Other pipe IDs cannot steal the GM token. Conservatively finish all
+    # authored handshakes before adding a new cross-lane dependency.
+    with pytest.raises(ValueError, match="outstanding or nested explicit C2V handshake"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_rejects_enclosing_pop_before_push():
+    """Lane splitting makes an early manual pop / later push a valid schedule."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            manual: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            out = pl.tile.store(manual, [16, 0], out)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            return out
+
+    with pytest.raises(ValueError, match="outstanding or nested explicit C2V handshake"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("pipe_id", [0, 1])
+def test_single_store_tensor_carry_rejects_enclosing_c2v_handshake(pipe_id):
+    """A newly recognized carry dependency must not reorder manual FIFO tokens."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            manual: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(id=pipe_id, split=0)
+            out = pl.tile.store(manual, [16, 0], out)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            pl.system.barrier(pipe=pl.PipeType.ALL)
+            for _i, (buffer, result) in pl.range(2, init_values=(scratch, out)):
+                chunk = pl.tile.load(buffer, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                updated = pl.tile.store(chunk, [0, 0], result)
+                scratch, out = pl.yield_(buffer, updated)
+            pl.tile.tpush_to_aiv(acc, id=pipe_id, split=0)
+            return out
+
+    # Newly recognized carry dependencies use the same conservative rule for
+    # every FIFO ID as multi-store phases; finish manual peers before fencing.
+    with pytest.raises(ValueError, match="outstanding or nested explicit C2V handshake"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("pipe_id", [0, 1])
+def test_multi_store_gm_allows_completed_explicit_handshake(pipe_id):
+    """A balanced manual transfer before the phase leaves no outstanding token."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, split=0, id=pipe_id)
+            manual: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0, id=pipe_id)
+            out = pl.tile.store(manual, [16, 0], out)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    After = _expand_raw(Before)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("trip_count", [0, 1, 2])
+def test_rebound_tensor_carry_does_not_alias_initial_gm_buffer(trip_count):
+    """A yielded replacement buffer must not inherit the initial buffer's stores."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            replacement: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            for i, (carry, out_carry) in pl.range(trip_count, init_values=(scratch, out)):
+                written = pl.tile.store(acc, [0, 0], carry)
+                written = pl.tile.store(acc, [16, 0], written)
+                vec = pl.tile.load(replacement, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                updated_out = pl.tile.store(vec, [0, 0], out_carry)
+                result, out = pl.yield_(replacement, updated_out)
+            chunk = pl.tile.load(result, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    # This used to raise the multi-store diagnostic for scratch, even though
+    # the loop result is not proven to alias scratch across all trip counts.
+    After = _expand_raw(Before)
+    assert "_gm_sync" not in ir.python_print(After)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize("trip_count", [0, 1, 2])
+def test_branch_between_carry_and_init_keeps_gm_dependency(backend_name, trip_count):
+    """The carry/branch cycle preserves one allocation, including a zero-trip exit."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            for _i, (carry,) in pl.range(trip_count, init_values=(scratch,)):
+                if flag:
+                    merged = pl.yield_(carry)
+                else:
+                    merged = pl.yield_(scratch)
+                result = pl.yield_(merged)
+            chunk = pl.tile.load(result, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    After = _expand_raw(Before)
+    rendered = ir.python_print(After)
+    assert "_gm_sync" in rendered
+    assert rendered.count("tpush_to_aiv(") == 1
+    assert rendered.count("tpop_from_aic(") == 1
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("trip_count", [0, 1, 2])
+def test_nested_while_carry_branch_keeps_gm_dependency(trip_count):
+    """Nested loop and branch constraints need a joint allocation induction."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            carry = scratch
+            index: pl.Scalar[pl.INDEX] = 0
+            while index < trip_count:
+                for _j, (inner,) in pl.range(2, init_values=(carry,)):
+                    if flag:
+                        merged = pl.yield_(inner)
+                    else:
+                        merged = pl.yield_(scratch)
+                    inner_result = pl.yield_(merged)
+                carry = inner_result
+                index = index + 1
+            chunk = pl.tile.load(carry, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    After = _expand_raw(Before)
+    rendered = ir.python_print(After)
+    assert "_gm_sync" in rendered
+    assert rendered.count("tpush_to_aiv(") == 1
+    assert rendered.count("tpop_from_aic(") == 1
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("trip_count", [0, 1, 2])
+def test_branch_rebound_carry_keeps_unknown_gm_origin(trip_count):
+    """An SCC with two incoming allocations must not inherit its initial buffer."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            replacement: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            for _i, (carry, result) in pl.range(trip_count, init_values=(scratch, out)):
+                written = pl.tile.store(acc, [0, 0], carry)
+                written = pl.tile.store(acc, [16, 0], written)
+                chunk = pl.tile.load(replacement, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                updated_out = pl.tile.store(chunk, [0, 0], result)
+                if flag:
+                    merged = pl.yield_(carry)
+                else:
+                    merged = pl.yield_(replacement)
+                buffer, out = pl.yield_(merged, updated_out)
+            chunk = pl.tile.load(buffer, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    # Unknown/rebound origins retain the existing conservative behavior, rather
+    # than spuriously imposing scratch's repeated-store phase on the return.
+    After = _expand_raw(Before)
+    assert "_gm_sync" not in ir.python_print(After)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_multi_store_gm_rejects_boundary_slots_escaping_branches(backend_name):
+    """Phi results retain slot contents even when the finalizer frees before yield."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            if flag:
+                first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            else:
+                first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            if flag:
+                second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            else:
+                second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(first, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    # A third token could wrap a depth-two ring and overwrite first before its
+    # use. Lexical tfree counts miss both escaped values, so reject pre-split.
+    with pytest.raises(ValueError, match="C2V tiles returned through control flow"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_multi_store_gm_rejects_top_level_slots_returned_by_branch(backend_name):
+    """Control-flow aliases of top-level pops must keep their slot contents alive."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            if flag:
+                chosen = first
+            else:
+                chosen = second
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(chosen, [16, 0], out)
+            return out
+
+    # The finalizer cannot represent both possible pop identities. Reject the
+    # GM token rather than free and overwrite the slot still held by chosen.
+    with pytest.raises(ValueError, match="C2V tiles returned through control flow"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_multi_store_gm_rejects_top_level_slots_returned_by_zero_trip_loop(backend_name):
+    """Control-flow aliases of top-level pops must keep their slot contents alive."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            for _ in pl.range(0, 0):
+                first = second
+            chosen = first
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(chosen, [16, 0], out)
+            return out
+
+    # The finalizer cannot represent both possible pop identities. Reject the
+    # GM token rather than free and overwrite the slot still held by chosen.
+    with pytest.raises(ValueError, match="C2V tiles returned through control flow"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_gm_fifo_alias_lifetime_branch(backend_name):
+    """A reused buffer stays live; a fresh output does not retain the FIFO slot."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            padded = pl.tile.fillpad_inplace(first, pad_value=0)
+            view = pl.tile.reshape(padded, [16, 16])
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            if flag:
+                chosen = view
+            else:
+                chosen = view
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(chosen, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    # An in-place writer does not allocate: its result still occupies first's
+    # slot while second is retained. A third GM token must not overwrite it.
+    with pytest.raises(ValueError, match="C2V tiles returned through control flow"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_gm_fifo_alias_lifetime_loop(backend_name):
+    """A reused buffer stays live; a fresh output does not retain the FIFO slot."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            padded = pl.tile.fillpad_inplace(first, pad_value=0)
+            view = pl.tile.reshape(padded, [16, 16])
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            for _i, (carry,) in pl.range(1, init_values=(view,)):
+                chosen = pl.yield_(carry)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(chosen, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    # An in-place writer does not allocate: its result still occupies first's
+    # slot while second is retained. A third GM token must not overwrite it.
+    with pytest.raises(ValueError, match="C2V tiles returned through control flow"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_gm_fifo_alias_lifetime_direct(backend_name):
+    """A reused buffer stays live; a fresh output does not retain the FIFO slot."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            padded = pl.tile.fillpad_inplace(first, pad_value=0)
+            view = pl.tile.reshape(padded, [16, 16])
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    # An in-place writer does not allocate: its result still occupies first's
+    # slot while second is retained. A third GM token must not overwrite it.
+    with pytest.raises(ValueError, match="slot_num=2 is insufficient for 3 simultaneously retained"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_gm_fifo_alias_lifetime_fresh(backend_name):
+    """A reused buffer stays live; a fresh output does not retain the FIFO slot."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            padded = pl.tile.add(first, first)
+            view = pl.tile.reshape(padded, [16, 16])
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    # The add result owns fresh storage. Its later use must not keep first's
+    # FIFO slot retained, leaving room for second and the generated GM token.
+    after = _expand_raw(Before)
+    assert "_gm_sync" in ir.python_print(after)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+
+
+def test_multi_store_gm_accounts_for_retained_manual_fifo_slots():
+    """Popped tiles occupy FIFO slots until their last use, including views."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            second: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            view = pl.tile.reshape(first, [16, 16])
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="slot_num=2 is insufficient for 3 simultaneously retained"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_accounts_for_retained_boundary_fifo_slots():
+    """Popped tiles occupy FIFO slots until their last use, including views."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            view = pl.tile.reshape(first, [16, 16])
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="slot_num=2 is insufficient for 3 simultaneously retained"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_rejects_retained_slots_with_authored_setup():
+    """Authored setup must not bypass retained-slot protection for a GM fence."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            c2v = pl.reserve_buffer(name="manual_c2v", size=2048, base=pl.AUTO)
+            peer = pl.import_peer_buffer(name="manual_c2v", peer_func="relay_aiv")
+            pl.aic_initialize_pipe(peer, c2v, dir_mask=3, slot_size=1024, slot_num=2)
+            pl.aiv_initialize_pipe(c2v, peer, dir_mask=3, slot_size=1024, slot_num=2)
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            second: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            view = pl.tile.reshape(first, [16, 16])
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="retained C2V slots in an authored pipe"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize("free_id", [None, 1])
+@pytest.mark.parametrize("release_default", [False, True])
+def test_multi_store_gm_matches_authored_free_to_source_pipe(backend_name, free_id, release_default):
+    """An unstamped pipe-one free cannot release the retained default-pipe slot."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            c2v = pl.reserve_buffer(name="manual_c2v", size=1024, base=pl.AUTO)
+            peer = pl.import_peer_buffer(name="manual_c2v", peer_func="relay_aiv")
+            other = pl.reserve_buffer(name="other_c2v", size=1024, base=pl.AUTO)
+            other_peer = pl.import_peer_buffer(name="other_c2v", peer_func="relay_aiv")
+            pl.aic_initialize_pipe(peer, c2v, dir_mask=3, slot_size=1024, slot_num=1)
+            pl.aiv_initialize_pipe(c2v, peer, dir_mask=3, slot_size=1024, slot_num=1)
+            pl.aic_initialize_pipe(other_peer, other, dir_mask=3, slot_size=1024, slot_num=1, id=1)
+            pl.aiv_initialize_pipe(other, other_peer, dir_mask=3, slot_size=1024, slot_num=1, id=1)
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            pl.tile.tpush_to_aiv(acc, split=0, id=1)
+            second: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0, id=1)
+            view = pl.tile.reshape(second, [16, 16])
+            pl.tfree_to_aic(view, id=free_id)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(first, [16, 0], out)
+            return out
+
+    func = next(iter(Before.functions.values()))
+    stmts = _flatten_top_level_stmts(func.body)
+    if release_default:
+        stores = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("tile.store").name]
+        stmts.remove(stores[-1])
+        stmts.insert(stmts.index(stores[0]), stores[-1])
+    before = ir.Program(
+        [
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions)),
+                func.return_types,
+                _make_stmt_body(stmts, func.body.span),
+                func.span,
+                func.func_type,
+                func.level,
+                func.role,
+            )
+        ],
+        Before.name,
+        Before.span,
+    )
+    if release_default:
+        after = _expand_raw(before)
+        assert "_gm_sync" in ir.python_print(after)
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+    else:
+        with pytest.raises(ValueError, match="retained C2V slots in an authored pipe"):
+            _expand_raw(before)
+
+
+def test_multi_store_gm_rejects_retained_boundary_slots_with_authored_setup():
+    """Authored setup must not bypass retained-slot protection for a GM fence."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            c2v = pl.reserve_buffer(name="manual_c2v", size=2048, base=pl.AUTO)
+            peer = pl.import_peer_buffer(name="manual_c2v", peer_func="relay_aiv")
+            pl.aic_initialize_pipe(peer, c2v, dir_mask=3, slot_size=1024, slot_num=2)
+            pl.aiv_initialize_pipe(c2v, peer, dir_mask=3, slot_size=1024, slot_num=2)
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            first = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            second = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            view = pl.tile.reshape(first, [16, 16])
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="retained C2V slots in an authored pipe"):
+        _expand_raw(Before)
+
+
+def test_multi_store_gm_allows_released_slots_with_authored_setup():
+    """Authored transfers consumed before the phase leave room for the GM token."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            c2v = pl.reserve_buffer(name="manual_c2v", size=2048, base=pl.AUTO)
+            peer = pl.import_peer_buffer(name="manual_c2v", peer_func="relay_aiv")
+            pl.aic_initialize_pipe(peer, c2v, dir_mask=3, slot_size=1024, slot_num=2)
+            pl.aiv_initialize_pipe(c2v, peer, dir_mask=3, slot_size=1024, slot_num=2)
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            second: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            view = pl.tile.reshape(first, [16, 16])
+            out = pl.tile.store(view, [16, 0], out)
+            out = pl.tile.store(second, [32, 0], out)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    After = _expand_raw(Before)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize("side", ["aic", "aiv"])
+@pytest.mark.parametrize("schedule", ["small_slot", "small_depth", "different_buffer", "nested", "prologue"])
+def test_multi_store_gm_checks_active_authored_initializer(backend_name, side, schedule):
+    """A later initializer must not replace the configuration checked for a GM fence."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            c2v = pl.reserve_buffer(name="manual_c2v", size=2048, base=pl.AUTO)
+            peer = pl.import_peer_buffer(name="manual_c2v", peer_func="relay_aiv")
+            replacement = pl.reserve_buffer(name="replacement_c2v", size=2048, base=pl.AUTO)
+            replacement_peer = pl.import_peer_buffer(name="replacement_c2v", peer_func="relay_aiv")
+            pl.aic_initialize_pipe(peer, c2v, dir_mask=3, slot_size=1024, slot_num=2)
+            pl.aiv_initialize_pipe(c2v, peer, dir_mask=3, slot_size=1024, slot_num=2)
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.tile.tpush_to_aiv(acc, split=0)
+            first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+            out = pl.tile.store(first, [16, 0], out)
+            pl.aic_initialize_pipe(replacement_peer, replacement, dir_mask=3, slot_size=1024, slot_num=2)
+            pl.aiv_initialize_pipe(replacement, replacement_peer, dir_mask=3, slot_size=1024, slot_num=2)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    func = next(iter(Before.functions.values()))
+    stmts = _flatten_top_level_stmts(func.body)
+    init_names = {ir.get_op("system.aic_initialize_pipe").name, ir.get_op("system.aiv_initialize_pipe").name}
+    initializers = [stmt for stmt in stmts if _get_stmt_op_name(stmt) in init_names]
+    side_index = 0 if side == "aic" else 1
+    original, later = initializers[side_index], initializers[side_index + 2]
+    assert isinstance(original, ir.EvalStmt) and isinstance(original.expr, ir.Call)
+    assert isinstance(later, ir.EvalStmt) and isinstance(later.expr, ir.Call)
+    # Keep the other lane's second initialization in its valid prologue.
+    # Both lanes retain two initializers, matching the verifier's reserve/import
+    # counts; only the selected lane gets the unsafe schedule or geometry.
+    other_original = initializers[1 - side_index]
+    other_later = initializers[3 - side_index]
+    assert isinstance(other_original, ir.EvalStmt)
+    stmts.remove(other_later)
+    stmts.insert(stmts.index(initializers[1]) + 1, ir.EvalStmt(other_original.expr, other_later.span))
+    kwargs = dict(later.expr.kwargs)
+    if schedule == "small_slot":
+        kwargs["slot_size"] = 512
+    elif schedule == "small_depth":
+        kwargs["slot_num"] = 1
+    args = later.expr.args if schedule == "different_buffer" else original.expr.args
+    changed: ir.Stmt = ir.EvalStmt(ir.Call(later.expr.op, args, kwargs, later.expr.span), later.span)
+    if schedule in ("nested", "prologue"):
+        stmts.remove(later)
+        # A nested reinitialization before any transfer is unsafe too: the
+        # selected ring depends on the branch, despite a valid initial setup.
+        if schedule == "nested":
+            changed = ir.IfStmt(func.params[-1], changed, None, [], later.span)
+        stmts.insert(stmts.index(initializers[1]) + 1, changed)
+    else:
+        stmts[stmts.index(later)] = changed
+    before = ir.Program(
+        [
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions)),
+                func.return_types,
+                _make_stmt_body(stmts, func.body.span),
+                func.span,
+                func.func_type,
+                func.level,
+                func.role,
+            )
+        ],
+        Before.name,
+        Before.span,
+    )
+    if schedule == "prologue":
+        after = _expand_raw(before)
+        assert "_gm_sync" in ir.python_print(after)
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+    else:
+        with pytest.raises(
+            ValueError, match="pipe initializers in a top-level prologue before all transfers"
+        ):
+            _expand_raw(before)
+
+
+def test_single_store_tensor_carry_preserves_manual_events():
+    """A carried single-store dependency keeps its existing event handshake."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            for _i, (buffer, result) in pl.range(2, init_values=(scratch, out)):
+                chunk = pl.tile.load(buffer, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                updated = pl.tile.store(chunk, [0, 0], result)
+                scratch, out = pl.yield_(buffer, updated)
+            return out
+
+    After = _expand_raw(Before)
+    assert "_gm_sync" not in ir.python_print(After)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_single_store_keeps_existing_fence_across_reused_event_id(backend_name):
+    """Equal IDs from distinct event occurrences must not remove an old fence."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            return out
+
+    After = _expand_raw(Before)
+    rendered = ir.python_print(After)
+    assert "_gm_sync" in rendered
+    assert rendered.count("tpush_to_aiv(") == 1
+    assert rendered.count("tpop_from_aic(") == 1
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize(
+    "schedule",
+    ["reused_pair", "extra_release", "extra_acquire", "other_pipe", "dynamic", "unique", "distinct"],
+)
+def test_multi_store_gm_requires_unambiguous_event_occurrences(backend_name, schedule):
+    """A pre-store release can satisfy the first wait despite a later matching ID."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+    extra_id = 5 if schedule == "distinct" else 4
+    extra_pipe = pl.PipeType.M if schedule == "other_pipe" else pl.PipeType.FIX
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            event: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.system.sync_set(extra_id, pipe=extra_pipe, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(extra_id, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            return out
+
+    func = next(iter(Before.functions.values()))
+    stmts = _flatten_top_level_stmts(func.body)
+    sets = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("system.sync_set").name]
+    waits = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("system.sync_wait").name]
+    if schedule in ("extra_acquire", "unique"):
+        stmts.remove(sets[0])
+    if schedule in ("extra_release", "unique"):
+        stmts.remove(waits[-1])
+    if schedule == "dynamic":
+        stmts[stmts.index(sets[0])] = ir.EvalStmt(
+            pl.system.sync_set(
+                func.params[-1], pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC
+            ),
+            sets[0].span,
+        )
+        stmts.remove(waits[-1])
+    before = ir.Program(
+        [
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions)),
+                func.return_types,
+                _make_stmt_body(stmts, func.body.span),
+                func.span,
+                func.func_type,
+                func.level,
+                func.role,
+            )
+        ],
+        Before.name,
+        Before.span,
+    )
+    after = _expand_raw(before)
+    rendered = ir.python_print(after)
+    assert ("_gm_sync" in rendered) == (schedule not in ("unique", "distinct"))
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+def test_branch_merged_store_groups_do_not_erase_existing_fences(backend_name):
+    """Merging two old single-store groups must not trust unrelated event occurrences."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+            flag: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            first = pl.tile.store(acc, [0, 0], scratch)
+            chunk = pl.tile.load(first, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            if flag > 0:
+                merged = pl.yield_(scratch)
+            else:
+                merged = pl.yield_(scratch)
+            second = pl.tile.store(acc, [16, 0], merged)
+            chunk = pl.tile.load(second, [16, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [16, 0], out)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            return out
+
+    # The merged origin has an interleaved read, so it cannot use the new
+    # single-phase fence. Reject it instead of removing both original fences.
+    with pytest.raises(ValueError, match="top-level write phase"):
+        _expand_raw(Before)
+
+
+@pytest.mark.parametrize(
+    ("pipe_id", "slot_size", "import_name", "peer_func", "reserve_size", "local_depth"),
+    [
+        (1, 1024, "manual_pipe", "relay_aiv", 2048, 2),
+        (0, 512, "manual_pipe", "relay_aiv", 2048, 2),
+        (0, 1024, "manual_pipe", "relay_aiv", 2048, 2),
+        (0, 1024, "different_ring", "relay_aiv", 2048, 2),
+        (0, 1024, "manual_pipe", "different_aiv", 2048, 2),
+        (0, 1024, "manual_pipe", "relay_aiv", 1, 2),
+        (0, 1024, "manual_pipe", "relay_aiv", 1024, 2),
+        (0, 1024, "manual_pipe", "relay_aiv", 2047, 2),
+        (0, 1024, "manual_pipe", "relay_aiv", 1024, 1),
+        (0, 1024, "manual_pipe", "relay_aiv", 1023, 1),
+        (0, 1 << 30, "manual_pipe", "relay_aiv", 2048, 2),
+    ],
+)
+def test_multi_store_gm_requires_matching_authored_default_pipe(
+    pipe_id, slot_size, import_name, peer_func, reserve_size, local_depth
+):
+    """An unrelated or undersized authored pipe cannot carry a default GM token."""
+
+    # A2/A3 supports a smaller local ring than the transport depth. Verify the
+    # exact capacity boundary and reject products that would overflow int32.
+    if local_depth == 1:
+        backend.reset_for_testing()
+        backend.set_backend_type(backend.BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            local = pl.reserve_buffer(name="manual_pipe", size=reserve_size, base=pl.AUTO)
+            peer = pl.import_peer_buffer(name=import_name, peer_func=peer_func)
+            pl.aic_initialize_pipe(
+                peer,
+                local,
+                dir_mask=3,
+                slot_size=slot_size,
+                slot_num=2,
+                local_slot_num=local_depth,
+                id=pipe_id,
+            )
+            pl.aiv_initialize_pipe(
+                local,
+                peer,
+                dir_mask=3,
+                slot_size=slot_size,
+                slot_num=2,
+                local_slot_num=local_depth,
+                id=pipe_id,
+            )
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [32, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    if peer_func != "relay_aiv":
+        with pytest.raises(ValueError, match="GM C2V pipe import must name"):
+            _expand_raw(Before)
+    elif pipe_id != 0 or slot_size < 1024 or import_name != "manual_pipe":
+        with pytest.raises(ValueError, match="matching default C2V pipe initializers"):
+            _expand_raw(Before)
+    elif reserve_size < slot_size * local_depth:
+        with pytest.raises(ValueError, match="GM C2V pipe reserve requires at least"):
+            _expand_raw(Before)
+    else:
+        After = _expand_raw(Before)
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+def test_multi_store_gm_preserves_non_nearest_covering_events():
+    """Event 4 covers every access even when event 5 is locally nearer."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            pl.system.sync_set(5, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            pl.system.sync_wait(5, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            chunk = pl.tile.load(scratch, [16, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [16, 0], out)
+            return out
+
+    After = _expand_raw(Before)
+    assert "_gm_sync" not in ir.python_print(After)
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
+
+
+@pytest.mark.parametrize("schedule", ["matched", "wrong_event", "wrong_release_pipe", "wrong_acquire_pipe"])
+def test_multi_store_gm_preserves_explicit_release_acquire_schedule(schedule):
+    """Paged attention already orders its GM ring buffer through FFTS events."""
+    wait_event = 5 if schedule == "wrong_event" else 4
+    release_pipe = pl.PipeType.M if schedule == "wrong_release_pipe" else pl.PipeType.FIX
+    acquire_pipe = pl.PipeType.V if schedule == "wrong_acquire_pipe" else pl.PipeType.MTE2
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            for i in pl.range(2):
+                written = pl.tile.store(acc, [0, 0], scratch)
+                written = pl.tile.store(acc, [16, 0], written)
+                pl.system.sync_set(4, pipe=release_pipe, ffts_mode=2, core_type=pl.KernelType.AIC)
+            for i in pl.range(2):
+                pl.system.sync_wait(wait_event, pipe=acquire_pipe, core_type=pl.KernelType.AIV)
+                chunk = pl.tile.load(scratch, [0, 0], [32, 16], target_memory=pl.Mem.Vec)
+                out = pl.tile.store(chunk, [0, 0], out)
+            return out
+
+    if schedule != "matched":
+        with pytest.raises(ValueError, match="multiple stores requires a top-level write phase"):
+            _expand_raw(Before)
+    else:
+        After = _expand_raw(Before)
+        assert "_gm_sync" not in ir.python_print(After)
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
 
 
 if __name__ == "__main__":

@@ -90,6 +90,13 @@ std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count
   return aliased_idx;
 }
 
+std::optional<size_t> BufferAliasArgIndex(const CallPtr& call) {
+  if (!call || !call->op_) return std::nullopt;
+  if (auto index = BuiltinWritebackArgIndex(call->op_, call->args_.size())) return index;
+  if (!call->args_.empty() && IsBufferAliasingViewOp(call->op_->name_)) return 0;
+  return std::nullopt;
+}
+
 bool IsBuiltinOp(const std::string& op_name) {
   return op_name.rfind("tile.", 0) == 0 || op_name.rfind("tensor.", 0) == 0 ||
          op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0 ||

@@ -178,13 +178,11 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
   auto try_resolve_canonical_tpop = [&](const ExprPtr& expr, const TpopVarRemap& remap,
                                         VarPtr* canonical_var) -> bool {
-    // A zero-copy view that inherits its input's buffer (slice / reshape /
-    // transpose_view / ... — any IsBufferAliasingViewOp) over a popped tile
-    // aliases that buffer, so the view's own uses must extend the tpop's
-    // lifetime. Peel through a *chain* of such views (e.g.
-    // slice(transpose_view(tpop))) down to the underlying tile — a single-level
-    // unwrap would leave a stacked-view return var unresolved and let the tpop
-    // be freed before later uses of the returned view.
+    // Views and registry-declared in-place writers alias their input buffer,
+    // so uses of either result must extend the underlying tpop's lifetime.
+    // Peel through a chain of aliases, following each declared operand rather
+    // than assuming argument zero. Otherwise a fillpad_inplace result (or a
+    // view of it) could still be live when its FIFO slot is freed and reused.
     ExprPtr alias_src = expr;
     VarPtr src_var;
     while (alias_src) {
@@ -193,11 +191,9 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
         break;
       }
       auto call = std::dynamic_pointer_cast<const Call>(alias_src);
-      if (!call || !call->op_ || call->args_.empty() ||
-          !op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-        break;
-      }
-      alias_src = call->args_[0];
+      auto index = op_predicates::BufferAliasArgIndex(call);
+      if (!index) break;
+      alias_src = call->args_[*index];
     }
     if (!src_var) {
       return false;

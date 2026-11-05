@@ -16,6 +16,8 @@ PTO codegen 直接接收分配句柄和目标操作数。
 默认支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的静态物理形状二维稠密 Vec 和普通 cube kernel。
 物理行须按 32 字节对齐；valid 可以是物理 shape 内的静态部分矩形或已支持的运行时矩形。
 逐元素运算的 Tile 输入与目标必须具有一致的物理 shape 和 valid 范围；仅 valid 相同不足以入选。
+显式携带 `shapes=` 分区操作数的 store 保留 Tile IR：Buffer store 配方目前只接受三个操作数。
+此限制也适用于静态或运行时分区大小的二维 store。
 
 | 算子 | 元素类型 |
 | ---- | -------- |
