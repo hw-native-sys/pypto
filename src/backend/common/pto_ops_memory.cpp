@@ -42,6 +42,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/vec_nz_store.h"
 #include "pypto/ir/type.h"
@@ -251,6 +252,128 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   return "";
 }
 
+struct MxScaleStoreOperands {
+  std::string tile;
+  std::string tile_type;
+  std::string partition;
+  std::string partition_type;
+};
+
+static MxScaleStoreOperands EmitMxScaleStoreOperands(const CallPtr& op, const ir::VarPtr& tile,
+                                                     const ir::VarPtr& tensor,
+                                                     const ir::MakeTuplePtr& offsets,
+                                                     codegen::PTOCodegen& codegen) {
+  const auto source = As<ir::TileType>(tile->GetType());
+  const auto dest = AsTensorTypeLike(tensor->GetType());
+  const auto source_view = ir::tile_view_semantics::GetEffectiveTileView(*source);
+  const auto& valid = source_view.valid_shape;
+  const auto layout = dest->tensor_view_ ? dest->tensor_view_->layout : ir::TensorLayout::ND;
+  const bool is_a = layout == ir::TensorLayout::MX_A_ZZ;
+  INTERNAL_CHECK_SPAN(is_a || layout == ir::TensorLayout::MX_B_NN, op->span_)
+      << "MX scale tile.store expects an MX_A_ZZ or MX_B_NN destination";
+  const auto order = is_a ? ir::TileLayout::row_major : ir::TileLayout::col_major;
+  INTERNAL_CHECK_SPAN(source->dtype_ == DataType::FP8E8M0 &&
+                          source_view.fractal == ir::tile_view_semantics::kMXScaleFractal &&
+                          source_view.blayout == order && source_view.slayout == order,
+                      op->span_)
+      << "MX scale tile.store expects a packed FP8E8M0 source matching its destination layout";
+  const size_t block_axis = is_a ? 0 : 1;
+  const size_t group_axis = 1 - block_axis;
+  CHECK_SPAN(dest->shape_.size() == 2 && offsets->elements_.size() == 2, op->span_)
+      << "MX scale tile.store requires a logical rank-2 destination and offsets. "
+         "Use LegalizeMxScaleTensorViews with PTOAS v0.74.";
+  INTERNAL_CHECK_SPAN(valid.size() == 2 && source->shape_.size() == 2, op->span_)
+      << "MX scale tile.store requires a rank-2 source";
+  const auto block = As<ir::ConstInt>(valid[block_axis]);
+  const auto groups = As<ir::ConstInt>(valid[group_axis]);
+  const auto dest_block = As<ir::ConstInt>(dest->shape_[block_axis]);
+  const auto dest_groups = As<ir::ConstInt>(dest->shape_[group_axis]);
+  const auto group_offset = As<ir::ConstInt>(offsets->elements_[group_axis]);
+  INTERNAL_CHECK_SPAN(block && groups && dest_block && dest_groups && block->value_ > 0 &&
+                          groups->value_ > 0 && dest_block->value_ > 0 && dest_groups->value_ > 0 &&
+                          block->value_ % ir::tile_view_semantics::kMXSFractalRows == 0 &&
+                          groups->value_ % ir::tile_view_semantics::kMXSFractalCols == 0,
+                      op->span_)
+      << "MX scale tile.store requires static positive complete scale boxes";
+  CHECK_SPAN(groups->value_ == dest_groups->value_ && group_offset && group_offset->value_ == 0, op->span_)
+      << "MX scale tile.store must cover every scale group of the rows it writes, starting at group 0: "
+      << "the source has " << groups->value_ << " groups and the destination has " << dest_groups->value_;
+  const auto block_offset = As<ir::ConstInt>(offsets->elements_[block_axis]);
+  CHECK_SPAN(block->value_ <= dest_block->value_ &&
+                 (!block_offset ||
+                  (block_offset->value_ >= 0 && block_offset->value_ <= dest_block->value_ - block->value_)),
+             op->span_)
+      << "MX scale tile.store window must fit inside the destination block extent " << dest_block->value_;
+
+  if (op->args_.size() == 4) {
+    const auto shapes = As<ir::MakeTuple>(op->args_[3]);
+    CHECK_SPAN(shapes && ir::tile_view_semantics::ShapeExprListsEquivalent(shapes->elements_, valid),
+               op->span_)
+        << "MX scale tile.store explicit shape must match the entire source tile ["
+        << (is_a ? block->value_ : groups->value_) << ", " << (is_a ? groups->value_ : block->value_)
+        << "]. Remove the shapes argument or pass that shape.";
+  }
+
+  CHECK_SPAN(ir::tile_view_semantics::ShapeExprListsEquivalent(source->shape_, valid), op->span_)
+      << "MX scale tile.store requires a fully valid source tile. Store the whole unpadded tile.";
+  CHECK_SPAN(source->GetMemorySpace() == ir::MemorySpace::Vec, op->span_)
+      << "MX scale tile.store requires a source in Vec memory. Use the scale produced by quant_mx.";
+  const auto memref = source->memref_.has_value() ? ir::GetDefinedMemRef(source) : nullptr;
+  const auto address = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr;
+  CHECK_SPAN(codegen.EmitTileAddr() && address, op->span_)
+      << "MX scale tile.store requires a static PYPTO or DSA_RP memory allocation.";
+  CHECK_SPAN(dest_block->value_ <= std::numeric_limits<int64_t>::max() / groups->value_, op->span_)
+      << "MX scale tile.store destination element count overflows int64";
+  const int64_t elements = block->value_ * groups->value_;
+  CHECK_SPAN(memref->size_ == static_cast<uint64_t>(elements), op->span_)
+      << "MX scale tile.store requires a contiguous source allocation of " << elements << " FP8E8M0 bytes.";
+  CHECK_SPAN(!codegen.IsTileViewName(codegen.GetVarName(tile)), op->span_)
+      << "MX scale tile.store requires the whole scale tile the quantizer produced, not a view of one.";
+
+  // The whole group span is contiguous in SFractal order. Each aligned
+  // 16-row block occupies 16 * groups bytes, so the flat offset is the
+  // logical block-axis offset times the group count for either layout.
+  // Keep the original MX view for loads and use a separate ND TSTORE view.
+  const auto one = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+  const auto zero = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  const auto dest_extent = codegen.GetOrEmitConstant(dest_block->value_ * groups->value_, DataType::INDEX);
+  const auto tile_extent = codegen.GetOrEmitConstant(elements, DataType::INDEX);
+  const auto dtype = codegen.GetTypeString(dest->dtype_);
+  const auto view_type = codegen.GetTensorViewTypeString(dest.get());
+  const auto nd_view = codegen.NewNamedTemp(tensor->name_hint_ + "_mx_nd_view");
+  // The result of an earlier store may name a tensor view. Use its pointer.
+  codegen.Emit(nd_view + " = pto.make_tensor_view " + codegen.GetTensorBasePtr(tensor) + ", shape = [" + one +
+               ", " + dest_extent + "], strides = [" + dest_extent + ", " + one +
+               "] {layout = #pto.layout<nd>} : " + view_type);
+  std::string flat_offset;
+  if (block_offset) {
+    flat_offset = codegen.GetOrEmitConstant(block_offset->value_ * groups->value_, DataType::INDEX);
+  } else {
+    const auto row_index = EmitIndexOperand(codegen, offsets->elements_[block_axis], "MX block offset");
+    const auto group_extent = codegen.GetOrEmitConstant(groups->value_, DataType::INDEX);
+    flat_offset = codegen.NewNamedTemp(tensor->name_hint_ + "_mx_off");
+    codegen.Emit(flat_offset + " = arith.muli " + row_index + ", " + group_extent + " : index");
+  }
+  const auto partition_type = MakePartitionTensorViewType({"1", std::to_string(elements)}, dtype);
+  const auto partition = EmitPartitionViewPTO(tensor->name_hint_, nd_view, view_type, partition_type,
+                                              {zero, flat_offset}, {one, tile_extent}, codegen);
+
+  // TSTORE is row-oriented and requires an ND Vec source for this view.
+  // Describe the already-packed scale allocation as one ND row at its address.
+  std::vector<ExprPtr> shape = {std::make_shared<ir::ConstInt>(1, DataType::INDEX, op->span_),
+                                std::make_shared<ir::ConstInt>(elements, DataType::INDEX, op->span_)};
+  ir::TileView flat_view;
+  flat_view.valid_shape = shape;
+  const auto alias_type =
+      std::make_shared<ir::TileType>(shape, source->dtype_, std::nullopt, flat_view, ir::MemorySpace::Vec);
+  const auto alias_type_str = codegen.GetViewTileBufTypeStringFromTileType(alias_type);
+  const auto alias = codegen.NewNamedTemp(tile->name_hint_ + "_mx_nd");
+  codegen.Emit(alias + " = pto.alloc_tile addr = " +
+               codegen.GetOrEmitConstant(address->value_, DataType::INT64) + " : " + alias_type_str);
+  codegen.RegisterTileBufType(alias, alias_type_str, alias_type);
+  return {alias, alias_type_str, partition, partition_type};
+}
+
 // tile.store: emit pto.partition_view + pto.tstore
 static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -394,7 +517,16 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     shapes_tuple = As<ir::MakeTuple>(op->args_[3]);
   }
 
-  if (shapes_tuple) {
+  const bool mx_destination =
+      tensor_type->tensor_view_.has_value() && ir::IsMxTensorLayout(tensor_type->tensor_view_->layout);
+
+  if (mx_destination) {
+    auto operands = EmitMxScaleStoreOperands(op, tile, output_tensor, offsets_tuple, codegen);
+    tile_buf = std::move(operands.tile);
+    tile_buf_type = std::move(operands.tile_type);
+    partition_view = std::move(operands.partition);
+    partition_type = std::move(operands.partition_type);
+  } else if (shapes_tuple) {
     // N-rank partition path: use the explicit shapes tuple from FlattenTileNdTo2D.
     const auto& shape_elems = shapes_tuple->elements_;
     const auto& offset_elems = offsets_tuple->elements_;
@@ -405,7 +537,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
   } else {
-    // Logical 1D/2D path, including MX views whose packing PTOAS owns.
+    // Logical 1D/2D path.
     std::string height_dim = "?", width_dim = "?";
     if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
     if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
