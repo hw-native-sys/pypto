@@ -27,6 +27,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.op import tile as _ir_ops_tile
 from pypto.language.parser.diagnostics.exceptions import ParserError
 from pypto.pypto_core import ir as _ir_core
@@ -4104,7 +4105,8 @@ def test_tile_select_keeps_a_narrowed_tail_on_a_materialized_scalar_branch():
 
 
 @pytest.mark.parametrize("form", ["mask-tile-scalar", "mask-scalar-tile", "mask-tile-tile"], ids=lambda f: f)
-def test_tile_select_survives_the_default_pipeline(form, default_pass_manager, ascend_backend):
+@pytest.mark.parametrize("enabled", [None, False])
+def test_tile_select_survives_the_default_pipeline(form, ascend_backend, enabled):
     """Every operand form reaches the end of the pipeline, not just this pass.
 
     `LowerCompositeOps` runs at slot 13 and `FlattenTileNdTo2D` at 14, so an
@@ -4112,11 +4114,22 @@ def test_tile_select_survives_the_default_pipeline(form, default_pass_manager, a
     Checking this pass in isolation is not enough -- the rank-3 case below lowers
     cleanly here and only the full run proves the flattener takes what it emits.
     """
-    optimized = default_pass_manager.run_passes(_build_select_before(form=form))
+    options = {} if enabled is None else {"enable_buffer_ir": enabled}
+    with passes.PassContext([], **options):
+        manager = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = manager.run_passes(_build_select_before(form=form))
     names = _collect_op_names(optimized)
 
     assert _OP_TILE_SELECT not in names
-    assert (_OP_TILE_SEL in names) or (_OP_TILE_SELS in names)
+    # Supported FP32 composite selections now reach Buffer IR by default;
+    # disabling Buffer keeps the original Tile lowering contract observable.
+    use_buffer = enabled is not False and ascend_backend == BackendType.Ascend910
+    stage = ir.FunctionIRStage.Buffer if use_buffer else ir.FunctionIRStage.Functional
+    kernels = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
+    assert kernels and all(f.ir_stage == stage for f in kernels)
+    dialect = "buffer" if use_buffer else "tile"
+    suffix = "sels" if form == "mask-tile-scalar" else "sel"
+    assert ir.get_op(f"{dialect}.{suffix}").name in names
 
 
 @pytest.mark.parametrize("form", ["mask-tile-scalar", "mask-scalar-tile", "mask-tile-tile"], ids=lambda f: f)

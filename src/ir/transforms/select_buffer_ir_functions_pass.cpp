@@ -24,6 +24,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
@@ -377,6 +378,9 @@ class BufferKernelSupport : public IRVisitor {
     } else if (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num") ||
                IsOp(call, "tile.get_subblock_idx")) {
       supported &= call->args_.empty() && call->kwargs_.empty();
+    } else if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
+      supported &= backend::SupportsLogicalBufferConversion(*conversion, call);
+      for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
     } else if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
       supported &= backend::SupportsLogicalBufferRow(*row_recipe, call);
       // Native row recipes below are dense allocations. A slice retains a

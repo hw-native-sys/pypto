@@ -477,5 +477,118 @@ def test_default_row_vector_states(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
+def _cast_select_entry(scalar, valid):
+    rows, cols = valid
+
+    @pl.jit.incore
+    def kernel(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        a_tile = pl.load(a, [0, 0], [8, 64], valid_shape=[rows, cols])
+        b_tile = pl.load(b, [0, 0], [8, 64], valid_shape=[rows, cols])
+        x = pl.cast(a_tile, pl.FP32, mode="rint")
+        y = pl.cast(b_tile, pl.FP32, mode="rint")
+        if scalar:
+            mask = pl.tile.cmps(x, 0.0, cmp_type=4)
+            scalar_scratch = pl.create_tile([1, 64], dtype=pl.FP32)
+            selected = pl.tile.sels(mask, x, scalar_scratch, -3.0)
+        else:
+            mask = pl.tile.cmp(x, y, cmp_type=4)
+            tile_scratch = pl.create_tile([1, 16], dtype=pl.UINT32)
+            selected = pl.tile.sel(mask, x, y, tile_scratch)
+        result = pl.cast(selected, pl.FP16, mode="rint")
+        out = pl.store(result, [0, 0], out)
+        out = pl.store(a_tile, [8, 0], out)
+        return pl.store(b_tile, [16, 0], out)
+
+    @pl.jit
+    def entry(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(a, b, out)
+
+    return entry
+
+
+def _cast_select_golden(tensors, scalar, valid):
+    rows, cols = valid
+    a, b = tensors["a"], tensors["b"]
+    out = tensors["out"].clone()
+    lhs, rhs = a[:rows, :cols].float(), b[:rows, :cols].float()
+    condition = lhs > (0.0 if scalar else rhs)
+    out[:rows, :cols] = torch.where(condition, lhs, -3.0 if scalar else rhs).half()
+    out[8 : 8 + rows, :cols] = a[:rows, :cols]
+    out[16 : 16 + rows, :cols] = b[:rows, :cols]
+    return out
+
+
+@st.cases(
+    *[
+        st.case(
+            _cast_select_entry(scalar, valid),
+            ((torch.arange(512).reshape(8, 64) % 17) - 8).half() / 4,
+            torch.flip(((torch.arange(512).reshape(8, 64) % 17) - 8).half() / 4, [1]),
+            torch.full((24, 64), -777.0, dtype=torch.float16),
+            name=f"buffer_cast_select_{'scalar' if scalar else 'tile'}_{valid[1]}_{planner.name.lower()}",
+            golden=lambda tensors, scalar=scalar, valid=valid: _cast_select_golden(tensors, scalar, valid),
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for scalar in (False, True)
+        for valid in ((8, 64), (7, 61))
+        for planner in _PLANNERS
+    ]
+)
+def test_default_cast_compare_select(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+def _half_rounding_entry(valid, mode):
+    rows, cols = valid
+
+    @pl.jit.incore
+    def kernel(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        source = pl.load(a, [0, 0], [8, 64], valid_shape=[rows, cols])
+        result = pl.cast(source, pl.FP16, mode=mode, saturation_mode="off")
+        return pl.store(result, [0, 0], out)
+
+    return _softmax_entry(kernel)
+
+
+def _half_rounding_data():
+    data = torch.linspace(-3, 3, 512).reshape(8, 64)
+    # Consecutive half-way values round down/up under ties-to-even. Negative
+    # values and tiny subnormals expose sign and underflow handling as well.
+    data[0, :8] = torch.tensor(
+        [1 + 2**-11, 1 + 3 * 2**-11, -1 - 2**-11, -1 - 3 * 2**-11, 2**-25, 3 * 2**-25, -(2**-25), -3 * 2**-25]
+    )
+    return data
+
+
+def _half_rounding_golden(tensors, valid):
+    rows, cols = valid
+    result = tensors["out"].clone()
+    result[:rows, :cols] = tensors["a"][:rows, :cols].half()
+    return result
+
+
+@st.cases(
+    *[
+        st.case(
+            _half_rounding_entry(valid, mode),
+            _half_rounding_data(),
+            torch.full((8, 64), -777.0, dtype=torch.float16),
+            name=f"buffer_half_rounding_{mode}_{valid[1]}_{planner.name.lower()}",
+            golden=lambda tensors, valid=valid: _half_rounding_golden(tensors, valid),
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for mode in ("none", "rint")
+        for valid in ((8, 64), (7, 61))
+        for planner in _PLANNERS
+    ]
+)
+def test_default_half_rounding(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

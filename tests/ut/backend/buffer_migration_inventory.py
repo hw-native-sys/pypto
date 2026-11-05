@@ -158,6 +158,7 @@ MIGRATION_FAMILIES = (
             "tile.sel",
             "tile.sels",
         ),
+        restricted=frozenset({"tile.cmp", "tile.cmps", "tile.sel", "tile.sels"}),
     ),
     MigrationFamily(
         "G08: Vector generators",
@@ -227,7 +228,7 @@ MIGRATION_FAMILIES = (
             "tile.extract",
             "tile.assemble",
         ),
-        restricted=frozenset({"tile.move"}),
+        restricted=frozenset({"tile.move", "tile.cast"}),
     ),
     MigrationFamily(
         "G13: Views and valid metadata",

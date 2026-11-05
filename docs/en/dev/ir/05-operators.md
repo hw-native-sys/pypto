@@ -30,6 +30,9 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.extract` | source buffer, row offset, column offset, destination buffer | Void |
 | `buffer.matmul` | Left buffer, Right buffer, Acc destination | Void |
 | `buffer.matmul_acc` | Left buffer, Right buffer, Acc buffer read and written | Void |
+| `buffer.cast` | FP16/FP32 source, destination; explicit rounding/saturation attrs | Void |
+| `buffer.cmp`, `buffer.cmps` | FP32 source, tile/scalar comparison operand, packed UINT8 destination | Void |
+| `buffer.sel`, `buffer.sels` | packed predicate, value operands, explicit scratch, destination | Void |
 | `buffer.row_max`, `buffer.row_sum` | FP32 matrix, explicit scratch, column-vector destination | Void |
 | `buffer.row_expand_sub`, `buffer.row_expand_div` | FP32 matrix, column vector, matrix destination | Void |
 

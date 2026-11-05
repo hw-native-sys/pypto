@@ -1459,5 +1459,94 @@ class ColumnStore:
     assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
 
 
+def _conversion_program(scalar, mode=4, valid=(8, 64), cast_mode="rint"):
+    rows, cols = valid
+    compare = f"pl.tile.cmps(x, 0.0, cmp_type={mode})" if scalar else f"pl.tile.cmp(x, y, cmp_type={mode})"
+    scratch = (
+        "pl.create_tile([1, 64], dtype=pl.FP32)" if scalar else "pl.create_tile([1, 16], dtype=pl.UINT32)"
+    )
+    select = "pl.tile.sels(mask, x, scratch, -3.0)" if scalar else "pl.tile.sel(mask, x, y, scratch)"
+    return pl.parse_program(f"""
+@pl.program
+class ConversionChain:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[8, 64], pl.FP16], b: pl.Tensor[[8, 64], pl.FP16],
+               out: pl.InOut[pl.Tensor[[24, 64], pl.FP16]]) -> pl.Tensor[[24, 64], pl.FP16]:
+        a_tile = pl.load(a, [0, 0], [8, 64], valid_shape=[{rows}, {cols}])
+        b_tile = pl.load(b, [0, 0], [8, 64], valid_shape=[{rows}, {cols}])
+        x = pl.cast(a_tile, pl.FP32, mode="{cast_mode}")
+        y = pl.cast(b_tile, pl.FP32, mode="{cast_mode}")
+        mask = {compare}
+        scratch = {scratch}
+        selected = {select}
+        result = pl.cast(selected, pl.FP16, mode="{cast_mode}")
+        out = pl.store(result, [0, 0], out)
+        out = pl.store(a_tile, [8, 0], out)
+        return pl.store(b_tile, [16, 0], out)
+""")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("scalar", [False, True])
+@pytest.mark.parametrize("mode", range(6))
+@pytest.mark.parametrize("valid", [(8, 64), (7, 61)])
+@pytest.mark.parametrize("cast_mode", ["none", "rint"])
+def test_default_cast_compare_select_chain(tmp_path, planner, scalar, mode, valid, cast_mode):
+    lowered = _lower(_conversion_program(scalar, mode, valid, cast_mode), planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    restored = ir.deserialize(ir.serialize(lowered))
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
+    # Repeated comparisons include equal elements. Partial masks end mid-byte;
+    # untouched output and live source stores expose packing and alias mistakes.
+    a = ((torch.arange(512).reshape(8, 64) % 17) - 8).half() / 4
+    b = torch.flip(a, [1])
+    out = torch.full((24, 64), -777.0, dtype=torch.float16)
+    expected = out.clone()
+    rows, cols = valid
+    lhs, rhs = a[:rows, :cols].float(), b[:rows, :cols].float()
+    comparison = (torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge)[mode]
+    mask = comparison(lhs, 0.0 if scalar else rhs)
+    expected[:rows, :cols] = torch.where(mask, lhs, -3.0 if scalar else rhs).half()
+    expected[8 : 8 + rows, :cols] = a[:rows, :cols]
+    expected[16 : 16 + rows, :cols] = b[:rows, :cols]
+    namespace = {}
+    exec(torch_codegen(restored), namespace)  # noqa: S102
+    namespace["kernel"](a, b, out)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    text = codegen.PTOCodegen().generate(
+        restored, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    assert "pto.tcvt" in text
+    assert ("pto.tcmps" if scalar else "pto.tcmp") in text
+    assert ("pto.tsels" if scalar else "pto.tsel") in text
+    if find_ptoas_binary() is not None:
+        path = tmp_path / "conversion_chain.pto"
+        path.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(
+            str(path), str(tmp_path / "conversion_chain.cpp"), ["--pto-arch=a2", f"--pto-level={level}"]
+        )
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["off", "rounding", "empty"])
+def test_conversion_rollout_preserves_unopened_forms(planner, kind):
+    program = _conversion_program(
+        True,
+        valid=(0, 64) if kind == "empty" else (8, 64),
+        cast_mode="ceil" if kind == "rounding" else "rint",
+    )
+    lowered = _lower(program, planner, False if kind == "off" else None)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_conversion_rollout_keeps_a5_on_tile(ascend_backend, planner):
+    assert ascend_backend == BackendType.Ascend950
+    assert _kernel(_lower(_conversion_program(True), planner)).ir_stage == ir.FunctionIRStage.Functional
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

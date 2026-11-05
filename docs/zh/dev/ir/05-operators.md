@@ -30,6 +30,9 @@
 | `buffer.extract` | 源 buffer、行偏移、列偏移、目标 buffer | Void |
 | `buffer.matmul` | Left buffer、Right buffer、Acc 目标 | Void |
 | `buffer.matmul_acc` | Left buffer、Right buffer、被读写的 Acc buffer | Void |
+| `buffer.cast` | FP16/FP32 源、目的地；显式舍入/饱和属性 | Void |
+| `buffer.cmp`、`buffer.cmps` | FP32 源、Tile/标量比较操作数、打包 UINT8 目的地 | Void |
+| `buffer.sel`、`buffer.sels` | 打包谓词、值操作数、显式 scratch、目的地 | Void |
 | `buffer.row_max`、`buffer.row_sum` | FP32 矩阵、显式 scratch、列向量目的地 | Void |
 | `buffer.row_expand_sub`、`buffer.row_expand_div` | FP32 矩阵、列向量、矩阵目的地 | Void |
 
