@@ -5825,7 +5825,7 @@ class TestConvertGatherOp:
         Regression test for the case the converter previously crashed with
         CHECK(input_tensor_type): a local tensor.create + tensor.assemble feeds
         tensor.gather, so by the time gather is visited its `input` arg is a
-        TileType. The converter extracts a packed source for flat gather.
+        TileType. The converter reuses the dense initialized producer directly.
         """
 
         @pl.program
@@ -5862,14 +5862,13 @@ class TestConvertGatherOp:
                 tmp__tile = pl.tile.create([4, 16], dtype=pl.FP32)
                 assemble_src = pl.tile.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
                 tmp_1__tile = pl.tile.assemble(tmp__tile, assemble_src, [0, 0])
-                gather_src = pl.tile.extract(tmp_1__tile, 0, 0, [4, 16], target_memory=pl.Mem.Vec)
                 gather_idx = pl.tile.load(idx, [0, 0], [4, 3], [4, 3], target_memory=pl.Mem.Vec)
                 gather_ci_rows = pl.tile.ci(pl.const(0, pl.INT32), [1, 4], dtype=pl.INT32, descending=False)
                 gather_row_arange = pl.tile.reshape(gather_ci_rows, [4, 1])
                 gather_row_base = pl.tile.muls(gather_row_arange, pl.const(16, pl.INT32))
                 gather_flat_idx = pl.tile.row_expand_add(gather_idx, gather_row_base)
                 gather_tmp = pl.tile.create([4, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                gather = pl.tile.gather(gather_src, gather_flat_idx, gather_tmp)
+                gather = pl.tile.gather(tmp_1__tile, gather_flat_idx, gather_tmp)
                 out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather
                 ret0__store = pl.tile.store(out__tile, [0, 0], ret0__out)
                 return ret0__store
@@ -5888,18 +5887,15 @@ class TestConvertGatherOp:
         ir.assert_structural_equal(After, Expected)
 
     @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
-    def test_gather_conversion_strided_tile_source_materializes(self, ascend_backend):
-        """Flat-index gather materializes a strided tile.slice source.
+    def test_gather_conversion_strided_tile_source_uses_parent_offsets(self, ascend_backend):
+        """Flat-index gather uses a strided window's dense parent directly.
 
         Regression for the strided-source corruption (DeepSeek sparse_attn
         inverse-RoPE): flat[i,j] = i*src_cols + idx assumes the source is stored
         row-major with stride == src_cols, but a tile.slice view of a wider tile
         (rope = full[:, nope:head]) keeps the parent's wider stride, so every row
-        past the first is misaddressed. The converter now copies the TileType
-        source into a fresh contiguous tile (tile.extract) before
-        the flat-index tile.gather. The contiguous TensorType path
-        (test_gather_conversion) already materializes via tile.load and is not
-        copied.
+        past the first is misaddressed. Preserve the original parent and use
+        flat[i,j] = i*16 + 8 + idx instead, eliminating the packing allocation.
         """
 
         @pl.program
@@ -5937,16 +5933,17 @@ class TestConvertGatherOp:
                 full__tile = pl.tile.create([4, 16], dtype=pl.FP32)
                 assemble_src = pl.tile.load(src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec)
                 full_1__tile = pl.tile.assemble(full__tile, assemble_src, [0, 0])
-                rope__tile = pl.tile.slice(full_1__tile, [4, 8], [0, 8])
-                gather_src = pl.tile.extract(rope__tile, 0, 0, [4, 8], target_memory=pl.Mem.Vec)
+                # Conversion retains this view, but gather now reads its parent.
+                _rope__tile = pl.tile.slice(full_1__tile, [4, 8], [0, 8])
                 gather_idx = pl.tile.load(idx, [0, 0], [4, 8], [4, 8], target_memory=pl.Mem.Vec)
+                gather_idx_offset = pl.tile.adds(gather_idx, pl.const(8, pl.INT32))
                 gather_lin = pl.tile.ci(pl.const(0, pl.INT32), [1, 32], dtype=pl.INT32, descending=False)
                 gather_lin2d = pl.tile.reshape(gather_lin, [4, 8])
                 gather_row_ids = pl.tile.divs(gather_lin2d, pl.const(8, pl.INT32))
-                gather_row_base = pl.tile.muls(gather_row_ids, pl.const(8, pl.INT32))
-                gather_flat_idx = pl.tile.add(gather_idx, gather_row_base)
+                gather_row_base = pl.tile.muls(gather_row_ids, pl.const(16, pl.INT32))
+                gather_flat_idx = pl.tile.add(gather_idx_offset, gather_row_base)
                 gather_tmp = pl.tile.create([4, 8], dtype=pl.INT32, target_memory=pl.Mem.Vec)
-                gather = pl.tile.gather(gather_src, gather_flat_idx, gather_tmp)
+                gather = pl.tile.gather(full_1__tile, gather_flat_idx, gather_tmp)
                 out__tile: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = gather
                 ret0__store = pl.tile.store(out__tile, [0, 0], ret0__out)
                 return ret0__store

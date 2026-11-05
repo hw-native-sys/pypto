@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -1833,6 +1834,44 @@ void OpConversionRegistry::RegisterGatherOps() {
             As<TileType>(input->GetType()) && context.packed_tiles.count(input) != 0 &&
             tile_view_semantics::ShapeExprListsEquivalent(input_shape, source_window_shape);
 
+        // A static 2D window can gather from its dense parent directly. Encode
+        // the parent's pitch and the window's origin in the element indices;
+        // never reinterpret a narrow view as if its rows were tightly packed.
+        std::optional<GatherSourceWindow> direct_source;
+        int64_t direct_stride = 0;
+        int64_t direct_offset = 0;
+        if (rank == 2 && norm_dim == 1) {
+          auto known = context.gather_source_windows.find(input);
+          if (known != context.gather_source_windows.end()) {
+            const auto& window = known->second;
+            auto base = As<TileType>(window.base->GetType());
+            INTERNAL_CHECK_SPAN(base && base->shape_.size() == 2, span)
+                << "gather source window requires a 2D tile base";
+            auto base_rows = As<ConstInt>(base->shape_[0]);
+            auto base_cols = As<ConstInt>(base->shape_[1]);
+            auto rows = As<ConstInt>(index_shape[0]);
+            auto cols = As<ConstInt>(input_shape[1]);
+            const int64_t max_i32 = std::numeric_limits<int32_t>::max();
+            if (base_rows && base_cols && rows && cols && base_cols->value_ > 0 &&
+                base_rows->value_ <= max_i32 / base_cols->value_ && rows->value_ > 0 &&
+                rows->value_ <= base_rows->value_ && cols->value_ > 0 && cols->value_ <= base_cols->value_ &&
+                window.row_offset >= 0 && window.col_offset >= 0 &&
+                window.row_offset <= base_rows->value_ - rows->value_ &&
+                window.col_offset <= base_cols->value_ - cols->value_) {
+              const int64_t stride = base_cols->value_;
+              const int64_t offset = window.row_offset * stride + window.col_offset;
+              const int64_t max_index = offset + (rows->value_ - 1) * stride + cols->value_ - 1;
+              // INT16 flat indices must still address the original parent. If
+              // they cannot, retain the packed-source path and its range guard.
+              if (idx_dtype != DataType::INT16 || max_index <= 32767) {
+                direct_source = window;
+                direct_stride = stride;
+                direct_offset = offset;
+              }
+            }
+          }
+        }
+
         // Keep large gathers row-bounded on every backend. This conservative
         // estimate covers the source, output, and the flat-index working tiles;
         // surrounding live values can still require a smaller user tile.
@@ -1852,7 +1891,7 @@ void OpConversionRegistry::RegisterGatherOps() {
           }
           // Flat indices use the logical row width; physical row padding
           // would otherwise shift every row after the first.
-          if ((source_cols % 32) * input_dtype.GetByte() % 32 != 0) return true;
+          if (!direct_source && (source_cols % 32) * input_dtype.GetByte() % 32 != 0) return true;
           const auto* ctx = PassContext::Current();
           const auto* target = ctx ? ctx->GetBackend() : backend::BackendConfig::GetBackend();
           const uint64_t capacity = target->GetMemSize(MemorySpace::Vec);
@@ -1878,7 +1917,7 @@ void OpConversionRegistry::RegisterGatherOps() {
             if (aligned < *bytes || aligned > remaining) return true;
             remaining -= aligned;
           }
-          if (!reuse_packed_source) {
+          if (!reuse_packed_source && !direct_source) {
             const uint64_t source_row = row_bytes(source_cols, input_dtype.GetByte());
             if (source_row == 0) return false;
             if (static_cast<uint64_t>(rows) > remaining / source_row) return true;
@@ -1985,15 +2024,33 @@ void OpConversionRegistry::RegisterGatherOps() {
 
           auto zero_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
           auto inp_sh = MakeShapeTuple({make_idx(I0), make_idx(S1)}, span);
-          // GM loads are packed; local windows use the same packing as flat gather.
-          ExprPtr gather_src = As<TileType>(input->GetType())
+          // Known local windows keep their original parent live through gather;
+          // unknown layouts retain the existing materialization path.
+          ExprPtr gather_src = direct_source ? direct_source->base
+                               : As<TileType>(input->GetType())
                                    ? MaterializeGatherSource(input, {make_idx(I0), make_idx(S1)}, context,
                                                              prologue, span, "gather_src")
                                    : emit_load_or_slice(prologue, input, zero_ofs, inp_sh, "gather_inp");
           auto idx_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
           auto idx_full = emit_load_or_slice(prologue, index, zero_ofs, idx_sh, "gather_idx");
 
-          auto flat_idx = emit_flat_idx(prologue, idx_full, I0, S1, K, "gather");
+          // Add the origin in INT32 before narrowing, just like the row pitch.
+          // This also handles a one-row result, where emit_flat_idx skips rows.
+          auto offset_idx = idx_full;
+          if (direct_source && direct_offset != 0) {
+            if (idx_dtype != DataType::INT32) {
+              offset_idx = emit("tile.cast", {offset_idx},
+                                {{"target_type", DataType(DataType::INT32)}, {"mode", kCastModeNone}},
+                                "gather_idx_i32");
+            }
+            offset_idx = emit("tile.adds", {offset_idx, make_i32(direct_offset)}, {}, "gather_idx_offset");
+            if (idx_dtype != DataType::INT32) {
+              offset_idx = emit("tile.cast", {offset_idx},
+                                {{"target_type", idx_dtype}, {"mode", kCastModeNone}}, "gather_idx_cast");
+            }
+          }
+          auto flat_idx =
+              emit_flat_idx(prologue, offset_idx, I0, direct_source ? direct_stride : S1, K, "gather");
           auto tmp_sh = MakeShapeTuple({make_idx(I0), make_idx(K)}, span);
           auto tmp = emit("tile.create", {tmp_sh}, tmp_create_kwargs, "gather_tmp");
           auto result = emit("tile.gather", {gather_src, flat_idx, tmp}, {}, "gather");

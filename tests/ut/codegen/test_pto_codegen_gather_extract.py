@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Axis gather shares full-tile source packing across Ascend backends."""
+"""Axis gather preserves source addressing across Ascend backends."""
 
 import pypto.language as pl
 import pytest
@@ -31,9 +31,9 @@ def _codegen(program):
 @pytest.mark.parametrize("dtype", [pl.FP32, pl.FP16, pl.INT32, pl.INT16])
 @pytest.mark.parametrize("strided", [False, True])
 @pytest.mark.parametrize("index_rows", [8, 16])
-def test_gather_column_slice_uses_extract(dtype, strided, index_rows, ascend_backend):
-    # Sixteen rows cross the A5 FP32 vector box boundary. For a column slice,
-    # the parent pitch is 128 but tgather's flat indices assume a pitch of 64.
+def test_gather_column_slice_uses_parent_pitch(dtype, strided, index_rows, ascend_backend):
+    # Sixteen rows cross the A5 FP32 vector box boundary. Gather from the
+    # original parent using r*128 + 64 + idx, without packing its narrow view.
     if strided:
 
         @pl.program
@@ -70,31 +70,74 @@ def test_gather_column_slice_uses_extract(dtype, strided, index_rows, ascend_bac
                 return output
 
     mlir = _codegen(Program)
-    # TEXTRACT cannot read INT16/INT32; integer sources use exact adds(0).
-    subviews = [line for line in mlir.splitlines() if "pto.subview" in line]
-    floating = dtype in (pl.FP32, pl.FP16)
-    if floating:
-        assert not subviews
+    assert "pto.textract" not in mlir
     assert mlir.count("pto.tgather ins(") == 1
-    extracts = [line for line in mlir.splitlines() if "pto.textract ins(" in line]
-    if strided and floating:
-        assert len(extracts) == 1
-        # The nested slice offsets must fold into a read of the wider
-        # parent. The output must be dense and feed tgather directly.
-        assert "rows=16, cols=128" in extracts[0]
-        assert f"rows={index_rows}, cols=64" in extracts[0]
-        assert ", %c0_index, %c64_index :" in extracts[0]
-        packed = extracts[0].split("outs(")[1].split(" :")[0]
-        assert f"pto.tgather ins({packed}," in mlir
-    else:
-        # GM input is already packed by tload. Integer local input must
-        # not acquire a TEXTRACT unsupported by the backend verifier.
-        assert not extracts
-        if strided:
-            adds = [line for line in mlir.splitlines() if "pto.tadds ins(" in line]
-            assert len(adds) == 1
-            packed = adds[0].split("outs(")[1].split(" :")[0]
-            assert f"pto.tgather ins({packed}," in mlir
+    if strided:
+        gather = next(line for line in mlir.splitlines() if "pto.tgather ins(" in line)
+        assert "rows=16, cols=128" in gather
+        assert f"rows={index_rows}, cols=64" in gather
+        assert any("pto.tmuls ins(" in line and "%c128_i32" in line for line in mlir.splitlines())
+        assert any("pto.tadds ins(" in line and "%c64_i32" in line for line in mlir.splitlines())
+        assert not any("pto.tadds ins(" in line and "%c0_i" in line for line in mlir.splitlines())
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("rows", [1, 16])
+def test_gather_nested_window_keeps_row_and_column_origin(ascend_backend, rows):
+    # The nested window begins at parent[6,64], so element offsets must be
+    # r*256 + 1600 + idx. In particular a one-row gather still needs the origin.
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(self, idx: pl.Tensor[[{rows},64],pl.INT32],
+             output: pl.Out[pl.Tensor[[{rows},64],pl.FP32]]) -> pl.Tensor[[{rows},64],pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            parent = pl.full([32,256],dtype=pl.FP32,value=1.0)
+            outer = parent[4:28,32:224]
+            window = outer[2:18,32:96]
+            alias = window
+            picked = pl.tensor.gather(alias,dim=-1,index=idx)
+            output = pl.assemble(output,picked,[0,0])
+        return output
+""")
+    mlir = _codegen(program)
+    gather = next(line for line in mlir.splitlines() if "pto.tgather ins(" in line)
+    assert "rows=32, cols=256" in gather
+    assert "pto.textract" not in mlir
+    assert any("pto.tadds ins(" in line and "%c1600_i32" in line for line in mlir.splitlines())
+    if rows > 1:
+        assert any("pto.tmuls ins(" in line and "%c256_i32" in line for line in mlir.splitlines())
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("rows,parent_cols,needs_copy", [(16, 256, False), (64, 1024, True)])
+def test_gather_int16_offsets_use_parent_only_when_representable(
+    ascend_backend, rows, parent_cols, needs_copy
+):
+    # The logical 64x64 window fits signed INT16 offsets, but its last row in
+    # the 64x1024 parent does not. Retain packing rather than narrowing offsets.
+    # A5 supports the INT16/INT32 index casts used by this lowering.
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            idx: pl.Tensor[[rows, 16], pl.INT16],
+            output: pl.Out[pl.Tensor[[rows, 16], pl.FP16]],
+        ) -> pl.Tensor[[rows, 16], pl.FP16]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                parent = pl.full([rows, parent_cols], dtype=pl.FP16, value=1.0)
+                window = parent[:, 64:128]
+                picked = pl.tensor.gather(window, dim=-1, index=idx)
+                output = pl.assemble(output, picked, [0, 0])
+            return output
+
+    mlir = _codegen(Program)
+    assert ("pto.textract" in mlir) == needs_copy
+    gather = next(line for line in mlir.splitlines() if "pto.tgather ins(" in line)
+    expected_cols = 64 if needs_copy else parent_cols
+    assert f"rows={rows}, cols={expected_cols}" in gather
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
@@ -259,8 +302,9 @@ def test_gather_counts_backing_storage_and_window_copy(ascend_backend, case):
 
     mlir = _codegen(Program)
     capacity = backend.get_backend_instance(ascend_backend).get_mem_size(ir.MemorySpace.Vec)
-    # In all three cases these coexisting buffers alone need 192 KiB.
-    assert ("scf.for" in mlir) == (capacity < 192 * 1024)
+    # A known source parent is addressed directly, eliminating the old window
+    # copy. A large index backing still coexists with the GM source load.
+    assert ("scf.for" in mlir) == (case == "index_view" and capacity < 192 * 1024)
     assert mlir.count("pto.tgather ins(") == 1
 
 
