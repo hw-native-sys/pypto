@@ -170,12 +170,20 @@ def test_hardware_loop_depth_and_dynamic_capture(depth, stop_dtype, tmp_path):
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("feature", ["dependent_stop", "offset_add", "scalar_compare"])
+@pytest.mark.parametrize(
+    "feature", ["dependent_stop", "offset_add", "scalar_compare", "unsigned_add", "unsigned_div", "unsigned_mod"]
+)
 def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
     """Former LLVM rewrites confused body adds/comparisons and dependent bounds."""
     builder = IRBuilder()
     with builder.function("loop_expressions", span=SPAN, type=ir.FunctionType.AIV) as f:
-        stop = f.param("stop", ir.ScalarType(DataType.INT32))
+        dtype = DataType.UINT32 if feature.startswith("unsigned_") else DataType.INT32
+        stop = f.param("stop", ir.ScalarType(dtype))
+        if feature.startswith("unsigned_"):
+            stop = ir.Add(stop, ir.ConstInt(1, dtype, SPAN), dtype, SPAN)
+            if feature != "unsigned_add":
+                operation = ir.FloorDiv if feature == "unsigned_div" else ir.FloorMod
+                stop = operation(stop, ir.ConstInt(2, dtype, SPAN), dtype, SPAN)
         dst = builder.let("dst", tile.full([192], dtype=DataType.FP32, value=0))
         outer = ir.Var("outer", ir.ScalarType(DataType.INDEX), SPAN)
         with (
@@ -216,6 +224,10 @@ def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "Expressions", SPAN))
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     assert bundle.helpers[0].source.count("scf.for") == (2 if feature == "dependent_stop" else 1)
+    if feature.startswith("unsigned_"):
+        assert re.search(r"arith.addi .* : i32", bundle.helpers[0].source)
+        assert not re.search(r"arith\.\w+ .* : ui32", bundle.helpers[0].source)
+        assert "arith.index_castui" in bundle.helpers[0].source
     compile_vf_bundle(bundle, tmp_path)
 
 

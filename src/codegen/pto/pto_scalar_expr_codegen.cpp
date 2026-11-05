@@ -114,6 +114,30 @@ void PTOCodegen::VisitBinaryArithExpr(const BinaryExprPtr& op, const std::string
     }
   }
 
+  if (ir::GetScalarDtype(op).IsUnsignedInt()) {
+    // MLIR arithmetic uses signless integers; bridge back afterward so the
+    // expression retains its unsigned type for captures and index casts.
+    const auto signless_type = result_type.substr(1);
+    auto operand = [&](const ir::ExprPtr& expr) {
+      VisitExpr(expr);
+      const auto source = fs_.current_expr_value;
+      const auto converted = NewTemp();
+      Emit(converted + " = builtin.unrealized_conversion_cast " + source + " : " + result_type + " to " +
+           signless_type);
+      return converted;
+    };
+    const auto lhs = operand(op->left_);
+    const auto rhs = operand(op->right_);
+    if (mlir_op == "arith.divsi") mlir_op = "arith.divui";
+    if (mlir_op == "arith.remsi") mlir_op = "arith.remui";
+    const auto value = EmitArithBinaryOp(mlir_op, lhs, rhs, signless_type);
+    const auto result = NewTemp();
+    Emit(result + " = builtin.unrealized_conversion_cast " + value + " : " + signless_type + " to " +
+         result_type);
+    fs_.current_expr_value = result;
+    return;
+  }
+
   if (mlir_op == float_op) {
     VisitExpr(op->left_);
     std::string lhs = fs_.current_expr_value;
