@@ -1654,9 +1654,7 @@ jobs:
       CCACHE_UMASK: '000'
       PYPTO_GOLDEN_NUM_THREADS: 1
       OMP_NUM_THREADS: 1
-      # Bound nested compilation on shared runners. Large kernels can take
-      # ~40s alone; eight competing PTOAS processes can exceed the 60s deadline.
-      PYPTO_CODEGEN_MAX_WORKERS: 1
+      PYPTO_CODEGEN_MAX_WORKERS: 2
     steps:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
@@ -1686,7 +1684,7 @@ jobs:
         run: |
           source activate.sh
           python tests/ci/compile_pypto_lib.py --lib build/pypto-lib \
-            --platform "$LIB_PLATFORM" --jobs 2 --timeout 1200 \
+            --platform "$LIB_PLATFORM" --jobs 4 --timeout 1200 \
             --output build/lib-compile-results
 
       - name: Upload compilation logs and manifest
