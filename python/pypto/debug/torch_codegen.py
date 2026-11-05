@@ -880,7 +880,9 @@ def _tile_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
 
 
 def _torch_buffer_dtype(dtype: DataType) -> str:
-    return "torch.uint32" if dtype == DataType.UINT32 else _torch_dtype(dtype)
+    # UINT32 is opaque scratch storage here. INT32 preserves its four-byte
+    # width on older supported Torch versions that do not expose torch.uint32.
+    return "torch.int32" if dtype == DataType.UINT32 else _torch_dtype(dtype)
 
 
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
