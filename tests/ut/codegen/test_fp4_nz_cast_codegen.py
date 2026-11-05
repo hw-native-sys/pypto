@@ -150,6 +150,7 @@ def _vec_to_vec_relayout_moves(mlir: str) -> list[str]:
     return moves
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("planner", _PLANNERS, ids=lambda p: p.name)
 def test_nz_destination_cast_is_one_tcvt_writing_a_boxed_tile(planner, tmp_path):
     """One `pto.tcvt`, NZ destination type, no float intermediate -- and it assembles."""
