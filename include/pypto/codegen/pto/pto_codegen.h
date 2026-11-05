@@ -129,7 +129,10 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Warn that `high_precision=True` will not run on the target backend.
    *
-   * Call this wherever a `precisionType` attribute is written. Two emitters do:
+   * Call this for precision attributes governed by HonorsHighPrecisionAlgorithm.
+   * rsqrt is excluded: high_precision=True supplies scratch for A2/A3 and a
+   * selector for A5, so both backends honour it regardless of this hook.
+   * Two emitters handle the remaining precision attributes:
    * the Tile op callbacks in `pto_ops_elementwise.cpp` and the Buffer IR
    * emitter in `pto_buffer_codegen.cpp`. Both lower the same `tile.div` /
    * `tile.log` / `tile.recip` onto the same `pto.*` op, so a backend that

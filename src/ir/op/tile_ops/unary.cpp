@@ -61,13 +61,21 @@ TypePtr DeduceTileUnaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
-// tile.rsqrt accepts 1 arg (basic mode) or 2 args (high-precision mode with tmp workspace).
+// Precision is an explicit attribute; tmp is required only in high-precision mode.
 // The tmp tile must match the input in shape and dtype.
 TypePtr DeduceTileRsqrtType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name) {
   CHECK(args.size() == 1 || args.size() == 2)
       << "The operator " << op_name << " requires 1 or 2 arguments, but got " << args.size();
+
+  const bool high_precision = GetKwargOr<bool>(kwargs, "high_precision", false);
+  CHECK(!high_precision || args.size() == 2)
+      << op_name << ": high_precision=True requires a tmp scratch tile";
+  // A2/A3's scratch overload always computes high precision. Reject an unused
+  // workspace instead of letting operand count override the explicit flag.
+  CHECK(high_precision || args.size() == 1)
+      << op_name << ": tmp requires high_precision=True; omit tmp for default precision";
 
   auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
@@ -325,9 +333,10 @@ REGISTER_OP("tile.rsqrt")
     .set_op_category("TileOp")
     .set_description(
         "Reciprocal square root (1/sqrt(x)) of a tile (element-wise). "
-        "Passing an optional second tmp tile activates the high-precision PTO path.")
+        "high_precision=True selects the high-precision PTO path and requires a tmp tile.")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp", "Optional scratch tile for high-precision path (TileType)")
+    .add_argument("tmp", "Scratch tile required for high_precision=True (TileType)")
+    .set_attr<bool>("high_precision")
     // A2/A3 initializes tmp before reading it; incoming contents and validity
     // are not source data. Its physical shape and dtype remain deducer checks.
     .set_arg_effect(1, ArgEffect::Write)

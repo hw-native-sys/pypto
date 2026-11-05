@@ -1113,7 +1113,7 @@ class TestConvertTensorToTileOps:
 
         def expected_body(ib, tiles):
             tmp = ib.let("rsqrt_tmp", tile_ops.create([64], DataType.FP32, target_memory=MemorySpace.Vec))
-            return ib.let("y_tile", tile_ops.rsqrt(tiles[0], tmp))
+            return ib.let("y_tile", tile_ops.rsqrt(tiles[0], tmp, high_precision=True))
 
         before = _make_before(
             in_specs=in_specs,

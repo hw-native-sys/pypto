@@ -700,6 +700,33 @@ class TestTileUnaryOps:
         ir_str = str(Program)
         assert "tile.sqrt" in ir_str
 
+    @pytest.mark.parametrize("high_precision", [False, True])
+    @pytest.mark.parametrize("with_tmp", [False, True])
+    def test_tile_rsqrt_explicit_precision_contract(self, high_precision, with_tmp):
+        """Scratch must never silently select precision, including raw IR calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        args = [src, tmp] if with_tmp else [src]
+        if high_precision != with_tmp:
+            message = "requires a tmp" if high_precision else "tmp requires high_precision=True"
+            with pytest.raises(ValueError, match=message):
+                ir.create_op_call("tile.rsqrt", args, {"high_precision": high_precision}, span)
+            return
+        call = tile.rsqrt(src, tmp=tmp, high_precision=True) if with_tmp else tile.rsqrt(src)
+        assert dict(call.kwargs).get("high_precision", False) == high_precision
+        assert len(call.args) == len(args)
+        default = tile.rsqrt(src) if not high_precision else call
+        ir.assert_structural_equal(call, default)
+
+    def test_tile_rsqrt_tmp_requires_explicit_high_precision(self):
+        """The IR Python wrapper must reject legacy scratch-only calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            tile.rsqrt(src, tmp=tmp)
+
     def test_tile_rsqrt_rejects_tmp_shape_mismatch(self):
         """tile.rsqrt rejects a tmp tile whose per-dim shape differs from the input."""
         span = ir.Span.unknown()
@@ -709,10 +736,10 @@ class TestTileUnaryOps:
         tmp_var = ir.Var("tmp", tmp_type, span)
 
         with pytest.raises(ValueError, match="shape mismatch"):
-            tile.rsqrt(input_var, tmp_var)
+            tile.rsqrt(input_var, tmp_var, high_precision=True)
 
     def test_tile_rsqrt_high_precision(self):
-        """tile.rsqrt accepts an optional tmp tile for the high-precision path."""
+        """tile.rsqrt carries an explicit high_precision attribute and scratch."""
 
         @pl.program
         class Program:
@@ -726,7 +753,7 @@ class TestTileUnaryOps:
                 tmp: pl.Tile[[32, 32], pl.FP32] = pl.tile.create(
                     [32, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp)
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp, high_precision=True)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 

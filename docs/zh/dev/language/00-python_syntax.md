@@ -399,7 +399,7 @@ pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, sl
 
 ```python
 pl.matmul(tile_a, tile_b, b_trans=True)   # TypeError — tile 转置是视图，不是标志位
-pl.rsqrt(tile, high_precision=True)       # TypeError — tile 精度通过传入 tmp 选择
+pl.rsqrt(tile, high_precision=True)       # ValueError — 高精度需要 tmp=workspace
 pl.div(tile, 2.0, high_precision=True)    # TypeError — high_precision 需要 Tile rhs
 pl.row_max(tile)                          # TypeError — Tile 输入必须提供 tmp_tile
 pl.slice(tile, [64, 64], [64, 0])         # ValueError — 窗口越出源 tile 边界

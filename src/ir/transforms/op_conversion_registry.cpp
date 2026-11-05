@@ -307,7 +307,7 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
   RegisterSimple("tensor.sqrt", "tile.sqrt");
   RegisterSimple("tensor.cast", "tile.cast");
 
-  // tensor.rsqrt → tile.rsqrt (basic) or tile.rsqrt(src, tmp) (high-precision).
+  // tensor.rsqrt preserves high_precision when lowering to tile.rsqrt.
   // The tmp scratch tile is allocated via tile.create when high_precision=True.
   RegisterCustom(
       "tensor.rsqrt",
@@ -331,7 +331,7 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
         std::vector<StmtPtr> prologue;
         auto tmp_var = AppendScratchTile(&prologue, tile_type, "rsqrt_tmp", span);
 
-        auto rsqrt_call = op_reg.Create("tile.rsqrt", {input, tmp_var}, span);
+        auto rsqrt_call = op_reg.Create("tile.rsqrt", {input, tmp_var}, {{"high_precision", true}}, span);
         return ConversionResult{std::move(prologue), rsqrt_call};
       });
 

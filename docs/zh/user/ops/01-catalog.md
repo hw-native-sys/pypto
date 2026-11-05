@@ -45,7 +45,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | 指数、自然对数。`log` 的 `high_precision=True` 在 A5 上选择更慢、更高精度的 PTO 路径；A2/A3 接受该参数但 PTO-ISA 会忽略它并返回默认结果，编译时会给出告警 |
-| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径，传给 Tile 会**抛异常** —— tile 级的精度由是否传入 scratch tile 决定：`pl.tile.rsqrt(src, tmp)` |
+| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`rsqrt` 在 Tensor 和 Tile 层均默认 `high_precision=False`。Tensor 高精度由编译器分配 scratch；Tile 高精度须写 `pl.tile.rsqrt(src, tmp=tmp, high_precision=True)`（或 `pl.rsqrt(src, high_precision=True, tmp=tmp)`）。仅传 scratch 而未开启高精度会报错；A5 codegen 显式生成 `RsqrtAlgorithm::HIGH_PRECISION`。 |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | 三角函数 |
 
 ## 比较与选择

@@ -69,6 +69,8 @@ to global state.
 | `GetL0cMAlignment(dtype)` | physical M-row alignment shared by L0C tiling, dbC capacity, and allocation | 32 for INT32; otherwise 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
 
+`tile.rsqrt(high_precision=True)` is excluded from this warning hook: it requires a scratch tile and emits `precisionType` for A5; A2/A3 honour the request through the scratch overload even though they ignore the selector. Precision is selected by the explicit attribute, never by scratch presence alone.
+
 `SupportsRuntimeBoundLocalSoftwarePipeline()` defaults to `false`, preserving
 the existing loop fallback until a backend enables this lowering. It is
 independent of cross-core transport and does not describe hardware event support.
