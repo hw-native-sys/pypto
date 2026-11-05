@@ -290,6 +290,28 @@ class TestQuantMxCodegen:
             expected = (groups + alignment - 1) // alignment * alignment
             assert f"rows=1, cols={expected}" in scaling
 
+    def test_tensor_source_larger_than_ub_is_rejected(self):
+        """A whole-tensor quantization is not tiled — it has to fail loudly.
+
+        Tensor-layer ``pl.quant_mx`` converts its source into a single Vec tile,
+        so a GM tensor larger than UB has no lowering. There is no automatic
+        tiling, and the useful property is that the memory planner says so with
+        the actual and permitted byte counts rather than emitting a kernel that
+        overruns the buffer: a 256x512 BF16 source needs 413,696 bytes of Vec
+        against A5's 245,760. Callers tile the source themselves (load a block
+        per SPMD block, as the device tests do).
+        """
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[256, 512], pl.BF16]) -> pl.Tensor[[256, 512], pl.FP8E4M3FN]:
+                quant, _scale = pl.quant_mx(src, group_axis=1)
+                return quant
+
+        with pytest.raises(ValueError, match=r"Vec buffer usage \(\d+ bytes\) exceeds platform limit"):
+            _optimize(Program)
+
     def test_raw_is_value_returning_after_optimization(self):
         @pl.program
         class Program:
