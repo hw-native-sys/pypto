@@ -9,14 +9,15 @@
 
 """Unit tests for :mod:`pypto.runtime.debug.pto_rebuild`.
 
-The real ``ptoas`` binary is never invoked: ``_run_ptoas`` is monkeypatched
-to write a fake cpp, and ``_ptoas_binary`` is monkeypatched to a non-None
-sentinel so the availability guard passes.
+The real ``ptoas`` binary is never invoked: tests replace ``_run_ptoas``
+or its subprocess call to write a fake cpp, and replace ``_ptoas_binary``
+with a non-None sentinel so the availability guard passes.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -385,6 +386,70 @@ def test_l3_skips_fresh_rank_pto(tmp_path: Path, monkeypatch) -> None:
 
     touched = rebuild_kernel_cpp_from_pto(work_dir)
     assert touched == ["next_levels/rank0/kernels/aiv/foo.cpp"]
+
+
+@pytest.mark.parametrize(("setting", "expected"), [(None, 60), ("180", 180), ("1", 1)])
+def test_rebuild_uses_configured_timeout(tmp_path: Path, monkeypatch, setting, expected) -> None:
+    """Replay forwards the timeout and re-reads it on the next rebuild."""
+    work_dir = _setup_build_output(tmp_path, {"foo": [("aiv", "foo")]})
+    monkeypatch.delenv("PYPTO_REBUILD_FROM_PTO", raising=False)
+    monkeypatch.setattr(pto_rebuild, "_ptoas_binary", lambda: "/fake/ptoas")
+    monkeypatch.setattr(pto_rebuild, "_check_ptoas_version", lambda _: None)
+    if setting is None:
+        monkeypatch.delenv("PYPTO_PTOAS_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", setting)
+    timeouts = []
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        _fake_run_ptoas_by_stem(cmd[0], Path(cmd[1]), Path(cmd[3]))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(pto_rebuild.subprocess, "run", fake_run)
+    assert rebuild_kernel_cpp_from_pto(work_dir) == ["kernels/aiv/foo.cpp"]
+    assert "FRESH body for foo" in (work_dir / "kernels/aiv/foo.cpp").read_text()
+    assert timeouts == [expected]
+
+    monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", "240")
+    (work_dir / "ptoas/foo.cpp").unlink()
+    assert rebuild_kernel_cpp_from_pto(work_dir) == ["kernels/aiv/foo.cpp"]
+    assert timeouts == [expected, 240]
+
+
+@pytest.mark.parametrize("setting", ["", "0", "-1", "1.5", "nan", "inf", "invalid"])
+def test_rebuild_rejects_invalid_timeout(tmp_path: Path, monkeypatch, setting) -> None:
+    work_dir = _setup_build_output(tmp_path, {"foo": [("aiv", "foo")]})
+    monkeypatch.delenv("PYPTO_REBUILD_FROM_PTO", raising=False)
+    monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", setting)
+    monkeypatch.setattr(pto_rebuild, "_ptoas_binary", lambda: "/fake/ptoas")
+    monkeypatch.setattr(pto_rebuild, "_check_ptoas_version", lambda _: None)
+    monkeypatch.setattr(
+        pto_rebuild.subprocess, "run", lambda *_a, **_kw: pytest.fail("should not invoke ptoas")
+    )
+
+    with pytest.raises(ValueError, match="PYPTO_PTOAS_TIMEOUT_SECONDS must be a positive integer"):
+        rebuild_kernel_cpp_from_pto(work_dir)
+    assert "OLD body for foo" in (work_dir / "kernels/aiv/foo.cpp").read_text()
+    assert not (work_dir / "ptoas/foo.cpp").exists()
+
+
+def test_rebuild_propagates_configured_timeout(tmp_path: Path, monkeypatch) -> None:
+    work_dir = _setup_build_output(tmp_path, {"foo": [("aiv", "foo")]})
+    monkeypatch.delenv("PYPTO_REBUILD_FROM_PTO", raising=False)
+    monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", "180")
+    monkeypatch.setattr(pto_rebuild, "_ptoas_binary", lambda: "/fake/ptoas")
+    monkeypatch.setattr(pto_rebuild, "_check_ptoas_version", lambda _: None)
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(pto_rebuild.subprocess, "run", fake_run)
+    with pytest.raises(subprocess.TimeoutExpired) as exc_info:
+        rebuild_kernel_cpp_from_pto(work_dir)
+    assert exc_info.value.timeout == 180
+    assert "OLD body for foo" in (work_dir / "kernels/aiv/foo.cpp").read_text()
+    assert not (work_dir / "ptoas/foo.cpp").exists()
 
 
 if __name__ == "__main__":

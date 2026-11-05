@@ -33,6 +33,7 @@ import subprocess
 from pathlib import Path
 
 from pypto._environment import env_flag_disabled
+from pypto.backend._ptoas_config import get_ptoas_timeout
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
@@ -86,6 +87,7 @@ def _ptoas_flags(pto_content: str) -> list[str]:
 def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
     """Invoke the ``ptoas`` binary on *pto_path*, writing to *out_cpp*."""
     _check_ptoas_version(ptoas_bin)
+    timeout = get_ptoas_timeout()
     pto_content = pto_path.read_text(encoding="utf-8")
     cmd = [ptoas_bin, str(pto_path), "-o", str(out_cpp), *_ptoas_flags(pto_content)]
     result = subprocess.run(  # noqa: S603 — args are constructed locally, no shell
@@ -93,7 +95,7 @@ def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(f"ptoas rebuild failed for {pto_path.name}: {result.stderr.strip()}")

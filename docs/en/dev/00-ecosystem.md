@@ -138,6 +138,7 @@ Repeat with `--platform a5`. Each entry has a 1200-second timeout (override with
 Set `PYPTO_PTOAS_TIMEOUT_SECONDS` to a positive integer to override that deadline;
 invalid values raise an error. The library compilation CI job sets it to `180`
 for large kernels. Use `export PYPTO_PTOAS_TIMEOUT_SECONDS=180` to match CI locally.
+The setting applies to both fresh compilation and PTO rebuilds during debug replay.
 This does not change the per-entry `--timeout`.
 Compilation failures, process failures, timeouts, and zero recorded
 compilations fail the job. Malformed or unreadable receipts fail their entry

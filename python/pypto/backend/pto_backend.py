@@ -51,6 +51,8 @@ from pypto._function_attrs import (
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
+from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
+from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -64,7 +66,6 @@ from pypto.pypto_core import passes as _passes
 
 logger = logging.getLogger(__name__)
 
-_PTOAS_TIMEOUT_ENV = "PYPTO_PTOAS_TIMEOUT_SECONDS"
 _EMIT_SOURCE_LOC_ENV = "PYPTO_EMIT_PTO_LOC"
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -195,20 +196,6 @@ def _format_error_report(
         pass
 
     return "\n".join(lines)
-
-
-def _get_ptoas_timeout() -> int:
-    """Read the per-kernel assembly deadline at invocation time, in seconds."""
-    value = os.environ.get(_PTOAS_TIMEOUT_ENV, "60")
-    try:
-        timeout = int(value)
-    except ValueError:
-        raise ValueError(
-            f"{_PTOAS_TIMEOUT_ENV} must be a positive integer in seconds, got {value!r}"
-        ) from None
-    if timeout <= 0:
-        raise ValueError(f"{_PTOAS_TIMEOUT_ENV} must be a positive integer in seconds, got {value!r}")
-    return timeout
 
 
 def _run_ptoas(
