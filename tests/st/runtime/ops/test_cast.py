@@ -447,5 +447,164 @@ def test_fp4_e2m1_direct_fp8(test_config, planner, surface, row_start, column_st
         )
 
 
+# ---------------------------------------------------------------------------
+# NZ destination layout on the A5 packed FP4 cast
+# ---------------------------------------------------------------------------
+
+_NZ_M, _NZ_PACKED_K, _NZ_N = 32, 128, 64
+_NZ_K = 2 * _NZ_PACKED_K  # logical FP8 columns after the packed decode
+
+
+def _make_fp4_nz_matmul(nz: bool):
+    """Decode packed FP4 to FP8 and feed an FP8 matmul, with and without NZ.
+
+    One kernel per spelling: a kernel body cannot branch on the flag, because
+    the parser walks the body as IR rather than evaluating it.
+
+    ``blayout=col_major`` + ``slayout=row_major`` is standard NZ -- the layout
+    the matrix unit consumes -- so the native A5 ``pto.tcvt`` writes the FP8
+    result straight into it and the Vec-to-Vec ND-to-NZ relayout the ND form
+    needs disappears. Values must be identical either way; only the instruction
+    sequence changes.
+    """
+    if nz:
+
+        @pl.jit.incore
+        def kernel(
+            a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+            b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+            out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+        ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+            packed = pl.load(a, [0, 0], [_NZ_M, _NZ_PACKED_K])
+            lhs = pl.cast(
+                packed,
+                pl.FP8E4M3FN,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            rhs = pl.load(b, [0, 0], [_NZ_K, _NZ_N])
+            return pl.store(pl.matmul(lhs, rhs), [0, 0], out)
+
+        @pl.jit
+        def nz_matmul(
+            a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+            b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+            out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+        ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+            return kernel(a, b, out)
+
+        return nz_matmul
+
+    @pl.jit.incore
+    def nd_kernel(
+        a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+        b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+        out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+    ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+        packed = pl.load(a, [0, 0], [_NZ_M, _NZ_PACKED_K])
+        lhs = pl.cast(packed, pl.FP8E4M3FN)
+        rhs = pl.load(b, [0, 0], [_NZ_K, _NZ_N])
+        return pl.store(pl.matmul(lhs, rhs), [0, 0], out)
+
+    @pl.jit
+    def nd_matmul(
+        a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+        b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+        out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+    ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+        return nd_kernel(a, b, out)
+
+    return nd_matmul
+
+
+def _vec_relayout_moves(pto: str) -> list[str]:
+    """Vec-to-Vec `pto.tmov`s: the pure layout repairs the NZ request removes.
+
+    Operand staging moves (into Mat/Left/Right) change memory space and are
+    unaffected, so they must not be counted.
+    """
+    moves = []
+    for line in pto.splitlines():
+        if "pto.tmov " not in line:
+            continue
+        ins, _, outs = line.partition(") outs(")
+        if "loc=vec" in ins and "loc=vec" in outs:
+            moves.append(line.strip())
+    return moves
+
+
+def _read_kernels(compiled) -> str:
+    sources = list((compiled.output_dir / "ptoas").glob("*.pto"))
+    assert sources, "compilation did not produce the executed PTO kernel"
+    return "\n".join(source.read_text() for source in sources)
+
+
+@pytest.mark.platforms("a5")
+def test_fp4_nz_cast_fuses_the_relayout_and_matches_the_nd_result_bit_for_bit(test_config):
+    """One `pto.tcvt` writing NZ, one fewer relayout, and identical bytes.
+
+    The numeric claim is made as a DIFFERENTIAL against the same kernel without
+    the keyword rather than against a hand-written NZ golden. That is the claim
+    worth making -- the NZ cast must write exactly the bytes the ND cast plus
+    its relayout `tile.move` would have -- and it needs no NZ-aware store, which
+    PyPTO does not offer for an FP8 Vec tile: `tile.store` into a `pl.NZ` tensor
+    accepts only an FP32 Acc source, and `reinterpret_view` rejects a boxed
+    tile, so the bytes cannot be read back directly from the host.
+
+    Comparison is on the raw `uint8` view at `torch.equal`, not `isclose`: the
+    two paths must agree exactly, and a mis-addressed fractal reads entirely
+    different elements rather than slightly wrong ones.
+    """
+    nz_matmul = _make_fp4_nz_matmul(nz=True)
+    nd_matmul = _make_fp4_nz_matmul(nz=False)
+
+    packed = torch.empty((_NZ_M, _NZ_PACKED_K), dtype=torch.uint8)
+    rhs = torch.empty((_NZ_K, _NZ_N), dtype=torch.uint8)
+    nz_out = torch.zeros((_NZ_M, _NZ_N), dtype=torch.float32)
+    nd_out = torch.zeros((_NZ_M, _NZ_N), dtype=torch.float32)
+
+    packed_arg = packed.view(torch.float4_e2m1fn_x2)
+    rhs_arg = rhs.view(torch.float8_e4m3fn)
+
+    nz_compiled = nz_matmul.compile(packed_arg, rhs_arg, nz_out, config=test_config)
+    nd_compiled = nd_matmul.compile(packed_arg, rhs_arg, nd_out, config=test_config)
+
+    nz_pto = _read_kernels(nz_compiled)
+    nd_pto = _read_kernels(nd_compiled)
+
+    # Exactly one conversion either way, and only the NZ form writes a boxed
+    # destination.
+    nz_casts = [line for line in nz_pto.splitlines() if "pto.tcvt " in line]
+    nd_casts = [line for line in nd_pto.splitlines() if "pto.tcvt " in line]
+    assert len(nz_casts) == len(nd_casts) == 1, (nz_casts, nd_casts)
+    nz_destination = nz_casts[0].partition(") outs(")[2]
+    nd_destination = nd_casts[0].partition(") outs(")[2]
+    assert "blayout=col_major" in nz_destination and "slayout=row_major" in nz_destination, nz_casts[0]
+    assert "blayout=row_major" in nd_destination and "slayout=none_box" in nd_destination, nd_casts[0]
+    # The fused relayout: present without the keyword, gone with it.
+    assert len(_vec_relayout_moves(nd_pto)) == 1, nd_pto
+    assert _vec_relayout_moves(nz_pto) == [], nz_pto
+
+    if test_config.codegen_only:
+        return
+
+    for repeat in range(3):
+        # Small signed integers keep the FP32 accumulation exact, so the two
+        # paths must agree to the bit rather than to a tolerance.
+        packed[:] = (torch.arange(_NZ_M)[:, None] + torch.arange(_NZ_PACKED_K)[None, :] + 11 * repeat).to(
+            torch.uint8
+        )
+        rhs[:] = ((torch.arange(_NZ_K)[:, None] + torch.arange(_NZ_N)[None, :]) % 8 + 0x38).to(torch.uint8)
+        nz_out.zero_()
+        nd_out.zero_()
+        nz_compiled(packed_arg, rhs_arg, nz_out, config=test_config)
+        nd_compiled(packed_arg, rhs_arg, nd_out, config=test_config)
+        assert torch.equal(nz_out.view(torch.uint8), nd_out.view(torch.uint8)), (
+            f"NZ and ND cast paths disagree at repeat={repeat}"
+        )
+        # A kernel that wrote nothing would also compare equal.
+        assert torch.any(nz_out != 0), f"matmul produced no output at repeat={repeat}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

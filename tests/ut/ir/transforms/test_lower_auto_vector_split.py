@@ -6854,5 +6854,103 @@ def test_pure_vector_split_transpose_also_raises():
     _assert_actionable_split_error(excinfo, "UP_DOWN")
 
 
+# ---------------------------------------------------------------------------
+# A cast that REQUESTS a boxed destination, under the halving machinery
+# ---------------------------------------------------------------------------
+
+
+def _nz_cast_split_program(rows):
+    """A split region whose vector half casts into an NZ destination.
+
+    The dtype pair is deliberately FP32-to-FP16 rather than the packed FP4 pair
+    the native NZ conversion actually supports. This guard is purely about box
+    GEOMETRY and never looks at dtypes, and FP32-to-FP16 is the pair this file's
+    other split programs already lower cleanly -- an FP4 carrier would have to
+    be produced inside the region, which the pass rejects for its own unrelated
+    operand-partitioning reason. A full compile rejects this dtype pair's NZ
+    request in LegalizeTileCast (see
+    ``test_nz_destination_is_rejected_for_a_dtype_pair_without_a_native_edge``);
+    ``_lower`` runs only the split pass, so the geometry check is what is under
+    test here.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def kernel(
+            cube_seed: pl.Tile[[rows, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[rows, 128], pl.FP16]],
+        ) -> pl.Tensor[[rows, 128], pl.FP16]:
+            popped = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)
+            value = pl.tile.add(popped, popped)
+            narrowed = pl.tile.cast(
+                value,
+                pl.FP16,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            out_store = pl.tile.store(narrowed, [0, 0], out_0)
+            return out_store
+
+    return Before
+
+
+def test_split_rejects_a_requested_boxed_cast_that_breaks_its_boxes():
+    """Halving an NZ-requesting cast onto a partial box must fail with a span.
+
+    The hazard is specific to the request. pto-isa *waives* the row-granularity
+    rule for boxed `loc=vec` tiles in general (`allowUnalignedRows` in its
+    PTOTileLayoutVerification.cpp), which is why the native packed FP4 tcvt
+    re-imposes "NZ physical rows a multiple of 16" itself. Without this guard a
+    half-box lane is caught only by the assembler, with no PyPTO span; here it
+    is reported at the split, naming the lane extent and the box geometry.
+
+    FP16 at fractal 512 boxes as 16x16. 64 rows halves to 32 (two whole boxes)
+    and is accepted; 16 rows halves to 8 (half a box) and is not.
+    """
+    _lower(_nz_cast_split_program(rows=64))
+
+    with pytest.raises(ValueError) as excinfo:
+        _lower(_nz_cast_split_program(rows=16))
+    message = str(excinfo.value)
+    assert "requests a boxed destination layout cannot be split" in message, message
+    assert "16x16 fractal boxes" in message, message
+    assert "multiple of 16" in message, message
+
+
+def test_split_ignores_an_incidentally_boxed_cast():
+    """A boxed result reaching a cast with no layout request keeps today's behaviour.
+
+    This is the regression guard for the scoping decision: the check keys on the
+    kwargs, so the pre-existing boxed-Vec halving that
+    ``test_auto_split_updates_only_contiguous_unboxed_strides`` relies on stays
+    untouched. 16 rows halves to 8 -- half an FP32 box -- and is still accepted,
+    because nothing requested the layout.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def kernel(
+            cube_seed: pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            popped = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)
+            value: pl.Tile[
+                [16, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(
+                    valid_shape=[16, 128],
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                ),
+            ] = pl.tile.add(popped, popped)
+            out_store = pl.tile.store(value, [0, 0], out_0)
+            return out_store
+
+    _lower(Before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

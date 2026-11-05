@@ -830,5 +830,48 @@ def test_type_check_cast_accounts_for_dn_packed_axis(surface, decode, correct_ax
         assert any("logical shapes disagree" in diagnostic.message for diagnostic in diagnostics)
 
 
+@pytest.mark.parametrize(
+    "recorded_blayout,recorded_slayout,expected",
+    [
+        # Consistent: the recorded result is the NZ the kwargs requested.
+        (ir.TileLayout.col_major, ir.TileLayout.row_major, None),
+        # A rebuild that dropped the boxing entirely.
+        (ir.TileLayout.row_major, ir.TileLayout.none_box, "requested blayout=col_major"),
+        # A rebuild that kept the block layout but lost the scatter layout.
+        (ir.TileLayout.col_major, ir.TileLayout.none_box, "requested slayout=row_major"),
+    ],
+)
+def test_type_check_rejects_a_cast_whose_recorded_layout_contradicts_its_request(
+    recorded_blayout, recorded_slayout, expected
+):
+    """A requested destination layout must be the layout the result carries.
+
+    Deduction keeps the two consistent, but legalization and the splitting
+    passes rebuild a cast's recorded type directly, and codegen renders that
+    recorded type. So a rebuild that dropped the boxing would emit a
+    ``pto.tcvt`` whose destination silently disagrees with what the author
+    asked for -- the recorded type wins and nothing else notices.
+    """
+    span = ir.Span.unknown()
+    source_type = ir.TileType([16, 32], DataType.FP4E2M1X2)
+    result_view = ir.TileView(blayout=recorded_blayout, slayout=recorded_slayout)
+    result_type = ir.TileType([16, 64], DataType.FP8E4M3FN, None, result_view)
+    source = ir.Var("source", source_type, span)
+    kwargs: dict[str, Any] = {
+        "target_type": DataType.FP8E4M3FN,
+        "mode": 2,
+        "blayout": ir.TileLayout.col_major,
+        "slayout": ir.TileLayout.row_major,
+    }
+    call = ir.Call(ir.get_op("tile.cast"), [source], kwargs, result_type, span)
+    result = ir.Var("result", result_type, span)
+    diagnostics = _typecheck_diagnostics(ir.AssignStmt(result, call, span), params=[source])
+    layout_diagnostics = [d for d in diagnostics if "layout" in d.message or "blayout" in d.message]
+    if expected is None:
+        assert layout_diagnostics == [], layout_diagnostics
+    else:
+        assert any(expected in d.message for d in layout_diagnostics), diagnostics
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

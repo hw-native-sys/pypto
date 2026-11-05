@@ -366,5 +366,139 @@ def test_direct_cast_accepts_transport_box_with_narrowed_consumer(target, dynami
     assert _backend_core.is_direct_cast(call, handler)
 
 
+# ---------------------------------------------------------------------------
+# NZ destination rule for the A5 packed FP4 decode
+#
+# NZ on a tile is blayout=col_major + slayout=row_major + fractal=512: the
+# only boxed `pto.tcvt` destination PTOAS v0.72 accepts, and only for
+# f4E2M1x2 -> f8E4M3FN (PTO_IR_manual.md). Every constraint asserted below was
+# confirmed against the pinned assembler.
+# ---------------------------------------------------------------------------
+
+_NZ_VIEW_KWARGS = {
+    "blayout": _ir_core.TileLayout.col_major,
+    "slayout": _ir_core.TileLayout.row_major,
+}
+
+
+def _nz_view():
+    return _ir_core.TileView(**_NZ_VIEW_KWARGS)
+
+
+def _nz_cast_query(
+    source_shape=(16, 32), result_shape=(16, 64), source_dtype=pl.FP4E2M1X2, target_dtype=pl.FP8E4M3FN
+):
+    """A cast whose recorded result is NZ and which carries the layout request."""
+    span = _ir_core.Span.unknown()
+    source_type = _ir_core.TileType(list(source_shape), source_dtype, None, None, _ir_core.MemorySpace.Vec)
+    result_type = _ir_core.TileType(
+        list(result_shape), target_dtype, None, _nz_view(), _ir_core.MemorySpace.Vec
+    )
+    source = _ir_core.Var("source", source_type, span)
+    kwargs = {"target_type": target_dtype, "mode": 2, **_NZ_VIEW_KWARGS}
+    return _ir_core.Call(_ir_core.get_op("tile.cast"), [source], kwargs, result_type, span)
+
+
+def test_a5_nz_destination_cast_is_direct_and_preserves_only_the_output_layout():
+    """The NZ rule exempts the RESULT from row-major repair, never the operand.
+
+    Both halves are load-bearing. Without the output exemption the backend wraps
+    the native NZ write in a relayout ``tile.move`` and the fusion is lost.
+    Without the input requirement staying in force, a col-major operand would
+    skip repair and then be rejected by the rule's own ND source condition.
+    """
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    direct, info = _backend_core.query_direct_cast(_nz_cast_query(), handler)
+    assert direct, info.reason
+    assert info.preserve_output_layout
+    assert not info.preserve_input_layout
+
+
+def test_a5_nd_destination_cast_claims_no_layout_exemption():
+    """The contrast case: an ordinary ND cast must not suppress any repair."""
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    call = _direct_cast_query(
+        pl.FP4E2M1X2,
+        pl.FP8E4M3FN,
+        [16, 32],
+        [16, 64],
+        source_memory=_ir_core.MemorySpace.Vec,
+        result_memory=_ir_core.MemorySpace.Vec,
+    )
+    direct, info = _backend_core.query_direct_cast(call, handler)
+    assert direct, info.reason
+    assert not info.preserve_output_layout
+    assert not info.preserve_input_layout
+
+
+def test_a5_nz_destination_rejects_rows_that_are_not_whole_boxes():
+    """PTOAS: "NZ physical rows to be a multiple of 16 and fit a 16-bit stride"."""
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    direct, info = _backend_core.query_direct_cast(
+        _nz_cast_query(source_shape=(8, 32), result_shape=(8, 64)), handler
+    )
+    assert not direct
+    assert "whole number of boxes" in info.reason
+
+
+def test_a5_nz_destination_rejects_a_boxed_source():
+    """The native decode reads ND only, so a boxed operand is not this rule."""
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    span = _ir_core.Span.unknown()
+    source_type = _ir_core.TileType([16, 32], pl.FP4E2M1X2, None, _nz_view(), _ir_core.MemorySpace.Vec)
+    result_type = _ir_core.TileType([16, 64], pl.FP8E4M3FN, None, _nz_view(), _ir_core.MemorySpace.Vec)
+    call = _ir_core.Call(
+        _ir_core.get_op("tile.cast"),
+        [_ir_core.Var("source", source_type, span)],
+        {"target_type": pl.FP8E4M3FN, "mode": 2, **_NZ_VIEW_KWARGS},
+        result_type,
+        span,
+    )
+    direct, info = _backend_core.query_direct_cast(call, handler)
+    assert not direct
+    assert "source" in info.reason
+
+
+def test_a5_zn_destination_is_not_a_native_rule():
+    """ZN (row/col) is the other boxed flavour and PTOAS rejects it for this pair."""
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    span = _ir_core.Span.unknown()
+    zn = _ir_core.TileView(blayout=_ir_core.TileLayout.row_major, slayout=_ir_core.TileLayout.col_major)
+    source_type = _ir_core.TileType([16, 32], pl.FP4E2M1X2, None, None, _ir_core.MemorySpace.Vec)
+    result_type = _ir_core.TileType([16, 64], pl.FP8E4M3FN, None, zn, _ir_core.MemorySpace.Vec)
+    call = _ir_core.Call(
+        _ir_core.get_op("tile.cast"),
+        [_ir_core.Var("source", source_type, span)],
+        {"target_type": pl.FP8E4M3FN, "mode": 2},
+        result_type,
+        span,
+    )
+    assert not _backend_core.is_direct_cast(call, handler)
+
+
+def test_a5_nz_destination_is_not_a_rule_on_a2a3():
+    """A2/A3 has no packed FP4 tcvt edge at all."""
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend910).get_handler()
+    assert not _backend_core.is_direct_cast(_nz_cast_query(), handler)
+
+
+def test_unconstrained_dtype_edges_state_no_layout_exemption():
+    """An unconstrained edge must never claim it writes a boxed destination.
+
+    FP32-to-FP16 has no implementation conditions, so it matches any geometry --
+    which is exactly why ``preserve_output_layout`` must stay false for it. That
+    flag is what LegalizeTileCast uses to decide an explicitly requested boxed
+    destination is genuinely native, and PTOAS does not check the destination
+    layout for this pair, so a false positive here would assemble silently.
+    """
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    call = _nz_cast_query(
+        source_shape=(16, 32), result_shape=(16, 32), source_dtype=pl.FP32, target_dtype=pl.FP16
+    )
+    direct, info = _backend_core.query_direct_cast(call, handler)
+    assert direct, info.reason
+    assert not info.preserve_output_layout
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

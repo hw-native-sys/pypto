@@ -1107,5 +1107,121 @@ def test_native_conditional_edge_is_not_a_lossy_bf16_to_fp8_shortcut():
     assert _cast_pairs(after) == [("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
 
 
+# ---------------------------------------------------------------------------
+# NZ destination layout (blayout=col_major / slayout=row_major, fractal=512)
+# ---------------------------------------------------------------------------
+
+
+def _nz_cast_program(rows=16, packed_cols=32, dtype=pl.fp4e2m1x2, target=pl.FP8E4M3FN):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tensor[[rows, packed_cols], dtype],
+            output: pl.Out[pl.Tensor[[rows, 2 * packed_cols], target]],
+        ) -> pl.Tensor[[rows, 2 * packed_cols], target]:
+            packed = pl.load(source, [0, 0], [rows, packed_cols])
+            decoded = pl.tile.cast(
+                packed,
+                target,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            return pl.store(decoded, [0, 0], output)
+
+    return Before
+
+
+def test_a5_nz_destination_cast_stays_one_native_cast():
+    """An NZ destination is a native A5 tcvt, so legalization leaves it alone.
+
+    This is the whole point of the attribute: PTOAS v0.72 converts packed FP4
+    straight into a standard 512-byte NZ FP8 tile, so the cast must survive as
+    one hop with its boxed result type intact rather than being expanded.
+    """
+    before = _nz_cast_program()
+    after = _run(before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    ir.assert_structural_equal(after, before)
+
+
+def test_nz_destination_cast_survives_print_parse():
+    """The boxed result and both layout kwargs round-trip through the printer.
+
+    `TileLayout` kwargs already had printer, parser and serializer support --
+    they are how `tile.move` spells the same thing -- so the cast needs no new
+    round-trip machinery. What is asserted here is stronger than survival: the
+    printer emits the ORDINARY DSL spelling (not the `pl._dump.call` escape
+    hatch that a cast needs when its recorded type cannot be re-derived), which
+    means re-deducing from the two kwargs reproduces the boxed result type
+    exactly. If that ever stops holding, this fails rather than silently
+    degrading to the dump form.
+    """
+    before = _nz_cast_program()
+    after = _run(before, BackendType.Ascend950)
+    printed = python_print(after, format=False)
+    assert "blayout=pl.TileLayout.col_major" in printed
+    assert "slayout=pl.TileLayout.row_major" in printed
+    assert 'pl._dump.call("tile.cast"' not in printed
+    ir.assert_structural_equal(after, pl.parse_program(printed), enable_auto_mapping=True)
+
+
+def test_nz_destination_is_rejected_for_a_dtype_pair_without_a_native_edge():
+    """An unsupported boxing must fail loudly, not assemble and misaddress.
+
+    PTOAS's `tcvt` verifier inspects the destination layout ONLY for the packed
+    FP4-to-FP8 pair; for every other pair it accepts a boxed destination without
+    complaint. An unconstrained dtype edge in the backend table likewise states
+    no layout opinion, so without this gate an FP32-to-FP16 NZ request would
+    lower to a `pto.tcvt` whose destination the ISA never promised to write.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tensor[[16, 32], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+        ) -> pl.Tensor[[16, 32], pl.FP16]:
+            loaded = pl.load(source, [0, 0], [16, 32])
+            boxed = pl.tile.cast(
+                loaded,
+                pl.FP16,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            return pl.store(boxed, [0, 0], output)
+
+    with pytest.raises(ValueError, match="no native pto.tcvt that writes it"):
+        _run(Before, BackendType.Ascend950)
+
+
+def test_nz_destination_is_rejected_on_a2a3():
+    """A2/A3 has no packed FP4 tcvt at all, so the NZ request fails there too."""
+    before = _nz_cast_program()
+    with pytest.raises(ValueError, match="no native pto.tcvt that writes it"):
+        _run(before, BackendType.Ascend910)
+
+
+def test_an_incidentally_boxed_cast_is_not_caught_by_the_nz_gate():
+    """The gate keys on the REQUEST, not on the result being boxed.
+
+    A cast that merely happens to carry a boxed tile (no layout kwargs) keeps
+    the ordinary backend layout-repair path, so narrowing the gate to explicit
+    requests is what keeps this working.
+    """
+    span = ir.Span.unknown()
+    boxed_view = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major)
+    source = ir.Var("source", ir.TileType([16, 32], pl.FP32, tile_view=boxed_view), span)
+    call = ir.create_op_call("tile.cast", [source], {"target_type": pl.FP16, "mode": 2}, span)
+    assert "blayout" not in dict(call.kwargs)
+    result = call.type
+    assert isinstance(result, ir.TileType)
+    # Inherited, not requested: the gate must ignore it.
+    assert result.tile_view.slayout == ir.TileLayout.row_major
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
