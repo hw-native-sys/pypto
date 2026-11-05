@@ -101,8 +101,12 @@ def test_compile_receipts_gate_success(library, tmp_path, body, passed, count):
         "subprocess.Popen(command).wait()",
     ],
 )
-def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, passed, count, launch):
+@pytest.mark.parametrize("interpreter_options", [[], ["-u"]])
+def test_python_subprocess_compilations_are_audited(
+    library, tmp_path, cases, passed, count, launch, interpreter_options
+):
     # Formal entries can isolate cases in fresh interpreters to own runtime lifetimes.
+    # DSpark uses -u before the script; those children still need every audit hook.
     (library / "models/case.py").write_text(
         "import argparse, json, subprocess, sys\n"
         "from golden import run\n"
@@ -115,7 +119,7 @@ def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, pa
         "if args.case in ('all', 'nested'):\n"
         f"    cases = {cases!r} if args.case == 'all' else ['ok']\n"
         "    for case in cases:\n"
-        "        command = [sys.executable, __file__, '-p', args.p, '-d', '0',\n"
+        f"        command = [sys.executable, *{interpreter_options!r}, __file__, '-p', args.p, '-d', '0',\n"
         "                   '--case', case, '--compile-only']\n"
         f"        {launch}\n"
         "else:\n"
@@ -146,6 +150,8 @@ def test_python_subprocess_preserves_other_commands(library, tmp_path):
         "from pathlib import Path\n"
         "from golden import run\n"
         "subprocess.run([sys.executable, '-c', 'raise SystemExit(0)'], check=True)\n"
+        "subprocess.run([sys.executable, '-u', '-c', 'raise SystemExit(0)'], check=True)\n"
+        "subprocess.run([sys.executable, '-u', '-m', 'this'], stdout=subprocess.DEVNULL, check=True)\n"
         "subprocess.run([sys.executable, str(Path(__file__).with_name('helper.py'))], check=True)\n"
         "subprocess.run([b'true'], check=True)\n"
         "run('ok', [])\n"
@@ -155,13 +161,24 @@ def test_python_subprocess_preserves_other_commands(library, tmp_path):
     assert len(result["compilations"]) == 1
 
 
-def test_python_subprocess_preserves_popen_options(library, tmp_path):
+@pytest.mark.parametrize(
+    "interpreter_options",
+    [
+        [],
+        ["-u", "-B", "-W", "ignore", "-X", "dev"],
+        ["-uB", "-Wignore", "-Xdev"],
+        ["-uBW", "ignore", "-X", "dev"],
+        ["-uBX", "dev", "-W", "ignore"],
+        ["-uB", "-Wignore", "-Xdev", "--check-hash-based-pycs", "always", "--"],
+    ],
+)
+def test_python_subprocess_preserves_popen_options(library, tmp_path, interpreter_options):
     (library / "models/case.py").write_text(
         "import os, subprocess, sys\n"
         "from pathlib import Path\n"
         "from golden import run\n"
         "if '--case' not in sys.argv:\n"
-        "    command = [sys.executable, 'case.py', '--case', 'child', '-d', '0']\n"
+        f"    command = [sys.executable, *{interpreter_options!r}, 'case.py', '--case', 'child', '-d', '0']\n"
         "    with subprocess.Popen(args=command, cwd=Path(__file__).parent,\n"
         "                          env=os.environ | {'AUDIT_CHILD': 'preserved'},\n"
         "                          stdout=subprocess.PIPE, text=True) as child:\n"
@@ -172,12 +189,75 @@ def test_python_subprocess_preserves_popen_options(library, tmp_path):
         "    assert sys.argv[1:] == ['--case', 'child', '-d', '0']\n"
         "    assert Path.cwd() == Path(__file__).parent\n"
         "    assert os.environ['AUDIT_CHILD'] == 'preserved'\n"
+        f"    if {bool(interpreter_options)!r}:\n"
+        "        assert sys.stdout.write_through and sys.flags.dont_write_bytecode\n"
+        "        assert sys._xoptions['dev'] and 'ignore' in sys.warnoptions\n"
         "    run('ok', [])\n"
         "    print('child-output')\n"
     )
     result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
     assert result["passed"]
     assert len(result["compilations"]) == 1
+
+
+@pytest.mark.parametrize("interpreter_options", [["-x"], ["-ux"], ["-xu"], ["-B", "-x"]])
+def test_source_skipping_subprocess_is_not_wrapped(library, tmp_path, interpreter_options):
+    # The first line is valid in the parent, but the child must skip it. An
+    # audit wrapper would skip its own header and then execute this line.
+    (library / "models/case.py").write_text(
+        "if '--child' in __import__('sys').argv: raise AssertionError('first line was not skipped')\n"
+        "import subprocess, sys\n"
+        "if '--child' not in sys.argv:\n"
+        f"    command = [sys.executable, *{interpreter_options!r}, __file__, '--child']\n"
+        "    child = subprocess.run(command, check=True, capture_output=True, text=True)\n"
+        "    assert child.stdout.strip() == 'first-line-skipped'\n"
+        "    from golden import run\n"
+        "    run('ok', [])\n"
+        "else:\n"
+        "    print('first-line-skipped')\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
+
+
+@pytest.mark.parametrize("child_passed", [True, False])
+def test_relative_child_receipt_survives_changed_cwd(library, child_passed):
+    (library / "models/case.py").write_text(
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "if '--child' not in sys.argv:\n"
+        "    subprocess.run([sys.executable, '-u', 'case.py', '--child'],\n"
+        "                   cwd=Path(__file__).parent, check=True)\n"
+        "else:\n"
+        "    from golden import run\n"
+        f"    run({'ok' if child_passed else 'bad'!r}, [])\n"
+    )
+    # Unlike run_case's absolute output path, this hidden CLI mode may receive
+    # a relative receipt. Both child success and failure must reach the parent.
+    child = audit.subprocess.run(
+        [
+            sys.executable,
+            str(_RUNNER),
+            "--lib",
+            str(library),
+            "--platform",
+            "a5",
+            "--entry",
+            "models/case.py",
+            "--receipt",
+            "compilations.json",
+        ],
+        cwd=library,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert child.returncode == 0, child.stderr
+    results = audit.read_receipt(library / "compilations.json")
+    assert len(results) == 1 and results[0]["passed"] is child_passed
+    assert (library / "compilations.0.json").is_file()
+    assert not (library / "models/compilations.0.json").exists()
 
 
 def test_empty_child_receipt_cannot_reuse_previous_success(library, tmp_path, monkeypatch):
