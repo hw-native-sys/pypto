@@ -113,7 +113,7 @@ from pypto.ir.utils import (
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, PadValue
+from pypto.pypto_core.ir import AtomicType, PadValue, TileLayout
 
 from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -1646,6 +1646,8 @@ def cast(
     mode: str | int = "round",
     *,
     saturation_mode: str | int | None = None,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
 ) -> Tile: ...
 
 
@@ -1664,6 +1666,8 @@ def cast(
     target_type: int | DataType,
     mode: str | int = "round",
     saturation_mode: str | int | None = None,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
 ) -> Tensor | Tile | Scalar:
     """Type casting, dispatched by input type.
 
@@ -1693,15 +1697,43 @@ def cast(
             of native conversions the mode applies to the final hop. A ``Scalar``
             input does not support this option, so passing it one is an error
             rather than a silent no-op.
+        blayout: Destination block layout, for a ``Tile`` input only. Omitting
+            it inherits the source tile's layout.
+        slayout: Destination scatter layout, for a ``Tile`` input only. With
+            ``blayout=col_major``, ``slayout=row_major`` requests standard NZ so
+            an A5 E2M1x2-to-FP8E4M3FN conversion writes the FP8 result straight
+            into matrix-unit layout with no relayout move. A ``Tensor`` or
+            ``Scalar`` input rejects both, since neither has on-chip fractal
+            storage to describe.
 
     Example:
         >>> quantized = pl.cast(rounded_fp16, pl.INT8, mode="trunc", saturation_mode="on")
+        >>> nz_fp8 = pl.cast(
+        ...     packed_fp4,
+        ...     pl.FP8E4M3FN,
+        ...     blayout=pl.TileLayout.col_major,
+        ...     slayout=pl.TileLayout.row_major,
+        ... )
     """
+    # Destination layout is a Tile-only option: a boxed destination describes
+    # on-chip fractal storage, which a Tensor (GM) and a Scalar have no notion
+    # of. Reject it on those paths rather than accepting and ignoring it, the
+    # same way a Scalar rejects `saturation_mode` below.
+    requested_layout = blayout is not None or slayout is not None
     if isinstance(input, Tensor):
+        if requested_layout:
+            raise TypeError(
+                "pl.cast: blayout/slayout describe an on-chip tile destination and are not "
+                "supported for a Tensor input; cast the loaded tile instead"
+            )
         return _tensor.cast(input, target_type, mode, saturation_mode=saturation_mode)
     if isinstance(input, Tile):
-        return _tile.cast(input, target_type, mode, saturation_mode=saturation_mode)
+        return _tile.cast(
+            input, target_type, mode, saturation_mode=saturation_mode, blayout=blayout, slayout=slayout
+        )
     if _is_scalar_like(input):
+        if requested_layout:
+            raise TypeError("pl.cast: Scalar inputs do not support blayout/slayout")
         # ``resolve_cast_mode`` runs first, so an invalid mode is still a ValueError;
         # only a *valid* mode this path cannot honour reaches the TypeError below.
         if resolve_cast_mode(mode) != 2:

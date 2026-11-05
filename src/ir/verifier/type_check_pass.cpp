@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -541,6 +542,34 @@ void TypeChecker::CheckCastTypes(const CallPtr& call) {
                           ? typecheck::ErrorType::SHAPE_VALUE_MISMATCH
                           : typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH;
     RecordError(kind, name + " source/result logical shapes disagree", call->span_);
+    return;
+  }
+  // A requested destination layout must be the layout the recorded result
+  // actually carries. Deduction keeps the two consistent, but legalization and
+  // the splitting passes rebuild a cast's recorded type directly, so a rebuild
+  // that dropped the boxing would otherwise leave an NZ-requesting call
+  // claiming an ND result -- and codegen renders the recorded type, so the
+  // emitted pto.tcvt would silently disagree with the request.
+  if (tile_cast) {
+    const auto result_tile = As<TileType>(result);
+    const auto view = tile_view_semantics::GetEffectiveTileView(*result_tile);
+    for (const auto& [key, value] : call->kwargs_) {
+      const bool is_blayout = key == "blayout";
+      if (!is_blayout && key != "slayout") continue;
+      const auto* requested = std::any_cast<TileLayout>(&value);
+      if (requested == nullptr) {
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, name + " " + key + " must be a TileLayout",
+                    call->span_);
+        continue;
+      }
+      if (*requested != (is_blayout ? view.blayout : view.slayout)) {
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH,
+                    name + " requested " + key + "=" + TileLayoutToString(*requested) +
+                        " but the result view carries " +
+                        TileLayoutToString(is_blayout ? view.blayout : view.slayout),
+                    call->span_);
+      }
+    }
   }
 }
 
