@@ -64,7 +64,10 @@ jobs:
       - name: Checkout CI controller
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.workflow_sha }}
+          # Once enabled, PR edits to ci_control.py cannot select the tier.
+          # The flag stays off until this helper has been installed on main.
+          # PR workflow edits themselves still require runner-policy controls.
+          ref: ${{ github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' && github.event.pull_request.base.sha || github.workflow_sha }}
           sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Validate and pin the test revision

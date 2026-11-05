@@ -305,6 +305,11 @@ def test_workflow_wiring_covers_every_full_job(control):
                     if "sparse-checkout" in options
                     else "needs.changes.outputs.checkout_sha"
                 )
+                if name == "changes":
+                    expected = (
+                        "github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' "
+                        "&& github.event.pull_request.base.sha || github.workflow_sha"
+                    )
                 assert options["ref"] == "${{ " + expected + " }}"
                 assert options["persist-credentials"] is False
             if step.get("uses") == "./.github/actions/setup-ci-job":
@@ -523,3 +528,16 @@ def test_full_rerun_concurrency_is_scoped_to_original_request():
         == "ci-full-status-${{ needs.route.outputs.key }}"
     )
     assert "key={match[1]}-{match[2]}" in publisher["jobs"]["route"]["steps"][0]["run"]
+
+
+def test_tiered_pr_controller_uses_trusted_base_without_changing_trigger():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    # PyYAML's YAML 1.1 loader parses the unquoted Actions key "on" as True.
+    assert "pull_request" in workflow[True]
+    controller = workflow["jobs"]["changes"]["steps"][0]["with"]
+    assert controller["ref"] == (
+        "${{ github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' "
+        "&& github.event.pull_request.base.sha || github.workflow_sha }}"
+    )
+    assert controller["sparse-checkout"] == ".github/scripts"
+    assert controller["persist-credentials"] is False

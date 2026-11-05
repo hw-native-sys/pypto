@@ -43,6 +43,19 @@ and `clang-tidy`. The separate `Docs / build` check also runs. Documentation-onl
 PRs retain the automatic `clang-tidy` exemption. No device tests or wheel builds
 start automatically for PRs.
 
+With tiered CI enabled, the automatic PR run loads its controller from the
+trusted PR base SHA. Editing `ci_control.py` in the PR therefore does not change
+tier selection. Before activation, it uses the workflow revision so this change
+can be tested before the helper exists on main.
+
+This is a scheduling convention for the existing `pull_request` flow, not a
+complete protection against malicious runner use. A PR can still modify its
+workflow, remove a job condition, or add a job that targets an available runner.
+The `/ci full` command checks permissions, and its result publisher verifies
+the trusted dispatch, but neither restricts arbitrary PR-authored workflows.
+Enforcing that boundary requires separate GitHub runner access policies and
+trusted workflow restrictions. Those administrative settings are unchanged.
+
 A collaborator with repository **write**, **maintain** or **admin** permission
 can post exactly this comment in the PR conversation:
 
