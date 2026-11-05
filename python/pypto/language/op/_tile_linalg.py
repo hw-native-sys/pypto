@@ -365,8 +365,19 @@ def gemv(lhs: Tile, rhs: Tile, acc_phase: AccPhase = AccPhase.Unspecified) -> Ti
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 
     ``lhs`` must have exactly one physical and logical row. The rhs logical K
-    must cover the lhs logical K. Inputs must use the same INT8, FP16, BF16, or FP32
-    dtype; the output is INT32 for INT8 inputs and FP32 otherwise.
+    must cover the lhs logical K.
+
+    The operand dtypes must form a pair the Cube multiplies -- the same table
+    [`matmul`][pypto.language.matmul] uses, restricted to its GEMV rows: INT8,
+    FP16, BF16 or FP32 with itself on every target, plus any FP8 (E4M3FN /
+    E5M2, **either order**) pair and HF8 x HF8 on Ascend950. The output is
+    INT32 for INT8 inputs and FP32 for every other pair.
+
+    On Ascend950 the lhs needs a whole 512-byte block of physical K, because the
+    Mat-to-Left extract of a single row is a vector load: physical K must be a
+    multiple of ``512 / dtype_bytes`` -- 512 for a 1-byte operand, 256 for 2-byte,
+    128 for 4-byte. Logical (valid) K carries no such restriction. Narrowing the
+    *output* columns is not yet supported there; keep ``N`` fully valid.
 
     Args:
         lhs: Row vector tile [1, K]

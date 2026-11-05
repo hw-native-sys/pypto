@@ -670,8 +670,12 @@ def _cube_matmul(lhs, rhs):
     # both operands to FP32 first -- that is what the hardware computes anyway.
     # Equal wide dtypes (FP16 / BF16 / FP32 / INT8) keep their native kernel so
     # the reference preserves their rounding behaviour.
+    # `Tensor.element_size()`, not `dtype.itemsize`: the project declares
+    # torch>=2.0.0 (pyproject.toml) and the dtype property only arrived in 2.1.
+    # Equal float dtypes short-circuit past the first clause, so an ordinary FP32
+    # or BF16 reference would reach it on every call.
     both_float = lhs.dtype.is_floating_point and rhs.dtype.is_floating_point
-    if both_float and (lhs.dtype != rhs.dtype or lhs.dtype.itemsize == 1):
+    if both_float and (lhs.dtype != rhs.dtype or lhs.element_size() == 1):
         return torch.matmul(lhs.float(), rhs.float())
     return torch.matmul(lhs, rhs)
 
@@ -1304,9 +1308,13 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.matmul_acc"] = _tile_matmul_acc
     m["tile.batch_matmul_acc"] = _tile_matmul_acc
     m["tile.matmul_bias"] = lambda a, kw: f"({_matmul_expr(a[0], a[1], kw)}.float() + {a[2]})"
-    m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    # The GEMV family is the M==1 Cube matmul and shares its operand-pair table,
+    # so it needs the same widening of 1-byte / mixed float operands. gemv_acc
+    # reaches it through `_tile_matmul_acc` -> `_matmul_expr`; neither gemv form
+    # carries tf32_mode (an FP32-operand feature the ops do not expose).
+    m["tile.gemv"] = lambda a, _kw: f"_cube_matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = _tile_matmul_acc
-    m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
+    m["tile.gemv_bias"] = lambda a, _kw: f"(_cube_matmul({a[0]}, {a[1]}).float() + {a[2]})"
 
     # tile ternary ops (third arg is workspace/tmp, ignore it)
     m["tile.prelu"] = lambda a, _kw: f"torch.where({a[0]} > 0, {a[0]}, {a[0]} * {a[1]})"

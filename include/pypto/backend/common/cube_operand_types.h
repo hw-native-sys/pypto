@@ -57,9 +57,7 @@ struct CubeOperandPair {
 namespace cube_operand_detail {
 inline constexpr uint8_t kMatmulGemv =
     static_cast<uint8_t>(CubeOpFamily::kMatmul) | static_cast<uint8_t>(CubeOpFamily::kGemv);
-inline constexpr uint8_t kMatmul = static_cast<uint8_t>(CubeOpFamily::kMatmul);
-inline constexpr uint8_t kMatmulMx =
-    static_cast<uint8_t>(CubeOpFamily::kMatmul) | static_cast<uint8_t>(CubeOpFamily::kMx);
+inline constexpr uint8_t kMatmulGemvMx = kMatmulGemv | static_cast<uint8_t>(CubeOpFamily::kMx);
 }  // namespace cube_operand_detail
 
 /**
@@ -70,19 +68,23 @@ inline constexpr uint8_t kMatmulMx =
  * f16 / bf16 / f32 same-type pairs -> f32; A5 additionally multiplies any FP8
  * (E4M3FN / E5M2) pair, including the mixed orders, and HiF8 x HiF8 -> f32.
  *
- * Family bits record what PyPTO currently exposes for each pair (ordinary GEMV
- * accepts only the four common pairs; MX data only E4M3FN x E4M3FN).
+ * Family bits record what PyPTO currently exposes for each pair. The matmul and
+ * gemv families share one PTOAS rule (``pto.tgemv*`` verifies through the same
+ * ``verifyMatmulTypeTriple``, and the a5 TileLib templates for ``pto.tgemv`` /
+ * ``.acc`` / ``.bias`` carry the same ``MATMUL_*_DTYPES`` signature lists as
+ * ``pto.tmatmul``), so every row belongs to both; MX data is E4M3FN x E4M3FN only.
  */
 inline constexpr CubeOperandPair kCubeOperandPairs[] = {
     {DataType::INT8, DataType::INT8, DataType::INT32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
     {DataType::FP16, DataType::FP16, DataType::FP32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
     {DataType::BF16, DataType::BF16, DataType::FP32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
     {DataType::FP32, DataType::FP32, DataType::FP32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
-    {DataType::FP8E4M3FN, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulMx},
-    {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
-    {DataType::FP8E5M2, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
-    {DataType::FP8E5M2, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
-    {DataType::HF8, DataType::HF8, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmul},
+    {DataType::FP8E4M3FN, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5,
+     cube_operand_detail::kMatmulGemvMx},
+    {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
+    {DataType::FP8E5M2, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
+    {DataType::FP8E5M2, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
+    {DataType::HF8, DataType::HF8, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
 };
 
 /// The table entry for (lhs, rhs) in @p family on any architecture, or nullptr.

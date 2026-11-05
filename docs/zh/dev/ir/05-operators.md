@@ -254,16 +254,56 @@ Cube 能相乘的元素类型是一张硬件表，而不是“两边必须相同
 | FP16 x FP16 | FP32 | 支持 | 支持 | matmul、gemv |
 | BF16 x BF16 | FP32 | 支持 | 支持 | matmul、gemv |
 | FP32 x FP32 | FP32 | 支持 | 支持 | matmul、gemv |
-| FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、mx |
-| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul |
-| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul |
-| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul |
-| HF8 x HF8 | FP32 | 不支持 | 支持 | matmul |
+| FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv |
+| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv |
+| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv |
+| HF8 x HF8 | FP32 | 不支持 | 支持 | matmul、gemv |
 
 因此在 Ascend950 上，`tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、
 `tile.batch_matmul*`、`tensor.matmul` 与 `tensor.matmul_acc` 接受**两种顺序的
 FP8 混合操作数**；累加器、`matmul_acc` 的输入以及 `matmul_bias` 的 bias 仍为 FP32。
 `tf32_mode` 仍只支持 FP32，因此 FP8 操作数对会拒绝该参数。
+
+普通 GEMV 族——`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`——是该矩阵乘的
+`M == 1` 特化，并共用同一张表：`pto.tgemv`、`pto.tgemv.acc` 与 `pto.tgemv.bias`
+的元素类型都经由同一个 `verifyMatmulTypeTriple` 校验，其 a5 TileLib 模板也使用
+矩阵乘的 `MATMUL_*_DTYPES` 签名列表。因此 FP8 与 HF8 配对在这里同样可用，结果仍为
+FP32，`gemv_acc` 的累加器与 `gemv_bias` 的 bias 也仍为 FP32。**MX** GEMV 算子是另一条
+指令、另一张表，不在这些行的覆盖范围内。
+
+与矩阵乘不同，GEMV 的 dtype 校验（`ValidateGemvInputDtypes`，
+`src/ir/op/tile_ops/matmul.cpp`）是针对 `gemv` 行的**封闭**白名单：GEMV 从未有过
+“两边 dtype 相同”这一历史兜底分支，因此表外配对在类型推导阶段就被拒绝，不会下达到 PTOAS。
+
+##### A5 GEMV：静态 valid 累加器桥接
+
+Ascend950 上的普通 GEMV 还需要在指令处**重新标注累加器类型**，这与操作数 dtype 无关。
+PTOAS v0.72 的 `verifyGemvTileOperandsA5` 会转调*矩阵乘*的操作数校验以复用 A5 布局规则，
+从而继承了它的形状规则——“static matmul tile shapes lhs[M,K], rhs[K,N], and dst[M,N]”。
+该规则比较 `getMatmulLogicalShapeVec`，而后者在类型的 valid 为动态时回退到*物理*尺寸。
+PyPTO 通用的 `pto.alloc_tile` 发出的是 `v_row=?, v_col=?`，真实尺寸由单独的
+`valid_row` / `valid_col` 操作数承载；而 GEMV 的结果必然是只有一个逻辑行的 16 行 FP32
+Acc 箱——于是该规则用 lhs 的 1 行去比 dst 的 16 行，在任何 dtype 下都拒绝 a5 的
+`pto.tgemv*`。A2/A3 不会走到这条规则：`verifyGemvTileOperandsA2A3` 使用
+`verifyGemvValidShapes`，只比较 *valid* 行。
+
+因此 `EmitStaticValidGemvAccView`（`src/backend/common/pto_ops_elementwise.cpp`）
+仅在 a5 上发出一个零拷贝的 `pto.treshape`，其*结果类型*携带累加器的静态 valid 尺寸——
+与 `pto.tquant.mx` 所用的桥接相同——并让 GEMV 的 `outs()`（以及 `.acc` 的 `ins()`
+累加器）指向该视图。累加器自身的分配与下游的 `pto.tstore` 保持不变，A2/A3 发出的指令
+逐字节不变。
+
+有两种情况刻意不做桥接：
+
+| 情况 | 原因 |
+| ---- | ---- |
+| 累加器的 valid 尺寸不是编译期常量 | 没有可用的静态类型；该由 PTOAS 报告，而不是由代码生成臆造常量 |
+| 累加器的 valid N 小于其物理 N | 静态的 dst N 会触发该规则的 `rhs logical N == dst logical N` 子句，而 rhs 类型的 valid 仍是动态的，该子句会读取 rhs 的*物理* N，从而引入新的不匹配。部分有效的 N 需要重新标注 GEMV 的每个操作数，而不只是累加器 |
+
+GEMV lhs 的物理 K 取决于操作数 dtype：Mat 到 Left 的提取（`TExtractToAVector`，
+pto-isa `npu/a5/TExtractCommon.hpp`）要求 `Cols % (512 / sizeof(dtype)) == 0`，
+即一个完整的 512 字节 K 块——1 字节操作数为 K = 512，2 字节为 256，4 字节为 128。
 
 该契约分两层实现，因为合法集合取决于编译目标，而类型推导看不到目标：类型推导
 （`ValidateMatmulOperandDataTypes`，`src/ir/op/type_inference.cpp`）接受表中的配对

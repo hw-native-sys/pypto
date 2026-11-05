@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -309,19 +310,30 @@ void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwarg
                                     << acc_phase;
 }
 
+/// Validate the GEMV (lhs, rhs) operand pair and return the accumulator dtype.
+///
+/// `pto.tgemv`, `pto.tgemv.acc` and `pto.tgemv.bias` verify their element types
+/// through the *same* PTOAS rule as `pto.tmatmul` -- `verifyMatmulTypeTriple`,
+/// reached via `verifyMatmulOrGemv` / `verifyMatBiasCommon` -- and the a5
+/// TileLib templates for the three ops carry the matmul `MATMUL_*_DTYPES`
+/// signature lists. So the legal GEMV pairs are the `kGemv` rows of the shared
+/// Cube operand table, which on A5 include the four FP8 (E4M3FN / E5M2) pairs
+/// and HF8 x HF8.
+///
+/// Unlike matmul, this check has always been a closed allow-list, and stays
+/// one: a pair outside the table is rejected here rather than handed to PTOAS.
+/// Which table pairs the *configured* target can run is a separate, codegen-time
+/// question (`CheckMatmulOperandArch`) -- type deduction also runs with no
+/// backend configured, so it cannot answer it.
 DataType ValidateGemvInputDtypes(const TileTypePtr& lhs_type, const TileTypePtr& rhs_type,
                                  const std::string& op_name) {
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-
-  const auto input_dtype = lhs_type->dtype_;
-  CHECK(input_dtype == DataType::INT8 || input_dtype == DataType::FP16 || input_dtype == DataType::BF16 ||
-        input_dtype == DataType::FP32)
-      << "The operator " << op_name
-      << " supports only INT8 x INT8 -> INT32 and same-type FP16/BF16/FP32 inputs -> FP32, but got "
-      << input_dtype.ToString();
-  return input_dtype == DataType::INT8 ? DataType::INT32 : DataType::FP32;
+  const auto* pair =
+      backend::FindCubeOperandPair(backend::CubeOpFamily::kGemv, lhs_type->dtype_, rhs_type->dtype_);
+  CHECK(pair != nullptr) << "The operator " << op_name
+                         << " supports only the (lhs, rhs) data type pairs the Cube multiplies ("
+                         << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kGemv) << "), but got "
+                         << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  return pair->accumulator;
 }
 
 TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,

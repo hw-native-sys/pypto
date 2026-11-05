@@ -139,9 +139,9 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST；FP4 输入仅支持左侧 FP4×右侧 FP8，且必须显式做 FP4→FP8 cast；原生 FP4×FP4 暂缓；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束) |
 | pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST（`tile.matmul_mx_acc`） |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（`tile.matmul_mx_bias`）；ST 待补 |
-| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过；A5 真机验证待补 |
-| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过；A5 真机验证待补 |
-| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过；A5 真机验证待补 |
+| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。与 `pto.tmatmul` 共用操作数配对表，因此 A5 同样接受四种 FP8 配对（E4M3FN / E5M2，两种顺序）与 HF8 x HF8；见 [Cube 操作数类型配对](ir/05-operators.md#cube-操作数类型配对operand-dtype-pairs)。A5 ST 已覆盖全部 dtype（静态 valid 累加器桥接才使 a5 GEMV 可汇编）|
+| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。操作数配对同 `pto.tgemv`；acc_in 仍为 FP32。A5 ST 已覆盖全部 dtype、split-K 与 `init_cond` |
+| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。操作数配对同 `pto.tgemv`；bias 仍为 FP32。A5 ST 已覆盖全部 dtype |
 | pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
