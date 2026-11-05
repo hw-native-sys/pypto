@@ -805,6 +805,7 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("core_type", ["aiv", "aic", "mixed"])
 @pytest.mark.parametrize("dispatch", ["direct", "spmd", "submit"])
+@pytest.mark.parametrize("complete_annotation", [False, True])
 @pytest.mark.parametrize(
     ("returned", "consumed"),
     [
@@ -818,7 +819,9 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
     ],
     ids=["unused-leading", "unused-middle", "unused-trailing", "all-live", "one-live", "subset", "reordered"],
 )
-def test_extern_return_buffer_identities(tmp_path, ascend_backend, core_type, dispatch, returned, consumed):
+def test_extern_return_buffer_identities(
+    tmp_path, ascend_backend, core_type, dispatch, returned, consumed, complete_annotation
+):
     """Unused results must not shift physical buffers at a later task (#3251).
 
     Generate a real JIT module so each matrix entry exercises specialization,
@@ -831,7 +834,10 @@ def test_extern_return_buffer_identities(tmp_path, ascend_backend, core_type, di
         if core_type == "mixed"
         else f"source={str(cpp)!r}"
     )
-    result_type = "pl.Tensor" if len(returned) == 1 else f"tuple[{', '.join('pl.Tensor' for _ in returned)}]"
+    # Complete annotations must validate against the explicit return aliases,
+    # not force the signature-only all-output convention onto this declaration.
+    tensor_type = "pl.Tensor[[1, 32], pl.FP32]" if complete_annotation else "pl.Tensor"
+    result_type = tensor_type if len(returned) == 1 else f"tuple[{', '.join(tensor_type for _ in returned)}]"
     producer_call = f"{', '.join(returned)} = producer(first, second, third)"
     consumer_call = f"output = consumer({', '.join(consumed)}, output)"
     if dispatch == "direct":
@@ -881,6 +887,7 @@ def entry(output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("complete_annotation", [False, True])
 @pytest.mark.parametrize(
     ("shape", "dtype", "layout"),
     [
@@ -891,13 +898,21 @@ def entry(output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
     ],
     ids=["nd", "nz", "mx-a", "mx-b"],
 )
-def test_extern_single_readonly_return_keeps_input_identity(tmp_path, ascend_backend, shape, dtype, layout):
+def test_extern_single_readonly_return_keeps_input_identity(
+    tmp_path, ascend_backend, shape, dtype, layout, complete_annotation
+):
     """An explicit return names its parameter even when the kernel has no Out slots."""
     cpp = _write_kernel(tmp_path)
+    if complete_annotation:
 
-    @pl.jit.extern(core_type="aiv", source=cpp)
-    def forward(value: pl.Tensor) -> pl.Tensor:
-        return value
+        @pl.jit.extern(core_type="aiv", source=cpp)
+        def forward(value: pl.Tensor) -> pl.Tensor[shape, dtype, layout]:
+            return value
+    else:
+
+        @pl.jit.extern(core_type="aiv", source=cpp)
+        def forward(value: pl.Tensor) -> pl.Tensor:
+            return value
 
     @pl.jit.extern(core_type="aiv", source=cpp)
     def consumer(value: pl.Tensor, output: pl.Out[pl.Tensor]) -> pl.Tensor:
@@ -915,6 +930,38 @@ def test_extern_single_readonly_return_keeps_input_identity(tmp_path, ascend_bac
     entry.compile(config=RunConfig(backend_type=ascend_backend, save_kernels_dir=str(generated)))
     code = (generated / "orchestration" / "entry.cpp").read_text()
     assert "params_t1.add_input(ext_value);" in code
+
+
+@pytest.mark.parametrize(
+    ("annotation", "error"),
+    [
+        ("tuple[pl.Tensor[[1], pl.FP32], pl.Tensor[[16], pl.INT8]]", None),
+        ("tuple[pl.Tensor[[16], pl.INT8], pl.Tensor[[1], pl.FP32]]", "parameter 'second'"),
+        ("pl.Tensor[[1], pl.FP32]", "1 results for 2 explicitly returned"),
+    ],
+)
+def test_extern_explicit_return_annotation_matches_named_parameters(tmp_path, annotation, error):
+    """Validate heterogeneous aliases in return order after combining #3249 and #3251."""
+    cpp = _write_kernel(tmp_path)
+    module_path = tmp_path / "annotated_aliases.py"
+    module_path.write_text(
+        f"""import pypto.language as pl
+@pl.jit.extern(core_type="aiv", source={str(cpp)!r})
+def pair(first: pl.Out[pl.Tensor], second: pl.Out[pl.Tensor]) -> {annotation}:
+    return second, first
+@pl.jit
+def entry(first: pl.Out[pl.Tensor], second: pl.Out[pl.Tensor]):
+    second, first = pair(first, second)
+    return first, second
+"""
+    )
+    entry = _load_jit_module(module_path).entry
+    args = (torch.empty(16, dtype=torch.int8), torch.empty(1))
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            _specialize(entry, *args)
+    else:
+        entry.compile(*args, config=RunConfig(save_kernels_dir=str(tmp_path / "generated")))
 
 
 @pytest.mark.parametrize(

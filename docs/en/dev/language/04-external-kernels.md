@@ -136,15 +136,19 @@ signature-only declaration. Existing single-output stubs can still infer their
 return type from the first `pl.Out` parameter when no complete return annotation
 is supplied.
 
-Complete explicit return annotations must match **all** `pl.Out` and `pl.InOut` parameters in
-declaration order, including each output's specialized shape and dtype. The
-external ABI aliases results to these buffers; it cannot express a reordered
-or partial output list. Incompatible declarations fail during specialization.
+For a signature-only stub, complete explicit return annotations must match **all**
+`pl.Out` and `pl.InOut` parameters in declaration order, including each output's
+specialized shape and dtype. Types alone cannot identify a reordered or partial
+output list. A stub with a single return of parameter names instead validates
+the annotation against those parameters in return order, including readonly
+aliases (see below). Incompatible declarations fail during specialization.
 Use Python `tuple[...]` (or `typing.Tuple[...]`) for multiple results.
 `pl.Tuple[...]` denotes a single tuple-valued result and is rejected for externs,
 because it cannot alias the individual tensor output buffers.
 An explicit `tuple[()]` (or `typing.Tuple[()]`) declares zero results and is
-valid only without `pl.Out`/`pl.InOut` parameters. `pl.Tuple[()]` and legacy
+valid in a signature-only stub only without `pl.Out`/`pl.InOut` parameters.
+An explicit `return ()` can declare zero aliases even with output parameters.
+`pl.Tuple[()]` and legacy
 `pl.Tuple([...])` still denote a single tuple-valued result and are rejected.
 This validation does not apply to legacy inference from missing or bare return
 annotations. Kernels that write several buffers and are called only for their
