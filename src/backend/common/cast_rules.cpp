@@ -12,7 +12,6 @@
 #include "pypto/backend/common/cast_rules.h"
 
 #include <cstdint>
-#include <initializer_list>
 #include <limits>
 #include <string>
 
