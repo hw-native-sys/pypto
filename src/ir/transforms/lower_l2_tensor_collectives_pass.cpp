@@ -509,8 +509,8 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     //
     // Both forms are accepted (RFC #2521 O2). A literal folds to a ConstInt
     // launch width here, exactly as it always has; a runtime value becomes
-    // orchestration arithmetic over the rank count read from the CommContext
-    // the orchestration already holds -- see EmitRuntimeLaunchWidth.
+    // orchestration arithmetic over the signal's static rank count -- see
+    // EmitRuntimeLaunchWidth.
     const ExprPtr& core_num_expr = call->args_.back();
     auto core_num_scalar = As<ScalarType>(core_num_expr->GetType());
     INTERNAL_CHECK_SPAN(core_num_scalar != nullptr, call->span_)
@@ -538,10 +538,13 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     // The deducer requires `signal` to be [NR, S] with static NR and S, so both
     // are literals here. A literal `core_num` lets this pass fold
     // B = CalAllToAllVBlocks(NR, L) inline; a runtime one instead emits width
-    // arithmetic against the rank count read from the CommContext. The kernel
-    // always reads that context, and every counts address it derives comes from
-    // NR, so a runtime rank count that disagrees with NR is a malformed caller
-    // program; it is not diagnosed here.
+    // arithmetic over that static NR. This is deliberately *not* a read of the
+    // runtime CommContext: the materialized CommCtx reaching a CHIP
+    // orchestration is the per-rank device pointer, so dereferencing it in
+    // orchestration C++ would fault. NR is the same invariant the kernel
+    // already relies on -- every counts address it derives comes from NR -- so
+    // a runtime rank count that disagrees with NR is a malformed caller
+    // program, not a case to support here.
     auto signal_type = As<DistributedTensorType>(call->args_[2]->GetType());
     INTERNAL_CHECK_SPAN(signal_type && signal_type->shape_.size() == 2, call->span_)
         << "LowerL2TensorCollectives: pld.tensor.all_to_all_v signal must be a 2D DistributedTensor";
@@ -668,7 +671,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       // dispatch. Its validity is the caller's responsibility: only a
       // compile-time value can be diagnosed here.
       launch_attrs.emplace_back(kAttrCoreNum,
-                                EmitRuntimeLaunchWidth(call, indexed, core_num_expr, core_num_dtype));
+                                EmitRuntimeLaunchWidth(call, indexed, core_num_expr, core_num_dtype, nranks));
     }
     launch_attrs.emplace_back(kAttrSyncStart, true);
     return std::make_shared<Call>(kernel_callee, std::move(kernel_args),
@@ -813,10 +816,10 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   /// ``P`` not exceeding ``L``. ``Min``/``Max`` alone cannot express the split.
   /// The indexed variant launches exactly ``L`` and needs no arithmetic.
   ///
-  /// ``P`` comes from the CommContext the orchestration already holds:
-  /// ``MaterializeDistTensorCtx`` (eight passes later) replaces this
-  /// ``get_comm_ctx`` query with the materialized CommCtx parameter, so the
-  /// count costs no operand and leaves the kernel ABI untouched.
+  /// ``P`` is the signal's static ``NR``. It must equal the runtime domain size
+  /// -- every counts address the kernel derives comes from ``NR`` -- so it is
+  /// the same value the orchestration would read from the CommContext, without
+  /// dereferencing the per-rank *device* pointer a CHIP orchestration receives.
   ///
   /// The width is attached as computed, without a positivity clamp.
   /// ``LegalizeSpmdLaunches`` runs next and wraps any launch whose width it
@@ -824,23 +827,15 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   /// behaviour for a malformed request, which is the caller's responsibility to
   /// avoid. Clamping to ``max(B, 1)`` would launch one block instead.
   [[nodiscard]] ExprPtr EmitRuntimeLaunchWidth(const CallPtr& call, bool indexed, const ExprPtr& core_num,
-                                               DataType dtype) {
+                                               DataType dtype, int64_t nranks) {
     const Span& span = call->span_;
     ExprPtr width = core_num;
     if (!indexed) {
-      auto& registry = OpRegistry::GetInstance();
-      auto ctx = BindPrefix("a2av_ctx_",
-                            registry.Create("pld.system.get_comm_ctx", {call->args_[1]}, {}, span), span);
-      auto nranks = BindPrefix("a2av_nranks_", registry.Create("pld.system.nranks", {ctx}, {}, span), span);
-      auto p = BindPrefix("a2av_pcount_", MakeCast(nranks, dtype, span), span);
-      // The floor keeps the generated C++ total when the communicator reports
-      // P=0: ``L % 0`` is undefined behaviour, while a floored divisor yields
-      // ``B = L`` and leaves the malformed request to the caller's contract.
-      auto divisor =
-          BindPrefix("a2av_divisor_", MakeMax(p, std::make_shared<ConstInt>(1, dtype, span), span), span);
-      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(core_num, divisor, span), span);
-      auto at_least_p =
-          BindPrefix("a2av_atleast_", MakeCast(MakeGe(core_num, divisor, span), dtype, span), span);
+      // ``nranks`` is deducer-enforced positive, so no floored-divisor guard is
+      // needed here; ``L % P`` is always defined.
+      auto p = std::make_shared<ConstInt>(nranks, dtype, span);
+      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(core_num, p, span), span);
+      auto at_least_p = BindPrefix("a2av_atleast_", MakeCast(MakeGe(core_num, p, span), dtype, span), span);
       width = BindPrefix("a2av_blocks_", MakeSub(core_num, MakeMul(rem, at_least_p, span), span), span);
     }
     return width;

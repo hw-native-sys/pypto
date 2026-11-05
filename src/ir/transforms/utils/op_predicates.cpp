@@ -94,9 +94,8 @@ bool IsBuiltinOp(const std::string& op_name) {
   return op_name.rfind("tile.", 0) == 0 || op_name.rfind("tensor.", 0) == 0 ||
          op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0 ||
          op_name.rfind("reg.", 0) == 0 || op_name == "pld.system.get_comm_ctx" ||
-         // Reading the rank count is a scalar load on the context the
-         // orchestration already holds, so it is an operator there too, not a
-         // function the Program must define.
+         // Reading the rank count is an operator (a scalar load from the
+         // CommContext), not a function the Program must define.
          //
          // Spelled as a name literal like its ``get_comm_ctx`` sibling above,
          // not through ``IsOp``: this predicate takes a name, not an OpPtr, and
