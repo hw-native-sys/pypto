@@ -34,6 +34,9 @@ PTO codegen 直接接收分配句柄和目标操作数。
 GM 返回别名必须解析到参数，其类型（包括 TensorView 元数据）须与声明的返回类型一致；
 返回视图不匹配的 kernel 保持 Tile。
 
+带有显式 `shapes=` 分区的 store 也保留在 Tile IR。Buffer store 配方目前根据源的
+有效形状（valid shape）推导分区，不携带独立的分区操作数，即使目的地是二维张量也是如此。
+
 FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归约写入列优先
 `[R,1]` 目的地，物理行数须为 8 的倍数。广播读取该列向量，保留矩阵的物理形状和
 有效矩形。scratch 是显式的 full-valid FP32 Tile，物理形状须覆盖源；规划时保留为
