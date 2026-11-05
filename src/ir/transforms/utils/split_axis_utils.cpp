@@ -701,9 +701,10 @@ void CheckSplitKeepsRequestedCastBoxes(const CallPtr& call, const TypePtr& halve
   if (!halved) return;
   const auto box = tile_view_semantics::GetBoxedTileAlignment(*halved);
   if (!box) return;
+  if (split_dim < 0 || split_dim >= static_cast<int>(halved->shape_.size())) return;
   const int64_t granularity =
       split_dim == static_cast<int>(halved->shape_.size()) - 1 ? box->cols : box->rows;
-  if (granularity <= 1 || split_dim < 0 || split_dim >= static_cast<int>(halved->shape_.size())) return;
+  if (granularity <= 1) return;
   const auto extent = As<ConstInt>(halved->shape_[split_dim]);
   CHECK_SPAN(extent && extent->value_ % granularity == 0, call->span_)
       << "A tile.cast that requests a boxed destination layout cannot be split onto a lane extent of "

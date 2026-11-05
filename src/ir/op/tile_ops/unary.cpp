@@ -137,7 +137,7 @@ TypePtr DeduceTileFP32OnlyType(const std::vector<ExprPtr>& args,
 // the TileView default (`kStandardNzFractalBytes`), which is the one value the
 // native NZ destination accepts; the CHECK below pins that rather than
 // assuming it.
-void ApplyRequestedCastLayout(TileView& tile_view, const std::vector<ExprPtr>& shape, const TileType& source,
+void ApplyRequestedCastLayout(TileView& tile_view, const std::vector<ExprPtr>& shape,
                               const TileView& src_view, DataType target_dtype,
                               const std::vector<std::pair<std::string, std::any>>& kwargs,
                               const std::string& op_name, const Span& span) {
@@ -187,10 +187,6 @@ void ApplyRequestedCastLayout(TileView& tile_view, const std::vector<ExprPtr>& s
   CHECK_SPAN(cols->value_ % box->cols == 0, span)
       << op_name << ": NZ destination physical columns (" << cols->value_ << ") must be a multiple of "
       << box->cols << " for " << target_dtype.ToString();
-  // Source geometry is unchanged by the destination boxing, so a narrowed
-  // source must still describe the same logical rectangle.
-  CHECK_SPAN(source.shape_.size() == 2, span)
-      << op_name << ": an NZ destination requires a 2D source, got rank " << source.shape_.size();
 
   tile_view.blayout = requested_blayout;
   tile_view.slayout = requested_slayout;
@@ -267,7 +263,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
     tile_view.stride = {std::make_shared<ConstInt>(1, DataType::INDEX, span), shape[0]};
   }
   InheritTileViewLayout(tile_view, tile_type);
-  ApplyRequestedCastLayout(tile_view, shape, *tile_type, src_view, target_dtype, kwargs, op_name, span);
+  ApplyRequestedCastLayout(tile_view, shape, src_view, target_dtype, kwargs, op_name, span);
   // Dense DN casts execute in Vec; recording that placement now keeps memory
   // inference from canonicalizing the BF16 intermediate back to row-major.
   const std::optional<MemorySpace> memory =
