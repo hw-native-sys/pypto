@@ -880,7 +880,19 @@ def entry(output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
         assert ".set_dependencies(" in orchestration
 
 
-def test_extern_single_readonly_return_keeps_input_identity(tmp_path):
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize(
+    ("shape", "dtype", "layout"),
+    [
+        ([1, 32], pl.FP32, pl.ND),
+        ([16, 32], pl.FP32, pl.DN),
+        ([16, 32], pl.FP32, pl.NZ),
+        ([32, 4], pl.FP8E8M0, pl.MX_A_ZZ),
+        ([4, 32], pl.FP8E8M0, pl.MX_B_NN),
+    ],
+    ids=["nd", "dn", "nz", "mx-a", "mx-b"],
+)
+def test_extern_single_readonly_return_keeps_input_identity(tmp_path, ascend_backend, shape, dtype, layout):
     """An explicit return names its parameter even when the kernel has no Out slots."""
     cpp = _write_kernel(tmp_path)
 
@@ -893,13 +905,15 @@ def test_extern_single_readonly_return_keeps_input_identity(tmp_path):
         return output
 
     @pl.jit(auto_scope=False)
-    def entry(value: pl.Tensor[[1, 32], pl.FP32], output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
+    def entry(value: pl.Tensor[shape, dtype, layout], output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
         alias = forward(value)
         output = consumer(alias, output)
         return output
 
     generated = tmp_path / "generated"
-    entry.compile(config=RunConfig(save_kernels_dir=str(generated)))
+    # Layout passes replace parameter Vars; the extern's return reference must
+    # follow those replacements all the way through orchestration emission.
+    entry.compile(config=RunConfig(backend_type=ascend_backend, save_kernels_dir=str(generated)))
     code = (generated / "orchestration" / "entry.cpp").read_text()
     assert "params_t1.add_input(ext_value);" in code
 
