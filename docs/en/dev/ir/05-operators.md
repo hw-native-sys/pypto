@@ -740,12 +740,27 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id` |
-| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id` |
+| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu` |
+| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `slot_num`, optional `local_slot_num`, optional `id`, optional `c2v_dtype`, optional `pre_relu` |
 
 - `slot_num` (when set, must be > 0) pins the GM ring-buffer slot count; omit it to let PTOAS pick its default (8 unidirectional, 4 per direction bidirectional).
 - `local_slot_num` (a2/a3 only, must be > 0 and `<= slot_num`) pins the local slot count.
 - **Sizing the reserved/imported buffer is your responsibility and is architecture-dependent:** on **a3** use `slot_size * local_slot_num`; on **a5** use `slot_size * slot_num`.
+
+For explicit **A5 C2V-only, non-split** pipes (`dir_mask=1`, `split=0`), set
+`c2v_dtype=pl.FP32`, `pl.FP16`, or `pl.BF16` on **both** initializers. The producer
+must push an FP32 Acc tile and the consumer must pop the declared payload dtype.
+`pre_relu=True` applies ReLU before conversion on every push and requires an explicit
+`c2v_dtype`; both peers must agree. FP16/BF16 narrowing uses unscaled RNE, with no
+`pre_quant` scale. `slot_size` is measured in payload bytes: a `64 x 128` BF16 tile
+uses 16384 bytes, with a 32768-byte reserved buffer for `slot_num=2`. Release the
+popped FIFO slot only after its last consumer. Omitting these options preserves
+existing pipe behavior. Each AIC/AIV function initializes a given pipe `id` once;
+PTOAS rejects repeated initialization of that ID within the same function.
+The Torch reference also keeps queues independent by `id`. It applies the
+producer's executed initialization to subsequent pushes, including pushes delegated
+to inline helpers. When a later Group initializes a default C2V pipe with the same
+ID, the reference restores identity transport for that ID.
 
 ### Buffer Management Operations
 
@@ -755,6 +770,13 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 | `system.import_peer_buffer` | 0 | Import buffer from peer function (producer side) | `name`, `peer_func` |
 
 \* `base` defaults to `AUTO (-1)` for compiler-assigned address.
+
+In explicit JIT Groups, symbolic `peer_func` names resolve through inline wrappers
+around Group members and inside nested inline initializers. Each specialization of
+a helper that imports a peer must belong to one generated AIC/AIV peer pair;
+sharing it across different pairs is rejected. Helpers without peer imports may be
+shared. Names and call aliases that identify both peer members are rejected as
+ambiguous.
 
 ### DSL Example (cross-core V2C unidirectional)
 

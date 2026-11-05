@@ -784,6 +784,18 @@ class PTOCodegen : public CodegenBase {
    * disjoint byte ranges within that parameter.
    */
   [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
+
+  /// Emitter-only, function-local contract from an explicit pipe initializer.
+  /// NoConvert in PTOAS also accepts INT32; retain the declared dtype so a pop
+  /// cannot silently disagree with the Python API's c2v_dtype.
+  void RecordC2VPipeDtype(int pipe_id, DataType dtype) {
+    fs_.c2v_payload_dtypes.insert_or_assign(pipe_id, dtype);
+  }
+  [[nodiscard]] std::optional<DataType> GetC2VPipeDtype(int pipe_id) const {
+    auto found = fs_.c2v_payload_dtypes.find(pipe_id);
+    if (found == fs_.c2v_payload_dtypes.end()) return std::nullopt;
+    return found->second;
+  }
   /**
    * @brief Whether physical addresses are baked into the emitted PTO.
    *
@@ -1231,6 +1243,7 @@ class PTOCodegen : public CodegenBase {
     std::string gm_slot_buffer_ssa;
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
+    std::map<int, DataType> c2v_payload_dtypes;
     std::set<const ir::Var*> ffts_workspace_vars;
 
     /// SSA name of the synthetic runtime-owned SDMA workspace pointer param.
@@ -1327,6 +1340,7 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_ssa.clear();
       gm_slot_buffer_dtype = DataType::FP32;
       gm_slot_buffer_region_by_pipe.clear();
+      c2v_payload_dtypes.clear();
       ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();

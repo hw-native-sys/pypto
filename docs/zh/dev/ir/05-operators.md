@@ -670,12 +670,24 @@ UINT32 + INT32 → INT32 (signed precedence)
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id` |
-| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id` |
+| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id`，可选 `c2v_dtype`，可选 `pre_relu` |
+| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `slot_num`，可选 `local_slot_num`，可选 `id`，可选 `c2v_dtype`，可选 `pre_relu` |
 
 - `slot_num`（设置时必须 > 0）显式指定 GM 环形缓冲区的槽数量；省略时由 PTOAS 取默认值（单向 8，双向每方向 4）。
 - `local_slot_num`（仅 a2/a3，必须 > 0 且 `<= slot_num`）显式指定本地槽数量。
 - **预留/导入缓冲区大小需由用户自行设置，且与架构相关**：**a3** 为 `slot_size * local_slot_num`；**a5** 为 `slot_size * slot_num`。
+
+对于显式 **A5 C2V 单向、不切分**管道（`dir_mask=1`、`split=0`），在**两端**初始化函数上设置
+`c2v_dtype=pl.FP32`、`pl.FP16` 或 `pl.BF16`。生产者必须推送 FP32 Acc tile，消费者必须弹出
+声明的载荷类型。`pre_relu=True` 在每次推送时先执行 ReLU 再转换，要求显式提供 `c2v_dtype`，
+且两端配置一致。FP16/BF16 窄化采用无缩放的最近偶数舍入（RNE），不应用 `pre_quant` scale。
+`slot_size` 按载荷字节数计算：`64 x 128` BF16 tile 占 16384 字节；`slot_num=2` 时预留缓冲区
+为 32768 字节。最后一个消费者使用完数据后才能释放 FIFO 槽位。省略新参数时保持原有管道行为。
+每个 AIC/AIV 函数内，同一个管道 `id` 只初始化一次；PTOAS 不支持在该函数中重复初始化该 `id`。
+Torch 参考实现也按 `id` 隔离各管道的队列。
+生产者实际执行的初始化配置会作用于后续推送，包括委托给 inline 辅助函数的推送。
+当后续另一个 Group 以默认配置初始化同一个 C2V 管道 `id` 时，参考实现会恢复默认传输，
+不再沿用先前的类型转换和 ReLU 配置。
 
 ### 缓冲区管理操作
 
@@ -685,6 +697,12 @@ UINT32 + INT32 → INT32 (signed precedence)
 | `system.import_peer_buffer` | 0 | 从同组对等函数导入缓冲区（生产者侧） | `name`, `peer_func` |
 
 \* `base` 默认为 `AUTO (-1)`，由编译器自动分配地址。
+
+在显式 JIT Group 中，符号 `peer_func` 名称可穿过包裹 Group 成员调用的内联辅助函数解析，
+也支持嵌套的内联初始化辅助函数（inline initializer）。
+导入 peer 的辅助函数的每个特化（specialization）必须归属于唯一的生成后 AIC/AIV peer 对；
+跨不同 peer 对共享同一个特化时会报错。不导入 peer 的辅助函数可以共享。
+若符号名称或调用别名同时指向两个 peer 成员，则会报告歧义。
 
 ### DSL 示例（跨核 V2C 单向）
 

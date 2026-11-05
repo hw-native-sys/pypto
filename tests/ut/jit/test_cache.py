@@ -41,6 +41,50 @@ from pypto.runtime import RunConfig
 
 
 class TestComputeSourceHash:
+    def test_rebinding_same_callable_wrapper_changes_call_wiring_hash(self):
+        def shared(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            return out
+
+        producer = pl.jit.incore(level=pl.Level.AIC)(shared)
+        consumer = pl.jit.incore(level=pl.Level.AIV)(shared)
+        selected = producer
+
+        @pl.jit
+        def entry(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            producer(out)
+            consumer(out)
+            return selected(out)
+
+        initial_deps = entry._get_deps()
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        selected = consumer
+        assert entry._get_deps() == initial_deps
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+
+    def test_equivalent_wrapper_graph_hashes_do_not_depend_on_object_ids(self):
+        def shared(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            return out
+
+        def factory():
+            producer = pl.jit.incore(level=pl.Level.AIC)(shared)
+            consumer = pl.jit.incore(level=pl.Level.AIV)(shared)
+            alias = producer
+
+            @pl.jit
+            def entry(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+                producer(out)
+                consumer(out)
+                return alias(out)
+
+            return entry
+
+        first = factory()
+        second = factory()
+        assert first._get_source_hash() == second._get_source_hash()
+        assert first._persistent_source_digest() == second._persistent_source_digest()
+
     def test_deterministic(self):
         h1 = compute_source_hash(["def f(): pass"])
         h2 = compute_source_hash(["def f(): pass"])
@@ -909,9 +953,9 @@ class TestGlobalDependencies:
 
         initial_hash = entry._get_source_hash()
         entry.compile()
-        helper = pl.jit.incore(level=pl.Level.AIC)(implementation)
+        helper = pl.jit.incore(level=pl.Level.HOST)(implementation)
         assert entry._get_source_hash() != initial_hash
-        with pytest.raises(ParserSyntaxError, match="explicit level=AIC"):
+        with pytest.raises(ParserSyntaxError, match="explicit level=HOST"):
             entry.compile()
         assert len(compile_programs) == 1
 

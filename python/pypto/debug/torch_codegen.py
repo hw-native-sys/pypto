@@ -84,7 +84,7 @@ import torch
 import threading
 import time
 import traceback
-from collections import deque
+from collections import defaultdict, deque
 
 _PIPE_WAIT_TIMEOUT_SEC = 10.0
 _MIXED_KERNEL_TIMEOUT_SEC = 30.0
@@ -131,6 +131,18 @@ def _is_odd_split(split):
     return split in (3, 4)
 
 
+class _PipeQueues:
+    def __init__(self):
+        self.c2v_dtype = None
+        self.pre_relu = False
+        self.to_aiv = deque()
+        self.to_aiv_split = {c: {0: deque(), 1: deque()} for c in _SPLIT_CODES}
+        self.to_aiv_dual_nosplit = {0: deque(), 1: deque()}
+        self.to_aic = deque()
+        self.to_aic_split = {c: {0: deque(), 1: deque()} for c in _SPLIT_CODES}
+        self.to_aic_dual_nosplit = {0: deque(), 1: deque()}
+
+
 class _CrossCoreRuntime:
     def __init__(self):
         self._lock = threading.Lock()
@@ -140,59 +152,64 @@ class _CrossCoreRuntime:
     def reset(self, no_split_dual_aiv_dispatch=False):
         with self._cv:
             self._no_split_dual_aiv_dispatch = bool(no_split_dual_aiv_dispatch)
-            self._to_aiv = deque()
-            self._to_aiv_split = {c: {0: deque(), 1: deque()} for c in _SPLIT_CODES}
-            self._to_aiv_dual_nosplit = {0: deque(), 1: deque()}
-            self._to_aic = deque()
-            self._to_aic_split = {c: {0: deque(), 1: deque()} for c in _SPLIT_CODES}
-            self._to_aic_dual_nosplit = {0: deque(), 1: deque()}
+            # Independent frontend IDs own independent queues in both
+            # directions, including split and dual-AIV dispatch modes.
+            self._pipes = defaultdict(_PipeQueues)
             self._cv.notify_all()
 
-    def snapshot(self):
+    def snapshot(self, pipe_id=0):
         with self._lock:
-            return self._snapshot_locked()
+            return self._snapshot_locked(pipe_id)
 
     def notify_all(self):
         with self._cv:
             self._cv.notify_all()
 
-    def _snapshot_locked(self):
+    def initialize_c2v_pipe(self, dtype, pre_relu=False, pipe_id=0):
+        with self._cv:
+            queues = self._pipes[int(pipe_id)]
+            queues.c2v_dtype = dtype
+            queues.pre_relu = bool(pre_relu)
+
+    def _snapshot_locked(self, pipe_id=0):
+        queues = self._pipes[int(pipe_id)]
         return {
+            "pipe_id": int(pipe_id),
             "no_split_dual_aiv_dispatch": self._no_split_dual_aiv_dispatch,
-            "to_aiv": len(self._to_aiv),
+            "to_aiv": len(queues.to_aiv),
             "to_aiv_dual_nosplit": {
-                0: len(self._to_aiv_dual_nosplit[0]),
-                1: len(self._to_aiv_dual_nosplit[1]),
+                0: len(queues.to_aiv_dual_nosplit[0]),
+                1: len(queues.to_aiv_dual_nosplit[1]),
             },
             "to_aiv_split": {
-                c: {0: len(self._to_aiv_split[c][0]), 1: len(self._to_aiv_split[c][1])}
+                c: {0: len(queues.to_aiv_split[c][0]), 1: len(queues.to_aiv_split[c][1])}
                 for c in _SPLIT_CODES
             },
-            "to_aic": len(self._to_aic),
+            "to_aic": len(queues.to_aic),
             "to_aic_dual_nosplit": {
-                0: len(self._to_aic_dual_nosplit[0]),
-                1: len(self._to_aic_dual_nosplit[1]),
+                0: len(queues.to_aic_dual_nosplit[0]),
+                1: len(queues.to_aic_dual_nosplit[1]),
             },
             "to_aic_split": {
-                c: {0: len(self._to_aic_split[c][0]), 1: len(self._to_aic_split[c][1])}
+                c: {0: len(queues.to_aic_split[c][0]), 1: len(queues.to_aic_split[c][1])}
                 for c in _SPLIT_CODES
             },
         }
 
-    def _wait_for_locked(self, predicate, op_name, split, lane):
+    def _wait_for_locked(self, predicate, op_name, split, lane, pipe_id=0):
         deadline = time.monotonic() + _PIPE_WAIT_TIMEOUT_SEC
         while not predicate():
             cancel_event = _get_runtime_cancel_event()
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError(
                     f"{op_name} cancelled (split={split}, lane={lane}); "
-                    f"pipe_state={self._snapshot_locked()}"
+                    f"pipe_state={self._snapshot_locked(pipe_id)}"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError(
                     f"{op_name} timeout (split={split}, lane={lane}); "
-                    f"pipe_state={self._snapshot_locked()}"
+                    f"pipe_state={self._snapshot_locked(pipe_id)}"
                 )
             self._cv.wait(timeout=min(0.05, remaining))
 
@@ -286,48 +303,57 @@ class _CrossCoreRuntime:
 
         return merged
 
-    def push_to_aiv(self, tile, split, lane_stride=0):
+    def push_to_aiv(self, tile, split, lane_stride=0, pipe_id=0):
         split = int(split)
         lane_stride = int(lane_stride)
         with self._cv:
+            queues = self._pipes[int(pipe_id)]
+            # Configuration follows the executed pipe initialization, so a
+            # push delegated to an inline helper sees the same contract.
+            if queues.c2v_dtype is not None:
+                source = tile
+                if queues.pre_relu:
+                    tile = torch.maximum(tile, torch.zeros_like(tile))
+                tile = _copy_region_attrs(source, tile.to(queues.c2v_dtype))
             if split == 0:
                 if self._no_split_dual_aiv_dispatch:
-                    self._to_aiv_dual_nosplit[0].append(_copy_region_attrs(tile, tile.clone()))
-                    self._to_aiv_dual_nosplit[1].append(_copy_region_attrs(tile, tile.clone()))
+                    queues.to_aiv_dual_nosplit[0].append(_copy_region_attrs(tile, tile.clone()))
+                    queues.to_aiv_dual_nosplit[1].append(_copy_region_attrs(tile, tile.clone()))
                 else:
-                    self._to_aiv.append(_copy_region_attrs(tile, tile.clone()))
+                    queues.to_aiv.append(_copy_region_attrs(tile, tile.clone()))
             elif split in _SPLIT_CODES:
                 lane0, lane1 = self._split_tile(tile, split, lane_stride)
-                self._to_aiv_split[split][0].append(lane0)
-                self._to_aiv_split[split][1].append(lane1)
+                queues.to_aiv_split[split][0].append(lane0)
+                queues.to_aiv_split[split][1].append(lane1)
             else:
                 raise ValueError(f"Unsupported split mode for push_to_aiv: {split}")
             self._cv.notify_all()
 
-    def pop_from_aic(self, split):
+    def pop_from_aic(self, split, pipe_id=0):
         split = int(split)
         lane = _get_subblock_idx()
         with self._cv:
+            queues = self._pipes[int(pipe_id)]
             if split == 0:
                 if self._no_split_dual_aiv_dispatch:
                     if lane not in (0, 1):
                         raise ValueError(
                             f"No-split dual-dispatch tpop_from_aic requires lane in {{0,1}}, got {lane}"
                         )
-                    queue = self._to_aiv_dual_nosplit[lane]
-                    self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane)
+                    queue = queues.to_aiv_dual_nosplit[lane]
+                    self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane, pipe_id)
                     return queue.popleft()
-                self._wait_for_locked(lambda: len(self._to_aiv) > 0, "tpop_from_aic", split, lane)
-                return self._to_aiv.popleft()
+                self._wait_for_locked(lambda: len(queues.to_aiv) > 0, "tpop_from_aic", split, lane, pipe_id)
+                return queues.to_aiv.popleft()
             if split in _SPLIT_CODES:
                 if lane not in (0, 1):
                     raise ValueError(f"Split tpop_from_aic requires lane in {{0,1}}, got {lane}")
-                queue = self._to_aiv_split[split][lane]
-                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane)
+                queue = queues.to_aiv_split[split][lane]
+                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane, pipe_id)
                 return queue.popleft()
             raise ValueError(f"Unsupported split mode for pop_from_aic: {split}")
 
-    def push_to_aic(self, tile, split):
+    def push_to_aic(self, tile, split, pipe_id=0):
         split = int(split)
         if _is_odd_split(split):
             # pto-isa places lane 1's Vector -> Cube band at lane 1's own extent,
@@ -336,52 +362,56 @@ class _CrossCoreRuntime:
             raise ValueError(f"Unsupported odd split mode for push_to_aic: {split}")
         lane = _get_subblock_idx()
         with self._cv:
+            queues = self._pipes[int(pipe_id)]
             if split == 0:
                 if self._no_split_dual_aiv_dispatch:
                     if lane not in (0, 1):
                         raise ValueError(
                             f"No-split dual-dispatch tpush_to_aic requires lane in {{0,1}}, got {lane}"
                         )
-                    self._to_aic_dual_nosplit[lane].append(_copy_region_attrs(tile, tile.clone()))
+                    queues.to_aic_dual_nosplit[lane].append(_copy_region_attrs(tile, tile.clone()))
                 else:
-                    self._to_aic.append(_copy_region_attrs(tile, tile.clone()))
+                    queues.to_aic.append(_copy_region_attrs(tile, tile.clone()))
             elif split in _SPLIT_CODES:
                 if lane not in (0, 1):
                     raise ValueError(f"Split tpush_to_aic requires lane in {{0,1}}, got {lane}")
-                self._to_aic_split[split][lane].append(_copy_region_attrs(tile, tile.clone()))
+                queues.to_aic_split[split][lane].append(_copy_region_attrs(tile, tile.clone()))
             else:
                 raise ValueError(f"Unsupported split mode for push_to_aic: {split}")
             self._cv.notify_all()
 
-    def pop_from_aiv(self, split):
+    def pop_from_aiv(self, split, pipe_id=0):
         split = int(split)
         if _is_odd_split(split):
             raise ValueError(f"Unsupported odd split mode for pop_from_aiv: {split}")
         lane = _get_subblock_idx()
         with self._cv:
+            queues = self._pipes[int(pipe_id)]
             if split == 0:
                 if self._no_split_dual_aiv_dispatch:
-                    lane0_q = self._to_aic_dual_nosplit[0]
-                    lane1_q = self._to_aic_dual_nosplit[1]
+                    lane0_q = queues.to_aic_dual_nosplit[0]
+                    lane1_q = queues.to_aic_dual_nosplit[1]
                     self._wait_for_locked(
                         lambda: len(lane0_q) > 0 and len(lane1_q) > 0,
                         "tpop_from_aiv",
                         split,
                         lane,
+                        pipe_id,
                     )
                     lane0_tile = lane0_q.popleft()
                     lane1_q.popleft()
                     return lane0_tile
-                self._wait_for_locked(lambda: len(self._to_aic) > 0, "tpop_from_aiv", split, lane)
-                return self._to_aic.popleft()
+                self._wait_for_locked(lambda: len(queues.to_aic) > 0, "tpop_from_aiv", split, lane, pipe_id)
+                return queues.to_aic.popleft()
             if split in _SPLIT_CODES:
-                lane0_q = self._to_aic_split[split][0]
-                lane1_q = self._to_aic_split[split][1]
+                lane0_q = queues.to_aic_split[split][0]
+                lane1_q = queues.to_aic_split[split][1]
                 self._wait_for_locked(
                     lambda: len(lane0_q) > 0 and len(lane1_q) > 0,
                     "tpop_from_aiv",
                     split,
                     lane,
+                    pipe_id,
                 )
                 part0 = lane0_q.popleft()
                 part1 = lane1_q.popleft()
@@ -952,24 +982,42 @@ def _lane_stride_kwarg(kw: dict[str, Any]) -> int:
     return int(kw.get("lane_stride", 0) or 0)
 
 
+def _pipe_id_kwarg(kw: dict[str, Any]) -> str:
+    """Keep default-ID output stable while carrying independent pipe IDs."""
+    pipe_id = int(kw.get("id", 0))
+    return f", pipe_id={pipe_id}" if pipe_id else ""
+
+
 def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any]) -> str:
     # The stride is emitted only when a ragged boundary was rebalanced, so every
     # other kernel keeps the two-argument form.
     stride = _lane_stride_kwarg(kw)
     stride_arg = f", {stride}" if stride else ""
-    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg})"
+    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)}{stride_arg}{_pipe_id_kwarg(kw)})"
+
+
+def _handle_aic_initialize_pipe(_a: list[str], kw: dict[str, Any]) -> str:
+    dtype = kw.get("c2v_dtype")
+    if dtype is None:
+        if not int(kw.get("dir_mask", 1)) & 1:
+            return "# aic_initialize_pipe"
+        return f"_cross_core_rt.initialize_c2v_pipe(None, False{_pipe_id_kwarg(kw)})"
+    if dtype not in (DataType.FP32, DataType.FP16, DataType.BF16):
+        raise ValueError(f"c2v_dtype must be FP32, FP16, or BF16, got {dtype}")
+    relu = bool(kw.get("pre_relu", False))
+    return f"_cross_core_rt.initialize_c2v_pipe({_torch_dtype(dtype)}, {relu}{_pipe_id_kwarg(kw)})"
 
 
 def _handle_tpush_to_aic(a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)})"
+    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
 
 
 def _handle_tpop_from_aic(_a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)})"
+    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
 
 
 def _handle_tpop_from_aiv(_a: list[str], kw: dict[str, Any]) -> str:
-    return f"_cross_core_rt.pop_from_aiv({_split_kwarg(kw)})"
+    return f"_cross_core_rt.pop_from_aiv({_split_kwarg(kw)}{_pipe_id_kwarg(kw)})"
 
 
 # Built through the registry getter, which raises on an unregistered name, so a renamed operator
@@ -1365,6 +1413,8 @@ def _register_ops() -> None:  # noqa: PLR0915
         "system.tfree_to_aiv",
     ):
         m[op_name] = _noop(op_name.split(".")[-1])
+
+    m["system.aic_initialize_pipe"] = _handle_aic_initialize_pipe
 
 
 _register_ops()
