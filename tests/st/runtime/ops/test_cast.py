@@ -318,7 +318,46 @@ def test_issue_2973_planners(case_run):
 
 
 def _make_fp4_e2m1_direct_fp8(surface: str, row_start: int, column_start: int):
-    """Convert two packed tiles with offsets, reusing the loop's UB buffers."""
+    """Convert two packed tiles with offsets, reusing the loop's UB buffers.
+
+    One kernel per authoring surface: a kernel body cannot branch on the surface
+    itself, because the parser walks the body as IR rather than evaluating it.
+    """
+    if surface == "tensor":
+
+        @pl.jit(auto_scope=False)
+        def convert(
+            packed: pl.Tensor[[48, 96], pl.fp4e2m1x2],
+            output: pl.InOut[pl.Tensor[[48, 192], pl.INT8]],
+        ):
+            with pl.spmd(1, sync_start=False):
+                worker = pl.tile.get_block_idx()
+                for row in pl.range(row_start + worker * 32, row_start + 32, 16):
+                    source = pl.tensor.slice(packed, [16, 32], [row, column_start])
+                    converted = pl.cast(source, pl.FP8E4M3FN)
+                    result = pl.reinterpret_view(converted, pl.INT8)
+                    output = pl.tensor.assemble(output, result, [row, column_start * 2])
+            return output
+
+        return convert
+
+    if surface == "tile":
+
+        @pl.jit(auto_scope=False)
+        def convert(
+            packed: pl.Tensor[[48, 96], pl.fp4e2m1x2],
+            output: pl.InOut[pl.Tensor[[48, 192], pl.INT8]],
+        ):
+            with pl.spmd(1, sync_start=False):
+                worker = pl.tile.get_block_idx()
+                for row in pl.range(row_start + worker * 32, row_start + 32, 16):
+                    source = pl.tile.load(packed, [row, column_start], [16, 32])
+                    converted = pl.tile.cast(source, pl.FP8E4M3FN)
+                    result = pl.reinterpret_view(converted, pl.INT8)
+                    pl.tile.store(result, [row, column_start * 2], output)
+            return output
+
+        return convert
 
     @pl.jit(auto_scope=False)
     def convert(
@@ -328,19 +367,10 @@ def _make_fp4_e2m1_direct_fp8(surface: str, row_start: int, column_start: int):
         with pl.spmd(1, sync_start=False):
             worker = pl.tile.get_block_idx()
             for row in pl.range(row_start + worker * 32, row_start + 32, 16):
-                if surface == "tensor":
-                    source = pl.tensor.slice(packed, [16, 32], [row, column_start])
-                    converted = pl.cast(source, pl.FP8E4M3FN)
-                    result = pl.reinterpret_view(converted, pl.INT8)
-                    output = pl.tensor.assemble(output, result, [row, column_start * 2])
-                else:
-                    source = pl.tile.load(packed, [row, column_start], [16, 32])
-                    if surface == "tile":
-                        converted = pl.tile.cast(source, pl.FP8E4M3FN)
-                    else:
-                        converted = pl.cast(source, pl.FP8E4M3FN)
-                    result = pl.reinterpret_view(converted, pl.INT8)
-                    pl.tile.store(result, [row, column_start * 2], output)
+                source = pl.tile.load(packed, [row, column_start], [16, 32])
+                converted = pl.cast(source, pl.FP8E4M3FN)
+                result = pl.reinterpret_view(converted, pl.INT8)
+                pl.tile.store(result, [row, column_start * 2], output)
         return output
 
     return convert

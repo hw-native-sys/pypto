@@ -823,6 +823,53 @@ def test_dense_dn_tensor_slice_cast_preserves_other_consumer_layout(tmp_path, dt
         assert cpp.is_file()
 
 
+def _direct_fp8_program(surface: str, valid_rows: int, valid_cols: int):
+    """One program per authoring surface, selected in Python before parsing.
+
+    A DSL body cannot branch on the surface itself: the parser walks BOTH arms of
+    an ``if``, so a single kernel holding the Tensor and the Tile spelling would
+    rebind one name to two types. Each arm is therefore its own program.
+    """
+
+    @pl.program
+    class Tensor:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
+            packed = pl.tensor.slice(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
+            decoded = pl.cast(packed, pl.FP8E4M3FN)
+            return pl.assemble(output, decoded, [16, 64])
+
+    @pl.program
+    class Unified:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
+            packed = pl.load(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
+            decoded = pl.cast(packed, pl.FP8E4M3FN)
+            return pl.store(decoded, [16, 64], output)
+
+    @pl.program
+    class Tile:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
+            packed = pl.load(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
+            decoded = pl.tile.cast(packed, pl.FP8E4M3FN)
+            return pl.store(decoded, [16, 64], output)
+
+    return {"tensor": Tensor, "unified": Unified, "tile": Tile}[surface]
+
+
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
@@ -831,30 +878,8 @@ def test_dense_dn_tensor_slice_cast_preserves_other_consumer_layout(tmp_path, dt
 def test_e2m1_direct_fp8_cast_emits_one_tcvt(tmp_path, planner, surface, partial):
     """Tensor lowering and both Tile APIs must reach the direct A5 instruction."""
     valid_rows, valid_cols = (8, 24) if partial else (16, 32)
-    # The DSL accepts integer closure values, not Python strings.
-    surface_code = {"tensor": 0, "unified": 1, "tile": 2}[surface]
 
-    @pl.program
-    class Direct:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
-            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
-        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
-            if surface_code == 0:
-                packed = pl.tensor.slice(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
-                decoded = pl.cast(packed, pl.FP8E4M3FN)
-                return pl.assemble(output, decoded, [16, 64])
-            else:
-                packed = pl.load(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
-                if surface_code == 2:
-                    decoded = pl.tile.cast(packed, pl.FP8E4M3FN)
-                else:
-                    decoded = pl.cast(packed, pl.FP8E4M3FN)
-                return pl.store(decoded, [16, 64], output)
-
-    mlir = _emit_incore_mlir(Direct, planner)
+    mlir = _emit_incore_mlir(_direct_fp8_program(surface, valid_rows, valid_cols), planner)
     casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
     assert len(casts) == 1, mlir
     assert f"dtype=!pto.f4E2M1x2, rows=16, cols=32, v_row={valid_rows}, v_col={valid_cols}" in casts[0]
