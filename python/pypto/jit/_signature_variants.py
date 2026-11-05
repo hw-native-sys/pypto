@@ -30,6 +30,15 @@ if TYPE_CHECKING:
     from .decorator import JITFunction
 
 
+_PeerScopeResolver = Callable[
+    [_call_binding.VariantPlan, Mapping[_call_binding.VariantKey, str]],
+    tuple[
+        dict[_call_binding.VariantKey, Mapping[str, str | None]],
+        set[_call_binding.VariantKey],
+    ],
+]
+
+
 def _signature(
     names: Sequence[str], tensors: Mapping[str, TensorMeta], scalars: Mapping[str, DataType]
 ) -> tuple[Any, ...]:
@@ -109,6 +118,7 @@ def build_contexts(
     *,
     discover: _call_binding.DiscoverDeps,
     allocate_names: Callable[[Sequence[tuple[Any, "JITFunction"]]], dict[Any, str]],
+    resolve_peers: _PeerScopeResolver,
 ) -> list[SpecializeContext]:
     """Specialize external kernels and their ordinary helper callers together."""
     variants: list[_Variant] = []
@@ -124,7 +134,8 @@ def build_contexts(
     descriptor_metas = _DescriptorMetas()
 
     def index(function: "JITFunction") -> dict[ast.stmt, list[tuple[str, int, ast.Call]]]:
-        identity = id(function._func)
+        # Dependency discovery also depends on the wrapper's function type.
+        identity = id(function)
         if identity in indices:
             return indices[identity]
         deps = {binding.call_name: binding.dep for binding in discover(function._func, function._func_type)}
@@ -165,7 +176,8 @@ def build_contexts(
         scalar_dtypes: dict[str, DataType],
         constexpr: dict[str, str],
     ) -> int:
-        identity = id(function._func)
+        # Distinct wrappers may emit different core kinds for one callable.
+        identity = id(function)
         if identity in active:
             raise TypeError(f"@pl.jit: recursive dependency {function.__name__!r} cannot be specialized")
         if identity not in declared_scalars:
@@ -201,7 +213,7 @@ def build_contexts(
         ) -> None:
             for name, ordinal, call in calls.get(statement, ()):
                 dep = dependencies[identity][name]
-                dep_id = id(dep._func)
+                dep_id = id(dep)
                 if dep_id not in signatures:
                     signatures[dep_id] = (_arguments.constexpr_params(dep._func), dep._param_names())
                 values = (
@@ -228,6 +240,7 @@ def build_contexts(
                     call_node=_tensor_meta.CallSiteMetadata(call, live, resolve_expr, resolve_scalar),
                     caller_constexpr=constexpr,
                     discover_deps=discover,
+                    caller_identity=identity,
                 )
                 # A callee reads its argument descriptor. Parent bounds retained
                 # for local inference must not become constants in that callee.
@@ -250,6 +263,24 @@ def build_contexts(
 
     entry_id = visit(entry, tensors, scalars, constants)
     names = allocate_names([(entry_id, entry), *((i, variants[i].function) for i in order if i != entry_id)])
+    # Resolve peers over the signature-expanded graph: one wrapper can have
+    # several generated functions, each belonging to its actual Group instance.
+    variant_keys = {
+        i: (i, _call_binding.freeze_binding(variant.constants)) for i, variant in enumerate(variants)
+    }
+    peer_plan = _call_binding.VariantPlan(
+        order=[variant_keys[i] for i in order],
+        jit_func={variant_keys[i]: variant.function for i, variant in enumerate(variants)},
+        binding={variant_keys[i]: variant.constants for i, variant in enumerate(variants)},
+        origin={},
+        call_targets={
+            variant_keys[i]: {site: variant_keys[target] for site, target in variant.targets.items()}
+            for i, variant in enumerate(variants)
+        },
+    )
+    peer_names, ambiguous_peer_scopes = resolve_peers(
+        peer_plan, {variant_keys[i]: name for i, name in names.items()}
+    )
     contexts: list[SpecializeContext] = []
     for variant_id in order:
         variant = variants[variant_id]
@@ -270,6 +301,8 @@ def build_contexts(
                 dep_names=list(first),
                 dep_func_names=first,
                 dep_call_variants=targets,
+                peer_func_names=peer_names.get(variant_keys[variant_id], {}),
+                peer_func_scope_ambiguous=variant_keys[variant_id] in ambiguous_peer_scopes,
                 auto_scope=function._auto_scope,
                 external_core_type=function._external_core_type,
                 external_aic_source=function._external_aic_source,

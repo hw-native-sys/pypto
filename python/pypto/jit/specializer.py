@@ -65,7 +65,7 @@ from pypto.pypto_core.ir import TensorLayout
 
 from . import _specialize_values as values
 from ._source import _UNBOUND, cache_in_snapshot, function_namespace
-from ._specialize_body import BodyTransformer
+from ._specialize_body import BodyTransformer, remap_peer_references
 from ._specialize_types import DynDim, ShapeDim, TensorMeta
 from .external._call_normalizer import CallBinding, normalize_calls
 from .external.contracts import KernelContract
@@ -221,6 +221,11 @@ class SpecializeContext:
     # Internal provider hand-off after preparation/validation. Legacy externs
     # derive the equivalent result plan from their validated declaration.
     external_contract: KernelContract | None = None
+    # Original peer definition/alias -> generated name in the owning Group.
+    # None marks a shared function whose groups bind that name differently.
+    peer_func_names: Mapping[str, str | None] = field(default_factory=dict[str, str | None])
+    # A shared function reached by distinct peer sets diagnoses actual imports.
+    peer_func_scope_ambiguous: bool = False
 
     @property
     def source_def_name(self) -> str:
@@ -2471,6 +2476,9 @@ class Specializer:
 
         _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
         flat_body = normalize_calls(flat_body, self._external_calls, all_param_names)
+        remap_peer_references(
+            flat_body, ctx.peer_func_names, ctx.py_globals, ambiguous_scope=ctx.peer_func_scope_ambiguous
+        )
 
         if any(
             isinstance(node, ast.Name) and node.id == "pld" and isinstance(node.ctx, ast.Load)
@@ -2798,7 +2806,13 @@ class Specializer:
         # InCore
         if ctx.level is None:
             return "@pl.function(type=pl.FunctionType.InCore)"
-        # Level present
+        # Explicit core levels select the corresponding IR function kind.
+        # InCore itself derives CHIP_DIE, so combining it with level=AIC/AIV
+        # violates the IR contract; CORE_GROUP instead co-schedules the peers.
+        level_name = getattr(ctx.level, "name", str(ctx.level))
+        kind = {"AIC": "AIC", "AIV": "AIV", "CORE_GROUP": "Group"}.get(level_name)
+        if kind is not None:
+            return f"@pl.function(type=pl.FunctionType.{kind})"
         level_str = _level_to_str(ctx.level)
         return f"@pl.function(type=pl.FunctionType.InCore, level={level_str})"
 
@@ -2905,6 +2919,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     dep_func_names: dict[str, str] | None = None,
     constexpr_values: dict[str, str] | None = None,
     dep_call_variants: dict[tuple[str, int], str] | None = None,
+    peer_func_names: Mapping[str, str | None] | None = None,
+    peer_func_scope_ambiguous: bool = False,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -2932,6 +2948,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
             for bodies where one call name reaches more than one generated
             function, which happens when a dep is compiled once per
             ``pl.constexpr`` value it is called with.
+        peer_func_names: Symbolic peer names resolved within the owning Group.
+        peer_func_scope_ambiguous: Whether distinct peer sets reach this function.
 
     Dynamic dims live inside ``tensor_meta`` as :class:`DynDim` entries —
     no separate set is passed in.
@@ -2980,6 +2998,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         dep_names=dep_names,
         dep_func_names=dep_func_names or {},
         dep_call_variants=dep_call_variants or {},
+        peer_func_names=peer_func_names or {},
+        peer_func_scope_ambiguous=peer_func_scope_ambiguous,
         auto_scope=auto_scope,
         py_globals=func_name_lookup(func),
         eager_tile_annotations=eager_data,

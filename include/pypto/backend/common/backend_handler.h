@@ -264,6 +264,9 @@ class BackendHandler {
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.
   [[nodiscard]] virtual bool SupportsLocalPipeDepth() const { return false; }
 
+  /// Whether non-split C2V pipes support explicit FP32 output conversion and ReLU.
+  [[nodiscard]] virtual bool SupportsC2VFixpipeEpilogue() const { return false; }
+
   /**
    * @brief Whether this backend needs the MemoryReuse load + tpop_from_aic
    *        in-place hazard guard for split-AIV functions.

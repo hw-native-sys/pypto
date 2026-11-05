@@ -1154,3 +1154,65 @@ class BodyTransformer(ast.NodeTransformer):
             self._shape_inlined.pop(original, None)
             self._record_tensor_meta(captured, None)
         return [*capture_prefix, node] if capture_prefix else node
+
+
+class _PeerReferenceTransformer(ast.NodeTransformer):
+    """Rewrite symbolic peer names after ordinary body specialization."""
+
+    def __init__(
+        self, names: Mapping[str, str | None], py_globals: Mapping[str, Any], *, ambiguous_scope: bool = False
+    ) -> None:
+        self._peer_func_names = names
+        self._py_globals = py_globals
+        self._ambiguous_scope = ambiguous_scope
+
+    def visit_Call(self, node: ast.Call) -> ast.Call:
+        node = cast(ast.Call, self.generic_visit(node))
+        # Only DSL imports carry Group peer references; unrelated user
+        # functions may also have a peer_func keyword.
+        if not any(kw.arg == "peer_func" for kw in node.keywords):
+            return node
+        attrs: list[str] = []
+        root: ast.expr = node.func
+        while isinstance(root, ast.Attribute):
+            attrs.append(root.attr)
+            root = root.value
+        target = self._py_globals.get(root.id) if isinstance(root, ast.Name) else None
+        for attr in reversed(attrs):
+            target = getattr(target, attr, None)
+        if (
+            getattr(target, "__module__", None)
+            not in {"pypto.ir.op.system_ops", "pypto.language.op.system_ops"}
+            or getattr(target, "__name__", None) != "import_peer_buffer"
+        ):
+            return node
+        for kw in node.keywords:
+            if kw.arg != "peer_func" or not isinstance(kw.value, ast.Constant):
+                continue
+            name = kw.value.value
+            if not isinstance(name, str):
+                continue
+            if self._ambiguous_scope:
+                raise ValueError(f"peer_func={name!r} is ambiguous across groups; use separate peer helpers")
+            if name not in self._peer_func_names:
+                continue
+            generated = self._peer_func_names[name]
+            if generated is None:
+                raise ValueError(f"peer_func={name!r} is ambiguous across groups; use separate peer helpers")
+            kw.value = ast.copy_location(ast.Constant(value=generated), kw.value)
+        return node
+
+
+def remap_peer_references(
+    body: list[ast.stmt],
+    names: Mapping[str, str | None],
+    py_globals: Mapping[str, Any],
+    *,
+    ambiguous_scope: bool = False,
+) -> None:
+    """Resolve Group-local symbols in one additional linear AST walk."""
+    if not names and not ambiguous_scope:
+        return
+    transformer = _PeerReferenceTransformer(names, py_globals, ambiguous_scope=ambiguous_scope)
+    for stmt in body:
+        transformer.visit(stmt)

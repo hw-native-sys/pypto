@@ -70,10 +70,20 @@ core levels:
 | --------- | --------- | ------- |
 | `@pl.jit` | `Orchestration` | Chip-level entry point that dispatches InCore work |
 | `@pl.jit.host` | `level=HOST, role=Orchestrator` | HOST entry — allocates window buffers, dispatches chip orchestrators per rank |
-| `@pl.jit.incore` | `InCore` | A device kernel (accepts `level=` to target a specific hierarchy level) |
+| `@pl.jit.incore` | `InCore`, `AIC`, `AIV`, or `Group` | A device kernel; explicit `level=AIC` / `AIV` selects that core kind, and `level=CORE_GROUP` co-schedules explicit peers |
 | `@pl.jit.inline` | `Inline` | Helper spliced into every call site by `InlineFunctions` |
 | `@pl.jit.opaque` | `Opaque` | A separate IR function that may hold orchestration loops and `pl.at` scopes |
 | `@pl.jit.graph` | `Graph` | A recordable orchestration fragment — the `host_build_graph` runtime records its task topology on the first call and replays it after, so N calls cost one graph build rather than N. Requires compiling under `RuntimeKind.HOST_BUILD_GRAPH` |
+
+`@pl.jit.incore` without a level (or with `level=pl.Level.CHIP_DIE`) keeps the
+ordinary `InCore` kind. For a manual cross-core protocol, use
+`@pl.jit.incore(level=pl.Level.AIC)` and `level=pl.Level.AIV` helpers, called by
+an `@pl.jit.incore(level=pl.Level.CORE_GROUP)` helper. Dispatch that group once
+from the `@pl.jit` entry, for example inside `pl.spmd(...)`; the two peers then
+run as one co-scheduled task. This exposes explicit pipe initialization through
+the normal JIT specialization and compilation path.
+When factories produce same-named peers, JIT resolves `peer_func` within each
+Group and rewrites it to that peer's generated name, including aliased calls.
 
 `@pl.jit.graph` has a scope form: `with pl.graph("name"):` marks a region *in place*
 instead of splitting it into a function. The two compile to the same thing — the region is
