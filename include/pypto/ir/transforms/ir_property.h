@@ -157,6 +157,7 @@ enum class IRProperty : uint64_t {
   TileStorageAllocated,  ///< Canonical device storage also has nonoverlapping effective address windows
   RegScopeValid,         ///< Register schemas, implicit captures and region ownership are valid
   HardwareLoopContractValid,  ///< Require loops are Sequential; final eligibility/evidence checked at codegen
+  SimtValid,                  ///< Canonical SIMT helper signatures, domains, and launch result mappings
   kCount                      ///< Sentinel (must be last)
 };
 
@@ -286,13 +287,11 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated,
- * MixedKernelExpanded, AllocatedMemoryAddr,
- * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
- * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
- * AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid,
- * IterArgCarryClassified, RuntimeScopesMaterialized,
- * DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
+ * Returns {SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid,
+ * InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks,
+ * InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid,
+ * AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified,
+ * RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
  * FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid} —
  * lightweight checks that catch the most common IR errors.
  */
@@ -303,7 +302,7 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * Never declared in per-pass PassProperties. VerificationInstrument checks
  * them before and after every pass; at pipeline start PassPipeline checks only
- * the intersection with GetVerifiedProperties(). Returns {TypeChecked, RegScopeValid,
+ * the intersection with GetVerifiedProperties(). Returns {TypeChecked, SimtValid, RegScopeValid,
  * HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed,
  * NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
  * AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}.
@@ -313,10 +312,9 @@ const IRPropertySet& GetStructuralProperties();
 /**
  * @brief Default property set for explicit verification
  *
- * Returns {SSAForm, TypeChecked, RegScopeValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
- * TileTypeCoherence, ArrayNotEscaped} — the properties checked by
- * run_verifier() when no explicit set is given.
+ * Returns {SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls,
+ * BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence,
+ * ArrayNotEscaped} — the properties checked by run_verifier() when no explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

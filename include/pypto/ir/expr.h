@@ -31,6 +31,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/simt.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -127,9 +128,10 @@ class Op {
     static_assert(
         std::is_same_v<T, bool> || std::is_same_v<T, int> || std::is_same_v<T, std::string> ||
             std::is_same_v<T, double> || std::is_same_v<T, DataType> || std::is_same_v<T, MemorySpace> ||
-            std::is_same_v<T, TensorLayout> || std::is_same_v<T, TileLayout> || std::is_same_v<T, PadValue>,
+            std::is_same_v<T, TensorLayout> || std::is_same_v<T, TileLayout> || std::is_same_v<T, PadValue> ||
+            std::is_same_v<T, SimtAxis>,
         "SetAttrType only accepts: bool, int, std::string, double, DataType, MemorySpace, TensorLayout, "
-        "TileLayout, PadValue");
+        "TileLayout, PadValue, SimtAxis");
 
     attrs_.emplace(key, std::type_index(typeid(T)));
   }

@@ -83,6 +83,16 @@ class OpParser:
             )
         return self.dispatch_op(_dsl_reg, "pl.reg", name, call)
 
+    def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
+        """Read canonical SIMT ops; inline simt_scope syntax belongs to outlining."""
+        result = ir.create_op_call(
+            f"simt.{name}",
+            [self.callbacks.expression(arg) for arg in call.args],
+            self.parse_op_kwargs(call),
+            self.services.span_tracker.get_span(call),
+        )
+        return self.attrs.attach_op_attrs(result, self.attrs.parse_op_attrs(call))
+
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
         """Parse operation call like pl.tensor.create_tensor() or pl.add().
 
@@ -138,8 +148,9 @@ class OpParser:
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "builtin":
             return self.parse_builtin_op(attrs[2:], call)
 
-        if len(attrs) == 3 and attrs[0] == "pl" and attrs[1] == "reg":
-            return self.parse_reg_op(attrs[2], call)
+        scoped_ops = {"reg": self.parse_reg_op, "simt": self.parse_simt_op}
+        if len(attrs) == 3 and attrs[0] == "pl" and attrs[1] in scoped_ops:
+            return scoped_ops[attrs[1]](attrs[2], call)
 
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":

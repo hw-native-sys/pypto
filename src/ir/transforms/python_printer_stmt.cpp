@@ -851,6 +851,27 @@ void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
   --comm_domain_depth_;
 }
 
+void IRPythonPrinter::VisitStmt_(const SimtLaunchStmtPtr& op) {
+  for (size_t i = 0; i < op->results_.size(); ++i) {
+    if (i) stream_ << ", ";
+    VisitExpr(op->results_[i]);
+  }
+  if (!op->results_.empty()) stream_ << " = ";
+  stream_ << prefix_ << ".simt.launch(self." << op->callee_->name_;
+  for (const auto& arg : op->args_) {
+    stream_ << ", ";
+    VisitExpr(arg);
+  }
+  stream_ << ", block_dims=(";
+  for (size_t i = 0; i < op->block_dims_.size(); ++i) {
+    if (i) stream_ << ", ";
+    VisitExpr(op->block_dims_[i]);
+  }
+  stream_ << "), result_param_indices=(";
+  for (int index : op->result_param_indices_) stream_ << index << ", ";
+  stream_ << "))";
+}
+
 void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
   // Print expression statement: expr
   VisitExpr(op->expr_);

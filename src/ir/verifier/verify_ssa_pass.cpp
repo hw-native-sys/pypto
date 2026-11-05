@@ -76,6 +76,7 @@ class SSAVerifier : public IRVisitor {
 
   void VisitVarLike_(const VarPtr& op) override;
   void VisitStmt_(const AssignStmtPtr& op) override;
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
@@ -390,6 +391,16 @@ void SSAVerifier::VerifyIfStmt(const IfStmtPtr& if_stmt) {
     RecordError(ssa::ErrorType::YIELD_COUNT_MISMATCH, msg.str(), if_stmt->span_);
   } else {
     CheckNoMidBodyYield("IfStmt else-branch", if_stmt->else_body_.value());
+  }
+}
+
+void SSAVerifier::VisitStmt_(const SimtLaunchStmtPtr& op) {
+  for (const auto& dim : op->block_dims_) VisitExpr(dim);
+  for (const auto& arg : op->args_) VisitExpr(arg);
+  for (const auto& result : op->results_) {
+    CheckVariableAssignment(result);
+    DefineVar(result);
+    RegisterTypeVars(result->GetType());
   }
 }
 

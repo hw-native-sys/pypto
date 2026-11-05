@@ -982,17 +982,20 @@ class OpRegistryEntry {
   /// result is a `TupleType` with exactly N elements, and every element is an
   /// output: destination tiles must NOT appear in `add_argument()`, because a
   /// caller cannot pre-allocate a buffer that `InitMemRef` owns. Default 1.
+  /// SIMT operations may declare zero results: they access borrowed storage,
+  /// while updated functional values are defined by SimtLaunchStmt.
   inline OpRegistryEntry& set_output_arity(size_t arity) {
-    CHECK(arity >= 1 || ir_stage_ == OpIRStage::Buffer)
+    CHECK(arity >= 1 || ir_stage_ == OpIRStage::Buffer || op_category_ == "SimtOp")
         << "Operator '" << name_ << "' declared output arity " << arity
-        << "; functional operators produce at least one value. Select Buffer stage before declaring zero";
+        << "; functional operators produce at least one value. Select Buffer stage or SimtOp category before "
+           "declaring zero";
     output_arity_ = arity;
     output_arity_declared_ = true;
     return *this;
   }
 
   inline OpRegistryEntry& set_ir_stage(OpIRStage stage) {
-    CHECK(stage == OpIRStage::Buffer || output_arity_ > 0)
+    CHECK(stage == OpIRStage::Buffer || output_arity_ > 0 || op_category_ == "SimtOp")
         << "Operator '" << name_ << "' cannot give a zero-result operator Functional stage";
     ir_stage_ = stage;
     return *this;

@@ -45,6 +45,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/simt.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/signature_symbols.h"
 #include "pypto/ir/type.h"
@@ -348,6 +349,11 @@ class Projection {
       CheckField("value", assign->value_);
       CheckField("var", assign->var_, true);
       Activate(assign->var_);
+    } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+      CheckField("callee", launch->callee_);
+      CheckField("block_dims", launch->block_dims_);
+      CheckField("args", launch->args_);
+      DefineResults(launch->results_);
     } else if (auto loop = As<ForStmt>(stmt)) {
       CheckField("attrs", loop->attrs_);
       CheckField("start", loop->start_);
@@ -541,6 +547,7 @@ class Projection {
     PROJECT_NODE(CommDomainScopeStmt)
     PROJECT_NODE(GraphScopeStmt)
     PROJECT_NODE(RegScopeStmt)
+    PROJECT_NODE(SimtLaunchStmt)
     PROJECT_NODE(SeqStmts)
     PROJECT_NODE(EvalStmt)
     PROJECT_NODE(BreakStmt)
@@ -708,6 +715,7 @@ class Projection {
     PROJECT_ANY(double)
     PROJECT_ANY(float)
     PROJECT_ANY(DataType)
+    PROJECT_ANY(SimtAxis)
     PROJECT_ANY(MemorySpace)
     PROJECT_ANY(TensorLayout)
     PROJECT_ANY(TileLayout)

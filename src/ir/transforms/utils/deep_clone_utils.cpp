@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -70,6 +71,19 @@ class DeepCloneMutator : public IRMutator {
   // Pre-register fresh copies BEFORE calling base visitor, which handles
   // traversal and reconstruction. This ensures VisitExpr_(VarPtr) finds
   // the fresh copies during its map lookup.
+
+  StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    if (clone_def_vars_) PreRegisterDefFields(*op);
+    auto result = std::static_pointer_cast<const SimtLaunchStmt>(IRMutator::VisitStmt_(op));
+    // The base visitor may retype a result to match a substituted argument.
+    // Publish that final definition in the map used by later uses and GetVarMap.
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      if (result->results_[i] != op->results_[i]) {
+        expr_map_[op->results_[i].get()] = result->results_[i];
+      }
+    }
+    return result;
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     if (clone_def_vars_) PreRegisterDefFields(*op);

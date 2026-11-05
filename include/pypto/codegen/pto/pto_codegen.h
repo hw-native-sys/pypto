@@ -833,6 +833,7 @@ class PTOCodegen : public CodegenBase {
   void VisitStmt_(const ir::WhileStmtPtr& op) override;
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
+  void VisitStmt_(const ir::SimtLaunchStmtPtr& op) override;
 
   /// Emit a registered RegOp as typed VMI SSA; return false for ordinary calls
   /// so assignment emission can fall back to the normal Tile/scalar path.

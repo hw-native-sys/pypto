@@ -1929,6 +1929,8 @@ def generate(
     Returns:
         Dict mapping relative file paths to their content.
     """
+    if any(f.func_type == _ir_core.FunctionType.SIMT for f in transformed_program.functions.values()):
+        raise NotImplementedError("SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet")
     if memory_planner is None:
         memory_planner = _passes.MemoryPlanner.PYPTO
     if emit_source_loc is None:

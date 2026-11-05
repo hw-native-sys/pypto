@@ -419,6 +419,13 @@ narrowing yields an infinity, and PyPTO matches that unless you ask for `"on"`. 
 multi-hop cast applies the mode to its final hop, which is the one that reaches the dtype
 you named.
 
+## SIMT query axes
+
+`pl.SimtAxis.X`, `pl.SimtAxis.Y`, and `pl.SimtAxis.Z` identify the coordinate axis
+in canonical SIMT IR. These enum values are distinct from integer operands.
+The inline SIMT programming interface and executable lowering are still pending;
+see [scalar SIMT IR](../../dev/ir/11-simt.md) for the current contract.
+
 ## See Also
 
 - [Functions and Programs](01-functions.md) — where these annotations appear, and what a signature means to the caller.

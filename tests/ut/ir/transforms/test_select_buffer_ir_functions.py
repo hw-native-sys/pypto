@@ -216,6 +216,63 @@ class Transfer:
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dtype", ["FP32", "INT32"])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_explicit_store_shapes_keep_partial_transfer_on_tile(planner, dtype, dynamic):
+    # Explicit partition shapes add a fourth store operand. Selecting this
+    # otherwise-supported kernel used to fail in LowerTileToBuffer, after
+    # storage planning had already committed to the Buffer representation.
+    rows = "n" if dynamic else "13"
+    program = pl.parse_program(f"""
+@pl.program
+class ExplicitStoreShapes:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.{dtype}], n: pl.Scalar[pl.INDEX],
+               out: pl.InOut[pl.Tensor[[24, 48], pl.{dtype}]]) -> pl.Tensor[[24, 48], pl.{dtype}]:
+        x = pl.load(a, [0, 0], [16, 32], valid_shape=[{rows}, 24])
+        return pl.store(x, [3, 8], out, shapes=[{rows}, 24])
+""")
+    lowered = _lower(program, planner)
+    function = _kernel(lowered)
+    assert function.ir_stage == ir.FunctionIRStage.Functional
+    stores: list[ir.Call] = []
+
+    class StoreCollector(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == ir.get_op("tile.store").name:
+                stores.append(op)
+            super().visit_call(op)
+
+    StoreCollector().visit_function(function)
+    assert len(stores) == 1
+    assert len(stores[0].args) == 4
+    shapes = stores[0].args[3]
+    assert isinstance(shapes, ir.MakeTuple)
+    assert len(shapes.elements) == 2
+    store_rows, store_cols = shapes.elements
+    if dynamic:
+        assert isinstance(store_rows, ir.Var)
+    else:
+        assert isinstance(store_rows, ir.ConstInt)
+        assert store_rows.value == 13
+    assert isinstance(store_cols, ir.ConstInt)
+    assert store_cols.value == 24
+    text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=False, emit_source_loc=False)
+    assert "pto.tstore" in text
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    torch_dtype = torch.float32 if dtype == "FP32" else torch.int32
+    a = torch.arange(512, dtype=torch_dtype).reshape(16, 32)
+    for n in (7, 13):
+        out = torch.full((24, 48), -777, dtype=torch_dtype)
+        expected = out.clone()
+        valid_rows = n if dynamic else 13
+        expected[3 : 3 + valid_rows, 8:32] = a[:valid_rows, :24]
+        namespace["kernel"](a, n, out)
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
 def test_unsupported_scalar_power_keeps_the_whole_kernel_on_tile(planner):
     program = pl.parse_program("""
 @pl.program

@@ -879,6 +879,10 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // Generate entry and GenerateFunction
 // ========================================================================
 
+void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& op) {
+  CHECK_SPAN(false, op->span_) << "SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet";
+}
+
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   separate_vf_ = false;
   return GenerateImpl(program, emit_tile_addr, emit_source_loc);
@@ -910,6 +914,10 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
   reported_precision_sites_.clear();
+  for (const auto& [_, function] : program->functions_) {
+    CHECK_SPAN(function->func_type_ != ir::FunctionType::SIMT, function->span_)
+        << "SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet";
+  }
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();

@@ -17,6 +17,9 @@ PTO codegen 直接接收分配句柄和目标操作数。
 物理行须按 32 字节对齐；valid 可以是物理 shape 内的静态部分矩形或已支持的运行时矩形。
 逐元素运算的 Tile 输入与目标必须具有一致的物理 shape 和 valid 范围；仅 valid 相同不足以入选。
 
+带显式 `shapes` 操作数的 store 保持 Tile IR。默认 Buffer store 配方仅接受三个操作数的形式；
+选择阶段在存储规划前排除显式分区形式，避免在最终 lowering 阶段失败。
+
 | 算子 | 元素类型 |
 | ---- | -------- |
 | 普通紧密 ND GM load/store | FP16、BF16、FP32、INT32 |

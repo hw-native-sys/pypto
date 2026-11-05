@@ -13,6 +13,7 @@
 #define PYPTO_BACKEND_950_BACKEND_950_HANDLER_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,10 @@ namespace backend {
 class Ascend950Handler : public BackendHandler {
  public:
   static const Ascend950Handler& Instance();
+
+  [[nodiscard]] std::optional<SimtLimits> GetSimtLimits() const override {
+    return SimtLimits{{2048, 2048, 2048}, 2048, {{256, 128}, {512, 64}, {1024, 32}, {2048, 16}}};
+  }
 
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a5"; }
   [[nodiscard]] const sync::ResourceCatalog& GetSyncResourceCatalog() const override;
