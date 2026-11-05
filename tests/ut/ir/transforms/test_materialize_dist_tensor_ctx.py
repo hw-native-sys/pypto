@@ -10,6 +10,7 @@
 
 """Tests for ``MaterializeDistTensorCtx``."""
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -724,7 +725,29 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
             pld.system.wait(data, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
 
     result = _apply(Before)
-    ir.assert_structural_equal(_get_func(result, "chip_orch"), _get_func(ExpectedChipOrch, "chip_orch"))
+    chip = _get_func(result, "chip_orch")
+    expected_chip = _get_func(ExpectedChipOrch, "chip_orch")
+    old_data = expected_chip.params[0]
+    old_type = old_data.type
+    window = chip.params[0].type.window_buffer
+    assert window is not None
+    expected_data = ir.Var(
+        old_data.name_hint,
+        ir.DistributedTensorType(
+            list(old_type.shape), old_type.dtype, old_type.memref, old_type.tensor_view, window
+        ),
+        old_data.span,
+    )
+
+    class BindExpectedWindow(ir.IRMutator):
+        def visit_var(self, var):
+            return expected_data if var is old_data else super().visit_var(var)
+
+    # C2a now preserves the owner's window on the CHIP formal and every body
+    # use. Keep the exact ctx-query/body structural expectation with that one
+    # additional type field, rather than dropping the structural comparison.
+    expected_chip = BindExpectedWindow().visit_function(expected_chip)
+    ir.assert_structural_equal(chip, expected_chip)
 
     # `host` is compared by assertion rather than structurally: its body is
     # wrapped in a CommDomainScopeStmt by MaterializeCommDomainScopes, and that
@@ -737,13 +760,15 @@ def test_device_get_comm_ctx_is_replaced_by_materialized_context():
 # The one Before below is hand-built rather than DSL-authored, and deliberately
 # so: the program under test is one the DSL frontend refuses to author. It
 # allocates a window inside a *chip* orchestration function, and the parser
-# rejects ``pld.alloc_window_buffer`` outside HOST orchestration with its own
-# diagnostic — which is a different error from the pass-level one this test
-# pins. Reaching pass 46 with that shape therefore requires raw ``ir.*``.
+# rejects ``pld.alloc_window_buffer`` outside HOST/CLUSTER_0 orchestration with
+# its own diagnostic. Native verification now rejects the same invalid IR before
+# the pass; disabling instrumentation separately pins the materializer's error.
+# Constructing that unsupported shape therefore requires raw ``ir.*``.
 # ---------------------------------------------------------------------------
 
 
-def test_device_call_without_materialized_context_rejects_synthesized_prefix():
+@pytest.mark.parametrize("instrumented", [False, True])
+def test_device_call_without_materialized_context_rejects_synthesized_prefix(instrumented):
     span = ir.Span("test_materialize_dist_tensor_ctx.py", 1, 1)
     data_ty = ir.DistributedTensorType([4], pl.FP32)
 
@@ -799,10 +824,17 @@ def test_device_call_without_materialized_context_rejects_synthesized_prefix():
     )
 
     program = ir.Program([predicate, main], "unsupported_prefix_context", span)
-    # A user-facing limitation, not an internal invariant: the message must name
-    # the tensor and the function, and say what to change.
-    with pytest.raises(ValueError, match="Cannot determine the communication context"):
-        passes.materialize_dist_tensor_ctx()(program)
+    instruments = (
+        [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)] if instrumented else []
+    )
+    error_type = pypto.Error if instrumented else ValueError
+    match = "Pre-verification failed" if instrumented else "Cannot determine the communication context"
+    with passes.PassContext(instruments, verification_level=passes.VerificationLevel.NONE):
+        with pytest.raises(error_type, match=match) as excinfo:
+            passes.materialize_dist_tensor_ctx()(program)
+    if instrumented:
+        assert "DistributedOperationContext" in str(excinfo.value)
+        assert "pld.tensor.alloc_window_buffer" in str(excinfo.value)
 
 
 def test_submit_prefix_runtime_out_keeps_ctx_after_passed_args():
@@ -899,6 +931,108 @@ def test_return_call_reuses_returned_param_ctx():
             )
 
     ir.assert_structural_equal(_derive_and_materialize(Before), Expected)
+
+
+@pytest.mark.parametrize("kind", ["call", "submit"])
+def test_c2b_supplied_distributed_out_return_uses_output_ctx(kind):
+    """Supplied Out has caller provenance distinct from the input's context."""
+    span = _span()
+    memref = ir.MemRef("output_storage", 0, 16, span)
+    dt = ir.DistributedTensorType([4], pl.FP32, memref, ir.TensorView(stride=[1], layout=ir.TensorLayout.ND))
+    source, output = ir.Var("source", _dist_ty(), span), ir.Var("output", dt, span)
+    stage = ir.Function(
+        "stage",
+        [(source, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+        [source.type, dt],
+        ir.ReturnStmt([source, output], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    invocation = _c2b_invocation(kind, [source, output], [source.type, dt], span)
+    attrs = {
+        **invocation.attrs,
+        "arg_directions": [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.OutputExisting,
+        ],
+    }
+    if kind == "call":
+        invocation = ir.Call(invocation.op, invocation.args, invocation.kwargs, attrs, invocation.type, span)
+    else:
+        invocation = ir.Submit(
+            invocation.op,
+            invocation.args,
+            [],
+            invocation.kwargs,
+            attrs,
+            invocation.type,
+            span,
+            core_num=invocation.core_num,
+            sync_start=True,
+            allow_early_resolve=True,
+            predicate=invocation.predicate,
+        )
+    packed = ir.Var("packed", invocation.type, span)
+    result = ir.Var("result", dt, span)
+    ctx = ir.Var("ctx", ir.CommCtxType(), span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(packed, invocation, span),
+            ir.AssignStmt(result, ir.TupleGetItemExpr(packed, 1, span), span),
+            ir.AssignStmt(ctx, ir.create_op_call("pld.system.get_comm_ctx", [result], {}, span), span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    if kind == "submit":
+        body = ir.RuntimeScopeStmt(manual=True, body=body, span=span)
+    caller = ir.Function(
+        "caller",
+        [source, output],
+        [],
+        body,
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    after = passes.materialize_dist_tensor_ctx()(ir.Program([stage, caller], "SuppliedDTOut", span))
+    caller, stage = _get_func(after, "caller"), _get_func(after, "stage")
+    body = caller.body.body if kind == "submit" else caller.body
+    launch = body.stmts[0].value
+    assert list(launch.args[-2:]) == list(caller.params[-2:])
+    assert body.stmts[2].value is caller.params[-1]
+    assert body.stmts[2].value is not caller.params[-2]
+    assert stage.params[1].type.memref is memref
+    ir.assert_structural_equal(stage.params[1].type, dt)
+    assert body.stmts[1].var.type is dt
+    assert body.stmts[1].value.type is dt
+
+
+def _c2b_invocation(kind, args, returns, span, dependency=None):
+    """Keep launch metadata visible while testing only the ctx ABI mutation."""
+    kwargs = {"saved_kwarg": 7}
+    attrs = {
+        "saved_attr": "kept",
+        "arg_directions": [
+            ir.ArgDirection.Scalar if isinstance(arg.type, ir.CommCtxType) else ir.ArgDirection.Input
+            for arg in args
+        ],
+    }
+    if kind == "submit":
+        return ir.Submit(
+            ir.GlobalVar("stage"),
+            args,
+            [dependency] if dependency is not None else [],
+            kwargs,
+            attrs,
+            ir.TupleType([*returns, ir.ScalarType(DataType.TASK_ID)]),
+            span,
+            core_num=ir.ConstInt(2, DataType.INDEX, span),
+            sync_start=True,
+            allow_early_resolve=True,
+            predicate=ir.ConstBool(True, span),
+        )
+    return_type = returns[0] if len(returns) == 1 else ir.TupleType(returns)
+    return ir.Call(ir.GlobalVar("stage"), args, kwargs, attrs, return_type, span)
 
 
 if __name__ == "__main__":

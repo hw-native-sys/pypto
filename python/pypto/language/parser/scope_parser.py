@@ -1942,6 +1942,7 @@ class ScopeParser:
             with (
                 self.regions.scope_kind_context(scope_kind),
                 self.regions.incore_user_split_context(scope_kind, split),
+                self.regions.distributed_hierarchy_context(scope_kind, level, role),
             ):
                 self.services.scope_manager.enter_scope("scope")
                 self.callbacks.body(stmt.body)
@@ -2656,7 +2657,8 @@ class ScopeParser:
                             (key.value, self.attrs.parse_attr_value("comm_domain", key.value, value))
                         )
                 slots.extend(
-                    self.services.type_resolver.resolve_window_buffer(node) for node in slots_node.elts
+                    self.services.type_resolver.resolve_window_buffer(node, bind_owner=True)
+                    for node in slots_node.elts
                 )
                 self.comments.discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                 self.services.scope_manager.exit_scope(leak_vars=True)

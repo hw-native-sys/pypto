@@ -9,16 +9,47 @@
 
 """Explicit packaging of generated configurations and supported extern sources."""
 
+import ast
+import gzip
+import hashlib
+import io
 import os
+import tarfile
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pypto.jit._artifact_manifest import BuildKind, encode_manifest
 
 from . import _vpto
 from ._extern_includes import UnsupportedArtifactInput, literal_includes
 from ._prebuilt import _encode_signature, _relative_file, chip_directories
+
+if TYPE_CHECKING:
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram
+
+# Keep the producer compatible with R1 startup_artifacts without importing the
+# optional runtime/compiler into parent-only artifact packaging. The per-file
+# ceiling is deliberately conservative; the other limits match the receiver.
+_CLUSTER_MAX_FILE_BYTES = 64 * 1024 * 1024
+_CLUSTER_MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+_CLUSTER_MAX_UNPACKED_BYTES = 256 * 1024 * 1024
+_CLUSTER_MAX_MEMBERS = 4096
+
+
+def _read_cluster_source(directory: Path, path: str, remaining: int) -> bytes:
+    """Bound every read before parsing or adding bytes to the source closure."""
+    if remaining < 0:
+        raise ValueError("Cluster source unpacked content exceeds size limit")
+    source = _relative_file(directory, path)
+    limit = min(_CLUSTER_MAX_FILE_BYTES, remaining)
+    with source.open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > _CLUSTER_MAX_FILE_BYTES:
+        raise ValueError(f"Cluster source member exceeds file size limit: {path}")
+    if len(data) > remaining:
+        raise ValueError(f"Cluster source unpacked content exceeds size limit: {path}")
+    return data
 
 
 def read_kernel_config(path: Path) -> ModuleType:
@@ -187,3 +218,144 @@ def validate_generated_sources(directory: Path, kind: BuildKind) -> None:
                     raise ValueError(f"External include directory is outside the artifact: {path}")
                 if path.exists() and not path.is_dir():
                     raise ValueError(f"External include path is not a directory: {path}")
+
+
+def _cluster_source_payloads(directory: Path, entries: list[dict[str, Any]], budget: int) -> dict[str, bytes]:
+    """Read one validated source closure within the remaining session budget."""
+    from pypto.ir._cluster_artifacts import source_layout  # noqa: PLC0415
+
+    directory = directory.resolve()
+    paths = {
+        "__init__.py",
+        "orchestration/__init__.py",
+        "orchestration/cluster_orch.py",
+        "orchestration/_distributed_support.py",
+        "next_levels/__init__.py",
+    }
+    for entry in entries:
+        prefix = entry["logical_path"]
+        source_path = f"{prefix}/orchestration/host_orch.py"
+        paths.update({f"{prefix}/__init__.py", f"{prefix}/orchestration/__init__.py", source_path})
+        if (directory / prefix / "orchestration/_distributed_support.py").exists():
+            paths.add(f"{prefix}/orchestration/_distributed_support.py")
+        if entry["sub_worker_paths"]:
+            paths.add(f"{prefix}/sub_workers/__init__.py")
+            paths.update(entry["sub_worker_paths"].values())
+    payloads = {}
+    for path in sorted(paths):
+        data = _read_cluster_source(directory, path, budget)
+        payloads[path] = data
+        budget -= len(data)
+    # Bound the complete declared closure before any source reaches the AST
+    # parser; metadata comparison then uses the exact bytes that will be sent.
+    for entry in entries:
+        source_path = f"{entry['logical_path']}/orchestration/host_orch.py"
+        if source_layout(payloads[source_path].decode("utf-8"), entry["entry_name"]) != entry["layout"]:
+            raise ValueError(f"Cluster entry source layout differs from cold metadata: {source_path}")
+    for path, data in payloads.items():
+        if not path.endswith(".py"):
+            continue
+        for node in ast.walk(ast.parse(data, filename=path)):
+            imports = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else ([node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
+            )
+            if any(name == "pypto" or name.startswith("pypto.") for name in imports):
+                raise ValueError(f"Cluster runtime source imports PyPTO: {path}")
+    return payloads
+
+
+def _encode_cluster_payloads(payloads: dict[str, bytes]) -> tuple[str, bytes]:
+    """Own a plain USTAR closure and stream it into a bounded gzip sink."""
+    if len(payloads) > _CLUSTER_MAX_MEMBERS:
+        raise ValueError("Cluster source archive has too many members")
+    if sum(map(len, payloads.values())) > _CLUSTER_MAX_UNPACKED_BYTES:
+        raise ValueError("Cluster source unpacked content exceeds size limit")
+
+    class BoundedPayload(io.BytesIO):
+        def write(self, buffer: Any) -> int:
+            # Enforce the receiver budget on every gzip write, including the
+            # header and final trailer emitted by GzipFile.close().
+            if self.tell() + len(buffer) > _CLUSTER_MAX_PAYLOAD_BYTES:
+                raise ValueError("Cluster gzip payload exceeds size limit")
+            return super().write(buffer)
+
+    stream = BoundedPayload()
+    # Stream tar records into compression; never allocate the expanded archive.
+    # Empty filename and fixed mtime keep the gzip envelope deterministic too.
+    with gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.USTAR_FORMAT) as archive:
+            for path, data in sorted(payloads.items()):
+                member = tarfile.TarInfo(path)
+                member.size = len(data)
+                member.mode = 0o644
+                member.uid = member.gid = member.mtime = 0
+                member.uname = member.gname = ""
+                archive.addfile(member, io.BytesIO(data))
+    bundle = stream.getvalue()
+    return hashlib.sha256(bundle).hexdigest(), bundle
+
+
+_SESSION_HELPER_EXPORTS = (
+    "_ChipCallables",
+    "_EmbeddedEntryState",
+    "_EmbeddedNodeState",
+    "_copy_return_tensor",
+    "make_tensor_arg",
+    "add_chip_tensor_arg",
+    "_submit_chip",
+    "_decode_scalar",
+    "_encode_scalar",
+    "_slice_tensor",
+    "_reshape_tensor",
+    "_record_dispatch_program",
+    "_resolve_chip_worker",
+    "_reset_dfx_dispatch_state",
+    "_dfx_rank_label",
+)
+
+
+def build_cluster_session_bundle(programs: list["DistributedCompiledProgram"]) -> tuple[str, bytes]:
+    """Relocate program closures around one canonical runtime-only helper/hook.
+
+    Input artifacts are immutable. Every helper copy is validated before a
+    source-relative shim replaces it in this privately owned aggregate.
+    """
+    payloads = {"programs/__init__.py": b"", "orchestration/__init__.py": b""}
+    for portable in (
+        "_distributed_support.py",
+        "cluster_bootstrap.py",
+        "_cluster_controller.py",
+        "_cluster_channel.py",
+    ):
+        remaining = _CLUSTER_MAX_UNPACKED_BYTES - sum(len(data) for data in payloads.values())
+        payloads["orchestration/" + portable] = _read_cluster_source(
+            Path(__file__).parent, portable, remaining
+        )
+    helper = payloads["orchestration/_distributed_support.py"]
+    for index, program in enumerate(programs):
+        remaining = _CLUSTER_MAX_UNPACKED_BYTES - sum(len(data) for data in payloads.values())
+        closure = program.l3_entries
+        assert closure is not None
+        source = _cluster_source_payloads(program.output_dir, closure["entries"], remaining)
+        prefix = f"programs/p{index}"
+        for path, data in source.items():
+            if path.endswith("/_distributed_support.py"):
+                if data != helper:
+                    raise ValueError(f"Cluster session helper contract mismatch: p{index}/{path}")
+                # Each level moves toward the session root; no sys.modules
+                # alias or import hook is needed for identical class objects.
+                relative = "." * len((prefix + "/" + path).split("/"))
+                data = (
+                    "from "
+                    + relative
+                    + "orchestration._distributed_support import (\n    "
+                    + ", ".join(_SESSION_HELPER_EXPORTS)
+                    + ",\n)\n"
+                ).encode()
+            elif path.endswith("/orchestration/__init__.py") and path != "orchestration/__init__.py":
+                if data != b"from ....orchestration import _distributed_support\n":
+                    raise ValueError(f"Cluster session helper package shim contract mismatch: {path}")
+            payloads[prefix + "/" + path] = data
+    return _encode_cluster_payloads(payloads)

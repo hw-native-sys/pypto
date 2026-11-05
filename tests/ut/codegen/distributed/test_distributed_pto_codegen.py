@@ -1466,9 +1466,9 @@ def test_if_merged_distributed_metadata_rejects_conflicting_contexts():
         _generate_mlir(P)
 
 
-def test_rank_emits_pto_load_at_slot_2_plus_trunci():
-    """``pld.system.rank(ctx)`` reads slot 2 (= kRankIdOffset /
-    kWindowSlotStride = 16/8) then truncates to signless ``i32`` for PTOAS.
+def test_rank_emits_pto_load_at_slot_0_plus_trunci():
+    """``pld.system.rank(ctx)`` reads slot 0 (= kRankIdOffset /
+    kWindowSlotStride = 0/8) then truncates to signless ``i32`` for PTOAS.
 
     Asserts that the emitted MLIR contains ``pto.load %argN[%cK] :
     !pto.ptr<i64> -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
@@ -1494,7 +1494,7 @@ def test_rank_emits_pto_load_at_slot_2_plus_trunci():
 
 
 def test_nranks_emits_pto_load_plus_shrui_32_plus_trunci():
-    """``pld.system.nranks(ctx)`` reads the SAME slot 2 then
+    """``pld.system.nranks(ctx)`` reads the SAME slot 0 then
     ``arith.shrui ..., 32`` (high 32 bits = rankNum) then ``arith.trunci``.
 
     Uses the static_asserted invariant ``kRankNumOffset == kRankIdOffset

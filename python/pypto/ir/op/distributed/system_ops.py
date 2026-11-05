@@ -27,6 +27,16 @@ from pypto.pypto_core.ir import Call, NotifyOp, Span, WaitCmp
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
+def num_workers(*, span: Span | None = None) -> Call:
+    """Build the orchestration immediate-child count query, returning INT64.
+
+    Context legality is checked by the parser and the IR verifier. HOST counts
+    local devices; CLUSTER_0 counts nodes, independently of communication ranks.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.system.num_workers", [], {}, actual_span)
+
+
 def world_size(*, span: Span | None = None) -> Call:
     """Build a ``pld.system.world_size()`` Call returning ``ScalarType(INT64)``.
 
@@ -142,4 +152,4 @@ def defer_wait(
     )
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "num_workers", "rank", "wait", "world_size"]

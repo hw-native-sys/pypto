@@ -12,8 +12,10 @@
 #ifndef PYPTO_CODEGEN_DISTRIBUTED_DISTRIBUTED_CODEGEN_H_
 #define PYPTO_CODEGEN_DISTRIBUTED_DISTRIBUTED_CODEGEN_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -67,6 +69,13 @@ class DistributedCodegen : public CodegenBase {
    */
   [[nodiscard]] std::string Generate(const ir::ProgramPtr& program);
 
+  /// Generate one explicitly selected HOST Orchestrator with the direct
+  /// ``(orch, args, config)`` ABI. Keep the complete lowered program: window
+  /// ownership may belong to a CLUSTER function outside the selected body.
+  /// Without a name, exactly one HOST Orchestrator must exist.
+  [[nodiscard]] std::string GenerateEmbedded(const ir::ProgramPtr& program,
+                                             const std::optional<std::string>& entry_name = std::nullopt);
+
   // CodegenBase interface
   [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_target_var_; }
   void Emit(const std::string& line) override;
@@ -116,6 +125,16 @@ class DistributedCodegen : public CodegenBase {
   /// ``wb``.
   [[nodiscard]] std::string GetCommDomainHandleVar(const ir::WindowBufferPtr& wb) const;
 
+  [[nodiscard]] bool IsEmbedded() const { return embedded_mode_; }
+  [[nodiscard]] const std::string& EmbeddedSupportAlias() const { return embedded_support_alias_; }
+  /// Native named-slot view kwargs; a MemRef offset is relative to its owning
+  /// WindowBuffer base, never to an additional domain-allocation offset.
+  [[nodiscard]] std::string EmbeddedWindowViewArgs(const ir::DistributedTensorTypePtr& type,
+                                                   const ir::Span& span);
+  /// Shared custom/builtin ordering path; ordinary HOST text stays unchanged.
+  void EmitDomainOrderingTokens(const std::vector<std::string>& handles, const std::string& rank,
+                                const std::string& task_args, bool require_same_domain = false);
+
   /// Format a DistributedTensor's shape as a Python tuple literal.
   [[nodiscard]] std::string FormatShapeTuple(const std::vector<ir::ExprPtr>& shape);
 
@@ -140,6 +159,7 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::CallPtr& op) override;
   void VisitExpr_(const ir::SubmitPtr& op) override;
   void VisitExpr_(const ir::VarPtr& op) override;
+  void VisitExpr_(const ir::IterArgPtr& op) override;
   void VisitExpr_(const ir::ConstIntPtr& op) override;
   void VisitExpr_(const ir::ConstFloatPtr& op) override;
   void VisitExpr_(const ir::ConstBoolPtr& op) override;
@@ -183,8 +203,23 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
+  [[nodiscard]] std::string GenerateImpl(const ir::ProgramPtr& program, bool embedded,
+                                         const std::optional<std::string>& entry_name);
+  [[nodiscard]] ir::FunctionPtr SelectEmbeddedEntry(const std::optional<std::string>& entry_name) const;
+
+  struct ReturnPosition {
+    ir::TypePtr type;
+    std::optional<size_t> output_param;
+  };
+  [[nodiscard]] const std::vector<ReturnPosition>& GetReturnPlan(const ir::FunctionPtr& func);
+  void CollectEmbeddedWindowBindings(const ir::FunctionPtr& func);
+  void CollectEmbeddedContextAliases(const ir::FunctionPtr& func);
+  [[nodiscard]] ir::ExprPtr ResolveEmbeddedContextOrigin(const ir::ExprPtr& arg, const ir::Span& span) const;
+  [[nodiscard]] std::string EmbeddedCommCtxHandle(const ir::ExprPtr& arg, const ir::Span& span) const;
+
   // Code structure emission
-  void EmitImports();
+  void EmitImports(const ir::FunctionPtr& entry);
+  void EmitEmbeddedLayout(const ir::FunctionPtr& entry);
   void EmitFunction(const ir::FunctionPtr& func);
   void EmitEntryFunction();
   // Tag the emitted orchestrator/entry with a sentinel attribute so the runtime
@@ -275,6 +310,31 @@ class DistributedCodegen : public CodegenBase {
 
   ir::ProgramPtr program_;
   CodeEmitter emitter_;
+  // Explicit per-generation ABI choice, reset by GenerateImpl on every call.
+  // HOST presence alone never opts ordinary Generate into the embedded ABI.
+  bool embedded_mode_{false};
+  std::string embedded_entry_alias_;
+  std::string embedded_builtins_alias_;
+  std::string embedded_support_alias_;
+  std::string embedded_layout_alias_;
+  std::map<const ir::Function*, std::vector<ReturnPosition>> return_plans_;
+  std::map<std::string, ir::TensorTypePtr> embedded_prepared_tensors_;
+  struct EmbeddedWindowBinding {
+    size_t formal;
+    size_t ctx_formal;
+    size_t ctx_scalar;
+    ir::VarPtr param;
+  };
+  std::vector<EmbeddedWindowBinding> embedded_windows_;
+  std::map<const ir::WindowBuffer*, std::string> embedded_window_handles_;
+  std::map<std::string, size_t> embedded_ctx_scalars_;
+  // Only proven invariant CommCtx carries/phis enter this per-generation map.
+  // IterArg is a distinct IR kind, so keys include it as well as plain Var.
+  std::unordered_map<const ir::Expr*, ir::ExprPtr> embedded_ctx_aliases_;
+  std::map<size_t, std::set<int64_t>> embedded_domain_workers_;
+  std::set<size_t> embedded_dynamic_domain_workers_;
+  std::vector<std::vector<size_t>> embedded_same_domain_groups_;
+  std::map<std::string, std::vector<int64_t>> embedded_local_tokens_;
 
   // Stack of currently-open ``CommDomainScopeStmt``s, pushed on entry to
   // ``VisitStmt_(CommDomainScopeStmtPtr)`` and popped on exit. Used by
