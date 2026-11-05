@@ -2306,7 +2306,7 @@ jobs:
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
         #
-        # The two FP4 cast cases are named as single parametrisations ON PURPOSE,
+        # The FP4 cast cases are named as single parametrisations ON PURPOSE,
         # and that is the whole budget of this step. Every *_mx case above is a
         # TestRunner harness case: the run shares one Worker inside this
         # task-submit session, and sixteen of them take 38s end to end. A case
@@ -2325,6 +2325,16 @@ jobs:
         # parametrisations stay in the file for daily and manual device runs, and
         # matmul_mx[mxfp4-x-mxfp8] above now reaches the same direct instruction
         # through a harness case (it used to emit FP4->BF16->FP32->FP8).
+        #
+        # The third selector, the NZ case, is the only device gate for the boxed
+        # cast destination. It compiles the same kernel with and without the
+        # layout request and compares their FP8 matmul results byte for byte,
+        # because the bytes cannot be read back on the host: tile.store into a
+        # pl.NZ tensor takes only an FP32 Acc source, and reinterpret_view
+        # rejects a boxed tile. It is UNPARAMETRISED, so it costs one of the
+        # ~170s device inits above; if it is ever parametrised, name the
+        # individual ids here rather than the bare test function, or this step
+        # walks straight back into the cap.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
@@ -2336,6 +2346,7 @@ jobs:
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               'tests/st/runtime/ops/test_cast.py::test_fp4_e2m1_direct_fp8[16-32-tile-PYPTO]' \
               'tests/st/runtime/ops/test_cast.py::test_fp4_e2m1_direct_fp8[16-32-tensor-PYPTO]' \
+              tests/st/runtime/ops/test_cast.py::test_fp4_nz_cast_fuses_the_relayout_and_matches_the_nd_result_bit_for_bit \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5
