@@ -48,7 +48,13 @@ For every MX_A_ZZ or MX_B_NN tensor, the pass rewrites:
   iteration arguments, Calls, and Submits;
 - `tile.load` offsets and shapes into rank-5 coordinates;
 - `tile.store` MX-scale destinations and optional partition shapes into the
-  matching rank-5 coordinates; stores require complete FP8E8M0 16x2 boxes;
+  matching rank-5 coordinates; stores require complete FP8E8M0 16x2 boxes.
+  Codegen then rejects the store itself: the pinned pto-isa TSTORE accepts only
+  ND, DN and NZ GlobalTensor layouts, so no MX-layout destination can be
+  written. Stage the scale through a plain tensor instead — store the flattened
+  scale into an unannotated FP8E8M0 tensor and read it back with
+  `pl.tensor.view(..., layout=pl.MX_A_ZZ)`, which needs the PYPTO or DSA_RP
+  memory planner;
 - physical `valid_shape` arguments to the complete aligned load box while
   preserving a narrowed logical `TileType.valid_shape` as tile metadata;
 - shaped FP8E8M0 `tensor.view` aliases in both ND-to-MX and MX-to-ND directions;
@@ -97,7 +103,7 @@ fixed-width expression's evaluation before division.
 | narrowed load-level `valid_shape` | kept as tile metadata; physical box stays complete |
 | `target_memory != Mat` or missing in raw IR | rejected; public `pl.load` fills omitted target with `Mat` |
 | MX tensor used by an unsupported operator | rejected |
-| `tile.store` of complete FP8E8M0 16x2 scale boxes | rewritten to a rank-5 MX destination |
+| `tile.store` of complete FP8E8M0 16x2 scale boxes | rewritten to a rank-5 MX destination, then rejected by codegen (no MX-layout TSTORE overload) |
 | shaped FP8E8M0 ND/MX backing alias | rewritten |
 | distributed MX tensor | rejected |
 

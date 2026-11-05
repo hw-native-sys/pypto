@@ -45,7 +45,12 @@ stride 就得到物理 GlobalTensor stride，因此本 pass 之后
   `TensorType` 槽位；
 - `tile.load` 的 offset 和 shape，使其使用 rank-5 坐标；
 - `tile.store` 的 MX-scale 目标和可选 partition shape，使其使用对应的 rank-5
-  坐标；store 必须写完整的 FP8E8M0 16x2 box；
+  坐标；store 必须写完整的 FP8E8M0 16x2 box。随后 codegen 会拒绝该 store：
+  固定版本的 pto-isa TSTORE 只接受 ND、DN 和 NZ 的 GlobalTensor layout，
+  无法写入 MX layout 的目标。应改为经普通张量中转——把展平后的 scale 写入未标注
+  layout 的 FP8E8M0 张量，再在 matmul 读取处用
+  `pl.tensor.view(..., layout=pl.MX_A_ZZ)` 重新标注；该路径需要 PYPTO 或
+  DSA_RP 内存规划器；
 - 物理 `valid_shape` 参数，使其保持完整对齐 load box，同时把缩窄的逻辑
   `TileType.valid_shape` 保留为 tile 元数据；
 - 两个方向的 FP8E8M0 有 shape `tensor.view` 别名：ND-to-MX 与 MX-to-ND；
@@ -89,7 +94,7 @@ callee 参数必须在每一个 caller 中都可证明。调用映射缺失或�
 | load 级缩窄 `valid_shape` | 保留为 tile 元数据；物理 box 仍完整 |
 | 原始 IR 中 `target_memory != Mat` 或缺失 | 拒绝；公开 `pl.load` 会将省略的 target 补为 `Mat` |
 | MX tensor 被不支持的算子使用 | 拒绝 |
-| 写入完整 FP8E8M0 16x2 scale box 的 `tile.store` | 改写为 rank-5 MX 目标 |
+| 写入完整 FP8E8M0 16x2 scale box 的 `tile.store` | 改写为 rank-5 MX 目标，随后被 codegen 拒绝（TSTORE 无 MX layout 目标重载） |
 | 有 shape 的 FP8E8M0 ND/MX backing alias | 改写 |
 | distributed MX tensor | 拒绝 |
 

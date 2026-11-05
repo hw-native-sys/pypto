@@ -518,3 +518,127 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         assert "pto.tmatmul.mx.bias" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
+
+
+class TestMxScaleStoreRejection:
+    """Writing a tile back into an MX_A_ZZ / MX_B_NN tensor has no lowering.
+
+    The pinned pto-isa TSTORE takes ND, DN or NZ ``GlobalTensor`` layouts only,
+    and a store reuses the tensor's single ``pto.make_tensor_view``, which
+    carries the MX layout its Cube-side load needs. Codegen rejects the store so
+    the limitation is named once, instead of surfacing as a static assertion
+    inside ``pto/npu/a5/TStore.hpp`` that reports an instantiated template.
+    """
+
+    _MESSAGE = "MX_A_ZZ / MX_B_NN tensor is not supported"
+
+    @pytest.mark.parametrize(
+        ("group_axis", "dtype", "scale_shape", "layout"),
+        [
+            (1, pl.FP8E4M3FN, (64, 4), pl.MX_A_ZZ),
+            (0, pl.FP8E4M3FN, (4, 64), pl.MX_B_NN),
+            (1, pl.FP4E2M1X2, (64, 4), pl.MX_A_ZZ),
+            (0, pl.FP4E2M1X2, (4, 64), pl.MX_B_NN),
+        ],
+    )
+    def test_tensor_quant_mx_scale_return_is_rejected(self, group_axis, dtype, scale_shape, layout):
+        scale_rows, scale_cols = scale_shape
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[64, 128], pl.BF16]
+            ) -> pl.Tensor[[scale_rows, scale_cols], pl.FP8E8M0, layout]:
+                _data, scale = pl.quant_mx(src, group_axis=group_axis, dtype=dtype)
+                return scale
+
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            _emit_incore_mlir(Program)
+
+    def test_tile_store_into_mx_tensor_is_rejected(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[64, 128], pl.BF16],
+                out_scale: pl.Out[pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ]],
+            ) -> pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ]:
+                _data, scale = pl.quant_mx(pl.load(src, [0, 0], [64, 128]), group_axis=1)
+                return pl.store(scale, [0, 0], out_scale)
+
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            _emit_incore_mlir(Program)
+
+    def test_four_argument_store_is_rejected_too(self):
+        """An explicit shapes tuple must not route around the rejection.
+
+        `pl.store(tile, offsets, tensor, shapes)` supplies args[3], and
+        BlockMxScaleTensorViews rewrites that tuple to rank 5 as well, so the
+        generic N-rank partition path would otherwise emit the unsupported
+        MX-layout tstore.
+        """
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[64, 128], pl.BF16],
+                out_scale: pl.Out[pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ]],
+            ) -> pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ]:
+                _data, scale = pl.quant_mx(pl.load(src, [0, 0], [64, 128]), group_axis=1)
+                return pl.store(scale, [0, 0], out_scale, [64, 4])
+
+        with pytest.raises(ValueError, match=self._MESSAGE):
+            _emit_incore_mlir(Program)
+
+    def test_message_names_the_supported_staging_route(self):
+        """The rejection has to tell the user what to write instead."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[64, 128], pl.BF16]) -> pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ]:
+                _data, scale = pl.quant_mx(src, group_axis=1)
+                return scale
+
+        with pytest.raises(ValueError) as excinfo:
+            _emit_incore_mlir(Program)
+        message = str(excinfo.value)
+        assert "TSTORE accepts only ND, DN and NZ" in message
+        # The whole scale, not the group count: a [64,4] scale flattens to 256.
+        # Floor division, because `tile.reshape` rejects a float extent.
+        assert "pl.reshape(scale, [1, M * (K // 32)])" in message
+        assert "/ 32])" not in message
+        assert "pl.tensor.view(..., layout=pl.MX_A_ZZ)" in message
+        # And the route itself needs an addressed plan.
+        assert "needs the PYPTO or DSA_RP memory planner" in message
+
+    @pytest.mark.ptoas_compile
+    def test_flat_scale_staging_still_compiles(self, tmp_path):
+        """The route the rejection recommends assembles and keeps the MX load."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[64, 128], pl.BF16],
+                out_quant: pl.Out[pl.Tensor[[64, 128], pl.FP8E4M3FN]],
+                out_scale: pl.Out[pl.Tensor[[1, 256], pl.FP8E8M0]],
+            ):
+                quant, scale = pl.quant_mx(pl.load(src, [0, 0], [64, 128]), group_axis=1)
+                pl.store(quant, [0, 0], out_quant)
+                pl.store(pl.reshape(scale, [1, 256]), [0, 0], out_scale)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tquant.mx" in mlir
+        # A [1, N] store is the ND special case TSTORE accepts.
+        store = next(line for line in mlir.splitlines() if "pto.tstore" in line and "f8E8M0" in line)
+        assert "rows=1, cols=256" in store
+
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
