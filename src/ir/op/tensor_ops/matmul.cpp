@@ -360,10 +360,20 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires oriented 2D data and scale tensors";
   CHECK_SPAN(!lhs->dtype_.IsPackedFp4() && !rhs->dtype_.IsPackedFp4(), span)
       << kOpName
-      << " native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-         "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions";
-  CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
-      << kOpName << " requires FP8E4M3FN data tensors";
+      << " native packed FP4 matmul_mx is not supported; cast the packed FP4E2M1X2/FP4E1M2X2 operand "
+         "to FP8E4M3FN or FP8E5M2 with pl.cast first";
+  // The accepted data pairs come from the shared Cube operand table's kMx rows, the
+  // same source `tile.matmul_mx` reads (PTOAS v0.72 `isA5MxFp8InputType`, pto-isa
+  // `isSupportedFp8Combo`): FP8E4M3FN or FP8E5M2 per side, chosen independently. One
+  // table for both layers is what makes the Tensor surface accept exactly the pairs
+  // the Tile op it lowers to accepts -- each operand keeps its own dtype through the
+  // conversion, so a mixed pair is never coerced to a single format. HF8 is a Cube
+  // FP8 operand but not an MX one (kMatmul without kMx).
+  CHECK_SPAN(backend::FindCubeOperandPair(backend::CubeOpFamily::kMx, lhs->dtype_, rhs->dtype_) != nullptr,
+             span)
+      << kOpName << " requires one of the MX data pairs ("
+      << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kMx, "a5") << "), but got "
+      << lhs->dtype_.ToString() << " x " << rhs->dtype_.ToString();
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)
       << kOpName << " requires FP8E8M0 scale tensors";
   const auto lhs_layout =
@@ -434,9 +444,9 @@ REGISTER_OP("tensor.quant_mx")
 REGISTER_OP("tensor.matmul_mx")
     .set_op_category("TensorOp")
     .set_description("MXFP8 matrix multiplication of oriented data and scale tensors")
-    .add_argument("lhs", "Left FP8E4M3FN tensor [M, K]")
+    .add_argument("lhs", "Left FP8E4M3FN or FP8E5M2 tensor [M, K]")
     .add_argument("lhs_scale", "Left FP8E8M0 MX_A_ZZ scale tensor [M, K/32]")
-    .add_argument("rhs", "Right FP8E4M3FN tensor [K, N]")
+    .add_argument("rhs", "Right FP8E4M3FN or FP8E5M2 tensor [K, N]")
     .add_argument("rhs_scale", "Right FP8E8M0 MX_B_NN scale tensor [K/32, N]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

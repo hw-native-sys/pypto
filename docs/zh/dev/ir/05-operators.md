@@ -408,6 +408,7 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
+| `tensor.matmul_mx` / `pl.matmul_mx` | `lhs, lhs_scale, rhs, rhs_scale -> [M, N]` FP32 GM tensor；Tensor 侧仅有该基础形式（没有 Tensor 级 `_acc` / `_bias`）。操作数 dtype 与 `tile.matmul_mx` 读取同一张 kMx 表，因此四种 FP8 组合全部支持，scale tensor 必须带 `MX_A_ZZ` / `MX_B_NN`。`ConvertTensorToTileOps` 把四个操作数都载入 `Mat` 并发射 `tile.matmul_mx`，逐操作数透传各自的 dtype，混合组合在 tile 层仍保持混合。桥接生成的入口 load 都是整窗，因此每个 tile 到达 Cube 时 valid == physical：`tile.matmul_mx` 允许的收窄 valid K 无法从该层表达。要求 M/K/N 为静态正值且 `M % 16 == 0`、`N % 32 == 0`、`K % 64 == 0`，scale shape 为 `[M, K/32]` / `[K/32, N]`。 |
 
 规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
 GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。左侧输入可使用任一打包 FP4 格式，但必须先显式转换为 FP8；对齐 M↑16、K↑64、N↑32。

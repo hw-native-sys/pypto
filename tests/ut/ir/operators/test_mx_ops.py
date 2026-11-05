@@ -14,6 +14,48 @@ import pytest
 from pypto import ir
 from pypto.pypto_core import DataType
 
+# A5 MX picks its operand format per side, so the Tile and the Tensor op both
+# accept these four pairs (PTOAS v0.72 isA5MxFp8InputType, pto-isa
+# isSupportedFp8Combo).
+_MX_FP8_PAIRS = [
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+
+def _shaped(op_type: ir.Type) -> ir.ShapedType:
+    """Narrow a deduced result type to its shaped form.
+
+    ``Call.type`` / ``Var.type`` are statically ``Type``, which carries no
+    ``shape`` / ``dtype`` / ``memory_space``; every operand and result asserted
+    on below deduces a Tensor or Tile type, and the assert says so.
+    """
+    assert isinstance(op_type, ir.ShapedType), f"expected a ShapedType, got {type(op_type).__name__}"
+    return op_type
+
+
+def _extents(op_type: ir.Type) -> list[int]:
+    """The static extents of a deduced shaped type."""
+    dims: list[int] = []
+    for dim in _shaped(op_type).shape:
+        assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
+        dims.append(dim.value)
+    return dims
+
+
+def _as_tile_type(op_type: ir.Type) -> ir.TileType:
+    """Narrow an operand / result type to ``TileType``.
+
+    ``Call.type`` is statically ``Type``; every tile op asserted on below deduces
+    a tile, and the assert is itself part of what the caller checks -- narrowing
+    only to ``ShapedType`` would silence the type checker while dropping the
+    check that a *tile* op did not hand back a Tensor type.
+    """
+    assert isinstance(op_type, ir.TileType), f"expected a TileType, got {type(op_type).__name__}"
+    return op_type
+
 
 class TestMxLoad:
     def test_mx_layout_sets_fractal(self):
@@ -111,29 +153,87 @@ class TestDtypeAndMemorySpace:
 
 
 class TestTensorMatmulMx:
-    def test_tensor_matmul_mx_requires_oriented_scale_layouts(self):
+    @staticmethod
+    def _mx_tensors(*, m=16, k=64, n=32, lhs_dtype=pl.FP8E4M3FN, rhs_dtype=pl.FP8E4M3FN):
+        """Build a valid oriented Tensor MX operand set for ``[m, k] x [k, n]``."""
         span = ir.Span.unknown()
-        lhs = ir.Var("lhs", ir.TensorType([16, 64], pl.FP8E4M3FN), span)
+        groups = k // 32
+        lhs = ir.Var("lhs", ir.TensorType([m, k], lhs_dtype), span)
         lhs_scale = ir.Var(
             "lhs_scale",
-            ir.TensorType([16, 2], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_A_ZZ)),
+            ir.TensorType([m, groups], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_A_ZZ)),
             span,
         )
-        rhs = ir.Var("rhs", ir.TensorType([64, 32], pl.FP8E4M3FN), span)
+        rhs = ir.Var("rhs", ir.TensorType([k, n], rhs_dtype), span)
         rhs_scale = ir.Var(
             "rhs_scale",
-            ir.TensorType([2, 32], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_B_NN)),
+            ir.TensorType([groups, n], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_B_NN)),
             span,
         )
+        return lhs, lhs_scale, rhs, rhs_scale
+
+    def test_tensor_matmul_mx_requires_oriented_scale_layouts(self):
+        lhs, lhs_scale, rhs, rhs_scale = self._mx_tensors()
 
         call = ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
         assert isinstance(call.type, ir.TensorType)
         assert call.type.dtype == pl.FP32
         assert tuple(dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)) == (16, 32)
 
+        span = ir.Span.unknown()
         bad_scale = ir.Var("bad_scale", ir.TensorType([16, 2], pl.FP8E8M0), span)
         with pytest.raises(ValueError, match="lhs_scale layout MX_A_ZZ"):
             ir.op.tensor.matmul_mx(lhs, bad_scale, rhs, rhs_scale)
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_every_fp8_pair_deduces_an_fp32_result(self, lhs_dtype, rhs_dtype):
+        """The Tensor op accepts the same four pairs as the Tile op it lowers to.
+
+        Multi-block on every axis: M spans two 16-row Cube blocks, N three 32-column
+        ones, and K four 64-element blocks (eight MX scale groups), so a per-pair
+        regression cannot hide behind a single-block shape.
+        """
+        operands = self._mx_tensors(m=32, k=256, n=96, lhs_dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        call = ir.op.tensor.matmul_mx(*operands)
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == pl.FP32
+        assert _extents(call.type) == [32, 96]
+        # The operands keep their declared dtypes -- nothing coerces one side.
+        assert _shaped(operands[0].type).dtype == lhs_dtype
+        assert _shaped(operands[2].type).dtype == rhs_dtype
+
+    @pytest.mark.parametrize(
+        ("lhs_dtype", "rhs_dtype"),
+        [
+            # HF8 is an A5 Cube FP8 operand, but PTOAS gates MX through
+            # isA5MxFp8InputType, which excludes HiF8 -- so it stays rejected here.
+            pytest.param(DataType.HF8, DataType.HF8, id="hf8-x-hf8"),
+            pytest.param(DataType.HF8, DataType.FP8E5M2, id="hf8-x-e5m2"),
+            pytest.param(DataType.FP8E5M2, DataType.HF8, id="e5m2-x-hf8"),
+            pytest.param(DataType.BF16, DataType.BF16, id="bf16-x-bf16"),
+            pytest.param(DataType.FP16, DataType.FP16, id="fp16-x-fp16"),
+            pytest.param(DataType.INT8, DataType.INT8, id="int8-x-int8"),
+            pytest.param(DataType.FP8E5M2, DataType.BF16, id="e5m2-x-bf16"),
+        ],
+    )
+    def test_rejects_pairs_outside_the_mx_table(self, lhs_dtype, rhs_dtype):
+        operands = self._mx_tensors(lhs_dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        with pytest.raises(ValueError, match=r"requires one of the MX data pairs") as exc_info:
+            ir.op.tensor.matmul_mx(*operands)
+        # The diagnostic names the four accepted pairs and the rejected one.
+        message = str(exc_info.value)
+        assert "fp8e4m3fn x fp8e5m2" in message
+        assert f"but got {lhs_dtype.to_string()} x {rhs_dtype.to_string()}" in message
+
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    @pytest.mark.parametrize("side", ["lhs", "rhs"])
+    def test_rejects_native_packed_fp4_with_a_cast_hint(self, side, dtype):
+        """Native packed FP4 x FP4 is unsupported; the lhs must be cast to FP8 first."""
+        lhs_dtype = dtype if side == "lhs" else pl.FP8E5M2
+        rhs_dtype = dtype if side == "rhs" else pl.FP8E5M2
+        operands = self._mx_tensors(lhs_dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        with pytest.raises(ValueError, match=r"native packed FP4 matmul_mx is not supported.*pl\.cast"):
+            ir.op.tensor.matmul_mx(*operands)
 
 
 class TestPackedFp4Shape:
@@ -151,46 +251,6 @@ class TestPackedFp4Shape:
         tensor_type = ir.TensorType([ir.ConstInt(8, DataType.INDEX, span), carrier_width], dtype)
         assert tensor_type.dtype == dtype
         assert str(tensor_type.shape[1]) == "carrier_width"
-
-
-_MX_FP8_PAIRS = [
-    pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="e4m3-x-e4m3"),
-    pytest.param(DataType.FP8E5M2, DataType.FP8E5M2, id="e5m2-x-e5m2"),
-    pytest.param(DataType.FP8E4M3FN, DataType.FP8E5M2, id="e4m3-x-e5m2"),
-    pytest.param(DataType.FP8E5M2, DataType.FP8E4M3FN, id="e5m2-x-e4m3"),
-]
-
-
-def _shaped(op_type: ir.Type) -> ir.ShapedType:
-    """Narrow a deduced result type to its shaped form.
-
-    ``Call.type`` / ``Var.type`` are statically ``Type``, which carries no
-    ``shape`` / ``dtype`` / ``memory_space``; every operand and result asserted
-    on below deduces a Tensor or Tile type, and the assert says so.
-    """
-    assert isinstance(op_type, ir.ShapedType), f"expected a ShapedType, got {type(op_type).__name__}"
-    return op_type
-
-
-def _extents(op_type: ir.Type) -> list[int]:
-    """The static extents of a deduced shaped type."""
-    dims: list[int] = []
-    for dim in _shaped(op_type).shape:
-        assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
-        dims.append(dim.value)
-    return dims
-
-
-def _as_tile_type(op_type: ir.Type) -> ir.TileType:
-    """Narrow an operand / result type to ``TileType``.
-
-    ``Call.type`` is statically ``Type``; every tile op asserted on below deduces
-    a tile, and the assert is itself part of what the caller checks -- narrowing
-    only to ``ShapedType`` would silence the type checker while dropping the
-    check that a *tile* op did not hand back a Tensor type.
-    """
-    assert isinstance(op_type, ir.TileType), f"expected a TileType, got {type(op_type).__name__}"
-    return op_type
 
 
 def _tile(name, shape, dtype, *, valid_shape=None, memory=None):

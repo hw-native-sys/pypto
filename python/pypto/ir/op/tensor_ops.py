@@ -505,11 +505,18 @@ def matmul_mx(
 ) -> Call:
     """MXFP8 matrix multiplication of oriented GM data and scale tensors.
 
+    Each data tensor is ``FP8E4M3FN`` or ``FP8E5M2``, chosen independently per
+    side, so all four FP8 pairs are accepted; the scales stay ``FP8E8M0`` and
+    the result FP32. Lowers to ``tile.matmul_mx``, which reads the same operand
+    table, with each operand's dtype carried through unchanged.
+
     Args:
-        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs: A-side quantized data tensor with shape ``[M, K]``
+            (``FP8E4M3FN`` or ``FP8E5M2``).
         lhs_scale: A-side ``MX_A_ZZ`` FP8E8M0 scale tensor with shape
             ``[M, K/32]``.
-        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs: B-side quantized data tensor with shape ``[K, N]``
+            (``FP8E4M3FN`` or ``FP8E5M2``).
         rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
             ``[K/32, N]``.
         span: Optional source span for debugging (auto-captured if not provided).
@@ -518,10 +525,11 @@ def matmul_mx(
         Call expression for the FP32 ``[M, N]`` result tensor.
 
     Raises:
-        ValueError: If data tensors are not static 2D MX data tensors, the inner
-            dimensions do not agree, M is not divisible by 16, N is not
-            divisible by 32, K is not divisible by 64, or either scale tensor
-            has the wrong dtype, shape, or MX layout.
+        ValueError: If data tensors are not static 2D MX data tensors, their
+            dtypes are not one of the four FP8 pairs, the inner dimensions do
+            not agree, M is not divisible by 16, N is not divisible by 32, K is
+            not divisible by 64, or either scale tensor has the wrong dtype,
+            shape, or MX layout.
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)

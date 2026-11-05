@@ -658,3 +658,64 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         assert "pto.tmatmul.mx.bias" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    @pytest.mark.parametrize(
+        "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
+    )
+    def test_tensor_matmul_mx_emits_per_side_operand_dtypes(
+        self, tmp_path, compile_with_ptoas, lhs_dtype, rhs_dtype
+    ):
+        """The Tensor dispatch reaches PTOAS with each operand's own FP8 format.
+
+        Written on the Tensor surface (GM tensors straight into ``pl.matmul_mx``, no
+        ``pl.load`` / ``pl.move``): ``ConvertTensorToTileOps`` synthesizes the operand
+        loads, so this covers the whole Tensor path rather than the tile op alone.
+        Multi-block on every axis -- M = 2x16, N = 3x32, K = 4x64 = 8 MX groups.
+        """
+        m, k, n = 32, 256, 96
+        groups = k // 32
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[m, k], lhs_dtype],
+                a_s: pl.Tensor[[m, groups], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[k, n], rhs_dtype],
+                b_s: pl.Tensor[[groups, n], pl.FP8E8M0, pl.MX_B_NN],
+            ) -> pl.Tensor[[m, n], pl.FP32]:
+                out: pl.Tensor[[m, n], pl.FP32] = pl.matmul_mx(a, a_s, b, b_s)
+                return out
+
+        mlir = _emit_incore_mlir(Program)
+        lhs_pto = _PTO_FP8_SPELLING[lhs_dtype]
+        rhs_pto = _PTO_FP8_SPELLING[rhs_dtype]
+        matmul = next(line for line in mlir.splitlines() if "pto.tmatmul.mx " in line)
+        # The two emitted data tile_bufs each carry the dtype their Tensor declared.
+        assert f"loc=left, dtype={lhs_pto}, rows={m}, cols={k}" in matmul
+        assert f"loc=right, dtype={rhs_pto}, rows={k}, cols={n}" in matmul
+        assert f"loc=scaling, dtype=!pto.f8E8M0, rows={m}, cols={groups}" in matmul
+        assert f"loc=scaling, dtype=!pto.f8E8M0, rows={groups}, cols={n}" in matmul
+        assert "loc=acc, dtype=f32," in matmul
+        # Each side's scale-addr binding is derived from that side's own data tile.
+        tget_lines = [line for line in mlir.splitlines() if "pto.tget_scale_addr" in line]
+        assert len(tget_lines) == 2
+        (left_tget,) = [line for line in tget_lines if "loc=left," in line]
+        (right_tget,) = [line for line in tget_lines if "loc=right," in line]
+        assert f"loc=left, dtype={lhs_pto}," in left_tget
+        assert f"loc=right, dtype={rhs_pto}," in right_tget
+        # Scale operands keep their MX GM layouts through the synthesized loads.
+        assert "#pto.layout<mx_a_zz>" in mlir
+        assert "#pto.layout<mx_b_nn>" in mlir
+
+        if compile_with_ptoas:
+            # Textual IR cannot prove PTOAS accepts the pair; v0.72 gates MX in
+            # verifyA5MxTypeTriple, so assemble with the installed release.
+            if find_ptoas_binary() is None:
+                pytest.skip("PTOAS is not available")
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            assert f"Tile<TileType::Left, {_ISA_FP8_SPELLING[lhs_dtype]}" in cpp
+            assert f"Tile<TileType::Right, {_ISA_FP8_SPELLING[rhs_dtype]}" in cpp
+            assert cpp.count("TMATMUL_MX(") == 1

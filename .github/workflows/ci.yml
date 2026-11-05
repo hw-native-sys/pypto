@@ -2166,10 +2166,12 @@ jobs:
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Three steps share one checkout / install:
+    # npu-a5 card. Four steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
     #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
-    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
+    #   3. tensor-mx-tests-a5    — the Tensor surface of matmul_mx, in its own
+    #                              session (see that step for why)
+    #   4. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2236,6 +2238,15 @@ jobs:
     # A @ I decode case and a valid-K tail). All are
     # `@pytest.mark.platforms("a5")` — this job is the only one giving them
     # device coverage, so a file absent from the list below is never re-run.
+    # The Tensor surface of matmul_mx is NOT here — it is tensor-mx-tests-a5.
+    #
+    # --- tensor-mx-tests-a5 ---
+    # Scope — tests/st/runtime/ops/test_matmul_mx_tensor_a5.py: `pl.matmul_mx` on
+    # GM tensors over the four FP8 pairs, each case running the Tensor and Tile
+    # surfaces in one kernel over byte-identical operands and comparing both on
+    # raw FP32 words. It shares its operand generator with test_matmul_mx.py via
+    # the non-collected `_matmul_mx_data.py`, so the split into two sessions
+    # cannot turn into two drifting copies of the data.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2376,6 +2387,57 @@ jobs:
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               tests/st/runtime/ops/test_fp8e5m2_transfer.py \
               tests/st/runtime/ops/test_matmul_fp8_mixed.py \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: tensor-mx-tests-a5
+        # The Tensor-surface matmul_mx ST runs in its OWN task-submit session,
+        # deliberately NOT appended to mx-tests-a5 above, and its cases live in
+        # their own module for the same reason.
+        #
+        # Adding cases to mx-tests-a5's session made its *first* test hang:
+        # pytest collected the items and then printed nothing for the full
+        # --max-time cap, never reaching the `[DEVICE] ... -> device 0`
+        # assignment line, so the task queue killed the step and every later
+        # step in this job was skipped with it. Two other changes hit the same
+        # signature the same day by appending a *file* to a step. The mechanism
+        # is NOT understood. Isolating the session keeps mx-tests-a5 running
+        # exactly the set that is known green and confines any residual risk
+        # here.
+        #
+        # Ruled out, so nobody re-derives them:
+        #   - *harness style*. `st.case` vs `PTOTestCase` is irrelevant:
+        #     test_quant_mx.py mixes both inside mx-tests-a5 itself, and
+        #     test_cross_core.py mixes them in mixed-kernel-tests-a5. Both pass.
+        #   - *case count*. mixed-kernel-tests-a5 passes with 167 collected
+        #     while mx-tests-a5 hung with 20.
+        #   - *adding cases to an already-selected file*. The tile MX change
+        #     added three cases to test_matmul_mx.py, which mx-tests-a5 already
+        #     selected wholesale, and that step is green at 19 collected.
+        #     Scoreboard: 16 green, 19 green, 21 hang, 23 hang.
+        #   - *eager import-time torch compute*. Refuted: CI sets
+        #     OMP_NUM_THREADS: 1, so the fork-after-threads deadlock it depends
+        #     on cannot fire, and an isolated step passes on a file that still
+        #     does torch work at import.
+        #   - *collection cost*. All four files collect together in 0.21 s.
+        #
+        # The file is the whole target rather than node IDs on purpose: a stale
+        # or mistyped node ID in --deselect/-k is SILENTLY ignored by pytest, so
+        # node-ID containment would quietly un-contain itself on any rename and
+        # bring the hang back with nothing in the log to say why.
+        #
+        # Do NOT merge this back into mx-tests-a5 without reproducing that hang.
+        #
+        # --max-time 600 rather than 3600: these four cases need ~53 s of device
+        # time, so a hang here is reported in 10 minutes instead of consuming
+        # the hour and starving vf-tests-a5 of the card.
+        timeout-minutes: 20
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/ops/test_matmul_mx_tensor_a5.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5

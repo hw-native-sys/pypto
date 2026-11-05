@@ -461,6 +461,7 @@ spaces are resolved.
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid M/N must match the matmul output. |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. |
 | `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` family. |
+| `tensor.matmul_mx` / `pl.matmul_mx` | `lhs, lhs_scale, rhs, rhs_scale -> [M, N]` FP32 GM tensor; the Tensor dispatch has only this base form (no Tensor-level `_acc` / `_bias`). Operand dtypes are checked against the same kMx table rows as `tile.matmul_mx`, so all four FP8 pairs are accepted and the scale tensors must carry `MX_A_ZZ` / `MX_B_NN`. `ConvertTensorToTileOps` loads all four operands to `Mat` and emits `tile.matmul_mx`, carrying each operand's own dtype through, so a mixed pair stays mixed at the tile layer. The bridge's entry loads materialize full windows, so every tile reaches the Cube with valid == physical: the narrowed valid K `tile.matmul_mx` admits is not expressible from this surface. Requires static positive M/K/N with `M % 16 == 0`, `N % 32 == 0`, `K % 64 == 0`, and scale shapes `[M, K/32]` / `[K/32, N]`. |
 
 The canonical shape is `M=128, K=64, N=64`, with FP8E4M3FN data,
 FP8E8M0 scales shaped `[128,2]` and `[2,64]`, and `mx_a_zz` / `mx_b_nn`
