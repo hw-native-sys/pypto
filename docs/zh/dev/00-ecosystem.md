@@ -134,7 +134,12 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 ```
 
 使用 `--platform a5` 重复测试。每个入口默认超时 1200 秒，可通过
-`--timeout` 修改。编译失败、进程失败、超时和未记录到编译均会使 job 失败。
+`--timeout` 修改。每个 PTOAS 内核编译另有默认 60 秒的超时限制。
+可将 `PYPTO_PTOAS_TIMEOUT_SECONDS` 设为正整数来覆盖该限制；非法值会报错。
+库编译 CI job 将其设为 `180`，为大型内核提供更多编译时间。
+本地使用 `export PYPTO_PTOAS_TIMEOUT_SECONDS=180` 可与 CI 保持一致。
+该设置不改变入口级别的 `--timeout`。
+编译失败、进程失败、超时和未记录到编译均会使 job 失败。
 损坏或不可读的编译回执只使对应入口失败，不会中断其他入口或丢失矩阵汇总。
 若入口通过当前 Python 解释器再次运行自身脚本来分发用例，每个子进程都会进入同一仅编译适配器。
 子用例的环境、工作目录和进程隔离均保留，父进程负责汇总编译记录。

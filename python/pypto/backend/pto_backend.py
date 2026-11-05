@@ -64,6 +64,7 @@ from pypto.pypto_core import passes as _passes
 
 logger = logging.getLogger(__name__)
 
+_PTOAS_TIMEOUT_ENV = "PYPTO_PTOAS_TIMEOUT_SECONDS"
 _EMIT_SOURCE_LOC_ENV = "PYPTO_EMIT_PTO_LOC"
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -196,6 +197,20 @@ def _format_error_report(
     return "\n".join(lines)
 
 
+def _get_ptoas_timeout() -> int:
+    """Read the per-kernel assembly deadline at invocation time, in seconds."""
+    value = os.environ.get(_PTOAS_TIMEOUT_ENV, "60")
+    try:
+        timeout = int(value)
+    except ValueError:
+        raise ValueError(
+            f"{_PTOAS_TIMEOUT_ENV} must be a positive integer in seconds, got {value!r}"
+        ) from None
+    if timeout <= 0:
+        raise ValueError(f"{_PTOAS_TIMEOUT_ENV} must be a positive integer in seconds, got {value!r}")
+    return timeout
+
+
 def _run_ptoas(
     pto_path: str,
     output_path: str,
@@ -206,6 +221,8 @@ def _run_ptoas(
     Locates ptoas via the PTOAS_ROOT env var, probing ``$PTOAS_ROOT/ptoas``
     (pre-v0.51 launcher), ``$PTOAS_ROOT/ptoas.sh`` (v0.55+ bundled-CPython
     launcher) then ``$PTOAS_ROOT/bin/ptoas``, or PATH fallback.
+    ``PYPTO_PTOAS_TIMEOUT_SECONDS`` overrides the default 60-second deadline
+    for each kernel. It must be a positive integer.
 
     Args:
         pto_path: Path to the input .pto file
@@ -214,6 +231,7 @@ def _run_ptoas(
 
     Raises:
         FileNotFoundError: If the ptoas binary cannot be found
+        ValueError: If PYPTO_PTOAS_TIMEOUT_SECONDS is not a positive integer
         RuntimeError: If ptoas is older than the pinned minimum, or compilation fails
     """
     ptoas_bin = _find_ptoas_binary()
@@ -231,6 +249,7 @@ def _run_ptoas(
         )
     _check_ptoas_version(ptoas_bin)
 
+    timeout = _get_ptoas_timeout()
     cmd = [ptoas_bin, pto_path, "-o", output_path]
     if ptoas_flags:
         cmd.extend(ptoas_flags)
@@ -241,10 +260,13 @@ def _run_ptoas(
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
+        raise RuntimeError(
+            f"ptoas compilation timed out after {exc.timeout}s; "
+            f"set {_PTOAS_TIMEOUT_ENV} to adjust the per-kernel deadline"
+        ) from exc
     if result.returncode != 0:
         status = f"signal {-result.returncode}" if result.returncode < 0 else f"exit code {result.returncode}"
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
