@@ -51,6 +51,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -290,6 +291,50 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
 
 bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
 
+/// Whether the author explicitly asked for this cast's destination layout.
+///
+/// Keyed on the kwargs rather than on the result view, so the check below
+/// applies only to the explicit request and never to a tile that is merely
+/// boxed in passing (those keep the ordinary layout-repair path).
+bool RequestsDestinationLayout(const CallPtr& call) {
+  return std::any_of(call->kwargs_.begin(), call->kwargs_.end(),
+                     [](const auto& entry) { return entry.first == "blayout" || entry.first == "slayout"; });
+}
+
+/// Fail an explicitly requested destination layout that this backend cannot
+/// write natively, instead of letting it through.
+///
+/// A chain cannot rescue the request: every intermediate hop is ND, and the
+/// terminal hop is precisely the one that would have to write the boxed
+/// destination. Reporting it here names the dtype pair and the arch, which the
+/// generic "no native cast path" diagnostic below would not.
+///
+/// Silence is the specific hazard being closed. PTOAS's `tcvt` verifier
+/// inspects the destination layout ONLY for the packed FP4-to-FP8 pair; for
+/// every other pair it accepts a boxed destination without complaint and then
+/// addresses it as the ISA sees fit. So an unsupported request assembles
+/// cleanly and produces wrong bytes unless PyPTO rejects it.
+void CheckRequestedDestinationLayoutIsNative(const CallPtr& call, const backend::BackendHandler& handler,
+                                             const std::string& arch_name, DataType src, DataType dst,
+                                             const Span& span) {
+  if (!RequestsDestinationLayout(call)) return;
+  const auto result = As<TileType>(call->GetType());
+  INTERNAL_CHECK_SPAN(result, span) << "Internal error: tile.cast result must be TileType";
+  const auto view = tile_view_semantics::GetEffectiveTileView(*result);
+  if (view.slayout == TileLayout::none_box) return;
+
+  backend::DirectCastInfo info;
+  const bool native =
+      backend::IsDirectCast(call, handler.GetTcvtAdjacency(), &info) && info.preserve_output_layout;
+  CHECK_SPAN(native, span) << "LegalizeTileCast: a boxed destination layout ("
+                           << TileLayoutToString(view.blayout) << "/" << TileLayoutToString(view.slayout)
+                           << ", fractal=" << view.fractal << ") was requested for a " << src.ToString()
+                           << " to " << dst.ToString() << " cast, but arch " << arch_name
+                           << " has no native pto.tcvt that writes it"
+                           << (info.reason.empty() ? std::string{} : "; " + info.reason)
+                           << ". Cast into the source's layout and convert with tile.move";
+}
+
 /// Report only fallback chains; a supported native FP4 -> FP8 cast is silent.
 void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
   if (!diags || !src.IsPackedFp4() || !IsFp8DataCastTarget(dst)) return;
@@ -324,6 +369,8 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType src = src_tile->dtype_;
     DataType dst = result_tile->dtype_;
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
+
+    CheckRequestedDestinationLayoutIsNative(call, handler_, arch_name_, src, dst, op->span_);
 
     if (backend::IsDirectCast(call, handler_.GetTcvtAdjacency())) {
       return IRMutator::VisitStmt_(op);

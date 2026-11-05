@@ -685,6 +685,34 @@ TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
+void CheckSplitKeepsRequestedCastBoxes(const CallPtr& call, const TypePtr& halved_result, int split_dim) {
+  if (!IsOp(call, "tile.cast")) return;
+  // Keyed on the REQUEST, not on the result merely being boxed: a cast that
+  // happens to carry a boxed tile keeps the ordinary layout-repair path, and
+  // pto-isa waives the row-granularity rule for boxed `loc=vec` tiles in
+  // general (PTOTileLayoutVerification.cpp `allowUnalignedRows`). The rule
+  // re-imposed here is the one the native packed FP4 tcvt adds for its NZ
+  // destination specifically: physical rows must be a multiple of 16.
+  const bool requested = std::any_of(call->kwargs_.begin(), call->kwargs_.end(), [](const auto& entry) {
+    return entry.first == "blayout" || entry.first == "slayout";
+  });
+  if (!requested) return;
+  auto halved = std::dynamic_pointer_cast<const TileType>(halved_result);
+  if (!halved) return;
+  const auto box = tile_view_semantics::GetBoxedTileAlignment(*halved);
+  if (!box) return;
+  const int64_t granularity =
+      split_dim == static_cast<int>(halved->shape_.size()) - 1 ? box->cols : box->rows;
+  if (granularity <= 1 || split_dim < 0 || split_dim >= static_cast<int>(halved->shape_.size())) return;
+  const auto extent = As<ConstInt>(halved->shape_[split_dim]);
+  CHECK_SPAN(extent && extent->value_ % granularity == 0, call->span_)
+      << "A tile.cast that requests a boxed destination layout cannot be split onto a lane extent of "
+      << (extent ? std::to_string(extent->value_) : std::string("a dynamic size")) << " on axis " << split_dim
+      << ": the native conversion writes whole " << box->rows << "x" << box->cols
+      << " fractal boxes, so each lane's extent must stay a multiple of " << granularity
+      << ". Size the tile so both lanes hold whole boxes, or keep the boxed cast out of the split region";
+}
+
 // Discover each tuple element's axis, physical capacity and logical step from
 // the operator's per-lane type deduction, or return nullopt without a proven mapping.
 //
@@ -875,6 +903,7 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int spli
   // xfailing params record what a runtime split-axis extent still gets wrong on
   // this path.
   auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride);
+  CheckSplitKeepsRequestedCastBoxes(call, new_result_type, split_dim);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -1191,6 +1220,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       ExprPtr half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
 
       auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride);
+      CheckSplitKeepsRequestedCastBoxes(call, new_result_type, split_dim);
       const ExprPtr load_step = LaneStep(lane_stride, half_dim_size);
       std::vector<ExprPtr> new_args = call->args_;
       new_args[1] = AdjustOffsets(call->args_[1], split_dim, load_step, subblock_idx);
@@ -1517,6 +1547,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
                 ? reshape_step
                 : lane_stride;
         auto new_result_type = HalveTileShape(call->GetType(), result_split_dim, subblock_idx, result_stride);
+        CheckSplitKeepsRequestedCastBoxes(call, new_result_type, result_split_dim);
 
         const ExprPtr lane_step = reshape_info        ? LogicalLaneStep(*reshape_info, lane_stride)
                                   : distinct_capacity ? LogicalLaneStep(input_info, lane_stride)
