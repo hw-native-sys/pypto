@@ -36,6 +36,79 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [PTOAS Op Status Matrix](ptoas-op-status.md) | Which public and compatibility PTOAS ops the compiler currently emits |
 | [FP4](fp4.md) | Packed E2M1x2/E1M2x2 types, byte-carrier ABI, and existing E2M1 operator support |
 
+## Comment-triggered full CI
+
+After rollout, PR creation and updates run `changes`, `toolchain`, `pre-commit`
+and `clang-tidy`. The separate `Docs / build` check also runs. Documentation-only
+PRs retain the automatic `clang-tidy` exemption. No device tests or wheel builds
+start automatically for PRs.
+
+A collaborator with repository **write**, **maintain** or **admin** permission
+can post exactly this comment in the PR conversation:
+
+```text
+/ci full
+```
+
+The `CI Command` workflow checks current repository permissions and dispatches
+`CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
+verifies the merge's parents before any tests start. Fork PRs are supported.
+A conflicting PR, or one whose merge is still being computed, must be resolved
+or retried. The command's Actions summary records acceptance or rejection.
+An identical request already queued/running is not dispatched again.
+
+Full includes lint, wheel warm-up, unit, example, codegen, system, distributed,
+pypto-lib and A5/simulator tests. Core tests execute even for documentation-only
+PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
+when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
+jobs build locally if necessary; every applicable test must succeed.
+
+### Results and retries
+
+`ci/full` is a commit status on the PR head, published by `CI Full Status`.
+It stays pending while full runs and succeeds only after the `full-result`
+job confirms all applicable tests passed. Skipped, missing, failed or cancelled
+required tests cannot satisfy it. The publisher runs on a fresh GitHub-hosted
+runner, reads GitHub metadata, and never executes PR code or downloads artifacts.
+Test jobs do not hold status-write or Actions-write tokens.
+
+Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
+revision is preserved; the finalizer combines successful dependencies from the
+previous attempt with rerun results. If only the finalizer is missing, rerun that
+job too. The status publisher handles rerun events and ignores older requests
+and results for obsolete PR heads. A new commit needs a new `/ci full` comment.
+The external `pr-rerun` service remains unchanged: it can still rerun eligible
+ordinary PR CI, but does not discover/authorize these dispatched full runs.
+
+`main` pushes, manual CI runs without PR inputs, Daily CI and Codex Review keep
+their existing policies. Manual PR inputs are intended for the comment handler;
+leave all four empty to run CI against main.
+
+### Operator rollout
+
+The repository variable `CI_COMMENT_TIERS_ENABLED` is an activation switch.
+Unset or false preserves existing automatic full CI while the required checks
+are migrated. No GitHub App secret, public webhook endpoint or service update
+is needed.
+
+1. Merge the workflows and helper onto `main`, leaving the switch unset.
+2. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
+   **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm
+   unauthorized comments and stale-head results cannot launch or approve full.
+3. Add `ci/full` to the main ruleset's required status checks, selecting the
+   GitHub Actions source where available. Keep `pre-commit`, `clang-tidy` and
+   existing review requirements. Do not require the dispatch job `full-result`
+   itself: it belongs to the main workflow revision, not the PR head.
+4. Once `ci/full` is required, remove the former individual heavy-test contexts
+   from the required list, including the `unit-tests` matrix context. They may
+   be skipped or absent in lint runs; coverage is now enforced by `ci/full`.
+5. Set `CI_COMMENT_TIERS_ENABLED=true`. Subsequent PR runs use lint by default.
+
+For rollback, unset the switch to restore automatic tests; keep the `ci/full`
+requirement until the previous heavy-test requirements have been restored.
+This implementation targets the current PR merge flow, not merge queues;
+`merge_group` support is required before enabling a merge queue.
+
 ## Automated PR Review
 
 The `Codex Review` GitHub Actions workflow reviews only non-draft pull requests targeting `main` when

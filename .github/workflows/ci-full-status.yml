@@ -1,0 +1,38 @@
+name: CI Full Status
+
+# Includes native reruns: requested alone does not fire when a run is rerun.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested, in_progress, completed]
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      startsWith(github.event.workflow_run.display_title, 'CI full PR #')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      # All attempts and requests for this PR/head share one writer. The helper
+      # re-reads current state and ignores older requests and obsolete heads.
+      group: ci-full-status-${{ github.event.workflow_run.display_title }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Checkout trusted status publisher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Update the PR head's full CI status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/ci_control.py publish
