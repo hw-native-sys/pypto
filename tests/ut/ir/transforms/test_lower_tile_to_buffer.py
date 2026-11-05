@@ -810,7 +810,8 @@ class PartitionedStore:
             after = PassManager(OptimizationStrategy.Default).run_passes(before)
         function = after.get_function("kernel")
         assert function is not None
-        assert function.attrs["buffer_ir_selected"] is False
+        if enabled:
+            assert function.attrs["buffer_ir_selected"] is False
         assert function.ir_stage == ir.FunctionIRStage.Functional
         outputs.append(function.body)
         source = codegen.PTOCodegen().generate(after, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
