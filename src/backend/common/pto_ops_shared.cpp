@@ -168,6 +168,36 @@ std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, cod
   return codes;
 }
 
+bool BeginNonEmptyRegion(const std::vector<ir::ExprPtr>& extents, codegen::PTOCodegen& codegen,
+                         const std::vector<std::string>& index_values) {
+  std::string condition;
+  for (size_t i = 0; i < extents.size(); ++i) {
+    const auto& extent = extents[i];
+    if (As<ir::ConstInt>(extent)) continue;
+    const auto value = index_values.empty() ? GetSizeCodes({extent}, codegen).front() : index_values[i];
+    const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    const auto positive = codegen.NewTemp();
+    codegen.Emit(positive + " = arith.cmpi sgt, " + value + ", " + zero + " : index");
+    if (condition.empty()) {
+      condition = positive;
+    } else {
+      const auto combined = codegen.NewTemp();
+      codegen.Emit(combined + " = arith.andi " + condition + ", " + positive + " : i1");
+      condition = combined;
+    }
+  }
+  if (condition.empty()) return false;
+  codegen.EmitStructural("scf.if " + condition + " {");
+  codegen.IncreaseIndent();
+  return true;
+}
+
+void EndNonEmptyRegion(bool guarded, codegen::PTOCodegen& codegen) {
+  if (!guarded) return;
+  codegen.DecreaseIndent();
+  codegen.EmitStructural("}");
+}
+
 bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs) {
   if (lhs.get() == rhs.get()) return true;
   auto lhs_const = As<ir::ConstInt>(lhs);
@@ -207,7 +237,7 @@ codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& s
   // so reading the parent's IR valid here can diverge from PTOAS. The case
   // that surfaces in practice is the lane-1 all-zero sentinel, which would
   // produce a `v_row=0, v_col=0` result that ccec cannot compile (issue #1507);
-  // `IsZeroValidShapeSentinel` owns that rationale.
+  // Static zero is not a supported PTO-ISA valid-mask template argument.
   //
   // Only the sentinel is special-cased; for every other narrow valid (e.g.,
   // parent subviews whose deducer propagated a real `v_row/v_col`) keep the

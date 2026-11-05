@@ -191,7 +191,10 @@ def test_dynamic_valid_matmul_if_phi_restores_shape_at_lexical_site(planner):
     set_index, set_shape = next(
         (i, ln) for i, ln in enumerate(lines) if ln.strip().startswith(f"pto.set_validshape {phi},")
     )
-    if_index = next(i for i, ln in enumerate(lines) if "scf.if" in ln)
+    # Load/store emptiness guards are also scf.if regions. Identify the DSL
+    # flag comparison rather than taking the first conditional in the function.
+    flag_condition = _first_group(r"(%[A-Za-z0-9_]+) = arith.cmpi eq,", mlir)
+    if_index = next(i for i, ln in enumerate(lines) if f"scf.if {flag_condition} " in ln)
 
     # The head declaration uses the full 16x32 physical box, not the body-local
     # valid_rows SSA value.  The latter is restored after its defining scalar op

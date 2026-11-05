@@ -298,6 +298,31 @@ alloc-backed handle does.  To narrow a view, pass `valid_shape=` to the slice
 (it lands in `pto.subview`'s `valid [...]` clause and accepts runtime extents),
 or call `set_validshape` on the source tile before taking the view.
 
+**Empty valid regions.** A zero in either valid dimension denotes an empty
+region, independently of the physical allocation. Ordinary reshape and
+reinterpret views rooted in a local allocation use dynamic valid dimensions
+for empty regions and initialize both dimensions with `pto.set_validshape`
+immediately after `pto.treshape`. Static positive valid dimensions retain their
+static encoding. Initializing a compiler-created descriptor does not make the
+user-facing `pl.set_validshape` operation legal on arbitrary views.
+
+Ordinary Tile and Buffer memory transfers omit statically empty windows. Runtime-sized
+windows are created and accessed only inside a non-empty guard. Skipping a store
+preserves its output tensor identity and leaves destination data unchanged;
+these guards do not remove cross-core communication or synchronization.
+Stores with `st_phase=Final` are excluded: they must remain in the same
+straight-line region as their `acc_phase=Final` producer to clear its unit flag.
+Their existing backend restrictions on empty windows still apply; when skipping
+an empty phased operation, guard the producer and store together in the source.
+
+Dynamic-valid views require an SSA source rooted in a local allocation. Codegen
+reports an unsupported-case error for TPOP, subview, and control-flow sources;
+materialize into a local tile before taking such a view. Static positive TPOP
+views remain supported. `SplitVectorKernel` replaces discarded lane-1 replay
+reshape/reinterpret/transpose views with empty local tiles, preserving the
+TPOP/TPUSH/TFREE handshakes. Subview initialization remains blocked by
+[PTOAS #1706](https://github.com/hw-native-sys/PTOAS/issues/1706).
+
 ### Cross-Core Operations → PTO Instructions
 
 | PyPTO Operation | Generated PTO-ISA | Description |

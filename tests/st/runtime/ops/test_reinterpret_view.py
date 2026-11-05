@@ -24,6 +24,7 @@ import torch
 from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.pypto_core.passes import MemoryPlanner
+from pypto.runtime.tensor_spec import ScalarSpec
 
 ROWS = 8
 COLS = 16
@@ -317,6 +318,43 @@ def _packed_fp4_alias_cases():
     else pytest.mark.skip(reason="torch.float4_e2m1fn_x2 is unavailable")
 )
 def test_packed_fp4_byte_reshape_round_trip(case_run):
+    case_run.assert_passed()
+
+
+@pl.jit
+def empty_extent_reinterpret(
+    x: pl.Tensor, out: pl.InOut[pl.Tensor], rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        src = pl.load(x, [0, 0], [16, 16], valid_shape=[rows, cols])
+        view = pl.tile.reinterpret_view(src, pl.FP16)
+        back = pl.cast(view, pl.FP32)
+        pl.store(back, [0, 0], out)
+    return out
+
+
+def _empty_extent_cases():
+    for planner in _PLANNERS:
+        for rows, cols in ((0, 0), (0, 8), (8, 0), (8, 8)):
+            x = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+            expected = torch.full((16, 32), -7.0, dtype=torch.float32)
+            expected[:rows, : cols * 2] = x.view(torch.float16).float()[:rows, : cols * 2]
+            yield st.case(
+                empty_extent_reinterpret,
+                x,
+                torch.full((16, 32), -7.0, dtype=torch.float32),
+                rows,
+                cols,
+                name=f"empty_extent_reinterpret_{planner.name}_{rows}x{cols}",
+                scalars=[ScalarSpec("rows", rows), ScalarSpec("cols", cols)],
+                memory_planner=planner,
+                golden=lambda _tensors, expected=expected: expected,
+            )
+
+
+@st.cases(*_empty_extent_cases())
+def test_empty_extent_reinterpret_preserves_output(case_run):
+    """Empty stores preserve a nonzero output; nonempty stores change exactly the valid rectangle."""
     case_run.assert_passed()
 
 

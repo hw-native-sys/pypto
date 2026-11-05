@@ -1084,5 +1084,63 @@ class TestSplitVectorKernelStandaloneSetValidshape:
         _assert_split_matches_expected(Before, Expected)
 
 
+@pytest.mark.parametrize(
+    "expression, result_shape, result_dtype",
+    [
+        ("pl.reshape(popped, [8, 32])", [8, 32], "FP32"),
+        ("pl.tile.reinterpret_view(popped, pl.INT32)", [16, 16], "INT32"),
+        ("pl.tile.transpose_view(popped)", [16, 16], "FP32"),
+    ],
+)
+def test_replay_tpop_views_become_empty_local_tiles(expression, result_shape, result_dtype):
+    """Discarded lane-1 views need empty storage while all FIFO handshakes survive."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    program = pl.parse(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def main_aiv(self):
+        pl.func_attr({{"dual_aiv_dispatch": True}})
+        local = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=8192)
+        peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+        pl.aiv_initialize_pipe(dir_mask=3, slot_size=1024, c2v_consumer_buf=local, v2c_consumer_buf=peer)
+        popped: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+        view: pl.Tile[{result_shape}, pl.{result_dtype}, pl.MemorySpace.Vec] = {expression}
+        pl.tpush_to_aic(view, split=0)
+        pl.tfree_to_aic(popped)
+""")
+    transformed = _run_split_vector_kernel(program)
+    function = transformed.get_function("main_aiv")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+    assert isinstance(branch.else_body, ir.SeqStmts)
+    replay = branch.else_body
+    creates = [
+        stmt
+        for stmt in replay.stmts
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.create").name
+    ]
+    assert len(creates) == 1, python_print(transformed)
+    tile_type = creates[0].var.type
+    assert isinstance(tile_type, ir.TileType)
+    assert len(tile_type.shape) == len(result_shape)
+    for dim, expected in zip(tile_type.shape, result_shape):
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == expected
+    assert tile_type.dtype == getattr(pl, result_dtype)
+    assert tile_type.tile_view is not None
+    assert len(tile_type.tile_view.valid_shape) == 2
+    for dim in tile_type.tile_view.valid_shape:
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == 0
+    text = python_print(transformed)
+    for operation in ("tile.tpop_from_aic", "tile.tpush_to_aic", "system.tfree_to_aic"):
+        assert text.count(f"pl.{operation}(") == 2, text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
