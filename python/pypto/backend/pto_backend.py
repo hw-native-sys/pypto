@@ -51,6 +51,8 @@ from pypto._function_attrs import (
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
+from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
+from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -206,6 +208,8 @@ def _run_ptoas(
     Locates ptoas via the PTOAS_ROOT env var, probing ``$PTOAS_ROOT/ptoas``
     (pre-v0.51 launcher), ``$PTOAS_ROOT/ptoas.sh`` (v0.55+ bundled-CPython
     launcher) then ``$PTOAS_ROOT/bin/ptoas``, or PATH fallback.
+    ``PYPTO_PTOAS_TIMEOUT_SECONDS`` overrides the default 60-second deadline
+    for each kernel. It must be a positive integer.
 
     Args:
         pto_path: Path to the input .pto file
@@ -214,6 +218,7 @@ def _run_ptoas(
 
     Raises:
         FileNotFoundError: If the ptoas binary cannot be found
+        ValueError: If PYPTO_PTOAS_TIMEOUT_SECONDS is not a positive integer
         RuntimeError: If ptoas is older than the pinned minimum, or compilation fails
     """
     ptoas_bin = _find_ptoas_binary()
@@ -231,6 +236,7 @@ def _run_ptoas(
         )
     _check_ptoas_version(ptoas_bin)
 
+    timeout = _get_ptoas_timeout()
     cmd = [ptoas_bin, pto_path, "-o", output_path]
     if ptoas_flags:
         cmd.extend(ptoas_flags)
@@ -241,10 +247,13 @@ def _run_ptoas(
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
+        raise RuntimeError(
+            f"ptoas compilation timed out after {exc.timeout}s; "
+            f"set {_PTOAS_TIMEOUT_ENV} to adjust the per-kernel deadline"
+        ) from exc
     if result.returncode != 0:
         status = f"signal {-result.returncode}" if result.returncode < 0 else f"exit code {result.returncode}"
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"

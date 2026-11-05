@@ -197,6 +197,10 @@
       "category": "nonsemantic",
       "reason": "Selects the base for new private build/runtime directories. Does not force compilation or change artifact identity; existing objects retain their directories."
     },
+    "PYPTO_PTOAS_TIMEOUT_SECONDS": {
+      "category": "nonsemantic",
+      "reason": "Bounds each PTOAS kernel compilation; successful generated output is unchanged."
+    },
     "PYPTO_REBUILD_FROM_PTO": {
       "category": "fresh_request",
       "reason": "Explicitly rebuilds edited artifacts; incompatible with immutable reuse. Only an explicit enabled value requests fresh compilation; 0/false/no do not."

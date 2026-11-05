@@ -1655,6 +1655,8 @@ jobs:
       PYPTO_GOLDEN_NUM_THREADS: 1
       OMP_NUM_THREADS: 1
       PYPTO_CODEGEN_MAX_WORKERS: 2
+      # Large software FP32 kernels need headroom for PTOAS sync analysis.
+      PYPTO_PTOAS_TIMEOUT_SECONDS: '180'
     steps:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
