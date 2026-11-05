@@ -1094,6 +1094,15 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto result_func = MutableCopy(normalized_func);
   result_func->params_ = new_params;
   result_func->body_ = new_body;
+  // The custom function rebuild bypasses IRMutator::VisitFunction. Keep
+  // parameter-valued attrs (including external return contracts) attached to
+  // the fresh Vars whose tensor types now carry memory references.
+  for (auto& [key, value] : result_func->attrs_) {
+    if (auto remapped =
+            MapAttrExprs(value, [&mutator](const ExprPtr& expr) { return mutator.VisitExpr(expr); })) {
+      value = std::move(*remapped);
+    }
+  }
   VerifyRegMemoryInitialization(result_func);
 
   // Step 4: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)

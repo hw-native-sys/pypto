@@ -341,10 +341,10 @@ std::vector<size_t> OrchestrationStmtCodegen::CollectOutIndices(const FunctionPt
 }
 
 // Return-position -> callee param-index map, read straight off the callee's
-// ReturnStmt (pointer identity) and memoized per callee. Pipeline IR
-// satisfies IRProperty::ReturnParamsExplicit, which is what makes this a
-// lookup rather than an analysis. Empty when the callee has no ReturnStmt —
-// callers then fall back to the direction-based tail heuristic.
+// ReturnStmt or external-return contract (pointer identity), memoized per callee.
+// Pipeline IR satisfies IRProperty::ReturnParamsExplicit, making this a lookup
+// rather than an analysis. An ambiguous extern declaration raises here: it must
+// never enter the legacy positional fallback for non-external open IR.
 const std::vector<std::optional<size_t>>& OrchestrationStmtCodegen::GetReturnedParamIndices(
     const FunctionPtr& callee) {
   auto it = returned_param_indices_cache_.find(callee.get());
@@ -582,7 +582,6 @@ void OrchestrationStmtCodegen::GenerateSingleReturnAlias(const Var* result_var, 
   FunctionPtr callee = program_->GetFunction(call->op_->name_);
   if (!callee) return;
   auto out_indices = CollectOutIndices(callee);
-  if (out_indices.empty()) return;
   // Find the Out/InOut parameter that the callee's ReturnStmt actually
   // returns. When the kernel declares multiple Out params (e.g., a real
   // result plus per-block GM scratch tensors used by a pl.spmd-dispatched
@@ -592,12 +591,13 @@ void OrchestrationStmtCodegen::GenerateSingleReturnAlias(const Var* result_var, 
   // IR with a single output, where it is unambiguous.
   const auto& ret_map = GetReturnedParamIndices(callee);
   auto returned_idx = ret_map.empty() ? std::nullopt : ret_map[0];
+  if (!returned_idx && out_indices.empty()) return;
   INTERNAL_CHECK_SPAN(returned_idx.has_value() || out_indices.size() == 1, call->span_)
       << "Internal error: cannot map return of callee '" << callee->name_ << "' to one of its "
       << out_indices.size()
       << " Out/InOut params; its ReturnStmt does not reference a param directly, so the IR violates "
          "IRProperty::ReturnParamsExplicit (run NormalizeReturnOrder). Aliasing would be a guess";
-  size_t param_idx = returned_idx.value_or(out_indices[0]);
+  size_t param_idx = returned_idx ? *returned_idx : out_indices[0];
   EmitTensorAlias(result_var, var_name, call, param_idx);
 }
 

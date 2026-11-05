@@ -48,7 +48,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast, get_args, get_origin
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
-from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_RETURN_PARAMS_ATTR
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
@@ -723,7 +723,8 @@ def _inline_annotation_ir_type(annotation: Any, path: tuple[int, ...] = ()) -> _
         )
     view = annotation.layout
     if isinstance(view, TensorLayout):
-        view = _ir.TensorView(layout=view)
+        # A layout shorthand leaves strides for lowering to materialize.
+        view = _ir.TensorView(stride=[], layout=view)
     return _ir.TensorType(shape, annotation.dtype, memref=annotation.memref, tensor_view=view)
 
 
@@ -1530,7 +1531,11 @@ def _render_folded_return_annotation(
 
 
 def _extern_return_type(
-    definition: ast.FunctionDef, ctx: SpecializeContext, ann_globals: dict[str, Any], params: list[str]
+    definition: ast.FunctionDef,
+    ctx: SpecializeContext,
+    ann_globals: dict[str, Any],
+    params: list[str],
+    returned_params: list[str] | None,
 ) -> str | None:
     """Specialize the snapshot, retaining the ordinary inference fallback for bare types."""
     if "return" in ctx.eager_tile_annotations.sources:
@@ -1550,16 +1555,18 @@ def _extern_return_type(
             _tile_annotation_dynvars(_eval_annotation(ast.unparse(normalized), ann_globals))
         )
     if result is not None:
-        _validate_extern_return_mapping(ctx, params, f" -> {result}")
+        _validate_extern_return_mapping(ctx, params, f" -> {result}", returned_params)
     return result
 
 
-def _validate_extern_return_mapping(ctx: SpecializeContext, params: list[str], ret_ann: str) -> None:
+def _validate_extern_return_mapping(
+    ctx: SpecializeContext, params: list[str], ret_ann: str, returned_params: list[str] | None
+) -> None:
     """Reject declarations the header-only output-buffer ABI cannot represent.
 
-    Both caller metadata propagation and orchestration aliases map returns to
-    Out/InOut parameters in declaration order. Types alone cannot encode a
-    permutation or subset, so require matching arity and logical tensor types.
+    An explicit return identifies aliases, including subsets and permutations.
+    Without one, types alone cannot encode those identities, so use all Out/InOut
+    parameters in declaration order. Validate types against the selected aliases.
     Use the parser's resolver for tuple semantics and symbolic dimensions.
     """
     if not ret_ann:
@@ -1569,11 +1576,15 @@ def _validate_extern_return_mapping(ctx: SpecializeContext, params: list[str], r
     signature = ast.parse(f"def kernel({', '.join(params)}){ret_ann}: pass").body[0]
     assert isinstance(signature, ast.FunctionDef) and signature.returns is not None
     outputs: list[tuple[str, _ir.Type]] = []
+    param_types: dict[str, _ir.Type] = {}
     for arg in signature.args.args:
         assert arg.annotation is not None
         typ, direction = resolver.resolve_param_type(arg.annotation)
+        param_types[arg.arg] = typ
         if direction in (_ir.ParamDirection.Out, _ir.ParamDirection.InOut):
             outputs.append((arg.arg, typ))
+    if returned_params is not None:
+        outputs = [(name, param_types[name]) for name in returned_params]
     resolved = resolver.resolve_type(signature.returns)
     returns = resolved if isinstance(resolved, list) else [resolved]
     if any(isinstance(typ, _ir.TupleType) for typ in returns):
@@ -1582,12 +1593,22 @@ def _validate_extern_return_mapping(ctx: SpecializeContext, params: list[str], r
             "which cannot alias tensor output parameters; use Python tuple[...] for multiple results"
         )
     if len(returns) != len(outputs):
+        if returned_params is not None:
+            raise ValueError(
+                f"Extern '{ctx.source_def_name}' declares {len(returns)} results for "
+                f"{len(outputs)} explicitly returned tensor parameters"
+            )
         raise ValueError(
             f"Extern '{ctx.source_def_name}' declares {len(returns)} results for {len(outputs)} Out/InOut "
             "parameters; return every output exactly once in parameter declaration order"
         )
     for index, (actual, (name, expected)) in enumerate(zip(returns, outputs, strict=True)):
         if not _ir.structural_equal(actual, expected):
+            if returned_params is not None:
+                raise ValueError(
+                    f"Extern '{ctx.source_def_name}' result {index} must match "
+                    f"explicitly returned tensor parameter '{name}'"
+                )
             raise ValueError(
                 f"Extern '{ctx.source_def_name}' result {index} must match output parameter '{name}' "
                 "in declaration order; return reordering or incompatible output types are unsupported"
@@ -2267,19 +2288,30 @@ class Specializer:
             extra_anns=extra_param_anns,
         )
 
-        # A signature-only extern has no Return node. Preserve its complete
-        # declaration before the legacy first-Out fallback can erase outputs.
-        ret_type = (
-            _extern_return_type(func_def, ctx, ann_globals, params) if ctx.func_type == "extern" else None
-        ) or _infer_return_type(func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals)
-        ret_ann = f" -> {ret_type}" if ret_type else ""
-
         # External C++ kernel: emit header-only declaration(s) backed by the
         # hand-written source instead of a transformed DSL body. A "mixed"
         # kernel expands to an AIC member + AIV member + Group wrapper so the
         # entry's call lowers to a single MixedKernels submit.
         if ctx.func_type == "extern":
-            return self._render_external(ctx, params, ret_ann, all_param_names)
+            returned_params = self._external_return_params(func_def, tensor_params, out_params, None)
+            # A signature-only extern has no Return node. Preserve its complete
+            # declaration before the legacy first-Out fallback can erase outputs.
+            ret_type = _extern_return_type(func_def, ctx, ann_globals, params, returned_params)
+            ret_type = ret_type or _infer_return_type(
+                func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+            )
+            return self._render_external(
+                ctx,
+                params,
+                f" -> {ret_type}" if ret_type else "",
+                all_param_names,
+                self._external_return_params(func_def, tensor_params, out_params, ret_type),
+            )
+
+        ret_type = _infer_return_type(
+            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+        )
+        ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # Transform body
         dep_names = set(ctx.dep_names)
@@ -2377,12 +2409,57 @@ class Specializer:
 
         return result_lines
 
+    @staticmethod
+    def _external_return_params(
+        func_def: ast.FunctionDef,
+        tensor_params: list[str],
+        out_params: list[str],
+        ret_type: str | None,
+    ) -> list[str] | None:
+        """Preserve explicit extern result identities before discarding its body.
+
+        A return here declares aliases, not native computation. Accept a single
+        terminal return of tensor parameters; arbitrary Python computation has
+        no representation in a declaration-only kernel and must not be erased.
+        """
+        body = [
+            stmt
+            for stmt in func_def.body
+            if not (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+            )
+        ]
+        returns = [node for stmt in body for node in ast.walk(stmt) if isinstance(node, ast.Return)]
+        if returns:
+            if len(body) != 1 or not isinstance(body[0], ast.Return) or len(returns) != 1:
+                raise ValueError(
+                    f"Extern '{func_def.name}' must declare returned tensor parameters with a single "
+                    "return statement; its body is not executed"
+                )
+            value = returns[0].value
+            elements = value.elts if isinstance(value, ast.Tuple) else [value]
+            tensor_param_names = set(tensor_params)
+            if any(
+                not isinstance(element, ast.Name) or element.id not in tensor_param_names
+                for element in elements
+            ):
+                raise ValueError(f"Extern '{func_def.name}' can only return tensor parameters")
+            return [cast(ast.Name, element).id for element in elements]
+        # Retain the existing JIT single-result default explicitly. Multi-result
+        # signature-only declarations use the IR's all-writable-params contract.
+        if ret_type and out_params and not ret_type.startswith("tuple["):
+            return [out_params[0]]
+        return None
+
     def _render_external(
         self,
         ctx: SpecializeContext,
         params: list[str],
         ret_ann: str,
         all_param_names: list[str],
+        returned_params: list[str] | None,
     ) -> list[str]:
         """Render an external C++ kernel declaration as @pl.function source lines.
 
@@ -2410,9 +2487,15 @@ class Specializer:
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
+            result_contract = (
+                [f"    pl.func_attr({{{EXTERNAL_RETURN_PARAMS_ATTR!r}: [{', '.join(returned_params)}]}})"]
+                if returned_params is not None
+                else []
+            )
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
+                *result_contract,
                 "    ...",
             ]
 

@@ -43,6 +43,10 @@ Precision attributes retain their existing native policy. GM return aliases must
 resolve to parameters whose types match the declared results, including TensorView
 metadata; kernels with mismatched return views retain Tile IR.
 
+Stores with an explicit `shapes=` partition also retain Tile IR. The Buffer
+store recipe currently derives its partition from the source valid shape and
+does not carry the separate partition operand, even for rank-2 destinations.
+
 The FP32 row recipes accept dense allocation-backed matrices and static positive
 valid extents. Reductions write a column-major `[R,1]` destination whose physical
 rows are a multiple of eight. Broadcast reads that column vector and preserves

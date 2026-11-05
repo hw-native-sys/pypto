@@ -6,6 +6,12 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 过位置直接映射 `out_indices[i]`，无需追踪 `tile.store` / `ForStmt` yield
 链。
 
+外部 AIC/AIV 声明没有 `ReturnStmt`，其 `external_return_params` 中按顺序排列的参数
+引用提供相同的返回身份契约；来源追溯与结构化读取都会验证该契约。没有此属性时，
+声明必须按参数顺序返回全部可写参数，且返回数量和 Tensor 类型匹配。有歧义的契约
+会被拒绝。经过 extern 调用的 wrapper 返回值同样由步骤 A0 规范化。
+参见[外部 kernel](../language/04-external-kernels.md)。
+
 ## 概述
 
 用户代码可以以任意顺序写 `tile.store` —— 先 `out_b` 后 `out_a`，或者与计算

@@ -625,6 +625,14 @@ FunctionPtr TransformFunction(const FunctionPtr& func, const MxOffsetFacts& fact
   if (params_changed) new_func->params_ = std::move(new_params);
   if (returns_changed) new_func->return_types_ = std::move(new_return_types);
   if (body_changed) new_func->body_ = std::move(new_body);
+  // Function attrs share the body's Var identities (e.g. extern return
+  // parameters), so they must follow the same cached substitutions.
+  for (auto& [key, value] : new_func->attrs_) {
+    if (auto remapped =
+            MapAttrExprs(value, [&mutator](const ExprPtr& expr) { return mutator.VisitExpr(expr); })) {
+      value = std::move(*remapped);
+    }
+  }
   new_func->attrs_.emplace_back(kMxBlockedAttr, std::any(true));
   return new_func;
 }

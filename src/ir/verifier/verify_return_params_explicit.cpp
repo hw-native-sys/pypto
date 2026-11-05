@@ -39,10 +39,23 @@ class ReturnParamsExplicitVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      // External C++ kernels are header-only declarations (empty '...' body); the
-      // implementation lives in the hand-written source named by "external_source".
-      // They legitimately have no ReturnStmt, so exempt them from this property.
-      if (func->HasAttr(kAttrExternalSource)) continue;
+      // A declaration-only extern has no ReturnStmt, but still must identify
+      // its returned parameters. Validate the contract before a wrapper can
+      // mistake unresolved extern lineage for a fresh kernel allocation.
+      if (func->HasAttr(kAttrExternalSource)) {
+        try {
+          (void)return_lineage::ExplicitReturnedParamIndices(func);
+        } catch (const pypto::Error& error) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "ReturnParamsExplicit", 0, error.what(),
+                                   func->span_);
+        }
+        continue;
+      }
+      if (func->HasAttr(kAttrExternalReturnParams)) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "ReturnParamsExplicit", 0,
+                                 "Only external kernels may declare external returned parameters",
+                                 func->span_);
+      }
       // Graph is in scope for the same reason InCore and the wrappers are:
       // orchestration codegen reads its return->param map off the ReturnStmt to
       // alias call results to call-site tensors. Exempting it made the property

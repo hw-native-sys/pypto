@@ -116,6 +116,11 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
   for (auto item : kwargs_dict) {
     std::string key = nb::cast<std::string>(item.first);
 
+    if (key == kAttrExternalReturnParams && !nb::isinstance<nb::list>(item.second) &&
+        !nb::isinstance<nb::tuple>(item.second)) {
+      throw pypto::TypeError("external return parameters must be a list of parameter Vars");
+    }
+
     // Try to cast to common types
     // NOTE: Check DataType/MemorySpace/PipeType/CoreType/PadValue BEFORE int, and bool BEFORE int
     if (nb::isinstance<DataType>(item.second)) {
@@ -200,7 +205,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
         }
         kwargs.emplace_back(key, std::move(idxs));
       } else if (key == kAttrManualDepEdges || key == kAttrCompilerManualDepEdges ||
-                 key == kAttrArgDirOverrideVars || key == kAttrDumpVars) {
+                 key == kAttrArgDirOverrideVars || key == kAttrDumpVars || key == kAttrExternalReturnParams) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {

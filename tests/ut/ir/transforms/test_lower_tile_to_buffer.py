@@ -783,6 +783,43 @@ class Transfer:
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dtype_name", ["FP32", "INT32"])
+@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
+def test_explicit_store_partition_keeps_whole_kernel_on_tile(planner, dtype_name, dynamic):
+    """Route packing must retain its fourth store operand through selection.
+
+    Buffer selection previously accepted this valid rank-2 store, then lowering
+    asserted that it had only three operands. Exercise the model's narrowed
+    output partition with both constant and runtime row counts.
+    """
+    rows = "count" if dynamic else "8"
+    before = pl.parse_program(f"""
+@pl.program
+class PartitionedStore:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, source: pl.Tensor[[16, 32], pl.{dtype_name}],
+               output: pl.Out[pl.Tensor[[16, 16], pl.{dtype_name}]],
+               count: pl.Scalar[pl.INDEX]) -> pl.Tensor[[16, 16], pl.{dtype_name}]:
+        value = pl.load(source, [0, 0], [16, 32], valid_shape=[{rows}, 16])
+        pl.store(value, [0, 0], output, shapes=[{rows}, 16])
+        return output
+""")
+    outputs = []
+    for enabled in (False, True):
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
+            after = PassManager(OptimizationStrategy.Default).run_passes(before)
+        function = after.get_function("kernel")
+        assert function is not None
+        if enabled:
+            assert function.attrs["buffer_ir_selected"] is False
+        assert function.ir_stage == ir.FunctionIRStage.Functional
+        outputs.append(function.body)
+        source = codegen.PTOCodegen().generate(after, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        assert "pto.tstore" in source
+    ir.assert_structural_equal(*outputs, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("op_name", ["tile.load", "tile.store", "tile.add", "tile.mul"])
 def test_call_attributes_outside_lowering_contract_keep_whole_kernel_on_tile(planner, op_name):
     class AddAttribute(ir.IRMutator):

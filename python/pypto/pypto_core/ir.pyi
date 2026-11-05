@@ -2747,7 +2747,11 @@ class Function(IRNode):
     """Function role (None = unspecified)."""
 
     attrs: Final[dict[str, Any]]
-    """Function-level attributes (key-value metadata)."""
+    """Function-level attributes (key-value metadata).
+
+    ``external_return_params`` holds an ordered ``list[Var]`` referencing this
+    external function's parameters, one per returned tensor.
+    """
 
     ir_stage: Final[FunctionIRStage]
     """Function body representation; defaults to Functional."""

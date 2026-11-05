@@ -116,8 +116,9 @@ def scan_dep_io(
 
     ``output_param_names`` covers both ``pl.Out[...]`` and ``pl.InOut[...]``
     params — a caller can capture either from ``v = dep(...)`` — and is kept in
-    declaration order so it stays aligned with the callee's return order (the
-    positional target<->param zip in ``_dep_out_metas``).
+    declaration order for the ordinary positional output convention in
+    ``_dep_out_metas``. Explicit extern aliases bypass that convention and
+    propagate metadata from their returned parameter names instead.
 
     ``caller_func_type`` mirrors ``_discover_deps``'s gating: a host
     orchestrator also admits ``orchestration`` deps (its chip orchestrators).
@@ -251,8 +252,10 @@ def _dep_return_metas(
     deps: _DepScan,
     local: Mapping[str, TensorMeta],
 ) -> _DepReturn:
-    """For ``v1, ..., vk = dep(args)`` where ``dep`` returns tensors it created
-    itself, resolve each ``vi`` from the callee's own ``return`` statement.
+    """Resolve each ``vi`` in ``v1, ..., vk = dep(args)`` from the callee's return.
+
+    This also handles explicit extern aliases before the positional output
+    convention, retaining metadata for reordered and readonly parameters.
 
     ``_dep_out_metas`` covers the in-place convention, where every returned
     tensor is also an ``Out`` parameter the *caller* allocated, so its meta is
@@ -363,12 +366,20 @@ def _dep_out_metas_or_return(
     deps: _DepScan,
     local: Mapping[str, TensorMeta],
 ) -> _DepReturn:
-    """Resolve one ``v1, ..., vk = dep(args)`` target, ``Out`` convention first.
+    """Resolve one ``v1, ..., vk = dep(args)`` target from its return contract.
 
-    The ``Out`` rule validates the caller's buffer against the callee's packed
-    format without descending into its body. Where both rules apply they agree,
-    so it wins and never marks a target stale.
+    Explicit extern returns may reorder, repeat, or select readonly parameters,
+    so their aliases take precedence over the positional Out/InOut convention.
+    Signature-only externs and ordinary kernels retain the existing Out rule,
+    which also validates the caller's buffer against the callee's packed format.
     """
+    dep = deps.funcs.get(dep_name)
+    if dep is not None and dep._func_type == "extern":
+        returned = _dep_return_metas(call, dep_name, target, deps, local)
+        # A resolved return can mark targets stale without providing any metas;
+        # do not replace that result with an unrelated writable buffer's type.
+        if returned is not _DEP_RETURN_DECLINED:
+            return returned
     out_metas = _dep_out_metas(call, dep_name, target, deps, local)
     if out_metas:
         return _DepReturn(out_metas, frozenset())

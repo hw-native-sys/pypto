@@ -7,6 +7,14 @@ this pass, orchestration codegen can map tuple element indices to output
 parameters with a direct `out_indices[i]` lookup, without tracing through
 `tile.store` / `ForStmt` yield chains.
 
+External AIC/AIV declarations have no `ReturnStmt`. Their ordered parameter
+references in `external_return_params` provide the same return identity contract;
+both lineage tracing and structural lookups validate it. A declaration without
+this attribute must return all writable parameters in declaration order, with
+matching count and tensor types. Ambiguous contracts are rejected. Wrapper
+returns reached through an extern call are canonicalized by the same Step A0.
+See [external kernels](../language/04-external-kernels.md#returned-tensor-identities).
+
 ## Overview
 
 User code is free to write `tile.store` calls in any order — `out_b`
