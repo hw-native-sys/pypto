@@ -171,7 +171,8 @@ def test_hardware_loop_depth_and_dynamic_capture(depth, stop_dtype, tmp_path):
 
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
-    "feature", ["dependent_stop", "offset_add", "scalar_compare", "unsigned_add", "unsigned_div", "unsigned_mod"]
+    "feature",
+    ["dependent_stop", "offset_add", "scalar_compare", "unsigned_add", "unsigned_div", "unsigned_mod"],
 )
 def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
     """Former LLVM rewrites confused body adds/comparisons and dependent bounds."""
