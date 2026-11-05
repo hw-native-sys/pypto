@@ -468,3 +468,148 @@ def gemv_bias(
     """
     call_expr = _ir_ops.gemv_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
+
+
+def gemv_mx(
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
+    """MX block-scale matrix-vector multiplication: ``C[1, N] = A[1, K] @ B[K, N]``, Ascend950 only.
+
+    The MX variant of [`gemv`][pypto.language.tile.gemv]: each operand carries a
+    per-32-element FP8E8M0 exponent alongside its FP8 data, and the Cube applies
+    both while it reduces. Each side independently takes FP8E4M3FN or FP8E5M2, so
+    all four pairs are legal; HF8 is **not** an MX format even though ordinary
+    ``gemv`` accepts it. The result, accumulator and bias stay FP32.
+
+    Scale shapes are logical ``[1, ceil(K/32)]`` for the lhs and
+    ``[ceil(K/32), N]`` for the rhs, and the two must be distinct tiles. The lhs
+    scale comes from a **plain ND** FP8E8M0 tensor rather than a ``pl.MX_A_ZZ``
+    one: ``MX_A_ZZ`` interleaves 16 rows x 2 groups into each 32-byte fractal,
+    which has no meaning for the single row a GEMV multiplies, and the hardware
+    reads a one-row scale as ``ceil(K/32)`` contiguous bytes. The rhs scale keeps
+    ``pl.MX_B_NN``, exactly as for
+    [`matmul_mx`][pypto.language.tile.matmul_mx].
+
+    Shape requirements:
+
+    - ``M == 1`` physically, not merely logically: the Cube selects GEMV mode
+      from the Left tile's physical row count.
+    - Physical ``K % 64 == 0`` and ``N % 32 == 0``; valid K must round up to the
+      same scale-group count as physical K (``ceil(validK/32) == ceil(K/32)``).
+    - **Physical K must be 512** for these 1-byte operands. The Mat-to-Left
+      extract of a single-row lhs is a vector load whose ISA ``static_assert``
+      requires ``Cols % (512 / sizeof(dtype)) == 0``, so a shorter K cannot be
+      assembled.
+    - Valid N must equal physical N. A narrowed N cannot be assembled for
+      Ascend950: making the accumulator's logical N static turns on PTOAS's
+      ``rhs logical N == dst logical N`` rule, which then reads the rhs's
+      *physical* N.
+    - On device, valid K must equal physical K. A tile MX program whose valid K
+      is narrower compiles but faults the card, for every FP8 pair.
+
+    Args:
+        lhs: Row vector data tile ``[1, K]`` (FP8E4M3FN or FP8E5M2)
+        lhs_scale: Left-hand side scale tile ``[1, ceil(K/32)]`` (FP8E8M0)
+        rhs: Right-hand side data tile ``[K, N]`` (FP8E4M3FN or FP8E5M2)
+        rhs_scale: Right-hand side scale tile ``[ceil(K/32), N]`` (FP8E8M0)
+        acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
+            for intermediate chunks of a split-K reduction and
+            ``pl.AccPhase.Final`` for the last one.
+
+    Returns:
+        Tile wrapping the gemv_mx operation; FP32 with logical shape ``[1, N]``
+    """
+    call_expr = _ir_ops.gemv_mx(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
+    )
+    return Tile(expr=call_expr)
+
+
+def gemv_mx_acc(
+    acc: Tile,
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
+    """MX block-scale GEMV with accumulation: ``acc += gemv_mx(...)``, Ascend950 only.
+
+    Accumulates in place, so ``acc`` must be an FP32 tile with the physical and
+    valid shape of the [`gemv_mx`][pypto.language.tile.gemv_mx] result. Operand,
+    scale and shape requirements are identical to ``gemv_mx``.
+
+    **A segmented-K reduction is rejected at compile time.** Accumulating a
+    second chunk means a second set of scale tiles, which needs a fresh
+    scale-address binding after the first MX instruction has already consumed
+    one; PTOAS hoists that re-binding back to the original scale fill (PTOAS
+    #1691), so the later chunk would read the earlier chunk's scales for part of
+    its output. On device the result is wrong nondeterministically -- a two-chunk
+    K=1024 case produced a correct answer in only 3 of 6 runs -- and removing the
+    phase bits does not help, so it is not an ``acc_phase`` problem. A compile
+    error beats a silently wrong number, so the GEMV family refuses to emit the
+    shape; accumulate over a single K window instead. ``acc_phase`` itself works
+    and is the right tool for a producer/consumer flag pair within one window.
+    The same hazard exists for ``tile.matmul_mx_acc``, which is *not* rejected --
+    existing callers are built on it, so that contract is unchanged.
+
+    Unlike [`gemv_acc`][pypto.language.tile.gemv_acc] there is no ``init_cond``
+    predicate: the MX accumulate instruction exposes no conditional-initialize
+    bit through PTOAS, so seed the accumulator with ``gemv_mx`` instead.
+
+    Args:
+        acc: Accumulator tile (FP32), accumulated into in place
+        lhs: Row vector data tile ``[1, K]`` (FP8E4M3FN or FP8E5M2)
+        lhs_scale: Left-hand side scale tile ``[1, ceil(K/32)]`` (FP8E8M0)
+        rhs: Right-hand side data tile ``[K, N]`` (FP8E4M3FN or FP8E5M2)
+        rhs_scale: Right-hand side scale tile ``[ceil(K/32), N]`` (FP8E8M0)
+        acc_phase: Producer-side unit-flag phase; see
+            [`gemv_mx`][pypto.language.tile.gemv_mx]
+
+    Returns:
+        Tile wrapping the gemv_mx_acc operation
+    """
+    call_expr = _ir_ops.gemv_mx_acc(
+        acc.unwrap(),
+        lhs.unwrap(),
+        lhs_scale.unwrap(),
+        rhs.unwrap(),
+        rhs_scale.unwrap(),
+        acc_phase=acc_phase,
+    )
+    return Tile(expr=call_expr)
+
+
+def gemv_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
+    """MX block-scale GEMV with bias: ``C[1, N] = A[1, K] @ B[K, N] + bias[1, N]``, Ascend950 only.
+
+    The bias is added on the Cube's bias path while the accumulator is written,
+    so it costs no extra pass over the result. Operand, scale and shape
+    requirements are identical to [`gemv_mx`][pypto.language.tile.gemv_mx].
+
+    Carries no ``acc_phase``, mirroring
+    [`gemv_bias`][pypto.language.tile.gemv_bias]: ``pto.tgemv.mx.bias`` has no
+    such attribute, so a phase could only be accepted and then silently dropped.
+    A phased biased reduction therefore has to apply the bias in its final
+    ``gemv_mx_acc`` step's consumer instead.
+
+    Args:
+        lhs: Row vector data tile ``[1, K]`` (FP8E4M3FN or FP8E5M2)
+        lhs_scale: Left-hand side scale tile ``[1, ceil(K/32)]`` (FP8E8M0)
+        rhs: Right-hand side data tile ``[K, N]`` (FP8E4M3FN or FP8E5M2)
+        rhs_scale: Right-hand side scale tile ``[ceil(K/32), N]`` (FP8E8M0)
+        bias: Bias tile ``[1, N]`` (FP32)
+
+    Returns:
+        Tile wrapping the gemv_mx_bias operation
+    """
+    call_expr = _ir_ops.gemv_mx_bias(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap()
+    )
+    return Tile(expr=call_expr)

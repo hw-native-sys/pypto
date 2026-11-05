@@ -142,9 +142,9 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。与 `pto.tmatmul` 共用操作数配对表，因此 A5 同样接受四种 FP8 配对（E4M3FN / E5M2，两种顺序）与 HF8 x HF8；见 [Cube 操作数类型配对](ir/05-operators.md#cube-操作数类型配对operand-dtype-pairs)。A5 ST 已覆盖全部 dtype（静态 valid 累加器桥接才使 a5 GEMV 可汇编）|
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。操作数配对同 `pto.tgemv`；acc_in 仍为 FP32。A5 ST 已覆盖全部 dtype、split-K 与 `init_cond` |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST 已通过。操作数配对同 `pto.tgemv`；bias 仍为 FP32。A5 ST 已覆盖全部 dtype |
-| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 前端+codegen+ST（`tile.gemv_mx`）。仅使用 MX 操作数表（四种 FP8 组合，不含 HF8）；A 侧 scale 为普通 ND `[1, ceil(K/32)]` tensor，B 侧为 `MX_B_NN`。要求物理 K = 512（1 字节操作数的 pto-isa 向量 extract 需要 `K % 512 == 0`）且有效 N == 物理 N。有效 K 必须**等于**物理 K：收窄的有效 K 可以汇编但会导致真机 fault，因此三种 GEMV 形式都会拒绝，见 [MX GEMV](ir/05-operators.md) |
+| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 前端+codegen+ST（`tile.gemv_mx_acc`）。操作数表与 `pto.tgemv.mx` 相同；c_in 保持 FP32，且必须与 dst 为同一 SSA 值。**分段 K 没有真机覆盖**，且无法编译：在 MX 消费者之后再次绑定 scale 会被拒绝（PTOAS #1691 会把该绑定提升回最初的 scale 填充处，结果以不确定的方式出错）。发射形态由 `tests/ut/codegen/test_mx_ops_codegen.py::TestGemvMxCodegen::test_segmented_k_mx_gemv_is_rejected_rather_than_silently_wrong` 固定。A5 ST 仅覆盖单窗口的 Partial/Final 组合。未暴露 `init_cond` 等价能力 |
+| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 前端+codegen+ST（`tile.gemv_mx_bias`）；bias 保持 FP32。该算子未声明 `accPhase` 属性，因此 PyPTO 既不在 Python 包装器上暴露 `acc_phase`，也不接受通过裸 `create_op_call` 传入该关键字——类型推导会直接拒绝，而不是任由 PTOAS 丢弃 |
 | **向量算术与数学（42）** |  |  |  |  |  |  |  |  |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

@@ -1150,6 +1150,39 @@ std::vector<int64_t> ParseSliceDropDims(const ExprPtr& drop_dims_arg, const std:
  */
 std::vector<ExprPtr> ApplyDropDims(const std::vector<ExprPtr>& shape, const std::vector<int64_t>& drop_dims);
 
+/**
+ * @brief Reject an ``acc_phase`` kwarg that does not encode a valid ``AccPhase``.
+ *
+ * Shared by every operator that exposes producer-side unit-flag phasing: the
+ * matmul and GEMV families and the A5 MX GEMV family. Defined in
+ * src/ir/op/tile_ops/matmul.cpp.
+ */
+void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const std::string& op_name);
+
+/**
+ * @brief Shape the GEMV result: the mandatory 16-row FP32/INT32 Acc box holding one logical row.
+ *
+ * A GEMV multiplies a single-row lhs, but L0C is NZ-boxed at 16x16, so the
+ * smallest accumulator that can hold ``[1, N]`` is physically ``[16, N]`` with
+ * ``valid_shape = [1, N]``. The physical/logical split is load-bearing
+ * downstream: ``EmitStaticValidGemvAccView``
+ * (src/backend/common/pto_ops_elementwise.cpp) re-types that box so PTOAS's
+ * matmul operand verifier compares the *logical* 1 against the lhs rather than
+ * the physical 16.
+ *
+ * Shared by the ordinary GEMV family (``tile.gemv`` / ``_acc`` / ``_bias``) and
+ * the A5 MX GEMV family (``tile.gemv_mx`` / ``_acc`` / ``_bias``), which differ
+ * only in how the product itself is validated. Defined in
+ * src/ir/op/tile_ops/matmul.cpp.
+ *
+ * @param inferred The product type a matmul-style deducer produced; supplies the result dtype.
+ * @param lhs_type The single-row lhs tile; its physical and valid row extents must both be 1.
+ * @param rhs_type The rhs tile; supplies the physical and valid N extents.
+ */
+TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,
+                                const TileTypePtr& rhs_type);
+
 }  // namespace ir
 }  // namespace pypto
 

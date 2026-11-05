@@ -277,10 +277,15 @@ is PyPTO's copy of PTOAS `verifyMatmulTypeTriple` and pto-isa `npu/a5/TMatmul.hp
 | BF16 x BF16 | FP32 | yes | yes | matmul, gemv |
 | FP32 x FP32 | FP32 | yes | yes | matmul, gemv |
 | FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, gemv, mx |
-| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul, gemv |
-| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul, gemv |
-| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul, gemv, mx |
+| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul, gemv, mx |
+| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul, gemv, mx |
 | HF8 x HF8 | FP32 | no | yes | matmul, gemv |
+
+The `mx` family covers both `tile.matmul_mx*` and `tile.gemv_mx*`: PTOAS gates
+them through one predicate, `isA5MxFp8InputType`, which admits FP8E4M3FN and
+FP8E5M2 per side but **not** HiFloat8 — which is why HF8 keeps `matmul, gemv`
+and never gains `mx`.
 
 So on Ascend950 `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`,
 `tile.batch_matmul*`, `tensor.matmul`, and `tensor.matmul_acc` accept **mixed FP8
@@ -294,8 +299,9 @@ The ordinary GEMV family — `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias` — 
 same `verifyMatmulTypeTriple`, and their a5 TileLib templates carry the matmul
 `MATMUL_*_DTYPES` signature lists. So the FP8 and HF8 pairs are available there
 too, with the same FP32 result, FP32 `gemv_acc` accumulator and FP32 `gemv_bias`
-bias. The **MX** GEMV ops are a different instruction with a different table and
-are not covered by these rows.
+bias. The **MX** GEMV ops are a different instruction gated by a different
+predicate and are not covered by these rows; see
+[MX GEMV (Ascend950)](#mx-gemv-ascend950).
 
 GEMV's dtype check (`ValidateGemvInputDtypes`, `src/ir/op/tile_ops/matmul.cpp`)
 is a *closed* allow-list over the `gemv` rows, unlike matmul's: GEMV never had
@@ -496,19 +502,120 @@ later unrolls the batched form into per-batch 2D ops.
 
 MX uses dedicated `LeftScale` / `RightScale` memory spaces and the `FP8E8M0`
 scale dtype. PyPTO supports host-prequant MXFP8 and an explicit FP4×FP8 conversion path on Ascend950 through
-the `matmul_mx` family. `InsertMxScaleAddr` (after `InferTileMemorySpace`)
+the `matmul_mx` and `gemv_mx` families. `InsertMxScaleAddr` (after `InferTileMemorySpace`)
 inserts the internal `tile.tget_scale_addr` bindings once operand memory
 spaces are resolved.
+
+Both families admit `FP8E4M3FN` or `FP8E5M2` on each data operand
+independently, so all four pairs are legal. `HF8` is **not** an MX format even
+though the ordinary matmul and GEMV accept `HF8 × HF8`: PTOAS gates MX through
+`isA5MxFp8InputType`, which admits only the two FP8 formats. See
+[Cube operand dtype pairs](#cube-operand-dtype-pairs).
 
 | IR / DSL | Notes |
 | -------- | ----- |
 | `tile.load` of `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | The source TensorLayout carries the MX scale GM layout. Dtype is FP8E8M0, and strided sources are rejected. Public `pl.load` defaults an omitted target to `Mat`; raw IR must carry `target_memory=Mat`. |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat-to-Scale move with hardware-fixed row/row/32 (left) or col/col/32 (right) layout; the source Mat tile and layout overrides must match exactly. |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | Not supported; load MX scale data into Mat and then move it into scale memory. |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; operand positions drive automatic placement, including Vec→Mat→LeftScale/RightScale staging for `quant_mx` scales. Both data operands reaching the op must be `FP8E4M3FN`, and scale is `FP8E8M0`; `lhs_scale` and `rhs_scale` must be distinct tiles. The supported packed-input form is either packed FP4 format as lhs × FP8 rhs with an explicit `pl.cast(fp4, pl.FP8E4M3FN)` before the op; native FP4×FP4 and FP8×FP4 are rejected. Physical M/K/N, valid K, and scale-group counts use the post-cast FP8 tile extents, never the packed x2 carrier shape. Physical `M % 16 == 0`, `K % 64 == 0`, and `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; operand positions drive automatic placement, including Vec→Mat→LeftScale/RightScale staging for `quant_mx` scales. Each data operand reaching the op is `FP8E4M3FN` or `FP8E5M2`, independently of the other, and scale is `FP8E8M0`; `lhs_scale` and `rhs_scale` must be distinct tiles. The supported packed-input form is either packed FP4 format as lhs × FP8 rhs with an explicit `pl.cast(fp4, pl.FP8E4M3FN)` before the op; native FP4×FP4 and FP8×FP4 are rejected. Physical M/K/N, valid K, and scale-group counts use the post-cast FP8 tile extents, never the packed x2 carrier shape. Physical `M % 16 == 0`, `K % 64 == 0`, and `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid M/N must match the matmul output. |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. |
-| `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` family. |
+| `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` / `gemv_mx` families. |
+
+#### MX GEMV (Ascend950)
+
+The matrix-vector forms of the MX family: `C[1, N] = (A[1, K] · SA) @ (B[K, N] · SB)`.
+Operand pair, scale dtype and scale-group arithmetic are identical to
+`matmul_mx`; the differences are all consequences of `M == 1`.
+
+| IR / DSL | Notes |
+| -------- | ----- |
+| `tile.gemv_mx` / `pl.tile.gemv_mx` | `Left, LeftScale, Right, RightScale → Acc`. Physical `M` must be **exactly 1**, not merely one valid row: the Cube selects GEMV mode from the Left tile's physical row count (pto-isa `a5/TMatmulCommon.hpp` `GetGemvCtrl` is `TileLeft::Rows != 1`). The result is the mandatory 16-row FP32 `Acc` box with `valid_shape = [1, N]`. Physical `K % 64 == 0` and `N % 32 == 0`, with `ceil(validK/32) == ceil(physicalK/32)`. Accepts `acc_phase`. |
+| `tile.gemv_mx_acc` / `pl.tile.gemv_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid shape must match the `gemv_mx` result. Accepts `acc_phase`. Unlike `tile.gemv_acc` it takes **no `init_cond`**: the MX accumulate instruction exposes no conditional-initialize bit through PTOAS, so seed the accumulator with `tile.gemv_mx` instead. |
+| `tile.gemv_mx_bias` / `pl.tile.gemv_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. Carries **no `acc_phase`**, mirroring `tile.gemv_bias` / `tile.matmul_bias`: `pto.tgemv.mx.bias` declares no `accPhase` attribute, so an emitted one would be kept as a discardable MLIR attribute and silently ignored. |
+
+Scale geometry differs from `matmul_mx` on the A side only:
+
+| Operand | Physical | Valid | GM tensor layout |
+| ------- | -------- | ----- | ---------------- |
+| `lhs_scale` | `[1, ceil(K/32)]` | `[1, ceil(K/32)]` | plain ND — **not** `pl.MX_A_ZZ` |
+| `rhs_scale` | `[ceil(K/32), N]` | `[ceil(K/32), N_valid]` | `pl.MX_B_NN` |
+
+`pl.MX_A_ZZ` interleaves 16 rows × 2 groups into each 32-byte SFractal, which has
+no meaning for the single row a GEMV multiplies — and its block dimension must be
+a multiple of 16, so a `[1, G]` scale cannot be expressed in it at all. The
+hardware reads a `rows=1, fractal=32` `ScaleLeft` tile as `ceil(K/32)`
+*contiguous* bytes, so padding an `MX_A_ZZ` buffer to 16 rows is **not** an
+alternative: logical row 0's groups would sit at stride 32 inside the fractals.
+`tile.load` therefore gives a single-row `FP8E8M0` tile targeting `Mat` the
+row/row/32 scale box rather than the ND row-vector view it gives a single-row
+*data* operand.
+
+Three limits apply, all of them properties of the toolchain rather than of this
+lowering:
+
+- **Physical `K` must be 512** for these 1-byte operands. The Mat-to-Left extract
+  of a single-row lhs is a vector load whose pto-isa `static_assert` requires
+  `Cols % (512 / sizeof(DType)) == 0` (`npu/a5/TExtractCommon.hpp`).
+- **Valid `N` must equal physical `N`.** The accumulator is bridged to a
+  static-valid view so PTOAS compares logical extents (`EmitStaticValidGemvAccView`);
+  making the dst's logical `N` static also turns on PTOAS's
+  `rhs logical N == dst logical N` rule, which then reads the rhs type's
+  *physical* `N`. The bridge therefore declines for a narrowed `N`, leaving that
+  case exactly as unassemblable as it was. Fixing it needs every operand
+  re-typed, not just the accumulator.
+- **Valid `K` must equal physical `K`, and the GEMV family rejects anything
+  else.** A tile MX program with a narrower valid K assembles and then faults the
+  card, for every FP8 pair. Matching scale-group counts
+  (`ceil(validK/32) == ceil(physicalK/32)`) are *not* sufficient: physical K=512
+  with valid K=481 rounds to the same 16 groups and still faults. All three
+  `tile.gemv_mx*` forms therefore reject a narrowed valid K at type deduction.
+  The limitation predates this family and `tile.matmul_mx*` still accepts the
+  shape -- tightening it there is a contract change for existing callers
+  (pypto-lib's MX models are built on `matmul_mx`), so that scope split is
+  deliberate, not an oversight.
+
+#### Segmented-K MX reductions are unsupported (PTOAS #1691)
+
+This limit applies to the **whole MX family**, `tile.matmul_mx*` as much as
+`tile.gemv_mx*`, and it is a toolchain limit rather than a PyPTO one.
+
+**For the GEMV family PyPTO now refuses to emit the shape**: `InsertMxScaleAddr`
+raises when a `tile.gemv_mx*` call needs a second scale binding after an MX
+instruction has already consumed one. A compile error is strictly better than the
+silently wrong number described below. `tile.matmul_mx*` is *not* rejected, for
+the scope reason given above -- it is still exposed, and chunked
+`matmul_mx` + `matmul_mx_acc` is exactly how pypto-lib's MX models are written.
+
+Accumulating a second K chunk means a second set of scale tiles, so a fresh
+`tile.tget_scale_addr` binding is needed after an MX instruction has already
+consumed one. `InsertMxScaleAddr` avoids re-binding after a consumer **only when
+the binding is unchanged** — its own note is that "repeating it after a consumer
+would make PTOAS hoist it across that consumer to the original scale fill" — and
+distinct per-chunk scales make that reuse impossible. The emitted sequence is
+therefore `bind, bind, consumer, bind, bind, consumer`, which PTOAS #1691 hoists
+back to the first scale fill, so the later chunk reads the earlier chunk's scales
+for part of its output.
+
+On device the result is wrong **nondeterministically**: a two-chunk `K = 1024`
+GEMV case produced the correct answer in only 3 of 6 runs, and failed identically
+with the phase bits removed — so this is not an `acc_phase` defect, and
+`acc_phase` remains correct for a producer/consumer flag pair within one K
+window. Accumulate over a single window until #1691 is fixed.
+
+The rejection is pinned by
+`tests/ut/codegen/test_mx_ops_codegen.py::...::test_segmented_k_mx_gemv_is_rejected_rather_than_silently_wrong`,
+which is the trigger to re-add device coverage once the hoist is fixed: drop the
+rejection, restore the emission-order assertion recorded in that test, re-add the
+device case. Two controls sit beside it -- a single-window `gemv_mx` +
+`gemv_mx_acc` pair still compiles (so the rejection is not over-broad), and a
+segmented-K `matmul_mx` still compiles (pinning the scope).
+
+**Not covered by the rejection**: the loop-carried form, where the binding and
+the consumer both sit inside one loop body and the hazard only appears across
+iterations. Bindings are tracked per straight-line region, so that shape still
+compiles. It is the form the matmul models use, and there is no device
+measurement of it either way.
 
 The canonical shape is `M=128, K=64, N=64`, with FP8E4M3FN data,
 FP8E8M0 scales shaped `[128,2]` and `[2,64]`, and `mx_a_zz` / `mx_b_nn`
@@ -594,8 +701,9 @@ mints a correctly typed accumulator, at the cost of a phi between the branches.
 
 ### Accumulator phases (A2/A3)
 
-`tile.matmul`, `tile.matmul_acc`, `tile.gemv`, `tile.gemv_acc`, and
-`tile.gemv_bias` accept `acc_phase` as `pl.AccPhase.Unspecified` (the default),
+`tile.matmul`, `tile.matmul_acc`, `tile.gemv`, `tile.gemv_acc`,
+`tile.gemv_bias`, `tile.gemv_mx`, and `tile.gemv_mx_acc` accept `acc_phase` as
+`pl.AccPhase.Unspecified` (the default),
 `pl.AccPhase.Partial`, or `pl.AccPhase.Final`. `Unspecified` preserves the
 existing behavior. Use `Partial` while more K chunks remain and `Final` for
 the last chunk. The Matmul DSL entry points make `acc_phase` keyword-only,
@@ -960,7 +1068,7 @@ workspace or silently turn a requested prefetch into a no-op. See
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
 | `tile_ops/matmul.cpp` | TileOp: matmul, gemv |
-| `tile_ops/matmul_mx.cpp` | TileOp: matmul_mx, matmul_mx_acc, matmul_mx_bias, internal tget_scale_addr binding |
+| `tile_ops/matmul_mx.cpp` | TileOp: matmul_mx, matmul_mx_acc, matmul_mx_bias, gemv_mx, gemv_mx_acc, gemv_mx_bias, internal tget_scale_addr binding |
 | `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls, etc. |
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |

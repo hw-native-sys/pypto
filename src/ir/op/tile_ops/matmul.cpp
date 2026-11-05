@@ -301,15 +301,6 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
 
 namespace {
 
-void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
-                      const std::string& op_name) {
-  const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
-  CHECK(IsValidAccPhase(acc_phase)) << "The operator " << op_name
-                                    << " requires acc_phase to be AccPhase.Unspecified, AccPhase.Partial, "
-                                       "or AccPhase.Final, but got int "
-                                    << acc_phase;
-}
-
 /// Validate the GEMV (lhs, rhs) operand pair and return the accumulator dtype.
 ///
 /// `pto.tgemv`, `pto.tgemv.acc` and `pto.tgemv.bias` verify their element types
@@ -334,6 +325,21 @@ DataType ValidateGemvInputDtypes(const TileTypePtr& lhs_type, const TileTypePtr&
                          << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kGemv) << "), but got "
                          << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
   return pair->accumulator;
+}
+
+}  // namespace
+
+// Declared in include/pypto/ir/type_inference.h: the A5 MX GEMV family
+// (src/ir/op/tile_ops/matmul_mx.cpp) accepts the same `acc_phase` kwarg and
+// shapes its result through the same 16-row Acc box, so these two live outside
+// the file-local namespace.
+void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const std::string& op_name) {
+  const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
+  CHECK(IsValidAccPhase(acc_phase)) << "The operator " << op_name
+                                    << " requires acc_phase to be AccPhase.Unspecified, AccPhase.Partial, "
+                                       "or AccPhase.Final, but got int "
+                                    << acc_phase;
 }
 
 TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,
@@ -364,6 +370,8 @@ TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_
   tile_view.valid_shape = {lhs_valid[0], rhs_valid[1]};
   return std::make_shared<TileType>(output_shape, inferred_type->dtype_, std::nullopt, tile_view);
 }
+
+namespace {
 
 TypePtr DeduceTileGemvType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,

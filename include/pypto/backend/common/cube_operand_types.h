@@ -30,7 +30,7 @@ inline constexpr uint8_t kCubeArchAll = kCubeArchA2A3 | kCubeArchA5;
 enum class CubeOpFamily : uint8_t {
   kMatmul = 1U << 0,  ///< pto.tmatmul / .acc / .bias
   kGemv = 1U << 1,    ///< pto.tgemv / .acc / .bias
-  kMx = 1U << 2,      ///< pto.tmatmul.mx / .acc / .bias
+  kMx = 1U << 2,      ///< pto.tmatmul.mx / .acc / .bias and pto.tgemv.mx / .acc / .bias
 };
 
 /// One (lhs, rhs) element-type pair the Cube multiplies, the L0C accumulator
@@ -72,7 +72,13 @@ inline constexpr uint8_t kMatmulGemvMx = kMatmulGemv | static_cast<uint8_t>(Cube
  * gemv families share one PTOAS rule (``pto.tgemv*`` verifies through the same
  * ``verifyMatmulTypeTriple``, and the a5 TileLib templates for ``pto.tgemv`` /
  * ``.acc`` / ``.bias`` carry the same ``MATMUL_*_DTYPES`` signature lists as
- * ``pto.tmatmul``), so every row belongs to both; MX data is E4M3FN x E4M3FN only.
+ * ``pto.tmatmul``), so every row belongs to both. ``kMx`` likewise covers the MX
+ * matmul *and* MX gemv families together: PTOAS gates both through the single
+ * predicate ``isA5MxFp8InputType`` (lib/PTO/IR/PTOTile/PTOInsertAndFillPad.cpp),
+ * which admits Float8E4M3FN and Float8E5M2 per side but *not* HiFloat8 -- so
+ * HF8 x HF8 stays out of ``kMx`` while remaining in matmul and gemv. The table
+ * comment says so because a stale note here is how someone later "fixes" HF8
+ * back into the MX family.
  */
 inline constexpr CubeOperandPair kCubeOperandPairs[] = {
     {DataType::INT8, DataType::INT8, DataType::INT32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
@@ -81,9 +87,9 @@ inline constexpr CubeOperandPair kCubeOperandPairs[] = {
     {DataType::FP32, DataType::FP32, DataType::FP32, kCubeArchAll, cube_operand_detail::kMatmulGemv},
     {DataType::FP8E4M3FN, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5,
      cube_operand_detail::kMatmulGemvMx},
-    {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
-    {DataType::FP8E5M2, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
-    {DataType::FP8E5M2, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
+    {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemvMx},
+    {DataType::FP8E5M2, DataType::FP8E4M3FN, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemvMx},
+    {DataType::FP8E5M2, DataType::FP8E5M2, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemvMx},
     {DataType::HF8, DataType::HF8, DataType::FP32, kCubeArchA5, cube_operand_detail::kMatmulGemv},
 };
 

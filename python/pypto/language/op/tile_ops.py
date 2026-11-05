@@ -133,6 +133,9 @@ from ._tile_linalg import batch_matmul_acc as batch_matmul_acc
 from ._tile_linalg import gemv as gemv
 from ._tile_linalg import gemv_acc as gemv_acc
 from ._tile_linalg import gemv_bias as gemv_bias
+from ._tile_linalg import gemv_mx as gemv_mx
+from ._tile_linalg import gemv_mx_acc as gemv_mx_acc
+from ._tile_linalg import gemv_mx_bias as gemv_mx_bias
 from ._tile_linalg import matmul as matmul
 from ._tile_linalg import matmul_acc as matmul_acc
 from ._tile_linalg import matmul_bias as matmul_bias
@@ -265,6 +268,9 @@ __all__ = [
     "gemv",
     "gemv_acc",
     "gemv_bias",
+    "gemv_mx",
+    "gemv_mx_acc",
+    "gemv_mx_bias",
     "row_max",
     "row_sum",
     "row_min",

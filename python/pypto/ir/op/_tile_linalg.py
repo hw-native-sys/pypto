@@ -251,6 +251,112 @@ def matmul_mx_bias(
     )
 
 
+def gemv_mx(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matrix-vector multiplication (A5): C[1, N] = gemv_mx(A, A_scale, B, B_scale).
+
+    Args:
+        lhs: Left-hand side tile, ``[1, K]``, FP8E4M3FN or FP8E5M2
+        lhs_scale: Left scale tile, ``[1, ceil(K/32)]``, FP8E8M0
+        rhs: Right-hand side tile, ``[K, N]``, FP8E4M3FN or FP8E5M2
+        rhs_scale: Right scale tile, ``[ceil(K/32), N]``, FP8E8M0
+        acc_phase: Producer-side unit-flag phase. Use ``AccPhase.Partial`` for
+            every partial segment of a split-K reduction and ``AccPhase.Final``
+            on the last one, whose result must then be consumed by a
+            ``AccPhase.Final`` store.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for the MX GEMV; result is FP32 with valid shape ``[1, N]``
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx",
+        [lhs, lhs_scale, rhs, rhs_scale],
+        {"acc_phase": int(acc_phase)},
+        actual_span,
+    )
+
+
+def gemv_mx_acc(
+    acc: Expr,
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale GEMV with accumulation (A5): acc += gemv_mx(...).
+
+    Args:
+        acc: Accumulator tile, FP32, with the physical and valid shape of the
+            ``gemv_mx`` result; accumulated into in place
+        lhs: Left-hand side tile, ``[1, K]``, FP8E4M3FN or FP8E5M2
+        lhs_scale: Left scale tile, ``[1, ceil(K/32)]``, FP8E8M0
+        rhs: Right-hand side tile, ``[K, N]``, FP8E4M3FN or FP8E5M2
+        rhs_scale: Right scale tile, ``[ceil(K/32), N]``, FP8E8M0
+        acc_phase: Producer-side unit-flag phase; see
+            [`gemv_mx`][pypto.ir.op.tile_ops.gemv_mx]
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for the accumulating MX GEMV
+
+    Note:
+        A segmented-K reduction (a second chunk with its own scale tiles) is
+        rejected at compile time: the required second scale-address binding is
+        hoisted by PTOAS back to the first scale fill (PTOAS #1691), so the later
+        chunk would read the earlier chunk's scales and the result would be
+        silently wrong. Accumulate over one K window.
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx_acc",
+        [acc, lhs, lhs_scale, rhs, rhs_scale],
+        {"acc_phase": int(acc_phase)},
+        actual_span,
+    )
+
+
+def gemv_mx_bias(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    bias: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale GEMV with bias (A5): C[1, N] = gemv_mx(...) + bias.
+
+    Carries no ``acc_phase``: ``pto.tgemv.mx.bias`` has no such attribute, so a
+    phase could only be dropped silently. Mirrors ``gemv_bias`` / ``matmul_bias``.
+
+    Args:
+        lhs: Left-hand side tile, ``[1, K]``, FP8E4M3FN or FP8E5M2
+        lhs_scale: Left scale tile, ``[1, ceil(K/32)]``, FP8E8M0
+        rhs: Right-hand side tile, ``[K, N]``, FP8E4M3FN or FP8E5M2
+        rhs_scale: Right scale tile, ``[ceil(K/32), N]``, FP8E8M0
+        bias: Bias tile, ``[1, N]``, FP32
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for the biased MX GEMV
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx_bias", [lhs, lhs_scale, rhs, rhs_scale, bias], {}, actual_span
+    )
+
+
 def tget_scale_addr(dst_scale: Expr, src: Expr, span: Span | None = None) -> Call:
     """Build the compiler-internal MX scale-address binding operation."""
     actual_span = _get_span_or_capture(span)
