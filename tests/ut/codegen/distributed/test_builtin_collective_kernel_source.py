@@ -297,21 +297,24 @@ def test_chip_rail_multi_block_request_emits_the_launch_spec(tmp_path):
     assert ".launch_spec.set_require_sync_start(true);" in source, source
 
 
-def test_runtime_core_num_computes_the_width_from_the_comm_context(tmp_path):
-    """``B`` is emitted arithmetic over a rank count read off the CommCtx.
+def test_runtime_core_num_computes_the_width_from_the_static_rank_count(tmp_path):
+    """``B`` is emitted arithmetic over the signal's static ``NR``.
 
     RFC #2521 frozen item #3 fixes ``B = CalAllToAllVBlocks(P, L)`` as a pure
     function of ``(P, L)``. With ``L`` only known at run time the compiler
     cannot fold it, so the same formula is emitted branch-free -- the
     expression codegen has no ternary, and ``min``/``max`` alone cannot
     express ``L < P ? L : (L / P) * P``.
+
+    ``P`` is the static ``NR`` the signal already carries; the orchestration
+    must not dereference the per-rank *device* CommCtx pointer it receives.
     """
     chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime")
     source = _chip_orchestration_sources(chip.output_dir)
-    rank_read = re.search(r"int32_t (\w+) = \*reinterpret_cast<const int32_t\*>\(\w+ \+ 20\);", source)
-    assert rank_read, source
-    assert re.search(r"= \(\w+ % \w+\);", source), source
-    assert re.search(r"= static_cast<int64_t>\(\(\w+ <= \w+\)\);", source), source
+    assert "reinterpret_cast<const int32_t*>" not in source, source
+    assert "pld.system.nranks" not in source, source
+    assert re.search(r"= \(\w+ % 2\);", source), source
+    assert re.search(r"= static_cast<int64_t>\(\(\w+ [<>=]+ \w+\)\);", source), source
     assert re.search(r"= \(\w+ - \(\w+ \* \w+\)\);", source), source
 
 
@@ -339,20 +342,20 @@ def test_runtime_core_num_launch_width_is_the_admitted_width(tmp_path):
     assert "rt_available_aiv_count" not in source, source
 
 
-def test_runtime_core_num_uses_a_floored_divisor(tmp_path):
-    """The width arithmetic stays total when the communicator reports ``P = 0``.
+def test_runtime_core_num_uses_the_static_rank_count(tmp_path):
+    """The divisor is the static ``NR``; no runtime context read is emitted.
 
-    ``L % 0`` is undefined behaviour in the generated C++, so the divisor is
-    floored to 1. The resulting ``B`` is not validated: dynamic parameter
-    validity is the caller's responsibility.
+    ``NR`` is deducer-enforced positive, so ``L % P`` is always defined and no
+    floored-divisor guard is needed. Dynamic ``L`` validity remains the
+    caller's responsibility.
     """
     chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_div")
     source = _chip_orchestration_sources(chip.output_dir)
-    divisor = re.search(r"int64_t (\w+) = std::max<int64_t>\((\w+), 1\);", source)
-    assert divisor, source
-    floored, raw = divisor.group(1), divisor.group(2)
-    assert f"% {floored})" in source, source
-    assert f"% {raw})" not in source, source
+    assert "std::max<int64_t>" not in source, source
+    assert "a2av_divisor_" not in source, source
+    assert "% 2)" in source, source
+    assert "pld.system.get_comm_ctx" not in source, source
+    assert "pld.system.nranks" not in source, source
 
 
 def test_literal_core_num_emits_no_runtime_prelude(tmp_path):

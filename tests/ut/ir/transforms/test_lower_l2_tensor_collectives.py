@@ -804,8 +804,8 @@ def test_dynamic_core_num_lowers_to_an_emitted_launch_width():
     This rail rejected a runtime ``core_num`` until RFC #2521 O2: the width has
     to be computed somewhere, and the compiler cannot do it when ``L`` is only
     known at run time. The replacement is orchestration arithmetic over the
-    rank count read from the CommContext, so the attr carries an expression
-    rather than a ``ConstInt``.
+    signal's static ``NR``, so the attr carries an expression rather than a
+    ``ConstInt``.
     """
     after = passes.lower_l2_tensor_collectives()(_build_dynamic_request())
     call = _kernel_call(after)
@@ -817,19 +817,25 @@ def test_dynamic_core_num_lowers_to_an_emitted_launch_width():
     assert call.attrs["sync_start"] is True
 
 
-def test_dynamic_core_num_reads_the_rank_count_from_the_comm_context():
-    """``P`` comes from the context, not from the signal's static ``NR``.
+def test_dynamic_core_num_uses_the_static_rank_count():
+    """``P`` is the signal's static ``NR``, never a host CommCtx dereference.
 
-    Route B (RFC #2521 O2): the orchestration already holds a CommCtx, so the
-    count is one load away and costs no operand. ``MaterializeDistTensorCtx``
-    later replaces the query with the materialized parameter.
+    Route B (RFC #2521 O2): the width arithmetic still emits a prelude, but it
+    is over the static ``NR`` the signal shape already carries. A CHIP
+    orchestration receives the per-rank *device* CommCtx pointer, so a
+    ``pld.system.nranks`` read here would fault on real hardware.
     """
     after = passes.lower_l2_tensor_collectives()(_build_dynamic_request())
     pipeline = _get_func(after, "chip_pipeline")
     assert pipeline is not None
     names = _callee_names(pipeline)
-    assert "pld.system.get_comm_ctx" in names, names
-    assert "pld.system.nranks" in names, names
+    assert "pld.system.get_comm_ctx" not in names, names
+    assert "pld.system.nranks" not in names, names
+    # The prelude is still emitted: the launch width is a bound arithmetic Var.
+    call = _kernel_call(after)
+    width = call.attrs["core_num"]
+    assert isinstance(width, ir.Var), width
+    assert width.name_hint.startswith("a2av_blocks_"), width.name_hint
 
 
 def test_literal_core_num_needs_no_runtime_prelude():
@@ -891,13 +897,13 @@ def test_two_returned_collectives_keep_their_source_order():
     after = passes.lower_l2_tensor_collectives()(TwoCollectives)
     pipeline = _get_func(after, "chip_pipeline")
     assert pipeline is not None
-    names = _callee_names(pipeline)
-    kernels = [i for i, name in enumerate(names) if name == _KERNEL_NAME]
-    assert len(kernels) == 2, names
-    # The runtime width's context read must sit between the two dispatches, not
-    # before both: the literal dispatch was written first and must submit first.
-    nranks_at = names.index("pld.system.nranks")
-    assert kernels[0] < nranks_at < kernels[1], names
+    calls = [c for c in _collect_calls(pipeline.body) if c.op.name == _KERNEL_NAME]
+    assert len(calls) == 2, [c.op.name for c in _collect_calls(pipeline.body)]
+    # The literal dispatch was written first and must submit first; the runtime
+    # one follows it, with its width prelude attached immediately before it.
+    assert isinstance(calls[0].attrs["core_num"], ir.ConstInt), calls[0].attrs
+    assert isinstance(calls[1].attrs["core_num"], ir.Var), calls[1].attrs
+    assert calls[1].attrs["core_num"].name_hint.startswith("a2av_blocks_")
 
 
 @pytest.mark.parametrize("runtime_width", [False, True])
@@ -1005,7 +1011,7 @@ def test_ordinary_return_call_keeps_its_order_before_a_collective(runtime_width,
     CallLikeCollector().visit_stmt(pipeline.body)
     assert names.index("consume_step") < names.index(_KERNEL_NAME), names
     if runtime_width:
-        assert names.index("consume_step") < names.index("pld.system.nranks"), names
+        assert names.count(_KERNEL_NAME) == 1, names
     else:
         assert names == ["consume_step", _KERNEL_NAME], names
 
