@@ -94,13 +94,33 @@ retain their existing policies.
 Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
 revision is preserved; the finalizer combines successful dependencies from the
 previous attempt with rerun results. If only the finalizer is missing, rerun that
-job too. The status publisher handles rerun events and ignores older requests
-and results for obsolete PR heads. A rerun of an old request cannot cancel a
+job too. The status publisher handles rerun events and ignores superseded requests.
+If publication finds that the PR has moved to another head, closed, or changed
+its target, it invalidates the original tested head unless a verified newer request owns its
+status. Resetting or reopening the PR cannot revive an old green rerun result.
+Only dispatches from `main` can block a
+duplicate request or supersede an earlier one; feature-ref dispatches are ignored.
+Duplicate detection scans all statuses together from the PR creation time, splitting
+creation-time ranges at GitHub’s search limit. Moving between unfinished statuses
+cannot hide an existing request from that scan.
+A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances
 before result publication, the old-base result fails and requires `/ci full`
 again. This check is made at publication time; an already published success
 is not automatically invalidated by a later main push. Requiring an up-to-date
 branch at merge time is a separate ruleset policy, unchanged by this PR.
+Changed-path classification compares the pinned base and head SHAs, so later
+PR pushes cannot change which conditional tests run. If the comparison fails
+or reaches GitHub’s 300-file limit, all conditional checks are enabled.
+
+If the live-run lookup fails, the publisher validates the GitHub event’s workflow,
+repository, branch, and run identity before invalidating the gate. Event data
+can never grant success; a verified newer published request is still preserved.
+If a run-history lookup hits GitHub's search limit, or workflow/PR/job metadata cannot
+be read, the publisher preserves a verifiably newer published request; otherwise
+it marks `ci/full` failed. An old
+green result must not survive an unverifiable rerun. Post `/ci full` again to
+create a recent request with a small history window.
 The external `pr-rerun` service remains unchanged: it can still rerun eligible
 ordinary PR CI, but does not discover/authorize these dispatched full runs.
 

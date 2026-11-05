@@ -11,9 +11,12 @@
 import copy
 import importlib.util
 import json
+import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import yaml
@@ -39,6 +42,7 @@ def pr():
     return {
         "state": "open",
         "number": 123,
+        "created_at": "2026-01-01T00:00:00Z",
         "mergeable": True,
         "merge_commit_sha": MERGE,
         "head": {"sha": HEAD, "repo": {"id": 2}},
@@ -147,6 +151,8 @@ def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr):
             writes.append((path, payload))
         elif path.endswith("/permission"):
             return {"permission": "write"}
+        elif "/actions/workflows/ci.yml/runs?" in path:
+            return {"workflow_runs": []}
         elif "/pulls/" in path:
             return pr
         elif "/git/commits/" in path:
@@ -155,7 +161,6 @@ def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr):
             raise AssertionError(path)
 
     monkeypatch.setattr(control, "api", api)
-    monkeypatch.setattr(control, "pages", lambda *a: [])
     # Empty pull_request data is still a PR marker; the issue API link normally
     # has fields, but identity should depend on its presence rather than contents.
     event["issue"]["pull_request"] = {"url": "unused"}
@@ -223,6 +228,15 @@ def publication(control, monkeypatch, pr):
             raise AssertionError(path)
 
     def pages(path, key):
+        if key == "statuses":
+            assert path == f"repos/{REPO}/commits/{HEAD}/status"
+            return [
+                {
+                    "context": "ci/full",
+                    "state": "success",
+                    "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/1",
+                }
+            ]
         if path.endswith("/attempts/2/jobs"):
             return jobs
         assert "event=workflow_dispatch" in path
@@ -263,10 +277,71 @@ def test_delayed_completion_cannot_green_running_rerun(control, publication):
     assert writes[0][1]["state"] == "pending"
 
 
-def test_new_head_cannot_receive_old_success(control, publication, pr):
-    pr["head"]["sha"] = "d" * 40
+@pytest.mark.parametrize("change", ["head", "closed", "base_ref", "base_repo"])
+@pytest.mark.parametrize(
+    "run_status,conclusion", [("in_progress", None), ("completed", "failure"), ("completed", "success")]
+)
+def test_obsolete_pr_invalidates_original_head_before_it_can_return(
+    control, publication, pr, change, run_status, conclusion
+):
+    original_pr = copy.deepcopy(pr)
+    run, _, _, writes = publication
+    run.update(status=run_status, conclusion=conclusion)
+    if change == "head":
+        pr["head"]["sha"] = "d" * 40
+    elif change == "closed":
+        pr["state"] = "closed"
+    elif change == "base_ref":
+        pr["base"]["ref"] = "release"
+    else:
+        pr["base"]["repo"]["full_name"] = "different/repo"
     control.publish(REPO, {"workflow_run": {"id": 50}})
-    assert not publication[3]
+    # Resetting/reopening the PR after publication must not revive the old green.
+    pr.update(original_pr)
+    assert len(writes) == 1
+    assert writes[0][0] == f"repos/{REPO}/statuses/{HEAD}"
+    assert writes[0][1]["state"] == "failure"
+    assert writes[0][1]["target_url"].endswith("/runs/50/attempts/2")
+
+
+@pytest.mark.parametrize("run_status", ["in_progress", "completed"])
+@pytest.mark.parametrize("newer_lookup_fails", [False, True])
+def test_moved_head_preserves_only_verified_newer_status(
+    control, monkeypatch, publication, pr, run_status, newer_lookup_fails
+):
+    run, _, _, writes = publication
+    run.update(status=run_status, conclusion="failure")
+    pr["head"]["sha"] = "d" * 40
+    candidate = copy.deepcopy(run)
+    candidate.update(id=51, run_number=9, status="completed", conclusion="success")
+    original_api = control.api
+
+    def request(path, payload=None):
+        if path.endswith("/actions/runs/51"):
+            if newer_lookup_fails:
+                raise subprocess.CalledProcessError(1, ["gh", "api"])
+            return candidate
+        return original_api(path, payload)
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda *args: [
+            {
+                "context": "ci/full",
+                "state": "success",
+                "target_url": f"https://github.com/{REPO}/actions/runs/51/attempts/1",
+            }
+        ],
+    )
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    if newer_lookup_fails:
+        assert len(writes) == 1
+        assert writes[0][0] == f"repos/{REPO}/statuses/{HEAD}"
+        assert writes[0][1]["state"] == "failure"
+    else:
+        assert not writes
 
 
 def test_old_request_cannot_overwrite_newer_request(control, publication):
@@ -276,6 +351,48 @@ def test_old_request_cannot_overwrite_newer_request(control, publication):
     candidates.append(newer)
     control.publish(REPO, {"workflow_run": {"id": 50}})
     assert not writes
+
+
+@pytest.mark.parametrize("branch", ["feature", "release-tag"])
+@pytest.mark.parametrize("phase", ["in_progress", "completed"])
+def test_feature_dispatch_cannot_suppress_genuine_result(control, publication, branch, phase):
+    run, jobs, candidates, writes = publication
+    run["status"] = phase
+    run["conclusion"] = "failure"
+    jobs[0]["conclusion"] = "failure"
+    newer = copy.deepcopy(run)
+    newer.update(id=51, run_number=9, head_branch=branch)
+    candidates.append(newer)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert len(writes) == 1
+    assert writes[0][1]["state"] == ("pending" if phase == "in_progress" else "failure")
+
+
+@pytest.mark.parametrize("branch", ["feature", "release-tag"])
+def test_feature_dispatch_cannot_own_fallback_status(control, monkeypatch, publication, branch):
+    run, _, _, writes = publication
+    newer = copy.deepcopy(run)
+    newer.update(id=51, run_number=9, head_branch=branch)
+    original_api = control.api
+
+    def request(path, payload=None):
+        if path.endswith("/pulls/123"):
+            raise ValueError("PR metadata unavailable")
+        if path.endswith("/actions/runs/51"):
+            return newer
+        return original_api(path, payload)
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda *args: [
+            {"context": "ci/full", "target_url": f"https://github.com/{REPO}/actions/runs/51/attempts/1"}
+        ],
+    )
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert len(writes) == 1
+    assert writes[0][1]["state"] == "failure"
 
 
 @pytest.mark.parametrize(
@@ -381,12 +498,6 @@ def test_cancelled_run_cannot_reuse_successful_finalizer(control, publication):
     assert publication[3][0][1]["state"] == "failure"
 
 
-def test_closed_pr_result_is_ignored(control, publication, pr):
-    pr["state"] = "closed"
-    control.publish(REPO, {"workflow_run": {"id": 50}})
-    assert not publication[3]
-
-
 def test_pagination_reads_every_job(control, monkeypatch):
     calls = []
 
@@ -425,29 +536,42 @@ def test_new_request_on_another_base_supersedes_old_run(control, publication):
     assert not writes
 
 
-@pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
-def test_every_unfinished_state_blocks_duplicate_dispatch(control, monkeypatch, event, pr, status):
+@pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending", "completed"])
+@pytest.mark.parametrize("branch", ["main", "feature", "release-tag"])
+def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch, event, pr, status, branch):
     queries = []
+    writes = []
 
     def request(path, payload=None):
-        assert payload is None, "An unfinished request must prevent dispatch"
+        if payload is not None:
+            writes.append(payload)
+            return None
         if path.endswith("/permission"):
             return {"permission": "write"}
         if path.endswith("/pulls/123"):
             return pr
-        assert path.endswith(f"/git/commits/{MERGE}")
-        return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
-
-    def pages(path, key):
+        if path.endswith(f"/git/commits/{MERGE}"):
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
         queries.append(path)
-        assert key == "workflow_runs"
-        assert "&status=" in path, "Never scan the entire historical run list"
-        return [{"display_title": f"CI full PR #123 @{HEAD} base:{BASE}"}] if path.endswith(status) else []
+        assert "&branch=main&created=" in path
+        assert "status=" not in path, "Status transitions must not change query membership"
+        return {
+            "workflow_runs": [
+                {
+                    "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
+                    "head_branch": branch,
+                    "event": "workflow_dispatch",
+                    "status": status,
+                }
+            ]
+        }
 
     monkeypatch.setattr(control, "api", request)
-    monkeypatch.setattr(control, "pages", pages)
     control.dispatch(REPO, event)
-    assert any(path.endswith(f"status={status}") for path in queries)
+    assert len(queries) == 1
+    assert len(writes) == (0 if branch == "main" and status != "completed" else 1)
+    if writes:
+        assert writes[0]["ref"] == "main"
 
 
 def test_publication_history_is_bounded_by_creation_time(control, monkeypatch):
@@ -455,6 +579,7 @@ def test_publication_history_is_bounded_by_creation_time(control, monkeypatch):
 
     def request(path):
         calls.append(path)
+        assert "&branch=main" in path
         assert "&created=>=2026-11-05T01:00:00Z&per_page=100" in path
         if path.endswith("page=1"):
             # Unrelated runs can fill pages. Do not mistake them for requests
@@ -462,7 +587,13 @@ def test_publication_history_is_bounded_by_creation_time(control, monkeypatch):
             return {"workflow_runs": [{"display_title": "Manual main", "run_number": 90}] * 100}
         assert path.endswith("page=2")
         return {
-            "workflow_runs": [{"display_title": f"CI full PR #123 @{HEAD} base:{BASE}", "run_number": 10}]
+            "workflow_runs": [
+                {
+                    "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
+                    "run_number": 10,
+                    "head_branch": "main",
+                }
+            ]
         }
 
     monkeypatch.setattr(control, "api", request)
@@ -470,6 +601,160 @@ def test_publication_history_is_bounded_by_creation_time(control, monkeypatch):
         REPO, 123, HEAD, {"created_at": "2026-11-05T01:00:00Z", "run_number": 8}
     )
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("publication_scan", [False, True])
+def test_filtered_run_search_cap_cannot_silently_truncate(control, monkeypatch, publication_scan):
+    calls = []
+
+    def request(path):
+        calls.append(path)
+        assert len(calls) <= 10, "The API cannot return more than 1,000 filtered runs"
+        return {"workflow_runs": [{"display_title": "Manual main", "run_number": 90}] * 100}
+
+    monkeypatch.setattr(control, "api", request)
+    with pytest.raises(ValueError, match="pagination limit"):
+        if publication_scan:
+            control.newer_request_exists(
+                REPO, 123, HEAD, {"created_at": "2026-11-05T01:00:00Z", "run_number": 8}
+            )
+        else:
+            control.pages("repos/owner/repo/actions/workflows/ci.yml/runs?status=queued", "workflow_runs")
+    assert len(calls) == 10
+
+
+@pytest.mark.parametrize("run_status", ["in_progress", "completed"])
+def test_capped_scan_invalidates_the_rerun_previous_success(control, monkeypatch, publication, run_status):
+    run, _, _, writes = publication
+    run.update(status=run_status, conclusion="failure")
+
+    def capped(*args):
+        raise ValueError("Recent CI requests exceeded the pagination limit")
+
+    def latest_status(path, key):
+        assert path == f"repos/{REPO}/commits/{HEAD}/status"
+        assert key == "statuses"
+        return [
+            {
+                "context": "ci/full",
+                "state": "success",
+                "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/1",
+            }
+        ]
+
+    monkeypatch.setattr(control, "newer_request_exists", capped)
+    monkeypatch.setattr(control, "pages", latest_status)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert writes[0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize("candidate_number", [7, 9])
+def test_capped_scan_preserves_only_a_verified_newer_status(
+    control, monkeypatch, publication, candidate_number
+):
+    run, _, _, writes = publication
+    candidate = copy.deepcopy(run)
+    candidate.update(id=51, run_number=candidate_number)
+    original_api = control.api
+
+    def capped(*args):
+        raise ValueError("Recent CI requests exceeded the pagination limit")
+
+    def request(path, payload=None):
+        if path.endswith("/actions/runs/51"):
+            return candidate
+        return original_api(path, payload)
+
+    monkeypatch.setattr(control, "newer_request_exists", capped)
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda *args: [
+            {"context": "ci/full", "target_url": f"https://github.com/{REPO}/actions/runs/51/attempts/1"}
+        ],
+    )
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    if candidate_number > run["run_number"]:
+        assert not writes
+    else:
+        assert writes[0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize("status_lookup_fails", [False, True])
+def test_metadata_failure_cannot_preserve_previous_green(
+    control, monkeypatch, publication, status_lookup_fails
+):
+    def request(path, key):
+        if key == "statuses" and not status_lookup_fails:
+            return []
+        raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="API unavailable")
+
+    monkeypatch.setattr(control, "pages", request)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert publication[3][0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize("lookup_path", ["/pulls/123", "/workflows/ci.yml"])
+@pytest.mark.parametrize("run_status", ["in_progress", "completed"])
+@pytest.mark.parametrize("lookup_error", ["http", "json"])
+def test_gate_lookup_failure_invalidates_previous_success(
+    control, monkeypatch, publication, run_status, lookup_error, lookup_path
+):
+    run, _, _, writes = publication
+    run.update(status=run_status, conclusion="failure")
+    original_api = control.api
+
+    def request(path, payload=None):
+        if path.endswith(lookup_path):
+            if lookup_error == "http":
+                raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="Metadata lookup unavailable")
+            raise ValueError("Invalid metadata JSON")
+        return original_api(path, payload)
+
+    def latest_status(path, key):
+        assert path == f"repos/{REPO}/commits/{HEAD}/status"
+        assert key == "statuses"
+        return [
+            {
+                "context": "ci/full",
+                "state": "success",
+                "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/1",
+            }
+        ]
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(control, "pages", latest_status)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert len(writes) == 1
+    assert writes[0][0] == f"repos/{REPO}/statuses/{HEAD}"
+    assert writes[0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize("lookup_path", ["/pulls/123", "/workflows/ci.yml"])
+def test_gate_lookup_failure_preserves_verified_newer_status(control, monkeypatch, publication, lookup_path):
+    run, _, _, writes = publication
+    candidate = copy.deepcopy(run)
+    candidate.update(id=51, run_number=9)
+    original_api = control.api
+
+    def request(path, payload=None):
+        if path.endswith(lookup_path):
+            raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="Metadata lookup unavailable")
+        if path.endswith("/actions/runs/51"):
+            return candidate
+        return original_api(path, payload)
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda *args: [
+            {"context": "ci/full", "target_url": f"https://github.com/{REPO}/actions/runs/51/attempts/1"}
+        ],
+    )
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert not writes
 
 
 @pytest.mark.parametrize("cli_error", [False, True])
@@ -541,3 +826,263 @@ def test_tiered_pr_controller_uses_trusted_base_without_changing_trigger():
     )
     assert controller["sparse-checkout"] == ".github/scripts"
     assert controller["persist-credentials"] is False
+
+
+@pytest.mark.parametrize(
+    "case,event_name,expected",
+    [
+        ("docs", "pull_request", ("true", "true", "false")),
+        ("docs", "workflow_dispatch", ("false", "true", "false")),
+        ("mixed", "workflow_dispatch", ("false", "true", "false")),
+        ("rename", "pull_request", ("false", "true", "false")),
+        ("version", "workflow_dispatch", ("false", "false", "true")),
+        ("same-version", "workflow_dispatch", ("false", "false", "false")),
+        ("299-files", "pull_request", ("true", "true", "false")),
+        ("300-files", "pull_request", ("false", "true", "true")),
+        ("missing-files", "workflow_dispatch", ("false", "true", "true")),
+        ("empty", "workflow_dispatch", ("false", "true", "true")),
+        ("unavailable", "workflow_dispatch", ("false", "true", "true")),
+        ("missing-version", "workflow_dispatch", ("false", "true", "true")),
+    ],
+)
+def test_classification_uses_pinned_comparison(tmp_path, case, event_name, expected):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    classify = next(s for s in workflow["jobs"]["changes"]["steps"] if s.get("id") == "classify")
+    assert "inputs.base_sha" in classify["env"]["PR_BASE_SHA"]
+    assert "inputs.head_sha" in classify["env"]["PR_HEAD_SHA"]
+    files = [{"filename": "docs/en/example.md"}]
+    if case == "mixed":
+        files.insert(0, {"filename": "src/example.cpp"})
+    elif case == "rename":
+        files[0]["previous_filename"] = "src/example.cpp"
+    elif case in {"version", "same-version", "missing-version"}:
+        files = [{"filename": "toolchain/versions.env"}]
+    elif case in {"299-files", "300-files"}:
+        files *= int(case.split("-")[0])
+    elif case == "empty":
+        files = []
+    comparison = {} if case == "missing-files" else {"files": files}
+    output_file, calls_file = tmp_path / "outputs", tmp_path / "calls"
+    env = dict(
+        os.environ,
+        GITHUB_OUTPUT=str(output_file),
+        EVENT_NAME=event_name,
+        PR_NUMBER="123",
+        PR_BASE_SHA=BASE,
+        PR_HEAD_SHA=HEAD,
+        REPO=REPO,
+        CI_TEST_CALLS=str(calls_file),
+        CI_TEST_COMPARISON=json.dumps(comparison),
+        CI_TEST_CASE=case,
+    )
+    # The stub rejects all mutable PR reads. Only the authorized immutable
+    # comparison and the two pinned version-file requests can succeed.
+    stub = r"""
+    gh() {
+      local endpoint="${!#}"
+      printf '%s\n' "$endpoint" >> "$CI_TEST_CALLS"
+      case "$endpoint" in
+        "repos/$REPO/compare/$PR_BASE_SHA...$PR_HEAD_SHA?per_page=1")
+          [ "$CI_TEST_CASE" != unavailable ] || return 1
+          printf '%s\n' "$CI_TEST_COMPARISON" ;;
+        "repos/$REPO/contents/toolchain/versions.env?ref=$PR_BASE_SHA")
+          printf 'PTOAS_VERSION=1\n' ;;
+        "repos/$REPO/contents/toolchain/versions.env?ref=$PR_HEAD_SHA")
+          [ "$CI_TEST_CASE" != missing-version ] || return 1
+          if [ "$CI_TEST_CASE" = same-version ]; then
+            printf '# changed comment\nPTOAS_VERSION=1\n'
+          else
+            printf 'PTOAS_VERSION=2\n'
+          fi ;;
+        *) return 99 ;;
+      esac
+    }
+    """
+    result = subprocess.run(
+        ["bash", "-c", stub + classify["run"]], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in output_file.read_text().splitlines())
+    assert tuple(outputs[k] for k in ("docs_only", "docs_changed", "ptoas_version_changed")) == expected
+    calls = calls_file.read_text().splitlines()
+    assert calls[0] == f"repos/{REPO}/compare/{BASE}...{HEAD}?per_page=1"
+    assert all("/pulls/" not in call for call in calls)
+
+
+@pytest.fixture
+def publication_event(publication):
+    run = copy.deepcopy(publication[0])
+    # Even a delayed successful completion must only invalidate on lookup failure.
+    run.update(run_attempt=1, status="completed", conclusion="success")
+    return {
+        "action": "completed",
+        "repository": copy.deepcopy(run["repository"]),
+        "workflow": {"id": run["workflow_id"], "path": run["path"]},
+        "workflow_run": run,
+    }
+
+
+@pytest.mark.parametrize("action", ["requested", "in_progress", "completed"])
+@pytest.mark.parametrize("lookup_error", ["http", "json"])
+def test_live_lookup_failure_invalidates_event_success(
+    control, monkeypatch, publication, publication_event, action, lookup_error
+):
+    publication_event["action"] = action
+    original_api = control.api
+
+    def request(path, payload=None):
+        if path.endswith("/actions/runs/50"):
+            if lookup_error == "http":
+                raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="Live run unavailable")
+            raise ValueError("Invalid run JSON")
+        return original_api(path, payload)
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda *args: [
+            {"context": "ci/full", "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/1"}
+        ],
+    )
+    control.publish(REPO, publication_event)
+    writes = publication[3]
+    assert len(writes) == 1
+    assert writes[0][0] == f"repos/{REPO}/statuses/{HEAD}"
+    assert writes[0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("action",), "unrelated"),
+        (("repository", "full_name"), "unrelated/repo"),
+        (("repository", "id"), 3),
+        (("workflow", "path"), ".github/workflows/fake.yml"),
+        (("workflow", "id"), 100),
+        (("workflow_run", "path"), ".github/workflows/fake.yml"),
+        (("workflow_run", "head_branch"), "feature"),
+        (("workflow_run", "event"), "pull_request"),
+        (("workflow_run", "repository", "full_name"), "unrelated/repo"),
+        (("workflow_run", "head_repository", "id"), 2),
+        (("workflow_run", "display_title"), "Unrelated run"),
+        (("workflow_run", "run_attempt"), 0),
+        (("workflow_run", "run_number"), "8"),
+        (("workflow_run", "workflow_id"), None),
+        (("workflow",), None),
+    ],
+)
+def test_live_lookup_failure_rejects_untrusted_event(
+    control, monkeypatch, publication, publication_event, path, value
+):
+    target = publication_event
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    def unavailable(path, payload=None):
+        assert payload is None
+        assert path.endswith("/actions/runs/50")
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(control.UntrustedRunError, match="event provenance"):
+        control.publish(REPO, publication_event)
+    assert not publication[3]
+
+
+@pytest.mark.parametrize("newer_lookup_fails", [False, True])
+def test_live_lookup_failure_preserves_only_verified_newer_writer(
+    control, monkeypatch, publication, publication_event, newer_lookup_fails
+):
+    candidate = copy.deepcopy(publication[0])
+    candidate.update(id=51, run_number=9)
+    original_api = control.api
+
+    def request(path, payload=None):
+        if path.endswith("/actions/runs/50") or (newer_lookup_fails and path.endswith("/actions/runs/51")):
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        if path.endswith("/actions/runs/51"):
+            return candidate
+        return original_api(path, payload)
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda *args: [
+            {"context": "ci/full", "target_url": f"https://github.com/{REPO}/actions/runs/51/attempts/1"}
+        ],
+    )
+    control.publish(REPO, publication_event)
+    if newer_lookup_fails:
+        assert publication[3][0][1]["state"] == "failure"
+    else:
+        assert not publication[3]
+
+
+@pytest.mark.parametrize("unfinished", [False, True])
+def test_duplicate_scan_splits_large_history_without_losing_old_reruns(control, monkeypatch, unfinished):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(seconds=1100)
+    title = f"CI full PR #123 @{HEAD} base:{BASE}"
+    calls = []
+    runs = [
+        {
+            "display_title": title,
+            "head_branch": "main",
+            "event": "workflow_dispatch",
+            "status": "requested" if unfinished and second == 0 else "completed",
+            "created_at": f"{start + timedelta(seconds=second):%Y-%m-%dT%H:%M:%SZ}",
+        }
+        for second in range(1101)
+    ]
+
+    def request(path):
+        query = parse_qs(urlsplit(path).query)
+        assert "status" not in query
+        lower, upper = (
+            datetime.strptime(v, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            for v in query["created"][0].split("..")
+        )
+        page = int(query["page"][0])
+        assert 1 <= page <= 10
+        calls.append((lower, upper, page))
+        # A rerun created at the oldest boundary can change state between pages.
+        # Its membership must not depend on which status was queried first.
+        if unfinished and len(calls) > 1:
+            runs[0]["status"] = "queued"
+        matches = [
+            run
+            for run in reversed(runs)
+            if f"{lower:%Y-%m-%dT%H:%M:%SZ}" <= run["created_at"] <= f"{upper:%Y-%m-%dT%H:%M:%SZ}"
+        ]
+        return {"workflow_runs": matches[(page - 1) * 100 : page * 100]}
+
+    monkeypatch.setattr(control, "api", request)
+    assert control.unfinished_request_exists(REPO, title, start, end) is unfinished
+    windows = {(lower, upper) for lower, upper, _ in calls}
+    middle = start + timedelta(seconds=550)
+    assert windows == {(start, end), (start, middle), (middle + timedelta(seconds=1), end)}
+
+
+def test_duplicate_scan_rejects_unsplittable_cap(control, monkeypatch):
+    point = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(control, "api", lambda *args: {"workflow_runs": [{"display_title": "Other"}] * 100})
+    with pytest.raises(ValueError, match="cannot verify duplicates"):
+        control.unfinished_request_exists(REPO, "Full request", point, point)
+
+
+def test_duplicate_scan_propagates_api_failure(control, monkeypatch):
+    point = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def unavailable(*args):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        control.unfinished_request_exists(REPO, "Full request", point, point)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v", f"--confcutdir={Path(__file__).parent}"]))
