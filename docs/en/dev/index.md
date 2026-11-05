@@ -52,7 +52,7 @@ can post exactly this comment in the PR conversation:
 
 The `CI Command` workflow checks current repository permissions and dispatches
 `CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
-verifies the merge's parents before any tests start. Fork PRs are supported.
+verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 A conflicting PR, or one whose merge is still being computed, must be resolved
 or retried. The command's Actions summary records acceptance or rejection.
 An identical request already queued/running is not dispatched again.
@@ -70,13 +70,24 @@ It stays pending while full runs and succeeds only after the `full-result`
 job confirms all applicable tests passed. Skipped, missing, failed or cancelled
 required tests cannot satisfy it. The publisher runs on a fresh GitHub-hosted
 runner, reads GitHub metadata, and never executes PR code or downloads artifacts.
-Test jobs do not hold status-write or Actions-write tokens.
+Test jobs do not hold status-write or Actions-write tokens. The entire `CI`
+workflow declares `cache-mode: read`: GitHub's cache service prevents cache
+writes, including direct API calls from PR code. Hosted wheel sharing uses
+artifacts from the same run, with separate names for each producer attempt.
+Expired/missing artifacts fall back to building locally. This also makes CI's
+main-branch cache access read-only; other workflows and self-hosted disk caches
+retain their existing policies.
 
 Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
 revision is preserved; the finalizer combines successful dependencies from the
 previous attempt with rerun results. If only the finalizer is missing, rerun that
 job too. The status publisher handles rerun events and ignores older requests
-and results for obsolete PR heads. A new commit needs a new `/ci full` comment.
+and results for obsolete PR heads. A rerun of an old request cannot cancel a
+newer request. A new commit needs a new `/ci full` comment. If main advances
+before result publication, the old-base result fails and requires `/ci full`
+again. This check is made at publication time; an already published success
+is not automatically invalidated by a later main push. Requiring an up-to-date
+branch at merge time is a separate ruleset policy, unchanged by this PR.
 The external `pr-rerun` service remains unchanged: it can still rerun eligible
 ordinary PR CI, but does not discover/authorize these dispatched full runs.
 

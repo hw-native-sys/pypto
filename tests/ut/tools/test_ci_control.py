@@ -10,6 +10,8 @@
 
 import copy
 import importlib.util
+import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -190,7 +192,8 @@ def publication(control, monkeypatch, pr):
         "id": 50,
         "run_attempt": 2,
         "run_number": 8,
-        "display_title": f"CI full PR #123 @{HEAD}",
+        "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
+        "created_at": "2026-11-05T01:00:00Z",
         "event": "workflow_dispatch",
         "path": control.WORKFLOW,
         "workflow_id": 99,
@@ -213,6 +216,9 @@ def publication(control, monkeypatch, pr):
             return {"id": 99}
         elif path.endswith("/pulls/123"):
             return pr
+        elif "event=workflow_dispatch" in path:
+            assert "created=>=2026-11-05T01:00:00Z" in path
+            return {"workflow_runs": candidates}
         else:
             raise AssertionError(path)
 
@@ -392,3 +398,128 @@ def test_pagination_reads_every_job(control, monkeypatch):
     assert len(result) == 101
     assert result[-1]["name"] == "full-result"
     assert len(calls) == 2
+
+
+def test_forged_merge_with_correct_parents_is_rejected(control, pr):
+    with pytest.raises(ValueError, match="current test merge"):
+        control.verify_merge(REPO, pr, HEAD, BASE, "d" * 40)
+
+
+def test_obsolete_base_cannot_publish_success(control, publication, pr):
+    pr["base"]["sha"] = "d" * 40
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert publication[3][0][1]["state"] == "failure"
+
+
+def test_new_request_on_another_base_supersedes_old_run(control, publication):
+    run, _, candidates, writes = publication
+    newer = copy.deepcopy(run)
+    newer.update(id=51, run_number=9, display_title=f"CI full PR #123 @{HEAD} base:{'d' * 40}")
+    candidates.append(newer)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert not writes
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
+def test_every_unfinished_state_blocks_duplicate_dispatch(control, monkeypatch, event, pr, status):
+    queries = []
+
+    def request(path, payload=None):
+        assert payload is None, "An unfinished request must prevent dispatch"
+        if path.endswith("/permission"):
+            return {"permission": "write"}
+        if path.endswith("/pulls/123"):
+            return pr
+        assert path.endswith(f"/git/commits/{MERGE}")
+        return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+
+    def pages(path, key):
+        queries.append(path)
+        assert key == "workflow_runs"
+        assert "&status=" in path, "Never scan the entire historical run list"
+        return [{"display_title": f"CI full PR #123 @{HEAD} base:{BASE}"}] if path.endswith(status) else []
+
+    monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(control, "pages", pages)
+    control.dispatch(REPO, event)
+    assert any(path.endswith(f"status={status}") for path in queries)
+
+
+def test_publication_history_is_bounded_by_creation_time(control, monkeypatch):
+    calls = []
+
+    def request(path):
+        calls.append(path)
+        assert "&created=>=2026-11-05T01:00:00Z&per_page=100" in path
+        if path.endswith("page=1"):
+            # Unrelated runs can fill pages. Do not mistake them for requests
+            # for this PR, or assume a short history that fits in one page.
+            return {"workflow_runs": [{"display_title": "Manual main", "run_number": 90}] * 100}
+        assert path.endswith("page=2")
+        return {
+            "workflow_runs": [{"display_title": f"CI full PR #123 @{HEAD} base:{BASE}", "run_number": 10}]
+        }
+
+    monkeypatch.setattr(control, "api", request)
+    assert control.newer_request_exists(
+        REPO, 123, HEAD, {"created_at": "2026-11-05T01:00:00Z", "run_number": 8}
+    )
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("cli_error", [False, True])
+def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tmp_path, cli_error):
+    event_file, summary = tmp_path / "event.json", tmp_path / "summary"
+    event_file.write_text(json.dumps({}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_file))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GH_TOKEN", "secret-token")
+    monkeypatch.setattr(control.sys, "argv", ["ci_control.py", "dispatch"])
+
+    def fail(*args):
+        if cli_error:
+            raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="Forbidden <detail> secret-token")
+        raise ValueError("Only collaborators may request full CI")
+
+    monkeypatch.setattr(control, "dispatch", fail)
+    with pytest.raises(SystemExit) as error:
+        control.main()
+    assert error.value.code == 1
+    text = summary.read_text()
+    assert "dispatch failed:" in text
+    if cli_error:
+        assert "Forbidden &lt;detail&gt; [REDACTED]" in text
+        assert "secret-token" not in text
+    else:
+        assert "Only collaborators" in text
+
+
+def test_pr_jobs_cannot_write_github_caches():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    assert workflow["cache-mode"] == "read"
+    for job in workflow["jobs"].values():
+        assert job.get("cache-mode", "read") in {"read", "none"}
+    producer = workflow["jobs"]["prebuild-wheels-github"]
+    upload = next(s for s in producer["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
+    assert "github.run_attempt" in upload["with"]["name"]
+    for name in ("unit-tests", "system-tests-a5sim"):
+        downloads = [
+            s
+            for s in workflow["jobs"][name]["steps"]
+            if s.get("uses", "").startswith("actions/download-artifact@")
+        ]
+        assert len(downloads) == 1
+        assert downloads[0]["with"]["name"] == "${{ needs.prebuild-wheels-github.outputs.artifact_name }}"
+        assert "run-id" not in downloads[0]["with"]
+
+
+def test_full_rerun_concurrency_is_scoped_to_original_request():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    assert "format('full-run-{0}', github.run_id)" in workflow["concurrency"]["group"]
+    publisher = yaml.safe_load((ROOT / ".github/workflows/ci-full-status.yml").read_text())
+    assert (
+        publisher["jobs"]["publish"]["concurrency"]["group"]
+        == "ci-full-status-${{ needs.route.outputs.key }}"
+    )
+    assert "key={match[1]}-{match[2]}" in publisher["jobs"]["route"]["steps"][0]["run"]

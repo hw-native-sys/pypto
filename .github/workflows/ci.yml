@@ -1,7 +1,7 @@
 name: CI
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
-      && format('CI full PR #{0} @{1}', inputs.pr_number, inputs.head_sha)
+      && format('CI full PR #{0} @{1} base:{2}', inputs.pr_number, inputs.head_sha, inputs.base_sha)
       || format('CI {0} {1}', github.event_name, github.ref_name) }}
 
 on:
@@ -33,8 +33,12 @@ on:
 permissions:
   contents: read
 
+# Enforced by the cache service, including cache API calls made by PR code.
+# Wheel transfer uses run artifacts; cache key naming is not a security boundary.
+cache-mode: read
+
 concurrency:
-  group: ci-${{ github.workflow }}-${{ inputs.pr_number && format('full-pr-{0}', inputs.pr_number) || github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.pr_number && format('full-run-{0}', github.run_id) || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -555,7 +559,7 @@ jobs:
     # prebuild-wheels for the GitHub-hosted jobs. Same idea, different
     # plumbing, because GitHub-hosted runners share no disk: there is nothing
     # for a flock to coordinate and nothing that survives the job, so the wheels
-    # travel through actions/cache and the consumers take a real `needs:` edge.
+    # travel through run artifacts and the consumers take a real `needs:` edge.
     #
     # Named for whose runners it serves, not for an architecture. Both
     # consumers here are x86_64 and so is every GitHub-hosted runner, but the
@@ -602,7 +606,7 @@ jobs:
       run:
         shell: bash
     outputs:
-      cache_key: ${{ steps.key.outputs.cache_key }}
+      artifact_name: ${{ steps.wheels.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -697,56 +701,21 @@ jobs:
           command -v ccache >/dev/null && ccache -s || true
           ls -l wheelhouse
 
-      # Content-addressed by the checkout's tree, exactly like the self-hosted
-      # slots: a different tree is a different key, and a rebase or a re-run of
-      # the same tree reuses one. Derived after the build rather than before it
-      # so the suffix can name the versions that were actually resolved, not
-      # the ones a file asked for: the image is a moving `:latest` whose rebuild
-      # is not reproducible (an apt package, a base image, or a `cmake>=3.15`
-      # can all float), so keying on the literal string "github-ci" let a wheel
-      # built by different tools stay valid under an unchanged tree.
-      - name: Derive the wheel cache key
-        id: key
-        env:
-          PR_CACHE_SCOPE: ${{ inputs.pr_number && format('pr-{0}-run-{1}-', inputs.pr_number, github.run_id) || '' }}
-        run: |
-          tree="$(git rev-parse 'HEAD^{tree}')"
-          build_inputs="$(python - <<'PY'
-          from importlib.metadata import PackageNotFoundError, version
-          names = ("cmake", "nanobind", "ninja", "scikit-build-core")
-          def resolve(n):
-              try:
-                  return f"{n}=={version(n)}"
-              except PackageNotFoundError:
-                  return f"{n}=<absent>"
-          print(" ".join(resolve(n) for n in names))
-          PY
-          )"
-          echo "[build inputs] $build_inputs"
-          test -n "$build_inputs" || {
-            echo "::error::could not resolve the build inputs for the cache key"
-            exit 1
-          }
-          b="$(printf '%s' "$build_inputs" | sha256sum | cut -c1-12)"
-          key="wheels-x86_64-${PR_CACHE_SCOPE}${tree}-github-ci-b${b}-g1"
-          echo "cache_key=$key" >> "$GITHUB_OUTPUT"
-          echo "wheel cache key: $key"
-
-      # PR dispatches use a per-run key, never a shared main wheel key.
+      # Artifacts belong to this run. A native rerun uses a fresh attempt name,
+      # while consumers of a successful earlier producer keep its output name.
       - name: Publish the wheels
-        uses: actions/cache/save@v4
+        id: upload-wheels
+        uses: actions/upload-artifact@v4
         with:
-          path: wheelhouse
-          key: ${{ steps.key.outputs.cache_key }}
-
-      # Main only, for the quota reason on the wheel cache above: a ccache saved
-      # on a PR branch is visible to that branch alone.
-      - name: Save ccache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-x86_64-prebuild-${{ needs.changes.outputs.checkout_sha }}
+          name: wheels-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          retention-days: 7
+      - name: Record the available wheel artifact
+        id: wheels
+        env:
+          ARTIFACT_NAME: wheels-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+        run: echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
 
   unit-tests:
     # Build inputs come from build-constraints.txt rather than from whatever
@@ -823,20 +792,21 @@ jobs:
         # because setup-python's default for pip is **/requirements.txt, and
         # this repo has none — leaving it out fails the step outright rather
         # than falling back to something.
-        # Dispatched PRs run under main; do not publish their pip cache there.
-        cache: ${{ inputs.pr_number == '' && 'pip' || '' }}
+        # The workflow cache-mode permits restores only, including on main.
+        cache: pip
         cache-dependency-path: pyproject.toml
 
     # The wheel prebuild-wheels-github already built, rather than a second
     # build of the same tree. Restore-only: this job publishes nothing.
-    - name: Restore the prebuilt wheels
+    - name: Download the prebuilt wheels
       if: >-
         needs.changes.outputs.docs_only != 'true'
-        && needs.prebuild-wheels-github.outputs.cache_key != ''
-      uses: actions/cache/restore@v4
+        && needs.prebuild-wheels-github.outputs.artifact_name != ''
+      continue-on-error: true
+      uses: actions/download-artifact@v4
       with:
         path: wheelhouse
-        key: ${{ needs.prebuild-wheels-github.outputs.cache_key }}
+        name: ${{ needs.prebuild-wheels-github.outputs.artifact_name }}
 
     # The two steps the docs-only gate actually elides — installing the
     # extension and running the suite. The job itself still runs, so both
@@ -851,7 +821,7 @@ jobs:
           echo "installing the prebuilt wheel: $whl"
           pip install "pypto[dev] @ file://$PWD/$whl"
         else
-          # Reachable when the prebuild was skipped or its cache entry was
+          # Reachable when the prebuild was skipped or its artifact was
           # evicted. Slow but correct, and loud about which path it took.
           echo "::warning::no prebuilt wheel — building in place"
           pip install -v .[dev]
@@ -2491,32 +2461,13 @@ jobs:
       # Both wheels come from prebuild-wheels-github, which runs in this same
       # image — so unlike the unit-tests job there is not even a container
       # boundary between building them and installing them.
-      # Before the restore, and for the same reason the prebuild installs it:
-      # actions/cache folds the compression method into the cache *version*, so
-      # a reader without zstd asks for a `cache.tgz` version that a zstd-capable
-      # writer never produced, and misses on an exact key match. This job shares
-      # the prebuild's image, so whatever that job can write, this one must be
-      # able to read -- fixing only the writer just moved the miss from
-      # `unit-tests` (on the runner image, which has zstd) to here.
-      #
-      # A no-op once the image carries zstd; it is in the Dockerfile now, but
-      # that only reaches a PR after the image is rebuilt on main.
-      - name: Ensure zstd
-        if: needs.prebuild-wheels-github.outputs.cache_key != ''
-        run: |
-          if ! command -v zstd >/dev/null; then
-            apt-get update -qq &&
-              apt-get install -y -qq --no-install-recommends zstd || true
-          fi
-          command -v zstd >/dev/null ||
-            echo "::warning::zstd unavailable — the prebuilt wheel cache will miss"
-
-      - name: Restore the prebuilt wheels
-        if: needs.prebuild-wheels-github.outputs.cache_key != ''
-        uses: actions/cache/restore@v4
+      - name: Download the prebuilt wheels
+        if: needs.prebuild-wheels-github.outputs.artifact_name != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
         with:
           path: wheelhouse
-          key: ${{ needs.prebuild-wheels-github.outputs.cache_key }}
+          name: ${{ needs.prebuild-wheels-github.outputs.artifact_name }}
 
       - name: Install project and dependencies
         run: |
@@ -2532,10 +2483,10 @@ jobs:
 
       - name: Cache ptoas environment
         id: cache-ptoas
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/ptoas-bin
-          key: ptoas-x86_64-${{ inputs.pr_number && format('pr-{0}-run-{1}-', inputs.pr_number, github.run_id) || '' }}${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
+          key: ptoas-x86_64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
 
       - name: Install ptoas
         if: steps.cache-ptoas.outputs.cache-hit != 'true'

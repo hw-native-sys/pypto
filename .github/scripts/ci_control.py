@@ -20,11 +20,13 @@ import os
 import re
 import subprocess
 import sys
+from html import escape
 from pathlib import Path
 from typing import Any
 
 WORKFLOW = ".github/workflows/ci.yml"
-FULL_TITLE = re.compile(r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40})")
+FULL_TITLE = re.compile(r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})")
+UNFINISHED = ("queued", "in_progress", "requested", "waiting", "pending")
 REQUIRED = {
     "changes",
     "toolchain",
@@ -80,6 +82,28 @@ def report(message: str) -> None:
             stream.write(f"{message}\n\n")
 
 
+def newer_request_exists(repo: str, number: int, head: str, run: dict[str, Any]) -> bool:
+    """Limit the scan to requests created since this run, including other bases."""
+    path = (
+        f"repos/{repo}/actions/workflows/ci.yml/runs?event=workflow_dispatch"
+        f"&created=>={run['created_at']}&per_page=100"
+    )
+    for page in range(1, 101):
+        batch = api(f"{path}&page={page}")["workflow_runs"]
+        for candidate in batch:
+            match = FULL_TITLE.fullmatch(candidate.get("display_title", ""))
+            if (
+                match
+                and int(match[1]) == number
+                and match[2] == head
+                and candidate["run_number"] > run["run_number"]
+            ):
+                return True
+        if len(batch) < 100:
+            return False
+    raise ValueError("Recent CI requests exceeded the pagination limit")
+
+
 def output(values: dict[str, str]) -> None:
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
         for key, value in values.items():
@@ -112,6 +136,8 @@ def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str
         sha(value)
     if pr["head"]["sha"] != head or pr["base"]["sha"] != base:
         raise ValueError("PR changed; post /ci full again for the new revision")
+    if pr.get("merge_commit_sha") != merge:
+        raise ValueError("merge_sha is not the PR's current test merge; post /ci full again")
     commit = api(f"repos/{repo}/git/commits/{merge}")
     if [parent["sha"] for parent in commit["parents"]] != [base, head]:
         raise ValueError("Test merge does not have the authorized base and head parents")
@@ -137,11 +163,15 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         raise ValueError("PR merge is conflicting or still being computed; retry /ci full when ready")
     head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
     verify_merge(repo, pr, head, base, merge)
-    title = f"CI full PR #{number} @{head}"
-    runs = pages(f"repos/{repo}/actions/workflows/ci.yml/runs?event=workflow_dispatch", "workflow_runs")
-    if any(run["display_title"] == title and run["status"] != "completed" for run in runs):
-        report(f"Full CI for PR #{number} at {head} is already queued or running.")
-        return
+    title = f"CI full PR #{number} @{head} base:{base}"
+    for status in UNFINISHED:
+        runs = pages(
+            f"repos/{repo}/actions/workflows/ci.yml/runs?event=workflow_dispatch&status={status}",
+            "workflow_runs",
+        )
+        if any(run["display_title"] == title for run in runs):
+            report(f"Full CI for PR #{number} at {head} is already queued or running.")
+            return
     # Dispatch always chooses the trusted workflow on main, never the PR branch.
     api(
         f"repos/{repo}/actions/workflows/ci.yml/dispatches",
@@ -210,7 +240,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
         or run["head_repository"]["id"] != run["repository"]["id"]
     ):
         raise ValueError("Full CI result did not originate from the trusted workflow")
-    number, head = int(match[1]), match[2]
+    number, head, base = int(match[1]), match[2], match[3]
     pr = api(f"repos/{repo}/pulls/{number}")
     if (
         pr["state"] != "open"
@@ -223,11 +253,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
     # A newer explicit /ci full supersedes an older run, even if its first
     # workflow_run event has not been delivered yet. Old native reruns cannot
     # overwrite the newer request's status either.
-    runs = pages(f"repos/{repo}/actions/workflows/ci.yml/runs?event=workflow_dispatch", "workflow_runs")
-    if any(
-        candidate["display_title"] == run["display_title"] and candidate["run_number"] > run["run_number"]
-        for candidate in runs
-    ):
+    if newer_request_exists(repo, number, head, run):
         report("Ignoring a superseded full CI request.")
         return
     state = "pending"
@@ -242,6 +268,12 @@ def publish(repo: str, event: dict[str, Any]) -> None:
             and finalizers[0]["conclusion"] == "success"
         )
         state = "success" if passed else "failure"
+    if pr["base"]["sha"] != base:
+        # Replace an earlier green status as well: reruns must not attest a
+        # merge against an obsolete base. Strict up-to-date rules are still
+        # needed to cover main advancing after this publication completes.
+        state = "failure"
+        report("The tested base is obsolete; post /ci full again against current main.")
     api(
         f"repos/{repo}/statuses/{head}",
         {
@@ -256,12 +288,27 @@ def publish(repo: str, event: dict[str, Any]) -> None:
 
 def main() -> None:
     command = sys.argv[1]
-    if command == "aggregate":
-        aggregate(json.loads(os.environ["CI_NEEDS"]))
-        return
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    repo = os.environ["GITHUB_REPOSITORY"]
-    {"dispatch": dispatch, "prepare": prepare, "publish": publish}[command](repo, event)
+    try:
+        if command == "aggregate":
+            aggregate(json.loads(os.environ["CI_NEEDS"]))
+            return
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        repo = os.environ["GITHUB_REPOSITORY"]
+        {"dispatch": dispatch, "prepare": prepare, "publish": publish}[command](repo, event)
+    except (ValueError, subprocess.CalledProcessError) as error:
+        detail = (
+            error.stderr or str(error) if isinstance(error, subprocess.CalledProcessError) else str(error)
+        )
+        # GitHub errors may contain repository-controlled text. Escape markup,
+        # redact the token, and indent log lines so they cannot be commands.
+        for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+            if token := os.environ.get(key):
+                detail = detail.replace(token, "[REDACTED]")
+        print(f"{command} failed:\n" + "\n".join(f"  {line}" for line in detail.splitlines()))
+        if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with Path(summary).open("a") as stream:
+                stream.write(f"{escape(command)} failed:<pre>{escape(detail)}</pre>\n")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
