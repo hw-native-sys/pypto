@@ -9,14 +9,11 @@
 
 """On-board A5 runtime tests for MX quantization."""
 
-from typing import Any
-
 import pypto.language as pl
 import pytest
 import torch
 from harness import st
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.runtime.runner import RunConfig
+from harness.core.harness import DataType, TensorSpec
 
 MX_GROUP_SIZE = 32
 
@@ -96,83 +93,34 @@ def _quant_inputs_and_golden(group_axis: int) -> tuple[torch.Tensor, torch.Tenso
     return src.contiguous(), quantized.contiguous(), scale.contiguous()
 
 
-class TestQuantMx(PTOTestCase):
-    """Quantize FP32 blocks through either public MX grouping path."""
+def _make_fp8_quant(group_axis: int):
+    """Quantize exactly representable FP32 blocks through one public MX path."""
+    (rows, cols), (quant_rows, quant_cols) = _case_shapes(group_axis)
+    scale_elements = rows * cols // MX_GROUP_SIZE
 
-    __test__ = False
+    @pl.jit(auto_scope=False)
+    def quantize(
+        src: pl.Tensor[[rows, cols], pl.FP32],
+        out_quant: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
+        out_scale: pl.Out[pl.Tensor[[1, scale_elements], pl.FP8E8M0]],
+    ):
+        with pl.spmd(1):
+            block = pl.tile.get_block_idx()
+            values = pl.tile.load(src, [block * rows, 0], [rows, cols])
+            quantized, scale = pl.quant_mx(values, group_axis=group_axis)
+            pl.tile.store(quantized, [0, 0], out_quant)
+            pl.tile.store(pl.reshape(scale, [1, scale_elements]), [0, 0], out_scale)
+        return out_quant, out_scale
 
-    def __init__(self, group_axis: int, *, platform: str | None = None):
-        super().__init__(RunConfig(rtol=0, atol=0), platform=platform)
-        self.group_axis = group_axis
-        self.src_shape, self.quant_shape = _case_shapes(group_axis)
-        self.scale_elements = self.src_shape[0] * self.src_shape[1] // MX_GROUP_SIZE
-
-    def get_name(self) -> str:
-        return f"quant_mx_axis{self.group_axis}_{self.src_shape[0]}x{self.src_shape[1]}"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        src, _expected_quant, _expected_scale = _quant_inputs_and_golden(self.group_axis)
-        return [
-            TensorSpec("src", list(self.src_shape), DataType.FP32, init_value=src),
-            TensorSpec("out_quant", list(self.quant_shape), DataType.FP8E4M3FN, is_output=True),
-            TensorSpec(
-                "out_scale",
-                [1, self.scale_elements],
-                DataType.FP8E8M0,
-                is_output=True,
-            ),
-        ]
-
-    def get_program(self) -> Any:
-        src_rows, src_cols = self.src_shape
-        quant_rows, quant_cols = self.quant_shape
-        scale_elements = self.scale_elements
-        group_axis = self.group_axis
-
-        @pl.program
-        class QuantMxProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def quant_mx(
-                self,
-                src: pl.Tensor[[src_rows, src_cols], pl.FP32],
-                out_quant: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
-                out_scale: pl.Out[pl.Tensor[[1, scale_elements], pl.FP8E8M0]],
-            ):
-                src_tile = pl.load(src, [0, 0], [src_rows, src_cols])
-                quantized, scale = pl.quant_mx(src_tile, group_axis=group_axis)
-                out_quant = pl.store(quantized, [0, 0], out_quant)
-                out_scale = pl.store(pl.reshape(scale, [1, scale_elements]), [0, 0], out_scale)
-                return out_quant, out_scale
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                src: pl.Tensor[[src_rows, src_cols], pl.FP32],
-                out_quant: pl.Out[pl.Tensor[[quant_rows, quant_cols], pl.FP8E4M3FN]],
-                out_scale: pl.Out[pl.Tensor[[1, scale_elements], pl.FP8E8M0]],
-            ):
-                out_quant, out_scale = self.quant_mx(src, out_quant, out_scale)
-                return out_quant, out_scale
-
-        return QuantMxProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        _src, expected_quant, expected_scale = _quant_inputs_and_golden(self.group_axis)
-        tensors["out_quant"][:] = expected_quant
-        tensors["out_scale"][:] = expected_scale
+    return quantize
 
 
-@pytest.mark.platforms("a5")
-class TestQuantMxOperations:
-    """Numerical execution coverage for the Ascend950-only quantization ops."""
+def _fp8_quant_golden(group_axis: int):
+    def golden(tensors):
+        _src, quant, scale = _quant_inputs_and_golden(group_axis)
+        return {"out_quant": quant, "out_scale": scale}
 
-    @pytest.mark.parametrize(
-        ("platform", "group_axis"),
-        [pytest.param("a5", 1, id="a5-axis1"), pytest.param("a5", 0, id="a5-axis0")],
-    )
-    def test_quant_mx(self, test_runner, platform, group_axis):
-        result = test_runner.run(TestQuantMx(group_axis, platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+    return golden
 
 
 def _fp4_quant_golden(group_axis, algorithm, raw=False, interleave=False):
@@ -382,6 +330,53 @@ def _fp4_quant_output(name: str, shape: list[int]) -> TensorSpec:
     ],
 )
 def test_fp4_quant_runtime(case_run):
+    case_run.assert_passed()
+
+
+# The FP8 paths used to run through a PTOTestCase, whose default validator is
+# `torch.isclose`: at rtol=atol=0 that still accepts a -0.0 for a +0.0, so the
+# "exact" claim did not actually cover the sign bit of a zero payload byte.
+# These cases compare carrier bytes instead, like the FP4 ones above.
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            _make_fp8_quant(axis),
+            tensors=[
+                TensorSpec(
+                    "src",
+                    list(_case_shapes(axis)[0]),
+                    DataType.FP32,
+                    init_value=lambda axis=axis: _quant_inputs_and_golden(axis)[0],
+                ),
+                TensorSpec(
+                    "out_quant",
+                    list(_case_shapes(axis)[1]),
+                    DataType.FP8E4M3FN,
+                    init_value=lambda axis=axis: torch.zeros(_case_shapes(axis)[1], dtype=torch.uint8).view(
+                        torch.float8_e4m3fn
+                    ),
+                    is_output=True,
+                ),
+                TensorSpec(
+                    "out_scale",
+                    [1, _case_shapes(axis)[0][0] * _case_shapes(axis)[0][1] // MX_GROUP_SIZE],
+                    DataType.FP8E8M0,
+                    init_value=lambda axis=axis: torch.zeros(
+                        (1, _case_shapes(axis)[0][0] * _case_shapes(axis)[0][1] // MX_GROUP_SIZE),
+                        dtype=torch.uint8,
+                    ).view(torch.float8_e8m0fnu),
+                    is_output=True,
+                ),
+            ],
+            name=f"quant_mx_axis{axis}",
+            golden=_fp8_quant_golden(axis),
+            compare=_compare_quant_bytes,
+        )
+        for axis in (1, 0)
+    ],
+)
+def test_fp8_quant_runtime(case_run):
     case_run.assert_passed()
 
 
