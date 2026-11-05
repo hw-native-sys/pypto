@@ -101,8 +101,12 @@ def test_compile_receipts_gate_success(library, tmp_path, body, passed, count):
         "subprocess.Popen(command).wait()",
     ],
 )
-def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, passed, count, launch):
+@pytest.mark.parametrize("interpreter_options", [[], ["-u"]])
+def test_python_subprocess_compilations_are_audited(
+    library, tmp_path, cases, passed, count, launch, interpreter_options
+):
     # Formal entries can isolate cases in fresh interpreters to own runtime lifetimes.
+    # DSpark uses -u before the script; those children still need every audit hook.
     (library / "models/case.py").write_text(
         "import argparse, json, subprocess, sys\n"
         "from golden import run\n"
@@ -115,7 +119,7 @@ def test_python_subprocess_compilations_are_audited(library, tmp_path, cases, pa
         "if args.case in ('all', 'nested'):\n"
         f"    cases = {cases!r} if args.case == 'all' else ['ok']\n"
         "    for case in cases:\n"
-        "        command = [sys.executable, __file__, '-p', args.p, '-d', '0',\n"
+        f"        command = [sys.executable, *{interpreter_options!r}, __file__, '-p', args.p, '-d', '0',\n"
         "                   '--case', case, '--compile-only']\n"
         f"        {launch}\n"
         "else:\n"
@@ -146,6 +150,8 @@ def test_python_subprocess_preserves_other_commands(library, tmp_path):
         "from pathlib import Path\n"
         "from golden import run\n"
         "subprocess.run([sys.executable, '-c', 'raise SystemExit(0)'], check=True)\n"
+        "subprocess.run([sys.executable, '-u', '-c', 'raise SystemExit(0)'], check=True)\n"
+        "subprocess.run([sys.executable, '-u', '-m', 'this'], stdout=subprocess.DEVNULL, check=True)\n"
         "subprocess.run([sys.executable, str(Path(__file__).with_name('helper.py'))], check=True)\n"
         "subprocess.run([b'true'], check=True)\n"
         "run('ok', [])\n"
@@ -155,13 +161,24 @@ def test_python_subprocess_preserves_other_commands(library, tmp_path):
     assert len(result["compilations"]) == 1
 
 
-def test_python_subprocess_preserves_popen_options(library, tmp_path):
+@pytest.mark.parametrize(
+    "interpreter_options",
+    [
+        [],
+        ["-u", "-B", "-W", "ignore", "-X", "dev"],
+        ["-uB", "-Wignore", "-Xdev"],
+        ["-uBW", "ignore", "-X", "dev"],
+        ["-uBX", "dev", "-W", "ignore"],
+        ["-uB", "-Wignore", "-Xdev", "--check-hash-based-pycs", "always", "--"],
+    ],
+)
+def test_python_subprocess_preserves_popen_options(library, tmp_path, interpreter_options):
     (library / "models/case.py").write_text(
         "import os, subprocess, sys\n"
         "from pathlib import Path\n"
         "from golden import run\n"
         "if '--case' not in sys.argv:\n"
-        "    command = [sys.executable, 'case.py', '--case', 'child', '-d', '0']\n"
+        f"    command = [sys.executable, *{interpreter_options!r}, 'case.py', '--case', 'child', '-d', '0']\n"
         "    with subprocess.Popen(args=command, cwd=Path(__file__).parent,\n"
         "                          env=os.environ | {'AUDIT_CHILD': 'preserved'},\n"
         "                          stdout=subprocess.PIPE, text=True) as child:\n"
@@ -172,6 +189,9 @@ def test_python_subprocess_preserves_popen_options(library, tmp_path):
         "    assert sys.argv[1:] == ['--case', 'child', '-d', '0']\n"
         "    assert Path.cwd() == Path(__file__).parent\n"
         "    assert os.environ['AUDIT_CHILD'] == 'preserved'\n"
+        f"    if {bool(interpreter_options)!r}:\n"
+        "        assert sys.stdout.write_through and sys.flags.dont_write_bytecode\n"
+        "        assert sys._xoptions['dev'] and 'ignore' in sys.warnoptions\n"
         "    run('ok', [])\n"
         "    print('child-output')\n"
     )

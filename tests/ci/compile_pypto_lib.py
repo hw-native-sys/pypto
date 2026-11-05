@@ -121,6 +121,33 @@ def read_receipt(receipt: Path) -> list[dict[str, Any]]:
     return results
 
 
+def _python_script_index(command: list[Any] | tuple[Any, ...]) -> int | None:
+    """Locate a Python script without mistaking interpreter options for paths."""
+    index = 1
+    while index < len(command):
+        argument = os.fsdecode(command[index])
+        if argument == "--":
+            return index + 1 if index + 1 < len(command) else None
+        if argument == "-":
+            return None
+        if not argument.startswith("-"):
+            return index
+        if argument == "--check-hash-based-pycs":
+            index += 2
+            continue
+        # Short flags may be grouped. -W/-X consume the rest of their group
+        # or the next argument; -c/-m and unknown options are not script runs.
+        for offset, flag in enumerate(argument[1:], start=1):
+            if flag in "WX":
+                if offset == len(argument) - 1:
+                    index += 1
+                break
+            if flag not in "bBdEiIOPqRsSuvx":
+                return None
+        index += 1
+    return None
+
+
 def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: list[str] | None = None) -> None:
     """Force every golden.run call through its real compile-only pipeline."""
     sys.path[:0] = [str(lib), str((lib / entry).parent)]
@@ -150,17 +177,24 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
                 and Path(os.fsdecode(command[0])).resolve() == Path(sys.executable).resolve()
             ):
                 options = popen_signature.bind(args, *popenargs, **kwargs).arguments
-                script = Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[1])
+                script_index = _python_script_index(command)
+                script = (
+                    Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[script_index])
+                    if script_index is not None
+                    else None
+                )
                 if (
                     not options.get("shell")
                     and not options.get("executable")
+                    and script_index is not None
+                    and script is not None
                     and script.resolve() == entry_path
                 ):
                     # Self-dispatching entries need the same audit in each fresh interpreter.
                     child_receipt = receipt.with_name(f"{receipt.stem}.{next(child_ids)}.json")
                     child_receipt.unlink(missing_ok=True)
                     command = [
-                        command[0],
+                        *command[:script_index],
                         str(Path(__file__).resolve()),
                         "--lib",
                         str(lib),
@@ -171,7 +205,7 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
                         "--receipt",
                         str(child_receipt),
                         "--entry-args",
-                        json.dumps([os.fsdecode(arg) for arg in command[2:]]),
+                        json.dumps([os.fsdecode(arg) for arg in command[script_index + 1 :]]),
                     ]
             try:
                 super().__init__(command, *popenargs, **kwargs)
