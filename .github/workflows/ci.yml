@@ -1,4 +1,8 @@
 name: CI
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
+      && format('CI full PR #{0} @{1}', inputs.pr_number, inputs.head_sha)
+      || format('CI {0} {1}', github.event_name, github.ref_name) }}
 
 on:
   push:
@@ -6,81 +10,80 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number (normally supplied by /ci full; empty tests main)
+        type: string
+        default: ''
+      head_sha:
+        description: Authorized PR head SHA
+        type: string
+        default: ''
+      base_sha:
+        description: Authorized PR base SHA
+        type: string
+        default: ''
+      merge_sha:
+        description: Immutable test merge SHA with base/head parents
+        type: string
+        default: ''
+
+# PR test code never receives Actions/status write credentials. Publishing the
+# merge gate happens in ci-full-status.yml on a fresh GitHub-hosted runner.
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.pr_number && format('full-pr-{0}', inputs.pr_number) || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # DOCS-ONLY GATE — classifies a pull request's changed paths and, when every
-  # one of them is documentation, elides the whole build/test pipeline below:
-  # `clang-tidy`, `unit-tests`, `codegen-tests`, the four device jobs and
-  # `system-tests-a5sim`. A prose-only change cannot break a build or a test, so
-  # spending four in-house CPU / NPU slots (a scarce shared pool) on it
-  # only delays every other PR in the queue.
-  #
-  # Two mechanisms, because one of them does not work for a matrix job:
-  #  - every job except `unit-tests` is skipped outright via `if:`;
-  #  - `unit-tests` runs with its expensive *steps* gated instead, since
-  #    `jobs.<job_id>.if` is evaluated before `strategy.matrix` expands and a
-  #    skipped matrix job never creates the per-matrix required contexts. The
-  #    full reasoning, with the run that demonstrates it, is on that job.
-  #
-  # What still runs on a docs-only PR — the checks that actually validate docs:
-  #  - `pre-commit`: markdownlint, `check-docs-en-zh-parity`, `check-docs-nav`,
-  #    `check-english-only`, trailing whitespace / EOF. Free ubuntu runner.
-  #  - the separate `Docs` workflow (docs.yml): `mkdocs build --strict`, which
-  #    fails on a dead intra-docs link, a bad anchor, or a page missing from nav.
-  #  - `toolchain`: seconds-long metadata read on a free GitHub-hosted runner,
-  #    deliberately ungated here for the same reason it is ungated behind the
-  #    lint gate — gating it would protect no scarce capacity.
-  #
-  # This cannot weaken the merge rule. The skipped jobs are required status
-  # checks (repo ruleset "default"); each is a non-matrix job, so skipping it
-  # still creates a check run under its exact required context name with a
-  # `skipped` conclusion, which required status checks count as satisfied. (This
-  # is why the gate uses a job-level `if:` and not a workflow-level `paths`
-  # filter: the filter creates no check run at all, leaving every required
-  # context "expected" and the PR unmergeable.) `unit-tests` is the exception the
-  # note above covers. Nothing becomes un-runnable either: pushing a single
-  # non-documentation file to the PR flips the classification and the full
-  # pipeline runs on the next event.
-  #
-  # Deliberately conservative — `docs_only` is true only for a `pull_request`
-  # whose every changed path (both sides of a rename) matches the allowlist in the
-  # step below, and only when the file list is provably complete. A `push` to
-  # main, a `workflow_dispatch`, an API failure, an empty list and a truncated
-  # list all fall through to the full pipeline, so a mis-detection costs CI time
-  # rather than coverage.
-  # ---------------------------------------------------------------------------
+  # PR pushes run lint after CI_COMMENT_TIERS_ENABLED is enabled. Until then,
+  # preserve legacy behavior so rulesets can be migrated without a merge gap.
+  # /ci full dispatches trusted main with immutable PR head/base/merge inputs.
+  # Dispatched PR full runs deliberately disable the docs-only exemption for
+  # core tests. docs-examples and serving-guard retain their applicability gates.
   changes:
     runs-on: ubuntu-latest
     permissions:
-      # `pull-requests: read` is what the PR files API below needs; nothing is
-      # checked out or written.
+      # The classifier needs pull-requests: read. On dispatched full runs the
+      # controller comes from trusted main and never executes the PR checkout.
       contents: read
       pull-requests: read
     outputs:
+      full: ${{ steps.target.outputs.full }}
+      checkout_sha: ${{ steps.target.outputs.checkout_sha }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
       docs_changed: ${{ steps.classify.outputs.docs_changed }}
       ptoas_version_changed: ${{ steps.classify.outputs.ptoas_version_changed }}
     steps:
+      - name: Checkout CI controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Validate and pin the test revision
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_COMMENT_TIERS_ENABLED: ${{ vars.CI_COMMENT_TIERS_ENABLED }}
+        run: python .github/scripts/ci_control.py prepare
       - name: Classify changed paths
         id: classify
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
           # Only a pull request has a well-defined "files this change touches"
           # list; everything else runs the full pipeline.
-          if [ "$EVENT_NAME" != 'pull_request' ]; then
+          if [ -z "$PR_NUMBER" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "docs_changed=true" >> "$GITHUB_OUTPUT"
             # `ptoas_version_changed` gates the serving guard, which is opt-in
@@ -225,6 +228,11 @@ jobs:
             fi
           fi
 
+          # Explicit full means core tests actually execute, even for docs-only
+          # PRs. Keep docs_changed/ptoas_version_changed independently computed.
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+            docs_only=false
+          fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
           echo "ptoas_version_changed=$ptoas_version_changed" >> "$GITHUB_OUTPUT"
@@ -234,6 +242,7 @@ jobs:
           fi
 
   toolchain:
+    needs: changes
     # Single source of truth for the toolchain versions every device job uses.
     # ptoas is declared in toolchain/versions.env (pypto-owned); pto-isa is
     # DERIVED from the pinned runtime submodule's runtime/pto_isa.pin (the
@@ -256,6 +265,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.changes.outputs.checkout_sha }}
+          persist-credentials: false
           submodules: true
       - name: Read pinned toolchain versions
         id: read
@@ -278,7 +289,7 @@ jobs:
             status=1
           fi
           if grep -rnE 'git checkout [0-9a-f]{40}' .github/workflows/; then
-            echo "::error::Hardcoded pto-isa commit found in a workflow. Use \${{ needs.toolchain.outputs.pto_isa_commit }}; pto-isa is bumped via the runtime submodule (runtime/pto_isa.pin)."
+            echo "::error::Hardcoded pto-isa commit found in a workflow. Use needs.toolchain.outputs.pto_isa_commit; pto-isa is bumped via the runtime submodule (runtime/pto_isa.pin)."
             status=1
           fi
           if grep -rnE 'PTOAS_SHA256(_[A-Z0-9]+)?: *[0-9a-f]{64}' .github/workflows/; then
@@ -320,11 +331,15 @@ jobs:
   # concurrently with the gate instead.
   # ---------------------------------------------------------------------------
   pre-commit:
+    needs: changes
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.changes.outputs.checkout_sha }}
+        persist-credentials: false
     - name: Set up Python for lint hooks
       uses: actions/setup-python@v5
       with:
@@ -367,12 +382,13 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       with:
+        ref: ${{ needs.changes.outputs.checkout_sha }}
+        persist-credentials: false
         submodules: true
         path: clang-tidy-checkout
         # Host-native on a persistent self-hosted runner now: don't leave the
         # token in the reused .git/config between runs (zizmor artipacked), same
         # as every setup-ci-job / action-defs checkout in these workflows.
-        persist-credentials: false
 
     - name: Fetch base branch for diff
       if: github.event_name == 'pull_request'
@@ -488,7 +504,7 @@ jobs:
     # EXT_SUFFIX), so the two legs cannot collide even if they somehow shared a
     # cache root: they write different slots.
     needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     strategy:
@@ -516,9 +532,10 @@ jobs:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
-          persist-credentials: false
 
       # The whole job. setup-ci-job builds both wheels and publishes them to
       # $CI_CACHE_ROOT/wheels as a side effect of installing them, so there is
@@ -527,6 +544,7 @@ jobs:
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: prebuild-checkout
           needs-device: 'false'
           toolchain: bundle
@@ -564,7 +582,7 @@ jobs:
     # pinned version. simpler resolves its own pto-isa from
     # runtime/pto_isa.pin at build time, and no ptoas is installed.
     needs: [changes, pre-commit]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # `packages: read` is not decoration. Declaring a `permissions:` block at
     # all narrows GITHUB_TOKEN to exactly what it lists, and pulling the job
     # container is an authenticated ghcr.io read — so `contents: read` alone
@@ -588,6 +606,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.changes.outputs.checkout_sha }}
+          persist-credentials: false
           submodules: true
 
       # The workspace belongs to the runner user and these steps are root, so
@@ -602,7 +622,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-x86_64-prebuild-${{ github.sha }}
+          key: ccache-x86_64-prebuild-${{ needs.changes.outputs.checkout_sha }}
           restore-keys: ccache-x86_64-prebuild-
 
       - name: Enable ccache
@@ -687,6 +707,8 @@ jobs:
       # built by different tools stay valid under an unchanged tree.
       - name: Derive the wheel cache key
         id: key
+        env:
+          PR_CACHE_SCOPE: ${{ inputs.pr_number && format('pr-{0}-run-{1}-', inputs.pr_number, github.run_id) || '' }}
         run: |
           tree="$(git rev-parse 'HEAD^{tree}')"
           build_inputs="$(python - <<'PY'
@@ -706,10 +728,11 @@ jobs:
             exit 1
           }
           b="$(printf '%s' "$build_inputs" | sha256sum | cut -c1-12)"
-          key="wheels-x86_64-${tree}-github-ci-b${b}-g1"
+          key="wheels-x86_64-${PR_CACHE_SCOPE}${tree}-github-ci-b${b}-g1"
           echo "cache_key=$key" >> "$GITHUB_OUTPUT"
           echo "wheel cache key: $key"
 
+      # PR dispatches use a per-run key, never a shared main wheel key.
       - name: Publish the wheels
         uses: actions/cache/save@v4
         with:
@@ -719,11 +742,11 @@ jobs:
       # Main only, for the quota reason on the wheel cache above: a ccache saved
       # on a PR branch is visible to that branch alone.
       - name: Save ccache
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-x86_64-prebuild-${{ github.sha }}
+          key: ccache-x86_64-prebuild-${{ needs.changes.outputs.checkout_sha }}
 
   unit-tests:
     # Build inputs come from build-constraints.txt rather than from whatever
@@ -767,6 +790,7 @@ jobs:
     # job did before the prebuild existed.
     needs: [changes, pre-commit, clang-tidy, prebuild-wheels-github]
     if: >-
+      needs.changes.outputs.full == 'true' &&
       !cancelled()
       && needs.pre-commit.result == 'success'
       && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
@@ -787,6 +811,8 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       with:
+        ref: ${{ needs.changes.outputs.checkout_sha }}
+        persist-credentials: false
         submodules: true
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
@@ -797,7 +823,8 @@ jobs:
         # because setup-python's default for pip is **/requirements.txt, and
         # this repo has none — leaving it out fails the step outright rather
         # than falling back to something.
-        cache: pip
+        # Dispatched PRs run under main; do not publish their pip cache there.
+        cache: ${{ inputs.pr_number == '' && 'pip' || '' }}
         cache-dependency-path: pyproject.toml
 
     # The wheel prebuild-wheels-github already built, rather than a second
@@ -850,7 +877,7 @@ jobs:
     # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
     # blocks run inside examples-tests, against the code it changed.
     needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.docs_changed == 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_changed == 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, cpu]
@@ -872,13 +899,15 @@ jobs:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: docs-checkout
           needs-device: 'false'
           pip-cache-name: pip-docs
@@ -901,7 +930,7 @@ jobs:
     # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
     # instead of rebuilding in an ephemeral container on every PR.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -963,13 +992,15 @@ jobs:
         # runner untouched).
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: examples-checkout
           needs-device: 'false'
           toolchain: bundle
@@ -1018,7 +1049,7 @@ jobs:
     # clang-tidy, so it must not start until that pool's lint job is green.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, pre-commit, clang-tidy, toolchain]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
@@ -1043,13 +1074,15 @@ jobs:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: codegen-checkout
           needs-device: 'false'
           install-toolchain: 'false'
@@ -1111,7 +1144,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1158,15 +1191,17 @@ jobs:
         # subdir checkouts on this persistent runner untouched).
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
           # Bootstrap only fetches the public .github/actions tree; it doesn't
           # need the token persisted into .git/config afterward (zizmor artipacked).
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: st-checkout
           needs-device: 'true'
           pip-cache-name: pip-st
@@ -1248,7 +1283,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1294,15 +1329,17 @@ jobs:
         # sibling subdir checkouts on this persistent runner untouched).
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
           # Bootstrap only fetches the public .github/actions tree; it doesn't
           # need the token persisted into .git/config afterward (zizmor artipacked).
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: st-direct-checkout
           needs-device: 'true'
           toolchain: bundle
@@ -1474,7 +1511,7 @@ jobs:
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1547,15 +1584,17 @@ jobs:
         # subdir checkouts on this persistent runner untouched).
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
           # Bootstrap only fetches the public .github/actions tree; it doesn't
           # need the token persisted into .git/config afterward (zizmor artipacked).
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: dist-checkout
           needs-device: 'true'
           toolchain: bundle
@@ -1624,7 +1663,7 @@ jobs:
     # Compile all formal library entrypoints without executing device code.
     # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
@@ -1661,13 +1700,15 @@ jobs:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: lib-compile-checkout
           # This setup input activates CANN; compilation never acquires a device.
           needs-device: ${{ matrix.needs-cann }}
@@ -1715,7 +1756,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1766,15 +1807,17 @@ jobs:
         # subdir checkouts on this persistent runner untouched).
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
           # Bootstrap only fetches the public .github/actions tree; it doesn't
           # need the token persisted into .git/config afterward (zizmor artipacked).
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: lib-checkout
           needs-device: 'true'
           toolchain: bundle
@@ -1915,6 +1958,7 @@ jobs:
     # Lint gate + docs-only gate, as every other device job here.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: >-
+      needs.changes.outputs.full == 'true' &&
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.ptoas_version_changed == 'true'
     # Checkout + clone pypto-serving + test only.
@@ -1951,9 +1995,10 @@ jobs:
         # $GITHUB_WORKSPACE, but the repo is checked out into ./serving-checkout.
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
-          persist-credentials: false
 
       - name: Resolve runner card and model dir
         # Checked before the setup on purpose, mirroring serving's own job: this
@@ -2009,6 +2054,7 @@ jobs:
         # with `pypto-lib-model` or the system-test jobs.
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: serving-checkout
           needs-device: 'true'
           toolchain: bundle
@@ -2227,7 +2273,7 @@ jobs:
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree that
     # doesn't lint. Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -2257,15 +2303,17 @@ jobs:
         # subdir checkouts on this persistent runner untouched).
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: .github/actions
           clean: false
           # Bootstrap only fetches the public .github/actions tree; it doesn't
           # need the token persisted into .git/config afterward (zizmor artipacked).
-          persist-credentials: false
 
       - name: Setup CI job
         uses: ./.github/actions/setup-ci-job
         with:
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           checkout-path: a5-checkout
           needs-device: 'true'
           pip-cache-name: pip-a5
@@ -2396,6 +2444,9 @@ jobs:
           checkout-path: a5-checkout
 
   system-tests-a5sim:
+    permissions:
+      contents: read
+      packages: read
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
     # alongside it.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
@@ -2408,6 +2459,7 @@ jobs:
     # to use.
     needs: [changes, toolchain, pre-commit, clang-tidy, prebuild-wheels-github]
     if: >-
+      needs.changes.outputs.full == 'true' &&
       !cancelled()
       && needs.changes.outputs.docs_only != 'true'
       && needs.pre-commit.result == 'success'
@@ -2426,6 +2478,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.changes.outputs.checkout_sha }}
+          persist-credentials: false
           submodules: true
 
       # Same story as unit-tests: 7m52 of from-scratch compiling on run
@@ -2481,7 +2535,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/ptoas-bin
-          key: ptoas-x86_64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
+          key: ptoas-x86_64-${{ inputs.pr_number && format('pr-{0}-run-{1}-', inputs.pr_number, github.run_id) || '' }}${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
 
       - name: Install ptoas
         if: steps.cache-ptoas.outputs.cache-hit != 'true'
@@ -2551,3 +2605,43 @@ jobs:
 
       - name: Test A2A3 cross-core system tests (simulator)
         run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim
+
+  # Always run after all tests, including failed/skipped dependencies. A skipped
+  # job counts as success to GitHub rulesets, so only this explicit validation
+  # may produce the full-result signal consumed by the trusted status publisher.
+  full-result:
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
+    needs:
+      - changes
+      - toolchain
+      - pre-commit
+      - clang-tidy
+      - codegen-tests
+      - dist-system-tests
+      - docs-examples
+      - examples-tests
+      - onboard-tests-a5
+      - prebuild-wheels
+      - prebuild-wheels-github
+      - pypto-lib-compile
+      - pypto-lib-model
+      - serving-guard
+      - system-tests
+      - system-tests-a5sim
+      - system-tests-direct
+      - unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted result validator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Require every applicable full test
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python .github/scripts/ci_control.py aggregate

@@ -61,6 +61,10 @@ description: >-
   on a bundle job it is simply not there.
 
 inputs:
+  checkout-ref:
+    description: Immutable test revision; empty preserves the caller event revision
+    required: false
+    default: ''
   checkout-path:
     description: >-
       Workspace-relative dir to check the repo out into (also the venv /
@@ -266,6 +270,7 @@ runs:
       continue-on-error: true
       uses: actions/checkout@v4
       with:
+        ref: ${{ inputs.checkout-ref }}
         submodules: true
         path: ${{ inputs.checkout-path }}
         persist-credentials: false
@@ -280,6 +285,7 @@ runs:
       if: steps.checkout.outcome == 'failure'
       uses: actions/checkout@v4
       with:
+        ref: ${{ inputs.checkout-ref }}
         submodules: true
         path: ${{ inputs.checkout-path }}
         persist-credentials: false

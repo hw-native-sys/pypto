@@ -34,6 +34,71 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 | [PTOAS 算子状态矩阵](ptoas-op-status.md) | 编译器当前会发射哪些 PTOAS 公开与兼容算子 |
 | [FP4](fp4.md) | 打包 E2M1x2/E1M2x2 类型、字节载体 ABI 与现有 E2M1 算子支持 |
 
+## 评论触发完整 CI
+
+启用后，创建或更新 PR 自动运行 `changes`、`toolchain`、`pre-commit` 和
+`clang-tidy`，独立的 `Docs / build` 检查也会运行。纯文档 PR 保留自动跳过
+`clang-tidy` 的规则。PR 不再自动启动设备测试或 wheel 构建。
+
+具有仓库 **write**、**maintain** 或 **admin** 权限的协作者可以在 PR 对话中
+发布内容恰好为以下命令的评论：
+
+```text
+/ci full
+```
+
+`CI Command` 工作流检查当前仓库权限，从受信任的 `main` 调度 `CI`。
+它固定 PR head、base 和测试合并提交（test merge）的 SHA，并在测试开始前
+验证合并提交的父节点。支持 fork PR。有冲突的 PR 需要先解决冲突；GitHub
+尚未算出合并提交时，需要稍后重试。命令工作流的 Actions 总结会记录接受或
+拒绝原因。相同版本已有排队或运行中的请求时，不会重复调度。
+
+Full 包括 lint、wheel 预热、单元、示例、代码生成、系统、分布式、pypto-lib
+以及 A5/模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
+时适用；`serving-guard` 仅在 `PTOAS_VERSION` 变更时适用。Wheel 预热失败不单独
+阻止合入，因为测试任务可以自行构建；所有适用测试都必须成功。
+
+### 结果与重跑
+
+`ci/full` 是由 `CI Full Status` 发布到 PR head 的提交状态（commit status）。
+Full 运行时状态为 pending；只有 `full-result` 确认所有适用测试通过才会成功。
+必要测试被跳过、缺失、失败或取消均不能满足该检查。结果发布器使用全新的
+GitHub 托管 runner，只读取 GitHub 元数据，不执行 PR 代码或下载运行附件。
+测试任务不持有写入状态或修改 Actions 的 token。
+
+在 GitHub Actions 的 full 运行页面选择 **Re-run failed jobs**。原测试版本保持
+不变；汇总任务结合之前已成功的依赖和本次重跑结果判断是否通过。如果仅缺少
+汇总任务，还需重跑该任务。发布器处理重跑事件，并忽略被新请求替代的运行及
+旧 PR head 的结果。新提交需要重新评论 `/ci full`。
+外部 `pr-rerun` 服务保持不变：仍可重跑符合条件的普通 PR CI，但不能发现和
+授权这些手动调度的 full 运行。
+
+`main` push、不含 PR 参数的手动 CI、Daily CI 和 Codex Review 保留原有策略。
+手动 PR 参数主要供评论处理器使用；四个参数均留空时，对 main 执行 CI。
+
+### 管理员启用步骤
+
+仓库变量 `CI_COMMENT_TIERS_ENABLED` 是启用开关。未设置或为 false 时保留
+原来的自动 full CI，以便安全迁移必需检查。无需 GitHub App 密钥、公网
+webhook 地址或服务升级。
+
+1. 将工作流和脚本合入 `main`，暂不设置开关。
+2. 在测试 PR 评论 `/ci full`，验证 fork 检出、实际测试失败、
+   **Re-run failed jobs** 和最终 `ci/full` 状态；确认无权限评论无法启动 full，
+   旧版本结果无法放行新提交。
+3. 在 main 的 ruleset 中将 `ci/full` 加入必需状态检查；可选来源时选择
+   GitHub Actions。保留 `pre-commit`、`clang-tidy` 和原有审批要求。
+   不要直接要求 dispatch 的 `full-result` job，因为它属于主分支工作流版本，
+   并不直接挂在 PR head 上。
+4. 确认 `ci/full` 已成为必需检查后，移除旧的逐项重测试要求，包括
+   `unit-tests` 的矩阵检查。Lint 运行中这些检查可能被跳过或不出现，
+   测试覆盖由 `ci/full` 汇总强制保障。
+5. 设置 `CI_COMMENT_TIERS_ENABLED=true`，后续 PR 默认仅运行 lint。
+
+回滚时先取消该变量以恢复自动测试；恢复旧的重测试必需检查后，才能移除
+`ci/full` 要求。本实现针对当前 PR 合入流程；启用合并队列（merge queue）前
+需要额外实现 `merge_group` 支持。
+
 ## 自动 PR 审查
 
 `Codex Review` GitHub Actions 工作流仅审查目标分支为 `main` 的非草稿 PR，在其创建、重新打开、更新或标记为
