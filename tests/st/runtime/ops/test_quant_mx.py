@@ -256,25 +256,28 @@ class _Fp4EncodeAndDequantReference:
     comparison against the encoder golden already covers that path.
     """
 
-    def __init__(self, rows: int, groups: int):
+    def __init__(self, rows: int, groups: int, torch_dtype):
         assert rows == 16, "the packed order is row-major only for one box row"
         self._rows = rows
         self._groups = groups
+        self._torch_dtype = torch_dtype
         self._encoder = _fp4_quant_golden(1, "ocp")
-        self._source: torch.Tensor | None = None
 
     def golden(self, tensors):
-        self._source = tensors["src"].float().clone()
         return self._encoder(tensors)
 
     def compare(self, actual, expected):
         _compare_quant_bytes(actual, expected)
-        assert self._source is not None, "golden must run before compare"
+        # Rebuild the source rather than remembering it from `golden`: with
+        # `--save-kernels` into an existing directory the harness reuses the
+        # persisted goldens and never calls `golden` in this process, so any
+        # state stashed there would still be unset here.
+        source = _fp4_quant_source(1, self._torch_dtype).float()
         decoded = _decode_packed_e2m1(actual["out_quant"])
         codes = actual["out_scale"].view(torch.uint8).reshape(self._rows, self._groups)
         scales = torch.pow(2.0, codes.float() - 127.0)
         rebuilt = decoded.reshape(self._rows, self._groups, MX_GROUP_SIZE) * scales.unsqueeze(-1)
-        blocks = self._source.reshape(self._rows, self._groups, MX_GROUP_SIZE)
+        blocks = source.reshape(self._rows, self._groups, MX_GROUP_SIZE)
         limit = (_E2M1_LEVELS[-1] * scales).unsqueeze(-1)
         expected_values = torch.clamp(blocks, -limit, limit)
         wrong = rebuilt != expected_values
@@ -348,11 +351,11 @@ def _fp4_quant_output(name: str, shape: list[int]) -> TensorSpec:
     )
 
 
-# One reference per axis1 source dtype, since each instance remembers the source
-# its golden saw and hands it to its own compare.
+# One reference per axis1 source dtype, so each instance can rebuild that
+# dtype's source in `compare` without depending on `golden` having run.
 _FP4_AXIS1_REFERENCES = {
-    pl.BF16: _Fp4EncodeAndDequantReference(16, 2),
-    pl.FP16: _Fp4EncodeAndDequantReference(16, 2),
+    pl.BF16: _Fp4EncodeAndDequantReference(16, 2, torch.bfloat16),
+    pl.FP16: _Fp4EncodeAndDequantReference(16, 2, torch.float16),
 }
 
 
