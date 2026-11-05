@@ -158,6 +158,8 @@ enum class IRProperty : uint64_t {
   RegScopeValid,         ///< Register schemas, implicit captures and region ownership are valid
   HardwareLoopContractValid,  ///< Require loops are Sequential; final eligibility/evidence checked at codegen
   SimtValid,                  ///< Canonical SIMT helper signatures, domains, and launch result mappings
+  SimtOutputsMaterialized,    ///< Writable SIMT Tiles use initialized, dedicated output storage
+  SimtSpecialized,            ///< Reachable helpers carry resources matching their launch dimensions
   kCount                      ///< Sentinel (must be last)
 };
 
@@ -287,13 +289,13 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid,
- * InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks,
- * InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid,
- * AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified,
- * RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
- * FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid} —
- * lightweight checks that catch the most common IR errors.
+ * Returns {SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid,
+ * HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr,
+ * BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly,
+ * ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D,
+ * HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized,
+ * GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid,
+ * AccStorePhaseValid} — lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 

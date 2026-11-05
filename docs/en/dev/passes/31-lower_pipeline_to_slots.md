@@ -21,7 +21,7 @@ for i in pl.range(64):
     pl.tile.store(x, [i * 128], out)
 ```
 
-**The legacy rotation needs no new IR op or additional switch.** The synthesized MemRef is shaped exactly like an author's declaration, so [`InitMemRef`](35-init_memref.md) resolves it through the same path and codegen sees no difference between a rotation the author wrote and one the compiler derived.
+**The legacy rotation needs no new IR op or additional switch.** The synthesized MemRef is shaped exactly like an author's declaration, so [`InitMemRef`](37-init_memref.md) resolves it through the same path and codegen sees no difference between a rotation the author wrote and one the compiler derived.
 
 Because bounds, step and `iter_args` are untouched, there is no remainder to dispatch — a dynamic trip count needs no special case at all.
 
@@ -178,7 +178,7 @@ For a `ForStmt(kind == ForKind::Pipeline, attrs["pipeline_stages"] == F)` with `
 
 Every top-level `tile.load` result the author has not already bound.
 
-- **Loads only.** A load buffer is what must stay private so iteration `i+1`'s prefetch overlaps iteration `i`'s compute; compute intermediates may coalesce. This is the same distinction [`MemoryReuse`](37-memory_reuse.md) already draws with `pipeline_load_tiles`. Giving *every* tile `F` private copies overflows the on-chip budget on real kernels — a `stage=4` RMSNorm would need `4 x 67 KB > 188 KB` UB. `tile.read` is **not** included: it returns a scalar element, not a tile, so there is no buffer to rotate.
+- **Loads only.** A load buffer is what must stay private so iteration `i+1`'s prefetch overlaps iteration `i`'s compute; compute intermediates may coalesce. This is the same distinction [`MemoryReuse`](39-memory_reuse.md) already draws with `pipeline_load_tiles`. Giving *every* tile `F` private copies overflows the on-chip budget on real kernels — a `stage=4` RMSNorm would need `4 x 67 KB > 188 KB` UB. `tile.read` is **not** included: it returns a scalar element, not a tile, so there is no buffer to rotate.
 - **Top-level.** Only direct members of the loop body's `SeqStmts`; a load nested in an inner loop or `if` belongs to that region.
 - **No loop-invariance filter.** Every unbound top-level load qualifies, including one whose arguments never mention the induction variable. Invariance cannot be read off the induction variable: a load addressed through a loop-carried `IterArg` reads different data each iteration without naming `iv`, and skipping it would strand it with neither a slot nor a replicated copy once a sibling candidate demotes the loop. Slotting a genuinely invariant load costs nothing over the fallback either — `LowerPipelineLoops` replicates its buffer `F` times all the same.
 - A tile the author already bound to a declared allocation stays the author's.
@@ -336,7 +336,7 @@ The loop strides by its original step with a single body, and the region carries
 
 - [`LowerPipelineLoops`](32-lower_pipeline_loops.md) — the replication path, which still handles every loop this pass declines
 - [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md) — same structure for cross-core pipeline loops
-- [`InitMemRef`](35-init_memref.md) — resolves the synthesized declaration
+- [`InitMemRef`](37-init_memref.md) — resolves the synthesized declaration
 - [PTO codegen](../codegen/00-pto_codegen.md) — lowers the slots to a ptoas region
 - [Python syntax: Slots](../language/00-python_syntax.md#slots) — the hand-written form of the same declaration
 

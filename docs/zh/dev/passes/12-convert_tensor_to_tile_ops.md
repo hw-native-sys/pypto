@@ -271,7 +271,7 @@ load 会把同一个操作数放进同一块 buffer。
 
 Mat 驻留 parent 的 `tile.slice` 并不是整块 buffer。它以 `pto.subview` 到达 codegen，
 携带运行期 offset 与 **parent 的**行间距，而两者都无法进入 `alloc_tile`：动态 offset
-无法折叠进常量 `addr`（见 [`AllocateMemoryAddr`](38-allocate_memory_addr.md)），行间距
+无法折叠进常量 `addr`（见 [`AllocateMemoryAddr`](40-allocate_memory_addr.md)），行间距
 也不在类型里。ptoas 同样没有针对该窗口的转置读取 —— 它拒绝以 view 作为 mat 源的
 `pto.tmov`（"expects mat-source tmov to use matching src/dst shapes"），也在任意目标
 尺寸下拒绝对其做 `pto.treshape`（"expects src and dst to have the same total byte

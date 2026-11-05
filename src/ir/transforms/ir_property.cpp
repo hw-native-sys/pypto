@@ -131,6 +131,10 @@ std::string IRPropertyToString(IRProperty prop) {
       return "HardwareLoopContractValid";
     case IRProperty::SimtValid:
       return "SimtValid";
+    case IRProperty::SimtOutputsMaterialized:
+      return "SimtOutputsMaterialized";
+    case IRProperty::SimtSpecialized:
+      return "SimtSpecialized";
     default:
       return "Unknown";
   }
@@ -175,6 +179,8 @@ const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
                                    IRProperty::SimtValid,
+                                   IRProperty::SimtOutputsMaterialized,
+                                   IRProperty::SimtSpecialized,
                                    IRProperty::RegScopeValid,
                                    IRProperty::HardwareLoopContractValid,
                                    IRProperty::InlineFunctionsEliminated,

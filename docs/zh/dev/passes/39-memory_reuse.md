@@ -16,14 +16,14 @@
 - 共享完成后，已无引用的 MemRef 及其 alloc 语句会被清理
 
 **使用时机**：这是 `MemoryPlanner.PYPTO` 的机会性复用阶段，在
-[`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) 之后、
-[`AllocateMemoryAddr`](38-allocate_memory_addr.md) 之前运行。
+[`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md) 之后、
+[`AllocateMemoryAddr`](40-allocate_memory_addr.md) 之前运行。
 `MemoryPlanner.DSA_RP` 会跳过它，以便 DSA-RP 求解器仍能看到独立 buffer；
 `MemoryPlanner.PTOAS` 也会跳过它，因为生命周期复用由 ptoas 负责。三种模式中的
 循环 carry 与原地强制别名都已由 `MaterializeSemanticAliases` 建立。
 
 前一个 pass 还会确定编译器创建的选择池容量。证明安全的
-[条件重置](36-materialize_semantic_aliases.md#条件重置存储)可以使用单个共享静态槽位进入规划。
+[条件重置](38-materialize_semantic_aliases.md#条件重置存储)可以使用单个共享静态槽位进入规划。
 否则双槽池保留完整容量；整个 allocation 的复用不会丢弃仍然存活的槽位。
 
 ## 规划器边界
@@ -164,7 +164,7 @@ MemRef 共享完成后，部分 MemRef 对象变为无引用状态（其变量�
 
 在 tile 注解中引用一个声明好的 `pl.MemRef("name")`，作者即可把某块分配从 packer 手里收回。
 InitMemRef 将其物化为 `tile.alloc(..., pinned=True)`（见
-[InitMemRef](35-init_memref.md#声明式分配)），本 pass 随后视其为封闭的：pinned 区间在
+[InitMemRef](37-init_memref.md#声明式分配)），本 pass 随后视其为封闭的：pinned 区间在
 first-fit 打包中自开一个槽位，之后每个候选在扫描槽位时都会跳过它。（隔离是打包循环内的
 per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) 打包的最内层，且每次 shed
 都会重跑，所以该判定按区间解析一次，而不是按配对解析。）具体而言：
@@ -205,7 +205,7 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 
 两种分类都以 `Var` 标识（identity）为键，而不依赖 MemRef 是否存在。TPOP 结果、其零复制视图和普通 SSA 别名使用预留管道存储，不占用通用分配池，因此 `InitMemRef` 有意不为它们创建 MemRef。收集器仍识别这些 producer，并沿缓冲区别名视图和普通别名传播来源，再对消费它们的 writer 分类。仅仅消费 TPOP 输入并产生独立值，不会让新结果成为 TPOP 别名。
 
-值经由**循环携带（loop carry）**到达 writer 时，还需额外处理：`IterArg` 本身不是 `AssignStmt` 的定义。对于带有 MemRef 的 carry，[`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md) 已将 carry 链（init value、`IterArg`、yield value）融合到同一 base，收集器可进一步检查该 base 的污染（taint）状态。必须用 `AsVarLike` 读取操作数，才能识别这种 carry（`As<Var>` 不匹配 `IterArg` 自己的 `ObjectKind`）。
+值经由**循环携带（loop carry）**到达 writer 时，还需额外处理：`IterArg` 本身不是 `AssignStmt` 的定义。对于带有 MemRef 的 carry，[`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md) 已将 carry 链（init value、`IterArg`、yield value）融合到同一 base，收集器可进一步检查该 base 的污染（taint）状态。必须用 `AsVarLike` 读取操作数，才能识别这种 carry（`As<Var>` 不匹配 `IterArg` 自己的 `ObjectKind`）。
 
 carry 同时也打破了程序序，因此收集器会对函数体遍历**两次**。污染某条 carry buffer 的 producer 可能位于它所污染的那个 use **之后**——例如 `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p`，从第 1 次迭代起 `w` 就读到了 tpop 值，但单次前向遍历在见到 `p` 之前就已经对 `w` 完成了分类。第三次遍历不会带来任何新信息：第一次遍历后 base 集合即已完备（`tile.tpop_from_aic` 的定义与顺序无关，而 view 与其 source 共享 base），因此第二次遍历中只有 `Var` 集合会增长，且它们在该次遍历内部按程序序传播。两次遍历均为 O(N)。
 

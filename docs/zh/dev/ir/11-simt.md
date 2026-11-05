@@ -68,6 +68,28 @@ store 的物理效果是 `Write`；launch 的可写参数在逻辑上是 `InOut`
 禁止 Out 参数、普通 Call 或运行时 Submit 调用 helper，以及嵌套 launch。
 调用者必须是 AIV 或展开前的 InCore。VMI 寄存器不是可接受的存储操作数；
 helper 借用 UB 或 GM 存储。
+活动 VMI 寄存器作用域内的 launch 也会被拒绝。混合核展开将 SIMT launch 放在
+AIV 上，避免在不同核上重复执行。
+
+## 编译器准备
+
+默认流水线现在会在内存规划前保留存储语义：
+
+- [MaterializeSimtOutputs](../passes/35-materialize_simt_outputs.md) 为每个
+  可写 Tile 初始化独立副本。部分写入保留未触及元素，旧 Tile 值在分支和循环中
+  仍可读取。
+- [SpecializeSimtHelpers](../passes/36-specialize_simt_helpers.md) 根据完整块
+  维度、类型及布局和目标创建变体。动态元数据成为标量实参，分配地址不进入特化键。
+- GM 结果保留原 Tensor 标识。`simt.store` 使用独立于标量控制器和 DMA 存储的
+  `Simt` 写通道。核函数参数方向以 InOut 传播到外层 Call 和 Submit，再由普通
+  任务依赖分析处理。即使后续读取使用旧 GM 句柄，设备语句调度也保留 launch 顺序。
+- 混合核拆分将 launch 保留在 AIV，并在清理前保留 AIC 借用的 GM 句柄。
+  Tensor 视图保留形状、步长和布局，包括通过循环和分支传递的视图与别名。
+  仅处理 GM 句柄不会产生额外的 Cube 核函数。
+
+复制前会拒绝已知的可写实参重叠。不同 GM 实参在运行时仍可能别名，调用者负责
+保证不重叠。辅助函数参数借用存储，不独立分配。自动选择 Buffer IR 时，SIMT
+核函数仍保留在 Functional IR。
 
 ## 自动资源推导与实现边界
 
@@ -83,6 +105,5 @@ Ascend950 的三个维度乘积不得超过 2,048，寄存器数量按以下规�
 
 用户不提供 `simt_max_threads` 或 `simt_max_regs`。其他后端明确拒绝 SIMT 资源推导。
 
-本阶段实现规范 IR 及其验证。保留存活旧 Tile 的输出物化、内存规划和外层调用方向
-传播、资源特化、PTOAS lowering 及设备执行属于后续阶段。连接这些阶段前，
-PTO codegen 会明确拒绝 SIMT；IR 验证通过不代表生成的内核已经可以执行。
+规范 IR、验证、存储准备、内存规划集成和资源特化已实现。PTOAS lowering 和设备
+执行属于后续阶段。PTO codegen 仍明确拒绝 SIMT；流水线验证通过不代表内核可执行。

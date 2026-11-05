@@ -82,7 +82,7 @@ rule at construction, including when attributes are attached with
 `ir.set_call_attrs`.
 
 The public Tile DSL uses `TileType`; default whole-kernel selection converts
-supported functions through [LowerTileToBuffer](../passes/55-lower_tile_to_buffer.md).
+supported functions through [LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md).
 Direct PTO emission also accepts explicitly constructed buffer programs
 with dense row-major Vec FP16/BF16/FP32/INT32 descriptors of rank one or two,
 and static positive-valid FP32 column-major `[R,1]` descriptors with `R` a multiple of eight,
@@ -178,7 +178,7 @@ Address emission depends only on the allocation operand; the legacy
 operands remain in their lexical scope. No logical `TileType` or `MemRef` is
 reconstructed, and no implicit tile allocation pass runs on this path. The
 pipeline with `enable_buffer_ir=True` converts Tile IR before emission through
-[LowerTileToBuffer](../passes/55-lower_tile_to_buffer.md).
+[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md).
 
 Static storage views use ordinary SSA alias edges in the same Buffer stage:
 

@@ -168,7 +168,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives) |
-| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/51-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/53-materialize_runtime_scopes.md) |
 
 `pl.scope(..., name_hint="label")` and `pl.manual_scope(name_hint="label")`
 accept an optional string literal, defaulting to `""`. The label is preserved
@@ -198,7 +198,7 @@ Potentially non-positive dynamic SPMD counts are guarded automatically: a count
 caller unless arithmetic analysis proves the count positive. Missing outputs
 are compile-time errors naming the tensor and parameter index. On the empty
 path, returned tensors keep their existing contents; no output is initialized.
-See [LegalizeSpmdLaunches](../passes/42-legalize_spmd_launches.md).
+See [LegalizeSpmdLaunches](../passes/44-legalize_spmd_launches.md).
 
 Optional `optimizations=[...]`. The entries are orthogonal and may be combined
 in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):

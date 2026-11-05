@@ -232,6 +232,7 @@ enum class ArgEffect : uint8_t {
 enum class WriteChannel : uint8_t {
   Dma,     ///< MTE3 / DMA store path (tile.store, tensor.assemble, cross-rank put/get).
   Scalar,  ///< Scalar D-cache write path (tensor.write).
+  Simt,    ///< SIMT lane stores; distinct from controller scalar stores and DMA.
 };
 
 /**

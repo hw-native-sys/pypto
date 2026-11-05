@@ -320,7 +320,7 @@ two declarations at one address are the entire mechanism.
 A `tile.slice` of a Mat-resident parent is not a whole buffer. It reaches
 codegen as `pto.subview`, carrying a runtime offset and the **parent's** row
 pitch, and neither survives into an `alloc_tile`: a dynamic offset cannot fold
-into the constant `addr` (see [`AllocateMemoryAddr`](38-allocate_memory_addr.md))
+into the constant `addr` (see [`AllocateMemoryAddr`](40-allocate_memory_addr.md))
 and the pitch is not in the type. ptoas has no transposing read of such a window
 either — it refuses a mat-source `pto.tmov` on a view ("expects mat-source tmov
 to use matching src/dst shapes") and refuses `pto.treshape` on one at every

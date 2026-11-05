@@ -159,6 +159,7 @@ REGISTER_OP("simt.store")
     // Physical store is Write. The launch preserves untouched elements and is
     // logically InOut; consumers must use the helper access summary for that.
     .set_arg_effect(0, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Simt)
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
       return MemoryType(args, kwargs, true);
     });

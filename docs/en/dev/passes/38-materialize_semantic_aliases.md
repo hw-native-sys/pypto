@@ -16,17 +16,17 @@ Memory planning distinguishes two kinds of buffer sharing:
   lifetimes *may* share storage to save memory. This is optimization.
 
 This pass handles only the **must-alias** case. It was split out of
-[`MemoryReuse`](37-memory_reuse.md) (it is that pass's former "Step 0") so that
+[`MemoryReuse`](39-memory_reuse.md) (it is that pass's former "Step 0") so that
 the opportunistic lifetime coalescing can be skipped independently:
 
 - `MemoryPlanner.DSA_RP` keeps independent allocation identities for the
   in-process DSA-RP solver.
 - `MemoryPlanner.PTOAS` leaves lifetime reuse and address assignment to ptoas.
 
-**When to use**: Run after [`InitMemRef`](35-init_memref.md) (which creates the
+**When to use**: Run after [`InitMemRef`](37-init_memref.md) (which creates the
 MemRefs) and before the selected memory planner. It always runs. `PYPTO` follows
-it with [`MemoryReuse`](37-memory_reuse.md); `DSA_RP` consumes its allocation
-identities in [`AllocateMemoryAddr`](38-allocate_memory_addr.md).
+it with [`MemoryReuse`](39-memory_reuse.md); `DSA_RP` consumes its allocation
+identities in [`AllocateMemoryAddr`](40-allocate_memory_addr.md).
 
 ## Logical Tile selections
 
@@ -214,7 +214,7 @@ Once the control-flow boundary is resolved, the following normalization walk
 repairs the whole chain. Buffer IR also uses this deferred form before indexing
 old-value observations and after loop-entry isolation, while branch storage is
 still provisional; normalization after boundary resolution needs no deferred
-seed. See [MemoryReuse step 6](37-memory_reuse.md#algorithm) for the normalization
+seed. See [MemoryReuse step 6](39-memory_reuse.md#algorithm) for the normalization
 walks around yield fixup.
 
 The pass skips orchestration-like functions, including graph bodies. In other
@@ -356,4 +356,4 @@ simultaneously overlapping destination windows must be resolved before final
 Buffer lowering. Unselected kernels and explicit Off mode retain their previous Tile behavior.
 
 The default Buffer rollout selects complete supported kernels before storage
-legalization; see [whole-kernel selection](55-lower_tile_to_buffer.md#default-whole-kernel-selection).
+legalization; see [whole-kernel selection](57-lower_tile_to_buffer.md#default-whole-kernel-selection).

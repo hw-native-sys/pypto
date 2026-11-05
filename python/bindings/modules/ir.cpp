@@ -176,6 +176,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       // Lists/tuples carry exactly one element type, dispatched by attr key:
       //   - kAttrArgDirections             -> vector<ArgDirection>
       //   - kAttrArgDirectionOverrides     -> vector<int32_t>
+      //   - kSimtBlockDimsAttr            -> vector<int32_t> (derived helper metadata)
       //   - kAttrManualDepEdges /
       //     kAttrCompilerManualDepEdges /
       //     kAttrArgDirOverrideVars /
@@ -184,7 +185,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       // payloads (e.g. ``manual_dep_edges=[1]``) and fail later in codegen
       // instead of raising at parse time.
       auto seq = nb::cast<nb::sequence>(item.second);
-      if (key == kAttrArgDirectionOverrides) {
+      if (key == kAttrArgDirectionOverrides || key == kSimtBlockDimsAttr) {
         std::vector<int32_t> idxs;
         for (auto elem : seq) {
           if (nb::isinstance<nb::bool_>(elem) || !nb::isinstance<nb::int_>(elem)) {
@@ -289,8 +290,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
             throw pypto::TypeError(
                 "Unsupported list element type for key: " + key +
                 ". A list-valued attr under an arbitrary key may hold Var (a reference) or "
-                "ArgDirection. Integer lists are accepted only for the reserved key '" +
-                std::string(kAttrArgDirectionOverrides) + "'.");
+                "ArgDirection. Integer lists are accepted only for the reserved keys '" +
+                std::string(kAttrArgDirectionOverrides) + "' and '" + kSimtBlockDimsAttr + "'.");
           }
           dirs.push_back(nb::cast<ArgDirection>(elem));
         }
@@ -1101,7 +1102,8 @@ void BindIR(nb::module_& m) {
 
   nb::enum_<WriteChannel>(ir, "WriteChannel", "The hardware path an operator's writes travel")
       .value("Dma", WriteChannel::Dma, "MTE3 / DMA store path")
-      .value("Scalar", WriteChannel::Scalar, "Scalar D-cache write path");
+      .value("Scalar", WriteChannel::Scalar, "Scalar D-cache write path")
+      .value("Simt", WriteChannel::Simt, "SIMT lane store path");
 
   ir.def(
       "get_op_arg_effect",

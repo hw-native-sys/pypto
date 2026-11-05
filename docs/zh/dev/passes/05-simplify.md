@@ -15,7 +15,7 @@
 - **SSA 后**（在 `ConvertToSSA` 之后、`FlattenCallExpr` 之前）：将闭包捕获的常量（如 `CHUNK_K: Scalar[INDEX] = 512`）传播进 shape 表达式与类型，使后续的 tile lowering Pass 看到的是字面量而不是变量。
 - **tile pipeline 末尾**（在 `MaterializeDistTensorCtx` 之后）：清理由内存空间推断、layout 解析等晚期 lowering 暴露出来的可折叠表达式。
 
-[InitMemRef](35-init_memref.md) 还会在入口处以**仅常量模式（constant-only mode）**调用共享的内部辅助函数，随后再规范化语句结构、构建地址。该模式将可证明的常量传播到表达式与类型元数据中，并删除死标量赋值，同时保留控制流、phi 和循环携带结构；它跳过恒等 `tensor.view` 折叠、非常量代数重写和死 yield 槽位裁剪。这样，即使直接调用 `InitMemRef`，也能折叠此前 lowering Pass 引入的常量，无需额外的流水线 Pass 或新的前置条件。独立的 `Simplify` Pass 仍执行下文介绍的完整行为。
+[InitMemRef](37-init_memref.md) 还会在入口处以**仅常量模式（constant-only mode）**调用共享的内部辅助函数，随后再规范化语句结构、构建地址。该模式将可证明的常量传播到表达式与类型元数据中，并删除死标量赋值，同时保留控制流、phi 和循环携带结构；它跳过恒等 `tensor.view` 折叠、非常量代数重写和死 yield 槽位裁剪。这样，即使直接调用 `InitMemRef`，也能折叠此前 lowering Pass 引入的常量，无需额外的流水线 Pass 或新的前置条件。独立的 `Simplify` Pass 仍执行下文介绍的完整行为。
 
 **需要 (Requires)**：无。
 

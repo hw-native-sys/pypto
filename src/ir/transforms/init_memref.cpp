@@ -831,6 +831,23 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
   }
 
+  StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    auto launch = MutableCopy(op);
+    for (auto& dim : launch->block_dims_) dim = VisitExpr(dim);
+    for (auto& arg : launch->args_) arg = VisitExpr(arg);
+    for (size_t i = 0; i < launch->results_.size(); ++i) {
+      // MaterializeSimtOutputs has already selected (and initialized) the
+      // writable Tile storage. GM results are reference updates. Neither kind
+      // allocates another buffer at the result definition.
+      const auto& argument = launch->args_[launch->result_param_indices_[i]];
+      auto result =
+          std::make_shared<Var>(op->results_[i]->name_hint_, argument->GetType(), op->results_[i]->span_);
+      var_map_[op->results_[i]] = result;
+      launch->results_[i] = std::move(result);
+    }
+    return launch;
+  }
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Manual traversal of ForStmt fields to ensure correct MemRef assignment:
     // - iter_args inherit MemRef from initValue (via ProcessIterArg)
@@ -1006,6 +1023,9 @@ class InitMemRefMutator : public IRMutator {
  * Variables without memory_space default to DDR.
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
+  // Helper storage is borrowed from each launch caller; allocating here would
+  // give the helper an unrelated UB/GM buffer instead of its supplied operand.
+  if (func->func_type_ == FunctionType::SIMT) return func;
   // Lowering may introduce constant SSA aliases after the early Simplify pass.
   // Normalize them with the shared transformation before building addresses,
   // including when InitMemRef is invoked outside the default pipeline.
@@ -1127,6 +1147,16 @@ namespace {
 class HasMemRefsVerifier : public IRVisitor {
  public:
   explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (const auto& result : op->results_) {
+      if (As<TileType>(result->GetType()) && !GetTypeMemRef(result->GetType())) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "HasMemRefs", 0,
+                                  "SIMT Tile result has no initialized output storage", result->span_);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op || !op->var_ || !op->var_->GetType()) return;

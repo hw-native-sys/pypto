@@ -63,6 +63,8 @@
 | -------- | ---------- | ---- |
 | **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield、作用域违规、基数检查 |
 | **SimtValid** | SimtValid | 检查规范 SIMT helper 的签名、借用存储访问、launch 域及 InOut 结果映射。见[标量 SIMT IR](../ir/11-simt.md)。 |
+| **SimtOutputsMaterialized** | SimtOutputsMaterialized | 每个可写 Tile 使用独立的已初始化 SIMT 输出副本。 |
+| **SimtSpecialized** | SimtSpecialized | 每个 launch 的辅助函数资源与块维度及目标匹配。 |
 | **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性；调用边界 layout 一致性 |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
@@ -385,7 +387,7 @@ Buffer IR 选项。
 | ---- | ------ | ---- |
 | `GetStructuralProperties()` | `{TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly, AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}` | 由 `VerificationInstrument` 在每个 Pass 执行前后验证的不变量（与 `GetVerifiedProperties()` 共有的子集还会在流水线启动时验证） |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence, ArrayNotEscaped}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid, HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

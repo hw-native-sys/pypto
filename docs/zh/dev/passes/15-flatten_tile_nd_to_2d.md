@@ -139,7 +139,7 @@ batch 重发。
 
 **列**窗口覆盖父 tile 的整个行范围，因此窗口自身的紧凑几何与父 tile 的几何一致，
 被丢弃的跨步也就无关紧要。`GetSliceAccumulatorGeometry` 正是给这种形状计算
-NZ 精确字节偏移（参见 [33-init_memref.md](35-init_memref.md)）。
+NZ 精确字节偏移（参见 [33-init_memref.md](37-init_memref.md)）。
 
 ### 生产者侧的变化
 
@@ -425,3 +425,10 @@ load、分配和 transpose 复用同一个结果分配辅助函数；通用操�
 | 3D+ | 展平为 2D |
 
 仅处理 InCore 类型函数（InCore、AIC、AIV）。Orchestration 和 Opaque 函数原样返回。
+
+## SIMT 辅助函数
+
+此 pass 同时展平 ND Tile 参数、调用者 launch 实参及结果，并改写
+`simt.load`/`simt.store` 索引。前导坐标按行主序合并。初始支持要求隐式
+紧凑布局和静态正数前导维度；显式 ND Tile 视图会被拒绝。GM Tensor 索引
+保留原秩。

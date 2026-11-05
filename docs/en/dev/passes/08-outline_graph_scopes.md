@@ -199,7 +199,7 @@ even a Graph function, since nested regions are rejected outright.
 
 - [09-outline_incore_scopes.md](09-outline_incore_scopes.md) — runs next; keeps a
   Graph function `Graph` while outlining the InCore scopes in its body
-- [50-legalize_graph_boundary.md](50-legalize_graph_boundary.md) — enforces the
+- [52-legalize_graph_boundary.md](52-legalize_graph_boundary.md) — enforces the
   runtime's boundary contract on the outlined function
 - [00-pass_manager.md](00-pass_manager.md) — the `GraphOutlined` IRProperty in the
   property table

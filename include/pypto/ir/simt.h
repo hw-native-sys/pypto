@@ -19,6 +19,16 @@
 
 namespace pypto::ir {
 
+/// Compiler-owned marker on the initializing tile.move for one SIMT output.
+/// The copy preserves Functional IR value semantics, including partial writes.
+inline constexpr const char* kSimtOutputSeedAttr = "simt_output_seed";
+
+/// Compiler-derived helper specialization metadata, never user resource knobs.
+inline constexpr const char* kSimtBlockDimsAttr = "simt_block_dims";
+inline constexpr const char* kSimtTargetAttr = "simt_target";
+inline constexpr const char* kSimtMaxThreadsAttr = "simt_max_threads";
+inline constexpr const char* kSimtMaxRegsAttr = "simt_max_regs";
+
 /// A compile-time query axis, deliberately distinct from an integer operand.
 enum class SimtAxis : uint8_t { X, Y, Z };
 

@@ -7,7 +7,7 @@
 `pld.tensor.reduce_scatter`, `pld.tensor.allgather`,
 `pld.tensor.all_to_all`, and `pld.tensor.all_to_all_v` into compiler-internal
 builtin chip dispatches. It runs
-after [`MaterializeCommDomainScopes`](47-materialize_comm_domain_scopes.md), so
+after [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md), so
 each window-bound data tensor and explicit or synthesized signal tensor already has a
 `WindowBuffer` back-reference and belongs to an inferred communication domain.
 
@@ -108,7 +108,7 @@ surfacing as a compiler-bug diagnostic during codegen. Write the composite
 
 Whole-program print/parse round-trip preserves the enclosing communication
 scopes and window back-references through the private dump syntax documented in
-[`MaterializeCommDomainScopes`](47-materialize_comm_domain_scopes.md#text-round-trip).
+[`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md#text-round-trip).
 The parser restores this metadata directly, without rerunning materialization.
 
 ## Checks
@@ -194,7 +194,7 @@ consecutive call leaves no stale satisfied cell behind.
 
 `all_to_all_v` calls inside a `for`/`while` loop in `host_orch` are still
 rejected up front by
-[`MaterializeCommDomainScopes`](47-materialize_comm_domain_scopes.md), which
+[`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md), which
 runs immediately before this pass — a compiler limitation (dynamic
 re-invocation would need loop-carried window lifetime management), not a
 property of the signal, and the same restriction `LowerCompositeOps` enforces

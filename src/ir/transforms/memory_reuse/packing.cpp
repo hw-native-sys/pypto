@@ -80,7 +80,7 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
   return !(a.last_use_point <= b.def_point || b.last_use_point <= a.def_point);
 }
 
-// Cross-group shed objective (see docs/en/dev/passes/37-memory_reuse.md, pipeline-stage guard): when a
+// Cross-group shed objective (see docs/en/dev/passes/39-memory_reuse.md, pipeline-stage guard): when a
 // space overflows at every group's max-affordable depth,
 // the packer lowers one pipeline group's double-buffering depth by a residue. The MaxRelief heuristic
 // selects **which** group loses a level — lower score sheds first; ties always break by lowest group id

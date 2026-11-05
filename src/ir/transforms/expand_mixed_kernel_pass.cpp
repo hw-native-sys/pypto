@@ -424,23 +424,26 @@ TpopDefs CollectTpopDefs(const std::vector<StmtPtr>& stmts) {
 // Forward declare
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                 const TpopDefs& tpop_defs, const AivPlacement& placement);
+                                 const TpopDefs& tpop_defs, const AivPlacement& placement,
+                                 std::unordered_map<const Var*, ExprPtr>* simt_gm_aliases);
 
 CoreAffinity AnalyzeStmtsAffinity(const std::vector<StmtPtr>& stmts,
                                   std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                   std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                  const TpopDefs& tpop_defs = {}, const AivPlacement& placement = {}) {
+                                  const TpopDefs& tpop_defs = {}, const AivPlacement& placement = {},
+                                  std::unordered_map<const Var*, ExprPtr>* simt_gm_aliases = nullptr) {
   CoreAffinity combined = CoreAffinity::SHARED;
   for (const auto& stmt : stmts) {
-    combined =
-        CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_defs, placement));
+    combined = CombineAffinity(
+        combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_defs, placement, simt_gm_aliases));
   }
   return combined;
 }
 
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                 const TpopDefs& tpop_defs, const AivPlacement& placement) {
+                                 const TpopDefs& tpop_defs, const AivPlacement& placement,
+                                 std::unordered_map<const Var*, ExprPtr>* simt_gm_aliases) {
   CoreAffinity result = CoreAffinity::SHARED;
 
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -470,29 +473,44 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (call) result = ClassifyPlacedCall(call, placement);
+  } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+    result = CoreAffinity::VECTOR;
+    for (size_t i = 0; i < launch->results_.size(); ++i) {
+      const auto& output = launch->results_[i];
+      var_affinity[output.get()] = CoreAffinity::VECTOR;
+      if (simt_gm_aliases && As<TensorType>(output->GetType())) {
+        // During an actual split, retain the handle-producing control flow on
+        // AIC as well. The launch executes only on AIV; AIC borrows its original
+        // GM argument, including any view metadata. The initial mixed-kernel
+        // detection omits this map so aliases alone never create cube work.
+        simt_gm_aliases->emplace(output.get(), launch->args_[launch->result_param_indices_[i]]);
+        result = CoreAffinity::MIXED;
+      }
+    }
   } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_defs, placement);
+    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_defs, placement,
+                                  simt_gm_aliases);
   } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    result =
-        AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_defs, placement);
+    result = AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_defs,
+                                  placement, simt_gm_aliases);
     const auto& else_body = if_stmt->else_body_;
     if (else_body.has_value()) {
       result = CombineAffinity(result, AnalyzeStmtsAffinity(FlattenBody(*else_body), stmt_map, var_affinity,
-                                                            tpop_defs, placement));
+                                                            tpop_defs, placement, simt_gm_aliases));
     }
   } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    result =
-        AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_defs, placement);
+    result = AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_defs,
+                                  placement, simt_gm_aliases);
   } else if (auto reg = As<RegScopeStmt>(stmt)) {
     // A register boundary is indivisible and always belongs to AIV. Treating
     // an unknown scope as SHARED would replicate its stores onto AIC as well.
-    auto body_affinity =
-        AnalyzeStmtsAffinity(FlattenBody(reg->body_), stmt_map, var_affinity, tpop_defs, placement);
+    auto body_affinity = AnalyzeStmtsAffinity(FlattenBody(reg->body_), stmt_map, var_affinity, tpop_defs,
+                                              placement, simt_gm_aliases);
     CHECK_SPAN(body_affinity != CoreAffinity::CUBE && body_affinity != CoreAffinity::MIXED, reg->span_)
         << "RegScope cannot contain AIC or cross-core operations";
     result = CoreAffinity::VECTOR;
   } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
-    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_defs, placement);
+    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_defs, placement, simt_gm_aliases);
   }
 
   stmt_map[stmt.get()] = result;
@@ -1608,6 +1626,13 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     auto it = stmt_map.find(stmt.get());
     CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
 
+    if (As<SimtLaunchStmt>(stmt)) {
+      if (side == CoreSide::AIV) result.push_back(stmt);
+      // GM result uses on AIC are substituted before finalization. Retain no
+      // launch or Tile result there: neither executes on the cube lane.
+      continue;
+    }
+
     // Leaf boundary move — emit tpush/tpop. boundary_moves is the authoritative
     // signal for "this stmt needs cross-core split"; the stmt's CoreAffinity is
     // MIXED here, but we handle it specially before the generic MIXED arm below.
@@ -1870,6 +1895,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 ///   * AssignStmt: lhs inherits its value Var's origin; for tile.store the lhs
 ///     (a fresh tensor version) inherits the origin of the store DESTINATION
 ///     (args_[2]).
+///   * SimtLaunchStmt: each Tensor result inherits its mapped writable argument's
+///     origin. Tile results retain value semantics and are not GM aliases.
 ///   * ForStmt / WhileStmt: iter_arg inherits its init's origin; return_var[i]
 ///     inherits iter_arg[i]'s origin.
 ///   * IfStmt phi: return_var[i] inherits the origin that BOTH branches'
@@ -1878,8 +1905,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 ///     return_var is left unmapped — conservative, since only an in-place GM
 ///     tensor version yields a single agreed origin (an if-without-else has
 ///     already been given a synthesized else yielding the incoming version).
-std::unordered_map<const Var*, const Var*> BuildGmOriginMap(const std::vector<StmtPtr>& stmts,
-                                                            const std::vector<VarPtr>& params) {
+std::unordered_map<const Var*, const Var*> BuildGmOriginMap(
+    const std::vector<StmtPtr>& stmts, const std::vector<VarPtr>& params,
+    std::unordered_set<const Var*>& simt_written_params) {
   std::unordered_map<const Var*, const Var*> origin_map;
   for (const auto& param : params) {
     origin_map[param.get()] = param.get();
@@ -1921,6 +1949,14 @@ std::unordered_map<const Var*, const Var*> BuildGmOriginMap(const std::vector<St
           }
         }
         propagate_from_expr(lhs, assign->value_);
+      } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+        for (size_t i = 0; i < launch->results_.size(); ++i) {
+          if (As<TensorType>(launch->results_[i]->GetType())) {
+            propagate_from_expr(launch->results_[i].get(), launch->args_[launch->result_param_indices_[i]]);
+            auto origin = origin_map.find(launch->results_[i].get());
+            if (origin != origin_map.end()) simt_written_params.insert(origin->second);
+          }
+        }
       } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         // iter_args inherit their init origin so in-body uses resolve; the
         // post-loop return_var is the trailing yielded value, so key its origin
@@ -1976,24 +2012,28 @@ std::unordered_map<const Var*, const Var*> BuildGmOriginMap(const std::vector<St
 /// shared base parameter. For every Var referenced in the body but (a) not
 /// defined there, (b) not already in `side_clone_map` (so params and
 /// boundary-tpop remaps take precedence), and (c) whose origin per `origin_map`
-/// is an Out/InOut parameter, seed `side_clone_map[ref] = <that side's fresh
+/// is an Out/InOut or SIMT-written parameter, seed `side_clone_map[ref] = <that side's fresh
 /// param>`. The subsequent DeepClone then rewrites the use onto the shared
 /// parameter. Symmetric for AIC and AIV. Deterministic: dangling refs are
 /// processed in GetSortedVarRefs order.
 void RemapDanglingGmRefsToParam(const StmtPtr& body_stmt,
                                 std::unordered_map<const Var*, ExprPtr>& side_clone_map,
                                 const std::unordered_map<const Var*, const Var*>& origin_map,
+                                const std::unordered_set<const Var*>& simt_written_params,
                                 const FunctionPtr& func) {
   // VarDefUseCollector gathers both defs and uses in a single pass, so one
   // instance yields var_defs and GetAllVarRefs() — no second traversal.
   var_collectors::VarDefUseCollector collector;
   collector.VisitStmt(body_stmt);
 
-  // Out/InOut params only: a tile.store / phi version of an In param is never a
-  // cross-lane output writeback. Precompute the set so the per-ref test is a
+  // Declared Out/InOut params and proven SIMT writes are cross-lane output
+  // writebacks. Precompute the set so the per-ref test is a
   // hash lookup, not a scan of func->params_ — keeps the loop O(R) rather than
   // O(R*P).
   std::unordered_set<const Var*> out_or_inout_params;
+  // DeriveCallDirections runs later, so a SIMT-written Tensor can still have an
+  // In annotation here. Its launch result mapping already proves the writeback.
+  out_or_inout_params.insert(simt_written_params.begin(), simt_written_params.end());
   for (size_t idx = 0; idx < func->params_.size() && idx < func->param_directions_.size(); ++idx) {
     if (func->param_directions_[idx] != ParamDirection::In) {
       out_or_inout_params.insert(func->params_[idx].get());
@@ -2086,7 +2126,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
   std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
   std::unordered_map<const Var*, CoreAffinity> var_affinity;
-  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement);
+  std::unordered_map<const Var*, ExprPtr> simt_gm_aliases;
+  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement, &simt_gm_aliases);
 
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
@@ -2125,6 +2166,13 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
     if (!std::dynamic_pointer_cast<const ReturnStmt>(s)) {
       aic_stmts_no_return.push_back(s);
     }
+  }
+  // Do this before dead-code and loop/phi cleanup: a view used only by a
+  // launch result would otherwise be deleted, and its shape/strides cannot
+  // be recovered by replacing the result with the raw base parameter later.
+  if (!simt_gm_aliases.empty()) {
+    aic_stmts_no_return =
+        FlattenBody(transform_utils::Substitute(MakeBody(aic_stmts_no_return, func->span_), simt_gm_aliases));
   }
   // tpop_var_remap keys are originally-defined Vars whose producers got
   // replaced on this side by a boundary tpop. A later DeepClone seeded with
@@ -2241,7 +2289,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // reference here, because DeepClone — which mints fresh Vars — has not run
   // yet. One map repoints dangling cross-lane GM references on either side,
   // including the IfStmt phi propagation.
-  auto gm_origin_map = BuildGmOriginMap(stmts, func->params_);
+  std::unordered_set<const Var*> simt_written_params;
+  auto gm_origin_map = BuildGmOriginMap(stmts, func->params_, simt_written_params);
 
   // Create AIC function with deep clone (fresh Vars for all params and locals)
   auto [aic_params, aic_map] = make_param_map();
@@ -2253,7 +2302,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // defined in the body, which this skips) and BEFORE the clone so DeepClone
   // applies the repoint.
   auto aic_body_stmt = apply_tpop_remap(MakeBody(aic_final, func->span_), aic_tpop_remap);
-  RemapDanglingGmRefsToParam(aic_body_stmt, aic_map, gm_origin_map, func);
+  RemapDanglingGmRefsToParam(aic_body_stmt, aic_map, gm_origin_map, simt_written_params, func);
   auto [aic_cloned_body, aic_clone_map_unused] = DeepClone(aic_body_stmt, aic_map);
   (void)aic_clone_map_unused;
   auto aic_func = std::make_shared<Function>(aic_name, aic_params, func->param_directions_,
@@ -2307,7 +2356,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
     // tile.store-result block above, params) and refs defined in the body (every
     // boundary tpop result, bound by apply_tpop_remap) are skipped, so this is
     // purely additive over prior AIV behavior.
-    RemapDanglingGmRefsToParam(aiv_body_stmt, aiv_map, gm_origin_map, func);
+    RemapDanglingGmRefsToParam(aiv_body_stmt, aiv_map, gm_origin_map, simt_written_params, func);
   }
 
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(aiv_body_stmt, aiv_map);
