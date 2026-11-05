@@ -15,7 +15,17 @@ import torch
 from harness import st
 from harness.core.harness import DataType, TensorSpec
 
+# These dtypes are optional in the torch versions the project supports
+# (>=2.0), and the case list below dereferences them while collecting — before
+# the a5 platform marker could skip. Guard at import, like test_matmul_mx.py.
+_REQUIRED_TORCH_DTYPES = ("float4_e2m1fn_x2", "float8_e4m3fn", "float8_e8m0fnu")
+if not all(hasattr(torch, name) for name in _REQUIRED_TORCH_DTYPES):
+    pytest.skip("torch MXFP4/MXFP8/E8M0 dtypes required", allow_module_level=True)
+
 MX_GROUP_SIZE = 32
+# One MX scale box is 16 rows x 2 groups of exponent codes.
+_SCALE_BOX_ROWS = 16
+_SCALE_BOX_COLS = 2
 
 
 def _case_shapes(group_axis: int) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -94,20 +104,46 @@ def _quant_inputs_and_golden(
         quant_shape = src_shape if group_axis == 1 else (src_shape[1], src_shape[0])
     groups = src_shape[1] // MX_GROUP_SIZE
     exponent_shape = (src_shape[0], groups) if group_axis == 1 else (groups, src_shape[0])
-    group_exponents = (torch.arange(exponent_shape[0] * exponent_shape[1]) % 4 - 1).reshape(exponent_shape)
-    scales = torch.pow(2.0, group_exponents).to(torch.float32)
+    # Both the exponent and the payload must vary with *both* scale coordinates,
+    # or the fixture cannot see a layout bug: a row-major `arange % 4` gives
+    # every row the same exponents and every group the same 32 values, so
+    # swapping two box rows or two group boxes leaves the bytes identical. The
+    # coprime multipliers make each (row, group) distinct, and rotating the
+    # payload keeps every value exactly representable while making each group's
+    # carriers distinct too -- the rotation is a permutation, so each block's
+    # amax stays 448 and OCP still selects exactly `e`.
+    rows_index = torch.arange(exponent_shape[0]).reshape(-1, 1)
+    groups_index = torch.arange(exponent_shape[1]).reshape(1, -1)
+    # One exponent per 16x2 box, so no two boxes carry the same scale bytes and
+    # a swapped box is visible. `_pack_scale_codes` boxes (row/16, group/2) on
+    # axis1 and (group/2, row/16) on axis0, so index the box the same way round.
     if group_axis == 1:
-        src = (fp8_values.reshape(1, 1, MX_GROUP_SIZE) * scales.unsqueeze(-1)).reshape(src_shape)
-        quantized = fp8_values.to(torch.float8_e4m3fn).repeat(src_shape[0], groups)
+        box_index = (rows_index // _SCALE_BOX_ROWS) * (
+            (exponent_shape[1] + _SCALE_BOX_COLS - 1) // _SCALE_BOX_COLS
+        ) + (groups_index // _SCALE_BOX_COLS)
     else:
-        src_kn = (fp8_values.reshape(1, MX_GROUP_SIZE, 1) * scales.unsqueeze(1)).reshape(quant_shape)
+        box_index = (groups_index // _SCALE_BOX_ROWS) * (
+            (exponent_shape[0] + _SCALE_BOX_COLS - 1) // _SCALE_BOX_COLS
+        ) + (rows_index // _SCALE_BOX_COLS)
+    # FP16 bounds the range: the largest payload is 448, so 448 * 2**e must stay
+    # finite (e <= 7), and the smallest is 2**-6.
+    group_exponents = (box_index % 12) - 4
+    scales = torch.pow(2.0, group_exponents).to(torch.float32)
+    # Within a box every row shares the exponent, so the payload rotation is
+    # what distinguishes rows: it varies with both coordinates.
+    rotation = (rows_index * 5 + groups_index * 11) % MX_GROUP_SIZE
+    lane = torch.arange(MX_GROUP_SIZE)
+    if group_axis == 1:
+        # [rows, groups, 32] payload, rotated per group.
+        values = fp8_values[(lane.reshape(1, 1, -1) - rotation.unsqueeze(-1)) % MX_GROUP_SIZE]
+        src = (values * scales.unsqueeze(-1)).reshape(src_shape)
+        quantized = values.to(torch.float8_e4m3fn).reshape(src_shape)
+    else:
+        # [groups, 32, N]: the group axis is outermost in the quantized result.
+        values = fp8_values[(lane.reshape(1, -1, 1) - rotation.unsqueeze(1)) % MX_GROUP_SIZE]
+        src_kn = (values * scales.unsqueeze(1)).reshape(quant_shape)
         src = src_kn.transpose(0, 1)
-        quantized = (
-            fp8_values.to(torch.float8_e4m3fn)
-            .reshape(1, MX_GROUP_SIZE, 1)
-            .expand(groups, MX_GROUP_SIZE, src_shape[0])
-            .reshape(quant_shape)
-        )
+        quantized = values.to(torch.float8_e4m3fn).reshape(quant_shape)
     scale = _pack_scale_codes((group_exponents + 127).to(torch.uint8), group_axis)
     return src.to(dtype).contiguous(), quantized.contiguous(), scale.contiguous()
 
