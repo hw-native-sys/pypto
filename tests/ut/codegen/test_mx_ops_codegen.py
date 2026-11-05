@@ -46,6 +46,20 @@ def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
     return "\n".join(parts)
 
 
+# A5 MX accepts E4M3FN / E5M2 independently per side (PTOAS v0.72
+# isA5MxFp8InputType, pto-isa isSupportedFp8Combo).
+_MX_FP8_PAIRS = [
+    pytest.param(pl.FP8E4M3FN, pl.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(pl.FP8E5M2, pl.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(pl.FP8E4M3FN, pl.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(pl.FP8E5M2, pl.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+# tile_buf dtype spelling in emitted PTO, and the pto-isa C++ element type.
+_PTO_FP8_SPELLING = {pl.FP8E4M3FN: "f8E4M3FN", pl.FP8E5M2: "f8E5M2"}
+_ISA_FP8_SPELLING = {pl.FP8E4M3FN: "float8_e4m3_t", pl.FP8E5M2: "float8_e5m2_t"}
+
+
 class TestMxMatmulCodegen:
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     @pytest.mark.parametrize("hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NOT_ALLOC_KEEP])
@@ -436,6 +450,132 @@ class TestMxMatmulCodegen:
             cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
             # Base and accumulating forms use two overloads of TMATMUL_MX.
             assert cpp.count("TMATMUL_MX(") == 2
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    @pytest.mark.parametrize(
+        "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
+    )
+    def test_every_fp8_pair_emits_its_own_operand_dtypes(
+        self, tmp_path, compile_with_ptoas, lhs_dtype, rhs_dtype
+    ):
+        """Each MX FP8 pair reaches PTOAS with per-side dtypes on data, scale-addr and matmul.
+
+        Operand placement is left to the compiler (no hand-written ``pl.move``), which
+        is the form the ``matmul_mx`` family is documented to accept and the only one
+        whose Bias staging PTOAS lowers.
+        """
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], lhs_dtype],
+                a_s: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], rhs_dtype],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                bias: pl.Tensor[[1, 32], pl.FP32],
+                out: pl.Tensor[[16, 32], pl.FP32],
+                out_acc: pl.Tensor[[16, 32], pl.FP32],
+                out_bias: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.load(a, [0, 0], [16, 64])
+                lhs_scale = pl.load(a_s, [0, 0], [16, 2])
+                rhs = pl.load(b, [0, 0], [64, 32])
+                rhs_scale = pl.load(b_s, [0, 0], [2, 32])
+                bias_tile = pl.load(bias, [0, 0], [1, 32])
+                base = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                pl.store(base, [0, 0], out)
+                pl.store(pl.matmul_mx_acc(base, lhs, lhs_scale, rhs, rhs_scale), [0, 0], out_acc)
+                pl.store(pl.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias_tile), [0, 0], out_bias)
+
+        mlir = _emit_incore_mlir(Program)
+        lhs_pto = _PTO_FP8_SPELLING[lhs_dtype]
+        rhs_pto = _PTO_FP8_SPELLING[rhs_dtype]
+        assert f"loc=left, dtype={lhs_pto}," in mlir
+        assert f"loc=right, dtype={rhs_pto}," in mlir
+        # Each side's scale-addr derivation reads that side's own data dtype; a
+        # dtype hardcoded in the MX path would make the two sides agree wrongly.
+        tget_lines = [line for line in mlir.splitlines() if "pto.tget_scale_addr" in line]
+        left_tget = [line for line in tget_lines if "loc=left," in line]
+        right_tget = [line for line in tget_lines if "loc=right," in line]
+        assert len(left_tget) + len(right_tget) == len(tget_lines) == 2
+        assert f"loc=left, dtype={lhs_pto}," in left_tget[0]
+        assert f"loc=right, dtype={rhs_pto}," in right_tget[0]
+        for pto_op in ("pto.tmatmul.mx ", "pto.tmatmul.mx.acc ", "pto.tmatmul.mx.bias "):
+            line = next(line for line in mlir.splitlines() if pto_op in line)
+            assert f"loc=left, dtype={lhs_pto}," in line
+            assert f"loc=right, dtype={rhs_pto}," in line
+            assert "loc=acc, dtype=f32," in line
+        assert "loc=bias, dtype=f32," in mlir
+
+        if compile_with_ptoas:
+            # Textual IR checks cannot prove PTOAS accepts a mixed pair; v0.72
+            # gates it in verifyA5MxTypeTriple, so compile with the real release.
+            if find_ptoas_binary() is None:
+                pytest.skip("PTOAS is not available")
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            assert f"Tile<TileType::Left, {_ISA_FP8_SPELLING[lhs_dtype]}" in cpp
+            assert f"Tile<TileType::Right, {_ISA_FP8_SPELLING[rhs_dtype]}" in cpp
+            # base + acc + bias all lower to TMATMUL_MX overloads.
+            assert cpp.count("TMATMUL_MX(") == 3
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    @pytest.mark.parametrize(
+        "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
+    )
+    def test_valid_k_narrower_than_physical_k_compiles(
+        self, tmp_path, compile_with_ptoas, lhs_dtype, rhs_dtype
+    ):
+        """A narrowed valid K reaches PTOAS, for every FP8 pair.
+
+        PTOAS reduces over the operands' *valid* K while deriving the scale group
+        count from physical K, so `ceil(validK/32)` must equal `ceil(physK/32)`;
+        112 and 128 both give 4 groups, which the deducer accepts.
+
+        Codegen-only on purpose. Executing this shape on A5 faults the device --
+        `AICore error 507018` / `aclrtSynchronizeStreamWithTimeout (AICPU) failed`,
+        SCHEDULER_TIMEOUT `S1:running-stalled`, after which the chip run lane is
+        poisoned and force-reset. It reproduces for E4M3xE4M3 as well, so it is
+        independent of the operand dtypes, while the same kernels with valid K ==
+        physical K run exactly in the same session (see
+        `tests/st/runtime/ops/test_matmul_mx.py`). Until that is understood the
+        contract is pinned here, at the layer that is actually sound.
+        """
+        k_phys, k_valid, groups = 128, 112, 4
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, k_phys], lhs_dtype],
+                a_s: pl.Tensor[[16, groups], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[k_phys, 32], rhs_dtype],
+                b_s: pl.Tensor[[groups, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.load(a, [0, 0], [16, k_phys], valid_shape=[16, k_valid])
+                lhs_scale = pl.load(a_s, [0, 0], [16, groups])
+                rhs = pl.load(b, [0, 0], [k_phys, 32], valid_shape=[k_valid, 32])
+                rhs_scale = pl.load(b_s, [0, 0], [groups, 32])
+                pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        matmul = next(line for line in mlir.splitlines() if "pto.tmatmul.mx " in line)
+        # Physical K stays 128 on both data operands while the valid extent narrows.
+        assert f"loc=left, dtype={_PTO_FP8_SPELLING[lhs_dtype]}, rows=16, cols={k_phys}" in matmul
+        assert f"loc=right, dtype={_PTO_FP8_SPELLING[rhs_dtype]}, rows={k_phys}, cols=32" in matmul
+        # Scale groups are counted off physical K, and both Ks agree on 4.
+        assert f"loc=scaling, dtype=!pto.f8E8M0, rows=16, cols={groups}" in matmul
+        assert f"loc=scaling, dtype=!pto.f8E8M0, rows={groups}, cols=32" in matmul
+        assert f"%c{k_valid}_index" in mlir
+
+        if compile_with_ptoas:
+            if find_ptoas_binary() is None:
+                pytest.skip("PTOAS is not available")
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            assert "TMATMUL_MX(" in cpp
 
     def test_mx_rank5_view_maps_aligned_logical_offsets(self):
         @pl.program

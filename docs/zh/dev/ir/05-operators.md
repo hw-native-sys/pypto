@@ -255,9 +255,9 @@ Cube 能相乘的元素类型是一张硬件表，而不是“两边必须相同
 | BF16 x BF16 | FP32 | 支持 | 支持 | matmul、gemv |
 | FP32 x FP32 | FP32 | 支持 | 支持 | matmul、gemv |
 | FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、mx |
-| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul |
-| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul |
-| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul |
+| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、mx |
+| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、mx |
+| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、mx |
 | HF8 x HF8 | FP32 | 不支持 | 支持 | matmul |
 
 因此在 Ascend950 上，`tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、
@@ -404,7 +404,7 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.load` 读取 `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | 源 TensorLayout 携带 MX scale GM layout。dtype 为 FP8E8M0，且不支持 strided source。公开 `pl.load` 在省略 target 时默认为 `Mat`；原始 IR 必须携带 `target_memory=Mat`。 |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；硬件 layout 固定为左侧 row/row/32、右侧 col/col/32，源 Mat tile 与 layout override 必须完全匹配。 |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | 不支持；应先把 MX scale 数据加载到 Mat，再 move 到 scale 内存。 |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；操作数位置驱动自动放置，包括为 `quant_mx` scale 生成 Vec→Mat→LeftScale/RightScale staging。进入算子的两块 data operand 必须都是 `FP8E4M3FN`，scale 为 `FP8E8M0`；`lhs_scale` 与 `rhs_scale` 必须是不同的 tile。支持的打包输入形式为任一 FP4 格式的左操作数×FP8 右操作数，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；操作数位置驱动自动放置，包括为 `quant_mx` scale 生成 Vec→Mat→LeftScale/RightScale staging。进入算子的每块 data operand 可独立为 `FP8E4M3FN` 或 `FP8E5M2`（四种 FP8 组合均支持；HF8 虽是 Cube 的 FP8 操作数，但不是 MX 操作数），scale 为 `FP8E8M0`；`lhs_scale` 与 `rhs_scale` 必须是不同的 tile。支持的打包输入形式为任一 FP4 格式的左操作数×FP8 右操作数，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
@@ -434,7 +434,7 @@ Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中
 | 约束 | 要点 |
 | ---- | ---- |
 | 独立 scale buffer | Cube **不**把 scale 折进 Left/Right data；`TileType::ScaleLeft` / `ScaleRight`（L0A/L0B sidecar）↔ PyPTO `LeftScale` / `RightScale` |
-| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；实际发射的 MX data pair 为 `FP8E4M3FN × FP8E4M3FN`（拒绝 `FP8E5M2` 与原生 packed FP4）。打包 FP4×FP8 输入先将打包的左操作数转换为 FP8；physical K、valid K 与 `ceil(K/32)` scale 组数均以 cast 后的 FP8 tile 为准，而非 packed x2 carrier；physical `K%64==0`，fractal=32 |
+| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；实际发射的每个 MX data 操作数可独立为 `FP8E4M3FN` 或 `FP8E5M2`，四种 FP8 组合全部支持（仍拒绝原生 packed FP4）。打包 FP4×FP8 输入先将打包的左操作数转换为 FP8；physical K、valid K 与 `ceil(K/32)` scale 组数均以 cast 后的 FP8 tile 为准，而非 packed x2 carrier；physical `K%64==0`，fractal=32。当 `ceil(validK/32) == ceil(physicalK/32)` 时类型推导接受收窄的 valid K，但**目前在 A5 上不可执行**：收窄的 valid K 会导致设备故障（`AICore error 507018`、调度超时 `S1:running-stalled`、run lane 被污染），且对包括 E4M3×E4M3 在内的所有 FP8 组合都会复现，因此请保持 valid K == physical K。契约由 `tests/ut/codegen/test_mx_ops_codegen.py` 的 codegen 覆盖固定 |
 | layout | `mx_a_zz` → row-major ZZ；`mx_b_nn` → col-major NN；`TLoadMxCube*`（AZZ2ZZ 等） |
 | `TMov` `CommonCheckMX` | 允许 `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right；canonical：ui8 Mat reshape 再 ui8→f8 Scale |
 | bind-then-fill | **先** `GetScaleAddr(Left/Right)` 再填 sidecar；写 provisional alloc 地址在 rebound 后无效 |
