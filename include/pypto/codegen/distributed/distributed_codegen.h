@@ -215,6 +215,12 @@ class DistributedCodegen : public CodegenBase {
   void CollectHostOrchHoistableAllocs(const ir::FunctionPtr& host_orch);
   void EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch);
 
+  /// Compute, in one traversal of @p func's body, which materialized comm
+  /// domains must provision a URMA workspace. Populates ``scope_urma_`` for
+  /// ``VisitStmt_(CommDomainScopeStmtPtr)``. One traversal serves every scope,
+  /// so analysis stays linear in the body rather than O(domains * body).
+  void CollectCommDomainEngines(const ir::FunctionPtr& func);
+
   /// Collect AssignStmt defs from a HOST orchestrator body so comm-slot size
   /// lowering can unwrap CSE/SSA temps (e.g. ``t = pld.system.world_size()``)
   /// before the body walk reaches ``VisitStmt_(CommDomainScopeStmtPtr)``, which
@@ -286,6 +292,10 @@ class DistributedCodegen : public CodegenBase {
   // linear scan stays O(depth) per query — well within the O(N log N)
   // pass-complexity bound.
   std::vector<ir::CommDomainScopeStmtPtr> comm_domain_stack_;
+
+  /// Whether each materialized comm domain must provision a URMA workspace.
+  /// Computed once per host orchestration by CollectCommDomainEngines().
+  std::unordered_map<const ir::CommDomainScopeStmt*, bool> scope_urma_;
 
   // Function classification
   std::map<std::string, ir::FunctionPtr> workers_;

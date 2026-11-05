@@ -219,6 +219,13 @@ AICORE inline void CopyIndexedSelf(__gm__ uint8_t* input, __gm__ uint8_t* target
   dsb(DSB_DDR);
 }
 
+// CommContext stores one descriptor per async engine; the domain must request
+// the URMA entry at allocation (workspace_engines=("urma",)), otherwise addr is
+// zero and no session can be built.
+AICORE inline __gm__ uint8_t* UrmaWorkspace(__gm__ CommContext* ctx) {
+  return reinterpret_cast<__gm__ uint8_t*>(comm_workspace<CommWorkspaceKind::URMA>(*ctx).addr);
+}
+
 AICORE inline void SubmitIndexed(__gm__ CommContext* ctx, int peer, __gm__ uint8_t* input,
                                  __gm__ uint8_t* target, __gm__ const int32_t* index, uint32_t rows,
                                  uint32_t row_bytes, uint32_t input_rows) {
@@ -226,7 +233,7 @@ AICORE inline void SubmitIndexed(__gm__ CommContext* ctx, int peer, __gm__ uint8
   using namespace pto::comm;
   using namespace pto::comm::urma;
   AsyncSession session;
-  if (!BuildAsyncSession<DmaEngine::URMA>(reinterpret_cast<__gm__ uint8_t*>(ctx->workSpace), peer, session)) {
+  if (!BuildAsyncSession<DmaEngine::URMA>(UrmaWorkspace(ctx), peer, session)) {
     FailIndexed("indexed_all_to_all_v: invalid URMA session");
     return;
   }
@@ -297,7 +304,7 @@ AICORE inline void WaitIndexed(__gm__ CommContext* ctx, int peer) {
   using namespace pto::comm;
   using namespace pto::comm::urma;
   AsyncSession session;
-  if (!BuildAsyncSession<DmaEngine::URMA>(reinterpret_cast<__gm__ uint8_t*>(ctx->workSpace), peer, session)) {
+  if (!BuildAsyncSession<DmaEngine::URMA>(UrmaWorkspace(ctx), peer, session)) {
     FailIndexed("indexed_all_to_all_v: invalid URMA completion session");
     return;
   }
@@ -331,11 +338,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   const int my_rank = static_cast<int>(comm_ctx->rankId);
   const int64_t signal_stride = signal_tensor->shapes[1];
   if (nranks <= 0 || my_rank < 0 || my_rank >= nranks || block_num <= 0 || signal_tensor->ndims != 2 ||
-      signal_tensor->shapes[0] != nranks || signal_stride < block_num || comm_ctx->workSpace == 0) {
+      signal_tensor->shapes[0] != nranks || signal_stride < block_num || UrmaWorkspace(comm_ctx) == nullptr) {
     FailIndexed("indexed_all_to_all_v: invalid domain, launch, signal or URMA workspace");
     return;
   }
-  auto* urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo*>(comm_ctx->workSpace);
+  auto* urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo*>(UrmaWorkspace(comm_ctx));
   if (urma_info->layout != pto::comm::urma::UrmaLayout::PER_PEER) {
     FailIndexed("indexed_all_to_all_v requires PER_PEER queues");
     return;

@@ -39,6 +39,8 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -67,11 +69,558 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
   }
   return result;
 }
+
+// Provenance of one value as a set of labels. Labels are scope indices in the
+// host pass and parameter indices in a function summary. Store only present
+// labels: a singleton parameter must not allocate a dense prefix proportional
+// to its index. Copies and iteration then cost only the actual provenance size.
+// One traversal carries provenance instead of rescanning once per domain.
+class LabelMask {
+ public:
+  void Add(size_t label) { labels_.insert(label); }
+
+  void Merge(const LabelMask& other) { labels_.insert(other.labels_.begin(), other.labels_.end()); }
+
+  [[nodiscard]] bool Any() const { return !labels_.empty(); }
+
+  template <typename Fn>
+  void ForEachLabel(Fn&& fn) const {
+    for (const size_t label : labels_) fn(label);
+  }
+
+ private:
+  std::set<size_t> labels_;
+};
+
+// What a function demands of its callers: the union of the parameters whose
+// provenance reaches any indexed collective's workspace CommCtx in its body
+// (label i = parameter i feeds a collective). Aggregated into one set because
+// the result is a boolean URMA demand per scope and composition distributes
+// over union, so a helper with K collectives does not replay K entries at each
+// of its call sites. Computed once per function and reused by every call site,
+// so a pipeline shared by D domains is analyzed once, not D times.
+struct EngineSummary {
+  LabelMask credit;
+  // The demand cannot be expressed over parameters (a window origin inside the
+  // callee, or a recursive call): callers credit the provenance of every
+  // argument.
+  bool all_args = false;
+};
+
+// Shared by the host analysis and all nested summary visitors for one unchanged
+// host body. Keep return maps separate from engine summaries: recursive engine
+// placeholders are replaced after traversal, but must not erase cached lineage.
+struct CommDomainAnalysisCache {
+  std::unordered_map<const ir::Function*, EngineSummary> engines;
+  std::unordered_map<const ir::Function*, std::vector<std::optional<size_t>>> return_lineage;
+};
+
+// Computes, in one traversal of the host body, which comm domains must
+// provision a URMA workspace. A domain is credited when it supplies the
+// CommCtx that the indexed kernel reads its workspace from (the target's
+// context, appended first); local-only operands (input / index / counts /
+// recv) are canonicalized as plain tensors by the kernel and must not pull
+// URMA into their own domain.
+//
+// A callee is summarized once with its parameter indices as labels, then each
+// call site maps that summary onto its own arguments' scope masks. The
+// collective is matched in both of its shapes: the registered operator
+// (before lowering) and, after LowerL2TensorCollectives rewrites the callee,
+// the synthesized builtin function `__builtin_indexed_all_to_all_v__<dtype>` —
+// a function name, not a registered operator, so it is matched by family
+// prefix the way IsBuiltinOp matches one. Submits carry the same operators
+// inside pl.manual_scope bodies.
+class CommDomainEngineAnalysis : public ir::IRVisitor {
+ public:
+  // Host pass: labels are scope indices; urma() reports the result.
+  CommDomainEngineAnalysis(const std::map<std::string, ir::FunctionPtr>* funcs,
+                           const std::vector<ir::CommDomainScopeStmtPtr>& scopes)
+      : mode_(Mode::kHost), funcs_(funcs), scopes_(scopes) {
+    // Slot -> owning scope, built once: every ownership query is a hash lookup
+    // rather than a linear scan over S slots (which made S uses O(S^2)).
+    for (size_t i = 0; i < scopes_.size(); ++i) {
+      scope_origins_.push_back(NewNode(i));
+      for (const auto& slot : scopes_[i]->slots_) slot_scope_.emplace(slot.get(), i);
+    }
+    urma_.assign(scopes_.size(), false);
+    cache_ = &cache_storage_;
+    frames_.emplace_back();  // the host body itself has no owned parameters
+  }
+
+  // Summary pass: labels are parameter indices of @p func.
+  CommDomainEngineAnalysis(const std::map<std::string, ir::FunctionPtr>* funcs,
+                           CommDomainAnalysisCache* cache, const ir::FunctionPtr& func)
+      : mode_(Mode::kSummary), funcs_(funcs), cache_(cache) {
+    frames_.emplace_back();
+    auto& frame = frames_.back();
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      Ownership owned;
+      owned.all.Add(NewNode(i));
+      frame.emplace(func->params_[i].get(), std::move(owned));
+    }
+  }
+
+  void Run(const ir::StmtPtr& body) {
+    if (body) VisitStmt(body);
+    ResolveCredits();
+  }
+
+  [[nodiscard]] const std::vector<bool>& urma() const { return urma_; }
+  [[nodiscard]] const EngineSummary& summary() const { return summary_; }
+
+ protected:
+  void VisitExpr_(const ir::CallPtr& call) override {
+    VisitOp(call->op_, call->args_);
+    ir::IRVisitor::VisitExpr_(call);
+  }
+
+  void VisitExpr_(const ir::SubmitPtr& submit) override {
+    VisitOp(submit->op_, submit->args_);
+    ir::IRVisitor::VisitExpr_(submit);
+  }
+
+  // Bind provenance to the assigned value. A Call/Submit result may be a tuple
+  // whose elements belong to different domains, so the mapping is per position
+  // whenever the callee's return lineage is known.
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    ir::IRVisitor::VisitStmt_(op);
+    if (op->var_ != nullptr) MarkOwned(op->var_.get(), OwnershipOf(op->value_));
+  }
+
+  // A yielded value feeds the enclosing If/For/While return variables; mark
+  // the positions that carry provenance so it crosses the merge.
+  void VisitStmt_(const ir::YieldStmtPtr& op) override {
+    if (!yield_frames_.empty()) {
+      for (size_t i = 0; i < op->value_.size(); ++i) {
+        const Ownership owned = OwnershipOf(op->value_[i]);
+        LinkOwnership(yield_frames_.back()[i], owned);
+      }
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ir::IfStmtPtr& op) override {
+    MarkReturnVars(op->return_vars_, VisitYieldingBody(op));
+  }
+
+  void VisitStmt_(const ir::ForStmtPtr& op) override { VisitLoop(op); }
+
+  void VisitStmt_(const ir::WhileStmtPtr& op) override { VisitLoop(op); }
+
+ private:
+  enum class Mode { kHost, kSummary };
+
+  // Masks here contain dependency-node IDs, rather than expanded origin labels.
+  // A stable node can acquire loop-backedge sources after its uses are visited.
+  // Tuple positions remain separate to avoid crediting a sibling result.
+  struct Ownership {
+    LabelMask all;
+    std::map<size_t, LabelMask> positions;
+
+    [[nodiscard]] bool Any() const {
+      if (all.Any()) return true;
+      return std::any_of(positions.begin(), positions.end(),
+                         [](const auto& entry) { return entry.second.Any(); });
+    }
+
+    [[nodiscard]] LabelMask Flatten() const {
+      LabelMask mask = all;
+      for (const auto& [position, position_mask] : positions) {
+        static_cast<void>(position);
+        mask.Merge(position_mask);
+      }
+      return mask;
+    }
+  };
+
+  struct ProvenanceNode {
+    LabelMask sources;
+    std::optional<size_t> origin;
+  };
+
+  size_t NewNode(std::optional<size_t> origin = std::nullopt) {
+    nodes_.push_back({{}, origin});
+    return nodes_.size() - 1;
+  }
+
+  // A stored variable/tuple position has one stable node. Add dependency edges
+  // instead of copying transitive provenance into every subsequent value.
+  void LinkSources(LabelMask& destination, const LabelMask& sources) {
+    if (!sources.Any()) return;
+    if (!destination.Any()) destination.Add(NewNode());
+    destination.ForEachLabel([&](size_t node) { nodes_[node].sources.Merge(sources); });
+  }
+
+  void LinkOwnership(Ownership& destination, const Ownership& sources) {
+    LinkSources(destination.all, sources.all);
+    for (const auto& [position, mask] : sources.positions) {
+      LinkSources(destination.positions[position], mask);
+    }
+  }
+
+  // All loop edges are installed before resolution. Backward reachability from
+  // collective contexts visits each node/edge once, including cycles, so swaps
+  // and multi-iteration carry chains need no fixed-point rescans of IR bodies.
+  void ResolveCredits() {
+    std::vector<size_t> pending;
+    credit_roots_.ForEachLabel([&](size_t node) { pending.push_back(node); });
+    std::vector<bool> visited(nodes_.size(), false);
+    while (!pending.empty()) {
+      const size_t node = pending.back();
+      pending.pop_back();
+      if (visited[node]) continue;
+      visited[node] = true;
+      const auto node_origin = nodes_[node].origin;
+      if (node_origin.has_value()) {
+        const size_t origin = node_origin.value();
+        if (mode_ == Mode::kHost) {
+          if (origin < urma_.size()) urma_[origin] = true;
+        } else {
+          summary_.credit.Add(origin);
+        }
+      }
+      nodes_[node].sources.ForEachLabel([&](size_t source) { pending.push_back(source); });
+    }
+  }
+
+  template <typename StmtT>
+  std::map<size_t, Ownership> VisitYieldingBody(const StmtT& op) {
+    yield_frames_.emplace_back();
+    ir::IRVisitor::VisitStmt_(op);
+    std::map<size_t, Ownership> yields = std::move(yield_frames_.back());
+    yield_frames_.pop_back();
+    return yields;
+  }
+
+  [[nodiscard]] const Ownership* FindOwned(const ir::Var* var) const {
+    if (var == nullptr) return nullptr;
+    for (auto frame = frames_.rbegin(); frame != frames_.rend(); ++frame) {
+      const auto it = frame->find(var);
+      if (it != frame->end()) return &it->second;
+    }
+    return nullptr;
+  }
+
+  void MarkOwned(const ir::Var* var, const Ownership& owned) {
+    if (var == nullptr || !owned.Any()) return;
+    Ownership& slot = frames_.back()[var];
+    LinkOwnership(slot, owned);
+  }
+
+  void MarkOwned(const ir::Var* var, const LabelMask& mask) {
+    if (var == nullptr || !mask.Any()) return;
+    LinkSources(frames_.back()[var].all, mask);
+  }
+
+  // Create stable carry nodes even when the initializer has no known origin:
+  // a later backedge can still bring an owned context into an earlier use.
+  void SeedIterArgs(const std::vector<ir::IterArgPtr>& iter_args) {
+    for (const auto& iter : iter_args) {
+      if (!iter) continue;
+      auto& owned = frames_.back()[iter.get()];
+      if (const auto tuple = ir::As<ir::TupleType>(iter->GetType())) {
+        // Tuple carries need a stable node per element before their first use.
+        // Flattening them would leak an unused sibling element's provenance.
+        for (size_t i = 0; i < tuple->types_.size(); ++i) {
+          auto& mask = owned.positions[i];
+          if (!mask.Any()) mask.Add(NewNode());
+        }
+      } else if (!owned.all.Any()) {
+        owned.all.Add(NewNode());
+      }
+      MarkOwned(iter.get(), OwnershipOf(iter->initValue_));
+    }
+  }
+
+  template <typename StmtT>
+  void VisitLoop(const StmtT& op) {
+    SeedIterArgs(op->iter_args_);
+    const auto yields = VisitYieldingBody(op);
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& iter = op->iter_args_[i];
+      if (!iter) continue;
+      const auto yielded = yields.find(i);
+      if (yielded != yields.end()) MarkOwned(iter.get(), yielded->second);
+      if (i < op->return_vars_.size()) {
+        // A zero-iteration loop returns its initializer; later iterations can
+        // return any origin reachable through the carry's backedge as well.
+        MarkOwned(op->return_vars_[i].get(), OwnershipOf(iter));
+      }
+    }
+  }
+
+  void MarkReturnVars(const std::vector<ir::VarPtr>& return_vars, const std::map<size_t, Ownership>& yields) {
+    for (const auto& [position, owned] : yields) {
+      if (position < return_vars.size() && return_vars[position] != nullptr) {
+        MarkOwned(return_vars[position].get(), owned);
+      }
+    }
+  }
+
+  [[nodiscard]] LabelMask ArgsMask(const std::vector<ir::ExprPtr>& args) {
+    LabelMask mask;
+    for (const auto& arg : args) mask.Merge(OwnershipOf(arg).Flatten());
+    return mask;
+  }
+
+  // The indexed kernel reads its URMA workspace from the target's CommCtx,
+  // appended first. Local-only operands are plain tensors in that kernel and
+  // must not pull URMA into their domains.
+  [[nodiscard]] LabelMask CtxMask(const std::vector<ir::ExprPtr>& args) {
+    LabelMask credit;
+    bool saw_ctx = false;
+    for (const auto& arg : args) {
+      if (arg && ir::IsA<ir::CommCtxType>(arg->GetType())) {
+        credit.Merge(OwnershipOf(arg).Flatten());
+        saw_ctx = true;
+        break;
+      }
+    }
+    if (!saw_ctx || !credit.Any()) return ArgsMask(args);
+    return credit;
+  }
+
+  void Credit(const LabelMask& mask) { credit_roots_.Merge(mask); }
+
+  // Resolve the provenance of @p expr. A value is owned when it names an owned
+  // variable, is a view of a scope's window buffer, or derives from one.
+  [[nodiscard]] Ownership OwnershipOf(const ir::ExprPtr& expr) {
+    if (!expr) return {};
+    const auto dist = ir::As<ir::DistributedTensorType>(expr->GetType());
+    if (dist && dist->window_buffer_.has_value()) {
+      if (mode_ == Mode::kHost) {
+        const auto owner = slot_scope_.find(dist->window_buffer_->get());
+        if (owner != slot_scope_.end()) {
+          Ownership owned;
+          owned.all.Add(scope_origins_[owner->second]);
+          return owned;
+        }
+      } else {
+        // A callee has no window origin of its own; its tensors arrive as
+        // parameters. A window view surviving here means the demand cannot be
+        // expressed over parameters, so callers fall back to all arguments.
+        summary_.all_args = true;
+      }
+    }
+    if (const auto var = ir::AsVarLike(expr)) {
+      if (const Ownership* owned = FindOwned(var.get())) return *owned;
+      if (const auto iter = ir::As<ir::IterArg>(expr)) return OwnershipOf(iter->initValue_);
+      return {};
+    }
+    if (const auto get = ir::As<ir::TupleGetItemExpr>(expr)) {
+      // Project a stored tuple directly, without copying all R position masks
+      // for each of its R uses. Non-variable tuple expressions still own their
+      // local temporary until this projection is complete.
+      const auto tuple_var = ir::AsVarLike(get->tuple_);
+      const Ownership* base = tuple_var ? FindOwned(tuple_var.get()) : nullptr;
+      Ownership temporary;
+      if (base == nullptr) {
+        temporary = OwnershipOf(get->tuple_);
+        base = &temporary;
+      }
+      Ownership owned;
+      owned.all = base->all;
+      const auto it = base->positions.find(static_cast<size_t>(get->index_));
+      if (it != base->positions.end()) owned.all.Merge(it->second);
+      return owned;
+    }
+    if (const auto tuple = ir::As<ir::MakeTuple>(expr)) {
+      Ownership owned;
+      for (size_t i = 0; i < tuple->elements_.size(); ++i) {
+        LabelMask mask = OwnershipOf(tuple->elements_[i]).Flatten();
+        if (mask.Any()) owned.positions.emplace(i, std::move(mask));
+      }
+      return owned;
+    }
+    if (const auto call = ir::As<ir::Call>(expr)) {
+      return ResultOwnership(call->op_, call->args_, expr->GetType(), /*has_task_id=*/false);
+    }
+    if (const auto submit = ir::As<ir::Submit>(expr)) {
+      return ResultOwnership(submit->op_, submit->args_, expr->GetType(), /*has_task_id=*/true);
+    }
+    return {};
+  }
+
+  // Per-result-position provenance of a Call/Submit, resolved through the
+  // callee's explicit return->param map (NormalizeReturnOrder has run by
+  // codegen time). A Submit's trailing TaskId is never owned.
+  [[nodiscard]] Ownership ResultOwnership(const ir::OpPtr& op, const std::vector<ir::ExprPtr>& args,
+                                          const ir::TypePtr& result_type, bool has_task_id) {
+    size_t positional = 1;
+    if (const auto tuple = ir::As<ir::TupleType>(result_type)) positional = tuple->types_.size();
+    const size_t results = has_task_id && positional > 0 ? positional - 1 : positional;
+
+    const std::vector<std::optional<size_t>>* lineage = nullptr;
+    if (funcs_ != nullptr && op != nullptr) {
+      const auto callee = funcs_->find(op->name_);
+      if (callee != funcs_->end() && callee->second) {
+        // Finding a return nested in a scope walks the callee body. Compute
+        // that structural map once per function, including empty maps, and
+        // borrow it here rather than rescanning or copying at every call site.
+        auto [entry, inserted] = cache_->return_lineage.try_emplace(callee->second.get());
+        if (inserted) {
+          entry->second = ir::return_lineage::ExplicitReturnedParamIndices(callee->second);
+        }
+        lineage = &entry->second;
+      }
+    }
+
+    Ownership owned;
+    LabelMask single;
+    LabelMask conservative;
+    for (size_t r = 0; r < results; ++r) {
+      LabelMask mask;
+      const std::optional<size_t> source =
+          lineage != nullptr && r < lineage->size() ? (*lineage)[r] : std::nullopt;
+      if (source.has_value() && source.value() < args.size()) {
+        mask = OwnershipOf(args[source.value()]).Flatten();
+      } else {
+        // The returned value is not one parameter (builtin op, computed
+        // return, or a callee without a top-level ReturnStmt). Keep the
+        // conservative union so a real dependency is not dropped.
+        // Unknown results share one union node. Rebuilding/copying K argument
+        // sources for each of K results would otherwise take quadratic space
+        // and time even though the call and its result list are linear-sized.
+        if (!conservative.Any()) {
+          const size_t node = NewNode();
+          nodes_[node].sources = ArgsMask(args);
+          conservative.Add(node);
+        }
+        mask = conservative;
+      }
+      if (results == 1) {
+        single.Merge(mask);
+      } else if (mask.Any()) {
+        owned.positions.emplace(r, std::move(mask));
+      }
+    }
+    if (results == 1) owned.all = single;
+    return owned;
+  }
+
+  // One summary per function, independent of the caller's concrete masks: the
+  // callee body is walked once with its parameter indices as labels.
+  [[nodiscard]] const EngineSummary& SummaryFor(const ir::FunctionPtr& func) {
+    EngineSummary* slot = nullptr;
+    const auto existing = cache_->engines.find(func.get());
+    if (existing != cache_->engines.end()) {
+      slot = &existing->second;
+    } else {
+      slot = &cache_->engines.emplace(func.get(), EngineSummary{}).first->second;
+      // Install a conservative placeholder before walking: a recursive call
+      // returns it instead of recursing forever.
+      slot->all_args = true;
+      if (func->body_) {
+        CommDomainEngineAnalysis nested(funcs_, cache_, func);
+        nested.Run(func->body_);
+        *slot = nested.summary();
+      } else {
+        *slot = EngineSummary{};
+      }
+    }
+    return *slot;
+  }
+
+  void VisitOp(const ir::OpPtr& op, const std::vector<ir::ExprPtr>& args) {
+    if (!op) return;
+    if (ir::IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
+        op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0) {
+      Credit(CtxMask(args));
+    }
+    if (funcs_ == nullptr) return;
+    const auto callee = funcs_->find(op->name_);
+    if (callee == funcs_->end() || !callee->second || !callee->second->body_) return;
+    const LabelMask arg_mask = ArgsMask(args);
+    if (!arg_mask.Any()) return;
+    const EngineSummary& callee_summary = SummaryFor(callee->second);
+    if (callee_summary.all_args) {
+      Credit(arg_mask);
+      return;
+    }
+    // The trailing context suffix is shared by every credited parameter.
+    // Scan it once per call, keeping each parameter-to-argument lookup O(1).
+    size_t ctx = 0;
+    const auto& params = callee->second->params_;
+    for (auto it = params.rbegin(); it != params.rend(); ++it) {
+      if (!ir::IsA<ir::CommCtxType>((*it)->GetType())) break;
+      ++ctx;
+    }
+    LabelMask composed;
+    callee_summary.credit.ForEachLabel([&](size_t param) {
+      const std::optional<size_t> arg = ParamToArgIndex(params.size(), args.size(), ctx, param);
+      if (arg.has_value()) composed.Merge(OwnershipOf(args[*arg]).Flatten());
+    });
+    Credit(composed);
+  }
+
+  // Map a callee parameter index to the call argument bound to it, following
+  // the Call/Submit args-coverage invariant in include/pypto/ir/expr.h:
+  //   gap = params.size() - args.size()
+  //   ctx = number of trailing CommCtxType params
+  //   param < args.size()-ctx            -> args[param]
+  //   args.size()-ctx <= param < params.size()-ctx -> omitted (no argument)
+  //   param >= params.size()-ctx         -> args[param-gap]
+  // A Call has gap == 0 and recovers identity. A Submit may omit trailing
+  // runtime-allocated Out params, so indexing args[param] directly would read
+  // the wrong argument or drop the credit beyond args.size().
+  [[nodiscard]] static std::optional<size_t> ParamToArgIndex(size_t param_count, size_t arg_count, size_t ctx,
+                                                             size_t param) {
+    if (param >= param_count || arg_count > param_count || ctx > arg_count) return std::nullopt;
+    const size_t supplied = arg_count - ctx;
+    const size_t user_params = param_count - ctx;
+    if (param < supplied) return param;
+    if (param < user_params) return std::nullopt;  // omitted runtime-allocated Out
+    return param - (param_count - arg_count);
+  }
+
+  Mode mode_;
+  const std::map<std::string, ir::FunctionPtr>* funcs_;
+  std::vector<ir::CommDomainScopeStmtPtr> scopes_;  // host pass only
+  std::unordered_map<const ir::WindowBuffer*, size_t> slot_scope_;
+  std::vector<ProvenanceNode> nodes_;
+  std::vector<size_t> scope_origins_;
+  LabelMask credit_roots_;
+  CommDomainAnalysisCache cache_storage_;
+  CommDomainAnalysisCache* cache_ = nullptr;
+  std::vector<bool> urma_;
+  EngineSummary summary_;
+  // One entry per active callee (index 0 is the current body): parameters and
+  // locals that carry provenance, per tuple position where the value is a
+  // multi-result tuple.
+  std::vector<std::unordered_map<const ir::Var*, Ownership>> frames_;
+  // Provenance of the innermost If/For/While yields, by position.
+  std::vector<std::map<size_t, Ownership>> yield_frames_;
+};
 }  // namespace
 
 // ========================================================================
 // Public API
 // ========================================================================
+
+void DistributedCodegen::CollectCommDomainEngines(const ir::FunctionPtr& func) {
+  scope_urma_.clear();
+  if (!func || !func->body_) return;
+
+  class ScopeCollector : public ir::IRVisitor {
+   public:
+    std::vector<ir::CommDomainScopeStmtPtr> scopes;
+
+   protected:
+    void VisitStmt_(const ir::CommDomainScopeStmtPtr& op) override {
+      scopes.push_back(op);
+      ir::IRVisitor::VisitStmt_(op);
+    }
+  } collector;
+  collector.VisitStmt(func->body_);
+  if (collector.scopes.empty()) return;
+
+  CommDomainEngineAnalysis analysis(&all_funcs_, collector.scopes);
+  analysis.Run(func->body_);
+  const auto& urma = analysis.urma();
+  for (size_t i = 0; i < collector.scopes.size(); ++i) {
+    scope_urma_.emplace(collector.scopes[i].get(), urma[i]);
+  }
+}
 
 std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
@@ -94,6 +643,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   builtin_next_level_specs_.clear();
 
   comm_domain_stack_.clear();
+  scope_urma_.clear();
 
   ClassifyFunctions();
   CHECK(!workers_.empty() || !orchestrators_.empty())
@@ -123,6 +673,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
     const bool is_host_orch =
         best_orch->level_.has_value() &&
         ir::LevelToLinquLevel(*best_orch->level_) >= 3;  // NOLINT(bugprone-unchecked-optional-access)
+    CollectCommDomainEngines(best_orch);
     if (is_host_orch) {
       CollectHostOrchHoistableAllocs(best_orch);
       EmitAllocIntermediatesFunction(best_orch);
@@ -583,11 +1134,20 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     window_size_expr << "(" << slot_alloc_nbytes[i] << ")";
   }
 
+  // Provision only the async engines the body actually uses; every other
+  // descriptor stays zero and costs nothing. The requirement was computed once
+  // for the whole host body by CollectCommDomainEngines().
+  const auto scope_urma = scope_urma_.find(op.get());
+  const bool needs_urma = scope_urma != scope_urma_.end() && scope_urma->second;
+
   emitter_.EmitLine("with (_domain_provider or orch.allocate_domain)(");
   emitter_.IncreaseIndent();
   emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
   emitter_.EmitLine("workers=" + workers.str() + ",");
   emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
+  if (needs_urma) {
+    emitter_.EmitLine("workspace_engines=(\"urma\",),");
+  }
   emitter_.EmitLine("buffers=[");
   emitter_.IncreaseIndent();
   for (size_t i = 0; i < op->slots_.size(); ++i) {
@@ -630,6 +1190,7 @@ void DistributedCodegen::EmitEntryFunction() {
   declared_vars_.clear();
   task_args_counter_ = 0;
   current_func_ = entry_func_;
+  CollectCommDomainEngines(entry_func_);
 
   // Entry function signature
   emitter_.EmitLine("def entry(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size):");
