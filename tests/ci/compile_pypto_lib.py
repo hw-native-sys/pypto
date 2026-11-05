@@ -137,12 +137,13 @@ def _python_script_index(command: list[Any] | tuple[Any, ...]) -> int | None:
             continue
         # Short flags may be grouped. -W/-X consume the rest of their group
         # or the next argument; -c/-m and unknown options are not script runs.
+        # -x skips the entry's first line, which runpy would execute unchanged.
         for offset, flag in enumerate(argument[1:], start=1):
             if flag in "WX":
                 if offset == len(argument) - 1:
                     index += 1
                 break
-            if flag not in "bBdEiIOPqRsSuvx":
+            if flag not in "bBdEiIOPqRsSuv":
                 return None
         index += 1
     return None
@@ -150,6 +151,8 @@ def _python_script_index(command: list[Any] | tuple[Any, ...]) -> int | None:
 
 def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: list[str] | None = None) -> None:
     """Force every golden.run call through its real compile-only pipeline."""
+    # A child's cwd must not change where its receipt is written or collected.
+    receipt = receipt.resolve()
     sys.path[:0] = [str(lib), str((lib / entry).parent)]
     golden: Any = importlib.import_module("golden")
     runner: Any = importlib.import_module("golden.runner")
