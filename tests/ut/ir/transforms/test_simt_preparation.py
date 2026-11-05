@@ -466,6 +466,174 @@ class Before:
     assert body.stmts[0] in graph.get_predecessors(body.stmts[1])
 
 
+@pytest.mark.parametrize("flow", ["straight", "chain", "for", "while", "if"])
+@pytest.mark.parametrize("annotated", [False, True])
+@pytest.mark.parametrize("storage", ["direct", "ND", "DN"])
+def test_mixed_kernel_gm_launch_results_resolve_to_cube_parameters(flow, annotated, storage):
+    """The AIC consumer must borrow dst, not the AIV-only launch result or src."""
+    launch = (
+        "updated = pl.simt.launch(self.update, src, updated, "
+        "block_dims=(64, 1, 1), result_param_indices=(1,))"
+    )
+    bodies = {
+        "straight": f"        {launch}",
+        "chain": f"        {launch}\n        {launch}",
+        "for": f"        for i in pl.range(2):\n            {launch}",
+        "while": (
+            f"        i = pl.const(0, pl.INDEX)\n        while i < 2:\n            {launch}\n"
+            "            i = i + 1"
+        ),
+        "if": f"        if flag == 0:\n            {launch}\n        else:\n            {launch}",
+    }
+    dst_type = "pl.Tensor[[16, 16], pl.FP16]" if storage == "direct" else "pl.Tensor[[256], pl.FP16]"
+    if annotated:
+        dst_type = f"pl.InOut[{dst_type}]"
+    initial = (
+        "dst" if storage == "direct" else f"pl.tensor.view(dst, [16, 16], layout=pl.TensorLayout.{storage})"
+    )
+    before = parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def update(self, src: pl.Tensor[[16, 16], pl.FP16], dst: pl.InOut[pl.Tensor[[16, 16], pl.FP16]]):
+        value = pl.simt.load(src, (0, 0))
+        pl.simt.store(dst, (0, 0), value)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, src: pl.Tensor[[16, 16], pl.FP16], dst: {dst_type},
+               rhs: pl.Tensor[[16, 16], pl.FP16], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+               flag: pl.Scalar[pl.INT32]):
+        updated = {initial}
+{bodies[flow]}
+        left_mat = pl.tile.load(updated, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        left = pl.tile.move(left_mat, target_memory=pl.Mem.Left)
+        right_mat = pl.tile.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        right = pl.tile.move(right_mat, target_memory=pl.Mem.Right)
+        product = pl.tile.matmul(left, right)
+        result = pl.tile.store(product, [0, 0], out)
+        return result
+""")
+    after = passes.convert_to_ssa()(before)
+    after = passes.infer_tile_memory_space()(after)
+    borrowed_type = launches(after)[0].args[1].type
+    after = passes.expand_mixed_kernel()(after)
+
+    aic = function(after, "kernel_aic")
+    aiv = function(after, "kernel_aiv")
+    loads: list[ir.Call] = []
+    views: list[ir.Call] = []
+
+    class Loads(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == ir.get_op("tile.load").name:
+                loads.append(op)
+            if op.op.name == ir.get_op("tensor.view").name:
+                views.append(op)
+            super().visit_call(op)
+
+    Loads().visit_stmt(aic.body)
+    assert len(loads) == 2
+    ir.assert_structural_equal(loads[0].args[0].type, borrowed_type)
+    if storage == "direct":
+        # A retained loop/phi may still name the handle. Trace its returned
+        # identity through the public analysis instead of assuming a flat body.
+        probe = ir.Function(
+            "probe",
+            aic.params,
+            [loads[0].args[0].type],
+            ir.SeqStmts([aic.body, ir.ReturnStmt([loads[0].args[0]], aic.span)], aic.span),
+            aic.span,
+            ir.FunctionType.AIC,
+        )
+        assert ir.returned_param_indices(probe, after) == [1]
+        assert not views
+    else:
+        assert len(views) == 1
+        assert views[0].args[0] is aic.params[1]
+        ir.assert_structural_equal(views[0].type, borrowed_type)
+    assert loads[1].args[0] is aic.params[2]
+    assert len(launches(ir.Program([aic], "Cube", aic.span))) == 0
+    assert len(launches(ir.Program([aiv], "Vector", aiv.span))) == (2 if flow in ("chain", "if") else 1)
+    assert "__FREE_VAR" not in ir.python_print(after)
+    ir.verify_structural_bindings(after)
+    directed = passes.derive_call_directions()(after)
+    assert function(directed, "kernel_aiv").param_directions[1] == ir.ParamDirection.InOut
+    assert function(directed, "kernel").param_directions[1] == ir.ParamDirection.InOut
+
+
+def test_mixed_kernel_preserves_branch_local_gm_views():
+    before = parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def update(self, dst: pl.InOut[pl.Tensor[[16, 16], pl.FP16]]):
+        pl.simt.store(dst, (0, 0), pl.const(1.0, pl.FP16))
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[256], pl.FP16], b: pl.Tensor[[256], pl.FP16],
+               out: pl.Out[pl.Tensor[[16, 16], pl.FP32]], flag: pl.Scalar[pl.INT32]):
+        if flag == 0:
+            view = pl.tensor.view(a, [16, 16])
+            updated = pl.simt.launch(self.update, view, block_dims=(64, 1, 1), result_param_indices=(0,))
+        else:
+            view = pl.tensor.view(b, [16, 16])
+            updated = pl.simt.launch(self.update, view, block_dims=(64, 1, 1), result_param_indices=(0,))
+        tile = pl.tile.load(updated, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        left = pl.tile.move(tile, target_memory=pl.Mem.Left)
+        right = pl.tile.move(tile, target_memory=pl.Mem.Right)
+        product = pl.tile.matmul(left, right)
+        result = pl.tile.store(product, [0, 0], out)
+        return result
+""")
+    after = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(before)))
+    aic = function(after, "kernel_aic")
+    statements = ir.flatten_to_stmts(aic.body)
+    branch = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+    assert branch.else_body is not None
+    branch_views: list[tuple[ir.Stmt, ir.Var]] = []
+    for body, param in ((branch.then_body, aic.params[0]), (branch.else_body, aic.params[1])):
+        definitions = [stmt for stmt in ir.flatten_to_stmts(body) if isinstance(stmt, ir.AssignStmt)]
+        assert len(definitions) == 1
+        call = definitions[0].value
+        assert isinstance(call, ir.Call)
+        assert call.op.name == ir.get_op("tensor.view").name
+        assert call.args[0] is param
+        branch_views.append((body, definitions[0].var))
+    load = next(
+        stmt.value
+        for stmt in statements
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == ir.get_op("tile.load").name
+    )
+    slot = next(i for i, value in enumerate(branch.return_vars) if load.args[0] is value)
+    for body, view in branch_views:
+        yielded = ir.flatten_to_stmts(body)[-1]
+        assert isinstance(yielded, ir.YieldStmt)
+        assert yielded.value[slot] is view
+    assert "__FREE_VAR" not in ir.python_print(after)
+    ir.verify_structural_bindings(after)
+
+
+def test_gm_view_launch_without_cube_work_stays_pure_aiv():
+    before = parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def update(self, dst: pl.InOut[pl.Tensor[[16, 16], pl.FP16]]):
+        pl.simt.store(dst, (0, 0), pl.const(1.0, pl.FP16))
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, dst: pl.Tensor[[256], pl.FP16]):
+        view = pl.tensor.view(dst, [16, 16])
+        updated = pl.simt.launch(self.update, view, block_dims=(64, 1, 1), result_param_indices=(0,))
+""")
+    after = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(before)))
+    assert function(after, "kernel").func_type == ir.FunctionType.AIV
+    assert not any(f.func_type == ir.FunctionType.AIC for f in after.functions.values())
+    assert len(launches(after)) == 1
+
+
 def test_launch_inside_active_register_scope_is_rejected():
     Before = parse_program("""
 @pl.program

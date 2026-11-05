@@ -93,6 +93,10 @@ The default pipeline now preserves storage semantics before memory planning:
   directions propagate as InOut to outer Call and Submit sites, where ordinary
   task dependency analysis applies. Device statement scheduling preserves launch
   order even when a later read uses the old GM handle.
+- Mixed-kernel splitting keeps launches on AIV and preserves their borrowed GM
+  handles on AIC before cleanup. Tensor views retain their shape, strides and
+  layout, including views and aliases carried through loops and branches.
+  GM handle bookkeeping alone does not create a cube kernel.
 
 Known overlapping writable arguments are rejected before copying. Distinct GM
 arguments may still alias at runtime; guaranteeing nonoverlap remains the caller's
