@@ -13,6 +13,7 @@ import re
 
 import pypto.language as pl
 import pytest
+import torch
 from pypto import codegen, ir, passes
 
 
@@ -427,6 +428,67 @@ class TestDistributedCodegen:
         assert "torch.float32" in code
         assert ".share_memory_()" in code
         assert "import torch" in code
+
+    @pytest.mark.parametrize(
+        ("dtype", "torch_name"),
+        [
+            (pl.FP8E4M3FN, "float8_e4m3fn"),
+            (pl.FP8E5M2, "float8_e5m2"),
+            (pl.FP8E8M0, "float8_e8m0fnu"),
+            (pl.FP4E2M1X2, "float4_e2m1fn_x2"),
+            # Torch has no hifloat8 / packed-E1M2 dtype, so both cross as the
+            # byte carrier holding the same bytes.
+            (pl.FP4E1M2X2, "uint8"),
+            (pl.HF8, "uint8"),
+        ],
+    )
+    def test_create_tensor_low_precision_dtype_names_a_real_torch_dtype(self, dtype, torch_name):
+        """A host tensor.create must emit a torch dtype that actually exists.
+
+        The emitted line is executed verbatim in the generated ``host_orch.py``,
+        so an IR abbreviation left untranslated (``torch.fp8e5m2``) raises
+        AttributeError at dispatch time, before the kernel runs.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
+            def chip_worker(
+                self,
+                a: pl.Tensor[[64], dtype],
+                buf: pl.Out[pl.Tensor[[64], dtype]],
+            ) -> pl.Tensor[[64], dtype]:
+                return a
+
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(
+                self,
+                a: pl.Tensor[[64], dtype],
+                buf: pl.Out[pl.Tensor[[64], dtype]],
+            ) -> pl.Tensor[[64], dtype]:
+                result: pl.Tensor[[64], dtype] = self.chip_worker(a, buf)
+                return result
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, a: pl.Tensor[[64], dtype]) -> pl.Tensor[[64], dtype]:
+                buf: pl.Tensor[[64], dtype] = pl.create_tensor([64], dtype=dtype)
+                result: pl.Tensor[[64], dtype] = self.chip_orch(a, buf)
+                return result
+
+        code = codegen.DistributedCodegen().generate(passes.convert_to_ssa()(Input))
+        create_lines = [line for line in code.splitlines() if "torch.zeros(" in line]
+        assert len(create_lines) == 1, create_lines
+        assert f"dtype=torch.{torch_name}" in create_lines[0], create_lines[0]
+        # The IR abbreviation must not survive as a torch attribute name.
+        assert f"torch.{dtype.to_string()}" not in code or torch_name == dtype.to_string()
+        # Catch a typo in the table's torch spelling, but only where this torch
+        # provides the name: the optional FP8/FP4 dtypes are absent on older
+        # supported builds (torch 2.0 registers none of them), and whether the
+        # host interpreter happens to have them says nothing about whether
+        # codegen emitted the right string -- which the asserts above check.
+        emitted_dtype = getattr(torch, torch_name, None)
+        if emitted_dtype is not None:
+            assert isinstance(emitted_dtype, torch.dtype), f"torch.{torch_name} exists but is not a dtype"
 
     def test_create_tensor_shared_zeros_for_multiple_tensors(self):
         """Multiple tensor.create calls each emit torch.zeros(...).share_memory_()."""
