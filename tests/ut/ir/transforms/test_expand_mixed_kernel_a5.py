@@ -6672,6 +6672,80 @@ def test_single_store_keeps_existing_fence_across_reused_event_id(backend_name):
 
 
 @pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
+@pytest.mark.parametrize(
+    "schedule",
+    ["reused_pair", "extra_release", "extra_acquire", "other_pipe", "dynamic", "unique", "distinct"],
+)
+def test_multi_store_gm_requires_unambiguous_event_occurrences(backend_name, schedule):
+    """A pre-store release can satisfy the first wait despite a later matching ID."""
+    backend.reset_for_testing()
+    backend.set_backend_type(getattr(backend.BackendType, backend_name))
+    extra_id = 5 if schedule == "distinct" else 4
+    extra_pipe = pl.PipeType.M if schedule == "other_pipe" else pl.PipeType.FIX
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def relay(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            scratch: pl.Tensor[[32, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            event: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            mat = pl.tile.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.move(mat, target_memory=pl.Mem.Left)
+            right = pl.tile.move(mat, target_memory=pl.Mem.Right)
+            acc = pl.tile.matmul(left, right)
+            pl.system.sync_set(extra_id, pipe=extra_pipe, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            scratch = pl.tile.store(acc, [0, 0], scratch)
+            scratch = pl.tile.store(acc, [16, 0], scratch)
+            chunk = pl.tile.load(scratch, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            out = pl.tile.store(chunk, [0, 0], out)
+            pl.system.sync_set(4, pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC)
+            pl.system.sync_wait(extra_id, pipe=pl.PipeType.MTE2, core_type=pl.KernelType.AIV)
+            return out
+
+    func = next(iter(Before.functions.values()))
+    stmts = _flatten_top_level_stmts(func.body)
+    sets = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("system.sync_set").name]
+    waits = [stmt for stmt in stmts if _get_stmt_op_name(stmt) == ir.get_op("system.sync_wait").name]
+    if schedule in ("extra_acquire", "unique"):
+        stmts.remove(sets[0])
+    if schedule in ("extra_release", "unique"):
+        stmts.remove(waits[-1])
+    if schedule == "dynamic":
+        stmts[stmts.index(sets[0])] = ir.EvalStmt(
+            pl.system.sync_set(
+                func.params[-1], pipe=pl.PipeType.FIX, ffts_mode=2, core_type=pl.KernelType.AIC
+            ),
+            sets[0].span,
+        )
+        stmts.remove(waits[-1])
+    before = ir.Program(
+        [
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions)),
+                func.return_types,
+                _make_stmt_body(stmts, func.body.span),
+                func.span,
+                func.func_type,
+                func.level,
+                func.role,
+            )
+        ],
+        Before.name,
+        Before.span,
+    )
+    after = _expand_raw(before)
+    rendered = ir.python_print(after)
+    assert ("_gm_sync" in rendered) == (schedule not in ("unique", "distinct"))
+    ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend950", "Ascend910B"])
 def test_branch_merged_store_groups_do_not_erase_existing_fences(backend_name):
     """Merging two old single-store groups must not trust unrelated event occurrences."""
     backend.reset_for_testing()

@@ -1648,6 +1648,15 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     }
     return call->GetKwarg<int>("event_id", -1);
   };
+  // An ID alone does not identify an event occurrence. Only a single static
+  // release/acquire call-site pair can justify suppressing a new FIFO fence.
+  // Count all pipes on each lane: reusing an ID on a different pipe is still
+  // ambiguous. Dynamic IDs may collide with any static ID, so disable the
+  // exemption when their identity cannot be established. Loop trip counts
+  // remain part of the authored protocol; this checks distinct call sites.
+  std::array<size_t, 14> release_occurrences{};
+  std::array<size_t, 14> acquire_occurrences{};
+  bool has_dynamic_forward_event = false;
   std::unordered_map<const Stmt*, EventSet> explicit_releases;
   std::unordered_map<const Stmt*, EventSet> explicit_acquires;
   std::function<void(const std::vector<StmtPtr>&, EventSet, bool)> index_events;
@@ -1659,10 +1668,16 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
       if (auto eval = As<EvalStmt>(stmt)) call = As<Call>(eval->expr_);
       if (call && IsOp(call, release ? "system.sync_set" : "system.sync_wait") &&
           call->GetKwarg<std::string>("core_type", "") == (release ? "aic" : "aiv") &&
-          call->GetKwarg<int>("pipe", -1) == static_cast<int>(release ? PipeType::FIX : PipeType::MTE2) &&
           (!release || call->GetKwarg<int>("ffts_mode", -1) == 2)) {
         const int id = static_event_id(call);
-        if (id >= 0 && static_cast<size_t>(id) < events.size()) events.set(id);
+        if (id >= 0 && static_cast<size_t>(id) < events.size()) {
+          ++(release ? release_occurrences : acquire_occurrences)[id];
+          if (call->GetKwarg<int>("pipe", -1) == static_cast<int>(release ? PipeType::FIX : PipeType::MTE2)) {
+            events.set(id);
+          }
+        } else {
+          has_dynamic_forward_event = true;
+        }
       }
       (release ? explicit_releases : explicit_acquires)[stmt.get()] = events;
       if (auto loop = As<ForStmt>(stmt)) {
@@ -1677,6 +1692,12 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   };
   index_events(stmts, {}, true);
   index_events(stmts, {}, false);
+  EventSet unambiguous_events;
+  if (!has_dynamic_forward_event) {
+    for (size_t id = 0; id < unambiguous_events.size(); ++id) {
+      if (release_occurrences[id] == 1 && acquire_occurrences[id] == 1) unambiguous_events.set(id);
+    }
+  }
 
   // Pass 2: collect cross-lane store/load records, tagged with a structural
   // body id and a program-order index.
@@ -1922,8 +1943,7 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     // already required a fence. Merged groups still need a legal write phase;
     // reject interleaving rather than silently erase an established dependency.
     if (has_cube_store && has_vector_load && !origins_with_store_chain_dependency.count(origin)) {
-      EventSet authored_events;
-      authored_events.set();
+      EventSet authored_events = unambiguous_events;
       for (const auto* write : origin_stores) {
         if (write->side == CoreSide::AIC) authored_events &= explicit_releases.at(write->stmt);
       }

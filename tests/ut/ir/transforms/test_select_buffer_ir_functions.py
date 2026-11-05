@@ -1402,5 +1402,34 @@ class ColumnStore:
     assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dtype", ["FP32", "INT32"])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_explicit_store_partition_shape_remains_tile(planner, dtype, dynamic, tmp_path):
+    """Gate route packing uses a fourth store operand, outside the Buffer recipe."""
+    valid_rows = "rows" if dynamic else "8"
+    program = pl.parse_program(f"""
+@pl.program
+class ShapedStore:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, source: pl.Tensor[[16, 32], pl.{dtype}], rows: pl.Scalar[pl.INDEX],
+               output: pl.Out[pl.Tensor[[16, 8], pl.{dtype}]]) -> pl.Tensor[[16, 8], pl.{dtype}]:
+        value = pl.tile.load(source, [0, 0], [16, 32], valid_shape=[{valid_rows}, 8])
+        pl.tile.store(value, [0, 0], output, shapes=[{valid_rows}, 8])
+        return output
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Functional
+    text = codegen.PTOCodegen().generate(
+        lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    assert "pto.tstore" in text
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "shaped_store.pto"
+        source.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source), str(tmp_path / "shaped_store.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

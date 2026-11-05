@@ -22,6 +22,9 @@ with PYPTO, DSA_RP and PTOAS planners. Physical rows must be 32-byte aligned;
 valid extents may be static partial rectangles or supported runtime rectangles within the physical shape.
 Elementwise Tile operands and their destination must have matching physical shapes
 and valid extents; matching valid extents alone do not qualify.
+Stores with an explicit `shapes=` partition operand retain Tile IR: the Buffer
+store recipe currently accepts only the three-operand form. This also applies to
+rank-2 stores with static or runtime partition extents.
 
 | Operations | Element types |
 | ---------- | ------------- |
