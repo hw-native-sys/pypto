@@ -121,12 +121,10 @@ TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
     output_shape.push_back(n_dim);
   }
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-  // Hardware matmul accumulates to FP32 for float inputs, INT32 for integer inputs.
-  auto result_dtype =
-      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
+  // Same operand-pair contract as the 2D tile.matmul this unrolls into (so an
+  // A5 mixed-FP8 tensor.matmul with a batch dim is not rejected here first),
+  // and the accumulator dtype comes from the same shared check.
+  auto result_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, op_name);
 
   // The matmul output tile uses the hardware's native accumulator layout
   // (col_major block / row_major sub-block), which is exactly Acc's implicit
@@ -251,12 +249,8 @@ TypePtr DeduceTileBatchMatMulAccType(const std::vector<ExprPtr>& args,
     }
   }
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-  // Hardware accumulates to FP32 for float inputs, INT32 for integer inputs.
-  auto result_dtype =
-      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
+  // Same operand-pair contract as the 2D tile.matmul_acc this unrolls into.
+  auto result_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, op_name);
 
   CHECK(acc_type->dtype_ == result_dtype)
       << "The operator " << op_name << " requires accumulator dtype " << result_dtype.ToString()
