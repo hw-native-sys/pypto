@@ -212,6 +212,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
 ### Tile 视图 (TileView)
 
 `blayout` 和 `slayout` 接受外围 Python 作用域中的 `pl.TileLayout` 常量。
+`pl.cast` / `pl.tile.cast` 以相同的两个名称提供仅关键字选项，用于指定*目标*布局，
+参见 [LegalizeTileCast](../passes/18-legalize_tile_cast.md#目标布局nz)。
 
 ```python
 # Create TileView

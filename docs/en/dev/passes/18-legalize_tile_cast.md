@@ -106,6 +106,80 @@ narrows to an integer, so the applicable default is `"on"` and only a cast that
 explicitly opted out allocates a tile at all. A caller-supplied `tmp` is never
 dropped.
 
+## Destination layout (NZ)
+
+`pl.tile.cast` and `pl.cast` take optional keyword-only `blayout` and `slayout`,
+spelled exactly as on [`pl.tile.move`](../ir/05-operators.md):
+
+```python
+nz_fp8 = pl.cast(
+    packed_fp4,
+    pl.FP8E4M3FN,
+    blayout=pl.TileLayout.col_major,
+    slayout=pl.TileLayout.row_major,
+)
+```
+
+**Omitting both inherits the source tile's layout**, which is what every cast
+did before these attributes existed, and nothing is recorded on the call — so a
+plain cast's IR, printed form and serialization are unchanged.
+
+`blayout=col_major` + `slayout=row_major` with the default 512-byte fractal is
+**standard NZ**: the same triple `tile_view_semantics::GetImplicitTileLayout`
+assigns a Mat or Left tile, and the layout the matrix unit consumes. Requesting
+it lets the A5 packed-FP4 conversion write the FP8 result straight into the box
+grid, so the Vec-to-Vec ND-to-NZ `pto.tmov` that would otherwise precede the
+operand's staging to Mat disappears, along with its Vec buffer.
+
+### Why the keyword is spelled `blayout` / `slayout`
+
+A tile's layout *is* `blayout` / `slayout` / `fractal` — `TileLayout`, not the
+GM-side `TensorLayout` that `pl.NZ` names — and `tile.move` already takes these
+two as optional attributes with the same "absent inherits the source" contract.
+Reusing them needs no new enum and no new printer, parser or serializer support,
+since `TileLayout` kwargs already round-trip. `fractal` deliberately has no
+keyword: it is inherited, and an ND source carries the 512 that is the only
+value the native NZ destination accepts.
+
+### What the cast will and will not convert
+
+The **only** layout change a cast performs is ND source to standard NZ
+destination. A request equal to the inherited layout is accepted as a no-op;
+any other change is rejected and pointed at `tile.move`. In particular ZN
+(`row_major` / `col_major`) and a non-512 fractal are rejected, matching PTOAS,
+which accepts neither for this conversion.
+
+Accepted geometry, all enforced on the **physical** shape (PTOAS pads a boxed
+destination up to the box grid and tracks the narrower extent as the valid
+region):
+
+| Requirement | Why |
+| ----------- | --- |
+| ND source (`row_major` / `none_box`) | the only source form the native conversion reads; also keeps the backend's result repair from re-deducing the cast into a degenerate NZ-to-NZ `tile.move` |
+| destination rows a multiple of 16 | one NZ box is 16 rows; a partial row of boxes has no addressable storage |
+| destination columns a multiple of `32 / dtype_bytes` | the box's column count; for FP8 that is 32 |
+| `compact=null` on both tiles | padded boxed destinations are out of scope |
+| source packed columns a multiple of 32 | the native conversion's own register-alignment rule |
+
+Those two granularities also make the tile a whole number of 512-byte boxes, so
+its byte footprint stays the plain `rows * cols` product the allocator already
+computes — there is no boxed-padding term, which is why no allocation code
+changed.
+
+**A boxed destination is only ever honoured for a dtype pair that natively
+writes one.** PTOAS's `tcvt` verifier inspects the destination layout *only* for
+`!pto.f4E2M1x2 -> f8E4M3FN`; for every other pair it accepts a boxed
+destination without complaint and then addresses it as the ISA sees fit. A
+silent pass is not a capability, so an explicitly requested boxed destination
+that no native rule writes is rejected here, naming the dtype pair and the arch.
+The check keys on the *request*, so a tile that is merely boxed in passing keeps
+the ordinary [layout-repair path](23-resolve_backend_op_layouts.md).
+
+Scope: A5 `E2M1x2 -> FP8E4M3FN` only, `compact=null` only, and the Tile entry
+point only. `tensor.cast` never declares these attributes, so the operator
+registry rejects them there with its own `Unknown kwarg` error and no
+Tensor-level destination-layout path exists.
+
 ## Native casts vs legalized chains
 
 `pl.cast` does not always compile to one instruction. Whether a given

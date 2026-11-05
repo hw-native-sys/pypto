@@ -210,6 +210,11 @@ b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 `shape[-1] % (256 / dtype 位宽) == 0`），逻辑秩至少为 2。前导轴折叠进描述符唯一的
 batch 槽位。
 
+`pl.NZ` 是**张量**布局，描述全局内存中的字节序。*片上 tile* 的布局拼写方式不同——
+由 `pl.TileView` 中的 `blayout` / `slayout` / `fractal` 给出，其中标准 NZ 为
+`col_major` / `row_major` / 512——这也正是 `pl.tile.move` 和 `pl.cast` 所接受的关键字拼写。
+两者刻意保持为相互独立的词汇；`pl.NZ` 不能用于 tile。
+
 在 A2/A3 上，`pl.store(acc, offsets, out)` 还支持将有效区域完整、静态二维的
 FP32 Acc tile 写入 FP32 `pl.NZ` 目标。行列均须为 16 的倍数；tile 必须从行偏移
 0 开始覆盖目标的整个行轴。每次 store 只写一个 panel，列偏移和 batch 偏移必须

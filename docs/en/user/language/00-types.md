@@ -264,6 +264,12 @@ fractal-aligned trailing plane with a whole-byte dtype (`shape[-2] % 16 == 0`,
 `shape[-1] % (256 / dtype bits) == 0`) and logical rank at least 2. Leading axes fold into
 the descriptor's single batch slot.
 
+`pl.NZ` is a **tensor** layout, for bytes in global memory. An *on-chip tile* spells its
+layout differently — `blayout` / `slayout` / `fractal` in its `pl.TileView`, where standard
+NZ is `col_major` / `row_major` / 512 — and that is the spelling `pl.tile.move` and
+`pl.cast` take as keywords. The two are separate vocabularies on purpose; `pl.NZ` is not
+accepted on a tile.
+
 On A2/A3, `pl.store(acc, offsets, out)` also supports a fully valid, static 2-D FP32 Acc
 tile and an FP32 `pl.NZ` destination. Rows and columns must be multiples of 16; the tile
 must cover the destination's entire row axis at row offset 0. Each store writes one panel,

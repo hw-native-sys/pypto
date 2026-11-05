@@ -95,7 +95,16 @@ needed because every E2M1 value is exactly representable in E4M3FN, including
 signed zero. PTOAS v0.72 also requires signed 32-bit byte spans and logical
 columns, at most 65,535 rows, and a source register count (`packed_cols / 256`)
 that fits 16 bits. Unsupported geometry retains the BF16/FP32 legalization
-path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts, or NZ output.
+path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts.
+
+The destination may also be **standard NZ**, requested with
+`blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major`, so the FP8
+result lands in matrix-unit layout and the Vec-to-Vec ND-to-NZ relayout
+disappears. That adds two requirements on the physical destination shape — rows
+a multiple of 16 and columns a multiple of 32 — and keeps every constraint
+above, including the ND source. Omitting the keywords inherits the source's ND
+layout, exactly as before. See
+[LegalizeTileCast](passes/18-legalize_tile_cast.md#destination-layout-nz).
 Static-valid descriptors alias the actual source handle, preserving runtime
 addresses from tile parameters, cross-core pipes, and rotating allocations.
 All three memory planners use this direct ND route. After vector splitting,
@@ -104,7 +113,8 @@ packed row is no longer aligned or validity becomes dynamic. Empty replay
 lanes retain their storage and issue no conversion.
 GM offsets remain in carrier units; the output uses FP8 element offsets.
 
-All packed casts require `none_box` storage. Wider cast chains require ND.
+Packed casts require `none_box` storage on the source, and on the destination
+too unless it is the standard NZ form above. Wider cast chains require ND.
 Decoding through BF16 preserves every FP4 value exactly. Implicit encoding chains must also preserve
 the original source through BF16: FP16/FP32 and larger integer sources are
 rejected because that intermediate can double-round. Write an explicit BF16
