@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -109,7 +110,7 @@ std::vector<std::optional<size_t>> ExternalReturnedParamIndices(const FunctionPt
           << "External kernel '" << func->name_ << "' return " << i
           << " has a different shape from its returned parameter at axis " << axis;
     }
-    result.push_back(it->second);
+    result.emplace_back(it->second);
   }
   return result;
 }
