@@ -376,7 +376,14 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     shapes_tuple = As<ir::MakeTuple>(op->args_[3]);
   }
 
-  if (shapes_tuple) {
+  // The destination's layout is decided before the shape dispatch below: a
+  // four-argument `pl.store(tile, offsets, tensor, shapes)` supplies a shapes
+  // tuple, and BlockMxScaleTensorViews rewrites that tuple to rank 5 as well,
+  // so an MX destination would otherwise take the generic branch.
+  const bool mx_destination =
+      tensor_type->tensor_view_.has_value() && ir::IsMxTensorLayout(tensor_type->tensor_view_->layout);
+
+  if (shapes_tuple && !mx_destination) {
     // N-rank partition path: use the explicit shapes tuple from FlattenTileNdTo2D.
     const auto& shape_elems = shapes_tuple->elements_;
     const auto& offset_elems = offsets_tuple->elements_;
@@ -386,28 +393,36 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
-  } else if (tensor_type->tensor_view_.has_value() &&
-             ir::IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
-    // MX scale tiles are logically [M,G] / [G,N], while their GM destination
-    // is the rank-5 SFractal view made explicit by BlockMxScaleTensorViews.
-    // A DMA store addresses that physical box directly. Each source scale
-    // tile must cover complete 16x2 boxes, so its logical valid extents map
-    // one-to-one onto a rank-5 partition with the same byte count.
-    auto height = As<ir::ConstInt>(valid_shape[0]);
-    auto width = As<ir::ConstInt>(valid_shape[1]);
-    INTERNAL_CHECK_SPAN(height && width && height->value_ > 0 && width->value_ > 0, op->span_)
-        << "MX tile.store requires static positive scale-tile valid dimensions";
-    const bool is_a = tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ;
-    const int64_t row_extent = is_a ? height->value_ : width->value_;
-    const int64_t group_extent = is_a ? width->value_ : height->value_;
-    INTERNAL_CHECK_SPAN(row_extent % 16 == 0 && group_extent % 2 == 0, op->span_)
-        << "MX tile.store requires complete 16x2 scale boxes";
-    const std::vector<std::string> physical_shape = {"1", std::to_string(row_extent / 16),
-                                                     std::to_string(group_extent / 2), "16", "2"};
-    partition_type = MakePartitionTensorViewType(physical_shape, dtype_str);
-    partition_view =
-        EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
-                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen), physical_shape, codegen);
+  } else if (mx_destination) {
+    // An MX scale tile is logically [M,G] / [G,N] over a GM destination that
+    // BlockMxScaleTensorViews has already turned into the rank-5 SFractal view,
+    // so a store would be a DMA straight into that physical box.
+    //
+    // The destination descriptor is what blocks it: a store reuses the tensor's
+    // single `pto.make_tensor_view`, which carries the MX layout the Cube-side
+    // load needs, and the pinned pto-isa TSTORE has no overload for an
+    // MX-layout GlobalTensor. Reject it here rather than emitting a module that
+    // assembles and then fails a static assertion in pto/npu/a5/TStore.hpp,
+    // which reports the instantiated template instead of the unsupported store.
+    //
+    // Lifting this needs three things, none of which exist yet: index-typed
+    // `sizes` operands on the rank-5 `pto.partition_view` (bare integers do not
+    // parse), an ND alias of the boxed ZZ source tile (`pto.tstore` takes
+    // ND/DN/NZ Vec sources and `pto.treshape` refuses to cross the boxed
+    // boundary), and a store-local ND view of the destination pointer -- the
+    // rank-5 shape and strides already describe the box layout, so ND is an
+    // honest description of a byte-wise store of already-boxed data.
+    UNREACHABLE_SPAN(op->span_)
+        << "Storing a tile into an MX_A_ZZ / MX_B_NN tensor is not supported: the pinned pto-isa "
+        << "TSTORE accepts only ND, DN and NZ GlobalTensor layouts, so an MX-layout destination "
+        << "cannot be written. Keep the scale on-chip and feed it to matmul_mx directly, or stage "
+        << "it through a plain tensor: flatten the whole scale -- "
+        << "`pl.reshape(scale, [1, M * (K // 32)])` on axis1, `[1, (K // 32) * N]` on axis0 -- "
+        << "floor division, since a float extent is rejected -- not just the "
+        << "group count -- store that into an unannotated FP8E8M0 tensor, then read it back with "
+        << "`pl.tensor.view(..., layout=pl.MX_A_ZZ)` (or `pl.MX_B_NN`) where the matmul loads it. "
+        << "That staging route needs the PYPTO or DSA_RP memory planner: flattening a boxed scale "
+        << "resolves to an addressed alias, which PTOAS-side planning cannot emit.";
   } else {
     // Standard 1D/2D path
     std::string height_dim = "?", width_dim = "?";
