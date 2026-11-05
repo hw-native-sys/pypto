@@ -121,15 +121,15 @@ with compute.prepare(
 内部使用，不同程序的名字可以不同。`slots` 将程序内槽序号映射到规范物理槽名，
 必须完整且一一对应；规范槽名允许重排槽次序。复用前校验有序成员、拓扑、
 runtime/profile、窗口和对齐后的槽大小，以及 dtype、shape、strides、字节偏移。
-相同大小不会自动共享，不同 key 和未配置的域继续隔离。共享布局要求槽大小
-静态可知。prepare 会保存配置快照，之后修改原映射不会改变会话；共享配置不
-进入 JIT 编译身份。
+相同大小不会自动共享，不同 key 和未配置的域继续隔离。持久域要求槽大小
+静态可知。非持久执行直接按本次调用的参数分配域。prepare 会保存配置快照，
+之后修改原映射不会改变会话。共享配置不进入 JIT 编译身份。
 
 会话安装一个有界的聚合源码包，每节点使用一份规范 runtime helper 和一个
 fork 前 token pool。各程序共享真实的 R1 retained domain，以及以
 `(domain_id, generation)` 为键的 ordering 状态。槽翻译只选择实际 runtime
-Buffer，不包装或重命名导入的全局域 view。helper/bootstrap 合同不匹配会在启动
-前失败。冷 schema-4 产物保存域描述；缺少这些描述的旧产物须重新生成后才能
+Buffer，不包装或重命名导入的全局域 view。Simpler 在导入前验证源码包摘要。
+冷 schema-4 产物保存域描述；缺少这些描述的旧产物须重新生成后才能
 显式共享。
 
 默认在本 run 的首个任务提交前清零复用的整个全局映射，包括 signals 和 padding；

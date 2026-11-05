@@ -189,73 +189,6 @@ def test_c3c_recursive_entries_keep_full_logical_chip_paths(cluster_artifact):
     assert _prebuilt.chip_directories(root, BuildKind.DISTRIBUTED) == expected
 
 
-_RUNTIME_IMPORT_PROOF = r"""
-import importlib
-import importlib.abc
-import sys
-class BlockPyPTO(importlib.abc.MetaPathFinder):
-    attempts = []
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'pypto' or fullname.startswith('pypto.'):
-            self.attempts.append(fullname)
-            raise AssertionError('Runtime sources imported ' + fullname)
-guard = BlockPyPTO()
-sys.meta_path.insert(0, guard)
-namespace, digest, archive_path, cache_root = sys.argv[1:]
-from pathlib import Path
-from simpler.startup_artifacts import (
-    StartupArtifactSpec, read_startup_artifacts, install_startup_artifacts, activate_startup_artifacts,
-)
-assert not Path(cache_root).exists()
-spec = StartupArtifactSpec(archive_path, digest, namespace)
-descriptions = read_startup_artifacts([spec.to_manifest()])
-installed = install_startup_artifacts(descriptions, cache_root)
-assert len(installed) == 1 and installed[0].digest == digest
-activate_startup_artifacts(installed)
-helper = importlib.import_module(namespace + '.orchestration._distributed_support')
-for name in ('first', 'second'):
-    module = importlib.import_module(namespace + '.next_levels.' + name + '.orchestration.host_orch')
-    entry = getattr(module, name)
-    assert entry._pypto_distributed_entry and entry._pypto_embedded_layout['version'] == 1
-    shim = importlib.import_module(namespace + '.next_levels.' + name + '.orchestration')
-    assert shim._distributed_support is helper
-observer = importlib.import_module(namespace + '.next_levels.first.sub_workers.observe')
-from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
-from simpler.task_interface import CallConfig, DataType, TaskArgs, TensorArgType
-from simpler.worker import Worker
-owner = mint_owner_instance_id()
-buffers = [create_host_shared_buffer(32, owner, index + 1) for index in range(2)]
-worker = None
-try:
-    buffers[0].shm.buf[:] = bytes(32)
-    buffers[1].shm.buf[:] = bytes([0xcd]) * 32
-    source = buffers[0].tensor(shapes=(8,), dtype=DataType.FLOAT32)
-    destination = buffers[1].tensor(shapes=(8,), dtype=DataType.FLOAT32)
-    worker = Worker(level=3, num_sub_workers=2)
-    observe_handle = worker.register(observer.observe)
-    copy_handle = worker.register(helper._copy_return_tensor)
-    worker.init()
-    def orchestration(orch, args, config):
-        observation = TaskArgs()
-        observation.add_tensor(source, TensorArgType.INPUT)
-        orch.submit_sub(observe_handle, observation)
-        copying = TaskArgs()
-        copying.add_tensor(source, TensorArgType.INPUT)
-        copying.add_tensor(destination, TensorArgType.OUTPUT_EXISTING)
-        orch.submit_sub(copy_handle, copying)
-    worker.run(orchestration, args=None, config=CallConfig())
-    assert bytes(buffers[1].shm.buf) == bytes(32)
-finally:
-    if worker is not None:
-        worker.close()
-    for backing in buffers:
-        backing.close()
-assert not guard.attempts
-assert not any(name == 'pypto' or name.startswith('pypto.') for name in sys.modules)
-print('C3C_RUNTIME_SOURCES_PASS')
-"""
-
-
 @pytest.fixture(scope="session")
 def cluster_startup_cache(tmp_path_factory):
     """Keep activated content-addressed roots stable for this test process."""
@@ -561,7 +494,6 @@ def test_direct_adapter_prepares_static_world_and_prefork_programs(
         plans = [program["plans"] for program in execution["programs"]]
         assert all(len(program_plans) == 1 for program_plans in plans)
         assert (plans[0][0]["pool_key"] == plans[1][0]["pool_key"]) is shared
-        assert all(program["provider"] for program in execution["programs"])
         prefixes = []
         for rank in (1, 2):
             startup = session.startup_by_rank[rank]
@@ -570,7 +502,6 @@ def test_direct_adapter_prepares_static_world_and_prefork_programs(
             hook = startup["startup_hook"]
             assert hook["import_path"].endswith(".orchestration.cluster_bootstrap:prepare_node")
             parameters = hook["parameters"]
-            assert parameters["version"] == 1
             programs = parameters["programs"]
             assert len(programs) == 2
             prefixes.append([program["module_prefix"] for program in programs])
@@ -592,7 +523,7 @@ def test_direct_adapter_single_program_still_uses_session_source_bundle(i2_progr
     with left.prepare():
         session = state.sessions[0]
         parameters = session.startup_by_rank[1]["startup_hook"]["parameters"]
-        assert parameters["version"] == 1 and len(parameters["programs"]) == 1
+        assert len(parameters["programs"]) == 1
         assert parameters["programs"][0]["module_prefix"].endswith(".programs.p0")
         # Per-invocation domains keep generated names; canonical bindings are
         # supplied only when the controller installs its domain provider.
@@ -1049,10 +980,9 @@ def test_i2_aggregate_is_deterministic_plain_ustar_and_program_qualified(i2_prog
                 names = archive.getnames()
                 assert names == sorted(set(names))
                 assert "__init__.py" not in names
-                assert "session_manifest.json" in names
                 for program in ("p0", "p1"):
                     base = f"programs/{program}"
-                    assert base + "/distributed_meta.json" in names
+                    assert base + "/orchestration/cluster_orch.py" in names
                     assert base + "/next_levels/node/orchestration/host_orch.py" in names
                     shim = archive.extractfile(base + "/orchestration/_distributed_support.py").read()
                     assert b"class _EmbeddedNodeState" not in shim
@@ -1072,14 +1002,14 @@ def test_i2_aggregate_is_deterministic_plain_ustar_and_program_qualified(i2_prog
 def test_i2_aggregate_caps_apply_to_whole_session(i2_programs, i2_runner_harness, monkeypatch, budget):
     _, state = i2_runner_harness
     left, right = i2_programs
-    _, single_payload = _artifact_sources.build_cluster_source_bundle(left.output_dir)
-    with tarfile.open(fileobj=io.BytesIO(single_payload), mode="r:gz") as archive:
+    _, payload = _artifact_sources.build_cluster_session_bundle([left, right])
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         members = archive.getmembers()
         if budget == "members":
-            monkeypatch.setattr(_artifact_sources, "_CLUSTER_MAX_MEMBERS", len(members) + 2)
+            monkeypatch.setattr(_artifact_sources, "_CLUSTER_MAX_MEMBERS", len(members) - 1)
         else:
             monkeypatch.setattr(
-                _artifact_sources, "_CLUSTER_MAX_UNPACKED_BYTES", sum(member.size for member in members) + 128
+                _artifact_sources, "_CLUSTER_MAX_UNPACKED_BYTES", sum(member.size for member in members) - 1
             )
     with pytest.raises(ValueError, match=r"(?i)(member|size|limit|unpacked)"):
         left.prepare(
@@ -1088,9 +1018,18 @@ def test_i2_aggregate_caps_apply_to_whole_session(i2_programs, i2_runner_harness
     assert "ready" not in state.events
 
 
-_I2_SESSION_PROOF = (
-    _RUNTIME_IMPORT_PROOF.split("namespace, digest, archive_path, cache_root", 1)[0]
-    + r"""
+_I2_SESSION_PROOF = r"""
+import importlib
+import importlib.abc
+import sys
+class BlockPyPTO(importlib.abc.MetaPathFinder):
+    attempts = []
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'pypto' or fullname.startswith('pypto.'):
+            self.attempts.append(fullname)
+            raise AssertionError('Runtime sources imported ' + fullname)
+guard = BlockPyPTO()
+sys.meta_path.insert(0, guard)
 import ctypes
 import json
 from pathlib import Path
@@ -1238,7 +1177,6 @@ finally:
     for backing in backings:
         backing.close()
 """
-)
 
 
 def test_i2_installed_native_entries_share_actual_views_and_prefork_pool(

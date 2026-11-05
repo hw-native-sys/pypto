@@ -17,10 +17,6 @@ from typing import Any
 import torch
 
 
-def _freeze(value: Any) -> Any:
-    return tuple(_freeze(item) for item in value) if isinstance(value, (list, tuple)) else value
-
-
 def _intervals(values: list[tuple[int, int]]) -> list[tuple[int, int]]:
     result: list[tuple[int, int]] = []
     for start, end in sorted(values):
@@ -214,13 +210,12 @@ class ClusterController:
                 }
                 module = importlib.import_module(program["module_prefix"] + ".orchestration.cluster_orch")
                 module._io_arg = _io_arg
-                plans = [dict(plan, pool_key=_freeze(plan["pool_key"])) for plan in program["plans"]]
+                plans = [dict(plan, pool_key=tuple(plan["pool_key"])) for plan in program["plans"]]
                 self._states[index] = {
                     "entry": getattr(module, program["entry_name"]),
                     "allocate": getattr(module, "_alloc_intermediates", None),
                     "callables": callables,
                     "plans": plans,
-                    "provider": program["provider"],
                     "param_names": program["param_names"],
                 }
             self._worker.init()
@@ -232,7 +227,6 @@ class ClusterController:
         """Prepare current root scopes before submission, then validate native requests."""
         from simpler.task_interface import CommBufferSpec  # noqa: PLC0415
 
-        local = {}
         by_name = {plan["domain"]["generated_name"]: plan for plan in state["plans"]}
 
         def signature(kwargs):
@@ -247,13 +241,11 @@ class ClusterController:
 
         def acquire(plan, kwargs):
             key = plan["pool_key"]
-            spec = signature(kwargs)
-            existing = self._domains.get(key) if self._persistent else local.get(key)
-            if existing is not None:
-                previous, handle = existing
-                if previous != spec or handle.released or handle.freed:
-                    raise ValueError("Retained global domain changed native specification or lifetime")
-                return handle, True
+            handle = self._domains.get(key)
+            if handle is not None:
+                if handle.released or handle.freed:
+                    raise ValueError("Retained global domain was released before reuse")
+                return handle
             handle = orch.allocate_global_domain(**kwargs)
             expected = [
                 (node, local_worker, rank, i)
@@ -268,15 +260,12 @@ class ClusterController:
             if actual != expected or handle.mapping_size < kwargs["window_size"]:
                 # R1 still owns the new handle in its run journal on this path.
                 raise ValueError("Allocated global domain differs from requested ordered members/window")
-            (self._domains if self._persistent else local)[key] = (spec, handle)
-            return handle, False
+            self._domains[key] = handle
+            return handle
 
         requests = {}
-        reset = set()
-        preexisting = set(self._domains)
+        reset = set(self._domains) if self._reset else set()
         for plan in state["plans"]:
-            if not plan["static"]:
-                continue
             kwargs = {
                 "name": plan["name"],
                 "members": [(self._nodes[node], local_worker) for node, local_worker, _ in plan["members"]],
@@ -285,28 +274,24 @@ class ClusterController:
                     CommBufferSpec(name=name, dtype="opaque", count=size, nbytes=allocated)
                     for name, size, allocated, _ in plan["canonical"]
                 ],
-                "retain_after_run": self._persistent,
+                "retain_after_run": True,
             }
-            handle, reused = acquire(plan, kwargs)
+            handle = acquire(plan, kwargs)
             requests[plan["domain"]["generated_name"]] = handle
-            if reused and self._reset and plan["pool_key"] in preexisting and plan["pool_key"] not in reset:
+            if plan["pool_key"] in reset:
                 zero = bytes(min(handle.mapping_size, 8 * 1024 * 1024))
                 for rank in range(len(handle.members)):
                     for offset in range(0, handle.mapping_size, len(zero)):
                         orch.copy_to_global_domain(
                             handle, rank, zero[: min(len(zero), handle.mapping_size - offset)], offset=offset
                         )
-                reset.add(plan["pool_key"])
+                reset.remove(plan["pool_key"])
 
         def provide(**kwargs):
             name = kwargs["name"]
             if name not in by_name:
                 raise ValueError(f"Native global domain request {name!r} is absent from cold metadata")
             plan = by_name[name]
-            if not plan["static"]:
-                if self._persistent:
-                    raise ValueError("Persistent cluster domain requires a static cold slot layout")
-                return orch.allocate_global_domain(**kwargs)
             expected = (
                 tuple((self._nodes[node], local_worker) for node, local_worker, _ in plan["members"]),
                 sum(slot["allocated_nbytes"] for slot in plan["domain"]["slots"]),
@@ -315,13 +300,9 @@ class ClusterController:
                     for slot in plan["domain"]["slots"]
                 ),
             )
-            if (
-                signature(kwargs) != expected
-                or bool(kwargs.get("retain_after_run", False)) != self._persistent
-            ):
+            if signature(kwargs) != expected or not kwargs.get("retain_after_run", False):
                 raise ValueError(f"Native global domain {name!r} request differs from cold specification")
-            handle = requests[name]
-            return _RetainedDomainLease(handle) if self._persistent else handle
+            return _RetainedDomainLease(requests[name])
 
         return provide
 
@@ -349,7 +330,7 @@ class ClusterController:
             self._active_io = io
 
             def orchestration(orch: Any, unused: Any, unused_config: Any) -> None:
-                provider = self._domain_provider(state, orch) if state["provider"] else None
+                provider = self._domain_provider(state, orch) if self._persistent else None
                 state["entry"](
                     orch,
                     unused,
@@ -361,7 +342,7 @@ class ClusterController:
                     node_bindings=[(io, node) for node in self._nodes],
                     _keep=self._keep,
                     _retain=self._persistent,
-                    **({"_domain_provider": provider} if provider is not None else {}),
+                    _domain_provider=provider,
                 )
 
             released = False
@@ -389,7 +370,7 @@ class ClusterController:
             self._closing = True
             first_error = None
             if self._active_io is None:
-                for _, handle in reversed(tuple(self._domains.values())):
+                for handle in reversed(tuple(self._domains.values())):
                     if not handle.freed:
                         try:
                             handle.release()

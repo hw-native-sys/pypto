@@ -61,12 +61,10 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _session_domains(programs: list[Any], bindings: Any, persistent: bool) -> list[list[dict[str, Any]]]:
+def _session_domains(programs: list[Any], bindings: Any) -> list[list[dict[str, Any]]]:
     """Snapshot explicit domain identities and compare canonical physical layouts."""
     from pypto.ir.distributed_compiled_program import SharedDomainBinding  # noqa: PLC0415
 
-    if bindings and not persistent:
-        raise ValueError("shared_domains requires persistent=True")
     selected = {}
     keys: dict[str, int] = {}
     for binding in tuple(bindings):
@@ -137,9 +135,8 @@ def _session_domains(programs: list[Any], bindings: Any, persistent: bool) -> li
                 for node in domain["node_indices"]
                 for local in range(len(cc.nodes[node].devices))
             ]
-            static = all(slot[1] is not None for slot in canonical)
-            if sharing and not static:
-                raise ValueError("Shared domain layout requires static slot sizes")
+            if any(slot[1] is None for slot in canonical):
+                raise ValueError("Persistent cluster domain requires static slot sizes")
             signature = (tuple(members), tuple(canonical))
             pool_key = ("shared", sharing[0]) if sharing else ("isolated", index, domain["ordinal"])
             if pool_key in signatures and signatures[pool_key] != signature:
@@ -156,7 +153,6 @@ def _session_domains(programs: list[Any], bindings: Any, persistent: bool) -> li
                     "slot_map": slot_map,
                     "canonical": canonical,
                     "members": members,
-                    "static": static,
                 }
             )
         result.append(plans)
@@ -166,8 +162,6 @@ def _session_domains(programs: list[Any], bindings: Any, persistent: bool) -> li
 def _node_domain_bindings(plans: list[dict[str, Any]], logical_path: str) -> list[dict[str, Any]]:
     bindings = []
     for plan in plans:
-        if not plan["static"]:
-            continue
         windows = [
             window
             for window in plan["domain"]["entry_windows"]
@@ -255,7 +249,9 @@ class ClusterWorker:
         compiled = programs[0]
         cc = compiled.cluster_config
         _validate_programs(programs, compiled, cc)
-        plans = _session_domains(programs, shared_domains, persistent)
+        if shared_domains and not persistent:
+            raise ValueError("shared_domains requires persistent=True")
+        plans = _session_domains(programs, shared_domains) if persistent else [[] for _ in programs]
         timeout = cc.startup_timeout_s if startup_timeout_s is None else startup_timeout_s
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Cluster startup_timeout_s must be positive and finite")
@@ -263,7 +259,7 @@ class ClusterWorker:
         chip_sets = [_assemble_cluster_chips(program) for program in programs]
         if any(runtime != cc.runtime for chips in chip_sets for _, runtime, _ in chips.values()):
             raise ValueError("Every cluster CHIP dependency must use ClusterConfig.runtime")
-        digest, payload = build_cluster_session_bundle([program.output_dir for program in programs])
+        digest, payload = build_cluster_session_bundle(programs)
         prefix = "_pypto_cluster_" + digest
         self._compiled = compiled
         self._config = config
@@ -307,8 +303,6 @@ class ClusterWorker:
                             record["logical_path"]: _node_domain_bindings(
                                 plans[index], record["logical_path"]
                             )
-                            if persistent or len(programs) > 1
-                            else []
                             for record in program.l3_entries["entries"]
                         },
                     }
@@ -323,11 +317,10 @@ class ClusterWorker:
                         "plans": [
                             {
                                 key: _plain(plan[key])
-                                for key in ("domain", "pool_key", "name", "canonical", "members", "static")
+                                for key in ("domain", "pool_key", "name", "canonical", "members")
                             }
                             for plan in plans[index]
                         ],
-                        "provider": bool(persistent or len(programs) > 1),
                     }
                 )
             minimum = sum(
@@ -358,9 +351,8 @@ class ClusterWorker:
                 "max_pending_frame_bytes": 128 * 1024 * 1024,
                 "launcher_args": list(cc.mpirun_args),
             }
-            parameters = {"module_prefix": prefix, "programs": prepared, "version": 1}
             hook = NodeStartupHook(
-                prefix + ".orchestration.cluster_bootstrap:prepare_node", parameters
+                prefix + ".orchestration.cluster_bootstrap:prepare_node", {"programs": prepared}
             ).to_manifest()
             session = {
                 "platform": compiled.platform,

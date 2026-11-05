@@ -230,6 +230,8 @@ def test_l4_nonpersistent_multi_program_dynamic_windows(test_config, tmp_path):
     ]
     for program in programs:
         assert program.comm_domains[0]["slots"][0]["logical_nbytes"] is None
+    with pytest.raises(ValueError, match="requires static slot sizes"):
+        programs[0].prepare(persistent=True)
     with programs[0].prepare(extra_compiled=[programs[1]], persistent=False) as worker:
         for i, (index, size) in enumerate(((0, 256), (1, 512), (0, 768))):
             current = inputs + i * 1000

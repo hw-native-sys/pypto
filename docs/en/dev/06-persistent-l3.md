@@ -144,16 +144,17 @@ and must cover every slot exactly once. Canonical names can reorder slots.
 The session validates ordered members, topology, runtime/profile, window and
 aligned slot sizes, dtype, shape, strides and byte offsets before reuse.
 Equal sizes do not imply sharing. Distinct keys and omitted bindings remain
-separate. Shared layouts require static slot sizes. Preparation snapshots the
-configuration; changing the original mapping later has no effect, and sharing
-does not enter JIT compilation identity.
+separate. Persistent layouts require static slot sizes. Nonpersistent runs
+allocate their domains directly from the invocation's arguments. Preparation
+snapshots the configuration so later changes to the original mapping have no
+effect. Sharing does not enter JIT compilation identity.
 
 The session installs one bounded aggregate source package with a canonical
 runtime helper and one prefork token pool per node. All programs use the same
 actual retained R1 domain and its `(domain_id, generation)` ordering state.
 Slot translation selects the real runtime Buffer; it does not wrap or rename
-the imported global-domain view. Helper/bootstrap contract mismatches fail
-before startup. Cold schema-4 artifacts preserve the domain descriptors;
+the imported global-domain view. Simpler verifies the source package digest
+before importing it. Cold schema-4 artifacts preserve the domain descriptors;
 older artifacts without them must be regenerated for explicit sharing.
 
 The default reset clears every reused global mapping, including signal state
