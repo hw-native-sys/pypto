@@ -14,6 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 from pypto._function_attrs import EXTERNAL_RETURN_PARAMS_ATTR
 from pypto.language import _dump
+from pypto.language.scalar_conversion import (
+    ArgumentDisposition,
+    classify_scalar_conversion,
+    conversion_temp_name,
+)
 from pypto.pypto_core import DataType, ir
 
 from .attr_parser import AttrParser
@@ -448,6 +453,7 @@ class CallParser:
         # their indices for the arg_direction_overrides attr.
         unwrapped_args, no_dep_indices = self.strip_call_arg_markers(arg_nodes)
         args = [self.callbacks.expression(arg) for arg in unwrapped_args]
+        args = self.coerce_declared_scalar_args(func_obj, args, method_name, span)
         # ``pl.submit`` parses the optional ``deps=[tid, ...]`` (explicit-edge
         # attr) and ``dumps=[tensor, ...]`` (selective dump) kwargs. A plain
         # Call recovers its selective-dump targets from the machine-only
@@ -557,6 +563,42 @@ class CallParser:
             predicate=predicate,
             extra_attrs=extra_attrs,
         )
+
+    def coerce_declared_scalar_args(
+        self,
+        func: ir.Function | None,
+        args: list[ir.Expr],
+        fn_name: str,
+        span: ir.Span,
+    ) -> list[ir.Expr]:
+        """Convert an argument to its parameter's declared scalar dtype.
+
+        A declared scalar parameter fixes the callee's dtype, so an argument
+        whose dtype differs but lies inside the declared slot's integer lattice
+        (exactly one end ``pl.INDEX``, the other a fixed-width integer) is
+        converted here. Admission is the shared rule
+        (:mod:`pypto.language.scalar_conversion`), so this lane and the tracing
+        lane convert the same pairs to the same dtype.
+
+        The conversion is bound to a temporary — the same name the tracing lane
+        gives it — which keeps the emitted IR identical across the two frontends
+        and prints as the spelling an author writes by hand
+        (``t = pl.cast(i, pl.INT32); f(..., t, ...)``). Other mismatches keep
+        whatever check this lane already applies; admission here never widens a
+        refusal into an acceptance.
+        """
+        if func is None:
+            return args
+        converted: list[ir.Expr] = []
+        for param, arg in zip(func.params, args):
+            decision = classify_scalar_conversion(param.type, arg.type)
+            if decision.disposition is not ArgumentDisposition.CONVERT or decision.target is None:
+                converted.append(arg)
+                continue
+            cast_expr = ir.cast(arg, decision.target, span=span)
+            temp_name = conversion_temp_name(param.name_hint, decision.target)
+            converted.append(self.services.builder.let(temp_name, cast_expr, span=span))
+        return converted
 
     def effective_return_types(self, func: ir.Function | None) -> list[ir.Type]:
         """Effective callee return types for cross-function call type inference.
@@ -1082,6 +1124,7 @@ class CallParser:
         self.validate_call_arg_count(func_name, ext_func, len(call.args), span)
 
         args = [self.callbacks.expression(arg) for arg in call.args]
+        args = self.coerce_declared_scalar_args(ext_func, args, func_name, span)
 
         gvar = ir.GlobalVar(func_name)
         return_types = self.effective_return_types(ext_func)

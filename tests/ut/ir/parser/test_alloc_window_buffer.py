@@ -278,7 +278,7 @@ def test_alloc_window_buffer_shaped_static():
     # Static shape must fold to a single ConstInt byte-size arg.
     assert isinstance(call.args[0], ir.ConstInt)
     assert call.args[0].value == 64 * 128 * 4  # FP32 = 4 bytes
-    assert call.args[0].dtype == DataType.INT64
+    assert call.args[0].dtype == DataType.INDEX
 
 
 def test_alloc_window_buffer_shaped_long_form():
@@ -302,7 +302,7 @@ def test_alloc_window_buffer_shaped_long_form():
     # Static shape must fold to a single ConstInt byte-size arg.
     assert isinstance(call.args[0], ir.ConstInt)
     assert call.args[0].value == 32 * 16 * 4  # INT32 = 4 bytes
-    assert call.args[0].dtype == DataType.INT64
+    assert call.args[0].dtype == DataType.INDEX
 
 
 def test_alloc_window_buffer_rejects_empty_shape():
