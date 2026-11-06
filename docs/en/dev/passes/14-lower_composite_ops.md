@@ -4,7 +4,7 @@ Decomposes composite tile / distributed ops into primitive operations so codegen
 
 ## Overview
 
-`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive tile-op recipe using `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, and `tile.cast`: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. `tile.tquant_mx` becomes value-returning `tile.tquant_mx_raw` + `tile.tmov_x2zz` (gather_compare-style SSA) plus explicit workspace tiles; public FP8 aliases are added via `reinterpret_view` / `transpose_view`. For `pld.tensor.*` distributed collectives, the rules emit the cross-rank recipes documented below; `pld.tensor.allreduce` remains explicit-signal in InCore/composite lowering. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
+`LowerCompositeOps` is a program-level pass. It first rejects any InCore composite collective in a multi-block SPMD launch (see [Rejected in a multi-block SPMD launch](#rejected-in-a-multi-block-spmd-launch)), then, function by function, rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive tile-op recipe using `tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, and `tile.cast`: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. `tile.tquant_mx` becomes value-returning `tile.tquant_mx_raw` + `tile.tmov_x2zz` (gather_compare-style SSA) plus explicit workspace tiles; public FP8 aliases are added via `reinterpret_view` / `transpose_view`. For `pld.tensor.*` distributed collectives, the rules emit the cross-rank recipes documented below; `pld.tensor.allreduce` remains explicit-signal in InCore/composite lowering. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
 
 Host-orchestrator `pld.tensor.allreduce` calls are skipped by this pass: `SynthesizeAllReduceSignals` first normalizes optional-signal host calls to the explicit-signal form, `MaterializeCommDomainScopes` places the data and signal windows into comm domains, and then `LowerHostTensorCollectives` lowers them to internal builtin dispatches.
 
@@ -47,8 +47,9 @@ src/ir/transforms/lower_composite/
 
 src/ir/transforms/lower_composite_ops_pass.cpp
   LowerCompositeOpsMutator         — statement rewriting and tuple/variable remapping
+  RejectCompositesInSpmdLaunch     — rejects a composite collective in a multi-block SPMD launch
   TransformLowerCompositeOps       — per-function context and managed-collective deferral
-  LowerCompositeOps                — pass factory
+  LowerCompositeOps                — pass factory (program-level)
 ```
 
 `CompositeLoweringFn` receives the original `CallPtr`, already visited operands,
@@ -268,6 +269,21 @@ Each call uses `AtomicAdd(1)` credits and call-local `Wait(>= g)` thresholds tha
 `kGe` (not `kEq`) is the load-bearing choice for every wait predicate: a fast peer can advance a cell past the value a slow rank is looking for before that rank ever polls it, so equality would deadlock. For the same reason `kSet` must never be mixed with `kAtomicAdd` on the same cells — a set could clobber an already-advanced counter.
 
 Mesh (`[NR, 1]`, one cell per rank) and ring (`[2*(NR-1), NR]`, one row per round) signals use incompatible cell addressing, so sharing one buffer between the two is rejected as a shape mismatch (`ValidateMeshSignalShape`) — the only restriction the protocol still imposes.
+
+### Rejected in a multi-block SPMD launch
+
+The expansion never reads the block index. Inside an SPMD launch of N blocks, every block would run the whole collective: the transfers repeat N times, and each peer cell gets N credits per sync point against a `Wait(>= g)` that expects one, so a barrier can release (or a later sync point be skipped) before every block's data has landed. The pass therefore rejects, with a user error naming the collective, the launch width and the dispatching function, any InCore composite collective reachable from a dispatch whose width is not the literal `1`:
+
+| Launch form | Where the width lives |
+| ----------- | --------------------- |
+| `with pl.spmd(N): self.kernel(...)` and `for _ in pl.spmd(N):` | the dispatch's `core_num` Call attr into the outlined Spmd wrapper |
+| `with pl.cluster(): with pl.spmd(N): ...` | the `core_num` Call attr into the unwrapped Group |
+| `pl.spmd_submit(self.kernel, ..., core_num=N)` | `Submit::core_num_` |
+| any of the above, **before `OutlineClusterScopes`** (a direct pass call, or a pipeline that runs this pass earlier) | `SpmdScopeStmt::core_num_`, which outranks a spec already on the dispatch |
+
+A runtime width is rejected because it cannot be proven to be 1; `pl.spmd(1)` is accepted **for a collective inside the launched kernel**. A collective in the launch wrapper's own body — or in a nested Group/Spmd wrapper it dispatches — is rejected at any width, including `1`: orchestration codegen emits only the wrapper's inner call, so such a collective would be silently dropped. The search follows calls from the launched kernel into the functions it calls, and skips orchestration bodies, whose collectives are managed. Launch sites come from the same `ForEachSpmdLaunch` (`utils/spmd_launch_utils.h`) as the `HardSyncallOccupancy` verifier. Multi-core collectives belong to the HOST rail (`core_num`) and the managed CHIP/L2 rail (`all_to_all_v`, `indexed_all_to_all_v`).
+
+The check is **independent of the outlining order**: when it runs before `OutlineClusterScopes`, `ForEachSpmdLaunch` reports the not-yet-outlined `SpmdScopeStmt` and its `core_num_` as the site's width — the scope outranks any spec already stamped on the dispatch, because outlining turns the scope into the launch and codegen reads the width it stamps there. The scope body is then classified by the carrier outlining would give it: under an `InCoreScopeStmt` it becomes the launched kernel (kernel rule, one block accepted), otherwise it becomes the launch wrapper (wrapper rule, rejected at any width). The rejection messages are therefore identical in both orders, which is why this pass declares no `ClusterOutlined` prerequisite. Note that a required property is only enforced while a `VerificationInstrument` is active, so a declared prerequisite would document the hazard without preventing a miscompile under a custom pass order.
 
 ### `pld.tensor.allreduce`
 

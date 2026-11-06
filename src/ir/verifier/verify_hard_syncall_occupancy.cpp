@@ -71,7 +71,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -88,61 +87,13 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/spmd_launch_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
-
-// Collects every Call and Submit reachable within a single function body
-// (recursing through nested statements, but never into other functions).
-class CallSubmitCollector : public IRVisitor {
- public:
-  std::vector<CallPtr> calls;
-  std::vector<SubmitPtr> submits;
-
-  void VisitExpr_(const CallPtr& op) override {
-    if (op) calls.push_back(op);
-    IRVisitor::VisitExpr_(op);
-  }
-  void VisitExpr_(const SubmitPtr& op) override {
-    if (op) submits.push_back(op);
-    IRVisitor::VisitExpr_(op);
-  }
-};
-
-// Resolve the distinct functions directly called by `fn` (callees only — op
-// calls such as tile.load resolve to nullptr via GetFunction and are dropped).
-// Deduplicated so a callee invoked more than once is checked (and reported) once.
-// Handles both Call (scope-based launch) and Submit (spmd_submit), per
-// pass-submit-awareness.
-std::vector<FunctionPtr> DirectCallees(const FunctionPtr& fn, const ProgramPtr& program) {
-  CallSubmitCollector collector;
-  if (fn->body_) collector.VisitStmt(fn->body_);
-  std::vector<FunctionPtr> out;
-  std::unordered_set<const Function*> seen;
-  auto add = [&](const OpPtr& op) {
-    if (!op) return;
-    auto callee = program->GetFunction(op->name_);
-    if (callee && seen.insert(callee.get()).second) out.push_back(callee);
-  };
-  for (const auto& call : collector.calls) add(call->op_);
-  for (const auto& submit : collector.submits) add(submit->op_);
-  return out;
-}
-
-// True when dispatching `fn` launches the kernels its BODY calls, rather than
-// `fn` itself: an outlined Spmd wrapper (scope-based ``with pl.spmd(...)``), or
-// a Group whose body WAS a ``pl.cluster(): with pl.spmd(...)`` region
-// (kAttrSpmdUnwrapped). Everything else — including a mixed-kernel Group reached
-// by ``pl.spmd_submit(self.kernel, ..., core_num=N)`` — is itself the launched
-// kernel, so CheckLaunchedKernel applies its Group / AIC / AIV rules directly.
-bool IsLaunchWrapper(const FunctionPtr& fn) {
-  if (!fn) return false;
-  return fn->func_type_ == FunctionType::Spmd ||
-         (fn->func_type_ == FunctionType::Group && fn->GetAttr<bool>(kAttrSpmdUnwrapped, false));
-}
 
 struct HardSyncall {
   std::string core_type;
@@ -300,76 +251,11 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       if (fn && fn->body_) query_defs.VisitStmt(fn->body_);
     }
 
-    // Memoize the per-function callee walk. ``LaunchedKernels`` is consulted
-    // once per launch SITE (not once per function as the pre-dispatch-carrier
-    // code was), and ``DirectCallees`` is a full body traversal — without a
-    // cache two dispatches to the same wrapper would each re-walk it, which is
-    // the nested-scan shape ``pass-complexity.md`` forbids. Both arguments are
-    // loop-invariant for the whole Verify() run, so the walk is pure and safe
-    // to cache; this keeps the verifier O(N) in IR size regardless of how many
-    // dispatches target the same callee.
-    std::unordered_map<const Function*, std::vector<FunctionPtr>> direct_callee_cache;
     SyncallCache syncall_cache;
-    auto direct_callees_cached = [&](const FunctionPtr& f) -> const std::vector<FunctionPtr>& {
-      auto [it, inserted] = direct_callee_cache.try_emplace(f.get());
-      if (inserted) it->second = DirectCallees(f, program);
-      return it->second;
-    };
-    // Resolve a dispatch's effective launch spec exactly as orchestration
-    // codegen's EffectiveLaunchSpec does: the dispatch's own spec wins, and the
-    // callee's Function attr is only a fallback for a dispatch that carries
-    // none. Validating the Function attr independently would reject a program
-    // codegen compiles correctly — e.g. a legacy Spmd function with
-    // core_num=24 dispatched from a call carrying core_num=48, sync_start=True.
-    auto check_dispatch = [&](const OpPtr& op, const ExprPtr& own_core_num, bool own_sync_start) {
-      if (!op) return;
-      auto callee = program->GetFunction(op->name_);
-      ExprPtr core_num = own_core_num;
-      bool sync_start = own_sync_start;
-      if (!core_num && callee) {
-        core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
-        sync_start = callee->GetAttr<bool>(kAttrSyncStart, false);
-      }
-      if (!core_num) return;
-      // A legacy Function-level spec predates kAttrSpmdUnwrapped, so classify
-      // its callee the pre-carrier-move way: a Spmd wrapper or ANY Group
-      // launches its own callees. Gating on the marker would demote an old
-      // cluster-unwrapped Group to a mixed kernel and misjudge its occupancy.
-      const bool legacy_spec = !own_core_num && callee;
-      const bool descend = legacy_spec ? (callee->func_type_ == FunctionType::Spmd ||
-                                          callee->func_type_ == FunctionType::Group)
-                                       : IsLaunchWrapper(callee);
-      std::vector<FunctionPtr> kernels;
-      if (!callee) {
-        kernels = {};
-      } else if (descend) {
-        kernels = direct_callees_cached(callee);
-      } else {
-        kernels = {callee};
-      }
-      CheckLaunchSite(core_num, sync_start, kernels, total_vector, total_cube, program, query_defs,
-                      &syncall_cache, diagnostics);
-    };
-
-    for (const auto& [gv, fn] : program->functions_) {
-      if (!fn || !fn->body_) continue;
-
-      CallSubmitCollector collector;
-      collector.VisitStmt(fn->body_);
-
-      // Launch sites. A dispatch carries its spec as kAttrCoreNum /
-      // kAttrSyncStart Call attrs (an outlined ``with pl.spmd(...)``) or in the
-      // first-class Submit fields (``pl.spmd_submit``, or an ``as tid`` scope).
-      // A plain call / submit to a callee with no Function-level spec resolves
-      // to nothing and is skipped.
-      for (const auto& call : collector.calls) {
-        check_dispatch(call->op_, call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr),
-                       call->GetAttr<bool>(kAttrSyncStart, false));
-      }
-      for (const auto& submit : collector.submits) {
-        check_dispatch(submit->op_, submit->core_num_.value_or(nullptr), submit->sync_start_);
-      }
-    }
+    ForEachSpmdLaunch(program, [&](const SpmdLaunchSite& site) {
+      CheckLaunchSite(site.core_num, site.sync_start, site.kernels, total_vector, total_cube, program,
+                      query_defs, &syncall_cache, diagnostics);
+    });
   }
 
  private:
