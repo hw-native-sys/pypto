@@ -14,6 +14,7 @@ using the explicit ``pl.tensor.X`` / ``pl.tile.X`` API — then asserts
 they produce structurally equal IR.
 """
 
+import importlib
 import os
 import pathlib
 import subprocess
@@ -1843,18 +1844,46 @@ class TestUnifiedOpsCrossPathKwargs:
 # Run in a subprocess with the ``pypto`` package reached through a symlink.
 # ``argv[1]`` is the symlinked sys.path entry the import is expected to use.
 _SYMLINKED_IMPORT_PROBE = """\
+import importlib.util
+import os
 import sys
 import warnings
+
+link_root = sys.argv[1]
+extension_dir = sys.argv[2]
+
+# An inplace editable install fronts every ``pypto`` module with a meta-path
+# finder bound to the source checkout, so it outranks ``PYTHONPATH`` and the
+# import would silently bypass the symlink. Drop those finders, then import
+# the top-level package through the symlinked path explicitly; the compiled
+# extension (which lives beside the installed package, not in the source
+# tree) stays reachable through the package search locations.
+for finder in list(sys.meta_path):
+    module_name = type(finder).__module__
+    if module_name.startswith("_editable_skbc") or "ScikitBuild" in type(finder).__name__:
+        sys.meta_path.remove(finder)
+
+package_dir = os.path.join(link_root, "pypto")
+spec = importlib.util.spec_from_file_location(
+    "pypto",
+    os.path.join(package_dir, "__init__.py"),
+    submodule_search_locations=[package_dir, extension_dir],
+)
+assert spec is not None and spec.loader is not None, "could not build the symlinked package spec"
+pypto_module = importlib.util.module_from_spec(spec)
+sys.modules["pypto"] = pypto_module
+spec.loader.exec_module(pypto_module)
 
 import pypto
 from pypto import DataType, ir
 from pypto.language.op import unified_ops
 from pypto.language.typing import Tensor
 
-link_root = sys.argv[1]
-# Without this an installed copy or a stray PYTHONPATH would make the whole
-# check vacuous by importing through the real path.
+# Without this the whole check is vacuous: blame attribution needs the
+# package's ``co_filename`` and the sibling caller frames to share the
+# aliased spelling.
 assert pypto.__file__.startswith(link_root), f"import bypassed the symlink: {pypto.__file__}"
+assert unified_ops.__file__.startswith(link_root), unified_ops.__file__
 
 src = Tensor(expr=ir.Var("x", ir.TensorType([16, 32], DataType.FP32), ir.Span.unknown()))
 with warnings.catch_warnings(record=True) as caught:
@@ -2057,11 +2086,15 @@ class TestUnifiedSlicePadValue:
         link_root = tmp_path / "linked_python"
         link_root.symlink_to(package_root, target_is_directory=True)
 
+        core_file = importlib.import_module("pypto.pypto_core").__file__
+        assert core_file is not None
+        extension_dir = pathlib.Path(core_file).resolve().parent
+
         script = tmp_path / "user_kernel.py"
         script.write_text(_SYMLINKED_IMPORT_PROBE)
 
         result = subprocess.run(
-            [sys.executable, str(script), str(link_root)],
+            [sys.executable, str(script), str(link_root), str(extension_dir)],
             capture_output=True,
             text=True,
             env={**os.environ, "PYTHONPATH": str(link_root)},
