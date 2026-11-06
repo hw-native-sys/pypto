@@ -151,6 +151,9 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
     auto it = pred_map.find(predicate);
     INTERNAL_CHECK_SPAN(it != pred_map.end(), op->span_) << "Unsupported float predicate for " << predicate;
     std::string float_pred = it->second;
+    // SIMT scalar comparison follows the IR's IEEE/Python inequality contract:
+    // a NaN is unequal, so the ordered predicate would silently lose a lane.
+    if (inside_simt_function_ && predicate == "ne") float_pred = "une";
 
     std::string result = NewTemp();
     Emit(result + " = arith.cmpf " + float_pred + ", " + lhs + ", " + rhs + " : " + operand_type);
@@ -391,6 +394,15 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   std::string mlir_op;
   if (src_dtype == dst_dtype) {
     fs_.current_expr_value = src;
+    return;
+  } else if (inside_simt_function_ && dst_dtype == DataType::BOOL) {
+    // Numeric truth is nonzero (including NaN), not the low bit of an integer
+    // or an fptosi conversion into i1. Keep Python scalar semantics in SIMT.
+    const auto zero =
+        src_is_float ? GetOrEmitConstant(0.0, src_dtype) : GetOrEmitConstant(int64_t{0}, src_dtype);
+    Emit(result + (src_is_float ? " = arith.cmpf une, " : " = arith.cmpi ne, ") + src + ", " + zero + " : " +
+         src_type);
+    fs_.current_expr_value = result;
     return;
   } else if (src_dtype == DataType::BOOL && (dst_dtype.IsInt() || dst_is_index || dst_is_float)) {
     // A logical BOOL is 0/1, whereas interpreting its i1 representation as

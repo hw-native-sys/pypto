@@ -78,18 +78,21 @@ std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 std::vector<ir::VarPtr> CollectTensorShapeDynVars(const ir::FunctionPtr& func);
 
 /// Backend artifacts, not IR nodes. The adapter retains capture order. The
-/// caller retains Tiles for PTOAS sync; the separate VPTO helper receives UB
-/// pointers. Effects conservatively cover each entire captured Tile footprint.
+/// caller retains storage handles for PTOAS sync; the separate VPTO helper
+/// receives UB/GM pointers. Effects conservatively cover the entire storage.
 struct VFHelper {
+  /// Execution family; both VF and SIMT exports use the device helper bundle.
+  std::string kind = "vf";
   std::string symbol;
   std::string adapter_symbol;
   std::string source;
   std::vector<std::string> parameter_types;
   std::vector<std::string> caller_parameter_types;
   std::vector<std::string> parameter_effects;
-  /// Helper argument -> caller argument; memory uses the lowest static UB address.
+  /// Helper argument -> caller argument; VF collapses memory onto one UB base,
+  /// while SIMT retains each storage pointer and scalar argument in ABI order.
   std::vector<size_t> parameter_indices;
-  /// Per-caller-argument byte offset from the shared UB base (zero for scalars).
+  /// VF byte offsets from its shared UB base; zero for scalars and SIMT pointers.
   std::vector<int64_t> capture_byte_offsets;
 };
 
@@ -855,6 +858,16 @@ class PTOCodegen : public CodegenBase {
   std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
   void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
   void EmitVFAdapter(const VFHelper& helper);
+  /// SIMT functions borrow storage through a pointer ABI, never Tile values.
+  bool inside_simt_function_ = false;
+  std::map<std::string, ir::FunctionPtr> simt_functions_;
+  std::map<std::string, std::vector<std::string>> simt_effects_;
+  std::map<std::pair<std::string, std::vector<std::string>>, size_t> simt_artifacts_;
+  std::set<std::string> used_simt_functions_;
+  std::string GenerateSimtFunction(const ir::FunctionPtr& function);
+  std::string SimtParameterType(const ir::TypePtr& type);
+  bool TryEmitSimtCall(const ir::CallPtr& call);
+  std::string SimtElementOffset(const ir::ExprPtr& storage, const ir::MakeTuplePtr& indices);
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;

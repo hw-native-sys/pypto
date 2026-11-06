@@ -51,6 +51,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
@@ -90,6 +91,110 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// Validate the borrowed-Tile ABI using IR value flow, before allocation and phi
+// handles erase view identity. Each dependency edge is visited once by a
+// monotone worklist; ordered lookups keep the analysis O(N log N), including
+// loop backedges. Fresh producers such as tile.extract end view provenance.
+class SimtTileProvenanceChecker : public ir::IRVisitor {
+ public:
+  void Check(const StmtPtr& body) {
+    VisitStmt(body);
+    std::vector<const ir::Var*> worklist(views_.begin(), views_.end());
+    for (size_t i = 0; i < worklist.size(); ++i) {
+      const auto users = users_.find(worklist[i]);
+      if (users == users_.end()) continue;
+      for (const auto* user : users->second) {
+        if (views_.insert(user).second) worklist.push_back(user);
+      }
+    }
+    for (const auto& launch : launches_) {
+      for (const auto& arg : launch->args_) {
+        if (!As<TileType>(arg->GetType())) continue;
+        const auto var = ir::AsVarLike(arg);
+        CHECK_SPAN(var && !views_.count(var.get()), launch->span_)
+            << "SIMT cannot borrow a Tile view with unproven physical strides; "
+               "materialize the window with tile.extract before launching";
+      }
+    }
+  }
+
+ protected:
+  // Only statements define edges. Do not recursively revisit IterArg init
+  // chains or type expressions at every use of a value.
+  void VisitExpr(const ExprPtr&) override {}
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!As<TileType>(op->var_->GetType())) return;
+    if (ir::AsVarLike(op->value_)) {
+      AddEdge(op->value_, op->var_);
+    } else if (auto call = As<ir::Call>(op->value_)) {
+      // YieldFixup may insert tile.move into the canonical branch storage;
+      // it is not proof of an independent dense allocation. Require explicit
+      // tile.extract for materialization of an otherwise unsupported view.
+      // assemble updates input 0 without changing its physical layout. The
+      // inserted source's view provenance does not describe the destination.
+      if (ir::IsOp(call, "tile.move") || ir::IsOp(call, "tile.set_validshape") ||
+          ir::IsOp(call, "tile.assemble")) {
+        AddEdge(call->args_[0], op->var_);
+      } else if (ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        views_.insert(op->var_.get());
+      } else if (const auto* entry = ir::LookupOpEntry(call->op_)) {
+        if (const auto input = entry->GetOutputReusesInputArg()) {
+          AddEdge(call->args_[*input], op->var_);
+        }
+      }
+    }
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    yield_targets_.push_back(op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override { VisitLoop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitLoop(op); }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    if (yield_targets_.empty()) return;
+    const auto& targets = yield_targets_.back();
+    INTERNAL_CHECK_SPAN(op->value_.size() == targets.size(), op->span_)
+        << "Internal error: SIMT provenance yield arity mismatch";
+    for (size_t i = 0; i < targets.size(); ++i) AddEdge(op->value_[i], targets[i]);
+  }
+
+  void VisitStmt_(const ir::SimtLaunchStmtPtr& op) override {
+    launches_.push_back(op);
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      AddEdge(op->args_[op->result_param_indices_[i]], op->results_[i]);
+    }
+  }
+
+ private:
+  void AddEdge(const ExprPtr& source, const VarPtr& target) {
+    if (!As<TileType>(target->GetType())) return;
+    const auto var = ir::AsVarLike(source);
+    INTERNAL_CHECK_SPAN(var, target->span_) << "Internal error: Tile storage source must be a Var";
+    users_[var.get()].push_back(target.get());
+  }
+
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& op) {
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      AddEdge(op->iter_args_[i]->initValue_, op->iter_args_[i]);
+      AddEdge(op->iter_args_[i], op->return_vars_[i]);
+    }
+    yield_targets_.emplace_back(op->iter_args_.begin(), op->iter_args_.end());
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  std::map<const ir::Var*, std::vector<const ir::Var*>> users_;
+  std::set<const ir::Var*> views_;
+  std::vector<std::vector<VarPtr>> yield_targets_;
+  std::vector<ir::SimtLaunchStmtPtr> launches_;
+};
 
 // Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
 // this name reserved in modules that use deferred completion so a user kernel
@@ -879,10 +984,6 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // Generate entry and GenerateFunction
 // ========================================================================
 
-void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& op) {
-  CHECK_SPAN(false, op->span_) << "SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet";
-}
-
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   separate_vf_ = false;
   return GenerateImpl(program, emit_tile_addr, emit_source_loc);
@@ -897,10 +998,16 @@ PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit
 
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   vf_helpers_.clear();
+  simt_functions_.clear();
+  simt_effects_.clear();
+  simt_artifacts_.clear();
+  used_simt_functions_.clear();
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   inside_reg_scope_ = false;
-  single_vf_function_ = program->functions_.size() == 1;
+  single_vf_function_ =
+      std::count_if(program->functions_.begin(), program->functions_.end(),
+                    [](const auto& entry) { return ir::IsInCoreType(entry.second->func_type_); }) == 1;
   VerifyVFInfrastructureCodegenPreconditions(program);
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
@@ -915,20 +1022,20 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   needs_deferred_completion_adapter_ = false;
   reported_precision_sites_.clear();
   for (const auto& [_, function] : program->functions_) {
-    CHECK_SPAN(function->func_type_ != ir::FunctionType::SIMT, function->span_)
-        << "SIMT IR is supported, but PTOAS SIMT lowering is not implemented yet";
+    if (function->func_type_ == ir::FunctionType::SIMT) simt_functions_.emplace(function->name_, function);
   }
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
   // Select the compiler from structured IR, before serializing it. EmitC cannot
   // legalize vecscope; PTOAS honors this attribute without a global CLI override.
-  class RegScopeDetector : public ir::IRVisitor {
+  class NativeHelperDetector : public ir::IRVisitor {
    public:
     bool found = false;
 
    protected:
     void VisitStmt_(const ir::RegScopeStmtPtr&) override { found = true; }
+    void VisitStmt_(const ir::SimtLaunchStmtPtr&) override { found = true; }
   } detector;
   detector.VisitProgram(program);
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"";
@@ -936,10 +1043,14 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   stream_ << "} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
+    if (func->func_type_ == ir::FunctionType::SIMT) continue;
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
+  }
+  if (!separate_vf_) {
+    for (const auto& name : used_simt_functions_) stream_ << GenerateSimtFunction(simt_functions_.at(name));
   }
 
   if (needs_deferred_completion_adapter_) {
@@ -1102,6 +1213,7 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
+  if (!simt_functions_.empty()) SimtTileProvenanceChecker().Check(func->body_);
   parameter_backed_tile_bases_.clear();
   if (UsesBufferIR(func)) {
     GenerateBufferFunction(func);
@@ -2976,6 +3088,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitExpr_(const CallPtr& op) {
+  if (TryEmitSimtCall(op)) return;
   if (TryEmitRegCall(op, nullptr)) return;
   if (fs_.buffer_ir && TryEmitBufferCall(op)) return;
   const std::string& op_name = op->op_->name_;

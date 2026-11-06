@@ -36,6 +36,7 @@ void BindCodegen(nb::module_& m) {
       m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
 
   nb::class_<VFHelper>(codegen_module, "VFHelper")
+      .def_ro("kind", &VFHelper::kind)
       .def_ro("symbol", &VFHelper::symbol)
       .def_ro("adapter_symbol", &VFHelper::adapter_symbol)
       .def_ro("source", &VFHelper::source)

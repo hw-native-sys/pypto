@@ -76,6 +76,8 @@ def test_timeout_keeps_partial_diagnostics(tmp_path):
         "tests/st/runtime/vpto/test_alias_helper_sync.py",
         "tests/st/runtime/vpto/test_tile_helper_sync.py",
         "tests/st/runtime/vpto/test_reg_scope_onboard.py",
+        "tests/st/runtime/vpto/test_simt_gm_copy_onboard.py",
+        "tests/st/runtime/vpto/test_simt_ir_onboard.py",
         "tests/st/runtime/vpto/test_vpto_vf_onboard.py",
         "tests/ut/backend/vpto_vf_validation/test_alias_sync.py",
         "examples/runtime/vf_emitc_vpto.py",

@@ -294,6 +294,8 @@ class KernelCompiler:
         return external_source_digest(
             sources,
             metadata=(
+                # Revalidate binaries admitted before the SIMT inline-asm check.
+                "intrinsic-simt-abi-v1",
                 check_ptoas_version(ptoas),
                 result.stdout,
                 result.stderr,
@@ -313,12 +315,20 @@ class KernelCompiler:
             llvm = directory / f"vpto_{index}.ll"
             obj = directory / f"vpto_{index}.o"
             self._run([ptoas, source, *_vpto.PTOAS_FLAGS, "-o", str(llvm)], llvm, "VPTO lowering")
+            llvm_text = llvm.read_text()
+            # LLVM export bypasses PTOAS's object-level VF_SIMT size patcher.
+            # Bisheng computes intrinsic-only bodies correctly, but inline asm
+            # can leave the 0xffff size sentinel. Reject that unsupported path
+            # before linking; never patch device instruction bytes here.
+            if "simt_entry" in llvm_text and re.search(r"\basm\s", llvm_text):
+                raise ValueError(
+                    f"SIMT helper {source} contains inline assembly; LLVM export cannot guarantee "
+                    "its VF_SIMT launch size. Use intrinsic-only SIMT operations."
+                )
             # LLVM text export does not link PTOAS's generated Bridge wrappers.
             # Reject all non-intrinsic declarations instead of producing an
             # object that only fails later or depends on hidden runtime support.
-            declarations = re.findall(
-                r'^declare\b[^\n]*?@(?:"([^"]+)"|([^\s(]+))', llvm.read_text(), re.MULTILINE
-            )
+            declarations = re.findall(r'^declare\b[^\n]*?@(?:"([^"]+)"|([^\s(]+))', llvm_text, re.MULTILINE)
             unsupported = [
                 quoted or plain for quoted, plain in declarations if not (quoted or plain).startswith("llvm.")
             ]

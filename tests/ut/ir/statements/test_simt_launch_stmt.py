@@ -264,7 +264,7 @@ def test_unsupported_target_and_codegen_fail_explicitly():
         with pytest.raises(ValueError, match="unsupported"):
             ir.infer_simt_resources(launch)
 
-        with pytest.raises(NotImplementedError, match="SIMT lowering"):
+        with pytest.raises(RuntimeError, match="SIMT lowering requires the A5"):
             generate(program, "/tmp", skip_ptoas=True)
     finally:
         backend.reset_for_testing()

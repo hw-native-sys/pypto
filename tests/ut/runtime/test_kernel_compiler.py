@@ -300,7 +300,7 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
-@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "bridge"])
+@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "bridge", "simt_asm"])
 def test_vpto_compilation_links_helpers_and_rejects_bridge(
     compiler_module, monkeypatch, tmp_path, helper_kind
 ):
@@ -324,6 +324,7 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
         "empty": "define void @helper() {\n  ret void\n}\n",
         "ssa_writeback": writeback,
         "bridge": "declare void @bridge()",
+        "simt_asm": 'define simt_entry void @helper() {\n call void asm sideeffect "nop", ""()\n ret void\n}',
     }[helper_kind]
     helpers = [tmp_path / "first.pto", tmp_path / "second.pto"]
     for helper in helpers:
@@ -353,8 +354,9 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), vpto_sources=list(map(str, helpers)))
-    if helper_kind == "bridge":
-        with pytest.raises(ValueError, match="not self-contained: bridge"):
+    if helper_kind in ("bridge", "simt_asm"):
+        error = "not self-contained: bridge" if helper_kind == "bridge" else "VF_SIMT launch size"
+        with pytest.raises(ValueError, match=error):
             compiler.compile_incore(_source(tmp_path), **kwargs)
         assert not any(command[0] == "linker" for command in commands)
     else:

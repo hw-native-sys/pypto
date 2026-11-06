@@ -105,5 +105,7 @@ Ascend950 的三个维度乘积不得超过 2,048，寄存器数量按以下规�
 
 用户不提供 `simt_max_threads` 或 `simt_max_regs`。其他后端明确拒绝 SIMT 资源推导。
 
-规范 IR、验证、存储准备、内存规划集成和资源特化已实现。PTOAS lowering 和设备
-执行属于后续阶段。PTO codegen 仍明确拒绝 SIMT；流水线验证通过不代表内核可执行。
+规范 IR、验证、存储准备、内存规划集成、资源特化及 A5 可执行子集已实现。
+[SIMT lowering 与执行](../codegen/05-simt-lowering.md)说明 ABI、同步、支持类型
+和验收测试。独立的[原生 SIMT 探针](../codegen/04-simt-native-validation.md)
+保留此前 P0 ABI 测试。更高层的编写入口及 outlining 仍属于独立工作。
