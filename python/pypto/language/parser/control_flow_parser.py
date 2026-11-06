@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from pypto.ir.printer import python_print
+from pypto.language.typing.type_utils import _const_int_value  # noqa: PLC2701 — the shared syntax-level seam
 from pypto.pypto_core import DataType, ir
 
 from .attr_parser import AttrParser
@@ -28,7 +29,6 @@ from .scope_parser import ScopeParser
 from .source_comments import SourceCommentTracker
 from .syntax_helpers import is_const_int, is_dsl_call
 from .type_resolver import (
-    _const_int_value,  # noqa: PLC2701
     _is_dump_call,  # noqa: PLC2701
     _is_index_expr_type,  # noqa: PLC2701
 )

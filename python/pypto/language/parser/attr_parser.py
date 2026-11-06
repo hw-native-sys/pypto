@@ -121,7 +121,7 @@ class AttrParser:
         are REJECTED rather than guessed — never silently dropped — mirroring
         the printer's fail-loud behaviour.
         """
-        from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
+        from pypto.language.typing.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
         node_span = self.services.span_tracker.get_span(value_node)
         if (

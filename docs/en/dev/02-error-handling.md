@@ -104,7 +104,7 @@ override so that state survives too — `VerificationError` is the worked exampl
 The Python parser has the mirror-image trap. Its handlers wrap stray exceptions as source-located
 `ParserError`s, which would re-hide an `InternalError` the moment it escaped C++. Every broad
 `except Exception` on the parse path therefore re-raises `BUG_CLASS_EXCEPTIONS`
-(`python/pypto/language/parser/diagnostics/exceptions.py`) first:
+(`python/pypto/language/diagnostics.py`) first:
 
 ```python
 except ParserError:
@@ -153,7 +153,7 @@ The `span` argument follows the same safety rule as `INTERNAL_CHECK_SPAN`: it is
 
 `FatalLogger::~FatalLogger` appends `\nCheck failed: <expr> at <file>:<line>` to **every** check message, `CHECK` included. That tail names a C++ expression and an absolute build-machine path — useful when debugging PyPTO, noise for someone whose kernel is simply invalid. Since the renderer splices the whole message into its bold `Error:` header, an unstripped tail lands between the header and the `-->` arrow pointing at the user's own source.
 
-The DSL parser therefore routes a user-facing backend exception through `concise_error_message()` (`python/pypto/language/parser/diagnostics/exceptions.py`) before wrapping it in a `ParserError`. The raw text stays reachable via `PTO_BACKTRACE=1`, which prints the Python traceback carrying the original exception as `__cause__`.
+The DSL parser therefore routes a user-facing backend exception through `concise_error_message()` (`python/pypto/language/diagnostics.py`) before wrapping it in a `ParserError`. The raw text stays reachable via `PTO_BACKTRACE=1`, which prints the Python traceback carrying the original exception as `__cause__`.
 
 Two consequences for op authors:
 

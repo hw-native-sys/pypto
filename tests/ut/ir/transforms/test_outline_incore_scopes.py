@@ -15,7 +15,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, codegen, ir, passes
 from pypto.ir.printer import python_print
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+from pypto.language.diagnostics import ParserSyntaxError
 from pypto.language.parser.text_parser import parse as text_parse
 
 
