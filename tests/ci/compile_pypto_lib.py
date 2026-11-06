@@ -82,13 +82,15 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         if count < 1:
             raise ValueError(f"Invalid device count in {path}: {count}")
         args += ["-d", ",".join(str(rank) for rank in range(count))]
+    calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)]
     options = [
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "add_argument"
+        node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
     ]
+    parser_count = sum(
+        (isinstance(node.func, ast.Attribute) and node.func.attr == "ArgumentParser")
+        or (isinstance(node.func, ast.Name) and node.func.id == "ArgumentParser")
+        for node in calls
+    )
     if not devices and any(
         any(isinstance(arg, ast.Constant) and arg.value == "--device" for arg in node.args)
         and any(
@@ -98,7 +100,10 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         for node in options
     ):
         args += ["-d", "0"]
-    if any(
+    # A component-specific flag (for example KDA's verify parser) need not be
+    # accepted by the default entry's other parsers. For multi-parser entries,
+    # rely on compile_entry's golden.run hook to enforce compile-only execution.
+    if parser_count <= 1 and any(
         any(isinstance(arg, ast.Constant) and arg.value == "--compile-only" for arg in node.args)
         for node in options
     ):

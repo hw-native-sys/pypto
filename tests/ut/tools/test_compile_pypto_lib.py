@@ -487,6 +487,38 @@ def test_compile_does_not_enable_replay_or_checkpoint_arguments(library, tmp_pat
     assert len(result["compilations"]) == 1
 
 
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("constructor", ["argparse.ArgumentParser", "ArgumentParser"])
+@pytest.mark.parametrize("verify_kernel", ["ok", "bad"])
+def test_component_specific_compile_flag_is_not_injected(
+    library, tmp_path, platform, constructor, verify_kernel
+):
+    # KDA's default entry visits projection before verify. Only verify accepts
+    # --compile-only; each golden.run must still compile without device inputs.
+    (library / "models/case.py").write_text(
+        "import argparse\n"
+        "from argparse import ArgumentParser\n"
+        "from golden import run\n"
+        "def projection():\n"
+        f"    parser = {constructor}()\n"
+        "    parser.add_argument('-p')\n"
+        "    parser.parse_args()\n"
+        "    run('ok', [])\n"
+        "def verify():\n"
+        f"    parser = {constructor}()\n"
+        "    parser.add_argument('-p')\n"
+        "    parser.add_argument('--compile-only', action='store_true')\n"
+        "    args = parser.parse_args()\n"
+        f"    run({verify_kernel!r}, [], compile_only=args.compile_only)\n"
+        "projection()\n"
+        "verify()\n"
+    )
+    result = audit.run_case(library, "models/case.py", platform, tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert result["passed"] is (verify_kernel == "ok")
+    assert [record["passed"] for record in result["compilations"]] == [True, verify_kernel == "ok"]
+
+
 def test_entry_arguments_preserve_declared_ranks(tmp_path):
     script = tmp_path / "distributed.py"
     script.write_text('# ci: devices=4\nparser.add_argument("--compile-only")\n')
