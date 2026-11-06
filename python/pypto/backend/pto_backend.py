@@ -59,6 +59,7 @@ from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_vers
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
 from pypto.compile_profiling import CompileProfiler, StageRecord
+from pypto.pypto_core import DataType as _DataType
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -281,6 +282,7 @@ _KERNEL_HEADER = """\
 {subblock_override}#include <pto/pto-inst.hpp>
 #include "tensor.h"
 {deferred_completion_include}
+{urma_transfer_include}
 {spmd_override}
 
 using namespace pto;
@@ -416,6 +418,159 @@ _DEFERRED_COMPLETION_INCLUDE = """\
 #endif
 #endif
 #include "async_kernel_api.h"
+"""
+
+_URMA_TRANSFER_INCLUDE = """\
+#if defined(__has_include)
+#if !__has_include("backend/urma/urma_completion_kernel.h")
+#error "put_async/get_async require Simpler's urma_completion_kernel.h"
+#endif
+#if !__has_include("platform_comm/comm_context.h")
+#error "put_async/get_async require Simpler's comm_context.h"
+#endif
+#endif
+#include "backend/urma/urma_completion_kernel.h"
+#include "platform_comm/comm_context.h"
+"""
+
+_URMA_TRANSFER_ADAPTER_TEMPLATE = """\
+// --- URMA async transfer adapter ---
+// V1 completion is owned by the enclosing task: the helpers below only submit
+// the request and register its completion condition. They never poll or wait,
+// and returning does not mean the transfer has completed.
+//
+// ABI: pypto codegen emits
+//   func.call @pypto_urma_{put,get}_async_<dtype>(
+//       raw_args, comm_ctx, dst_base, src_base,
+//       dst_byte_offset, src_byte_offset, nbytes, peer,
+//       dst_extent, src_extent)
+// The C++ definitions below use the same argument order. Both endpoints are
+// registered-window views; the remote address is resolved through the peer MR.
+// ``dst_extent``/``src_extent`` are each endpoint tensor view's byte span
+// (including any stride gaps). The window check alone cannot bound a dynamic
+// subregion to the tensor that owns it: the window holds every registered
+// buffer, so a runtime offset past one tensor but inside the window would
+// otherwise overwrite a neighbour. Static subregions are already bounded by
+// the IR verifier; these extents carry the same bound to runtime.
+static __aicore__ void pypto_urma_fail(AsyncCtx& ctx, int32_t code) {
+  pto2::detail::set_urma_error(ctx, code);
+  pto2::detail::defer_flush(ctx);
+}
+
+template <typename T, bool kPut>
+static __aicore__ void pypto_urma_transfer_impl(
+    __gm__ int64_t* raw_args,
+    __gm__ int64_t* comm_ctx_raw,
+    __gm__ T* dst_base,
+    __gm__ T* src_base,
+    int64_t dst_off,
+    int64_t src_off,
+    int64_t nbytes,
+    int64_t peer,
+    int64_t dst_extent,
+    int64_t src_extent)
+{
+  if (raw_args == nullptr) {
+#if defined(__CPU_SIM)
+    __builtin_trap();
+#else
+    trap();
+#endif
+    return;
+  }
+
+  AsyncCtx ctx = get_async_ctx(raw_args);
+
+  if (comm_ctx_raw == nullptr || dst_base == nullptr || src_base == nullptr ||
+      dst_off < 0 || src_off < 0 || nbytes <= 0 ||
+      dst_extent <= 0 || src_extent <= 0 ||
+      nbytes % static_cast<int64_t>(sizeof(T)) != 0) {
+    pypto_urma_fail(ctx, static_cast<int32_t>(SIMPLER_ERROR_ASYNC_COMPLETION_INVALID));
+    return;
+  }
+
+  __gm__ CommContext* comm = reinterpret_cast<__gm__ CommContext*>(comm_ctx_raw);
+  const uint64_t workspace_addr =
+      comm_workspace<CommWorkspaceKind::URMA>(*comm).addr;
+  if (workspace_addr == 0 || peer < 0 ||
+      static_cast<uint64_t>(peer) >= static_cast<uint64_t>(comm->rankNum) ||
+      static_cast<uint64_t>(peer) == static_cast<uint64_t>(comm->rankId) ||
+      comm->windowsIn[comm->rankId] == 0) {
+    pypto_urma_fail(ctx, static_cast<int32_t>(SIMPLER_ERROR_ASYNC_COMPLETION_INVALID));
+    return;
+  }
+
+  auto* workspace = reinterpret_cast<__gm__ uint8_t*>(workspace_addr);
+  const int64_t elems = static_cast<int64_t>(nbytes) / static_cast<int64_t>(sizeof(T));
+  // Address arithmetic stays in integers until every range is validated: a
+  // typed pointer formed past the end of an allocation is already undefined
+  // behavior, even if the next line would reject it. Bounds are checked with
+  // subtraction, not by adding nbytes, so an offset near the top of the
+  // address space cannot wrap the sum. The tensor extent is measured from the
+  // endpoint view's base, so the view-relative offset is the one to compare;
+  // `remote_off` is measured from the window base and is only for the window
+  // check and peer address.
+  constexpr uint64_t kMaxAddress = ~static_cast<uint64_t>(0);
+  const uint64_t bytes = static_cast<uint64_t>(nbytes);
+  const uint64_t local_off = static_cast<uint64_t>(kPut ? src_off : dst_off);
+  const uint64_t local_extent = static_cast<uint64_t>(kPut ? src_extent : dst_extent);
+  const uint64_t remote_view_off = static_cast<uint64_t>(kPut ? dst_off : src_off);
+  const uint64_t remote_extent = static_cast<uint64_t>(kPut ? dst_extent : src_extent);
+  const uint64_t local_base_abs =
+      reinterpret_cast<uint64_t>(kPut ? src_base : dst_base);
+  const uint64_t remote_base_abs =
+      reinterpret_cast<uint64_t>(kPut ? dst_base : src_base);
+  const uint64_t local_window = comm->windowsIn[comm->rankId];
+  if (local_off > local_extent || bytes > local_extent - local_off ||
+      remote_view_off > remote_extent || bytes > remote_extent - remote_view_off ||
+      local_off > kMaxAddress - local_base_abs ||
+      remote_view_off > kMaxAddress - remote_base_abs) {
+    pypto_urma_fail(ctx, static_cast<int32_t>(SIMPLER_ERROR_ASYNC_COMPLETION_INVALID));
+    return;
+  }
+  const uint64_t local_abs = local_base_abs + local_off;
+  const uint64_t remote_abs = remote_base_abs + remote_view_off;
+  if (remote_abs < local_window) {
+    pypto_urma_fail(ctx, static_cast<int32_t>(SIMPLER_ERROR_ASYNC_COMPLETION_INVALID));
+    return;
+  }
+  const uint64_t remote_off = remote_abs - local_window;
+  if (remote_off > comm->winSize || bytes > comm->winSize - remote_off) {
+    pypto_urma_fail(ctx, static_cast<int32_t>(SIMPLER_ERROR_ASYNC_COMPLETION_INVALID));
+    return;
+  }
+  __gm__ T* local = reinterpret_cast<__gm__ T*>(local_abs);
+  __gm__ T* remote = pto2::urma_backend::peer_mr_ptr<T>(
+      workspace, static_cast<uint32_t>(peer), remote_off);
+
+  using FlatShape = pto::Shape<1, 1, 1, 1, pto::DYNAMIC>;
+  using FlatStride =
+      pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, 1>;
+  using Flat = pto::GlobalTensor<T, FlatShape, FlatStride>;
+  const auto shape = FlatShape(1, 1, 1, 1, elems);
+  const auto stride = FlatStride(elems, elems, elems, elems, 1);
+  Flat dst_tensor(kPut ? remote : local, shape, stride);
+  Flat src_tensor(kPut ? local : remote, shape, stride);
+
+  // TPUT reads a local source, and a TGET may read a peer source that was
+  // populated from a local store before the cross-rank handshake. In both
+  // directions the preceding local stores must be visible before submission.
+  pipe_barrier(PIPE_ALL);
+  const bool submitted =
+      kPut ? send_request_entry(
+                 ctx, UrmaTput(dst_tensor, src_tensor, workspace,
+                               static_cast<uint32_t>(peer)))
+           : send_request_entry(
+                 ctx, UrmaTget(dst_tensor, src_tensor, workspace,
+                               static_cast<uint32_t>(peer)));
+  if (!submitted) {
+    // The submission path already published the failing chunk's error code;
+    // flush the registered conditions so the scheduler observes them.
+    pto2::detail::defer_flush(ctx);
+  }
+}
+
+__PYPTO_URMA_WRAPPERS__
 """
 
 
@@ -719,6 +874,9 @@ _AIV_FIFO_ENDPOINT_OPS = frozenset(
 )
 _SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
 _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
+_URMA_PUT_ASYNC_OP = _ir_core.get_op("pld.tensor.put_async").name
+_URMA_GET_ASYNC_OP = _ir_core.get_op("pld.tensor.get_async").name
+_URMA_TRANSFER_OPS = frozenset({_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP})
 _TILE_LOAD_OP = _ir_core.get_op("tile.load").name
 
 
@@ -768,6 +926,95 @@ def _uses_sdma_workspace(func: _ir_core.Function) -> bool:
 def _uses_deferred_completion(func: _ir_core.Function) -> bool:
     """Return whether the wrapper must expose the scheduler AsyncCtx."""
     return _function_uses_ops(func, _DEFERRED_COMPLETION_OPS)
+
+
+# pypto DataType -> (PTOAS dtype suffix, C++ element type). The suffix must match
+# DataTypeToMLIR in pto_type_utils.cpp: codegen uses the same suffix for the
+# private helper declaration, so the C++ wrapper name and the emitted func.call
+# stay in sync.
+_URMA_DTYPE_MAP: dict[_DataType, tuple[str, str]] = {
+    _DataType.FP32: ("f32", "float"),
+    _DataType.FP16: ("f16", "half"),
+    _DataType.BF16: ("bf16", "bfloat16_t"),
+    _DataType.INT32: ("i32", "int32_t"),
+    _DataType.UINT32: ("ui32", "uint32_t"),
+    _DataType.INT64: ("i64", "int64_t"),
+    _DataType.UINT64: ("ui64", "uint64_t"),
+    _DataType.INT16: ("i16", "int16_t"),
+    _DataType.UINT16: ("ui16", "uint16_t"),
+    _DataType.INT8: ("i8", "int8_t"),
+    _DataType.UINT8: ("ui8", "uint8_t"),
+    _DataType.FP8E4M3FN: ("f8E4M3FN", "float8_e4m3_t"),
+    _DataType.FP8E5M2: ("f8E5M2", "float8_e5m2_t"),
+}
+
+
+def _uses_urma_transfer(func: _ir_core.Function) -> bool:
+    """Return whether the wrapper must expose the URMA async transfer adapter."""
+    return _function_uses_ops(func, _URMA_TRANSFER_OPS)
+
+
+def _collect_urma_transfer_dtypes(func: _ir_core.Function) -> set[tuple[bool, _DataType]]:
+    """Collect ``(is_put, dtype)`` for every async transfer in *func*."""
+
+    class _UrmaFinder(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pairs: set[tuple[bool, _DataType]] = set()
+
+        def visit_call(self, op: _ir_core.Call) -> None:
+            ir_op = getattr(op, "op", None)
+            if isinstance(ir_op, _ir_core.Op) and op.args:
+                is_put = ir_op.name == _URMA_PUT_ASYNC_OP
+                is_get = ir_op.name == _URMA_GET_ASYNC_OP
+                if is_put or is_get:
+                    dtype = getattr(op.args[0].type, "dtype", None)
+                    if dtype is not None:
+                        self.pairs.add((is_put, dtype))
+            super().visit_call(op)
+
+    finder = _UrmaFinder()
+    finder.visit_stmt(func.body)
+    return finder.pairs
+
+
+def _generate_urma_transfer_adapter(func: _ir_core.Function) -> str:
+    """Render the C++ adapter for the async transfers in *func*.
+
+    The PTOAS declaration is dtype-suffixed, so only the ``(put, dtype)`` /
+    ``(get, dtype)`` pairs actually present get a C++ definition. The generic
+    implementation is shared.
+    """
+    pairs = _collect_urma_transfer_dtypes(func)
+    if not pairs:
+        return ""
+
+    wrappers: list[str] = []
+    for is_put, dtype in sorted(pairs, key=lambda item: (not item[0], str(item[1]))):
+        mapped = _URMA_DTYPE_MAP.get(dtype)
+        if mapped is None:
+            op = "put" if is_put else "get"
+            raise RuntimeError(
+                f"pld.tensor.{op}_async has no URMA adapter for dtype {dtype}; "
+                "add it to _URMA_DTYPE_MAP and the PTOAS helper declaration"
+            )
+        suffix, cpp_type = mapped
+        op = "put" if is_put else "get"
+        k_put = "true" if is_put else "false"
+        wrappers.append(
+            'extern "C" {\n'
+            f"static __aicore__ void pypto_urma_{op}_async_{suffix}(\n"
+            "    __gm__ int64_t* raw_args, __gm__ int64_t* comm_ctx_raw,\n"
+            f"    __gm__ {cpp_type}* dst_base, __gm__ {cpp_type}* src_base,\n"
+            "    int64_t dst_off, int64_t src_off, int64_t nbytes, int64_t peer,\n"
+            "    int64_t dst_extent, int64_t src_extent) {\n"
+            f"  pypto_urma_transfer_impl<{cpp_type}, {k_put}>(\n"
+            "      raw_args, comm_ctx_raw, dst_base, src_base, dst_off, src_off, nbytes, peer,\n"
+            "      dst_extent, src_extent);\n"
+            "}\n"
+            '} // extern "C"'
+        )
+    return _URMA_TRANSFER_ADAPTER_TEMPLATE.replace("__PYPTO_URMA_WRAPPERS__", "\n\n".join(wrappers))
 
 
 def _uses_l2_cache_offset(func: _ir_core.Function) -> bool:
@@ -1022,6 +1269,7 @@ def _generate_kernel_header(
     uses_sdma: bool | None = None,
     uses_l2_cache_offset: bool | None = None,
     uses_deferred_completion: bool | None = None,
+    uses_urma_transfer: bool | None = None,
 ) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
     fixed_subblock_id = _get_fixed_subblock_id(func)
@@ -1052,14 +1300,18 @@ def _generate_kernel_header(
         uses_l2_cache_offset = _uses_l2_cache_offset(func)
     if uses_deferred_completion is None:
         uses_deferred_completion = _uses_deferred_completion(func)
+    if uses_urma_transfer is None:
+        uses_urma_transfer = _uses_urma_transfer(func)
     needs_intrinsic = uses_spmd or uses_subblock or uses_sdma or uses_l2_cache_offset
     spmd_override = '#include "intrinsic.h"\n' if needs_intrinsic else ""
     deferred_completion_include = _DEFERRED_COMPLETION_INCLUDE if uses_deferred_completion else ""
+    urma_transfer_include = _URMA_TRANSFER_INCLUDE if uses_urma_transfer else ""
 
     return _KERNEL_HEADER.format(
         func_name=func.name,
         subblock_override=subblock_override,
         deferred_completion_include=deferred_completion_include,
+        urma_transfer_include=urma_transfer_include,
         spmd_override=spmd_override,
     )
 
@@ -1083,6 +1335,7 @@ def _generate_kernel_wrapper(
     func_uses_sdma = _uses_sdma_workspace(func)
     func_uses_l2_cache_offset = _uses_l2_cache_offset(func)
     func_uses_deferred_completion = _uses_deferred_completion(func)
+    func_uses_urma_transfer = _uses_urma_transfer(func)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     ptoas_body, fifo_uses_subblock = _forward_runtime_lane_to_split_fifo_calls(func, ptoas_body)
     wrapper_uses_subblock = func_uses_subblock or fifo_uses_subblock
@@ -1093,6 +1346,7 @@ def _generate_kernel_wrapper(
         uses_sdma=func_uses_sdma,
         uses_l2_cache_offset=func_uses_l2_cache_offset,
         uses_deferred_completion=func_uses_deferred_completion,
+        uses_urma_transfer=func_uses_urma_transfer,
     )
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
 
@@ -1162,7 +1416,7 @@ def _generate_kernel_wrapper(
     # alias offset, and the synthetic i32 identity params in canonical order
     # (block_idx, block_num, subblock_idx). Mirror that exact order here.
     call_args_list = list(var_names)
-    if func_uses_deferred_completion:
+    if func_uses_deferred_completion or func_uses_urma_transfer:
         call_args_list.append("args")
     if func_uses_sdma:
         call_args_list.append("__pypto_sdma_workspace")
@@ -1198,8 +1452,9 @@ def _generate_kernel_wrapper(
     )
 
     deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
+    urma_transfer_adapter = _generate_urma_transfer_adapter(func) if func_uses_urma_transfer else ""
     return (
-        f"{header}\n{deferred_completion_adapter}{fifo_lane_arg_bridge}"
+        f"{header}\n{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
     )
 
