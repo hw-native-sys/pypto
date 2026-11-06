@@ -442,12 +442,21 @@ class TestDistributedCodegen:
             (pl.HF8, "uint8"),
         ],
     )
-    def test_create_tensor_low_precision_dtype_names_a_real_torch_dtype(self, dtype, torch_name):
-        """A host tensor.create must emit a torch dtype that actually exists.
+    # 32768 is ``at::internal::GRAIN_SIZE``. ``Tensor::zero_`` serves a buffer
+    # BELOW the grain with a serial memset and dispatches at or above it to the
+    # parallel ``fill_`` kernel, which torch does not implement on CPU for every
+    # low-precision dtype. Both sides of that boundary must be allocatable, so
+    # both are exercised -- 64 alone passed while FP4 at 32768 raised
+    # NotImplementedError: "fill_cpu" not implemented for 'Float4_e2m1fn_x2'.
+    @pytest.mark.parametrize("size", [64, 32768])
+    def test_create_tensor_low_precision_dtype_allocates_on_the_host(self, dtype, torch_name, size):
+        """A host tensor.create must emit an allocation that actually runs.
 
         The emitted line is executed verbatim in the generated ``host_orch.py``,
-        so an IR abbreviation left untranslated (``torch.fp8e5m2``) raises
-        AttributeError at dispatch time, before the kernel runs.
+        so this evaluates it rather than pattern-matching it: an IR abbreviation
+        left untranslated (``torch.fp8e5m2``) raises AttributeError, and a dtype
+        with no CPU fill kernel raises NotImplementedError -- neither of which a
+        string assertion over the emitted text can observe.
         """
 
         @pl.program
@@ -455,40 +464,46 @@ class TestDistributedCodegen:
             @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
             def chip_worker(
                 self,
-                a: pl.Tensor[[64], dtype],
-                buf: pl.Out[pl.Tensor[[64], dtype]],
-            ) -> pl.Tensor[[64], dtype]:
+                a: pl.Tensor[[size], dtype],
+                buf: pl.Out[pl.Tensor[[size], dtype]],
+            ) -> pl.Tensor[[size], dtype]:
                 return a
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
             def chip_orch(
                 self,
-                a: pl.Tensor[[64], dtype],
-                buf: pl.Out[pl.Tensor[[64], dtype]],
-            ) -> pl.Tensor[[64], dtype]:
-                result: pl.Tensor[[64], dtype] = self.chip_worker(a, buf)
+                a: pl.Tensor[[size], dtype],
+                buf: pl.Out[pl.Tensor[[size], dtype]],
+            ) -> pl.Tensor[[size], dtype]:
+                result: pl.Tensor[[size], dtype] = self.chip_worker(a, buf)
                 return result
 
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-            def host_orch(self, a: pl.Tensor[[64], dtype]) -> pl.Tensor[[64], dtype]:
-                buf: pl.Tensor[[64], dtype] = pl.create_tensor([64], dtype=dtype)
-                result: pl.Tensor[[64], dtype] = self.chip_orch(a, buf)
+            def host_orch(self, a: pl.Tensor[[size], dtype]) -> pl.Tensor[[size], dtype]:
+                buf: pl.Tensor[[size], dtype] = pl.create_tensor([size], dtype=dtype)
+                result: pl.Tensor[[size], dtype] = self.chip_orch(a, buf)
                 return result
 
         code = codegen.DistributedCodegen().generate(passes.convert_to_ssa()(Input))
         create_lines = [line for line in code.splitlines() if "torch.zeros(" in line]
         assert len(create_lines) == 1, create_lines
-        assert f"dtype=torch.{torch_name}" in create_lines[0], create_lines[0]
+        # The declared dtype must be named somewhere in the allocation -- either
+        # as the ``zeros`` dtype or as the dtype a byte allocation is viewed as.
+        assert f"torch.{torch_name}" in create_lines[0], create_lines[0]
         # The IR abbreviation must not survive as a torch attribute name.
         assert f"torch.{dtype.to_string()}" not in code or torch_name == dtype.to_string()
-        # Catch a typo in the table's torch spelling, but only where this torch
-        # provides the name: the optional FP8/FP4 dtypes are absent on older
-        # supported builds (torch 2.0 registers none of them), and whether the
-        # host interpreter happens to have them says nothing about whether
-        # codegen emitted the right string -- which the asserts above check.
-        emitted_dtype = getattr(torch, torch_name, None)
-        if emitted_dtype is not None:
-            assert isinstance(emitted_dtype, torch.dtype), f"torch.{torch_name} exists but is not a dtype"
+
+        expected_dtype = getattr(torch, torch_name, None)
+        if expected_dtype is None:
+            pytest.skip(f"torch {torch.__version__} does not provide torch.{torch_name}")
+
+        # Run the emitted right-hand side exactly as ``host_orch.py`` would.
+        expr = create_lines[0].split("=", 1)[1].strip()
+        allocated = eval(expr, {"torch": torch})
+        assert allocated.dtype is expected_dtype, f"{expr} produced {allocated.dtype}"
+        assert tuple(allocated.shape) == (size,), f"{expr} produced shape {tuple(allocated.shape)}"
+        assert allocated.is_shared(), "host allocations must live in shared memory for the forked runtime"
+        assert not allocated.view(torch.uint8).any(), "host allocation must be zeroed"
 
     def test_create_tensor_shared_zeros_for_multiple_tensors(self):
         """Multiple tensor.create calls each emit torch.zeros(...).share_memory_()."""

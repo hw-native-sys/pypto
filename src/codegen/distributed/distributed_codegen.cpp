@@ -1241,10 +1241,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       }
       if (ret_type->shape_.size() == 1) shape += ",";
       shape += ")";
-      const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
       emitter_.EmitLine("if \"" + target + "\" not in tensors:");
-      emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
-                        torch_dtype + ").share_memory_()");
+      emitter_.EmitLine("    tensors[\"" + target + "\"] = " + HostZerosExpr(shape, ret_type->dtype_) +
+                        ".share_memory_()");
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
                         "\"]), TensorArgType.OUTPUT_EXISTING)");
     }
@@ -1427,11 +1426,9 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
   if (result_type->shape_.size() == 1) shape += ",";  // trailing comma for 1-tuple
   shape += ")";
 
-  std::string torch_dtype = DataTypeToPythonDType(result_type->dtype_);
-
   // share_memory_() is required for fork-based distributed runtime visibility.
-  emitter_.EmitLine("tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." + torch_dtype +
-                    ").share_memory_()");
+  emitter_.EmitLine("tensors[\"" + target + "\"] = " + HostZerosExpr(shape, result_type->dtype_) +
+                    ".share_memory_()");
 
   declared_vars_.insert(target);
   current_expr_value_ = "";
@@ -1632,6 +1629,26 @@ std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
   auto it = kRenames.find(name);
   CHECK(name != "unknown") << "Unsupported dtype for distributed tensor create: " << name;
   return it != kRenames.end() ? it->second : name;
+}
+
+std::string DistributedCodegen::HostZerosExpr(const std::string& shape, const DataType& dtype) {
+  const std::string name = DataTypeToPythonDType(dtype);
+  // Torch has no CPU ``fill_`` kernel for the packed FP4 E2M1 dtype, and
+  // ``Tensor::zero_`` only avoids ``fill_`` by taking a serial memset shortcut
+  // BELOW ATen's parallelisation grain (``at::internal::GRAIN_SIZE`` == 32768).
+  // So a buffer of 32768 bytes or more -- and only such a buffer -- dies with
+  //   NotImplementedError: "fill_cpu" not implemented for 'Float4_e2m1fn_x2'
+  // in the generated ``host_orch.py``, before the kernel runs. Allocate the
+  // bytes through uint8, which does have the kernel, and reinterpret: the IR
+  // shape of a packed carrier is already its physical byte extent (torch
+  // reports ``element_size() == 1`` for it), so the view is zero-copy, keeps
+  // the declared dtype the user wrote, and holds the same zeroed bytes.
+  // Reinterpreting before ``share_memory_()`` is deliberate -- that call moves
+  // the underlying storage, which the view aliases either way.
+  if (name == "float4_e2m1fn_x2") {
+    return "torch.zeros(" + shape + ", dtype=torch.uint8).view(torch." + name + ")";
+  }
+  return "torch.zeros(" + shape + ", dtype=torch." + name + ")";
 }
 
 std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
