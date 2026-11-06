@@ -7,9 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Compile every formal pypto-lib entry without executing device code.
+"""Compile the configured pypto-lib cases without executing device code.
 
-Selection is owned by pypto-lib's detect_changes.py and ci_platforms.json.
+Selection and per-case arguments are owned by pypto_lib_compile.json.
 The subprocess adapter supports older entries without a --compile-only CLI.
 """
 
@@ -32,15 +32,6 @@ from itertools import count
 from pathlib import Path
 from typing import Any
 
-# The library selector also includes these CPU-only reference and checkpoint tests.
-# Their default CLI paths run CPU checks and cannot contribute compilation coverage.
-NON_KERNEL_ENTRIES = {
-    "models/glm5_3_flash/prefill_fwd.py",  # main() defaults to CPU weight checks.
-    "models/glm5_3_flash/prefill_ref.py",
-    "models/glm5_3_flash/weights.py",
-}
-
-
 # These entry contracts use runtime-dir as a compile OUTPUT. Other library
 # CLIs use that spelling for replay inputs or only in checkpoint branches;
 # discovering an add_argument call is not sufficient to enable it (#3205).
@@ -48,37 +39,80 @@ NON_KERNEL_ENTRIES = {
 COMPILE_OUTPUT_ENTRIES: set[str] = set()
 
 
-def select_entries(lib: Path, platform: str) -> list[str]:
-    """Use the library's full formal-entry selector, including device-only cases."""
-    selected = subprocess.run(
-        [sys.executable, str(lib / ".github/scripts/detect_changes.py"), "--all", "--platform", platform],
-        cwd=lib,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    entries = sorted(set(selected.stdout.split()) - NON_KERNEL_ENTRIES)
-    if not entries:
-        raise ValueError(f"No formal pypto-lib entries selected for {platform}")
-    for entry in entries:
+DEFAULT_CASES = Path(__file__).with_name("pypto_lib_compile.json")
+
+
+def select_cases(lib: Path, platform: str, config: Path) -> list[dict[str, Any]]:
+    """Validate the explicit case list and select one platform without discovery."""
+    cases = json.loads(config.read_text())
+    if not isinstance(cases, list):
+        raise ValueError(f"Expected a case list in {config}, got {type(cases).__name__}")
+    names: set[str] = set()
+    selected = []
+    for case in cases:
+        if not isinstance(case, dict) or set(case) - {"name", "entry", "platforms", "args"}:
+            raise ValueError(f"Invalid case in {config}: {case!r}")
+        name = case.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+            raise ValueError(f"Invalid case name in {config}: {name!r}")
+        if name in names:
+            raise ValueError(f"Duplicate case name in {config}: {name}")
+        names.add(name)
+        entry = case.get("entry")
+        if not isinstance(entry, str) or not entry:
+            raise ValueError(f"Invalid entry for case {name}: {entry!r}")
         path = Path(entry)
         if (
-            path.is_absolute()
+            not path.parts
+            or path.is_absolute()
             or ".." in path.parts
+            or path.as_posix() != entry
             or path.parts[0] not in ("examples", "models")
+            or path.suffix != ".py"
             or path.name.endswith("_draft.py")
+            or not (lib / path).resolve().is_relative_to(lib.resolve())
             or not (lib / path).is_file()
         ):
-            raise ValueError(f"Invalid formal entry from pypto-lib selector: {entry}")
-    return entries
+            raise ValueError(f"Invalid or missing entry for case {name}: {entry}")
+        platforms = case.get("platforms")
+        if (
+            not isinstance(platforms, list)
+            or not platforms
+            or any(item not in ("a2a3", "a5") for item in platforms)
+            or len(set(platforms)) != len(platforms)
+        ):
+            raise ValueError(f"Expected unique a2a3/a5 platforms for case {name}, got {platforms!r}")
+        args = case.get("args", [])
+        if not isinstance(args, list) or any(not isinstance(arg, str) or "\0" in arg for arg in args):
+            raise ValueError(f"Expected a string argument list for case {name}, got {args!r}")
+        for arg in args:
+            option = arg.partition("=")[0]
+            if (arg.startswith("-p") and not arg.startswith("--")) or (
+                option.startswith("--") and option != "--" and "--platform".startswith(option)
+            ):
+                raise ValueError(f"Case {name} must use platforms, not a platform argument: {arg}")
+        if platform in platforms:
+            selected.append({**case, "args": args})
+    if not selected:
+        raise ValueError(f"No pypto-lib cases selected for {platform} in {config}")
+    return selected
 
 
-def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> list[str]:
+def entry_args(
+    path: Path, platform: str, extra: list[str] | None = None, *, runtime_dir: Path | None = None
+) -> list[str]:
     """Supply platform and declared logical ranks without acquiring devices."""
+    extra = extra or []
+    explicit_device = any(
+        arg == "--device"
+        or arg.startswith("--device=")
+        or (arg.startswith("-d") and not arg.startswith("--"))
+        for arg in extra
+    )
     source = path.read_text()
     args = [str(path), "-p", platform]
     devices = re.search(r"^#\s*ci:\s*devices=(\d+)\b", source, re.MULTILINE)
-    if devices:
+    if devices and not explicit_device:
         count = int(devices.group(1))
         if count < 1:
             raise ValueError(f"Invalid device count in {path}: {count}")
@@ -90,18 +124,22 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "add_argument"
     ]
-    if not devices and any(
-        any(isinstance(arg, ast.Constant) and arg.value == "--device" for arg in node.args)
+    if (
+        not devices
+        and not explicit_device
         and any(
-            kw.arg == "required" and isinstance(kw.value, ast.Constant) and kw.value.value is True
-            for kw in node.keywords
+            any(isinstance(arg, ast.Constant) and arg.value == "--device" for arg in node.args)
+            and any(
+                kw.arg == "required" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                for kw in node.keywords
+            )
+            for node in options
         )
-        for node in options
     ):
         args += ["-d", "0"]
     if runtime_dir is not None:
         args += ["--runtime-dir", str(runtime_dir)]
-    return args
+    return args + extra
 
 
 def read_receipt(receipt: Path) -> list[dict[str, Any]]:
@@ -271,7 +309,7 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
             if entry in COMPILE_OUTPUT_ENTRIES
             else None
         )
-        sys.argv = entry_args(entry_path, platform, runtime_dir)
+        sys.argv = entry_args(entry_path, platform, runtime_dir=runtime_dir)
     else:
         # Self-dispatched children inherit explicit CLI arguments. Replace the
         # inherited manifest directory while preserving their case selection.
@@ -307,9 +345,11 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
         receipt.write_text(json.dumps(results, indent=2) + "\n")
 
 
-def run_case(lib: Path, entry: str, platform: str, output: Path, timeout: int) -> dict[str, Any]:
+def run_case(lib: Path, case: dict[str, Any], platform: str, output: Path, timeout: int) -> dict[str, Any]:
     """Run one isolated interpreter; kill its entire compiler process group on timeout."""
-    case_dir = output / Path(entry).with_suffix("")
+    entry = case["entry"]
+    argv = entry_args(lib / entry, platform, case.get("args", []))[1:]
+    case_dir = output / case["name"]
     case_dir.mkdir(parents=True, exist_ok=True)
     receipt = case_dir / "compilations.json"
     receipt.unlink(missing_ok=True)
@@ -326,6 +366,8 @@ def run_case(lib: Path, entry: str, platform: str, output: Path, timeout: int) -
         entry,
         "--receipt",
         str(receipt),
+        "--entry-args",
+        json.dumps(argv),
     ]
     start = time.monotonic()
     timed_out = False
@@ -343,7 +385,9 @@ def run_case(lib: Path, entry: str, platform: str, output: Path, timeout: int) -
     results = read_receipt(receipt)
     passed = code == 0 and bool(results) and all(result["passed"] for result in results)
     return {
+        "name": case["name"],
         "entry": entry,
+        "args": argv,
         "platform": platform,
         "passed": passed,
         "exit_code": code,
@@ -363,10 +407,11 @@ def positive_int(value: str) -> int:
 
 
 def main() -> int:
-    """Run the full matrix leg and write a reproducible manifest and result summary."""
+    """Run the configured matrix leg and write a reproducible manifest and result summary."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lib", type=Path, required=True)
     parser.add_argument("--platform", choices=("a2a3", "a5"), required=True)
+    parser.add_argument("--cases", type=Path, default=DEFAULT_CASES, help="JSON list of named compile cases")
     parser.add_argument("--output", type=Path, default=Path("build/lib-compile"))
     parser.add_argument("--jobs", type=positive_int, default=4)
     parser.add_argument("--timeout", type=positive_int, default=1200)
@@ -383,24 +428,36 @@ def main() -> int:
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    entries = select_entries(lib, args.platform)
+    cases = select_cases(lib, args.platform, args.cases)
     revision = subprocess.check_output(["git", "-C", str(lib), "rev-parse", "HEAD"], text=True).strip()
-    manifest = {"lib_revision": revision, "platform": args.platform, "entries": entries}
+    manifest = {
+        "lib_revision": revision,
+        "platform": args.platform,
+        "entries": sorted({case["entry"] for case in cases}),
+        "cases": [
+            {**case, "argv": entry_args(lib / case["entry"], args.platform, case["args"])[1:]}
+            for case in cases
+        ],
+    }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"Compiling {len(entries)} entries on {args.platform}; pypto-lib {revision}", flush=True)
+    print(f"Compiling {len(cases)} cases on {args.platform}; pypto-lib {revision}", flush=True)
     results = []
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = {
-            pool.submit(run_case, lib, entry, args.platform, output, args.timeout): entry for entry in entries
+            pool.submit(run_case, lib, case, args.platform, output, args.timeout): case["name"]
+            for case in cases
         }
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
             status = "PASS" if result["passed"] else "FAIL"
-            print(f"{status} {result['entry']} ({result['seconds']}s) [{result['log']}]", flush=True)
+            print(
+                f"{status} {result['name']} ({result['entry']}) ({result['seconds']}s) [{result['log']}]",
+                flush=True,
+            )
             if not result["passed"]:
                 print((output / result["log"]).read_text(errors="replace")[-12000:], flush=True)
-    results.sort(key=lambda result: result["entry"])
+    results.sort(key=lambda result: result["name"])
     (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     passed = sum(result["passed"] for result in results)
     summary = f"pypto-lib {args.platform}: {passed}/{len(results)} passed (library {revision})"
@@ -410,7 +467,9 @@ def main() -> int:
             summary_file.write(summary + "\n")
             for result in results:
                 if not result["passed"]:
-                    summary_file.write(f"- FAIL: `{result['entry']}` — `{result['log']}`\n")
+                    summary_file.write(
+                        f"- FAIL: `{result['name']}` (`{result['entry']}`) — `{result['log']}`\n"
+                    )
     return int(passed != len(results))
 
 
