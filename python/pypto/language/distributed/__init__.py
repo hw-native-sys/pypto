@@ -22,20 +22,23 @@ plus 2-segment unified-dispatch short form, just like ``pl``):
 * :mod:`pypto.language.distributed.op` — parser-sentinel ops. Sub-namespaces:
   ``pld.system.*`` (:func:`world_size`, :func:`get_comm_ctx`, :func:`rank`,
   :func:`nranks`), ``pld.tensor.*`` (:func:`alloc_window_buffer`,
-  :func:`window`, :func:`get`, :func:`put`), and ``pld.tile.*`` (:func:`remote_load`,
+  :func:`window`, :func:`get`, :func:`put`, :func:`get_async`,
+  :func:`put_async`), and ``pld.tile.*`` (:func:`remote_load`,
   :func:`remote_store`). Per-file split mirrors the C++ side
   (``src/ir/op/distributed/``).
 * :mod:`pypto.language.distributed.typing` — DSL type wrappers
   (:class:`DistributedTensor`, :class:`CommCtx`).
-* :class:`NotifyOp` / :class:`WaitCmp` / :class:`AtomicType` / :class:`ReduceOp`
+* :class:`NotifyOp` / :class:`WaitCmp` / :class:`AtomicType` /
+  :class:`ReduceOp` / :class:`CommEngine`
   — typed enum payloads of ``pld.system.notify`` / ``pld.system.wait`` /
-  ``pld.tensor.put`` / ``pld.tensor.allreduce``, re-exported here so users
-  can write ``pld.NotifyOp.AtomicAdd`` / ``pld.WaitCmp.Ge`` /
-  ``pld.AtomicType.Add`` / ``pld.ReduceOp.Sum`` without reaching into
-  ``pypto.pypto_core.ir``.
+  ``pld.tensor.put`` / ``pld.tensor.allreduce`` / ``pld.tensor.put_async``
+  and ``get_async``, re-exported here so users can write
+  ``pld.NotifyOp.AtomicAdd`` / ``pld.WaitCmp.Ge`` /
+  ``pld.AtomicType.Add`` / ``pld.ReduceOp.Sum`` /
+  ``pld.CommEngine.URMA`` without reaching into ``pypto.pypto_core.ir``.
 """
 
-from pypto.pypto_core.ir import AtomicType, NotifyOp, ReduceOp, WaitCmp
+from pypto.pypto_core.ir import AtomicType, CommEngine, NotifyOp, ReduceOp, WaitCmp
 
 from .op import (
     alloc_window_buffer,
@@ -55,6 +58,7 @@ from .typing import CommCtx, DistributedTensor
 __all__ = [
     "AtomicType",
     "CommCtx",
+    "CommEngine",
     "DistributedTensor",
     "NotifyOp",
     "ReduceOp",

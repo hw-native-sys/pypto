@@ -2858,5 +2858,219 @@ def test_indexed_all_to_all_v_accepts_local_receive_counts(local):
     assert call.type is args[1].type
 
 
+# ---------------------------------------------------------------------------
+# pld.tensor.put_async / get_async (V1 asynchronous URMA transfer)
+# ---------------------------------------------------------------------------
+
+
+def test_put_async_returns_dst_type():
+    """Positive: the async result aliases dst, so its type is dst's type."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = dist_tensor_ops.put_async(dst, peer, src, span=span)
+    ir.assert_structural_equal(call.type, dst.type)
+
+
+def test_put_async_rejects_plain_tensor_src():
+    """Both async endpoints are window-bound; a plain Tensor src is rejected."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="window-bound"):
+        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_get_async_rejects_plain_tensor_dst():
+    """GET also requires a window-bound destination in V1."""
+    span = ir.Span.unknown()
+    dst = _make_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="window-bound"):
+        ir.create_op_call("pld.tensor.get_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_async_transfer_requires_urma_engine():
+    """V1 rejects every engine value other than CommEngine.URMA by name."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="CommEngine.URMA"):
+        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": 0}, span)
+    with pytest.raises(ValueError, match="CommEngine.URMA"):
+        ir.create_op_call("pld.tensor.get_async", [dst, peer, src], {"engine": 2}, span)
+
+
+def test_put_async_requires_region_args_together():
+    """The three region arguments are an all-or-nothing group."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        dist_tensor_ops.put_async(dst, peer, src, dst_offsets=[0, 0], span=span)
+
+
+def test_put_async_rejects_noncontiguous_subregion():
+    """A narrower innermost extent leaves gaps between rows; V1 rejects it."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([0, 0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    narrow = _make_shape_tuple([1, 32], span)
+
+    with pytest.raises(ValueError, match="full innermost dimension"):
+        ir.create_op_call(
+            "pld.tensor.put_async",
+            [dst, peer, src, dst_offsets, src_offsets, narrow],
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
+def test_get_async_rejects_plain_tensor_src():
+    """The source of an async GET must be a window-bound DistributedTensor."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="window-bound"):
+        ir.create_op_call("pld.tensor.get_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_put_async_rejects_partial_inner_dimension():
+    """Rank-3+ subregions must span every dimension after the leading one."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [2, 4, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [2, 4, 64], DataType.FP16, span)
+    offsets = _make_shape_tuple([0, 0, 0], span)
+    partial = _make_shape_tuple([2, 1, 64], span)
+
+    with pytest.raises(ValueError, match="full innermost dimension"):
+        ir.create_op_call(
+            "pld.tensor.put_async",
+            [dst, peer, src, offsets, offsets, partial],
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
+def test_get_async_rejects_partial_inner_dimension():
+    """The GET mirror has the same rank-3+ contiguity rule."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [2, 4, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [2, 4, 64], DataType.FP16, span)
+    offsets = _make_shape_tuple([0, 0, 0], span)
+    partial = _make_shape_tuple([2, 1, 64], span)
+
+    with pytest.raises(ValueError, match="full innermost dimension"):
+        ir.create_op_call(
+            "pld.tensor.get_async",
+            [dst, peer, src, offsets, offsets, partial],
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
+def test_put_async_accepts_leading_dimension_subregion():
+    """A partial leading dimension is still one contiguous flattened range."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [2, 4, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [2, 4, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([1, 0, 0], span)
+    src_offsets = _make_shape_tuple([0, 0, 0], span)
+    one_plane = _make_shape_tuple([1, 4, 64], span)
+
+    call = ir.create_op_call(
+        "pld.tensor.put_async",
+        [dst, peer, src, dst_offsets, src_offsets, one_plane],
+        {"engine": int(ir.CommEngine.URMA)},
+        span,
+    )
+    ir.assert_structural_equal(call.type, dst.type)
+
+
+def test_put_async_rejects_non_dense_endpoint_view():
+    """A strided view is not one contiguous GM range; V1 has no packing."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [2, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    shape = [ir.ConstInt(2, DataType.INT64, span), ir.ConstInt(64, DataType.INT64, span)]
+    stride = [ir.ConstInt(128, DataType.INT64, span), ir.ConstInt(1, DataType.INT64, span)]
+    view = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
+    src = ir.Var(
+        "src",
+        ir.DistributedTensorType(shape, DataType.FP16, tensor_view=view),
+        span,
+    )
+
+    with pytest.raises(ValueError, match="not dense"):
+        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_put_async_rejects_non_nd_implicit_layout():
+    """An implicit (empty-stride) DN/NZ view is not dense row-major."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(64, DataType.INT64, span)]
+    view = ir.TensorView(layout=ir.TensorLayout.DN)
+    src = ir.Var(
+        "src",
+        ir.DistributedTensorType(shape, DataType.FP16, tensor_view=view),
+        span,
+    )
+
+    with pytest.raises(ValueError, match="row-major ND"):
+        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_put_async_rejects_non_integer_peer():
+    """The peer rank is an address coordinate, not a data scalar."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.FP32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="integer rank index"):
+        ir.create_op_call("pld.tensor.put_async", [dst, peer, src], {"engine": int(ir.CommEngine.URMA)}, span)
+
+
+def test_put_async_rejects_non_integer_offsets():
+    """Offsets become address coordinates; a float must not pass as one."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    float_offsets = ir.MakeTuple(
+        [ir.ConstFloat(0.0, DataType.FP32, span), ir.ConstInt(0, DataType.INT64, span)], span
+    )
+    offsets = _make_shape_tuple([0, 0], span)
+    shape = _make_shape_tuple([16, 64], span)
+
+    with pytest.raises(ValueError, match="integer or index"):
+        ir.create_op_call(
+            "pld.tensor.put_async",
+            [dst, peer, src, float_offsets, offsets, shape],
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
