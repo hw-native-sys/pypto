@@ -107,16 +107,7 @@ ExprPtr GetBufferAliasSource(const ExprPtr& value) {
 bool IsBuiltinOp(const std::string& op_name) {
   return op_name.rfind("tile.", 0) == 0 || op_name.rfind("tensor.", 0) == 0 ||
          op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0 ||
-         op_name.rfind("reg.", 0) == 0 || op_name == "pld.system.get_comm_ctx" ||
-         // Reading the rank count is an operator (a scalar load from the
-         // CommContext), not a function the Program must define.
-         //
-         // Spelled as a name literal like its ``get_comm_ctx`` sibling above,
-         // not through ``IsOp``: this predicate takes a name, not an OpPtr, and
-         // is called from codegen and the verifiers on ops that may not be
-         // registry-resolvable in the caller's context. The ``pld.`` namespace
-         // as a whole is *not* builtin here — only these two members of it are.
-         op_name == "pld.system.nranks";
+         op_name.rfind("reg.", 0) == 0 || op_name == "pld.system.get_comm_ctx";
 }
 
 bool IsManagedTensorCollective(const OpPtr& op) {
