@@ -533,6 +533,30 @@ def test_unsigned_wrapping_stop_exceeds_hardware_counter_range():
     assert any("65535" in diagnostic.message for diagnostic in verify(region(loop)))
 
 
+@pytest.mark.parametrize("kind", ["same_width_cast", "widening_cast", "product"])
+def test_wrapped_constant_stop_exceeds_hardware_counter_range(kind: str):
+    dtype = DataType.UINT32
+    if kind == "product":
+        stop: ir.Expr = ir.Mul(
+            ir.ConstInt(0xFFFFFFFF, dtype, SPAN), ir.ConstInt(0xFFFF0000, dtype, SPAN), dtype, SPAN
+        )
+    else:
+        source_dtype = DataType.INT32 if kind == "same_width_cast" else DataType.INT16
+        stop = ir.Cast(ir.ConstInt(-1, source_dtype, SPAN), dtype, SPAN)
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("65535" in diagnostic.message for diagnostic in verify(region(loop)))
+
+
 @pytest.mark.parametrize("narrowed", [0, 65535, 65536])
 def test_hardware_loop_checks_stop_after_narrowing_cast(narrowed: int):
     policy = ir.HardwareLoopPolicy.Require

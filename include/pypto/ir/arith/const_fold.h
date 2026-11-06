@@ -532,7 +532,8 @@ inline std::optional<int64_t> TryEvaluateIntConstant(const ExprPtr& expr) {
     if (!operand) return std::nullopt;
     if (detail::ConstIntFitsDtype(*operand, dtype)) return operand;
     const auto bits = dtype.GetBit();
-    if (bits == 0 || bits >= GetScalarDtype(cast->operand_).GetBit() || bits >= 64) {
+    if (bits == 0 || bits >= 64 ||
+        (!dtype.IsUnsignedInt() && bits > GetScalarDtype(cast->operand_).GetBit())) {
       return std::nullopt;
     }
     const auto modulus = uint64_t{1} << bits;
@@ -558,6 +559,10 @@ inline std::optional<int64_t> TryEvaluateIntConstant(const ExprPtr& expr) {
     if ((kind == ObjectKind::BitShiftLeft || kind == ObjectKind::BitShiftRight) &&
         (*rhs < 0 || static_cast<uint64_t>(*rhs) >= dtype.GetBit())) {
       return std::nullopt;
+    }
+    if (kind == ObjectKind::Mul && dtype.IsUnsignedInt() && dtype.GetBit() < 64) {
+      const auto mask = (uint64_t{1} << dtype.GetBit()) - 1;
+      return static_cast<int64_t>((static_cast<uint64_t>(*lhs) * static_cast<uint64_t>(*rhs)) & mask);
     }
     folded = TryConstFoldBinary(kind, MakeConstInt(*lhs, dtype), MakeConstInt(*rhs, dtype), dtype);
   } else if (auto unary = As<UnaryExpr>(expr)) {
