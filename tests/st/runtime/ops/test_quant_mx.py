@@ -26,6 +26,11 @@ MX_GROUP_SIZE = 32
 # One MX scale box is 16 rows x 2 groups of exponent codes.
 _SCALE_BOX_ROWS = 16
 _SCALE_BOX_COLS = 2
+# Block exponents the FP8 fixtures cycle through, as `[_MIN_SCALE_EXPONENT,
+# _MIN_SCALE_EXPONENT + _SCALE_EXPONENTS)`. See `_quant_inputs_and_golden` for
+# why FP16 exactness caps the span at 16.
+_MIN_SCALE_EXPONENT = -8
+_SCALE_EXPONENTS = 16
 
 
 def _case_shapes(group_axis: int) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -124,20 +129,30 @@ def _quant_inputs_and_golden(
             (exponent_shape[0] + _SCALE_BOX_COLS - 1) // _SCALE_BOX_COLS
         ) + (rows_index // _SCALE_BOX_COLS)
         lane_in_box = (groups_index % _SCALE_BOX_ROWS) * _SCALE_BOX_COLS + (rows_index % _SCALE_BOX_COLS)
-    # FP16 bounds the range: the largest payload is 448, so 448 * 2**e must stay
-    # finite (e <= 7), and the smallest is 2**-6.
-    group_exponents = (box_index % 12) - 4
+    # The exponent must vary *inside* a box too, not just between boxes: the
+    # payload rotation below only orders the data, so a scale permutation that
+    # X-to-ZZ packing gets wrong independently of the payload is invisible
+    # while all 32 scale bytes of a box are equal. Driving it from
+    # `lane_in_box` makes a swapped row or group pair show up in `out_scale`.
+    #
+    # 16 is the widest injective stride the source dtypes allow. Every source
+    # value is `_FP8_E4M3_EXACT * 2**e` and must be exactly representable:
+    # 448 * 2**7 == 57344 is the largest FP16-finite choice, and
+    # 0.015625 * 2**-8 == 2**-14 is the smallest FP16 *normal* one, so e is
+    # confined to `_SCALE_EXPONENTS` values for the box's 32 lanes. Two lanes
+    # 16 apart therefore still share an exponent; a transpose of the 16x2 inner
+    # order, a swap of the two groups, or any pair closer than 16 does not.
+    group_exponents = ((box_index + lane_in_box) % _SCALE_EXPONENTS) + _MIN_SCALE_EXPONENT
     scales = torch.pow(2.0, group_exponents).to(torch.float32)
-    # Within a box every lane shares the exponent, so the payload rotation is
-    # the only thing that can distinguish them -- and it has to be *injective*
-    # over the box, not merely varying. `(row * 5 + group * 11) % 32` was not:
-    # for axis1 (row=15, group=0) and (row=0, group=1) both rotate by 11, which
-    # made those two blocks byte-identical and a swap between them invisible.
-    # `lane_in_box` is the 16x2 lane index, so it runs 0..31 exactly once per
-    # box and `box_index + lane_in_box` is a permutation of the 32 rotations
-    # within every box, while still differing between boxes. Rotation is itself
-    # a permutation of the block, so each block's amax stays 448 and OCP still
-    # selects exactly `e`.
+    # The payload rotation distinguishes all 32 lanes of a box, and it has to be
+    # *injective* over the box, not merely varying. `(row * 5 + group * 11) % 32`
+    # was not: for axis1 (row=15, group=0) and (row=0, group=1) both rotate by
+    # 11, which made those two blocks byte-identical and a swap between them
+    # invisible. `lane_in_box` runs 0..31 exactly once per box, so
+    # `box_index + lane_in_box` is a permutation of the 32 rotations within every
+    # box while still differing between boxes. Rotation is itself a permutation
+    # of the block, so each block's amax stays 448 and OCP still selects
+    # exactly `e`.
     rotation = (box_index + lane_in_box) % MX_GROUP_SIZE
     lane = torch.arange(MX_GROUP_SIZE)
     if group_axis == 1:
