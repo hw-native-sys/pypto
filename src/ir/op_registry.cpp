@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -29,6 +30,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
@@ -502,6 +504,147 @@ void OpRegistry::ValidateBufferCall(const CallPtr& call) const {
       entry, call->args_, call->kwargs_, entry.RequiresExplicitType() ? original_type : nullptr, call->span_);
   CHECK_SPAN(structural_equal(original_type, expected_type), call->span_)
       << "Buffer operator '" << entry.GetName() << "' stored result type does not match its deduced type";
+}
+
+CallPtr OpRegistry::BindResultStorage(const CallPtr& call,
+                                      const std::vector<std::optional<MemRefPtr>>& destinations) const {
+  CHECK(call && call->op_) << "Storage binding requires a detached registered producer call";
+  // `GlobalVar` derives from `Op` and carries a function name; looking that
+  // up could validate the call against a same-named registered operator's
+  // storage contract (kind first, name second).
+  CHECK_SPAN(!As<GlobalVar>(call->op_), call->span_) << "A GlobalVar call has no registered storage contract";
+  const auto& entry = GetEntry(call->op_->name_);
+  CHECK(entry.GetIRStage() == OpIRStage::Functional && !entry.IsInternalOnly())
+      << "Storage binding requires a public Functional-stage producer";
+  CHECK(entry.GetOpCategory() == "TileOp")
+      << "Storage binding requires a Tile producer; communication results use their transport storage";
+  const auto& spec = entry.GetMemorySpec();
+  // `no_memory_spec()` engages an empty spec on purpose; that must read as
+  // "no contract", not as one satisfied by the engaged optional.
+  CHECK(spec.has_value() && !spec->opted_out)
+      << "Operator '" << entry.GetName()
+      << "' declares no output memory contract; its result storage cannot be bound";
+  CHECK(!spec->output_reuses_input_arg.has_value())
+      << "Operator '" << entry.GetName() << "' writes its result into input argument "
+      << *spec->output_reuses_input_arg << "; bind that input's allocation instead";
+  CHECK(!(entry.OutputMemoryInheritsInput() && entry.IsInplaceSafe()))
+      << "Operator '" << entry.GetName() << "' inherits storage; bind its allocating input instead";
+  // Input MemRefs for alias checking; null for operands without storage.
+  // As<ShapedType> is the supported widening cast (kind_traits.h): it matches
+  // ShapedType, TensorType, DistributedTensorType, TileType and ArrayType,
+  // the same subtree the dynamic cast in GetTypeMemRef
+  // (transforms/utils/memref_utils.h) accepts.
+  std::vector<MemRefPtr> arg_memrefs(call->args_.size());
+  for (size_t a = 0; a < call->args_.size(); ++a) {
+    if (auto shaped = As<ShapedType>(call->args_[a]->GetType())) {
+      arg_memrefs[a] = shaped->memref_.value_or(nullptr);
+    }
+  }
+  std::vector<TypePtr> results;
+  const auto tuple = As<TupleType>(call->GetType());
+  if (tuple) {
+    results = tuple->types_;
+  } else {
+    results.push_back(call->GetType());
+  }
+  CHECK(destinations.size() == results.size())
+      << "Storage binding requires one destination per result, got " << destinations.size() << " for "
+      << results.size() << " results";
+  // Destinations that passed validation, paired with their result index: the
+  // pairwise check below runs after the loop, once every destination has been
+  // validated on its own terms.
+  std::vector<std::pair<size_t, MemRefPtr>> bound_destinations;
+  bound_destinations.reserve(results.size());
+  auto aliases_dest = [](const MemRefPtr& a, const MemRefPtr& b) {
+    // Same conservativeness as the input check below: sharing the allocation
+    // base is an alias unless both select provably-different constant slots,
+    // and an unresolved byte extent (0) means "unknown", not "empty".
+    if (a->base_.get() != b->base_.get()) return false;
+    auto a_slot = a->slot_index_ ? As<ConstInt>(*a->slot_index_) : nullptr;
+    auto b_slot = b->slot_index_ ? As<ConstInt>(*b->slot_index_) : nullptr;
+    if (a_slot && b_slot && a_slot->value_ != b_slot->value_) return false;
+    return a->size_ == 0 || b->size_ == 0 || MemRef::MayAlias(a, b);
+  };
+  // A producer with any placed result is itself already placed: a second
+  // request leaves the placed positions out of both the per-result and the
+  // pairwise checks below (they only see destinations supplied here), so a
+  // partial rebind could hand two results the same allocation.
+  for (const auto& result : results) {
+    if (auto tile = As<TileType>(result)) {
+      CHECK(!tile->memref_.has_value()) << "Producer already has an explicit storage binding";
+    }
+  }
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (!destinations[i].has_value()) continue;
+    auto tile = As<TileType>(results[i]);
+    CHECK(tile) << "Storage binding result " << i << " is not a Tile";
+    CHECK(tile->memory_space_.has_value())
+        << "Storage binding requires a resolved output memory space; specify target_memory";
+    const auto& memory = *destinations[i];
+    CHECK(memory && memory->is_pinned_) << "Storage binding requires an allocation declaration";
+    auto aliases_arg = [&](size_t arg_index) {
+      const auto& arg = arg_memrefs[arg_index];
+      if (!arg) return false;
+      // Binding runs before InitMemRef sizes a pinned destination, so a zero
+      // byte extent means "unresolved", not "empty": MayAlias's range
+      // overlap is no disjointness proof for an unsized region. The
+      // conservative floor is sharing the allocation base, lifted only by
+      // constant slot selections that provably name different slots.
+      if (memory->base_.get() != arg->base_.get()) return false;
+      auto dest_slot = memory->slot_index_ ? As<ConstInt>(*memory->slot_index_) : nullptr;
+      auto arg_slot = arg->slot_index_ ? As<ConstInt>(*arg->slot_index_) : nullptr;
+      if (dest_slot && arg_slot && dest_slot->value_ != arg_slot->value_) return false;
+      return memory->size_ == 0 || arg->size_ == 0 || MemRef::MayAlias(memory, arg);
+    };
+    if (!entry.IsInplaceSafe()) {
+      // Deliberately target-independent, which over-rejects one known case:
+      // A5's TPRELU keeps the ABI-required tmp operand of tile.prelu but never
+      // reads it, and its codegen checks dst only against src and slope. Binding
+      // is a type-layer statement made before (or without) a target, while
+      // A2/A3's TPRELU reads tmp while writing dst — so a destination sharing
+      // tmp's allocation is refused for every target. The target-aware memory
+      // planners make the opposite call when they do the packing
+      // (allocation_constraints / semantic_aliases exempt A5 tmp).
+      for (size_t a = 0; a < call->args_.size(); ++a) {
+        CHECK(!aliases_arg(a)) << "Operator '" << entry.GetName() << "' is not in-place safe: result " << i
+                               << " storage must not alias input argument " << a;
+      }
+    } else {
+      for (size_t a : entry.ForbidOutputAliasArgs()) {
+        if (a >= call->args_.size()) continue;
+        CHECK(!aliases_arg(a)) << "Operator '" << entry.GetName() << "' reads input argument " << a
+                               << " while writing its output: result " << i << " storage must not alias it";
+      }
+    }
+    if (memory->slot_index_.has_value()) {
+      const auto& index = *memory->slot_index_;
+      auto scalar = index ? As<ScalarType>(index->GetType()) : nullptr;
+      CHECK(scalar && scalar->dtype_.IsInt()) << "Storage slot index must be an integer scalar";
+      if (auto constant = As<ConstInt>(index)) {
+        CHECK(constant->value_ >= 0 && static_cast<uint64_t>(constant->value_) < memory->slot_count_)
+            << "Storage slot index is outside the declared slot count";
+      }
+    }
+    CHECK(memory->slot_count_ == 1 || memory->slot_index_.has_value())
+        << "Select a slot before binding a multi-slot allocation";
+    bound_destinations.emplace_back(i, memory);
+    results[i] =
+        std::make_shared<TileType>(tile->shape_, tile->dtype_, memory, tile->tile_view_, tile->memory_space_);
+  }
+  // Two results of one producer never see each other through the input-alias
+  // checks above, so compare the destinations to each other: the second write
+  // would otherwise overwrite the first.
+  for (size_t a = 0; a + 1 < bound_destinations.size(); ++a) {
+    for (size_t b = a + 1; b < bound_destinations.size(); ++b) {
+      CHECK(!aliases_dest(bound_destinations[a].second, bound_destinations[b].second))
+          << "Storage binding results " << bound_destinations[a].first << " and "
+          << bound_destinations[b].first
+          << " must not alias each other; give each result its own allocation or slot";
+    }
+  }
+  TypePtr result_type = tuple ? std::make_shared<TupleType>(results) : results[0];
+  return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, result_type,
+                                call->span_);
 }
 
 CallPtr OpRegistry::CreateImpl(const std::string& op_name, const std::vector<ExprPtr>& args,

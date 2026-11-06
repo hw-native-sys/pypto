@@ -3353,6 +3353,10 @@ def _create_internal_op_call(
     The descriptor is stored in the result type; runtime values stay in args.
     """
 
+def bind_result_storage(call: Call, destinations: Sequence[MemRef | None]) -> Call:
+    """Bind detached producer results to explicit storage without changing inferred value types."""
+    ...
+
 def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
     """Return a copy of ``call`` with compiler-internal ``attrs_`` set.
 

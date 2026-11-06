@@ -1067,6 +1067,14 @@ void BindIR(nb::module_& m) {
       "Create an internal Buffer call with a validated explicit result descriptor");
 
   ir.def(
+      "bind_result_storage",
+      [](const CallPtr& call, const std::vector<std::optional<MemRefPtr>>& destinations) {
+        return OpRegistry::GetInstance().BindResultStorage(call, destinations);
+      },
+      nb::arg("call"), nb::arg("destinations"),
+      "Bind each detached producer result to an allocation declaration, preserving inferred value types");
+
+  ir.def(
       "set_call_attrs",
       [](const CallPtr& call, const nb::dict& attrs_dict) -> CallPtr {
         // Return a copy of `call` with compiler-internal `attrs_` set from a

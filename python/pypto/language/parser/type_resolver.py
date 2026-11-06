@@ -2548,6 +2548,23 @@ class TypeResolver:
             if var is not None:
                 return var
 
+        # ``pl.const(value, dtype)`` — the printer emits MemRef offsets as
+        # typed constants; rebuild with the specified dtype (the reified
+        # runtime Scalar is not an int, so plain eval would fail).
+        if self._is_pl_const_call(node):
+            call = cast(ast.Call, node)
+            if (
+                len(call.args) == 2
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, (int, float))
+            ):
+                value = call.args[0].value
+                dtype = self.resolve_dtype(call.args[1])
+                span = self._get_span(node)
+                if isinstance(value, float):
+                    return ir.ConstFloat(value, dtype, span)
+                return ir.ConstInt(value, dtype, span)
+
         # Handle arithmetic expressions (e.g., var * 4, var + 128)
         if isinstance(node, ast.BinOp):
             lhs = self._resolve_memref_byte_offset(node.left)

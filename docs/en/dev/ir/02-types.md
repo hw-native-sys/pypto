@@ -653,6 +653,17 @@ unknown = ir.UnknownType()
 
 ### MemRef Type Annotations in DSL
 
+Producer storage can also be bound through
+`ir.bind_result_storage(call, destinations)`. This validates an allocating
+Functional-stage producer and returns a new immutable Call with the same op,
+arguments, kwargs, attrs, shapes, dtypes and views, adding the requested
+MemRefs to its Tile result types. A tuple requires exactly one destination per
+result (`None` keeps that result unchanged). Inherited-storage operations,
+unresolved output spaces, and rebinding an already placed producer are rejected.
+The operation does not mutate an existing Call or relocate an SSA variable.
+Storage is represented once in the result type; generic type remapping and
+recorded-call printing preserve the reference and its slot expression.
+
 MemRef can be specified as a positional argument in type annotations within `@pl.program` / `@pl.function` DSL code:
 
 ```python
