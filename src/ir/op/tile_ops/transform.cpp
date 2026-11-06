@@ -245,6 +245,70 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     tile_view.fractal = src_v.fractal;
     tile_view.pad = src_v.pad;
     tile_view.compact = src_v.compact;
+    // An MX scale tile's bytes are stored in SFractal box order, so only the
+    // WHOLE tile is representable as a boxed view. Every proper sub-window is
+    // rejected here, where the parent's geometry is still visible -- by the
+    // time anything downstream sees the result it is an offset into a shared
+    // buffer pool, indistinguishable from a legitimately placed whole tile.
+    //
+    // Why nothing weaker is sound. Each of these was implemented, measured, and
+    // found insufficient, in this order:
+    //
+    //   * "the logical span must equal the tile's own bytes" (checked at the
+    //     store). For A-ZZ ([M, G], groups innermost) a partial group span does
+    //     widen the logical envelope, but for B-NN ([G, N], groups OUTERMOST) a
+    //     group-axis window is perfectly row-major contiguous: `[2, 64]` of a
+    //     `[4, 64]` B-NN scale spans exactly its own 128 bytes while its data
+    //     is four 32-byte runs at 0, 64, 128 and 192.
+    //   * "full group coverage plus a box-aligned offset". This admits a window
+    //     that is genuinely contiguous in packed order yet still carries a
+    //     logical address: `[4, 32]` at `[0, 32]` of a `[4, 64]` B-NN scale
+    //     records +32 where its packed bytes start at +128. The store's span
+    //     test caught that one only because its logical envelope was 224 bytes
+    //     -- and a nested identity re-slice (`tile.slice(part, [4, 32], [0,0])`)
+    //     recomputes the span against the immediate parent, resetting it to a
+    //     tight 128 and defeating the test. A bare alias then strips the
+    //     codegen-side view marker as well.
+    //
+    // The recurring mechanism is that a slice's recorded offset is LOGICAL
+    // row-major while its bytes are packed, and no local predicate downstream
+    // can recover the difference. Only the whole tile has a logical address
+    // that is also its packed address, so that is the rule.
+    //
+    // Scoped to the MX scale fractal deliberately. Other boxed layouts (Acc /
+    // L0C) have their own contiguity guard in CanonicalizeTileSlice, and this
+    // check is not a statement about them.
+    if (src_v.fractal == tile_view_semantics::kMXScaleFractal && src_v.slayout != TileLayout::none_box &&
+        offsets.size() >= 2 && new_shape.size() >= 2 && tile_type->shape_.size() >= 2) {
+      auto extent = [](const ExprPtr& e) { return As<ConstInt>(e); };
+      bool is_whole_tile = true;
+      for (size_t axis = 0; axis < 2 && is_whole_tile; ++axis) {
+        auto offset = extent(offsets[axis]);
+        auto window = extent(new_shape[axis]);
+        auto parent = extent(tile_type->shape_[axis]);
+        is_whole_tile = offset && window && parent && offset->value_ == 0 && window->value_ == parent->value_;
+      }
+      std::string window_text;
+      std::string parent_text;
+      std::string offset_text;
+      for (size_t axis = 0; axis < 2; ++axis) {
+        const char* sep = axis ? ", " : "";
+        auto window = extent(new_shape[axis]);
+        auto parent = extent(tile_type->shape_[axis]);
+        auto offset = extent(offsets[axis]);
+        window_text += sep + (window ? std::to_string(window->value_) : std::string("?"));
+        parent_text += sep + (parent ? std::to_string(parent->value_) : std::string("?"));
+        offset_text += sep + (offset ? std::to_string(offset->value_) : std::string("dynamic"));
+      }
+      CHECK_SPAN(is_whole_tile, args[2]->span_)
+          << "tile.slice of an MX scale tile must select the whole tile, but this window is [" << window_text
+          << "] at [" << offset_text << "] of [" << parent_text
+          << "]. The scale's bytes are stored in packed box order while a slice records a logical "
+             "row-major address, and the two agree only for the whole tile -- a sub-window is "
+             "either a strided set of 32-byte runs or sits at an address nothing downstream can "
+             "correct. Store or move the scale tile the quantizer produced, or stage the scale "
+             "through a plain FP8E8M0 tensor and slice that.";
+    }
   } else {
     tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
   }
