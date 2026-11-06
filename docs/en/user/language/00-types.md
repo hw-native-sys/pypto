@@ -280,7 +280,7 @@ is also supported, with each chunk spanning the destination's full row axis.
 Atomic stores, FIXPIPE epilogue options (`pre_quant`, `pre_relu`),
 dtype conversion, A5, Vec/Mat sources, and dynamic or partially valid tiles are rejected.
 The full scope and the underlying row-window restriction are documented in
-[BlockNzTensorViews](../../dev/passes/16-block_nz_tensor_views.md#accumulator-stores).
+[BlockNzTensorViews](../../dev/passes/17-block_nz_tensor_views.md#accumulator-stores).
 
 When a tensor's rows are not contiguous — a window into a larger buffer, a strided slice
 handed in from outside — describe it with `pl.TensorView`, which makes the strides explicit
@@ -396,7 +396,7 @@ it — which is a race, not a diagnostic.
 | **`ParserTypeError` about the DN layout-only shorthand** | `pl.Tensor[..., pl.DN]` — removed, it forced two coordinate systems onto one annotation | Write the source shape with no marker; derive DN at the use site with `pl.transpose(x, -2, -1)`; or inherit it through a slice/reshape of a DN-producing op |
 | **Results wrong only when two tasks overlap** | A read-write buffer declared `In` or `Out` instead of `InOut` | Declare the direction the kernel actually performs |
 | **Reading an `Out` parameter returns garbage** | `Out` promises write-before-read | Use `pl.InOut[...]` if the prior contents matter |
-| **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) for multi-hop pairs |
+| **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/19-legalize_tile_cast.md) for multi-hop pairs |
 | **Two dimensions that should match are treated as independent** | Two separate `pl.dynamic("M")` calls | Create the `DynVar` once and reuse the object |
 
 Not every `pl.cast` is one instruction. Whether a `(src, dst)` pair maps to a single
@@ -405,7 +405,7 @@ instruction on Ascend910 and lowers to `INT32 -> FP32 -> FP16` on Ascend950. Eac
 costs a `tcvt`, and where an intermediate is narrower than the source the result can
 differ from a directly rounded conversion by one ULP of the destination. This is expected
 behaviour, not a defect — see
-[LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) for the per-architecture
+[LegalizeTileCast](../../dev/passes/19-legalize_tile_cast.md) for the per-architecture
 tables.
 
 `pl.cast` also takes a keyword-only `saturation_mode` (`"on"` / `"off"`, or `1` / `0`) for
@@ -423,8 +423,10 @@ you named.
 
 `pl.SimtAxis.X`, `pl.SimtAxis.Y`, and `pl.SimtAxis.Z` identify the coordinate axis
 in canonical SIMT IR. These enum values are distinct from integer operands.
-The inline SIMT programming interface and executable lowering are still pending;
-see [scalar SIMT IR](../../dev/ir/11-simt.md) for the current contract.
+`pl.simt.Axis` exposes the same enum for `pl.simt_scope(dims=(x, y, z))`
+inside `@pl.jit.aiv` functions. Query axes are required and may be passed
+positionally or as `axis=`. See [scalar SIMT IR](../../dev/ir/11-simt.md) for
+GM/UB access, supported types and the A5 execution contract.
 
 ## See Also
 
@@ -432,4 +434,4 @@ see [scalar SIMT IR](../../dev/ir/11-simt.md) for the current contract.
 - [Memory and Data Movement](03-memory.md) — moving data between the spaces these types name.
 - [Operations](../ops/index.md) — which operators accept `Tensor` versus `Tile`.
 - [IR Types](../../dev/ir/02-types.md) — the IR-level type system these annotations build.
-- [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) — per-architecture cast expansion and its precision consequences.
+- [LegalizeTileCast](../../dev/passes/19-legalize_tile_cast.md) — per-architecture cast expansion and its precision consequences.

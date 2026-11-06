@@ -1119,6 +1119,22 @@ static IRNodePtr DeserializeEvalStmt(const msgpack::object& fields_obj, msgpack:
   return std::make_shared<EvalStmt>(expr, span, DeserializeLeadingComments(fields_obj));
 }
 
+static IRNodePtr DeserializeSimtScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                          DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  std::vector<ExprPtr> dims;
+  for (const auto& item : GET_FIELD_OBJ("block_dims").as<std::vector<msgpack::object>>()) {
+    dims.push_back(std::dynamic_pointer_cast<const Expr>(ctx.DeserializeNode(item, zone)));
+  }
+  auto body = std::dynamic_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  std::vector<VarPtr> private_scalars;
+  for (const auto& item : GET_FIELD_OBJ("private_scalars").as<std::vector<msgpack::object>>()) {
+    private_scalars.push_back(std::dynamic_pointer_cast<const Var>(ctx.DeserializeNode(item, zone)));
+  }
+  return std::make_shared<SimtScopeStmt>(std::move(dims), body, span, std::move(private_scalars),
+                                         DeserializeLeadingComments(fields_obj));
+}
+
 // Deserialize a launch without converting storage results into thread returns.
 static IRNodePtr DeserializeSimtLaunchStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                            DeserializerContext& ctx) {
@@ -1412,6 +1428,7 @@ static TypeRegistrar _graph_scope_stmt_registrar("GraphScopeStmt", DeserializeGr
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _simt_launch_stmt_registrar("SimtLaunchStmt", DeserializeSimtLaunchStmt);
+static TypeRegistrar _simt_scope_stmt_registrar("SimtScopeStmt", DeserializeSimtScopeStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);
 static TypeRegistrar _continue_stmt_registrar("ContinueStmt", DeserializeContinueStmt);
 static TypeRegistrar _inline_stmt_registrar("InlineStmt", DeserializeInlineStmt);

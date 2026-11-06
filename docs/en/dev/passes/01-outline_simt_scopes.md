@@ -1,0 +1,50 @@
+# OutlineSimtScopes
+
+`OutlineSimtScopes` turns each transient `SimtScopeStmt` in an explicit AIV
+function into a void `FunctionType.SIMT` helper and a `SimtLaunchStmt`. It runs
+before `InlineFunctions`, control-flow normalization, SSA conversion and scope
+flattening. Code generation rejects unoutlined scopes.
+
+## Captures and results
+
+Captures follow first lexical use order and use Var identity. The helper gets
+fresh parameters; its body references those parameters instead of caller Vars.
+Runtime scalar captures are uniform inputs. Scalar reassignments create private
+bindings and do not update the caller. Thread-private values cannot escape.
+
+The transient node records reassigned outer scalar bindings in `private_scalars`.
+These are uses of caller bindings, not caller definitions. Cloning preserves
+their initial value and prevents region assignments from changing later caller
+uses. This also covers assignments executed on only one branch.
+
+A store makes its captured storage parameter `InOut`, even inside a conditional.
+Each such parameter has exactly one launch result, in parameter order. Before
+SSA, that result defines the captured caller binding; SSA then gives the updated
+handle a fresh version. Existing Tile output materialization preserves old Tile
+aliases and unwritten elements. Tensor aliases continue to reference GM.
+
+Outer `In` permissions survive storage copies/views. Captures must already be
+initialized. A complete, unmasked `tile.store` can initialize an `Out` Tensor
+before capture; a partial or conditional write is not proof at a later join.
+Initialization inside a branch is usable by a later scope in that same branch.
+
+Storage returned by a function call or projected from a rebound tuple is rejected
+when its provenance cannot be proved. Capture the original named storage instead.
+
+## Legality and resources
+
+Only explicit AIV functions may contain scopes initially. Nested SIMT regions,
+active register regions, storage allocation/rebinding inside helpers, VMI
+register captures, and control flow crossing the region boundary are rejected.
+The canonical SIMT verifier validates the generated helper bodies.
+
+Dimensions are exactly three positive compile-time integers. The pass uses the
+same target resource validation as explicit launches; later specialization
+supplies thread/register limits. Users cannot provide resource overrides.
+
+The pass indexes region definitions and storage permissions once per function.
+Capture collection traverses disjoint region bodies. Alias analysis uses union
+by rank/path compression and names use an ordered set: O(N log N) overall.
+
+See [SIMT authoring and IR](../ir/11-simt.md) for the public syntax and
+[pass manager](00-pass_manager.md) for pipeline integration.

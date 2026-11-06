@@ -277,4 +277,21 @@ class reg_scope:
         pass
 
 
-__all__ = ["ScopeMode", "manual_scope", "reg_scope", "scope", "submit", "spmd_submit"]
+class simt_scope:
+    """Run a scalar body on a static three-dimensional SIMT thread block.
+
+    Captured storage remains owned by the enclosing AIV function. Scalar
+    bindings created or assigned in this region are private to each thread.
+    """
+
+    def __init__(self, *, dims: tuple[int, int, int]) -> None:
+        self.dims = dims
+
+    def __enter__(self) -> None:
+        raise RuntimeError("pl.simt_scope() is only valid inside a parsed PyPTO function")
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+
+__all__ = ["ScopeMode", "manual_scope", "reg_scope", "simt_scope", "scope", "submit", "spmd_submit"]

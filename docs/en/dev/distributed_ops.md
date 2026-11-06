@@ -108,7 +108,7 @@ The flag is orthogonal to affinity (it constrains replication, not placement).
 Its only consumer is `LowerAutoVectorSplit`'s `pl.split_aiv` region placement
 stamp, which pins a region's no-duplicate calls to the AIV lane; see
 `docs/en/dev/ir/05-operators.md` and
-`docs/en/dev/passes/24-lower_auto_vector_split.md`.
+`docs/en/dev/passes/25-lower_auto_vector_split.md`.
 
 **Comm ops written outside every region are still duplicated onto both lanes,
 and nothing diagnoses it.** Putting the comm phase in a `pl.split_aiv` region is
@@ -458,7 +458,7 @@ provenance, so distinctness is the caller's obligation.
 
 On the managed CHIP/L2 rail, an operand built in the orchestration must be
 provably row-major, or `LowerL2TensorCollectives` rejects it (see the
-[pass reference](passes/43-lower_l2_tensor_collectives.md#current-limitations)
+[pass reference](passes/44-lower_l2_tensor_collectives.md#current-limitations)
 for what is proven and why). As a backstop, orchestration codegen emits one
 `is_contiguous` check per operand ahead of its `rt_submit_aiv_task`.
 The first non-contiguous operand latches `SIMPLER_ERROR_INVALID_ARGS` naming it
@@ -576,7 +576,7 @@ naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) accepts a
 compile-time `core_num`: it folds the same `B = CalAllToAllVBlocks(P, L)` at
 lowering and attaches it as the launch spec (`core_num=B`, `sync_start`) when
 `B > 1`. A runtime `core_num` is not supported on that rail yet — see
-[`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md).
+[`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md).
 
 **CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
 down, in a CHIP `Orchestration` body rather than in `host_orch`. It is rewritten
@@ -585,7 +585,7 @@ template the HOST rail uses, so the wire behaviour is identical and only the
 dispatch structure differs: the collective becomes one AIV task of the caller's
 own pipeline — no per-device fan-out, no nested L2 dispatch — ordered against
 the surrounding compute by ordinary TensorMap dependencies. See
-[`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md).
+[`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md).
 
 **HOST builtin** (`LowerHostTensorCollectives`): the same 5-arg call, made
 from a `host_orch` function, lowers per-device to `builtin.tensor.all_to_all_v`
@@ -665,7 +665,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/48-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/49-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape
 `[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
@@ -910,7 +910,7 @@ than a PTO tensor view.
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/49-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/50-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Distributed codegen rounds each slot's physical allocation up to 64 bytes and
@@ -920,7 +920,7 @@ slots on separate A2/A3 D-cache lines: a scalar store followed by DCCI writes
 back a whole 64-byte line and must not overwrite an adjacent signal slot's
 credits. The padding also covers 32-byte remote-transfer alignment and tails.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/50-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/51-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing
