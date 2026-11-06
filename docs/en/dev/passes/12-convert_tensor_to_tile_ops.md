@@ -224,6 +224,30 @@ function or a wrapper that absorbed output params in Phase 2a:
 InCore, AIC, AIV, Spmd, and Group functions are skipped from this phase — they were
 already rewritten in Phase 1 / 2a.
 
+### Phase 3: Propagate Storage Access Through Callers
+
+Analyze callees before callers and merge content reads and writes on backing storage.
+A plain input updated through an `Out` callee and consumed by a separate `In`
+callee becomes `InOut`, including through dynamic zero-copy reshapes. A
+metadata-only view does not itself read contents. Write-only inputs become `Out`;
+read-only inputs stay `In`. Explicit `Out` scratch retains its producer contract,
+while forwarding it to an `InOut` callee keeps the existing upgrade to `InOut`.
+
+The analysis shares the outliner's storage-effect collector and handles both Call
+and Submit. Each function body is analyzed once after its callee signatures are
+final, so initial `In` placeholders in a write-only wrapper cannot invent reads.
+Storage-return summaries follow the callee's actual returned values, including
+ambiguous branches and partial views; an independent fresh result never aliases
+an unrelated Out scratch. Summaries are scoped to an unchanged Program and
+shared across nested queries and caller analyses. The logical-footprint policy
+used by fusion retains its existing rules.
+
+Loop carry/result identities form a shared storage-transition graph. A bounded
+worklist propagates reads and writes through repeated iterations, including
+descriptor swaps and fresh seeds. Each effect bit traverses each edge at most
+once; carry-free nesting does not copy enclosing effect maps. Unsupported
+recursive caller graphs report a user-facing error.
+
 ## Where a Bridged Load Lands
 
 An operand listed in a conversion's `input_reqs` reaches the converter as a tile:

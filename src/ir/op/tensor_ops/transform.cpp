@@ -147,8 +147,8 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.reshape requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
-             args[0]->span_)
+  const auto& input_view_opt = tensor_type->tensor_view_;
+  CHECK_SPAN(!input_view_opt.has_value() || !IsMxTensorLayout(input_view_opt.value().layout), args[0]->span_)
       << "tensor.reshape does not support MX-layout tensors";
   CHECK_SPAN(!tensor_type->dtype_.IsPackedFp4(), args[0]->span_)
       << "tensor.reshape is not supported for FP4E2M1X2/FP4E1M2X2 (see docs/en/dev/fp4.md)";
@@ -202,8 +202,8 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   // permuting the strides, so ND alone does not imply the element order the
   // flat-prefix mapping walks.
   bool row_major_contiguous = true;
-  if (tensor_type->tensor_view_.has_value()) {
-    const TensorView& source_view = *tensor_type->tensor_view_;
+  if (input_view_opt.has_value()) {
+    const TensorView& source_view = input_view_opt.value();
     row_major_contiguous =
         source_view.layout == TensorLayout::ND &&
         (source_view.stride.empty() || tile_view_semantics::ShapeExprListsEquivalent(
@@ -241,8 +241,7 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
 
   // Return new TensorType with reshaped dimensions and same dtype. A fully valid
   // region is canonicalized away by the constructor, leaving no view at all.
-  const PadValue pad =
-      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  const PadValue pad = input_view_opt.has_value() ? input_view_opt.value().pad : PadValue::null;
   TensorView tensor_view({}, TensorLayout::ND, std::move(mapped_valid), pad);
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
                                       std::make_optional(std::move(tensor_view)));
@@ -259,14 +258,13 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
   auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK_SPAN(tensor_type, args[0]->span_)
       << kOpName << " requires data to be a TensorType, but got " << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
-             args[0]->span_)
+  const auto& input_view_opt = tensor_type->tensor_view_;
+  CHECK_SPAN(!input_view_opt.has_value() || !IsMxTensorLayout(input_view_opt.value().layout), args[0]->span_)
       << kOpName << " does not support MX-layout tensors";
   CHECK_SPAN(!tensor_type->shape_.empty(), args[0]->span_) << kOpName << " requires a tensor rank >= 1";
 
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
-  const TensorLayout layout =
-      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  const TensorLayout layout = input_view_opt.has_value() ? input_view_opt.value().layout : TensorLayout::ND;
   // NZ is a legal TensorType layout (in its blocked form), but reinterpreting a
   // fractal-blocked buffer under a new dtype would silently change which bytes
   // each element maps to — the fractal geometry is dtype-dependent (c0 = 32 /
@@ -278,12 +276,11 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
       << kOpName << " requires rank >= 2 for DN layout";
 
   bool preserve_explicit_stride = false;
-  if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
+  if (input_view_opt.has_value() && !input_view_opt.value().stride.empty()) {
     const auto expected_stride =
         tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, layout);
-    CHECK_SPAN(
-        tile_view_semantics::ShapeExprListsEquivalent(tensor_type->tensor_view_->stride, expected_stride),
-        args[0]->span_)
+    CHECK_SPAN(tile_view_semantics::ShapeExprListsEquivalent(input_view_opt.value().stride, expected_stride),
+               args[0]->span_)
         << kOpName << " only supports packed tensors with canonical strides for their layout";
     preserve_explicit_stride = true;
   }
@@ -298,7 +295,7 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
   const size_t contiguous_axis =
       layout == TensorLayout::DN ? tensor_type->shape_.size() - 2 : tensor_type->shape_.size() - 1;
   const std::vector<ExprPtr> source_valid =
-      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->valid_shape : std::vector<ExprPtr>{};
+      input_view_opt.has_value() ? input_view_opt.value().valid_shape : std::vector<ExprPtr>{};
   auto plan = reinterpret_view_semantics::Resolve(tensor_type->shape_, source_valid, tensor_type->dtype_,
                                                   target_dtype, contiguous_axis, requested_shape, kOpName,
                                                   args[0]->span_);
@@ -306,8 +303,7 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
   TensorView result_view;
   result_view.layout = layout;
   result_view.valid_shape = std::move(plan.valid_shape);
-  const PadValue source_pad =
-      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  const PadValue source_pad = input_view_opt.has_value() ? input_view_opt.value().pad : PadValue::null;
   result_view.pad = reinterpret_view_semantics::NormalizePad(source_pad);
   if (preserve_explicit_stride) {
     result_view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(plan.shape, layout);
@@ -327,8 +323,8 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.transpose requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
-             args[0]->span_)
+  const auto& input_view_opt = tensor_type->tensor_view_;
+  CHECK_SPAN(!input_view_opt.has_value() || !IsMxTensorLayout(input_view_opt.value().layout), args[0]->span_)
       << "tensor.transpose does not support MX-layout tensors";
 
   const auto& input_shape = tensor_type->shape_;
@@ -389,11 +385,11 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   PadValue pad = PadValue::null;
   std::vector<ExprPtr> in_valid_shape;
   std::vector<ExprPtr> in_stride;
-  if (tensor_type->tensor_view_.has_value()) {
-    in_layout = tensor_type->tensor_view_->layout;
-    pad = tensor_type->tensor_view_->pad;
-    in_valid_shape = tensor_type->tensor_view_->valid_shape;
-    in_stride = tensor_type->tensor_view_->stride;
+  if (input_view_opt.has_value()) {
+    in_layout = input_view_opt.value().layout;
+    pad = input_view_opt.value().pad;
+    in_valid_shape = input_view_opt.value().valid_shape;
+    in_stride = input_view_opt.value().stride;
   }
   TensorLayout out_layout = in_layout;
   if (is_trailing_swap) {
@@ -476,6 +472,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(src_type) << "tensor.view: src must be TensorType or DistributedTensorType, got "
                   << args[0]->GetType()->TypeName();
 
+  const auto& input_view_opt = src_type->tensor_view_;
   std::optional<TensorLayout> requested_layout;
   for (const auto& [k, v] : kwargs) {
     if (k == "layout") {
@@ -486,8 +483,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(args.size() >= 2 || requested_layout.has_value())
       << "tensor.view requires at least one of shape or layout";
 
-  TensorLayout src_layout =
-      src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
+  TensorLayout src_layout = input_view_opt.has_value() ? input_view_opt.value().layout : TensorLayout::ND;
   TensorLayout new_layout = requested_layout.value_or(src_layout);
   const bool has_shape = args.size() >= 2;
   // FP8E8M0 scale buffers may alias between packed ND storage and the Cube
@@ -516,18 +512,18 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       << "tensor.view cannot produce an NZ layout: the blocked NZ shape is derived from the "
       << "source tensor by BlockNzTensorViews, not chosen at a view site";
 
-  if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
+  if (input_view_opt.has_value() && !input_view_opt.value().stride.empty()) {
     auto canon_check = tensor_view_semantics::CheckCanonicalView(
-        src_type->shape_, src_type->tensor_view_->stride, src_layout, /*relaxed_symbolic=*/true);
+        src_type->shape_, input_view_opt.value().stride, src_layout, /*relaxed_symbolic=*/true);
     CHECK(canon_check.ok) << "tensor.view: src view is not canonical for layout "
                           << TensorLayoutToString(src_layout) << ": " << canon_check.reason;
   }
 
   std::vector<ExprPtr> new_shape;
   const bool has_explicit_valid_shape = args.size() == 3;
-  if (has_shape && src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
+  if (has_shape && input_view_opt.has_value() && !input_view_opt.value().stride.empty()) {
     auto packed_stride = tensor_view_semantics::BuildLogicalStridesFromLayout(src_type->shape_, src_layout);
-    const auto& src_stride = src_type->tensor_view_->stride;
+    const auto& src_stride = input_view_opt.value().stride;
     bool is_packed_source = packed_stride.size() == src_stride.size() &&
                             std::equal(packed_stride.begin(), packed_stride.end(), src_stride.begin(),
                                        [](const ExprPtr& a, const ExprPtr& b) {
@@ -586,8 +582,8 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       << "tensor.view: DN layout requires rank >= 2, got " << new_shape.size();
 
   TensorView new_view;
-  if (!has_shape && src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
-    std::vector<ExprPtr> new_stride = src_type->tensor_view_->stride;
+  if (!has_shape && input_view_opt.has_value() && !input_view_opt.value().stride.empty()) {
+    std::vector<ExprPtr> new_stride = input_view_opt.value().stride;
     if (src_layout != new_layout) {
       std::iter_swap(new_stride.end() - 2, new_stride.end() - 1);
     }
@@ -596,8 +592,8 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
     new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
   }
 
-  if (src_type->tensor_view_.has_value()) {
-    const auto& src_view = src_type->tensor_view_.value();
+  if (input_view_opt.has_value()) {
+    const auto& src_view = input_view_opt.value();
     if (has_shape && !has_explicit_valid_shape && !src_view.valid_shape.empty()) {
       bool is_fully_valid =
           src_view.valid_shape.size() == src_type->shape_.size() &&
@@ -649,13 +645,13 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       }
     }
     const bool source_has_valid_shape =
-        src_type->tensor_view_.has_value() && !src_type->tensor_view_->valid_shape.empty();
+        input_view_opt.has_value() && !input_view_opt.value().valid_shape.empty();
     if (!valid_shape.empty()) {
       CHECK(source_has_valid_shape)
           << "tensor.view: an explicit target valid_shape requires a source valid_shape";
       CHECK(src_layout == TensorLayout::ND && new_layout == TensorLayout::ND)
           << "tensor.view: explicit valid_shape shape reinterpretation only supports ND layout";
-      CHECK(IsNdLeadingCollapseTo2D(src_type->shape_, src_type->tensor_view_->valid_shape, new_shape,
+      CHECK(IsNdLeadingCollapseTo2D(src_type->shape_, input_view_opt.value().valid_shape, new_shape,
                                     valid_shape))
           << "tensor.view: explicit valid_shape must describe an ND leading-dimension collapse or "
              "contiguous-prefix linear collapse to 2D";
@@ -686,6 +682,7 @@ REGISTER_OP("tensor.reshape")
                   "Optional logical valid shape (MakeTuple, same rank as `shape`) carried onto the "
                   "result TensorView; present only in the 3-arg form")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReshapeType(args, kwargs);
@@ -699,6 +696,7 @@ REGISTER_OP("tensor.reinterpret_view")
     .add_argument("shape", "Optional target shape; omitted to scale the physically contiguous dimension")
     .set_attr<DataType>("dtype")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReinterpretViewType(args, kwargs);
@@ -729,6 +727,7 @@ REGISTER_OP("tensor.view")
     .add_argument("valid_shape", "Optional explicit target valid shape for shape reinterpretation")
     .set_attr<TensorLayout>("layout")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorViewType(args, kwargs);
@@ -809,9 +808,10 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
   check_const_bound("valid_rows", args[1], tensor_type->shape_[0]);
   check_const_bound("valid_cols", args[2], tensor_type->shape_[1]);
 
+  const auto& input_view_opt = tensor_type->tensor_view_;
   TensorView tensor_view;
-  if (tensor_type->tensor_view_.has_value()) {
-    tensor_view = *tensor_type->tensor_view_;
+  if (input_view_opt.has_value()) {
+    tensor_view = input_view_opt.value();
   }
   tensor_view.valid_shape = {args[1], args[2]};
 
@@ -835,6 +835,7 @@ REGISTER_OP("tensor.set_validshape")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     // Metadata-only: no data moves, so the result names the same buffer as the
     // input. Orthogonal to the space-inheritance above (see
     // OpRegistryEntry::OutputMemoryInheritsInput).

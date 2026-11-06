@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,11 +21,25 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace buffer_root {
+
+/// Share proven storage-return summaries while an unchanged Program is analyzed.
+/// Nested collectors reuse the scope; the outermost exit releases all cached IR.
+class ScopedStorageRootCache {
+ public:
+  ScopedStorageRootCache();
+  ~ScopedStorageRootCache();
+  ScopedStorageRootCache(const ScopedStorageRootCache&) = delete;
+  ScopedStorageRootCache& operator=(const ScopedStorageRootCache&) = delete;
+
+ private:
+  return_lineage::ScopedTraceCache trace_cache_;
+};
 
 /// What SelectReturnRoot does for a single-return call when the owning buffer
 /// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
@@ -39,6 +54,10 @@ enum class AmbiguousRootPolicy {
   /// dropped — a missing root silently degrades to OutputExisting.
   kFirstOutput,
 };
+
+/// Whether a view is a distinct logical footprint or shares its backing storage.
+/// Fusion keeps the default footprint policy; direction inference follows storage.
+enum class ViewRootPolicy { kLogicalFootprint, kBackingStorage };
 
 /**
  * @brief Determine the canonical buffer root for every Var in a function body.
@@ -58,7 +77,8 @@ enum class AmbiguousRootPolicy {
 class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
-                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip);
+                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
+                               ViewRootPolicy view_policy = ViewRootPolicy::kLogicalFootprint);
 
   void Initialize(const std::vector<VarPtr>& params);
 
@@ -85,6 +105,20 @@ class BufferRootCollector : public IRVisitor {
   }
 
  protected:
+  using RootCandidates = std::vector<const Var*>;
+
+  // Effect analyses visit RHS uses before installing the new binding and skip
+  // descriptor-only yields, while sharing all storage/control-flow propagation.
+  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
+  void RecordAssignmentRoots(const AssignStmtPtr& assign);
+  void RecordSimtLaunchRoots(const SimtLaunchStmtPtr& launch);
+  void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
+  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
+      const std::vector<IterArgPtr>& iter_args);
+  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
+                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run,
+                             bool may_repeat = true);
+
   void VisitStmt_(const IfStmtPtr& if_stmt) override;
   void VisitStmt_(const ForStmtPtr& for_stmt) override;
   void VisitStmt_(const WhileStmtPtr& while_stmt) override;
@@ -92,8 +126,6 @@ class BufferRootCollector : public IRVisitor {
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override;
 
  private:
-  using RootCandidates = std::vector<const Var*>;
-
   struct RootInfo {
     RootCandidates roots;
     bool ambiguous;
@@ -108,12 +140,8 @@ class BufferRootCollector : public IRVisitor {
   };
 
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
+  [[nodiscard]] RootCandidates ResolveStorageLeaves(const Var* var) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
-  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
-  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
-      const std::vector<IterArgPtr>& iter_args);
-  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
-                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run);
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
@@ -130,9 +158,14 @@ class BufferRootCollector : public IRVisitor {
   // value aliases its source buffer with the same logical shape and dtype.
   [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
 
+  [[nodiscard]] std::vector<OutputRoot> CollectProvenReturnRoots(const CallPtr& call) const;
+
+  std::unique_ptr<ScopedStorageRootCache> storage_cache_;
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
+  ViewRootPolicy view_policy_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
+  std::unordered_map<const Var*, RootCandidates> storage_successors_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
 };
 

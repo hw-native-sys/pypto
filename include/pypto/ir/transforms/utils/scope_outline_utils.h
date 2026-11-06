@@ -31,6 +31,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -60,6 +61,15 @@ struct CallWriteTarget {
 /// (`for ... : c = pl.store(t, off, c)`), and `As<Var>` does not match it (see
 /// `.claude/rules/ir-kind-traits.md`).
 [[nodiscard]] std::vector<CallWriteTarget> CallWriteTargets(const CallPtr& call);
+
+/// Infer content access on backing storage, not logical return identity.
+/// With declared directions, only plain In is reclassified by body effects.
+/// Explicit Out retains its producer/scratch contract, except that forwarding
+/// to a callee InOut preserves the existing required-input upgrade.
+[[nodiscard]] std::vector<ParamDirection> InferStorageParamDirections(
+    const std::vector<VarPtr>& params, const StmtPtr& body, const ProgramPtr& program,
+    const std::vector<ParamDirection>& declared_directions = {},
+    const std::unordered_set<const Var*>& store_outputs = {});
 
 class VarCollector : public IRVisitor {
  public:
@@ -499,6 +509,7 @@ class ScopeOutliner : public IRMutator {
   ScopeKind target_scope_kind_;
   FunctionType outlined_func_type_;
   std::string name_suffix_;
+  buffer_root::ScopedStorageRootCache storage_cache_;
   ProgramPtr program_;
   /// Program-wide set of outlined function names already emitted by earlier
   /// functions in the same pass run. Shared (non-owning of the pass) so that
