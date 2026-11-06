@@ -36,10 +36,9 @@
  * ``B = CalAllToAllVBlocks(NR, L)`` (``NR`` is the signal's static row count) and,
  * for ``B > 1``, attaches it to the call as the ``core_num`` / ``sync_start``
  * launch spec. With a runtime ``L``, ``B`` is emitted into the orchestration as
- * arithmetic over the runtime rank count read from the CommContext; dynamic
- * values are not validated here, so a malformed request is the caller's
- * responsibility. Either way these ride call attrs, not kernel parameters, so
- * the ABI below is unchanged.
+ * arithmetic over the signal's static ``NR``; dynamic values are not validated
+ * here, so a malformed request is the caller's responsibility. Either way these
+ * ride call attrs, not kernel parameters, so the ABI below is unchanged.
  *
  * The result is one ``rt_submit_aiv_task`` inside the caller's own pipeline —
  * no nested L2 -> L2 dispatch — and the collective participates in the normal
@@ -425,24 +424,31 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
 
   /// ``return pld.tensor.all_to_all_v(...)`` — the collective is embedded in
   /// the ReturnStmt rather than bound to a Var first. A literal ``core_num``
-  /// still substitutes in place, but a runtime one emits a prelude (the
-  /// CommContext read and the width arithmetic), and a ReturnStmt cannot carry
-  /// statements. So the lowered call is bound to a fresh result Var and the
+  /// still substitutes in place, but a runtime one needs an assignment the
+  /// launch legalizer can guard (and, on the non-indexed path, a width-arithmetic
+  /// prelude). So the lowered call is bound to a fresh result Var and any
   /// prelude is spliced in front, the shape SynthesizeAllReduceSignals uses.
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
     std::vector<ExprPtr> values;
     values.reserve(op->value_.size());
     // Per returned value: the statements that must precede the return, and
-    // whether the value is call-like. Kept per value rather than accumulated
-    // straight into ``pending_prefix_`` so both replay in source order below.
+    // whether the value must be lifted into an assignment. Kept per value
+    // rather than accumulated straight into ``pending_prefix_`` so both replay
+    // in source order below.
     std::vector<std::vector<StmtPtr>> preludes(op->value_.size());
-    // Every returned call-like value, not only the collectives: an ordinary
-    // kernel call left inline while a later collective is hoisted would run
-    // after it, so a consumer written before the exchange would read exchanged
-    // data. ``Submit`` counts for the same reason (pass-submit-awareness).
-    std::vector<bool> is_call(op->value_.size(), false);
+    // Every returned value that *contains* a call-like expression, not only
+    // the collectives: a tuple projection of an ordinary kernel call left
+    // inline while a later collective is hoisted would run after it, so a
+    // consumer written before the exchange would read exchanged data.
+    // ``Submit`` counts for the same reason (pass-submit-awareness), and so
+    // does a call nested inside a projection or arithmetic expression.
+    std::vector<bool> needs_lift(op->value_.size(), false);
     bool changed = false;
     bool any_prelude = false;
+    // A runtime width with no arithmetic prefix (the indexed variant launches
+    // exactly ``L``) still has to leave the ReturnStmt: LegalizeSpmdLaunches
+    // can only wrap an assignment in ``if (B > 0)``, not an inline return value.
+    bool any_runtime_width = false;
     for (size_t i = 0; i < op->value_.size(); ++i) {
       const auto& value = op->value_[i];
       if (auto call = As<Call>(value); IsManagedCollective(call)) {
@@ -456,29 +462,31 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
         preludes[i] = std::move(pending_prefix_);
         pending_prefix_.clear();
         any_prelude = any_prelude || !preludes[i].empty();
-        is_call[i] = true;
+        any_runtime_width = any_runtime_width || !As<ConstInt>(call->args_.back());
+        needs_lift[i] = true;
         changed = true;
         continue;
       }
       auto visited = VisitExpr(value);
-      is_call[i] = As<Call>(visited) != nullptr || As<Submit>(visited) != nullptr;
+      needs_lift[i] = transform_utils::ExprContainsCallLike(visited);
       values.push_back(visited);
     }
     if (!changed) return IRMutator::VisitStmt_(op);
-    if (!any_prelude) {
-      // Every width folded, so nothing has to precede the return and each call
-      // stays exactly where the author wrote it.
+    if (!any_prelude && !any_runtime_width) {
+      // Every width folded and every value stays in place, so each call remains
+      // exactly where the author wrote it.
       return std::make_shared<ReturnStmt>(std::move(values), op->span_, op->leading_comments_);
     }
-    // One runtime width lifts *every* returned call, in source order. Lifting
-    // only those needing a prelude would submit them ahead of anything left
-    // inline in the return, reversing both the order the author wrote and the
-    // task edges derived from it -- and that applies to an ordinary kernel call
-    // returned beside a collective just as much as to a second collective.
+    // One runtime width lifts *every* returned call-like value, in source
+    // order. Lifting only those needing a prelude would submit them ahead of
+    // anything left inline in the return, reversing both the order the author
+    // wrote and the task edges derived from it -- and that applies to an
+    // ordinary kernel call returned beside a collective just as much as to a
+    // second collective.
     std::vector<StmtPtr> stmts;
     for (size_t i = 0; i < values.size(); ++i) {
       for (auto& stmt : preludes[i]) stmts.push_back(std::move(stmt));
-      if (!is_call[i]) continue;
+      if (!needs_lift[i]) continue;
       auto result =
           std::make_shared<Var>(FreshGeneratedName("a2av_result_"), values[i]->GetType(), op->span_);
       stmts.push_back(std::make_shared<AssignStmt>(result, values[i], op->span_));
@@ -879,9 +887,10 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   }
 
   /// Statements the collective being lowered needs in front of its rewritten
-  /// statement: the CommContext read and the launch-width arithmetic for a
-  /// runtime ``core_num``. Filled by LowerCollective, drained by SplicePrefix.
-  /// A literal ``core_num`` leaves it empty, so that path emits nothing new.
+  /// statement: the launch-width arithmetic for a runtime ``core_num``. Filled
+  /// by LowerCollective, drained by SplicePrefix. A literal ``core_num`` (and
+  /// the indexed runtime variant, whose width is the request itself) leaves it
+  /// empty, so those paths emit no arithmetic prelude.
   std::vector<StmtPtr> pending_prefix_;
   std::unordered_set<std::string> generated_names_;
   int64_t next_generated_id_ = 0;
