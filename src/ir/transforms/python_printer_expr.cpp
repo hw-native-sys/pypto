@@ -280,8 +280,8 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 // Lowercase-snake-case names for ArgDirection used by the DSL helpers in
-// ``pypto.language.arg_direction`` (``pl.adir.<name>``). Kept in sync with
-// ``python/pypto/language/arg_direction.py::NAME_TO_DIRECTION``.
+// ``pypto.language.typing.arg_direction`` (``pl.adir.<name>``). Kept in sync with
+// ``python/pypto/language/typing/arg_direction.py::NAME_TO_DIRECTION``.
 static const char* ArgDirectionToDslName(ArgDirection dir) {
   switch (dir) {
     case ArgDirection::Input:

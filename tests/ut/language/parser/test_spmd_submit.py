@@ -18,7 +18,7 @@ same ``(result, task_id)`` surface and ``deps=[...]`` wiring.
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, ParserTypeError
+from pypto.language.diagnostics import ParserSyntaxError, ParserTypeError
 
 
 def _flatten(stmt):

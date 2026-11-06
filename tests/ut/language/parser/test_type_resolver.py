@@ -293,6 +293,90 @@ class TestTypeResolver:
             enable_auto_mapping=True,
         )
 
+    def test_compact_metadata_survives_syntax_normalization(self):
+        """A non-default compact mode is semantic, not elidable metadata.
+
+        ``_normalize_type_for_syntax_match`` drops a TileView only when every
+        field equals the implicit default. ``compact`` participates in that
+        decision: dropping it would make a compact tile compare equal to an
+        ordinary one, silently accepting a rebind between different layouts.
+        """
+        from pypto.language.typing.type_utils import (  # noqa: PLC0415 - regression seam
+            _normalize_type_for_syntax_match,
+            _types_match,
+        )
+
+        compact = ir.TileType(
+            [32, 32],
+            DataType.INT8,
+            tile_view=ir.TileView(valid_shape=[32, 16], compact=ir.CompactMode.normal),
+            memory_space=ir.MemorySpace.Right,
+        )
+        ordinary = ir.TileType(
+            [32, 32],
+            DataType.INT8,
+            tile_view=ir.TileView(valid_shape=[32, 16]),
+            memory_space=ir.MemorySpace.Right,
+        )
+
+        normalized = _normalize_type_for_syntax_match(compact)
+        assert isinstance(normalized, ir.TileType)
+        assert normalized.tile_view is not None
+        assert normalized.tile_view.compact == ir.CompactMode.normal
+        assert not _types_match(compact, ordinary)
+
+    def test_scale_memory_spaces_use_the_single_default_table(self):
+        """Every memory space resolves its implicit defaults through one table.
+
+        The TileView elision check used a private copy of the space→layout
+        table that omitted the MX scale spaces, so an omitted layout in
+        ``pl.Mem.LeftScale`` / ``pl.Mem.RightScale`` compared against the bare
+        defaults instead of the scale defaults.
+        """
+        from pypto.language.typing.type_utils import (  # noqa: PLC0415 - regression seam
+            _has_printable_tile_view,
+            implicit_tile_view_defaults,
+        )
+
+        shape = [ir.ConstInt(32, DataType.INDEX, ir.Span.unknown())] * 2
+        for space in (ir.MemorySpace.LeftScale, ir.MemorySpace.RightScale):
+            blayout, slayout, fractal = implicit_tile_view_defaults(shape, space)
+            assert fractal == 32
+            default_view = ir.TileView(blayout=blayout, slayout=slayout, fractal=fractal)
+            assert not _has_printable_tile_view(default_view, shape, space)
+            assert _has_printable_tile_view(ir.TileView(fractal=0), shape, space)
+
+    def test_types_match_ignores_memref_identity_through_one_seam(self):
+        """The shared type comparison keeps the parser's memref exclusion.
+
+        The parser's historical semantics stripped ``memref`` metadata before
+        comparing (the Var, not the Call, carries the authoritative memref via
+        ``override_type``); the tracing lane must not diverge, so both
+        frontends compare through the one shared seam, which strips it.
+        """
+        from pypto.language.parser.type_semantics import types_match  # noqa: PLC0415 - regression seam
+        from pypto.language.typing.type_utils import _types_match  # noqa: PLC0415 - regression seam
+
+        assert types_match is _types_match  # one implementation, two spellings
+
+        left_alloc = ir.MemRef("a", 0, 1024)
+        right_alloc = ir.MemRef("b", 0, 1024)
+        tensor_lhs = ir.TensorType([32, 32], DataType.FP16, left_alloc)
+        tensor_rhs = ir.TensorType([32, 32], DataType.FP16, right_alloc)
+        assert _types_match(tensor_lhs, tensor_rhs)
+        assert types_match(tensor_lhs, tensor_rhs)
+
+        tile_lhs = ir.TileType([32, 32], DataType.FP16, left_alloc, None, ir.MemorySpace.Vec)
+        tile_rhs = ir.TileType([32, 32], DataType.FP16, right_alloc, None, ir.MemorySpace.Vec)
+        assert _types_match(tile_lhs, tile_rhs)
+        assert types_match(tile_lhs, tile_rhs)
+
+        # The exclusion is memref-only: a real value difference still differs.
+        other_shape = ir.TensorType([32, 16], DataType.FP16, left_alloc)
+        other_dtype = ir.TileType([32, 32], DataType.FP32, left_alloc, None, ir.MemorySpace.Vec)
+        assert not _types_match(tensor_lhs, other_shape)
+        assert not _types_match(tile_lhs, other_dtype)
+
     @pytest.mark.parametrize("annotation", _DEFAULT_TILEVIEW_ANNOTATIONS)
     def test_tile_type_text_roundtrip_is_stable_after_canonicalization(self, annotation: str):
         """Once canonicalized, the printed tile type should parse and print stably."""
@@ -2569,6 +2653,22 @@ def test_body_dynamic_alias_does_not_leak_local_parameter(symbol_name, initializ
             assert isinstance(stmt.var.type, ir.TensorType)
             assert stmt.var.type.shape[0].same_as(expected)
     assert codegen.collect_tensor_shape_dyn_vars(second) == []
+
+
+def test_moved_type_helpers_keep_their_parser_spellings():
+    """A name that moved to the shared seam stays importable from the parser path.
+
+    ``type_semantics`` used to define the shape/view family itself, so both the
+    frontends in this repository and any downstream importer reach it by this
+    path. Re-exposing the seam's implementation keeps one implementation and no
+    broken imports; importing the private seam name directly would do neither.
+    """
+    from pypto.language.parser import type_semantics  # noqa: PLC0415 - regression seam
+    from pypto.language.typing import type_utils  # noqa: PLC0415 - regression seam
+
+    assert type_semantics.has_printable_tile_view is type_utils._has_printable_tile_view
+    assert type_semantics.shape_has_symbolic_dim is type_utils._shape_has_symbolic_dim
+    assert type_semantics.simplify_shape_dims is type_utils._simplify_shape_dims
 
 
 if __name__ == "__main__":

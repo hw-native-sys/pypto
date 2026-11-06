@@ -27,7 +27,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir
-from pypto.language.parser.diagnostics.exceptions import ParserError
+from pypto.language.parser.diagnostics import ParserError
 
 
 def _user_call_types(program: ir.Program, callee_name: str) -> list[ir.Type]:

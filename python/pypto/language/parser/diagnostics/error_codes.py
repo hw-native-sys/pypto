@@ -15,7 +15,7 @@ unless PTO_BACKTRACE is enabled.
 
 from enum import Enum
 
-from .exceptions import (
+from pypto.language.diagnostics import (
     InvalidOperationError,
     ParserSyntaxError,
     ParserTypeError,

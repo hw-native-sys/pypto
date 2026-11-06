@@ -24,7 +24,8 @@ IR 解析器 (Parser) 使用装饰器（`@pl.function`、`@pl.program`）将 Pyt
 | `source_comments.py` | 注释附着与块边界处理 |
 | `region_context.py` | 活跃作用域、split 和手动区域状态 |
 | `parser_state.py` | 共享服务、递归回调和状态契约 |
-| `syntax_helpers.py`、`type_semantics.py` | 共享语法识别与类型/形状辅助函数 |
+| `syntax_helpers.py` | 共享语法识别 |
+| `type_semantics.py` | 共享类型/形状辅助函数在解析侧的拼写，实现位于 `pypto.language.typing.type_utils` |
 
 组件接收显式依赖和少量递归回调，不持有整个 `ASTParser`。每个解析器共享同一个构建器、作用域管理器、求值器、类型解析器和源码位置跟踪器。内联展开临时修改现有求值器和源码跟踪器，因此索引、算子和嵌套语句始终使用一致的闭包和源码坐标。
 

@@ -12,7 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics.exceptions import (
+from pypto.language.diagnostics import (
     ParserSyntaxError,
     ParserTypeError,
     UnsupportedFeatureError,

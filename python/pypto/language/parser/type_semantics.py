@@ -7,17 +7,45 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Pure IR shape/type comparison and annotation normalization helpers."""
+"""Pure IR shape/type comparison and annotation normalization helpers.
 
-from collections.abc import Callable, Sequence
+The syntax-level comparison family is shared through
+``pypto.language.typing.type_utils``. Parser-specific normalization and
+return-provenance analysis remain here; compatibility aliases preserve the
+parser's existing import paths.
+"""
 
-from pypto.pypto_core import arith as _arith
+from collections.abc import Callable
+
+from pypto.language.typing.type_utils import (  # noqa: PLC2701 — the shared syntax-level seam
+    _const_int_value,
+    _has_printable_tile_view,
+    _normalize_type_for_syntax_match,
+    _shape_exprs_match,
+    _shape_has_symbolic_dim,
+    _simplify_shape_dims,
+    _tensor_types_differ_only_by_valid_shape,
+    _tile_types_differ_only_by_unset_memory_space,
+    _types_match,
+)
 from pypto.pypto_core import ir
 
-from .type_resolver import (
-    _const_int_value,  # noqa: PLC2701
-    _implicit_tile_view_defaults,  # noqa: PLC2701
-)
+# The parser lane's public spellings of the shared seam's comparison family:
+# one implementation (``typing.type_utils``), re-exposed under the names the
+# parser's callers import, so both frontends compare identically.
+normalize_type_for_syntax_match = _normalize_type_for_syntax_match
+shape_exprs_match = _shape_exprs_match
+tensor_types_differ_only_by_valid_shape = _tensor_types_differ_only_by_valid_shape
+tile_types_differ_only_by_unset_memory_space = _tile_types_differ_only_by_unset_memory_space
+types_match = _types_match
+
+# Shape/view helpers that were also part of this module's surface before the
+# seam existed, so they stay importable from here. A frontend (or a downstream
+# user) that imported them from this path must not break because the
+# implementation moved one package over.
+has_printable_tile_view = _has_printable_tile_view
+shape_has_symbolic_dim = _shape_has_symbolic_dim
+simplify_shape_dims = _simplify_shape_dims
 
 
 def fold_const_slice_extent(upper: object, lower: object) -> int | None:
@@ -81,155 +109,6 @@ def collect_type_symbol_ids(param_type: ir.Type, key: Callable[[ir.Var], int] = 
             for dim in list(view.valid_shape) + list(view.stride):
                 walk(dim)
     return symbol_ids
-
-
-def shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
-    """Return whether two shape-like expression lists are statically identical."""
-    if len(lhs) != len(rhs):
-        return False
-    for lhs_dim, rhs_dim in zip(lhs, rhs):
-        if lhs_dim is rhs_dim:
-            continue
-        lhs_value = _const_int_value(lhs_dim)
-        rhs_value = _const_int_value(rhs_dim)
-        if lhs_value is None or rhs_value is None or lhs_value != rhs_value:
-            return False
-    return True
-
-
-def has_printable_tile_view(
-    tile_view: ir.TileView | None,
-    shape: Sequence[ir.Expr],
-    memory_space: ir.MemorySpace | None = None,
-) -> bool:
-    """Return whether a TileView carries non-default metadata in Python text form."""
-    if tile_view is None:
-        return False
-    if tile_view.valid_shape and not shape_exprs_match(tile_view.valid_shape, shape):
-        return True
-    if tile_view.stride:
-        return True
-    if tile_view.start_offset is not None:
-        return True
-    default_blayout, default_slayout, default_fractal = _implicit_tile_view_defaults(shape, memory_space)
-    if tile_view.blayout != default_blayout:
-        return True
-    if tile_view.slayout != default_slayout:
-        return True
-    if tile_view.fractal != default_fractal:
-        return True
-    if tile_view.pad != ir.PadValue.null:
-        return True
-    if tile_view.compact != ir.CompactMode.null:
-        return True
-    return False
-
-
-def normalize_type_for_syntax_match(type_: ir.Type | None) -> ir.Type | None:
-    """Normalize omitted default TileView metadata before syntax-level comparison."""
-    if isinstance(type_, ir.TileType):
-        tile_view = type_.tile_view
-        if tile_view is not None and not has_printable_tile_view(tile_view, type_.shape, type_.memory_space):
-            tile_view = None
-        if tile_view is type_.tile_view:
-            return type_
-        return ir.TileType(type_.shape, type_.dtype, type_.memref, tile_view, type_.memory_space)
-
-    return type_
-
-
-def shape_has_symbolic_dim(type_: ir.Type) -> bool:
-    """Return True when *type_* is a shaped type with at least one non-ConstInt dim."""
-    if not isinstance(type_, (ir.TensorType, ir.TileType)):
-        return False
-    return any(not isinstance(d, ir.ConstInt) for d in type_.shape)
-
-
-def simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type:
-    """Rebuild a TensorType/TileType with each outer shape dim passed through
-    the arithmetic simplifier.
-
-    Needed so that symbolic dims that reduce to the same value — e.g.
-    ``(k + C) - k`` and ``C`` — compare equal under structural ``==``.
-
-    Scope: only the outer ``shape`` is simplified. TileView fields
-    (``valid_shape``, ``stride``, ``start_offset``) and TensorView
-    fields retain their original expressions and still compare structurally.
-    """
-    if not shape_has_symbolic_dim(type_):
-        return type_
-    assert isinstance(type_, (ir.TensorType, ir.TileType))
-    # The isinstance keeps a mistyped shape element diagnosable instead of
-    # crashing the simplify call.
-    simplified_shape = [
-        analyzer.simplify(d)
-        if isinstance(d, ir.Expr)  # pyright: ignore[reportUnnecessaryIsInstance]
-        else d
-        for d in type_.shape
-    ]
-    if isinstance(type_, ir.DistributedTensorType):
-        return ir.DistributedTensorType(
-            simplified_shape, type_.dtype, type_.memref, type_.tensor_view, type_.window_buffer
-        )
-    if isinstance(type_, ir.TensorType):
-        return ir.TensorType(simplified_shape, type_.dtype, type_.memref, type_.tensor_view)
-    return ir.TileType(simplified_shape, type_.dtype, type_.memref, type_.tile_view, type_.memory_space)
-
-
-def types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
-    """Return whether two IR types are structurally equal after TileView normalization.
-
-    Uses C++ ``structural_equal`` (via ``==``) instead of comparing printed
-    strings. This caller explicitly removes ``memref`` metadata: it is irrelevant for
-    parser-level type matching because the Var (not the Call) carries the
-    authoritative memref via ``override_type``.
-
-    Outer shape dimensions are simplified via a shared arithmetic analyzer
-    before comparison so expressions like ``(k + C) - k`` match ``C``.  The
-    analyzer is only constructed when at least one shape actually contains a
-    symbolic dim, keeping the all-static fast path free of arith overhead.
-    """
-    if lhs is rhs:
-        return True
-    if lhs is None or rhs is None:
-        return lhs is rhs
-    lhs = normalize_type_for_syntax_match(ir._without_type_memref(lhs))
-    rhs = normalize_type_for_syntax_match(ir._without_type_memref(rhs))
-    assert lhs is not None
-    assert rhs is not None
-    if type(lhs) is not type(rhs):
-        return False
-    if shape_has_symbolic_dim(lhs) or shape_has_symbolic_dim(rhs):
-        analyzer = _arith.Analyzer()
-        lhs = simplify_shape_dims(lhs, analyzer)
-        rhs = simplify_shape_dims(rhs, analyzer)
-    return lhs == rhs
-
-
-def tile_types_differ_only_by_unset_memory_space(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
-    """Return whether two TileTypes are equal once an unset space is a wildcard.
-
-    ``memory_space=None`` is the IR's "the compiler will place this", not a
-    distinct type. Ops that leave it unset (``pl.load``, ``pl.tile.create``) and
-    ops whose space is fixed by hardware (every vector op, via
-    ``set_output_memory(Vec)``) therefore mix freely in ordinary user code::
-
-        t = pl.load(a, [0, 0], [16, 64])   # unset
-        t = pl.add(t, t)                   # Vec
-
-    Treating that as a type change would reject the most common shape of DSL
-    there is. All other fields still compare exactly.
-
-    Kept separate from ``_types_match``: annotation-vs-inferred comparisons must
-    stay strict, so that a *stated* space which contradicts the producer is
-    still an error.
-    """
-    if not isinstance(lhs, ir.TileType) or not isinstance(rhs, ir.TileType):
-        return False
-    if (lhs.memory_space is None) == (rhs.memory_space is None):
-        return False  # both set or both unset -> plain _types_match already decided
-    unified = ir.TileType(rhs.shape, rhs.dtype, rhs.memref, rhs.tile_view, lhs.memory_space)
-    return types_match(lhs, unified)
 
 
 def normalize_inferred_type_for_annotation(
@@ -405,26 +284,6 @@ class ParameterReturnDims(ir.IRMutator):
         if isinstance(typ, ir.DistributedTensorType):
             return ir.DistributedTensorType(shape, typ.dtype, typ.memref, view, typ.window_buffer)
         return ir.TensorType(shape, typ.dtype, typ.memref, view)
-
-
-def tensor_types_differ_only_by_valid_shape(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
-    """Allow pre-SSA rebinding to refine only an ordinary tensor's valid region.
-
-    A fresh matmul product can narrow a full-box accumulator seed. Preserve the
-    RHS type for ConvertToSSA to version, while keeping shape, dtype and storage
-    layout checks strict. This is not annotation compatibility or a rule for
-    distributed windows.
-    """
-    if type(lhs) is not ir.TensorType or type(rhs) is not ir.TensorType:
-        return False
-
-    def without_valid_shape(tensor_type: ir.TensorType) -> ir.TensorType:
-        view = tensor_type.tensor_view
-        if view is not None:
-            view = ir.TensorView(view.stride, view.layout, [], view.pad)
-        return ir.TensorType(tensor_type.shape, tensor_type.dtype, tensor_type.memref, view)
-
-    return types_match(without_valid_shape(lhs), without_valid_shape(rhs))
 
 
 class InlineReturnProvenanceCollector(ir.IRVisitor):

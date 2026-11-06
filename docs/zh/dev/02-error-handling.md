@@ -98,7 +98,7 @@ try {
 
 Python 解析器有一个镜像陷阱。它的处理块会把漏出的异常包装成带源码位置的 `ParserError`,一旦
 `InternalError` 从 C++ 逃逸出来就会被重新隐藏。因此解析路径上每一个宽泛的 `except Exception` 都
-会先重新抛出 `BUG_CLASS_EXCEPTIONS`(`python/pypto/language/parser/diagnostics/exceptions.py`):
+会先重新抛出 `BUG_CLASS_EXCEPTIONS`(`python/pypto/language/diagnostics.py`):
 
 ```python
 except ParserError:
@@ -145,7 +145,7 @@ CHECK_SPAN(shape.size() == 2, span) << "tensor.matmul: only 2D inputs are suppor
 
 `FatalLogger::~FatalLogger` 会给**每一条**检查消息(包括 `CHECK`)追加 `\nCheck failed: <表达式> at <文件>:<行号>`。该尾部包含 C++ 表达式和构建机器上的绝对路径 —— 调试 PyPTO 时有用,但对于只是写错了 kernel 的用户而言纯属噪声。由于渲染器会把整条消息拼进加粗的 `Error:` 标题,未剥离的尾部会夹在标题与指向用户源码的 `-->` 箭头之间。
 
-因此,DSL 解析器在把面向用户的后端异常包装成 `ParserError` 之前,会先经过 `concise_error_message()`(`python/pypto/language/parser/diagnostics/exceptions.py`)。原始文本仍可通过 `PTO_BACKTRACE=1` 获取 —— 它会打印 Python 回溯,其中以 `__cause__` 携带原始异常。
+因此,DSL 解析器在把面向用户的后端异常包装成 `ParserError` 之前,会先经过 `concise_error_message()`(`python/pypto/language/diagnostics.py`)。原始文本仍可通过 `PTO_BACKTRACE=1` 获取 —— 它会打印 Python 回溯,其中以 `__cause__` 携带原始异常。
 
 对算子作者的两点影响:
 

@@ -29,8 +29,8 @@ from __future__ import annotations
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
-from pypto.language.arg_direction import DIRECTION_TO_NAME, NAME_TO_DIRECTION
 from pypto.language.parser.diagnostics import InvalidOperationError, ParserSyntaxError, ParserTypeError
+from pypto.language.typing.arg_direction import DIRECTION_TO_NAME, NAME_TO_DIRECTION
 
 # ---------------------------------------------------------------------------
 # Helpers

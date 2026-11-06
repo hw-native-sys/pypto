@@ -16,7 +16,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics.exceptions import ParserTypeError
+from pypto.language.diagnostics import ParserTypeError
 from pypto.pypto_core import passes
 
 Q = pl.dynamic("Q")

@@ -29,7 +29,7 @@ assert isinstance(my_func, ir.Function)
 - `attr_parser.py`, `dispatch_semantics.py` - Attributes, TaskId dependencies and predicates
 - `parser_state.py`, `region_context.py` - Explicit shared state and recursive callback contracts
 - `source_comments.py` - Comment ownership and attachment
-- `syntax_helpers.py`, `type_semantics.py` - Shared syntax and type/shape helpers
+- `syntax_helpers.py` - Shared syntax recognition helpers; the type/shape comparison family lives in `pypto.language.typing.type_utils` and is re-exposed by `type_semantics.py`
 - `span_tracker.py` - Source location tracking
 - `scope_manager.py` - SSA verification and scope isolation
 - `type_resolver.py` - Type annotation resolution

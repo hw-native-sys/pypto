@@ -29,7 +29,7 @@ from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.op import tile as _ir_ops_tile
-from pypto.language.parser.diagnostics.exceptions import ParserError
+from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import ir as _ir_core
 
 _OP_PLD_TILE_REMOTE_LOAD = ir.get_op("pld.tile.remote_load").name

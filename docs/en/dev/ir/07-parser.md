@@ -25,7 +25,8 @@ and variable binding. It composes specialized parsers rather than inheriting par
 | `source_comments.py` | Comment attachment and block-boundary handling |
 | `region_context.py` | Active scope, split and manual-region state |
 | `parser_state.py` | Shared services, recursive callbacks and state contracts |
-| `syntax_helpers.py`, `type_semantics.py` | Shared syntax recognition and type/shape helpers |
+| `syntax_helpers.py` | Shared syntax recognition |
+| `type_semantics.py` | Parser spellings of the shared type/shape helpers, whose implementation lives in `pypto.language.typing.type_utils` |
 
 Components receive explicit dependencies and a small set of recursive callbacks; they do
 not retain the entire `ASTParser`. Shared services keep one builder, scope manager,

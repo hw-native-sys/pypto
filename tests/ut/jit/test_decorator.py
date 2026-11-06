@@ -57,7 +57,7 @@ from pypto.jit.decorator import (
     jit,
 )
 from pypto.jit.specializer import DynDim, Specializer, TensorMeta
-from pypto.language.parser.diagnostics.exceptions import (
+from pypto.language.parser.diagnostics import (
     InvalidOperationError,
     ParserTypeError,
     UnsupportedFeatureError,

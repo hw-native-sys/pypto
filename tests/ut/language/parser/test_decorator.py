@@ -20,9 +20,9 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.language.parser import source_lookup
-from pypto.language.parser.diagnostics import ParserTypeError
-from pypto.language.parser.diagnostics.exceptions import (
+from pypto.language.parser.diagnostics import (
     ParserSyntaxError,
+    ParserTypeError,
     UndefinedVariableError,
     UnsupportedFeatureError,
 )
@@ -922,7 +922,7 @@ class TestFunctionDecoratorSourceUnavailable:
         """Test that @pl.function gives a clear ParserSyntaxError when no source is available."""
         code = textwrap.dedent("""\
             import pypto.language as pl
-            from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+            from pypto.language.parser.diagnostics import ParserSyntaxError
 
             try:
                 @pl.function
@@ -997,7 +997,7 @@ class TestProgramDecoratorSourceUnavailable:
         """Test that @pl.program gives a clear ParserSyntaxError when no source is available."""
         code = textwrap.dedent("""\
             import pypto.language as pl
-            from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+            from pypto.language.parser.diagnostics import ParserSyntaxError
 
             try:
                 @pl.program
