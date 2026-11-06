@@ -126,7 +126,8 @@ This does not build device binaries or check numerical results; `pypto-lib-model
 provides the separate device smoke tests.
 
 To add coverage, append a case to the JSON list; no workflow or runner edit is
-needed. For example, to run an entry with a different logical device list:
+needed. Save the list as UTF-8. For example, to run an entry with a different
+logical device list:
 
 ```json
 {
@@ -138,7 +139,8 @@ needed. For example, to run an entry with a different logical device list:
 ```
 
 - `name`: globally unique case ID, using letters, digits, `_`, `-`, or `.`,
-  starting with a letter or digit. Logs and build outputs are isolated by name.
+  starting with a letter or digit. `manifest.json` and `results.json` are reserved
+  for output artifacts. Logs and build outputs are isolated by name.
 - `entry`: exact Python script path relative to pypto-lib, under `examples/` or
   `models/`. Directories, globs, drafts, and paths outside the library are rejected.
 - `platforms`: nonempty list of `a2a3` and/or `a5`, without duplicates. The runner

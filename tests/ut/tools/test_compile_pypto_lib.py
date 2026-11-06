@@ -655,6 +655,8 @@ def case_config(library, tmp_path):
     "change",
     [
         {"name": "../escape"},
+        {"name": "manifest.json"},
+        {"name": "results.json"},
         {"name": ""},
         {"name": None},
         {"entry": ""},
@@ -694,6 +696,30 @@ def test_invalid_or_empty_case_list_fails(library, case_config, contents):
     case_config.write_text(contents)
     with pytest.raises(ValueError):
         audit.select_cases(library, "a5", case_config)
+
+
+def test_case_configuration_is_utf8_under_ascii_locale(library, case_config):
+    cases = json.loads(case_config.read_text())
+    cases[0]["args"] = ["--label", "caf\u00e9"]
+    case_config.write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+    result = audit.subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, locale, runpy, sys; from pathlib import Path; "
+            "assert locale.getpreferredencoding(False).lower() in ('ascii', 'ansi_x3.4-1968'); "
+            "audit = runpy.run_path(sys.argv[1]); "
+            "print(json.dumps(audit['select_cases'](Path(sys.argv[2]), 'a5', Path(sys.argv[3]))))",
+            str(_RUNNER),
+            str(library),
+            str(case_config),
+        ],
+        env=audit.os.environ | {"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == cases
 
 
 def test_default_cases_keep_glm_kernels_but_exclude_cpu_checks():

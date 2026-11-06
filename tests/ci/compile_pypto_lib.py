@@ -44,7 +44,7 @@ DEFAULT_CASES = Path(__file__).with_name("pypto_lib_compile.json")
 
 def select_cases(lib: Path, platform: str, config: Path) -> list[dict[str, Any]]:
     """Validate the explicit case list and select one platform without discovery."""
-    cases = json.loads(config.read_text())
+    cases = json.loads(config.read_text(encoding="utf-8"))
     if not isinstance(cases, list):
         raise ValueError(f"Expected a case list in {config}, got {type(cases).__name__}")
     names: set[str] = set()
@@ -55,6 +55,8 @@ def select_cases(lib: Path, platform: str, config: Path) -> list[dict[str, Any]]
         name = case.get("name")
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
             raise ValueError(f"Invalid case name in {config}: {name!r}")
+        if name in {"manifest.json", "results.json"}:
+            raise ValueError(f"Reserved case name in {config}: {name} conflicts with an output artifact")
         if name in names:
             raise ValueError(f"Duplicate case name in {config}: {name}")
         names.add(name)
