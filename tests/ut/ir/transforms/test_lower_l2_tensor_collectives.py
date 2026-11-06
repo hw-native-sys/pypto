@@ -1016,6 +1016,98 @@ def test_ordinary_return_call_keeps_its_order_before_a_collective(runtime_width,
         assert names == ["consume_step", _KERNEL_NAME], names
 
 
+def test_tuple_projected_call_is_lifted_before_a_runtime_collective():
+    """A call nested in a returned expression is lifted too.
+
+    ``return self.consume_pair(...)[0], all_to_all_v(..., core_num=n)`` has a
+    ``TupleGetItemExpr`` on the first value, not a direct ``Call``. If that
+    value stayed inline while the collective was lifted, the consumer would run
+    after the exchange it was written before.
+    """
+
+    @pl.program
+    class ProjectedCall:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_pair(
+            self,
+            data: pld.DistributedTensor[[TOTAL, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pl.Tensor[[TOTAL, SIZE], pl.FP32]]:
+            chunk = pl.load(data, [0, 0], [TOTAL, SIZE])
+            out = pl.store(chunk, [0, 0], out)
+            return out, out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            out: pl.Out[pl.Tensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[TOTAL, SIZE], pl.FP32], pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]]:
+            return (
+                self.consume_pair(data, out)[0],
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n),
+            )
+
+    after = passes.lower_l2_tensor_collectives()(ProjectedCall)
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    names = _callee_names(pipeline)
+    assert names.index("consume_pair") < names.index(_KERNEL_NAME), names
+    body = pipeline.body
+    assert isinstance(body, ir.SeqStmts), body
+    returned = body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt), returned
+    assert all(isinstance(value, ir.Var) for value in returned.value), returned.value
+
+
+def _build_indexed_runtime_return():
+    @pl.program
+    class IndexedRuntime:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[13, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pld.DistributedTensor[[NR, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            index: pl.Tensor[[NR, MAX_RECV], pl.INT32],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=n)
+
+    return IndexedRuntime
+
+
+def test_runtime_indexed_return_is_lifted_for_the_launch_legalizer():
+    """An indexed runtime width needs an assignment, not just a prelude.
+
+    The indexed variant's width is the request itself, so no arithmetic prelude
+    is emitted. It still has to leave the ``ReturnStmt``: ``LegalizeSpmdLaunches``
+    can only wrap an assignment in ``if (B > 0)``.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_indexed_runtime_return())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    body = pipeline.body
+    assert isinstance(body, ir.SeqStmts), body
+    returned = body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt), returned
+    assert isinstance(returned.value[0], ir.Var), returned.value[0]
+
+    legalized = passes.legalize_spmd_launches()(after)
+    pipeline = _get_func(legalized, "chip_pipeline")
+    assert pipeline is not None
+    assert isinstance(pipeline.body, ir.SeqStmts), pipeline.body
+    guarded = [stmt for stmt in pipeline.body.stmts if isinstance(stmt, ir.IfStmt)]
+    assert guarded, pipeline.body
+
+
 def test_collective_in_a_manual_scope_still_lowers():
     """A ``pl.manual_scope`` body is not a blind spot for this pass.
 
