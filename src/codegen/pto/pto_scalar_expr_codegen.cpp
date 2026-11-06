@@ -476,13 +476,7 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
       return;
     }
     if (src_is_uint) {
-      // uiN -> index : bridge uiN -> iN, then arith.index_cast iN -> index
-      std::string signless_src = src_type.substr(1);  // "ui32" -> "i32"
-      std::string signless_tmp = NewTemp();
-      Emit(signless_tmp + " = builtin.unrealized_conversion_cast " + src + " : " + src_type + " to " +
-           signless_src);
-      Emit(result + " = arith.index_cast " + signless_tmp + " : " + signless_src + " to " + dst_type);
-      fs_.current_expr_value = result;
+      fs_.current_expr_value = EmitCastToIndex(op->operand_, src);
       return;
     }
     mlir_op = "arith.index_cast";
@@ -504,6 +498,25 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
     mlir_op = dst_is_uint ? "arith.fptoui" : "arith.fptosi";
   }
 
+  // All arithmetic conversion operations require signless integer types.
+  // Preserve the public unsigned ABI with bit-preserving bridges at the edges.
+  if (mlir_op != "builtin.unrealized_conversion_cast") {
+    if (src_is_uint) {
+      const auto converted = NewTemp();
+      Emit(converted + " = builtin.unrealized_conversion_cast " + src + " : " + src_type + " to " +
+           src_type.substr(1));
+      src = converted;
+      src_type = src_type.substr(1);
+    }
+    if (dst_is_uint) {
+      const auto converted = NewTemp();
+      Emit(converted + " = " + mlir_op + " " + src + " : " + src_type + " to " + dst_type.substr(1));
+      Emit(result + " = builtin.unrealized_conversion_cast " + converted + " : " + dst_type.substr(1) +
+           " to " + dst_type);
+      fs_.current_expr_value = result;
+      return;
+    }
+  }
   Emit(result + " = " + mlir_op + " " + src + " : " + src_type + " to " + dst_type);
   fs_.current_expr_value = result;
 }

@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -37,33 +38,35 @@
 
 namespace pypto::ir {
 namespace {
-bool IsRepresentableLoopLiteral(const ConstIntPtr& literal);
-
+// Hardware-loop bounds use mathematical integer values. Source integer widths
+// do not add admission requirements; unknown expressions remain unproven.
 std::optional<int64_t> ExactHardwareLoopConstant(const ExprPtr& expr) {
-  if (auto value = As<ConstInt>(expr)) {
-    return IsRepresentableLoopLiteral(value) ? std::optional<int64_t>(value->value_) : std::nullopt;
+  if (auto value = As<ConstInt>(expr)) return value->value_;
+  if (auto cast = As<Cast>(expr)) {
+    const auto dtype = GetScalarDtype(expr);
+    return dtype.IsInt() || dtype == DataType::INDEX ? ExactHardwareLoopConstant(cast->operand_)
+                                                     : std::nullopt;
   }
+  ExprPtr folded;
   if (auto binary = As<BinaryExpr>(expr)) {
-    if (!ExactHardwareLoopConstant(binary->left_) || !ExactHardwareLoopConstant(binary->right_)) {
+    const auto lhs = ExactHardwareLoopConstant(binary->left_);
+    const auto rhs = ExactHardwareLoopConstant(binary->right_);
+    if (!lhs || !rhs) return std::nullopt;
+    const auto kind = expr->GetKind();
+    if ((kind == ObjectKind::FloorDiv || kind == ObjectKind::FloorMod) &&
+        (*rhs == 0 || (*lhs == std::numeric_limits<int64_t>::min() && *rhs == -1))) {
       return std::nullopt;
     }
+    if (kind == ObjectKind::Pow && *rhs < 0) return std::nullopt;
+    folded = arith::TryConstFoldBinary(kind, arith::MakeConstInt(*lhs, DataType::INDEX),
+                                       arith::MakeConstInt(*rhs, DataType::INDEX), DataType::INDEX);
   } else if (auto unary = As<UnaryExpr>(expr)) {
-    if (!ExactHardwareLoopConstant(unary->operand_)) {
-      return std::nullopt;
-    }
-  } else if (auto cast = As<Cast>(expr)) {
-    if (!ExactHardwareLoopConstant(cast->operand_)) {
-      return std::nullopt;
-    }
-  } else {
-    return std::nullopt;
+    const auto operand = ExactHardwareLoopConstant(unary->operand_);
+    if (!operand) return std::nullopt;
+    folded = arith::TryConstFoldUnary(expr->GetKind(), arith::MakeConstInt(*operand, DataType::INDEX));
   }
-  auto folded = arith::TryConstFold(expr);
-  auto value = As<ConstInt>(folded);
-  if (!value || !IsRepresentableLoopLiteral(value)) {
-    return std::nullopt;
-  }
-  return value->value_;
+  if (auto value = As<ConstInt>(folded)) return value->value_;
+  return std::nullopt;
 }
 
 // A malformed builder/deserialized literal must not prove an ancestor empty:
@@ -258,27 +261,23 @@ class RegionChecker : public IRVisitor {
     const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
     if (hardware_loop) ++hardware_loop_depth_;
     const bool previous_empty = empty_hardware_loop_;
-    const auto stop = As<ConstInt>(op->stop_);
-    const bool invalid_stop = stop && !IsRepresentableLoopLiteral(stop);
+    const auto exact_stop =
+        collecting_ && !previous_empty ? ExactHardwareLoopConstant(op->stop_) : std::nullopt;
     const auto start = As<ConstInt>(op->start_);
     const auto step = As<ConstInt>(op->step_);
     // Empty sequential ancestors suppress hardware realization requirements
     // even when the ancestor uses Auto policy rather than Require.
-    if (IsRepresentableLoopLiteral(start) && stop && !invalid_stop && IsRepresentableLoopLiteral(step) &&
-        ((step->value_ > 0 && start->value_ >= stop->value_) ||
-         (step->value_ < 0 && start->value_ <= stop->value_))) {
+    if (IsRepresentableLoopLiteral(start) && exact_stop && IsRepresentableLoopLiteral(step) &&
+        ((step->value_ > 0 && start->value_ >= *exact_stop) ||
+         (step->value_ < 0 && start->value_ <= *exact_stop))) {
       empty_hardware_loop_ = true;
     }
     if (collecting_ && hardware_loop && !previous_empty) {
-      if (invalid_stop) {
-        Error("Hardware loop stop must be representable in its dtype", op->span_);
-      }
       if (!empty_hardware_loop_) {
         if (hardware_loop_depth_ > 4) {
           Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
         }
-        const auto exact_stop = ExactHardwareLoopConstant(op->stop_);
-        if ((stop && stop->value_ > 65535) || (exact_stop && *exact_stop > 65535)) {
+        if (exact_stop && *exact_stop > 65535) {
           Error("Hardware loop stop must not exceed 65535", op->span_);
         }
       }

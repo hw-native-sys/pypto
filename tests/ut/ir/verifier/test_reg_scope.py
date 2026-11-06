@@ -131,15 +131,16 @@ def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop, computed):
         assert diagnostics == []
 
 
-def test_hardware_loop_does_not_prove_wrapping_intermediate_bound():
-    wrapped = ir.Add(
-        ir.ConstInt(32767, DataType.INT16, SPAN), ir.ConstInt(1, DataType.INT16, SPAN), DataType.INT16, SPAN
-    )
-    widened = ir.Cast(wrapped, DataType.INT64, SPAN)
+@pytest.mark.parametrize("cast_result", [False, True])
+def test_hardware_loop_folds_nested_constant_stop(cast_result: bool):
+    subtotal = ir.Add(integer(20000), integer(20000), DataType.INDEX, SPAN)
+    stop: ir.Expr = ir.Mul(subtotal, integer(2), DataType.INDEX, SPAN)
+    if cast_result:
+        stop = ir.Cast(stop, DataType.INT64, SPAN)
     loop = ir.ForStmt(
         scalar("i"),
         integer(0),
-        widened,
+        stop,
         integer(1),
         [],
         sequence(),
@@ -147,7 +148,7 @@ def test_hardware_loop_does_not_prove_wrapping_intermediate_bound():
         SPAN,
         hardware_loop_policy=ir.HardwareLoopPolicy.Require,
     )
-    assert verify(region(loop)) == []
+    assert any("65535" in d.message for d in verify(region(loop)))
 
 
 def test_auto_loop_outside_reg_scope_remains_legal():
@@ -512,12 +513,13 @@ def test_hardware_loop_static_unsigned_stop_is_checked_before_emission(dtype, va
         hardware_loop_policy=ir.HardwareLoopPolicy.Require,
     )
     diagnostics = verify(region(loop))
-    assert any("stop" in d.message for d in diagnostics)
+    assert bool(diagnostics) == (value > 65535)
 
 
 @pytest.mark.parametrize("policy", [ir.HardwareLoopPolicy.Auto, ir.HardwareLoopPolicy.Require])
 @pytest.mark.parametrize("outer_stop", [0, 1])
-def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop, policy):
+@pytest.mark.parametrize("computed", [False, True])
+def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop, policy, computed):
     body = sequence()
     for level in range(5):
         body = ir.ForStmt(
@@ -534,7 +536,9 @@ def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop
     body = ir.ForStmt(
         scalar("outer"),
         integer(0),
-        integer(outer_stop),
+        ir.Sub(integer(outer_stop + 1), integer(1), DataType.INDEX, SPAN)
+        if computed
+        else integer(outer_stop),
         integer(1),
         [],
         body,
@@ -547,7 +551,7 @@ def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop
 
 
 @pytest.mark.parametrize("value", [-129, 128])
-def test_signed_stop_must_be_representable_before_empty_classification(value):
+def test_signed_stop_source_width_does_not_restrict_admission(value):
     loop = ir.ForStmt(
         scalar("i"),
         integer(0),
@@ -559,7 +563,7 @@ def test_signed_stop_must_be_representable_before_empty_classification(value):
         SPAN,
         hardware_loop_policy=ir.HardwareLoopPolicy.Require,
     )
-    assert any("representable" in d.message for d in verify(region(loop)))
+    assert verify(region(loop)) == []
 
 
 def test_return_inside_hardware_loop_is_rejected_by_ir_verifier():

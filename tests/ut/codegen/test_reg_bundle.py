@@ -183,6 +183,8 @@ def test_hardware_loop_depth_and_dynamic_capture(depth, stop_dtype, tmp_path):
         "unsigned_neg",
         "unsigned_abs",
         "unsigned_logical_not",
+        "unsigned_widen",
+        "unsigned_to_index",
         "unsigned_compare",
         "unsigned_eq",
         "power",
@@ -203,6 +205,9 @@ def test_hardware_loop_scalar_expressions_compile(feature, tmp_path):
                 stop = ir.BitNot(stop, dtype, SPAN)
             elif feature == "unsigned_neg":
                 stop = ir.Neg(stop, dtype, SPAN)
+            elif feature in ("unsigned_widen", "unsigned_to_index"):
+                target_dtype = DataType.UINT64 if feature == "unsigned_widen" else DataType.INDEX
+                stop = ir.Cast(stop, target_dtype, SPAN)
             elif feature == "unsigned_abs":
                 stop = ir.Abs(stop, dtype, SPAN)
             elif feature == "unsigned_logical_not":
