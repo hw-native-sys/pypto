@@ -119,6 +119,9 @@ Other GLM kernel entries remain covered, including entries without a
 `--compile-only` option. Device-only entries are included because compilation
 needs no NPU. The adapter forces `golden.run` into compile-only mode, records direct compile calls, and requires PTOAS. Coverage
 includes frontend, passes, verification, codegen, and PTOAS.
+When an active argument parser declares `--compile-only`, the adapter supplies
+that flag to that parser. Other parsers keep their original arguments, preserving
+helper/component parsing while disabling post-compilation execution branches.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
 

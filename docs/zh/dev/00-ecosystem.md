@@ -119,6 +119,9 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 编译不需要 NPU，因此仅支持真机的入口也会纳入。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
+当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。
+其他解析器保留原始参数，兼容辅助解析器和组件解析器，
+同时阻止编译完成后进入设备执行分支。
 不构建设备二进制，也不验证数值结果；
 `pypto-lib-model` 提供独立的设备冒烟测试。
 
