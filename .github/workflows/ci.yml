@@ -2282,17 +2282,60 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
-      # Every test step below runs pytest with --forked. pytest-forked imports
-      # torch in the PARENT and then forks a child per test, so the child
-      # inherits an intraop threadpool whose state did not survive the fork
-      # (pytorch#17199). On this 384-core runner the symptom is a child that
-      # hangs with no verdict until --max-time kills the whole step at 3600 s,
-      # taking every later step in the job with it. Capping the parent's
-      # threadpool to one thread before Python starts is the fix that
-      # propagates across the fork; the same cap is set for the same reason on
-      # pypto-lib-compile. It belongs here in the job env rather than inline in
-      # a --run string, because task-submit starts the child from this
-      # environment.
+      # Three of this job's steps run pytest with --forked, which forks one
+      # child per test while module import has already happened in the pytest
+      # PARENT. torch's intraop thread pool does not survive that fork: a child
+      # inheriting a pool whose threads do not exist deadlocks, or faults, on
+      # its own first torch work (pytorch#17199). Pinning the pool to one
+      # thread removes the pool, and costs nothing here -- a post-fork child
+      # gets no parallelism either way, and every host-side golden in this job
+      # is small. pypto-lib-compile carries the same cap in its own job env for
+      # the same reason.
+      #
+      # Bisected card-free on an a5 host, one variable per leg, 5-20 forks per
+      # leg. The repro does NOT go through pytest -- it forks with
+      # multiprocessing's 'fork' context, which is the mechanism pytest_forked
+      # 1.7.5 itself uses (its frames in the SIGSEGV traceback are
+      # forked_run -> Process.start -> popen_fork._launch). torch 2.14.1,
+      # default intraop thread count 384 on that host:
+      #   parent torch work        child torch work   unset      =1
+      #   none                     MX golden          PASS 15/15 PASS 15/15
+      #   1024-element mul         MX golden          PASS  5/5  PASS  5/5
+      #   98304-element mul        none (10 elements) PASS  5/5  PASS  5/5
+      #   98304-element mul        MX golden          HANG  5/5  PASS  5/5
+      #   1 or 4 x _make_inputs    MX golden          HANG 20/20 PASS 20/20
+      # So it needs a parent-side op that opens a torch parallel region, plus
+      # real torch work in the child -- and `1` removes it from every leg that
+      # showed it. Every leg is deterministic; nothing here was intermittent.
+      #
+      # Do NOT turn the element counts in that table into a size screen. They
+      # are true of a mul (1024 never triggered it, 98304 always did) and do not
+      # generalise: a later card-free repro armed the fault with an
+      # advanced-indexing gather over 16,384 elements -- BELOW ATen's 32,768
+      # grain size -- while torch.randint over the same 16,384 did not. Which
+      # kernel opens a parallel region in the parent is what decides, not how
+      # big its input is.
+      #
+      # `1` is also the value the runtime already asks for: Worker startup does
+      # `setenv("OMP_NUM_THREADS", "1", 0)` (and the OPENBLAS / MKL / BLIS
+      # equivalents) in runtime/src/common/hierarchical/worker.cpp, with
+      # overwrite=0, so this job env agrees with it rather than overriding it.
+      #
+      # Job-wide rather than per-step because every unexplained failure this job
+      # has had -- the two mx/tensor-mx hangs described below and the four-case
+      # SIGSEGV in _matmul_mx_golden on 2026-11-06 -- landed on a --forked step
+      # with this variable unset, and the three --forked steps share the cause.
+      # Those steps also export it inside their `task-submit --run` strings so
+      # the requirement is visible at the point of use; this job env is what
+      # carries it (task-submit snapshots the submitter's environment with
+      # `env -0` under a blacklist that does not include OMP_NUM_THREADS, and
+      # task-daemon loads that snapshot into the payload env).
+      #
+      # What the bisection does NOT cover: it ran without a card, without
+      # pytest, and on a different torch build from the runner's, so it
+      # establishes the trigger and that `1` removes it -- not that the runner
+      # reproduces the HANG flavour rather than the SIGSEGV one. The first green
+      # run of the three --forked steps is what confirms the fix end to end.
       OMP_NUM_THREADS: 1
     steps:
       - name: Fetch composite action definitions
@@ -2333,12 +2376,15 @@ jobs:
         # matmul cases verify entry initialization after deliberately enabling HF32.
         # The rsqrt cases check both API entries against a FP64 ULP reference.
         # --forked isolates each case's device init, as the daily a5 job does.
+        # OMP_NUM_THREADS is re-exported here only so the --forked requirement
+        # is readable at the point of use; the job env above is what carries it.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              export OMP_NUM_THREADS=1 && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               tests/st/runtime/ops/test_rsqrt.py::test_a5_rsqrt_precision_ulp \
@@ -2376,12 +2422,14 @@ jobs:
         # explicit node IDs and record its cost here. Never narrow an existing
         # whole-file line into node IDs -- that silently drops every case in the
         # file it does not enumerate while looking like a fix.
+        # OMP_NUM_THREADS as in mixed-kernel-tests-a5: this step is --forked too.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              export OMP_NUM_THREADS=1 && python -m pytest \
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
@@ -2399,10 +2447,22 @@ jobs:
         # --max-time cap, never reaching the `[DEVICE] ... -> device 0`
         # assignment line, so the task queue killed the step and every later
         # step in this job was skipped with it. Two other changes hit the same
-        # signature the same day by appending a *file* to a step. The mechanism
-        # is NOT understood. Isolating the session keeps mx-tests-a5 running
-        # exactly the set that is known green and confines any residual risk
-        # here.
+        # signature the same day by appending a *file* to a step.
+        #
+        # The mechanism IS now understood, and the job-level `OMP_NUM_THREADS: 1`
+        # above is the fix. torch's intraop thread pool does not survive
+        # pytest-forked's fork, so a child of a parent that has already entered
+        # a torch parallel region deadlocks (or faults) on its own first torch
+        # work. THIS module builds all four cases' operands while it is being
+        # imported -- `st.cases(*[st.case(tensors=_tensor_case_tensors(...))])`
+        # evaluates the generator at decoration time, i.e. in the pytest parent
+        # -- which is exactly the parent-side parallel region the fault needs.
+        # test_matmul_mx.py builds its operands inside each test, i.e. in the
+        # child, which is why that step stays green on byte-identical data from
+        # the same generator in _matmul_mx_data.py. Measured: the two surfaces
+        # feed _matmul_mx_golden identical shapes and dtypes ((32,256) / (32,8)
+        # / (256,96) / (8,96), k_valid=256), so operand size is NOT the
+        # difference -- only where the operands are built is.
         #
         # Ruled out, so nobody re-derives them:
         #   - *harness style*. `st.case` vs `PTOTestCase` is irrelevant:
@@ -2414,18 +2474,26 @@ jobs:
         #     added three cases to test_matmul_mx.py, which mx-tests-a5 already
         #     selected wholesale, and that step is green at 19 collected.
         #     Scoreboard: 16 green, 19 green, 21 hang, 23 hang.
-        #   - *eager import-time torch compute*. Refuted: CI sets
-        #     OMP_NUM_THREADS: 1, so the fork-after-threads deadlock it depends
-        #     on cannot fire, and an isolated step passes on a file that still
-        #     does torch work at import.
         #   - *collection cost*. All four files collect together in 0.21 s.
+        #
+        # NOT ruled out -- *eager import-time torch compute* is the cause. The
+        # earlier "refuted" note here rested on the claim that CI set
+        # OMP_NUM_THREADS: 1 for this job. It did not: until the job env above
+        # was added, the only occurrence of that variable in this workflow was
+        # pypto-lib-compile's own job env. The same cause produced the
+        # 2026-11-06 failure of this step, where all four cases died with
+        # `signal 11 (SIGSEGV)` inside _matmul_mx_golden (_matmul_mx_data.py:269,
+        # a float64 elementwise multiply) in 1.24 s -- a fault rather than a
+        # hang, same trigger. See the job env for the bisection legs and counts.
         #
         # The file is the whole target rather than node IDs on purpose: a stale
         # or mistyped node ID in --deselect/-k is SILENTLY ignored by pytest, so
         # node-ID containment would quietly un-contain itself on any rename and
         # bring the hang back with nothing in the log to say why.
         #
-        # Do NOT merge this back into mx-tests-a5 without reproducing that hang.
+        # Do NOT merge this back into mx-tests-a5 on the strength of the fix
+        # alone: no run has yet verified the merged step, and the split is also
+        # what keeps this file's --max-time at 600 instead of mx-tests-a5's 3600.
         #
         # --max-time 600 rather than 3600: these four cases need ~53 s of device
         # time, so a hang here is reported in 10 minutes instead of consuming
@@ -2436,7 +2504,8 @@ jobs:
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              export OMP_NUM_THREADS=1 && python -m pytest \
               tests/st/runtime/ops/test_matmul_mx_tensor_a5.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
