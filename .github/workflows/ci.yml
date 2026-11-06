@@ -2229,8 +2229,12 @@ jobs:
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
-    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # MX_A_ZZ / MX_B_NN), test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul), and test_fp8e5m2_transfer.py (the wire-level sibling:
+    # a host-prequantized FP8E5M2 tensor crossing the runtime's UINT8 byte
+    # carrier and compared bit-for-bit). All are `@pytest.mark.platforms("a5")`.
+    # Keep this enumeration in step with the `run:` target list below — they are
+    # two statements of the same fact and nothing checks that they agree.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2335,9 +2339,9 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
-        # fp8e5m2_transfer is the wire-level sibling of those: one harness case
-        # (+1 to this step's 16) asserting that a host-prequantized FP8E5M2
-        # tensor survives the runtime's UINT8 byte carrier bit-for-bit. It is
+        # fp8e5m2_transfer is the wire-level sibling of those: a single harness
+        # case asserting that a host-prequantized FP8E5M2 tensor survives the
+        # runtime's UINT8 byte carrier bit-for-bit. It is
         # here rather than in a directory-glob step because every such step runs
         # at the default --platform=a2a3, which deselects its platforms("a5")
         # marker; this is the only job that gives it a5 device coverage.
