@@ -797,5 +797,63 @@ def test_chip_rail_requests_no_async_workspace(tmp_path):
     assert "workspace_engines" not in host_orch, host_orch
 
 
+def test_async_transfer_requests_the_urma_workspace(tmp_path):
+    """End-to-end A9: an async transfer reaches the host domain's engine list.
+
+    The engine scan must recognise ``put_async`` on the chip function, the pass
+    must record ``urma`` on every materialized domain under the program-wide
+    policy, and codegen must render it as ``workspace_engines``. Nothing else in
+    the program asks for URMA, so a missing match would emit a domain with no
+    engine list and the runtime would hand the helper a zero workspace.
+    """
+    f32_bytes = pl.FP32.get_byte()
+    window_bytes = SIZE * f32_bytes
+
+    @pl.program
+    class AsyncProgram:
+        # The transfer is issued by the task that owns the destination, so the
+        # op lives in the InCore body — exactly where the VECTOR placement puts
+        # it. An Orchestration body would only dispatch this kernel.
+        @pl.function(type=pl.FunctionType.InCore)
+        def async_kernel(
+            self,
+            dst: pld.DistributedTensor[[SIZE], pl.FP32],
+            src: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pld.DistributedTensor[[SIZE], pl.FP32]:
+            pld.tensor.put_async(dst, 1, src)
+            return dst
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_async(
+            self,
+            dst: pld.DistributedTensor[[SIZE], pl.FP32],
+            src: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pld.DistributedTensor[[SIZE], pl.FP32]:
+            return self.async_kernel(dst, src)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            dst_buf = pld.alloc_window_buffer(window_bytes)
+            src_buf = pld.alloc_window_buffer(window_bytes)
+            dst = pld.window(dst_buf, [SIZE], dtype=pl.FP32)
+            src = pld.window(src_buf, [SIZE], dtype=pl.FP32)
+            self.chip_async(dst, src, device=0)
+            return 0
+
+    result = ir.compile(
+        AsyncProgram,
+        output_dir=str(tmp_path / "async_workspace"),
+        platform="a5",
+        skip_ptoas=True,
+        dump_passes=False,
+        distributed_config=DistributedConfig(device_ids=list(range(NR)), num_sub_workers=0),
+    )
+    host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+
+    assert 'workspace_engines=("urma",)' in host_orch, host_orch
+    # No synchronous fallback may be introduced by the lowering.
+    assert "DmaEngine" not in host_orch, host_orch
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
