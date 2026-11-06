@@ -1011,6 +1011,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         // form on print to keep the output type-correct for static checkers
         // and round-trippable through the parser (pl.AtomicType is exposed).
         stream_ << prefix_ << ".AtomicType." << AtomicTypeToString(static_cast<AtomicType>(int_val));
+      } else if (key == "engine") {
+        // Stored as int (the DSL casts CommEngine -> int before stashing it on
+        // kwargs_). `engine` only exists on the pld async-transfer ops, whose
+        // names print in the bare `pld.` namespace, so restore the enum there.
+        stream_ << "pld.CommEngine." << CommEngineToString(static_cast<CommEngine>(int_val));
       } else if (key == "acc_phase") {
         stream_ << prefix_ << ".AccPhase." << AccPhaseToString(static_cast<AccPhase>(int_val));
       } else if (key == "cache" && (int_val > 1 || IsOp(op, "tile.store"))) {

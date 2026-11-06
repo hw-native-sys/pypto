@@ -41,6 +41,10 @@ def _unwrap_distributed_tensors(op_name: str, *, target: Any, signal: Any) -> tu
 
 
 @overload
+def _unwrap_distributed_tensors(op_name: str, *, dst: Any, src: Any) -> tuple[Expr, Expr]: ...
+
+
+@overload
 def _unwrap_distributed_tensors(
     op_name: str, *, target: Any, signal: Any, recv_counts: Any
 ) -> tuple[Expr, Expr, Expr]: ...
