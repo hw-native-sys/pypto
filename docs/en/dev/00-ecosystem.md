@@ -108,22 +108,51 @@ A library of real-world models and primitive tensor functions built **on top of*
 
 **Interface with pypto:** pypto-lib programs are standard pypto programs — they use the same `@pl.program`/`@pl.function` DSL and compile through the same pipeline. No special API exists between them; pypto-lib is a consumer of the pypto framework.
 
-**Compiler CI coverage:** The `pypto-lib-compile` job compiles all formal runnable
-entries selected by pypto-lib's `.github/scripts/detect_changes.py --all`, using
-its platform ownership rules for A2/A3 and A5. Drafts and non-runnable helpers are
-excluded, including the CPU-only GLM weights round-trip, prefill reference,
-and `models/glm5_3_flash/prefill_fwd.py` weight checks; helpers are exercised
-through their callers. That GLM prefill CLI defaults to CPU weight checks and
-produces no compilation records.
-Other GLM kernel entries remain covered, including entries without a
-`--compile-only` option. Device-only entries are included because compilation
-needs no NPU. The adapter forces `golden.run` into compile-only mode, records direct compile calls, and requires PTOAS. Coverage
-includes frontend, passes, verification, codegen, and PTOAS.
+**Compiler CI coverage:** The `pypto-lib-compile` job compiles only the named
+cases in [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json).
+The initial list is based on the former full selector at pypto-lib revision
+`2562a862f917ed76b67cdb064d3a9b74e156e8b4`, excluding the CPU-only
+`models/glm5_3_flash/prefill_fwd.py` self-test: 139 A2/A3 entries and
+45 A5 entries (173 distinct entries). New library files do not join automatically.
+Helpers are covered through their callers; CPU-only reference self-tests are not
+compile cases. Device-only entries can be listed because compilation needs no NPU.
+The adapter forces `golden.run` into compile-only mode, records direct compile
+calls, and requires PTOAS. Coverage includes frontend, passes, verification,
+codegen, and PTOAS.
 When an active argument parser declares `--compile-only`, the adapter supplies
 that flag to that parser. Other parsers keep their original arguments, preserving
 helper/component parsing while disabling post-compilation execution branches.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
+
+To add coverage, append a case to the JSON list; no workflow or runner edit is
+needed. For example, to run an entry with a different logical device list:
+
+```json
+{
+  "name": "advanced-allreduce-two-ranks",
+  "entry": "examples/advanced/allreduce.py",
+  "platforms": ["a2a3", "a5"],
+  "args": ["-d", "0,1"]
+}
+```
+
+- `name`: globally unique case ID, using letters, digits, `_`, `-`, or `.`,
+  starting with a letter or digit. Logs and build outputs are isolated by name.
+- `entry`: exact Python script path relative to pypto-lib, under `examples/` or
+  `models/`. Directories, globs, drafts, and paths outside the library are rejected.
+- `platforms`: nonempty list of `a2a3` and/or `a5`, without duplicates. The runner
+  supplies `-p`; do not put platform arguments in `args`.
+- `args`: optional array of strings passed directly as arguments, without shell
+  expansion. Omit it to keep the entry's defaults. An explicit `-d`/`--device`
+  replaces inferred logical ranks. Compile-only enforcement remains active.
+  The adapter enables each parser's declared `--compile-only` option at parse
+  time, without injecting the flag into other components that do not accept it.
+
+Give each parameter variant a different name, even when it uses the same entry.
+The runner validates the entire configuration before compiling; duplicate names,
+unknown fields/platforms, missing files, and an empty platform selection fail the
+job. Use `--cases /path/to/cases.json` to select an alternative list locally.
 
 The A2/A3 compile leg runs on a CANN-equipped `npu` host and activates the
 toolkit so external CCE wrappers can resolve devkit headers at import time.
@@ -156,9 +185,9 @@ mode; merely declaring that option does not enable output-directory injection.
 A child failure or missing, empty, or malformed child receipt fails the entry
 even if the parent exits successfully. This interception applies to the current entry
 script launched by the same Python interpreter.
-On compilation failure, CI uploads per-entry logs, results, and a manifest
-containing the tested library revision and selected entries. Successful runs
-report results in the job log and summary without uploading artifacts.
+On compilation failure, CI uploads per-case logs, results, and a manifest
+containing the tested library revision, selected entries, named cases, and effective arguments.
+Successful runs report results in the job log and summary without uploading artifacts.
 
 ### PTOAS — PTO Assembler & Optimizer
 

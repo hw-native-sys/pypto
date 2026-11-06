@@ -1,0 +1,1224 @@
+[
+  {
+    "name": "examples-advanced-allreduce",
+    "entry": "examples/advanced/allreduce.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-advanced-gemm_eltwise",
+    "entry": "examples/advanced/gemm_eltwise.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-advanced-multi_proj",
+    "entry": "examples/advanced/multi_proj.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-advanced-topk",
+    "entry": "examples/advanced/topk.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-beginner-hello_world",
+    "entry": "examples/beginner/hello_world.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-beginner-matmul",
+    "entry": "examples/beginner/matmul.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-intermediate-gemm",
+    "entry": "examples/intermediate/gemm.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-intermediate-layer_norm",
+    "entry": "examples/intermediate/layer_norm.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-intermediate-rms_norm",
+    "entry": "examples/intermediate/rms_norm.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-intermediate-rope",
+    "entry": "examples/intermediate/rope.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "examples-intermediate-softmax",
+    "entry": "examples/intermediate/softmax.py",
+    "platforms": [
+      "a2a3",
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-compressor",
+    "entry": "models/deepseek_v4_1_flash/compressor.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_c1a_full",
+    "entry": "models/deepseek_v4_1_flash/decode_c1a_full.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_c1a_reindex",
+    "entry": "models/deepseek_v4_1_flash/decode_c1a_reindex.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_c1a_reuse",
+    "entry": "models/deepseek_v4_1_flash/decode_c1a_reuse.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_c2a_full",
+    "entry": "models/deepseek_v4_1_flash/decode_c2a_full.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_c2a_reuse",
+    "entry": "models/deepseek_v4_1_flash/decode_c2a_reuse.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_fwd",
+    "entry": "models/deepseek_v4_1_flash/decode_fwd.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_fwd_dspark",
+    "entry": "models/deepseek_v4_1_flash/decode_fwd_dspark.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_layer",
+    "entry": "models/deepseek_v4_1_flash/decode_layer.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_moe",
+    "entry": "models/deepseek_v4_1_flash/decode_moe.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-decode_swa",
+    "entry": "models/deepseek_v4_1_flash/decode_swa.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-dspark_attention",
+    "entry": "models/deepseek_v4_1_flash/dspark_attention.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-dspark_context_kv",
+    "entry": "models/deepseek_v4_1_flash/dspark_context_kv.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-dspark_drafter",
+    "entry": "models/deepseek_v4_1_flash/dspark_drafter.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-dspark_state",
+    "entry": "models/deepseek_v4_1_flash/dspark_state.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-engram",
+    "entry": "models/deepseek_v4_1_flash/engram.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-expert_routed",
+    "entry": "models/deepseek_v4_1_flash/expert_routed.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-expert_shared",
+    "entry": "models/deepseek_v4_1_flash/expert_shared.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-gate",
+    "entry": "models/deepseek_v4_1_flash/gate.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-hc",
+    "entry": "models/deepseek_v4_1_flash/hc.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-input_pack",
+    "entry": "models/deepseek_v4_1_flash/input_pack.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-lm_head",
+    "entry": "models/deepseek_v4_1_flash/lm_head.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-o_proj",
+    "entry": "models/deepseek_v4_1_flash/o_proj.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_c1a_full",
+    "entry": "models/deepseek_v4_1_flash/prefill_c1a_full.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_c1a_reindex",
+    "entry": "models/deepseek_v4_1_flash/prefill_c1a_reindex.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_c1a_reuse",
+    "entry": "models/deepseek_v4_1_flash/prefill_c1a_reuse.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_c2a_full",
+    "entry": "models/deepseek_v4_1_flash/prefill_c2a_full.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_c2a_reuse",
+    "entry": "models/deepseek_v4_1_flash/prefill_c2a_reuse.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_fwd",
+    "entry": "models/deepseek_v4_1_flash/prefill_fwd.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_layer",
+    "entry": "models/deepseek_v4_1_flash/prefill_layer.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_moe",
+    "entry": "models/deepseek_v4_1_flash/prefill_moe.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-prefill_swa",
+    "entry": "models/deepseek_v4_1_flash/prefill_swa.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-sparse_attention",
+    "entry": "models/deepseek_v4_1_flash/sparse_attention.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-vision",
+    "entry": "models/deepseek_v4_1_flash/vision.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_compressor_ratio128",
+    "entry": "models/deepseek_v4_flash_dspark/decode_compressor_ratio128.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_compressor_ratio4",
+    "entry": "models/deepseek_v4_flash_dspark/decode_compressor_ratio4.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_cp_allgather",
+    "entry": "models/deepseek_v4_flash_dspark/decode_cp_allgather.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_csa",
+    "entry": "models/deepseek_v4_flash_dspark/decode_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_fwd",
+    "entry": "models/deepseek_v4_flash_dspark/decode_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_fwd_dspark",
+    "entry": "models/deepseek_v4_flash_dspark/decode_fwd_dspark.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_hca",
+    "entry": "models/deepseek_v4_flash_dspark/decode_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_indexer",
+    "entry": "models/deepseek_v4_flash_dspark/decode_indexer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_indexer_compressor",
+    "entry": "models/deepseek_v4_flash_dspark/decode_indexer_compressor.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_layer",
+    "entry": "models/deepseek_v4_flash_dspark/decode_layer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_o_proj",
+    "entry": "models/deepseek_v4_flash_dspark/decode_o_proj.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_sparse_attn_csa",
+    "entry": "models/deepseek_v4_flash_dspark/decode_sparse_attn_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_sparse_attn_hca",
+    "entry": "models/deepseek_v4_flash_dspark/decode_sparse_attn_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_sparse_attn_swa",
+    "entry": "models/deepseek_v4_flash_dspark/decode_sparse_attn_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-decode_swa",
+    "entry": "models/deepseek_v4_flash_dspark/decode_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-dspark_attention",
+    "entry": "models/deepseek_v4_flash_dspark/dspark_attention.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-dspark_context_kv",
+    "entry": "models/deepseek_v4_flash_dspark/dspark_context_kv.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-dspark_drafter",
+    "entry": "models/deepseek_v4_flash_dspark/dspark_drafter.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-dspark_markov",
+    "entry": "models/deepseek_v4_flash_dspark/dspark_markov.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-expert_routed",
+    "entry": "models/deepseek_v4_flash_dspark/expert_routed.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-expert_shared",
+    "entry": "models/deepseek_v4_flash_dspark/expert_shared.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-gate",
+    "entry": "models/deepseek_v4_flash_dspark/gate.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-hc_head",
+    "entry": "models/deepseek_v4_flash_dspark/hc_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-hc_pre",
+    "entry": "models/deepseek_v4_flash_dspark/hc_pre.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-lm_head",
+    "entry": "models/deepseek_v4_flash_dspark/lm_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-markov_head",
+    "entry": "models/deepseek_v4_flash_dspark/markov_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-moe",
+    "entry": "models/deepseek_v4_flash_dspark/moe.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_compressor_ratio128",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_compressor_ratio128.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_compressor_ratio4",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_compressor_ratio4.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_cp_token_allgather",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_cp_token_allgather.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_csa",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_fwd",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_hca",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_indexer",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_indexer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_indexer_compressor",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_indexer_compressor.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_layer",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_layer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_metadata",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_metadata.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_sparse_attn",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_sparse_attn.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-prefill_swa",
+    "entry": "models/deepseek_v4_flash_dspark/prefill_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_dspark-qkv_proj_rope",
+    "entry": "models/deepseek_v4_flash_dspark/qkv_proj_rope.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_compressor_ratio128",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_compressor_ratio128.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_compressor_ratio4",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_compressor_ratio4.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_csa",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_fwd",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_hca",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_indexer",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_indexer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_indexer_compressor",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_indexer_compressor.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_layer",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_layer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_sparse_attn_hca",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_sparse_attn_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_sparse_attn_swa",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_sparse_attn_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_swa",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-expert_routed",
+    "entry": "models/deepseek_v4_flash_lowlat/expert_routed.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-expert_routed_persistent_balanced",
+    "entry": "models/deepseek_v4_flash_lowlat/expert_routed_persistent_balanced.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-gate",
+    "entry": "models/deepseek_v4_flash_lowlat/gate.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-hc_head",
+    "entry": "models/deepseek_v4_flash_lowlat/hc_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-hc_post",
+    "entry": "models/deepseek_v4_flash_lowlat/hc_post.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-hc_pre",
+    "entry": "models/deepseek_v4_flash_lowlat/hc_pre.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-lm_head",
+    "entry": "models/deepseek_v4_flash_lowlat/lm_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-lookup_embedding",
+    "entry": "models/deepseek_v4_flash_lowlat/lookup_embedding.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-moe",
+    "entry": "models/deepseek_v4_flash_lowlat/moe.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-o_proj_tp",
+    "entry": "models/deepseek_v4_flash_lowlat/o_proj_tp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-qkv_proj_rope",
+    "entry": "models/deepseek_v4_flash_lowlat/qkv_proj_rope.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-rmsnorm",
+    "entry": "models/deepseek_v4_flash_lowlat/rmsnorm.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-sample",
+    "entry": "models/deepseek_v4_flash_lowlat/sample.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-tp_embedding",
+    "entry": "models/deepseek_v4_flash_lowlat/tp_embedding.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_compressor_ratio128",
+    "entry": "models/deepseek_v4_flash_mtp/decode_compressor_ratio128.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_compressor_ratio4",
+    "entry": "models/deepseek_v4_flash_mtp/decode_compressor_ratio4.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_csa",
+    "entry": "models/deepseek_v4_flash_mtp/decode_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_fwd",
+    "entry": "models/deepseek_v4_flash_mtp/decode_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_fwd_mtp",
+    "entry": "models/deepseek_v4_flash_mtp/decode_fwd_mtp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_hca",
+    "entry": "models/deepseek_v4_flash_mtp/decode_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_indexer",
+    "entry": "models/deepseek_v4_flash_mtp/decode_indexer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_indexer_compressor",
+    "entry": "models/deepseek_v4_flash_mtp/decode_indexer_compressor.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_layer",
+    "entry": "models/deepseek_v4_flash_mtp/decode_layer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_moe",
+    "entry": "models/deepseek_v4_flash_mtp/decode_moe.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_mtp",
+    "entry": "models/deepseek_v4_flash_mtp/decode_mtp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_sparse_attn_csa",
+    "entry": "models/deepseek_v4_flash_mtp/decode_sparse_attn_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_sparse_attn_hca",
+    "entry": "models/deepseek_v4_flash_mtp/decode_sparse_attn_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_sparse_attn_swa",
+    "entry": "models/deepseek_v4_flash_mtp/decode_sparse_attn_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-decode_swa",
+    "entry": "models/deepseek_v4_flash_mtp/decode_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-expert_routed",
+    "entry": "models/deepseek_v4_flash_mtp/expert_routed.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-expert_shared",
+    "entry": "models/deepseek_v4_flash_mtp/expert_shared.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-gate",
+    "entry": "models/deepseek_v4_flash_mtp/gate.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-hc_head",
+    "entry": "models/deepseek_v4_flash_mtp/hc_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-hc_pre",
+    "entry": "models/deepseek_v4_flash_mtp/hc_pre.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-lm_head",
+    "entry": "models/deepseek_v4_flash_mtp/lm_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-mtp_projection",
+    "entry": "models/deepseek_v4_flash_mtp/mtp_projection.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_compressor_ratio128",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_compressor_ratio128.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_compressor_ratio4",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_compressor_ratio4.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_cp_exchange",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_cp_exchange.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_cp_zigzag",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_cp_zigzag.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_csa",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_csa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_fwd",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_hca",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_hca.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_indexer",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_indexer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_indexer_compressor",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_indexer_compressor.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_moe",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_moe.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_mtp",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_mtp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_sparse_attn",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_sparse_attn.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-prefill_swa",
+    "entry": "models/deepseek_v4_flash_mtp/prefill_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-qkv_proj_rope",
+    "entry": "models/deepseek_v4_flash_mtp/qkv_proj_rope.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_mtp-sample",
+    "entry": "models/deepseek_v4_flash_mtp/sample.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-all_reduce",
+    "entry": "models/glm5_3_flash/all_reduce.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-attention",
+    "entry": "models/glm5_3_flash/attention.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-decode_layer",
+    "entry": "models/glm5_3_flash/decode_layer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-decode_moe",
+    "entry": "models/glm5_3_flash/decode_moe.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-dense_mlp",
+    "entry": "models/glm5_3_flash/dense_mlp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-elementwise",
+    "entry": "models/glm5_3_flash/elementwise.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-expert_routed",
+    "entry": "models/glm5_3_flash/expert_routed.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-expert_shared",
+    "entry": "models/glm5_3_flash/expert_shared.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-gate",
+    "entry": "models/glm5_3_flash/gate.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-indexer",
+    "entry": "models/glm5_3_flash/indexer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-kda",
+    "entry": "models/glm5_3_flash/kda.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-layer",
+    "entry": "models/glm5_3_flash/layer.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-linear",
+    "entry": "models/glm5_3_flash/linear.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-lm_head",
+    "entry": "models/glm5_3_flash/lm_head.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-mhc",
+    "entry": "models/glm5_3_flash/mhc.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-mtp",
+    "entry": "models/glm5_3_flash/mtp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-prefill_moe",
+    "entry": "models/glm5_3_flash/prefill_moe.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-rmsnorm",
+    "entry": "models/glm5_3_flash/rmsnorm.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-glm5_3_flash-vision",
+    "entry": "models/glm5_3_flash/vision.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-decode_fwd",
+    "entry": "models/qwen3_14b/decode_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-greedy_sample",
+    "entry": "models/qwen3_14b/greedy_sample.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-prefill_fwd",
+    "entry": "models/qwen3_14b/prefill_fwd.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-rope_qkv_regen",
+    "entry": "models/qwen3_14b/rope_qkv_regen.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-test_paged_attention_cce",
+    "entry": "models/qwen3_14b/test_paged_attention_cce.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-test_paged_attention_pypto",
+    "entry": "models/qwen3_14b/test_paged_attention_pypto.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-topk_select",
+    "entry": "models/qwen3_14b/topk_select.py",
+    "platforms": [
+      "a2a3"
+    ]
+  }
+]
