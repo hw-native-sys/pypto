@@ -201,6 +201,10 @@ std::vector<HardSyncall> CollectHardSyncalls(const FunctionPtr& fn) {
   CallSubmitCollector collector;
   if (fn->body_) collector.VisitStmt(fn->body_);
   std::vector<HardSyncall> out;
+  // 外部源码没有可遍历的同步操作，适配器以属性声明相同的全核驻留约束。
+  if (fn->HasAttr(kAttrExternalHardSyncall)) {
+    out.push_back({fn->GetAttr<std::string>(kAttrExternalHardSyncall), fn->span_});
+  }
   for (const auto& call : collector.calls) {
     if (!call->op_ || !IsOp(call, "system.syncall")) continue;
     if (call->GetKwarg<std::string>("mode", "hard") == "soft") continue;

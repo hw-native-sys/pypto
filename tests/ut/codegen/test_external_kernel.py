@@ -161,8 +161,8 @@ def test_external_source_requires_aic_or_aiv(tmp_path):
                 return out
 
 
-def test_external_kernel_requires_empty_body(tmp_path):
-    """An external kernel with a non-``...`` body is rejected."""
+def test_external_kernel_rejects_executable_body(tmp_path):
+    """外部核声明不能包含计算，即使末尾有合法的输出写回。"""
     cpp = _write_kernel(tmp_path)
     with pytest.raises(ParserSyntaxError, match="must have an empty"):
 

@@ -58,6 +58,7 @@ JITFunction.__call__ flow
 import ast
 import copy
 import functools
+import importlib
 import inspect
 import json
 import os
@@ -421,6 +422,7 @@ class JITFunction:
         external_aiv_source: str | None = None,
         external_dual_aiv_dispatch: bool = False,
         external_include_dirs: tuple[str, ...] = (),
+        external_builder: Callable[[SpecializeContext], Any] | None = None,
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
@@ -429,6 +431,7 @@ class JITFunction:
         # External C++ kernel backing (func_type == "extern"): resolved absolute
         # paths the specializer emits as @pl.function(external_source=...).
         self._external_core_type = external_core_type
+        self._external_builder = external_builder
         self._external_aic_source = external_aic_source
         self._external_aiv_source = external_aiv_source
         self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
@@ -504,6 +507,7 @@ class JITFunction:
             sorted(
                 (gen_names[id(dep._func)], param, str(layout))
                 for dep in state.graph.deps
+                if dep._external_builder is None
                 # ``dep.__name__`` here is the diagnostic name only — a layout
                 # error should name the user's own function.
                 for param, layout in _arguments.param_layouts(dep._func, dep.__name__).items()
@@ -513,37 +517,27 @@ class JITFunction:
         return layouts
 
     def _get_dep_graph(self) -> _DepGraph:
-        """Return the transitive JIT dep graph rooted at this function.
+        """返回以此函数为根的传递 JIT 依赖图。
 
-        The graph is computed lazily and reused while its direct dependency
-        bindings remain unchanged. Each request pins its validated graph;
-        another request can publish a new graph without changing this one.
-        Published graphs are never modified. Returns:
+        依赖图按需计算；直接依赖绑定不变时复用。每次请求固定使用已校验的图；
+        其他请求可以发布新图，而不会改变本次请求的图。已发布的图不可修改。返回：
 
-        - ``deps_topo``: every reachable dep in leaf-first topological order
-          (deduplicated by underlying Python function identity). The entry
-          function is NOT included.
-        - ``callers_by_dep_id``: for each dep, the list of
-          ``(caller_func, call_name)`` pairs whose bodies contain a call site
-          to it — ``call_name`` being the name that caller's source calls it
-          by, which differs from ``dep.__name__`` under an aliased import.
-          Recorded in DFS-discovery order; deduplicated within each list. The
-          entry has no caller and does not appear as a key.
+        - ``deps_topo``：按叶子优先拓扑顺序排列的全部可达依赖，
+          按底层 Python 函数身份去重，不包含入口函数。
+        - ``callers_by_dep_id``：为每个依赖记录函数体中调用它的
+          ``(caller_func, call_name)`` 列表。``call_name`` 为调用者源码中的名称，
+          使用别名导入时可能不同于 ``dep.__name__``。按 DFS 发现顺序记录，
+          各列表内部去重。入口没有调用者，不作为键出现。
 
-          Tensor / scalar metadata for a shared dep is still resolved
-          through the first-recorded caller — call sites in other branches
-          must agree on shapes/dtypes (otherwise one specialization would
-          have to differ from another, which the one-context-per-function
-          design doesn't support).
-        - ``callees_by_func_id``: for each function (entry + every reached
-          dep), the *call names* of the JIT deps it directly calls. Used to
-          set each context's ``dep_names`` so the body transformer rewrites
-          nested dep calls into the ``self.<dep>(...)`` form required by
-          multi-function ``@pl.program``.
-        - ``call_args_cache``: ``(id(caller_func), call_name)`` → unified
-          call-site arg list (see ``extract_call_args_for_dep``) or
-          ``None`` if the call site isn't found. Cached so metadata
-          resolution doesn't re-walk caller ASTs on every JIT call.
+          普通共享依赖通过首个记录的调用者解析张量/标量元数据，并要求签名兼容。
+          通向外部构建器的依赖随后由 ``_resolve_foreign_variants``
+          按已解析的调用签名展开。
+        - ``callees_by_func_id``：记录每个函数（入口及全部可达依赖）直接调用的
+          JIT 依赖的调用名称。用于设置各上下文的 ``dep_names``，让函数体转换器
+          将嵌套依赖调用改写为多函数 ``@pl.program`` 所需的 ``self.<dep>(...)``。
+        - ``call_args_cache``：将 ``(id(caller_func), call_name)`` 映射为统一的
+          调用点参数列表（参见 ``extract_call_args_for_dep``）；找不到调用点时
+          为 ``None``。缓存可避免每次 JIT 调用解析元数据时重新遍历调用者 AST。
         """
         return self._get_dep_graph_state().graph
 
@@ -606,7 +600,9 @@ class JITFunction:
             else self._compute_static_source_hash(deps_topo)
         )
         layout_dependencies = tuple(
-            (dep._func, names) for dep in deps_topo if (names := _layout_dependency_names(dep._func))
+            (dep._func, names)
+            for dep in deps_topo
+            if dep._external_builder is None and (names := _layout_dependency_names(dep._func))
         )
         state = _CachedDepGraph(graph, bindings, source_hash, layout_dependencies)
         self._dep_graph_state = state
@@ -686,6 +682,87 @@ class JITFunction:
         """
         deps_topo, callers_by_id, _, _ = self._get_dep_graph()
         return _call_binding.expand_constexpr_variants(self, deps_topo, callers_by_id, entry_constexpr)
+
+    def _resolve_foreign_variants(
+        self,
+        tensor_meta: dict[str, TensorMeta],
+        scalar_dtypes: dict[str, DataType],
+        constexpr_values: dict[str, str],
+        per_func_dyn: dict[int, dict[str, dict[int, DynDim]]],
+    ) -> _call_binding.VariantPlan:
+        """按已解析的签名特化依赖外部核的调用链。
+
+        仅拆分外部叶子任务并不足够：被两个签名共享的内联调用者，
+        会在此之前丢失第二次调用的元数据。因此须按调用者优先顺序解析并区分祖先。
+        普通后代也须继承签名特化，因为其形状或类型可能依赖已特化的调用者。
+        无关的普通依赖保留现有 constexpr 键。
+        """
+        deps, callers_by_id, _, _ = self._get_dep_graph()
+        foreign_chain = {id(dep._func) for dep in deps if dep._external_builder is not None}
+        if not foreign_chain:
+            return self._resolve_constexpr_bindings(constexpr_values)
+        # 依赖图按叶子优先排列，向直接调用者传播即可发现所有祖先，
+        # 无需重复扫描依赖图。
+        for dep in deps:
+            if id(dep._func) in foreign_chain:
+                foreign_chain.update(id(caller) for caller, _ in callers_by_id.get(id(dep._func), ()))
+        functions = {id(dep._func): dep for dep in [self, *deps]}
+        entry_key = (id(self._func), _call_binding.freeze_binding(constexpr_values))
+        metadata = {entry_key: (tensor_meta, scalar_dtypes)}
+        bindings = {entry_key: constexpr_values}
+        signature_key = "<foreign-signature>"
+
+        def key_for_call(
+            dep: "JITFunction",
+            caller_key: _call_binding.VariantKey,
+            call_name: str,
+            call: ast.Call,
+            values: Mapping[str, str],
+        ) -> _call_binding.VariantKey:
+            key = (id(dep._func), _call_binding.freeze_binding(values))
+            inherits_signature = bool(caller_key[1] and caller_key[1][-1][0] == signature_key)
+            if id(dep._func) not in foreign_chain and not inherits_signature:
+                return key
+            caller = functions[caller_key[0]]
+            caller_meta, caller_scalars = metadata[caller_key]
+            dep_meta, dep_scalars = _tensor_meta.resolve_dep_call_metadata(
+                dep,
+                caller._func,
+                caller_meta,
+                caller_scalars,
+                per_func_dyn.get(id(dep._func), {}),
+                caller_func_type=caller._func_type,
+                dep_call_name=call_name,
+                call_node=call,
+                caller_constexpr=bindings[caller_key],
+                discover_deps=_discover_dep_bindings,
+            )
+            tensor_signature = tuple(
+                (
+                    name,
+                    tuple(
+                        ("dynamic", dim.name, dim.literal, dim.static_bound, dim.synthesized)
+                        if isinstance(dim, DynDim)
+                        else dim
+                        for dim in meta.shape
+                    ),
+                    str(meta.dtype),
+                    str(meta.layout),
+                )
+                for name, meta in sorted(dep_meta.items())
+            )
+            scalar_signature = tuple((name, str(dtype)) for name, dtype in sorted(dep_scalars.items()))
+            # 此区分标识不是 Python 参数，绝不能进入 ctx.constexpr_values
+            # 或提供方的设备 ABI。
+            signature = repr((tensor_signature, scalar_signature))
+            key = (key[0], (*key[1], (signature_key, signature)))
+            metadata.setdefault(key, (dep_meta, dep_scalars))
+            bindings.setdefault(key, dict(values))
+            return key
+
+        return _call_binding.expand_constexpr_variants(
+            self, deps, callers_by_id, constexpr_values, call_variant_key=key_for_call
+        )
 
     def _constexpr_identity_records(self, plan: _call_binding.VariantPlan) -> list[tuple[Any, ...]]:
         """Flatten a variant plan into deterministic cache-identity records.
@@ -1109,6 +1186,22 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        prepared_contexts = None
+        foreign_digest = ""
+        if any(dep._external_builder is not None for dep in self._get_deps()):
+            from .foreign import external_context_digest  # noqa: PLC0415
+
+            prepared_contexts = self._build_contexts(
+                specialization.tensor_meta,
+                specialization.scalar_dtypes,
+                specialization.constexpr_values,
+                specialization.per_func_dyn,
+            )
+            foreign_digest = external_context_digest(
+                prepared_contexts,
+                compile_kwargs["backend_type"].name,
+                runtime_kind_to_name(_resolve_runtime()),
+            )
         target_platform = _platform_string(compile_kwargs["backend_type"], compile_kwargs["execution_mode"])
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
@@ -1127,6 +1220,7 @@ class JITFunction:
                     specialization.constexpr_values,
                     specialization.per_func_dyn,
                     pl,
+                    prepared_contexts=prepared_contexts,
                     **(compile_kwargs | overrides),
                 )
 
@@ -1140,7 +1234,10 @@ class JITFunction:
         constexpr_bindings = self._resolve_constexpr_bindings(specialization.constexpr_values)
         key = make_cache_key(
             source_hash=_request_source_hash(
-                self._get_source_hash(), self._constexpr_identity_records(constexpr_bindings)
+                compute_source_hash([self._get_source_hash(), foreign_digest])
+                if prepared_contexts is not None
+                else self._get_source_hash(),
+                self._constexpr_identity_records(constexpr_bindings),
             ),
             param_names=specialization.param_names,
             tensor_shapes={n: m.static_shape() for n, m in specialization.tensor_meta.items()},
@@ -1173,7 +1270,9 @@ class JITFunction:
                     key,
                     cache_config,
                     build,
-                    self._persistent_source_digest,
+                    (lambda: compute_source_hash([self._persistent_source_digest(), foreign_digest]))
+                    if prepared_contexts is not None
+                    else self._persistent_source_digest,
                     platform=target_platform,
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
                     distributed=self._func_type == "host",
@@ -1548,6 +1647,7 @@ class JITFunction:
         constexpr_values: dict[str, str],
         per_func_dyn: dict[int, dict[str, dict[int, DynDim]]],
         pl: Any,
+        prepared_contexts: list[SpecializeContext] | None = None,
         **ir_compile_kwargs: Any,
     ) -> Any:
         """Specialize entry + deps into @pl.program source, parse, and compile.
@@ -1570,7 +1670,11 @@ class JITFunction:
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
-        contexts = self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
+        contexts = (
+            prepared_contexts
+            if prepared_contexts is not None
+            else self._build_contexts(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
+        )
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts)
         source = specializer.specialize()
@@ -1658,14 +1762,12 @@ class JITFunction:
         _, callers_by_id, callees_by_id, _ = self._get_dep_graph()
         empty_dyn: dict[str, dict[int, DynDim]] = {}
 
-        # Map each Python function id → its JIT ``_func_type`` so meta
-        # resolution downstream can gate dep discovery on the caller's type
-        # (a host orchestrator additionally admits ``orchestration`` deps).
-        # Expand the graph into one generated function per compile-time binding.
-        # A dep called with two different ``pl.constexpr`` values is two
-        # functions here, not an error. The same walk backs the cache key, so
-        # the two cannot disagree.
-        plan = self._resolve_constexpr_bindings(constexpr_values)
+        # 将每个 Python 函数 id 映射到其 JIT ``_func_type``，供下游元数据解析
+        # 根据调用者类型筛选依赖；宿主编排函数还允许 ``orchestration`` 依赖。
+        # 按编译时绑定展开依赖图，并对依赖外部核的调用链按张量/标量签名继续展开。
+        # 同一依赖以两个不同 ``pl.constexpr`` 值调用时，在此生成两个函数而非报错。
+        # 缓存键也使用同一遍历流程，确保两者一致。
+        plan = self._resolve_foreign_variants(tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn)
         entry_key: _call_binding.VariantKey = (
             id(self._func),
             _call_binding.freeze_binding(constexpr_values),
@@ -1792,6 +1894,36 @@ class JITFunction:
                     external_include_dirs=dep._external_include_dirs,
                 )
             )
+            if dep._external_builder is not None:
+                from .foreign import apply_external_spec  # noqa: PLC0415
+
+                apply_external_spec(contexts[-1], dep._external_builder(contexts[-1]))
+        # 共享同一外部变体的调用，在导出设备 ABI 前仍须确认元数据兼容。
+        for caller_key, targets in plan.call_targets.items():
+            caller = plan.jit_func[caller_key]
+            c_meta, c_sd = resolved[caller_key]
+            for (call_name, ordinal), dep_key in targets.items():
+                dep = plan.jit_func[dep_key]
+                if dep._external_builder is None:
+                    continue
+                call = _call_binding._dep_call_nodes(caller._func, call_name)[ordinal]
+                actual = _tensor_meta.resolve_dep_call_metadata(
+                    dep,
+                    caller._func,
+                    c_meta,
+                    c_sd,
+                    {},
+                    caller_func_type=caller._func_type,
+                    dep_call_name=call_name,
+                    call_node=call,
+                    caller_constexpr=plan.binding[caller_key],
+                    discover_deps=_discover_dep_bindings,
+                )
+                if actual != resolved[dep_key]:
+                    raise ValueError(
+                        f"External kernel {call_name!r} requires the same shapes, dtypes and layouts "
+                        "at every call in one program; use distinct kernels for different signatures"
+                    )
         contexts.reverse()
         return contexts
 
@@ -1827,6 +1959,8 @@ def _discover_dep_bindings(
     Only top-level (non-method) calls are considered. The returned list
     preserves the order in which deps first appear in the source.
     """
+    if caller_func_type == "extern":
+        return []
     func_def = _ast_analysis.get_func_def(func)
 
     called_names = _ast_analysis.collect_all_called_names(func_def)
@@ -1841,6 +1975,20 @@ def _discover_dep_bindings(
     seen: set[str] = set()
     for name in called_names:
         obj = all_vars.get(name)
+        if not isinstance(obj, JITFunction):
+            adapter = importlib.import_module(".cannbotdsl", __package__)
+            provider = adapter.try_bind_kernel(obj)
+            if provider is not None:
+                if caller_func_type not in ("orchestration", "inline"):
+                    raise TypeError(f"External DSL kernel {name!r} must be called from chip orchestration")
+                obj = provider
+        hook = getattr(obj, "__pypto_jit__", None)
+        if hook is not None and not isinstance(obj, JITFunction):
+            obj = hook()
+            if not isinstance(obj, JITFunction):
+                raise TypeError(f"{name}.__pypto_jit__() must return a JITFunction")
+            if caller_func_type not in ("orchestration", "inline"):
+                raise TypeError(f"External DSL kernel {name!r} must be called from chip orchestration")
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_call_binding.DepBinding(call_name=name, dep=obj))
             seen.add(name)
@@ -1868,7 +2016,9 @@ def _generated_names_for(jit_func: JITFunction, base: str) -> tuple[str, ...]:
     which the specializer renders as an AIC member, an AIV member, and a Group
     wrapper — three names derived from the same base.
     """
-    if jit_func._func_type == "extern" and jit_func._external_core_type == "mixed":
+    if jit_func._func_type == "extern" and (
+        jit_func._external_core_type == "mixed" or jit_func._external_builder is not None
+    ):
         return (base, f"{base}_aic", f"{base}_aiv")
     return (base,)
 

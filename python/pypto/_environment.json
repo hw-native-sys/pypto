@@ -17,6 +17,10 @@
       "category": "tool_resolution",
       "reason": "Selects compiler, linker, SDK headers and libraries through simpler env_manager."
     },
+    "CANNBOTDSL_PYPTO_CACHE_DIR": {
+      "category": "nonsemantic",
+      "reason": "Storage location for generated CANNBotDSL wrappers; source contents and ABI metadata determine their identity."
+    },
     "CC": {
       "category": "tool_resolution",
       "reason": "Runtime build-tool selection; direct kernel compilation uses its selected toolchain object."

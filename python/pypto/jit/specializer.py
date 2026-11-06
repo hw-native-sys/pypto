@@ -48,7 +48,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast, get_args, get_origin
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
-from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_RETURN_PARAMS_ATTR
+from pypto._function_attrs import (
+    DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_HARD_SYNCALL_ATTR,
+    EXTERNAL_RETURN_PARAMS_ATTR,
+)
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
@@ -213,6 +217,11 @@ class SpecializeContext:
     # remain expressions so call bindings and local dimensions take precedence.
     eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    external_parameter_access: dict[str, str] | None = None
+    external_backend: str | None = None
+    external_runtime: str | None = None
+    # 外部源码不具有可遍历的函数体，通过属性保留全核屏障的启动约束。
+    external_hard_syncall: str | None = None
 
     @property
     def source_def_name(self) -> str:
@@ -1355,6 +1364,12 @@ def _specialize_eager_tile_annotation(
     return ast.unparse(node)
 
 
+def _implicit_return_value(params: tuple[str, ...]) -> ast.expr:
+    """为无返回值辅助函数的张量写回结果构造新的 AST。"""
+    values: list[ast.expr] = [ast.Name(id=name, ctx=ast.Load()) for name in params]
+    return values[0] if len(values) == 1 else ast.Tuple(elts=values, ctx=ast.Load())
+
+
 def _extern_annotation_source(annotation: Any) -> str | None:
     """Snapshot eager tensors without conflating a result list with a tuple value."""
     elements = _tuple_annotation_elements(annotation)
@@ -2032,6 +2047,17 @@ class Specializer:
         self._dep_constexpr_params: dict[str, set[str]] = {
             ctx.func_name: set(ctx.constexpr_values) for ctx in contexts
         }
+        self._dep_mutated_params = {
+            ctx.func_name: tuple(
+                name
+                for name in ctx.param_names
+                if ctx.external_parameter_access.get(name) in ("write", "read_write")
+            )
+            for ctx in contexts
+            if ctx.external_parameter_access is not None
+        }
+        self._implicit_inline_returns: dict[str, tuple[str, ...]] = {}
+        self._propagate_void_inline_writebacks()
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
@@ -2112,6 +2138,78 @@ class Specializer:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _propagate_void_inline_writebacks(self) -> None:
+        """通过无返回值的内联边界返回被外部核写入的参数。
+
+        上下文按叶子优先处理，因此父调用可观察到内联子函数已传播的读写行为。
+        有返回值的辅助函数保留显式结果契约和普通表达式语义。
+        """
+        for ctx in self._contexts:
+            if ctx.func_type != "inline":
+                continue
+            tree = ast.parse(textwrap.dedent(ctx.source))
+            func_def = _find_func_def(tree, ctx.source_def_name)
+            assert func_def is not None
+            returns = [node for node in ast.walk(func_def) if isinstance(node, ast.Return)]
+            if any(
+                node.value is not None
+                and not (isinstance(node.value, ast.Constant) and node.value.value is None)
+                for node in returns
+            ):
+                continue
+            targets = (
+                _resolve_dep_call_targets(func_def, set(ctx.dep_names), ctx.dep_call_variants)
+                if ctx.dep_call_variants
+                else {}
+            )
+            written: set[str] = set()
+            for node in ast.walk(func_def):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                if node.func.id not in ctx.dep_names:
+                    continue
+                dep_name = targets.get(id(node), ctx.dep_func_names.get(node.func.id, node.func.id))
+                mutated = self._dep_mutated_params.get(dep_name, ())
+                if not mutated:
+                    continue
+                params = self._dep_param_names[dep_name]
+                bound = dict(zip(params, node.args))
+                bound.update((keyword.arg, keyword.value) for keyword in node.keywords if keyword.arg)
+                for param in mutated:
+                    argument = bound.get(param)
+                    if isinstance(argument, ast.Name) and argument.id in ctx.tensor_meta:
+                        written.add(argument.id)
+            if not written:
+                continue
+            # 用户显式重新绑定变量可能替换参数存储。
+            # 应保留其显式结果，不能通过推断替代。
+            rebound = {
+                node.id
+                for node in ast.walk(func_def)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+            }
+            if ambiguous := written & rebound:
+                raise TypeError(
+                    f"Inline helper {ctx.source_def_name!r} rebinds foreign-written tensor parameter(s) "
+                    f"{sorted(ambiguous)!r}; return those tensors explicitly"
+                )
+            ordered = tuple(name for name in ctx.param_names if name in written)
+            self._implicit_inline_returns[ctx.func_name] = ordered
+            self._dep_mutated_params[ctx.func_name] = ordered
+
+    def _add_inline_writeback_returns(self, ctx: SpecializeContext, func_def: ast.FunctionDef) -> str | None:
+        """在函数体变量重命名前插入隐式张量结果。"""
+        params = self._implicit_inline_returns.get(ctx.func_name, ())
+        if not params:
+            return None
+        for node in ast.walk(func_def):
+            if isinstance(node, ast.Return):
+                node.value = _implicit_return_value(params)
+        if not isinstance(func_def.body[-1], ast.Return):
+            func_def.body.append(ast.Return(value=_implicit_return_value(params)))
+        types = [_build_tensor_annotation(ctx.tensor_meta[name], is_out=False) for name in params]
+        return types[0] if len(types) == 1 else f"tuple[{', '.join(types)}]"
+
     def _build_source_map(self, src: str) -> dict[int, tuple[str, int, int]]:
         """Map each generated-program line to the user's original source location.
 
@@ -2168,6 +2266,12 @@ class Specializer:
         return out
 
     def _specialize_function(self, ctx: SpecializeContext) -> list[str]:
+        """分发原生 Python 函数体或外部提供方的声明。"""
+        if ctx.external_parameter_access is not None:
+            return self._render_foreign(ctx)
+        return self._specialize_python_function(ctx)
+
+    def _specialize_python_function(self, ctx: SpecializeContext) -> list[str]:
         """Generate lines for a single @pl.function method."""
         # Parse the source to AST
         src = textwrap.dedent(ctx.source)
@@ -2179,7 +2283,6 @@ class Specializer:
         out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(
             func_def
         )
-
         # Inline helpers share the caller's tensor storage, so writes do not
         # need Out/InOut annotations at this eliminated call boundary. Local
         # name rebindings remain local; InlineFunctions separates their handles.
@@ -2308,7 +2411,8 @@ class Specializer:
                 self._external_return_params(func_def, tensor_params, out_params, ret_type),
             )
 
-        ret_type = _infer_return_type(
+        # 无返回值内联边界仍需传递外部写回，且使用重命名前的最新张量版本。
+        ret_type = self._add_inline_writeback_returns(ctx, func_def) or _infer_return_type(
             func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
@@ -2337,6 +2441,7 @@ class Specializer:
                 else {}
             ),
         )
+        transformer._dep_mutated_params = self._dep_mutated_params
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
         # Don't overwrite entries from earlier functions — in multi-function JIT,
@@ -2408,6 +2513,32 @@ class Specializer:
         result_lines.extend(body_lines[1:])
 
         return result_lines
+
+    def _render_foreign(self, ctx: SpecializeContext) -> list[str]:
+        """生成提供方 ABI，不解释其 DSL 注解。"""
+        assert ctx.external_parameter_access is not None
+        params: list[str] = []
+        for name in ctx.param_names:
+            if name in ctx.tensor_meta:
+                access = ctx.external_parameter_access[name]
+                annotation = _build_tensor_annotation(
+                    ctx.tensor_meta[name], is_out=access == "write", is_inout=access == "read_write"
+                )
+            else:
+                annotation = f"pl.Scalar[{values.dtype_str(ctx.scalar_dtypes[name])}]"
+            params.append(f"{name}: {annotation}")
+        types = [
+            _build_tensor_annotation(ctx.tensor_meta[name], is_out=False)
+            for name in self._dep_mutated_params[ctx.func_name]
+        ]
+        result = types[0] if len(types) == 1 else f"tuple[{', '.join(types)}]" if types else None
+        return self._render_external(
+            ctx,
+            params,
+            f" -> {result}" if result else "",
+            ctx.param_names,
+            list(self._dep_mutated_params[ctx.func_name]),
+        )
 
     @staticmethod
     def _external_return_params(
@@ -2486,6 +2617,8 @@ class Specializer:
                 function_attrs.append(f'"{EXTERNAL_INCLUDE_DIRS_ATTR}": {encoded_include_dirs!r}')
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
+            if ctx.external_hard_syncall is not None:
+                function_attrs.append(f'"{EXTERNAL_HARD_SYNCALL_ATTR}": {ctx.external_hard_syncall!r}')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
             result_contract = (
                 [f"    pl.func_attr({{{EXTERNAL_RETURN_PARAMS_ATTR!r}: [{', '.join(returned_params)}]}})"]

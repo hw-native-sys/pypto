@@ -25,13 +25,16 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
+from pypto import CacheConfig, Error
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import generate
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.jit import JITFunction
+from pypto.jit.foreign import ExternalKernelSpec
 from pypto.jit.specializer import Specializer
 from pypto.pypto_core import codegen, ir
-from pypto.runtime import RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
 
 _KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 _PAIR_ROWS = 16
@@ -800,6 +803,495 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
 
         @pl.jit.extern(core_type="aiv", source=cpp, include_dirs=[missing])
         def k(a: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+
+
+class _ForeignKernel:
+    """不带 PyPTO 注解，且不强制依赖第三方包的提供方。"""
+
+    def __init__(self, func, source, access, *, core="aiv", hard_syncall=None):
+        self.jit = JITFunction(
+            func,
+            func_type="extern",
+            external_builder=lambda ctx: ExternalKernelSpec(
+                source=str(source),
+                core_type=core,
+                parameter_access=access,
+                dual_aiv_dispatch=core == "mixed",
+                hard_syncall=hard_syncall,
+            ),
+        )
+
+    def __pypto_jit__(self):
+        return self.jit
+
+
+@pytest.mark.parametrize("core", ["aiv", "aic", "mixed"])
+def test_foreign_call_infers_outputs_and_emits_task(tmp_path, core):
+    def foreign_body(x, out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"x": "read", "out": "write"}, core=core)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+        leaf(x, out=out)
+        return out
+
+    args = (torch.zeros(1, 32), torch.empty(1, 32))
+    src = _specialize(entry, *args)
+    assert "out_v1 = self.foreign_body(x, out)" in src
+    assert "return out_v1" in src
+    config, after = _generate_external_config(entry, args, tmp_path)
+    assert "foreign_body" in config
+    orch = after.get_function("entry")
+    assert orch is not None
+    generated = codegen.generate_orchestration(after, orch).code
+    assert "add_output(" in generated
+    if core == "mixed":
+        assert "MixedKernels mixed_0 = {0, 1, 1}" in generated
+
+
+@pytest.mark.parametrize("core", ["aiv", "aic", "mixed"])
+def test_foreign_workspace_writeback_preserves_shape_expression(tmp_path, core):
+    """内部工作区的 tensor.dim 表达式不能被提供方特化后的常量形状替换。"""
+
+    def foreign_body(workspace, output):
+        pass
+
+    leaf = _ForeignKernel(
+        foreign_body, _write_kernel(tmp_path), {"workspace": "read_write", "output": "write"}, core=core
+    )
+
+    @pl.jit
+    def entry(source: pl.Tensor, output: pl.Out[pl.Tensor]):
+        rows = pl.tensor.dim(source, 0)
+        workspace = pl.create_tensor([rows, 32], dtype=pl.FP32)
+        leaf(workspace, output)
+        return output
+
+    args = (torch.empty(6, 32), torch.empty(6, 32))
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_inout_call_is_loop_carried(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]) -> pl.Tensor:
+        for _ in pl.range(0, 3):
+            leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32),)
+    src = _specialize(entry, *args)
+    assert "out = self.foreign_body(out)" in src
+    _, after = _generate_external_config(entry, args, tmp_path)
+    orch = after.get_function("entry")
+    assert orch is not None
+    generated = codegen.generate_orchestration(after, orch).code
+    assert "add_inout(" in generated
+
+
+def test_foreign_multiple_outputs_are_rebound(tmp_path):
+    def foreign_body(x, y):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"x": "write", "y": "write"})
+
+    @pl.jit
+    def entry(x: pl.Out[pl.Tensor], y: pl.Out[pl.Tensor]) -> tuple[pl.Tensor, pl.Tensor]:
+        leaf(x, y)
+        leaf(x, y)
+        return x, y
+
+    args = (torch.empty(1, 32), torch.empty(1, 32))
+    src = _specialize(entry, *args)
+    assert "x_v1, y_v1 = self.foreign_body(x, y)" in src
+    assert "x_v2, y_v2 = self.foreign_body(x_v1, y_v1)" in src
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_scoped_writeback_uses_active_alias(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor], enabled: pl.Scalar[pl.INT32]) -> pl.Tensor:
+        leaf(out)
+        for _ in pl.range(0, 3):
+            leaf(out)
+        if enabled > 0:
+            leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32), 1)
+    source = _specialize(entry, *args)
+    assert source.count("out_v1 = self.foreign_body(out_v1)") == 2
+    assert "return out_v1" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_writebacks_propagate_transitively(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def inner(out: pl.Tensor):
+        leaf(out)
+
+    @pl.jit.inline(auto_scope=False)
+    def outer(out: pl.Tensor):
+        inner(out)
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]) -> pl.Tensor:
+        outer(out)
+        leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32),)
+    source = _specialize(entry, *args)
+    assert "out_v1 = self.outer(out)" in source
+    assert "out_v2 = self.foreign_body(out_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_loop_and_branch_writebacks(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(out: pl.Tensor, enabled: pl.Scalar[pl.INT32]):
+        for _ in pl.range(0, 3):
+            if enabled > 0:
+                leaf(out)
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor], enabled: pl.Scalar[pl.INT32]) -> pl.Tensor:
+        leaf(out)
+        for _ in pl.range(0, 2):
+            helper(out, enabled)
+        leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32), 1)
+    source = _specialize(entry, *args)
+    assert "out_v1 = self.helper(out_v1, enabled)" in source
+    assert "out_v2 = self.foreign_body(out_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_explicit_inline_return_keeps_value_semantics(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(out: pl.Tensor) -> pl.Tensor:
+        leaf(out)
+        return out
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]) -> pl.Tensor:
+        out = helper(out)
+        leaf(out)
+        return out
+
+    args = (torch.zeros(1, 32),)
+    source = _specialize(entry, *args)
+    assert "out_v1 = self.helper(out)" in source
+    assert "out_v2 = self.foreign_body(out_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_multiple_outputs_keep_parameter_order(tmp_path):
+    def foreign_body(x, y):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"x": "write", "y": "write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(x: pl.Tensor, y: pl.Tensor) -> None:
+        leaf(y=y, x=x)
+
+    @pl.jit
+    def entry(x: pl.Out[pl.Tensor], y: pl.Out[pl.Tensor]) -> tuple[pl.Tensor, pl.Tensor]:
+        helper(y=y, x=x)
+        leaf(x, y)
+        return x, y
+
+    args = (torch.empty(1, 32), torch.empty(1, 32))
+    source = _specialize(entry, *args)
+    assert "x_v1, y_v1 = self.helper(x, y)" in source
+    assert "x_v2, y_v2 = self.foreign_body(x_v1, y_v1)" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_void_inline_parameter_rebind_requires_explicit_return(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "read_write"})
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(out: pl.Tensor):
+        leaf(out)
+        out = pl.create_tensor([1, 32], pl.FP32)
+
+    @pl.jit
+    def entry(out: pl.InOut[pl.Tensor]):
+        helper(out)
+
+    with pytest.raises(TypeError, match="helper.*rebinds.*out.*return those tensors explicitly"):
+        _specialize(entry, torch.empty(1, 32))
+
+
+def test_foreign_untyped_scalar_reports_parameter_before_rendering(tmp_path):
+    def foreign_body(out, scale):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]):
+        leaf(out, 1.0)
+
+    with pytest.raises(ValueError, match="foreign_body.*cannot infer.*scale"):
+        _specialize(entry, torch.empty(1, 32))
+
+
+def test_foreign_cache_tracks_generated_cpp(tmp_path, monkeypatch):
+    def foreign_body(out):
+        pass
+
+    cpp = _write_kernel(tmp_path)
+    leaf = _ForeignKernel(foreign_body, cpp, {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]) -> pl.Tensor:
+        leaf(out)
+        return out
+
+    builds = []
+
+    def compile_stub(*args, **kwargs):
+        artifact = object()
+        builds.append(artifact)
+        return artifact
+
+    monkeypatch.setattr(entry, "_compile", compile_stub)
+    config = RunConfig(
+        backend_type=BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        cache_config=CacheConfig(enabled=False),
+    )
+    out = torch.empty(1, 32)
+    first = entry.compile(out, config=config)
+    assert entry.compile(out, config=config) is first
+    cpp.write_text(_KERNEL_SRC + "\n// changed producer implementation\n")
+    assert entry.compile(out, config=config) is not first
+    assert len(builds) == 2
+
+
+def test_foreign_scalar_argument_inherits_caller_dtype(tmp_path):
+    def foreign_body(out, scale):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor], scale: pl.Scalar[pl.FP32]) -> pl.Tensor:
+        leaf(scale=scale, out=out)
+        return out
+
+    source = _specialize(entry, torch.empty(1, 32), 2.5)
+    assert "scale: pl.Scalar[pl.FP32]" in source
+    _generate_external_config(entry, (torch.empty(1, 32), 2.5), tmp_path)
+
+
+def test_foreign_mx_scale_storage_view_preserves_dtype_and_nd_layout(tmp_path):
+    def foreign_body(scale, out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"scale": "read", "out": "write"})
+
+    @pl.jit
+    def entry(scale: pl.Tensor[[8, 16], pl.FP8E8M0, pl.MX_B_NN], out: pl.Out[pl.Tensor]):
+        backing = pl.tensor.view(scale, [1, 128], layout=pl.ND)
+        leaf(backing, out)
+        return out
+
+    args = (torch.empty(8, 16, dtype=torch.float8_e8m0fnu), torch.empty(1, 128))
+    source = _specialize(entry, *args)
+    assert "scale: pl.Tensor[[1, 128], pl.FP8E8M0]" in source
+    _generate_external_config(entry, args, tmp_path)
+
+
+def test_foreign_scalar_argument_inherits_loop_index_dtype(tmp_path):
+    def foreign_body(out, page):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]) -> pl.Tensor:
+        for page in pl.parallel(2):
+            leaf(out, page)
+        return out
+
+    source = _specialize(entry, torch.empty(1, 32))
+    assert "page: pl.Scalar[pl.INDEX]" in source
+    _generate_external_config(entry, (torch.empty(1, 32),), tmp_path)
+
+
+def test_foreign_rebound_loop_index_does_not_keep_index_dtype(tmp_path):
+    def foreign_body(out, page):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor], scale: pl.Scalar[pl.FP32]) -> pl.Tensor:
+        for page in pl.parallel(2):
+            page = scale
+            leaf(out, page)
+        return out
+
+    with pytest.raises(ValueError, match="page"):
+        _specialize(entry, torch.empty(1, 32), 0.5)
+
+
+def test_foreign_different_call_shapes_are_specialized(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(x: pl.Out[pl.Tensor], y: pl.Out[pl.Tensor]):
+        leaf(x)
+        leaf(y)
+
+    args = (torch.empty(1, 32), torch.empty(1, 64))
+    _, _, tensor_meta, scalars, constexpr, dynamic = entry._bind_args(args, {})
+    contexts = entry._build_contexts(tensor_meta, scalars, constexpr, dynamic)
+    foreign = [ctx for ctx in contexts if ctx.external_parameter_access is not None]
+    assert {ctx.tensor_meta["out"].shape for ctx in foreign} == {(1, 32), (1, 64)}
+    assert len({ctx.func_name for ctx in foreign}) == 2
+    assert pl.parse(Specializer("_jit_foreign_shapes", contexts).specialize()) is not None
+
+
+def test_foreign_void_call_cannot_be_used_as_value(tmp_path):
+    def foreign_body(out):
+        pass
+
+    leaf = _ForeignKernel(foreign_body, _write_kernel(tmp_path), {"out": "write"})
+
+    @pl.jit
+    def entry(out: pl.Out[pl.Tensor]):
+        out = leaf(out)
+        return out
+
+    with pytest.raises(TypeError, match="standalone call statement"):
+        entry.specialize(torch.empty(1, 32))
+
+
+def test_foreign_hook_rejects_invalid_result():
+    class BadHook:
+        def __pypto_jit__(self):
+            return None
+
+    leaf = BadHook()
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        leaf(x)
+
+    with pytest.raises(TypeError, match="must return a JITFunction"):
+        entry.specialize(torch.zeros(1, 32))
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
+@pytest.mark.parametrize(
+    "launch", ["query", "scalar", "submit", "partial", "plain", "no_sync", "wrong_query"]
+)
+def test_foreign_hard_syncall_launch_contract(tmp_path, ascend_backend, core, launch):
+    def foreign_body(output):
+        pass
+
+    leaf = _ForeignKernel(
+        foreign_body,
+        _write_kernel(tmp_path),
+        {"output": "write"},
+        core=core,
+        hard_syncall={"aic": "aic_only", "aiv": "aiv_only", "mixed": "mix"}[core],
+    )
+    is_aiv = core == "aiv"
+    plain = launch == "plain"
+    partial = launch == "partial"
+    no_sync = launch == "no_sync"
+    scalar = launch == "scalar"
+    submit = launch == "submit"
+    wrong_query = launch == "wrong_query"
+
+    @pl.jit
+    def entry(output: pl.Out[pl.Tensor], n: pl.Scalar[pl.INDEX]):
+        if is_aiv:
+            count = pl.system.available_aiv_count()
+            wrong = pl.system.available_cluster_count()
+        else:
+            count = pl.system.available_cluster_count()
+            wrong = pl.system.available_aiv_count()
+        if plain:
+            leaf(output)
+        elif partial:
+            with pl.spmd(4, sync_start=True):
+                leaf(output)
+        elif no_sync:
+            with pl.spmd(count):
+                leaf(output)
+        elif scalar:
+            with pl.spmd(n, sync_start=True):
+                leaf(output)
+        elif submit:
+            with pl.spmd(count, sync_start=True) as _task:
+                leaf(output)
+        elif wrong_query:
+            with pl.spmd(wrong, sync_start=True):
+                leaf(output)
+        else:
+            with pl.spmd(count, sync_start=True):
+                leaf(output)
+        return output
+
+    args = (torch.zeros(1, 32), 4)
+    if launch in ("partial", "plain", "no_sync", "wrong_query"):
+        with pytest.raises(RuntimeError if launch == "plain" else Error, match="(?:syncall|sync_start)"):
+            _generate_external_config(entry, args, tmp_path)
+        return
+    _, after = _generate_external_config(entry, args, tmp_path)
+    orch = after.get_function("entry")
+    assert orch is not None
+    generated = codegen.generate_orchestration(after, orch).code
+    query = "rt_available_aiv_count()" if core == "aiv" else "rt_available_cluster_count()"
+    assert f"!= {query}" in generated
+    assert '.set_error("External hard syncall requires full runtime core occupancy")' in generated
+    assert ".set_require_sync_start(true)" in generated
+    assert generated.index(".set_error(") < generated.index("rt_submit_")
+    # 不透明函数的屏障属性经过完整降级后仍然存在，不能被空函数体消除。
+    kernels = [f for f in after.functions.values() if f.attrs.get("external_source")]
+    assert all(f.attrs.get("external_hard_syncall") for f in kernels)
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)

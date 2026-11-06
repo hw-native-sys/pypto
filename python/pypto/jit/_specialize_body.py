@@ -53,6 +53,8 @@ class BodyTransformer(ast.NodeTransformer):
         self._constexpr = dict(constexpr_values or {})
         self._dep_constexpr_params = dep_constexpr_params or {}
         self._dep_names = dep_names
+        self._dep_mutated_params: dict[str, tuple[str, ...]] = {}
+        self._foreign_statement_calls: set[int] = set()
         # Call name → generated function name, for deps this body reaches
         # under a different name (an aliased import). ``visit_Call`` resolves
         # through it so ``kern(...)`` becomes ``self.kernel(...)``; a name
@@ -257,11 +259,54 @@ class BodyTransformer(ast.NodeTransformer):
     # Statement-level transforms
     # ------------------------------------------------------------------
 
-    def visit_Expr(self, node: ast.Expr) -> ast.stmt | None:
+    def _foreign_writeback_target(self, name: str) -> str:
+        """为外部调用结果赋值选取当前张量别名。"""
+        if name not in self._assign_count:
+            self._record_first_assign(name)
+            return name
+        if self._scope_depth == self._assign_depth[name]:
+            return self._rebind(name)
+        return self._var_renames.get(name, name)
+
+    def visit_Expr(self, node: ast.Expr) -> ast.stmt | list[ast.stmt] | None:
         """Remove bind_dynamic(...) and dynvar assignment statements."""
         if isinstance(node.value, ast.Call):
             call = node.value
             func = call.func
+            if isinstance(func, ast.Name) and func.id in self._dep_names:
+                name = self._dep_call_targets.get(id(call), self._dep_func_names.get(func.id, func.id))
+                if name in self._dep_mutated_params:
+                    self._foreign_statement_calls.add(id(call))
+                    params = self._dep_param_names[name]
+                    if any(isinstance(arg, ast.Starred) for arg in call.args) or any(
+                        kw.arg is None for kw in call.keywords
+                    ):
+                        raise TypeError(f"External kernel {func.id!r} does not accept argument unpacking")
+                    bound = dict(zip(params, call.args))
+                    for kw in call.keywords:
+                        if kw.arg in bound or kw.arg not in params:
+                            raise TypeError(f"External kernel {func.id!r}: invalid argument {kw.arg!r}")
+                        bound[kw.arg] = kw.value
+                    if len(call.args) > len(params) or set(bound) != set(params):
+                        raise TypeError(f"External kernel {func.id!r} requires arguments {params}")
+                    mutated_exprs = [bound[param] for param in self._dep_mutated_params[name]]
+                    if any(not isinstance(arg, ast.Name) for arg in mutated_exprs):
+                        raise TypeError(
+                            f"External kernel {func.id!r}: output arguments must be tensor variables"
+                        )
+                    mutated = cast("list[ast.Name]", mutated_exprs)
+                    if len({arg.id for arg in mutated}) != len(mutated):
+                        raise ValueError(f"External kernel {func.id!r}: output arguments must be distinct")
+                    if mutated:
+                        # 在重新绑定输出前访问调用。这与普通显式结果的 SSA 更新相同；
+                        # 循环体内也必须保留跨迭代传递的更新。
+                        value = self.visit_Call(call)
+                        targets: list[ast.expr] = []
+                        for arg in mutated:
+                            var = self._foreign_writeback_target(arg.id)
+                            targets.append(ast.Name(id=var, ctx=ast.Store()))
+                        target = targets[0] if len(targets) == 1 else ast.Tuple(elts=targets, ctx=ast.Store())
+                        return ast.copy_location(ast.Assign(targets=[target], value=value), node)
             # param.bind_dynamic(dim, dynvar) → delete
             if (
                 isinstance(func, ast.Attribute)
@@ -515,6 +560,10 @@ class BodyTransformer(ast.NodeTransformer):
             dep_name = self._dep_call_targets.get(
                 id(node), self._dep_func_names.get(node.func.id, node.func.id)
             )
+            if dep_name in self._dep_mutated_params and id(node) not in self._foreign_statement_calls:
+                raise TypeError(
+                    f"External DSL kernel {node.func.id!r} returns None; use a standalone call statement"
+                )
             new_func = ast.Attribute(
                 value=ast.Name(id="self", ctx=ast.Load()),
                 attr=dep_name,

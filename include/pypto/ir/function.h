@@ -490,8 +490,9 @@ inline constexpr const char* kAttrSplitAiv = "split_aiv";
  * source.
  *
  * Value type: ``std::string`` (an absolute path). Written by the
- * ``@pl.function(external_source=...)`` decorator; the function's DSL body is
- * then an empty ``...``. Read by ``ExpandMixedKernel`` (external members cannot
+ * ``@pl.function(external_source=...)`` decorator.
+ * 函数体仅含空声明，写回参数契约由 external_return_params 属性表达。
+ * Read by ``ExpandMixedKernel`` (external members cannot
  * be ABI-normalised or inferred into dual dispatch),
  * ``VerifyReturnParamsExplicit`` (validates the declaration's return contract),
  * the Python printer, and the backend, which compiles the named
@@ -503,6 +504,15 @@ inline constexpr const char* kAttrSplitAiv = "split_aiv";
  * ``_DECORATOR_ONLY_FUNC_ATTRS``.
  */
 inline constexpr const char* kAttrExternalSource = "external_source";
+
+/**
+ * @brief 外部设备源码中的硬件全核屏障参与方，字符串为 mix、aic_only 或 aiv_only。
+ *
+ * 由外部核适配器写入 AIC/AIV 声明，贯穿降级过程，不移除。
+ * HardSyncallOccupancy 将其作为不透明函数体的同步效果；编排代码生成还会检查
+ * sync_start 和实际运行时核数，覆盖动态启动规模及没有 SPMD 作用域的调用。
+ */
+inline constexpr const char* kAttrExternalHardSyncall = "external_hard_syncall";
 
 /**
  * @brief Ordered parameter references returned by an external kernel declaration.
