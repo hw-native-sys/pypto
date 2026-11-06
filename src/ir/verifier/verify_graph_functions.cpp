@@ -378,9 +378,9 @@ class GraphBodyChecker : public IRVisitor {
       auto call = assign ? As<Call>(assign->value_) : nullptr;
       if (call && IsAllocation(call)) {
         batched_.insert(stmt.get());
-        const bool joins_batch =
-            !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
-            alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_, locally_defined);
+        const bool joins_batch = !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
+                                 alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_,
+                                                                        locally_defined, gm_pipe_consumers_);
         if (joins_batch) {
           ++batchable;
         } else {
@@ -649,6 +649,7 @@ class GraphBodyChecker : public IRVisitor {
   }
 
   ProgramPtr program_;
+  alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   FunctionPtr func_;
   std::vector<Diagnostic>& diagnostics_;
   graph_replay::ReplayInvariantSet invariant_;

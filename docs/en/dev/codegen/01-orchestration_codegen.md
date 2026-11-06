@@ -168,6 +168,16 @@ External tensors borrow chip-resident descriptors passed through `ChipTaskArgs`.
 
 A create is only hoisted to scope entry when its size is *entry-valid*. A size that reads a value the body itself defines — a plain local, or an `if` / `for` / `while` return_var, whose C++ declaration is emitted where that statement sits — keeps the create in body order instead, so the emitted C++ never uses a name before its declaration. The same rule covers the `__gm_pipe_buffer` placeholder, whose real size is `slot_bytes * core_num` rather than its IR shape.
 
+GM pipe allocations require the consuming kernel's per-block ring footprint multiplied by its
+effective launch `core_num`; the injected `tensor.create([1])` shape is only a placeholder.
+When `LegalizeGraphBoundary` moves an allocation into the Graph's caller, sizing follows that
+specific boundary tensor parameter to its concrete kernel `Call` or `Submit`. Launch-site
+attributes take precedence over callee attributes, as they do for task submission. The Graph
+container itself has no block count: unrelated pipe buffers retain their own layouts and
+launch widths, even when their kernels reuse the same pipe IDs. Emission and allocation
+batching share the consumer lookup. Forwarding that cannot identify a compatible concrete
+consumer is rejected rather than silently allocating one block's storage.
+
 ### Parameter Direction
 
 The `ParamDirection` of each function parameter determines how it appears in task submission:

@@ -706,6 +706,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const ir::Var*> declared_var_ptrs_;
   std::unordered_set<const ir::Stmt*> batched_create_stmts_;
   std::unordered_set<const ir::Var*> effective_uses_;
+  ir::alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   std::unordered_map<std::string, int64_t> gm_pipe_workspace_elements_by_callee_;
   std::unordered_map<std::string, std::string> tensor_create_size_expr_by_emit_name_;
   std::unordered_map<std::string, std::string> dist_param_to_ctx_param_;

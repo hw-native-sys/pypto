@@ -914,9 +914,9 @@ class GraphNodeCounter : public IRVisitor {
       auto call = assign ? As<Call>(assign->value_) : nullptr;
       if (call && IsAllocation(call)) {
         batched_.insert(stmt.get());
-        const bool joins_batch =
-            !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
-            alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_, locally_defined);
+        const bool joins_batch = !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
+                                 alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_,
+                                                                        locally_defined, gm_pipe_consumers_);
         if (joins_batch) {
           ++batchable;
         } else {
@@ -985,6 +985,7 @@ class GraphNodeCounter : public IRVisitor {
   FunctionPtr func_;
   ProgramPtr program_;
   size_t count_ = 0;
+  alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   std::unordered_set<const Stmt*> batched_;
 };
 
