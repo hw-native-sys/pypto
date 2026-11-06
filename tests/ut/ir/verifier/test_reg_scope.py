@@ -516,6 +516,23 @@ def test_hardware_loop_static_unsigned_stop_is_checked_before_emission(dtype, va
     assert bool(diagnostics) == (value > 65535)
 
 
+def test_unsigned_wrapping_stop_exceeds_hardware_counter_range():
+    dtype = DataType.UINT32
+    stop = ir.Sub(ir.ConstInt(0, dtype, SPAN), ir.ConstInt(1, dtype, SPAN), dtype, SPAN)
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("65535" in diagnostic.message for diagnostic in verify(region(loop)))
+
+
 @pytest.mark.parametrize("policy", [ir.HardwareLoopPolicy.Auto, ir.HardwareLoopPolicy.Require])
 @pytest.mark.parametrize("outer_stop", [0, 1])
 @pytest.mark.parametrize("computed", [False, True])
@@ -535,11 +552,15 @@ def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop
         )
     body = ir.ForStmt(
         scalar("outer"),
-        integer(0),
+        ir.Add(integer(0), integer(0), DataType.INDEX, SPAN)
+        if computed and policy == ir.HardwareLoopPolicy.Auto
+        else integer(0),
         ir.Sub(integer(outer_stop + 1), integer(1), DataType.INDEX, SPAN)
         if computed
         else integer(outer_stop),
-        integer(1),
+        ir.Add(integer(0), integer(1), DataType.INDEX, SPAN)
+        if computed and policy == ir.HardwareLoopPolicy.Auto
+        else integer(1),
         [],
         body,
         [],

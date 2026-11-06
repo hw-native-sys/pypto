@@ -117,9 +117,8 @@ A5 PTO codegen accepts canonical `pl.hardware_loop(stop)` inside `pl.reg_scope()
 with nesting up to four levels and no loop-carried values. `start` is zero and
 `step` is one. Integer stops may be static or dynamic. The scalar capture ABI supports signed
 and unsigned 8-, 16-, 32-, and 64-bit integers and index values. The verifier
-rejects a nonempty loop when the computed stop exceeds 65535. It evaluates
-constant expressions as integers without checking the source dtype range or
-modeling its wraparound. Unproven bounds pass through; callers must keep counts
+rejects a nonempty loop when the computed stop exceeds 65535. Static evaluation accounts for the result dtype when it can prove the value,
+including narrow unsigned wraparound. Unproven bounds pass through; callers must keep counts
 and memory accesses within their valid ranges.
 Runtime branches and while loops are rejected.
 

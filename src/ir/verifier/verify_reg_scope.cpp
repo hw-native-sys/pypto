@@ -19,9 +19,11 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/const_fold.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -38,51 +40,56 @@
 
 namespace pypto::ir {
 namespace {
-// Hardware-loop bounds use mathematical integer values. Source integer widths
-// do not add admission requirements; unknown expressions remain unproven.
-std::optional<int64_t> ExactHardwareLoopConstant(const ExprPtr& expr) {
-  if (auto value = As<ConstInt>(expr)) return value->value_;
+// Only use results whose integer semantics are known. An unknown bound is
+// neither a range violation nor proof that an ancestor is empty.
+std::optional<int64_t> ExactLoopConstant(const ExprPtr& expr) {
+  const auto type = As<ScalarType>(expr->GetType());
+  if (!type || !(type->dtype_.IsInt() || type->dtype_ == DataType::INDEX)) return std::nullopt;
+  const auto dtype = type->dtype_;
+  if (auto value = As<ConstInt>(expr)) {
+    return arith::detail::ConstIntFitsDtype(value->value_, dtype) ? std::optional<int64_t>(value->value_)
+                                                                  : std::nullopt;
+  }
   if (auto cast = As<Cast>(expr)) {
-    const auto dtype = GetScalarDtype(expr);
-    return dtype.IsInt() || dtype == DataType::INDEX ? ExactHardwareLoopConstant(cast->operand_)
-                                                     : std::nullopt;
+    const auto operand = ExactLoopConstant(cast->operand_);
+    if (operand && arith::detail::ConstIntFitsDtype(*operand, dtype)) return operand;
+    return std::nullopt;
   }
   ExprPtr folded;
   if (auto binary = As<BinaryExpr>(expr)) {
-    const auto lhs = ExactHardwareLoopConstant(binary->left_);
-    const auto rhs = ExactHardwareLoopConstant(binary->right_);
-    if (!lhs || !rhs) return std::nullopt;
+    const auto lhs = ExactLoopConstant(binary->left_);
+    const auto rhs = ExactLoopConstant(binary->right_);
+    if (!lhs || !rhs || !arith::detail::ConstIntFitsDtype(*lhs, dtype) ||
+        !arith::detail::ConstIntFitsDtype(*rhs, dtype)) {
+      return std::nullopt;
+    }
     const auto kind = expr->GetKind();
     if ((kind == ObjectKind::FloorDiv || kind == ObjectKind::FloorMod) &&
         (*rhs == 0 || (*lhs == std::numeric_limits<int64_t>::min() && *rhs == -1))) {
       return std::nullopt;
     }
     if (kind == ObjectKind::Pow && *rhs < 0) return std::nullopt;
-    folded = arith::TryConstFoldBinary(kind, arith::MakeConstInt(*lhs, DataType::INDEX),
-                                       arith::MakeConstInt(*rhs, DataType::INDEX), DataType::INDEX);
+    if ((kind == ObjectKind::BitShiftLeft || kind == ObjectKind::BitShiftRight) &&
+        (*rhs < 0 || static_cast<uint64_t>(*rhs) >= dtype.GetBit())) {
+      return std::nullopt;
+    }
+    folded = arith::TryConstFoldBinary(kind, arith::MakeConstInt(*lhs, dtype),
+                                       arith::MakeConstInt(*rhs, dtype), dtype);
   } else if (auto unary = As<UnaryExpr>(expr)) {
-    const auto operand = ExactHardwareLoopConstant(unary->operand_);
+    const auto operand = ExactLoopConstant(unary->operand_);
     if (!operand) return std::nullopt;
-    folded = arith::TryConstFoldUnary(expr->GetKind(), arith::MakeConstInt(*operand, DataType::INDEX));
+    folded = arith::TryConstFoldUnary(expr->GetKind(), arith::MakeConstInt(*operand, dtype));
   }
-  if (auto value = As<ConstInt>(folded)) return value->value_;
+  if (auto value = As<ConstInt>(folded)) {
+    if (arith::detail::ConstIntFitsDtype(value->value_, dtype)) return value->value_;
+    // Unsigned arithmetic is modular. For narrow types its wrapped value
+    // fits in the signed host representation used by the constant folder.
+    if (dtype.IsUnsignedInt() && dtype.GetBit() < 64) {
+      const auto mask = (uint64_t{1} << dtype.GetBit()) - 1;
+      return static_cast<int64_t>(static_cast<uint64_t>(value->value_) & mask);
+    }
+  }
   return std::nullopt;
-}
-
-// A malformed builder/deserialized literal must not prove an ancestor empty:
-// codegen narrows literals to their declared dtype before executing the loop.
-bool IsRepresentableLoopLiteral(const ConstIntPtr& literal) {
-  if (!literal) return false;
-  const auto type = As<ScalarType>(literal->GetType());
-  if (!type || !(type->dtype_.IsInt() || type->dtype_ == DataType::INDEX)) return false;
-  const auto bits = type->dtype_.GetBit();
-  const bool is_unsigned = type->dtype_.IsUnsignedInt();
-  if (is_unsigned && literal->value_ < 0) return false;
-  if (bits == 0) return false;
-  if (bits >= 64) return true;
-  if (is_unsigned) return static_cast<uint64_t>(literal->value_) < (uint64_t{1} << bits);
-  const auto limit = int64_t{1} << (bits - 1);
-  return literal->value_ >= -limit && literal->value_ < limit;
 }
 
 /// Two linear walks separate ownership from uses, including uses preceding an
@@ -261,15 +268,13 @@ class RegionChecker : public IRVisitor {
     const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
     if (hardware_loop) ++hardware_loop_depth_;
     const bool previous_empty = empty_hardware_loop_;
-    const auto exact_stop =
-        collecting_ && !previous_empty ? ExactHardwareLoopConstant(op->stop_) : std::nullopt;
-    const auto start = As<ConstInt>(op->start_);
-    const auto step = As<ConstInt>(op->step_);
+    const auto exact_stop = collecting_ && !previous_empty ? ExactLoopConstant(op->stop_) : std::nullopt;
+    const auto start = exact_stop ? ExactLoopConstant(op->start_) : std::nullopt;
+    const auto step = start ? ExactLoopConstant(op->step_) : std::nullopt;
     // Empty sequential ancestors suppress hardware realization requirements
     // even when the ancestor uses Auto policy rather than Require.
-    if (IsRepresentableLoopLiteral(start) && exact_stop && IsRepresentableLoopLiteral(step) &&
-        ((step->value_ > 0 && start->value_ >= *exact_stop) ||
-         (step->value_ < 0 && start->value_ <= *exact_stop))) {
+    if (exact_stop && start && step &&
+        ((*step > 0 && *start >= *exact_stop) || (*step < 0 && *start <= *exact_stop))) {
       empty_hardware_loop_ = true;
     }
     if (collecting_ && hardware_loop && !previous_empty) {
