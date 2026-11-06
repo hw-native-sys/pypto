@@ -486,7 +486,7 @@ InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直�
 信息中指明 CHIP 路径。下文的 CHIP/L2 路径两种形式都接受。编译期 `core_num` 在降级时折叠出
 同样的 `B = CalAllToAllVBlocks(P, L)`，并在 `B > 1` 时把启动规格
 （`core_num=B`、`sync_start`）附加到调用上。运行期 `core_num` 则把该公式作为
-orchestration 算术发射出来，其中 rank 数从通信 context 读取，并附加计算出的 `B`；
+orchestration 算术发射出来，其中 rank 数取 signal 的静态 `NR`，并附加计算出的 `B`；
 动态取值的有效性由调用方负责——见
 [`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md)。
 

@@ -111,9 +111,9 @@ kernel 走同一条路径，区别只在于文本来自模板而非 ptoas。
 两条通路都不传 rank 数标量。kernel 读 `CommContext::rankNum`，它与 HOST dispatch
 过去传的 `domain_size` 是同一个数：`comm_derive_context` **按 comm domain** 建
 context，其 `rankNum` 就是该域的 rank 数。去掉这个标量的代价是入口处多一次 GM
-读取，换来的是一份共享源码。这在 CHIP 通路上曾经也是唯一可行方案 —— 它当时根本无法计算
-rank 数。RFC #2521 O2 改变了这一点：`pld.system.nranks` 现在也有 orchestration
-代码生成，因此本通路可以从它已经持有的 context 中读取 rank 数（见*启动宽度*）。
+读取，换来的是一份共享源码。orchestration 侧的启动宽度不读取该 context：CHIP
+orchestration 拿到的是每 rank 的*设备*指针，因此宽度改用 signal 的静态 `NR`
+（见*启动宽度*）。
 
 `args[6..7]` 的副本是 `MaterializeDistTensorCtx` **为每个 `DistributedTensor`
 参数各追加一个 `CommCtx` 参数**的产物。合成签名中恰好声明三个这样的参数 ——
@@ -141,17 +141,16 @@ rank 数。RFC #2521 O2 改变了这一点：`pld.system.nranks` 现在也有 or
 出来。由于表达式代码生成没有三元运算符，而仅用 `min`/`max` 也无法表达这一分支，公式采用无分支形式：
 
 ```text
-P = nranks(get_comm_ctx(target))      # 从 orchestration 已持有的 context 读取
-D = max(P, 1)
-B = L - (L % D) * (L >= D)
+NR = signal.shape[0]                  # 静态；必须等于运行期域大小
+B = L - (L % NR) * (L >= NR)
 ```
 
-`D` 是保证算术全域有定义的向下取整，而不是校验：当通信域报告 `P = 0` 时，它避免生成代码中的
-`L % P` 成为未定义行为。得到的 `B` 原样附加到启动规格上。
+`NR` 由 deducer 保证为正，因此除数始终有定义；不发射运行期 context 读取，也不需要向下取整保护。
+得到的 `B` 原样附加到启动规格上。
 [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md) 无法证明运行期 `B` 为正，因此会把 dispatch
 包进 `if (B > 0)` 并保留空分支；若把宽度钳位成 `max(B, 1)`，畸形调用反而会启动一个 block。
 
-动态参数的有效性 —— `L > 0`、`P > 0`、`P == NR`、`S >= B` 以及不超过 AIV 数 —— 由调用方负责，本 pass
+动态参数的有效性 —— `L > 0`、`P == NR`、`S >= B` 以及不超过 AIV 数 —— 由调用方负责，本 pass
 **不**校验。runtime 仍会强制启动准入：超容量的 `require_sync_start` 启动会在提交时被拒绝，而不是
 只启动一部分。
 
@@ -168,7 +167,7 @@ RFC #2521 的算例表固定。
 | ---- | ---- |
 | 编译期 `core_num` 不在 `[1, INT32_MAX]` 内 | 拒绝 —— 与 HOST 通路 entry 在运行期强制的上界相同 |
 | 编译期 `signal` 步长 `S < B` | 拒绝 —— `B` 是折叠后的 block 数（见 *启动宽度*），不是原始 `core_num` |
-| 运行期 `core_num` / rank 数 / signal 步长 | 不在此诊断 —— 动态有效性由调用方负责（RFC #2521 冻结项 #10）；runtime 仍会在提交时拒绝超容量的 sync-start 启动 |
+| 运行期 `core_num` / signal 步长 | 不在此诊断 —— 动态有效性由调用方负责（RFC #2521 冻结项 #10）；runtime 仍会在提交时拒绝超容量的 sync-start 启动 |
 | `dtype != FP32 && dtype != INT8` | 拒绝 —— 支持 FP32 与 INT8（与 HOST 通路的 allowlist 一致） |
 | 集合通信残留在非 HOST 的 orchestration 函数体中 | 被本 pass 自身的后置条件检查拒绝 |
 
@@ -188,7 +187,7 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 
 ## 当前限制
 
-- **运行期 `core_num` 校验被推迟**。动态 `L`、非正的 rank 数、`NR != P` 以及 `S < B` 都不在编译期诊断，
+- **运行期 `core_num` 校验被推迟**。动态 `L`、非正的 `L`、`NR != P` 以及 `S < B` 都不在编译期诊断，
   本变更也不会发射运行期守卫。RFC #2521 §12.3 要求这些检查；将其表示为 IR（由通用代码生成降低的
   带副作用运行期断言）属于后续工作。在此之前，动态参数的有效性由调用方负责；故障仍是逐 rank 的：
   其对端会阻塞在没有超时的 exchange barrier 上，因此畸形请求会一直挂到看门狗触发（冻结项 #10 接受

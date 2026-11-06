@@ -576,7 +576,7 @@ naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) accepts either
 form. A compile-time `core_num` folds the same `B = CalAllToAllVBlocks(P, L)` at
 lowering and attaches it as the launch spec (`core_num=B`, `sync_start`) when
 `B > 1`. A runtime `core_num` emits that formula as orchestration arithmetic
-over a rank count read from the comm context and attaches the computed `B`; the
+over the signal's static `NR` and attaches the computed `B`; the
 validity of dynamic values is the caller's responsibility — see
 [`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md).
 
