@@ -494,7 +494,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x64]
+        arch: [x64, arm64]
     runs-on: [self-hosted, linux, "${{ matrix.arch }}", cpu]
     env:
       PTOAS_ROOT: ${{ github.workspace }}/prebuild-checkout/ptoas-bin
@@ -532,6 +532,10 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-prebuild
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          # CPU prebuilds do not activate CANN on either architecture. Build
+          # simulator assets here; SDK-equipped NPU jobs cache their own
+          # onboard runtime wheels under the separate target-specific keys.
+          runtime-targets: build_package_sim
 
   prebuild-wheels-github:
     # prebuild-wheels for the GitHub-hosted jobs. Same idea, different
@@ -883,6 +887,7 @@ jobs:
           needs-device: 'false'
           pip-cache-name: pip-docs
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_sim
 
       - name: Run the user manual's runnable code blocks
         run: |
@@ -975,6 +980,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-examples
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_sim
 
       # Every example and every documented alternate invocation, plus the
       # manual's runnable blocks. All three ladders are lists of independent
@@ -1171,6 +1177,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-st
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
           # Python and GCC come from the pypto-toolchain bundle rather than a
           # per-machine conda env. Per job on purpose: clang-tidy is still on
           # conda, and a job is reverted by deleting this one line.
@@ -1308,6 +1315,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-st-direct
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Test system tests (batched shard B — ops + cross_core, cheap compiles)
         timeout-minutes: 30
@@ -1562,6 +1570,7 @@ jobs:
           pip-cache-name: pip-dist
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
           unset-ring: 'true'
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Test distributed system tests
         # task-submit --timeout is the total wait for queueing plus execution;
@@ -1639,6 +1648,11 @@ jobs:
           - platform: a5
             runner: cpu
             needs-cann: 'false'
+            # Compile-only: no device and no A5 runtime assets required. Building
+            # the A5 onboard runtime needs a CANN with HcclChannelAcquireWithConfig,
+            # which this CPU runner's SDK does not provide; the sim wheel supplies
+            # the Python SDK and source tree the kernel compiler reads.
+            runtime-targets: build_package_sim
     defaults:
       run:
         working-directory: lib-compile-checkout
@@ -1674,6 +1688,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-lib
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: ${{ matrix['runtime-targets'] || format('build_package_{0};build_package_sim', matrix.platform) }}
 
       - name: Clone current pypto-lib
         run: |
@@ -1780,6 +1795,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-lib
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Clone pypto-lib (Qwen3-14B + DeepSeek-V4-Flash models)
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of lib-checkout, so
@@ -2014,6 +2030,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-serving-guard
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Clone pypto-serving
         # A sibling of serving-checkout, so actions/checkout leaves it alone on
@@ -2270,6 +2287,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-a5
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5;build_package_sim
           # Python and GCC come from the pypto-toolchain bundle, like every
           # other self-hosted job. The npu-a5 pool is provisioned with the
           # bundle and carries no conda env, so this is not optional here.

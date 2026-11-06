@@ -1150,13 +1150,17 @@ class CommDomainScopeStmt : public ScopeStmt {
   std::vector<int64_t> devices_;        ///< Covered worker indices (ascending); empty = all devices
   std::vector<WindowBufferPtr> slots_;  ///< Allocation slots in this scope (alloc-order)
 
+  std::vector<std::string> engines_;  ///< Required async workspace engines
+
   CommDomainScopeStmt(std::vector<int64_t> devices, std::vector<WindowBufferPtr> slots, std::string name_hint,
                       StmtPtr body, Span span, std::vector<std::string> leading_comments = {},
-                      std::vector<std::pair<std::string, std::any>> attrs = {})
+                      std::vector<std::pair<std::string, std::any>> attrs = {},
+                      std::vector<std::string> engines = {})
       : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
                   std::move(attrs)),
         devices_(std::move(devices)),
-        slots_(std::move(slots)) {}
+        slots_(std::move(slots)),
+        engines_(std::move(engines)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::CommDomainScopeStmt; }
   [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::CommDomain; }
@@ -1165,7 +1169,8 @@ class CommDomainScopeStmt : public ScopeStmt {
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&CommDomainScopeStmt::devices_, "devices"),
-                                          reflection::UsualField(&CommDomainScopeStmt::slots_, "slots")));
+                                          reflection::UsualField(&CommDomainScopeStmt::slots_, "slots"),
+                                          reflection::UsualField(&CommDomainScopeStmt::engines_, "engines")));
   }
 };
 

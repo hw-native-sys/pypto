@@ -19,6 +19,20 @@ the IR types so downstream codegen has O(1) access.
 | Threaded back onto | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | IR-level registry | `Program.functions_` (alloc stmts) | `CommDomainScopeStmt` wrapping each host_orch body (one per inferred comm domain) |
 
+## Async workspace engines
+
+`CommDomainScopeStmt.engines` records the async workspace engines required by a
+communication domain. Before materializing domains, this pass scans every function
+in the Program once, including Call and Submit nodes. If any function uses
+`pld.tensor.indexed_all_to_all_v` or its lowered builtin, every materialized domain
+receives `engines=["urma"]`. Otherwise the list is empty.
+
+This deliberately conservative policy includes unused functions and unrelated
+domains. Precise per-domain matching is deferred. Distributed codegen only emits
+`workspace_engines` from this IR field; it does not infer communication requirements.
+The field is preserved by structural comparison, serialization, and printed IR
+round trips.
+
 ## Position in the pipeline
 
 ```text

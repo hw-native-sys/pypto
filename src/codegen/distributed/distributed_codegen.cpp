@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <optional>
@@ -67,6 +68,7 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
   }
   return result;
 }
+
 }  // namespace
 
 // ========================================================================
@@ -588,6 +590,13 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
   emitter_.EmitLine("workers=" + workers.str() + ",");
   emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
+  if (!op->engines_.empty()) {
+    std::ostringstream engines;
+    engines << "workspace_engines=(";
+    for (const auto& engine : op->engines_) engines << std::quoted(engine) << ",";
+    engines << "),";
+    emitter_.EmitLine(engines.str());
+  }
   emitter_.EmitLine("buffers=[");
   emitter_.IncreaseIndent();
   for (size_t i = 0; i < op->slots_.size(); ++i) {

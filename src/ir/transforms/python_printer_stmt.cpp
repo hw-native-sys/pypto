@@ -831,6 +831,14 @@ void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
     stream_ << PrintWindowBuffer(op->slots_[i]);
   }
   stream_ << "]";
+  if (!op->engines_.empty()) {
+    stream_ << ", engines=[";
+    for (size_t i = 0; i < op->engines_.size(); ++i) {
+      if (i) stream_ << ", ";
+      stream_ << std::quoted(op->engines_[i]);
+    }
+    stream_ << "]";
+  }
   if (!op->attrs_.empty()) {
     stream_ << ", attrs={";
     for (size_t i = 0; i < op->attrs_.size(); ++i) {

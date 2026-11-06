@@ -2578,6 +2578,9 @@ class CommDomainScopeStmt(ScopeStmt):
     the scope directly without rerunning materialization.
     """
 
+    engines: Final[list[str]]
+    """Required async workspace engines, materialized by the compiler pass."""
+
     devices: Final[list[int]]
     """Covered worker indices (ascending). Empty list = all devices
     (resolved at codegen to ``*range(world_size)``)."""
@@ -2593,6 +2596,7 @@ class CommDomainScopeStmt(ScopeStmt):
         *,
         body: Stmt,
         span: Span,
+        engines: list[str] = [],
     ) -> None:
         """Create a CommDomain scope statement.
 
@@ -2602,6 +2606,7 @@ class CommDomainScopeStmt(ScopeStmt):
             name_hint: Handle name hint (codegen derives ``__comm_d<n>``).
             body: Inner statement block.
             span: Source location.
+            engines: Required async workspace engines.
         """
 
 class SeqStmts(Stmt):
@@ -3871,6 +3876,7 @@ class IRBuilder:
         devices: Sequence[int] = (),
         slots: Sequence[WindowBuffer] = (),
         attrs: dict[str, Any] | list[tuple[str, Any]] | None = None,
+        engines: Sequence[str] = (),
     ) -> ScopeStmt:
         """End building a scope statement.
 
@@ -3878,6 +3884,7 @@ class IRBuilder:
             end_span: Source location for end of scope
             devices: Device indices for a communication-domain scope.
             slots: Window allocations for a communication-domain scope.
+            engines: Required async workspace engines.
             attrs: Additional metadata resolved after body-local definitions.
 
         Returns:
