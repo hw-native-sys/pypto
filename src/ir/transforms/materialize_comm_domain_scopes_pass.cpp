@@ -678,13 +678,39 @@ class DefiningCallRetyper : public IRMutator {
 /// with type-updated copies, and wrap the body in a chain of
 /// ``CommDomainScopeStmt`` (one per inferred comm domain, outer = first
 /// declared, inner = last declared).
-FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string, FunctionPtr>& chip_orchs) {
+FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string, FunctionPtr>& chip_orchs,
+                            const std::vector<std::string>& engines) {
   // Idempotence: if this function's body is already wrapped in a
   // CommDomainScopeStmt, the pass has run on it before — skip to avoid
   // double-wrapping the body and minting a fresh set of WindowBuffer
   // instances that would shadow the existing ones on every view.
   if (func->body_ && As<CommDomainScopeStmt>(func->body_)) {
-    return func;
+    // Preserve materialized slots, but refresh requirements if the Program
+    // acquired another engine use since its domains were materialized.
+    class EngineUpdater : public IRMutator {
+     public:
+      explicit EngineUpdater(const std::vector<std::string>& engines) : engines_(engines) {}
+      StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+        auto updated = As<CommDomainScopeStmt>(IRMutator::VisitStmt_(op));
+        auto required = updated->engines_;
+        for (const auto& engine : engines_) {
+          if (std::find(required.begin(), required.end(), engine) == required.end())
+            required.push_back(engine);
+        }
+        if (required == updated->engines_) return updated;
+        auto result = MutableCopy(updated);
+        result->engines_ = std::move(required);
+        return result;
+      }
+
+     private:
+      const std::vector<std::string>& engines_;
+    } updater(engines);
+    auto body = updater.VisitStmt(func->body_);
+    if (body == func->body_) return func;
+    auto result = MutableCopy(func);
+    result->body_ = std::move(body);
+    return result;
   }
 
   StmtPtr materialization_body = func->body_;
@@ -844,8 +870,9 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   for (size_t i = pending.size(); i-- > 0;) {
     auto& g = pending[i];
     std::string name_hint = "comm_d" + std::to_string(i);
-    new_body = std::make_shared<const CommDomainScopeStmt>(g.desc.ToDevices(), std::move(g.slots),
-                                                           std::move(name_hint), new_body, g.span);
+    new_body = std::make_shared<const CommDomainScopeStmt>(
+        g.desc.ToDevices(), std::move(g.slots), std::move(name_hint), new_body, g.span,
+        std::vector<std::string>{}, std::vector<std::pair<std::string, std::any>>{}, engines);
   }
 
   if (new_body.get() == func->body_.get()) return func;
@@ -860,6 +887,32 @@ namespace pass {
 
 Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Conservative program-wide policy: one URMA use provisions every domain.
+    // Precise domain attribution belongs here in a future refinement, not in codegen.
+    class EngineCollector : public IRVisitor {
+     public:
+      bool uses_urma = false;
+      void Record(const OpPtr& op) {
+        // LowerL2TensorCollectives may already have replaced the registered op
+        // with a synthesized builtin function (not a registry operator).
+        if (op && (IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
+                   op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0))
+          uses_urma = true;
+      }
+      void VisitExpr_(const CallPtr& op) override {
+        Record(op->op_);
+        IRVisitor::VisitExpr_(op);
+      }
+      void VisitExpr_(const SubmitPtr& op) override {
+        Record(op->op_);
+        IRVisitor::VisitExpr_(op);
+      }
+    } collector;
+    for (const auto& [gv, func] : program->functions_) {
+      if (func && func->body_) collector.VisitStmt(func->body_);
+    }
+    const std::vector<std::string> engines =
+        collector.uses_urma ? std::vector<std::string>{"urma"} : std::vector<std::string>{};
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
     std::map<std::string, FunctionPtr> chip_orchs;
@@ -875,7 +928,7 @@ Pass MaterializeCommDomainScopes() {
         new_functions[gvar] = func;
         continue;
       }
-      auto new_func = ProcessHostOrch(func, chip_orchs);
+      auto new_func = ProcessHostOrch(func, chip_orchs, engines);
       new_functions[gvar] = new_func;
       if (new_func.get() != func.get()) modified = true;
     }

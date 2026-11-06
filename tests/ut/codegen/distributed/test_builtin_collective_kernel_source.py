@@ -479,15 +479,8 @@ def test_indexed_rail_requests_the_urma_workspace(tmp_path):
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
 
 
-def test_only_the_indexed_domain_requests_the_urma_workspace(tmp_path):
-    """A sibling comm domain must not inherit the indexed domain's URMA request.
-
-    ``MaterializeCommDomainScopes`` nests every domain scope around the whole
-    host body. The engine finder therefore has to attribute a dispatch by the
-    ``WindowBuffer`` behind its DistributedTensor args; scanning the body as a
-    whole would make every domain request URMA as soon as one domain contains
-    an indexed collective.
-    """
+def test_indexed_use_requests_urma_for_all_domains(tmp_path):
+    """Program-wide URMA detection provisions every materialized domain."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -550,25 +543,15 @@ def test_only_the_indexed_domain_requests_the_urma_workspace(tmp_path):
     )
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
-    assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
+    assert host_orch.count('workspace_engines=("urma",)') == 2, host_orch
     d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
     d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
     assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert "workspace_engines" not in d1, host_orch
+    assert 'workspace_engines=("urma",)' in d1, host_orch
 
 
-def test_shared_dispatch_does_not_leak_urma_to_the_sibling_domain(tmp_path):
-    """Ownership follows values into a callee, not the dispatch as a whole.
-
-    A dispatch may pass windows from more than one comm domain
-    (``EmitCallToWorker`` orders one WAW token per owning domain), so both
-    domain finders accept it. Descending into the callee with a blanket
-    "reached from an owned dispatch" flag then made every nested call look
-    owned: the sibling domain that contributed only the unused ``plain`` window
-    would provision a URMA transport workspace it never uses. Only the
-    parameters actually bound to the indexed domain's windows may carry its
-    provenance into the callee.
-    """
+def test_shared_dispatch_provisions_all_domains_conservatively(tmp_path):
+    """Program-wide URMA detection provisions every materialized domain."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -639,30 +622,22 @@ def test_shared_dispatch_does_not_leak_urma_to_the_sibling_domain(tmp_path):
 
     # The dispatch really is shared: one TaskArgs carries the sibling domain's
     # ``plain`` window alongside the indexed domain's operands, plus one
-    # ordering token per domain. That is what made both engine finders accept
-    # it before ownership was followed into the callee.
+    # ordering token per domain. Both domains receive the program's URMA requirement.
     mixed = host_orch.split('_submit_chip(orch, callables["chip_mixed"]', 1)[0]
     mixed = mixed[mixed.rindex("= TaskArgs()") :]
     assert '__comm_d1[0].buffers["plain_buf' in mixed, host_orch
     assert '__comm_d0[0].buffers["input_buf' in mixed, host_orch
     assert "__comm_d1_ord" in mixed and "__comm_d0_ord" in mixed, host_orch
 
-    assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
+    assert host_orch.count('workspace_engines=("urma",)') == 2, host_orch
     d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
     d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
     assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert "workspace_engines" not in d1, host_orch
+    assert 'workspace_engines=("urma",)' in d1, host_orch
 
 
 def test_indexed_collective_fed_by_if_result_requests_urma(tmp_path):
-    """Every indexed operand routed through an if/else merge provisions URMA.
-
-    Inside a CHIP callee, tensor types carry no ``window_buffer_``: the merge
-    results are defined by ``IfStmt::return_vars_`` and their operands only by
-    the branch ``YieldStmt``s, so tensor ownership has to cross that merge.
-    The appended ``CommCtx`` operands are a second, indirect signal; this pins
-    the merged-operand shape end to end.
-    """
+    """A collective nested behind control flow still contributes program engines."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -685,10 +660,7 @@ def test_indexed_collective_fed_by_if_result_requests_urma(tmp_path):
             recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             index: pld.DistributedTensor[[NR, MAX_RECV], pl.INT32],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], dtype]:
-            # Every indexed operand is routed through the merge. The merge
-            # vars have no window buffer; only the branch yields tie them to
-            # the indexed domain's inputs, so this fails if the collective is
-            # attributed from its other arguments.
+            # Route operands through the merge before invoking the collective.
             if choose > 0:
                 c_inp, c_data = inp, data
                 c_signal, c_counts = signal, counts
@@ -731,14 +703,8 @@ def test_indexed_collective_fed_by_if_result_requests_urma(tmp_path):
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
 
 
-def test_urma_follows_the_indexed_context_domain_not_local_operands(tmp_path):
-    """A local-only indexed operand's domain must not provision URMA.
-
-    The indexed kernel canonicalizes input/index/counts/recv as plain tensors
-    and reads its URMA workspace from the target's CommCtx. When such a local
-    buffer is also dispatched on another device, its merged comm domain is
-    distinct from the indexed domain; only the context domain may request URMA.
-    """
+def test_local_operand_domain_also_receives_program_engines(tmp_path):
+    """Program-wide URMA detection provisions every materialized domain."""
     dtype = _dtype_of("fp32")
     dtype_bytes = dtype.get_byte()
     i32_bytes = pl.INT32.get_byte()
@@ -799,235 +765,28 @@ def test_urma_follows_the_indexed_context_domain_not_local_operands(tmp_path):
     )
     host_orch = (result.output_dir / "orchestration" / "host_orch.py").read_text()
 
-    assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
+    assert host_orch.count('workspace_engines=("urma",)') == 2, host_orch
     d0 = host_orch.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
     d1 = host_orch.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
     assert 'workspace_engines=("urma",)' in d0, host_orch
-    assert "workspace_engines" not in d1, host_orch
+    assert 'workspace_engines=("urma",)' in d1, host_orch
 
 
-@pytest.mark.parametrize("omit_output", [False, True])
-@pytest.mark.parametrize("nested_returns", [False, True])
-@pytest.mark.parametrize(
-    "control_flow",
-    [
-        "direct",
-        "if",
-        "for",
-        "while",
-        "for_cycle",
-        "while_cycle",
-        "for_exit",
-        "while_exit",
-        "if_tuple",
-        "for_tuple",
-        "while_tuple",
-        "computed",
-    ],
-)
-def test_many_context_params_preserve_sparse_domain_provenance(omit_output, nested_returns, control_flow):
-    """Late-IR summaries keep high parameter labels and map a Submit's Out gap.
-
-    Use 130 contexts to cross multiple former mask-word boundaries. The last
-    context belongs to a sibling domain used only by control-flow cases;
-    a third domain is always unused. Construct the dispatch IR directly so the omitted-Out
-    Submit and its appended contexts coexist without earlier passes rewriting
-    the signature. Only host code is rendered; the builtin calls model the
-    workspace demand of the already-lowered chip body.
-
-    Repeated calls through a helper with a scoped return also exercise the
-    per-function return-lineage cache shared by nested summary visitors.
-    """
+@pytest.mark.parametrize("engines", [[], ["urma"], ["sdma", "urma"]])
+def test_codegen_reads_explicit_domain_engines(engines):
+    """Codegen emits IR requirements even when the body contains no collective."""
     span = ir.Span.unknown()
-    empty = ir.TupleType([])
-    contexts = [ir.Var(f"ctx_{i}", ir.CommCtxType(), span) for i in range(130)]
-    output = ir.Var("out", ir.TensorType([1], pl.FP32), span)
-    params = [(output, ir.ParamDirection.Out)] if omit_output else []
-    params.extend((ctx, ir.ParamDirection.In) for ctx in contexts)
-    functions = []
-    if nested_returns:
-        ctx_param = ir.Var("ctx_param", ir.CommCtxType(), span)
-        functions.append(
-            ir.Function(
-                "identity_ctx",
-                [ctx_param],
-                [ctx_param.type],
-                ir.InCoreScopeStmt(body=ir.ReturnStmt([ctx_param], span), span=span),
-                span,
-                type=ir.FunctionType.Orchestration,
-            )
-        )
-    demands: list[ir.Stmt] = []
-    for i, ctx in enumerate(contexts[:-1]):
-        target_ctx = ctx
-        if nested_returns:
-            target_ctx = ir.Var(f"returned_ctx_{i}", ir.CommCtxType(), span)
-            demands.append(
-                ir.AssignStmt(
-                    target_ctx,
-                    ir.Call(ir.GlobalVar("identity_ctx"), [ctx], target_ctx.type, span),
-                    span,
-                )
-            )
-        demands.append(
-            ir.EvalStmt(
-                ir.Call(ir.GlobalVar("__builtin_indexed_all_to_all_v__fp32"), [target_ctx], empty, span),
-                span,
-            )
-        )
-    if control_flow != "direct":
-
-        def consume(ctx: ir.Expr) -> ir.EvalStmt:
-            return ir.EvalStmt(
-                ir.Call(ir.GlobalVar("__builtin_indexed_all_to_all_v__fp32"), [ctx], empty, span), span
-            )
-
-        if control_flow in ("if", "if_tuple"):
-            then_value: ir.Expr = contexts[0]
-            else_value: ir.Expr = contexts[-1]
-            if control_flow == "if_tuple":
-                # Only element 0 is consumed; element 1's domain must remain
-                # unprovisioned even after both branches yield the whole tuple.
-                then_value = ir.MakeTuple([contexts[0], contexts[-1]], span)
-                else_value = ir.MakeTuple([contexts[0], contexts[-1]], span)
-            merged = ir.Var("merged_ctx", then_value.type, span)
-            # The second branch must contribute its own context provenance.
-            branch = ir.IfStmt(
-                ir.ConstBool(False, span),
-                ir.YieldStmt([then_value], span),
-                ir.YieldStmt([else_value], span),
-                [merged],
-                span,
-            )
-            selected = ir.TupleGetItemExpr(merged, 0, span) if control_flow == "if_tuple" else merged
-            demands = [branch, consume(selected)]
-        elif control_flow == "computed":
-            # K arguments and K non-parameter results must share one
-            # conservative union, rather than K separate K-source masks.
-            params_computed = [ir.Var(f"computed_{i}", ctx.type, span) for i, ctx in enumerate(contexts)]
-            values: list[ir.Expr] = [
-                ir.Call(ir.GlobalVar("unknown_context"), [ctx], ctx.type, span) for ctx in params_computed
-            ]
-            functions.append(
-                ir.Function(
-                    "computed_contexts",
-                    params_computed,
-                    [ctx.type for ctx in params_computed],
-                    ir.ReturnStmt(values, span),
-                    span,
-                    type=ir.FunctionType.Orchestration,
-                )
-            )
-            packed = ir.Var("packed", ir.TupleType([ctx.type for ctx in contexts]), span)
-            demands = [
-                ir.AssignStmt(
-                    packed, ir.Call(ir.GlobalVar("computed_contexts"), contexts, packed.type, span), span
-                ),
-                consume(ir.TupleGetItemExpr(packed, 0, span)),
-            ]
-        else:
-            cyclic = control_flow.endswith("_cycle")
-            exit_only = control_flow.endswith("_exit")
-            tuple_carry = control_flow.endswith("_tuple")
-            initial: list[ir.Expr] = [contexts[0], contexts[0], contexts[-1]] if cyclic else [contexts[0]]
-            if tuple_carry:
-                initial = [ir.MakeTuple([contexts[0], contexts[-1]], span)]
-            carries = [ir.IterArg(f"carry_{i}", ctx.type, ctx, span) for i, ctx in enumerate(initial)]
-            returned = [ir.Var(f"loop_out_{i}", ctx.type, span) for i, ctx in enumerate(carries)]
-            # A 3-way rotation brings the sibling into the consumed first
-            # carry only after two backedges; a single speculative replay
-            # would still miss it. The exit cases also retain the initializer.
-            yielded: list[ir.Expr] = [carries[1], carries[2], carries[0]] if cyclic else [contexts[-1]]
-            if tuple_carry:
-                yielded = [carries[0]]
-            selected_carry = ir.TupleGetItemExpr(carries[0], 0, span) if tuple_carry else carries[0]
-            body_stmts: list[ir.Stmt] = [] if exit_only else [consume(selected_carry)]
-            body_stmts.append(ir.YieldStmt(yielded, span))
-            loop_body = ir.SeqStmts(body_stmts, span)
-            if control_flow.startswith("for"):
-                loop = ir.ForStmt(
-                    ir.Var("i", ir.ScalarType(pl.INT64), span),
-                    ir.ConstInt(0, pl.INT64, span),
-                    ir.ConstInt(0 if exit_only else 3, pl.INT64, span),
-                    ir.ConstInt(1, pl.INT64, span),
-                    carries,
-                    loop_body,
-                    returned,
-                    span,
-                )
-            else:
-                loop = ir.WhileStmt(ir.ConstBool(not exit_only, span), carries, loop_body, returned, span)
-            selected_return = ir.TupleGetItemExpr(returned[0], 0, span) if tuple_carry else returned[0]
-            demands = [loop, consume(selected_return)] if exit_only or tuple_carry else [loop]
-    if omit_output:
-        demands.append(ir.ReturnStmt([output], span))
-    chip = ir.Function(
-        "chip",
-        params,
-        [output.type] if omit_output else [],
-        ir.SeqStmts(demands, span),
-        span,
-        type=ir.FunctionType.Orchestration,
+    buffer = ir.WindowBuffer(ir.Var("buf", ir.PtrType(), span), ir.ConstInt(64, pl.INT64, span))
+    body = ir.CommDomainScopeStmt(
+        [0], [buffer], "comm_d0", body=ir.SeqStmts([], span), span=span, engines=engines
     )
-    functions.append(chip)
-    callee = chip
-    if omit_output:
-        # The runtime-created Out precedes the context suffix in the callee,
-        # but has no call argument. Credited context indices must shift by one;
-        # identity mapping would credit the unused final sibling context.
-        result_type = ir.TupleType([output.type, ir.ScalarType(pl.TASK_ID)])
-        wrapper_contexts = [ir.Var(f"wrapper_ctx_{i}", ir.CommCtxType(), span) for i in range(130)]
-        submit = ir.Submit(ir.GlobalVar("chip"), wrapper_contexts, [], result_type, span)
-        callee = ir.Function(
-            "wrapper",
-            wrapper_contexts,
-            [],
-            ir.EvalStmt(submit, span),
-            span,
-            type=ir.FunctionType.Orchestration,
-        )
-        functions.append(callee)
-
-    buffers = [
-        ir.WindowBuffer(ir.Var(f"buf_{i}", ir.PtrType(), span), ir.ConstInt(4, pl.INT64, span))
-        for i in range(3)
-    ]
-    windows = [
-        ir.Var(f"window_{i}", ir.DistributedTensorType([ir.ConstInt(1, pl.INT64, span)], pl.FP32, buf), span)
-        for i, buf in enumerate(buffers)
-    ]
-    ctx_args = [
-        ir.Call(ir.get_op("pld.system.get_comm_ctx"), [window], ir.CommCtxType(), span) for window in windows
-    ]
-    call = ir.Call(
-        ir.GlobalVar(callee.name),
-        [*([ctx_args[0]] * 129), ctx_args[1]],
-        {},
-        {"device": ir.ConstInt(0, pl.INT64, span)},
-        empty,
-        span,
-    )
-    body: ir.Stmt = ir.EvalStmt(call, span)
-    for i in reversed(range(3)):
-        body = ir.CommDomainScopeStmt([0], [buffers[i]], f"comm_d{i}", body=body, span=span)
-    host = ir.Function(
-        "host_orch",
-        [],
-        [],
-        body,
-        span,
-        level=ir.Level.HOST,
-        role=ir.Role.Orchestrator,
-    )
-    source = codegen.DistributedCodegen().generate(ir.Program([host, *functions], "many_contexts", span))
-    needs_sibling = control_flow not in ("direct", "if_tuple", "for_tuple", "while_tuple")
-    assert source.count('workspace_engines=("urma",)') == (2 if needs_sibling else 1), source
-    d0 = source.split('name="comm_d0"', 1)[1].split("as __comm_d0:", 1)[0]
-    d1 = source.split('name="comm_d1"', 1)[1].split("as __comm_d1:", 1)[0]
-    assert 'workspace_engines=("urma",)' in d0, source
-    d2 = source.split('name="comm_d2"', 1)[1].split("as __comm_d2:", 1)[0]
-    assert ('workspace_engines=("urma",)' in d1) == needs_sibling, source
-    assert "workspace_engines" not in d2, source
+    host = ir.Function("host_orch", [], [], body, span, level=ir.Level.HOST, role=ir.Role.Orchestrator)
+    source = codegen.DistributedCodegen().generate(ir.Program([host], "explicit_engines", span))
+    if engines:
+        expected = "workspace_engines=(" + "".join(f'"{engine}",' for engine in engines) + "),"
+        assert expected in source
+    else:
+        assert "workspace_engines" not in source
 
 
 def test_chip_rail_requests_no_async_workspace(tmp_path):

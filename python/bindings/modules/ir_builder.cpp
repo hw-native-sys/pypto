@@ -311,12 +311,13 @@ void BindIRBuilder(nb::module_& m) {
       .def(
           "end_scope",
           [](IRBuilder& self, const Span& end_span, std::vector<int64_t> devices,
-             std::vector<WindowBufferPtr> slots, const nb::object& attrs) {
+             std::vector<WindowBufferPtr> slots, const nb::object& attrs, std::vector<std::string> engines) {
             return self.EndScope(end_span, std::move(devices), std::move(slots),
-                                 ConvertAttrsFromPython(attrs, false));
+                                 ConvertAttrsFromPython(attrs, false), std::move(engines));
           },
           nb::arg("end_span"), nb::arg("devices") = std::vector<int64_t>{},
           nb::arg("slots") = std::vector<WindowBufferPtr>{}, nb::arg("attrs") = nb::none(),
+          nb::arg("engines") = std::vector<std::string>{},
           "End building a scope statement.\n\n"
           "Finalizes the scope statement and returns it.\n\n"
           "Args:\n"

@@ -2022,11 +2022,16 @@ void BindIR(nb::module_& m) {
       "buffers=[...]) as __comm_d<n>:`. Synthesized by MaterializeCommDomainScopes pass; no user DSL "
       "surface.");
   comm_domain_scope_stmt_class.def(
-      nb::init<std::vector<int64_t>, std::vector<WindowBufferPtr>, std::string, const StmtPtr&,
-               const Span&>(),
+      "__init__",
+      [](CommDomainScopeStmt* self, std::vector<int64_t> devices, std::vector<WindowBufferPtr> slots,
+         std::string name_hint, const StmtPtr& body, const Span& span, std::vector<std::string> engines) {
+        new (self) CommDomainScopeStmt(std::move(devices), std::move(slots), std::move(name_hint), body, span,
+                                       std::vector<std::string>{},
+                                       std::vector<std::pair<std::string, std::any>>{}, std::move(engines));
+      },
       nb::arg("devices"), nb::arg("slots"), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
-      "Create a CommDomain scope statement. ``devices`` empty = all devices (resolved to "
-      "*range(world_size) at codegen).");
+      nb::arg("engines") = std::vector<std::string>{},
+      "Create a CommDomain scope with explicit async workspace engines.");
   BindFields<CommDomainScopeStmt>(comm_domain_scope_stmt_class);
   comm_domain_scope_stmt_class.def_prop_ro(
       "attrs",

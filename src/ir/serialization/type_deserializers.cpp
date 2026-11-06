@@ -1086,9 +1086,12 @@ static IRNodePtr DeserializeCommDomainScopeStmt(const msgpack::object& fields_ob
     attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
   }
 
+  std::vector<std::string> engines;
+  auto engines_obj = GetOptionalFieldObj(fields_obj, "engines", ctx);
+  if (engines_obj.has_value()) engines_obj->convert(engines);
   return std::make_shared<CommDomainScopeStmt>(std::move(devices), std::move(slots), std::move(name_hint),
                                                body, span, DeserializeLeadingComments(fields_obj),
-                                               std::move(attrs));
+                                               std::move(attrs), std::move(engines));
 }
 
 // Deserialize SeqStmts

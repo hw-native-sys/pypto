@@ -18,6 +18,17 @@
 | 回填到 | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | Program 级注册表 | `Program.functions_`（alloc 语句） | `CommDomainScopeStmt wrappers in each host_orch body` |
 
+## 异步工作区引擎
+
+`CommDomainScopeStmt.engines` 记录通信域需要的异步工作区引擎 (async workspace engines)。
+物化通信域之前，此 Pass 扫描整个 Program 中每个函数的 Call 和 Submit。
+只要发现 `pld.tensor.indexed_all_to_all_v` 或其降低后的 builtin，所有物化通信域都设置
+`engines=["urma"]`；否则为空列表。
+
+当前采用保守策略，包括未调用函数和无关通信域。精确匹配留待后续实现。
+分布式代码生成仅根据该 IR 字段输出 `workspace_engines`，不再分析通信需求。
+结构比较、序列化和打印解析往返均保留该字段。
+
 ## 流水线位置
 
 ```text

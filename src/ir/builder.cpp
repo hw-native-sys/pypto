@@ -389,7 +389,8 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
 
 StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
                             std::vector<WindowBufferPtr> slots,
-                            std::vector<std::pair<std::string, std::any>> extra_attrs) {
+                            std::vector<std::pair<std::string, std::any>> extra_attrs,
+                            std::vector<std::string> engines) {
   CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
       << "Cannot end scope: not inside a scope context at " << end_span.to_string();
 
@@ -469,9 +470,9 @@ StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
                                                           std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::CommDomain:
-      scope_stmt = std::make_shared<const CommDomainScopeStmt>(std::move(devices), std::move(slots),
-                                                               std::move(name_hint), body, combined_span,
-                                                               std::vector<std::string>{}, std::move(attrs));
+      scope_stmt = std::make_shared<const CommDomainScopeStmt>(
+          std::move(devices), std::move(slots), std::move(name_hint), body, combined_span,
+          std::vector<std::string>{}, std::move(attrs), std::move(engines));
       break;
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has
