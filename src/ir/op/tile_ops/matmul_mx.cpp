@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -36,7 +37,31 @@
 namespace pypto {
 namespace ir {
 
-static bool IsSupportedMxDataType(const DataType& dtype) { return dtype == DataType::FP8E4M3FN; }
+// A5 MX data operands come from the shared Cube operand table's kMx rows
+// (PTOAS v0.72 isA5MxFp8InputType, pto-isa isSupportedFp8Combo): each side is
+// FP8E4M3FN or FP8E5M2, independently. HF8 is a Cube FP8 operand but not an MX
+// one, so it carries kMatmul without kMx; packed FP4 is absent entirely.
+static bool IsSupportedMxDataPair(const DataType& lhs, const DataType& rhs) {
+  return backend::FindCubeOperandPair(backend::CubeOpFamily::kMx, lhs, rhs) != nullptr;
+}
+
+/// Can @p dtype appear on *either* side of some supported MX pair?
+///
+/// Used where only one operand is in hand -- the per-side diagnostics below and
+/// `tile.tget_scale_addr`, whose src may be the Left or the Right data tile.
+static bool IsSupportedMxDataType(const DataType& dtype) {
+  for (const auto& pair : backend::kCubeOperandPairs) {
+    if (!pair.InFamily(backend::CubeOpFamily::kMx)) continue;
+    if (pair.lhs == dtype || pair.rhs == dtype) return true;
+  }
+  return false;
+}
+
+static std::string PackedFp4MxHint(const DataType& dtype, const char* side) {
+  if (!dtype.IsPackedFp4()) return "";
+  return std::string("; native packed FP4 matmul_mx is not supported, cast the ") + side +
+         " to FP8E4M3FN or FP8E5M2 with pl.cast first";
+}
 
 // Static-dim checks only: when either side is symbolic (non-ConstInt), the match
 // is skipped. Full PTOAS alignment (M%16 / K%64 / N%32 / ceil(K/32) groups) is
@@ -102,21 +127,15 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK(lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D lhs/rhs tiles";
   CHECK(IsSupportedMxDataType(lhs_type->dtype_))
-      << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
-      << lhs_type->dtype_.ToString()
-      << (lhs_type->dtype_.IsPackedFp4()
-              ? "; native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-                "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions; cast the lhs to FP8E4M3FN "
-                "with pl.cast first"
-              : "");
+      << "The operator " << op_name << " requires lhs dtype FP8E4M3FN or FP8E5M2, but got "
+      << lhs_type->dtype_.ToString() << PackedFp4MxHint(lhs_type->dtype_, "lhs");
   CHECK(IsSupportedMxDataType(rhs_type->dtype_))
-      << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
-      << rhs_type->dtype_.ToString()
-      << (rhs_type->dtype_.IsPackedFp4()
-              ? "; native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-                "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions; cast the rhs to FP8E4M3FN "
-                "with pl.cast first"
-              : "");
+      << "The operator " << op_name << " requires rhs dtype FP8E4M3FN or FP8E5M2, but got "
+      << rhs_type->dtype_.ToString() << PackedFp4MxHint(rhs_type->dtype_, "rhs");
+  CHECK(IsSupportedMxDataPair(lhs_type->dtype_, rhs_type->dtype_))
+      << "The operator " << op_name << " requires one of the MX data pairs ("
+      << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kMx, "a5") << "), but got "
+      << lhs_type->dtype_.ToString() << " x " << rhs_type->dtype_.ToString();
 
   ExprPtr m_phys = lhs_type->shape_[0];
   ExprPtr k_phys_lhs = lhs_type->shape_[1];
@@ -327,9 +346,13 @@ TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tile.matmul_mx")
     .set_op_category("TileOp")
     .set_description("MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3); physical M % 16 == 0, K % 64 == 0")
+    .add_argument("lhs",
+                  "Left-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2); physical M % 16 == 0, "
+                  "K % 64 == 0")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0); physical/valid [M, ceil(K/32)]")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3); physical K % 64 == 0, N % 32 == 0")
+    .add_argument("rhs",
+                  "Right-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2); physical K % 64 == 0, "
+                  "N % 32 == 0")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0); physical/valid [ceil(K/32), N]")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
@@ -345,9 +368,9 @@ REGISTER_OP("tile.matmul_mx_acc")
     .set_op_category("TileOp")
     .set_description("MX block-scale matmul with accumulation: acc += matmul_mx(...)")
     .add_argument("acc", "Accumulator tile (TileType, 2D, FP32)")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2)")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
@@ -366,9 +389,9 @@ REGISTER_OP("tile.matmul_mx_acc")
 REGISTER_OP("tile.matmul_mx_bias")
     .set_op_category("TileOp")
     .set_description("MX block-scale matmul with bias: C = matmul_mx(...) + bias")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2)")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
     .add_argument("bias", "Bias tile (TileType, [1, N], FP32)")
     .set_input_memory(0, MemorySpace::Left)
@@ -397,7 +420,7 @@ TypePtr DeduceTileTGetScaleAddrType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires dst_scale dtype FP8E8M0, but got "
       << dst_type->dtype_.ToString();
   CHECK(IsSupportedMxDataType(src_type->dtype_))
-      << "The operator " << op_name << " requires src dtype FP8E4M3FN, but got "
+      << "The operator " << op_name << " requires src dtype FP8E4M3FN or FP8E5M2, but got "
       << src_type->dtype_.ToString();
   CHECK(dst_type->shape_.size() == 2 && src_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D dst_scale and src tiles";
@@ -466,7 +489,7 @@ REGISTER_OP("tile.tget_scale_addr")
         "Bind an inferred MX scale-tile address from a Left/Right data tile (A5): "
         "dst_addr = src_addr >> SHIFT_MX_ADDR. Maps to pto.tget_scale_addr.")
     .add_argument("dst_scale", "Resolved LeftScale/RightScale destination tile (FP8E8M0 only)")
-    .add_argument("src", "Resolved Left/Right MX data tile (FP8E4M3FN) whose address is scaled")
+    .add_argument("src", "Resolved Left/Right MX data tile (FP8E4M3FN or FP8E5M2) whose address is scaled")
     .set_output_memory_inherit_input()
     .set_output_reuses_input(0)
     // Binds a derived address into the shared physical scale buffer `dst_scale`

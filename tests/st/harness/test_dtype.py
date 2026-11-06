@@ -19,6 +19,7 @@ from harness.core.harness import DataType
     ("member", "torch_name"),
     [
         ("FP8E4M3FN", "float8_e4m3fn"),
+        ("FP8E5M2", "float8_e5m2"),
         ("FP8E8M0", "float8_e8m0fnu"),
         ("FP4E2M1X2", "float4_e2m1fn_x2"),
     ],

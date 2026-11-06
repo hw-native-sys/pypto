@@ -663,6 +663,21 @@ def _hf32_round(value, mode):
 def _hf32_matmul(lhs, rhs, mode):
     return torch.matmul(_hf32_round(lhs, mode), _hf32_round(rhs, mode))
 
+def _cube_matmul(lhs, rhs):
+    # The A5 Cube multiplies 1-byte float operands (FP8 E4M3FN / E5M2, HF8) and
+    # the mixed FP8 orders, always accumulating in FP32. Torch has no matmul
+    # kernel for those dtypes and refuses a mixed float pair outright, so widen
+    # both operands to FP32 first -- that is what the hardware computes anyway.
+    # Equal wide dtypes (FP16 / BF16 / FP32 / INT8) keep their native kernel so
+    # the reference preserves their rounding behaviour.
+    # Width comes from Tensor.element_size(), not torch.dtype.itemsize: the
+    # latter only exists from torch 2.1, while the package declares torch>=2.0.0
+    # (pyproject.toml) and guards every optional dtype with getattr elsewhere.
+    both_float = lhs.dtype.is_floating_point and rhs.dtype.is_floating_point
+    if both_float and (lhs.dtype != rhs.dtype or lhs.element_size() == 1):
+        return torch.matmul(lhs.float(), rhs.float())
+    return torch.matmul(lhs, rhs)
+
 def _buffer_matmul(lhs, rhs, destination, accumulate, tf32_mode=None):
     left = _buffer_active(lhs)
     right = _buffer_active(rhs)[:left.shape[1]]
@@ -812,7 +827,7 @@ def _matmul_expr(lhs: str, rhs: str, kw: dict[str, Any]) -> str:
     mode = kw.get("tf32_mode")
     if mode is not None:
         return f"_hf32_matmul({lhs}, {rhs}, {mode!r})"
-    return f"torch.matmul({lhs}, {rhs})"
+    return f"_cube_matmul({lhs}, {rhs})"
 
 
 def _handle_tensor_matmul(a: list[str], kw: dict[str, Any]) -> str:
@@ -1286,13 +1301,21 @@ def _register_ops() -> None:  # noqa: PLR0915
 
     # tile matmul variants — .float() to match hardware FP32 accumulation output
     m["tile.matmul"] = lambda a, kw: f"{_matmul_expr(a[0], a[1], kw)}.float()"
-    m["tile.batch_matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    # batch_matmul carries no tf32_mode, but shares tile.matmul's operand-pair
+    # contract, so it needs the same widening of 1-byte / mixed float operands.
+    m["tile.batch_matmul"] = lambda a, _kw: f"_cube_matmul({a[0]}, {a[1]}).float()"
     m["tile.matmul_acc"] = _tile_matmul_acc
     m["tile.batch_matmul_acc"] = _tile_matmul_acc
     m["tile.matmul_bias"] = lambda a, kw: f"({_matmul_expr(a[0], a[1], kw)}.float() + {a[2]})"
-    m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    # GEMV carries no tf32_mode, so it cannot share _matmul_expr, but it must not
+    # diverge from it either: tile.gemv_acc already routes through _cube_matmul
+    # via _tile_matmul_acc. The three forms are identical today -- GEMV's type
+    # deduction admits only identical INT8 / FP16 / BF16 / FP32 operands
+    # (ValidateGemvInputDtypes), for which _cube_matmul falls through to
+    # torch.matmul unchanged -- and stay identical if GEMV ever opens to FP8.
+    m["tile.gemv"] = lambda a, _kw: f"_cube_matmul({a[0]}, {a[1]}).float()"
     m["tile.gemv_acc"] = _tile_matmul_acc
-    m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
+    m["tile.gemv_bias"] = lambda a, _kw: f"(_cube_matmul({a[0]}, {a[1]}).float() + {a[2]})"
 
     # tile ternary ops (third arg is workspace/tmp, ignore it)
     m["tile.prelu"] = lambda a, _kw: f"torch.where({a[0]} > 0, {a[0]}, {a[0]} * {a[1]})"

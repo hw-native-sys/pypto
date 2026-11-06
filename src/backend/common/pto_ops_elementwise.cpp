@@ -28,6 +28,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -220,6 +221,10 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
 }
 
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
+// Defined below, next to the matmul codegen it guards.
+static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t rhs_index,
+                                   codegen::PTOCodegen& codegen);
+
 static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
                                       codegen::CodegenBase& codegen_base,
                                       std::optional<size_t> i32_operand_idx = std::nullopt) {
@@ -284,6 +289,9 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
       return "";
     }
   }
+  if (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias")) {
+    CheckMatmulOperandArch(op, /*lhs_index=*/0, /*rhs_index=*/1, codegen);
+  }
   const auto tf32_attr =
       (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias"))
           ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
@@ -314,10 +322,47 @@ static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) 
   return attrs + ", " + phase.substr(2);
 }
 
+/// Reject a Cube operand pair the configured target cannot multiply.
+///
+/// Which (lhs, rhs) element types `pto.tmatmul*` / `pto.tgemv*` accept is an
+/// architecture fact: A5 multiplies any FP8 (E4M3FN / E5M2) pair and HF8 x HF8,
+/// A2/A3 neither (PTOAS `verifyMatmulTypeTriple`; pto-isa `npu/a5/TMatmul.hpp`).
+/// Type deduction cannot decide it -- it also runs with no backend configured,
+/// and the identical DSL program is legal on one target and not the other -- so
+/// the target-dependent half of the contract is checked here, where the handler
+/// is known. Same placement as the `tile.mgather` FP8 guard in pto_ops_memory.cpp.
+///
+/// Only pairs the table knows are judged. A pair outside it reached codegen
+/// through the legacy "identical lhs and rhs" arm of type deduction and is left
+/// for PTOAS to accept or reject, exactly as before.
+static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t rhs_index,
+                                   codegen::PTOCodegen& codegen) {
+  if (op->args_.size() <= std::max(lhs_index, rhs_index)) return;
+  auto lhs = As<ir::TileType>(op->args_[lhs_index]->GetType());
+  auto rhs = As<ir::TileType>(op->args_[rhs_index]->GetType());
+  if (!lhs || !rhs) return;
+  const auto family =
+      ir::IsOp(op, "tile.gemv") || ir::IsOp(op, "tile.gemv_acc") || ir::IsOp(op, "tile.gemv_bias")
+          ? backend::CubeOpFamily::kGemv
+          : backend::CubeOpFamily::kMatmul;
+  const auto* pair = backend::FindCubeOperandPair(family, lhs->dtype_, rhs->dtype_);
+  if (pair == nullptr) return;
+  const auto* handler = codegen.GetBackendHandler();
+  INTERNAL_CHECK_SPAN(handler, op->span_)
+      << "Internal error: " << op->op_->name_ << " codegen requires a backend handler";
+  const std::string arch = handler->GetPtoTargetArch();
+  CHECK_SPAN(pair->SupportsArch(arch), op->span_)
+      << op->op_->name_ << " operand dtypes " << lhs->dtype_.ToString() << " x " << rhs->dtype_.ToString()
+      << " are not supported on the '" << arch << "' backend; it multiplies "
+      << backend::DescribeCubeOperandPairs(family, arch)
+      << ". Mixed and 1-byte float operand pairs require the Ascend950 ('a5') backend.";
+}
+
 static std::string MakePhasedMatmulCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
                                               codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
+  CheckMatmulOperandArch(op, /*lhs_index=*/0, /*rhs_index=*/1, codegen);
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
   return "";
 }
@@ -1313,6 +1358,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+      CheckMatmulOperandArch(op, /*lhs_index=*/1, /*rhs_index=*/2, codegen);
       const std::string attrs = MatmulAttrs(op, codegen);
 
       // ins() carries the accumulator only on the accumulating form; the

@@ -264,6 +264,48 @@ exact physical M/N/K box compatibility while allowing the accumulator's valid
 M/N rectangle and the rhs valid K extent to contain the smaller rectangle PTO
 computes from lhs M/K and rhs N.
 
+#### Cube operand dtype pairs
+
+The element types the Cube multiplies are a hardware table, not a symmetry rule:
+`backend::kCubeOperandPairs` (`include/pypto/backend/common/cube_operand_types.h`)
+is PyPTO's copy of PTOAS `verifyMatmulTypeTriple` and pto-isa `npu/a5/TMatmul.hpp`.
+
+| lhs x rhs | Accumulator | A2/A3 | A5 | Families |
+| --------- | ----------- | ----- | -- | -------- |
+| INT8 x INT8 | INT32 | yes | yes | matmul, gemv |
+| FP16 x FP16 | FP32 | yes | yes | matmul, gemv |
+| BF16 x BF16 | FP32 | yes | yes | matmul, gemv |
+| FP32 x FP32 | FP32 | yes | yes | matmul, gemv |
+| FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul, mx |
+| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul, mx |
+| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul, mx |
+| HF8 x HF8 | FP32 | no | yes | matmul |
+
+So on Ascend950 `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`,
+`tile.batch_matmul*`, `tensor.matmul`, and `tensor.matmul_acc` accept **mixed FP8
+operands in either order**; the accumulator, the `matmul_acc` input, and the
+`matmul_bias` bias stay FP32. `tf32_mode` remains FP32-only, so an FP8 operand
+pair rejects it.
+
+The contract is split across two layers, because the legal set depends on the
+compilation target while type deduction does not see one. Type deduction
+(`ValidateMatmulOperandDataTypes`, `src/ir/op/type_inference.cpp`) accepts a pair
+that is in the table **or** whose operands share one dtype — the second arm
+preserves the historical "identical lhs and rhs" contract, so dtypes PTOAS would
+reject anyway still reach the backend as they always have. Matmul codegen
+(`CheckMatmulOperandArch`, `src/backend/common/pto_ops_elementwise.cpp`) then
+rejects a table pair the configured target lacks (an FP8 or HF8 operand on
+`a2a3`) before PTOAS sees it; pairs outside the table are left to PTOAS, unchanged.
+
+`tensor.matmul` defaults an omitted `out_dtype` to the accumulator whenever either
+operand is FP8 or HF8: dtype promotion would answer FP8, which the unscaled
+FIXPIPE writeback cannot produce, and for a mixed pair the answer would depend on
+operand order. Wider operand pairs keep their promoted default.
+
+Physical K must stay a multiple of 32 for a 1-byte operand (the Left/Right
+fractal packs 32 bytes along K); valid K carries no such restriction.
+
 For rank-2 FP32 operands on Ascend950, `matmul`, `matmul_acc`, and
 `tile.matmul_bias` accept keyword-only `tf32_mode="round_even"` or
 `tf32_mode="round_away"`. Both round inputs to HF32 (e8m10) and accumulate in
@@ -415,7 +457,7 @@ spaces are resolved.
 | `tile.load` of `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | The source TensorLayout carries the MX scale GM layout. Dtype is FP8E8M0, and strided sources are rejected. Public `pl.load` defaults an omitted target to `Mat`; raw IR must carry `target_memory=Mat`. |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat-to-Scale move with hardware-fixed row/row/32 (left) or col/col/32 (right) layout; the source Mat tile and layout overrides must match exactly. |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | Not supported; load MX scale data into Mat and then move it into scale memory. |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; operand positions drive automatic placement, including Vec→Mat→LeftScale/RightScale staging for `quant_mx` scales. Both data operands reaching the op must be `FP8E4M3FN`, and scale is `FP8E8M0`; `lhs_scale` and `rhs_scale` must be distinct tiles. The supported packed-input form is either packed FP4 format as lhs × FP8 rhs with an explicit `pl.cast(fp4, pl.FP8E4M3FN)` before the op; native FP4×FP4 and FP8×FP4 are rejected. Physical M/K/N, valid K, and scale-group counts use the post-cast FP8 tile extents, never the packed x2 carrier shape. Physical `M % 16 == 0`, `K % 64 == 0`, and `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; operand positions drive automatic placement, including Vec→Mat→LeftScale/RightScale staging for `quant_mx` scales. Each data operand reaching the op is `FP8E4M3FN` or `FP8E5M2`, chosen independently per side (all four FP8 pairs; HF8 is a Cube FP8 operand but not an MX one), and scale is `FP8E8M0`; `lhs_scale` and `rhs_scale` must be distinct tiles. The supported packed-input form is either packed FP4 format as lhs × FP8 rhs with an explicit `pl.cast(fp4, pl.FP8E4M3FN)` before the op; native FP4×FP4 and FP8×FP4 are rejected. Physical M/K/N, valid K, and scale-group counts use the post-cast FP8 tile extents, never the packed x2 carrier shape. Physical `M % 16 == 0`, `K % 64 == 0`, and `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid M/N must match the matmul output. |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. |
 | `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` family. |
@@ -450,7 +492,7 @@ quantization alignment and memory-planner requirements.
 | Constraint | Detail |
 | ---------- | ------ |
 | Distinct scale buffers | Cube does not fold scales into Left/Right data. `TileType::ScaleLeft` / `ScaleRight` sidecars map to PyPTO `LeftScale` / `RightScale`. |
-| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; the emitted MX data pair is `FP8E4M3FN × FP8E4M3FN` (rejects `FP8E5M2` and native packed FP4). A packed-FP4×FP8 input first casts the packed lhs to FP8. Physical K, valid K, and `ceil(K/32)` scale groups are measured on that post-cast FP8 tile, not the packed x2 carrier; physical `K%64==0` and fractal is 32. |
+| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; each emitted MX data operand is `FP8E4M3FN` or `FP8E5M2`, chosen independently per side, so all four FP8 pairs are accepted (native packed FP4 is rejected). A packed-FP4×FP8 input first casts the packed lhs to FP8. Physical K, valid K, and `ceil(K/32)` scale groups are measured on that post-cast FP8 tile, not the packed x2 carrier; physical `K%64==0` and fractal is 32. A narrowed valid K is accepted by the deducer when `ceil(validK/32) == ceil(physicalK/32)`, but is **not executable on A5 today**: a narrowed valid K faults the device (`AICore error 507018`, scheduler timeout `S1:running-stalled`, poisoned run lane) for every FP8 pair including E4M3xE4M3, so keep valid K == physical K. Codegen coverage pins the contract in `tests/ut/codegen/test_mx_ops_codegen.py`. |
 | Layouts | `mx_a_zz` is row-major ZZ; `mx_b_nn` is col-major NN; loads use `TLoadMxCube*` (AZZ2ZZ). |
 | `TMov` `CommonCheckMX` | Allows UINT8 Mat → FP8E8M0 ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale. |
 | Bind then fill | Fill **after** `GetScaleAddr(Left/Right)`; writing the provisional alloc address is orphaned once rebound. |

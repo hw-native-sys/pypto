@@ -144,7 +144,10 @@ std::string CodegenBase::GetRuntimeDataTypeString(const DataType& dtype) const {
   if (dtype == DataType::UINT32) return "DataType::UINT32";
   if (dtype == DataType::BF16) return "DataType::BFLOAT16";
   if (dtype == DataType::FP8E4M3FN) return "DataType::FP8E4M3FN";
-  if (dtype == DataType::FP8E5M2) return "DataType::FP8E5M2";
+  // The runtime has no E5M2 enum; descriptors and Torch use UINT8 byte carriers
+  // (see pypto.runtime.task_interface.runtime_datatype). The in-core pointer keeps
+  // its FP8E5M2 type.
+  if (dtype == DataType::FP8E5M2) return "DataType::UINT8";
   if (dtype == DataType::FP8E8M0) return "DataType::FP8E8M0";
   if (dtype == DataType::FP4E2M1X2) return "DataType::FP4E2M1";
   // The runtime has no E1M2 enum; both descriptors and Torch use byte carriers.

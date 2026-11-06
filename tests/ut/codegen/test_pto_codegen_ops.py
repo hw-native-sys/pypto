@@ -6585,5 +6585,148 @@ class TestB03TriAndGatherCodegen:
             self._generate_mlir(Prog)
 
 
+class TestA5MixedFp8MatmulCodegen:
+    """`pto.tmatmul` family with the A5 mixed FP8 operand pairs.
+
+    PTOAS v0.72 accepts any (E4M3FN | E5M2) operand pair with an f32 destination
+    on A5 (`verifyMatmulTypeTriple`), and rejects every FP8 operand on A2/A3. The
+    operand dtypes therefore have to reach the emitted instruction unchanged, and
+    the target-dependent half of the contract is enforced at codegen.
+
+    Physical K is 64: an 8-bit Left/Right box packs 32 bytes along K, so K must be
+    a multiple of 32.
+    """
+
+    # (lhs, rhs) -> emitted PTOAS dtype spellings
+    _MIXED_PAIRS = [
+        (pl.FP8E4M3FN, pl.FP8E5M2, "f8E4M3FN", "f8E5M2"),
+        (pl.FP8E5M2, pl.FP8E4M3FN, "f8E5M2", "f8E4M3FN"),
+        (pl.FP8E5M2, pl.FP8E5M2, "f8E5M2", "f8E5M2"),
+    ]
+
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend950) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    @staticmethod
+    def _matmul_program(lhs_dtype, rhs_dtype, form):
+        """One kernel per matmul form, sharing the mixed FP8 operand pair.
+
+        The form is selected here, outside the kernel bodies: a `str` closure
+        variable is not a type the DSL parser can capture.
+        """
+        if form == "base":
+
+            @pl.program
+            class Base:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[32, 64], lhs_dtype],
+                    b: pl.Tensor[[64, 32], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                ) -> pl.Tensor[[32, 32], pl.FP32]:
+                    lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                        a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                    )
+                    rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                        b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul(lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Base
+
+        if form == "acc":
+
+            @pl.program
+            class Acc:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[32, 64], lhs_dtype],
+                    b: pl.Tensor[[64, 32], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                ) -> pl.Tensor[[32, 32], pl.FP32]:
+                    lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                        a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                    )
+                    rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                        b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    seed: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul(lhs, rhs)
+                    product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul_acc(seed, lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Acc
+
+        @pl.program
+        class Bias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 64], lhs_dtype],
+                b: pl.Tensor[[64, 32], rhs_dtype],
+                bias: pl.Tensor[[1, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                    a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                )
+                rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                    b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                )
+                bias_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(
+                    bias, [0, 0], [1, 32], target_memory=pl.MemorySpace.Mat
+                )
+                product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul_bias(lhs, rhs, bias_tile)
+                return pl.store(product, [0, 0], out)
+
+        return Bias
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _MIXED_PAIRS)
+    @pytest.mark.parametrize(
+        "form,pto_op", [("base", "pto.tmatmul "), ("acc", "pto.tmatmul.acc"), ("bias", "pto.tmatmul.bias")]
+    )
+    def test_mixed_fp8_operand_dtypes_reach_the_instruction(
+        self, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op
+    ):
+        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
+        line = next(line for line in mlir.splitlines() if pto_op in line)
+        # Each operand keeps its own dtype: the lhs box is col_major/row_major in
+        # left, the rhs row_major/col_major in right, and dst is the f32 Acc tile.
+        assert f"loc=left, dtype={lhs_text}" in line
+        assert f"loc=right, dtype={rhs_text}" in line
+        assert "loc=acc, dtype=f32" in line
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _MIXED_PAIRS)
+    @pytest.mark.parametrize(
+        "form,isa_macro",
+        [("base", "TMATMUL("), ("acc", "TMATMUL_ACC("), ("bias", "TMATMUL_BIAS(")],
+    )
+    def test_mixed_fp8_matmul_compiles_with_native_ptoas(
+        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, isa_macro
+    ):
+        """The real assembler, not just our own expectation of it, accepts the pair."""
+        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert isa_macro in cpp
+
+    @pytest.mark.parametrize("form", ["base", "acc", "bias"])
+    def test_mixed_fp8_matmul_is_rejected_on_a2a3(self, form):
+        """A2/A3 has no FP8 Cube operand, so the pair must fail before PTOAS."""
+        with pytest.raises(ValueError, match="not supported on the 'a2a3' backend"):
+            self._generate_mlir(self._matmul_program(pl.FP8E4M3FN, pl.FP8E5M2, form), BackendType.Ascend910)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
