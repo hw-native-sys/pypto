@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -694,8 +695,9 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
         auto updated = As<CommDomainScopeStmt>(IRMutator::VisitStmt_(op));
         auto required = updated->engines_;
         for (const auto& engine : engines_) {
-          if (std::find(required.begin(), required.end(), engine) == required.end())
+          if (std::find(required.begin(), required.end(), engine) == required.end()) {
             required.push_back(engine);
+          }
         }
         if (required == updated->engines_) return updated;
         auto result = MutableCopy(updated);
@@ -896,8 +898,9 @@ Pass MaterializeCommDomainScopes() {
         // LowerL2TensorCollectives may already have replaced the registered op
         // with a synthesized builtin function (not a registry operator).
         if (op && (IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
-                   op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0))
+                   op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0)) {
           uses_urma = true;
+        }
       }
       void VisitExpr_(const CallPtr& op) override {
         Record(op->op_);
