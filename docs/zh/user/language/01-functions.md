@@ -78,6 +78,15 @@ def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
 区域内，也不能嵌套在 `pl.at` / `pl.cluster` / `pl.spmd` 内 —— 后者会变成单个设备 task，
 而 Graph 区域录制的是 task 的拓扑。三种情况都是编译期错误。
 
+传给 `pl.submit` 或 `pl.spmd_submit` 的 JIT 依赖也会被发现；callee 的 constexpr
+参数参与特化，`deps` 等提交元数据仍保留在提交操作上。
+
+首次提交也可省略由运行时分配的 Out 参数，但其完整张量注解必须能确定 shape 和 dtype；
+constexpr 使用本次调用的绑定值。JIT 从完整返回契约或已知 store 写回目标确定结果类型，
+真正无返回值的 callee 不会额外产生张量结果。Submit 在 callee 各结果后追加一个 TaskId。
+单变量 tuple 绑定及常量投影会保留张量元数据，也支持直接作为调用实参的投影；
+TaskId 槽位不会被当成张量。
+
 子函数依赖（`.incore` / `.inline` / `.opaque` / `.graph`）从入口函数体自动发现 —— 按名字调用即可。这里的名字在入口函数自身的命名空间中解析，因此别名导入（`from kernels import matmul as mm`，或普通的 `mm = matmul` 重绑定）与其他绑定一样能被发现；生成的程序仍以其 `def` 名字命名该函数。当两个不同的子函数同名时 —— 两个模块各自定义了 `helper`，或同一个工厂产出的两个 kernel —— 后生成的那个会被加上后缀（`helper`、`helper__2`），从而两份特化都得以保留；入口函数始终保留自己的名字。`@pl.jit.host` 入口还会额外发现 `@pl.jit`（chip 编排）依赖，因此一个完整的分布式程序无需任何 `@pl.program` 类。
 
 下面这段只展示发现结构 —— kernel 体已省略，它用到的分布式类型见[分布式](../distributed/index.md)：

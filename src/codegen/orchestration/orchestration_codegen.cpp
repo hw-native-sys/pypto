@@ -145,8 +145,9 @@ std::string GenerateConfigFunction(int expected_arg_count) {
 // ``_arg_shape_as_declared`` on the Python side). The runtime ``Tensor`` that
 // arrives therefore carries the logical rank.
 bool IsBlockedNzParam(const TensorTypePtr& tensor_type) {
-  return tensor_type && tensor_type->tensor_view_.has_value() &&
-         tensor_type->tensor_view_->layout == TensorLayout::NZ;
+  if (!tensor_type) return false;
+  const auto& view = tensor_type->tensor_view_;
+  return view.has_value() && view.value().layout == TensorLayout::NZ;
 }
 
 std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_index,
@@ -274,7 +275,7 @@ std::string GenerateDynamicDimDefs(const std::vector<VarPtr>& params, const std:
   for (const auto& var : params) {
     auto tensor_type = AsTensorTypeLike(var->GetType());
     if (!tensor_type) continue;
-    const std::string param_name = auto_name::GetCompatibleBaseName(var->name_hint_);
+    const std::string param_name = codegen->GetVarName(var);
     for (size_t axis = 0; axis < tensor_type->shape_.size(); ++axis) {
       auto extent = As<Var>(tensor_type->shape_[axis]);
       if (!extent) continue;
@@ -363,11 +364,14 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
     std::unordered_map<const Var*, std::string> emit_name_map;
     std::set<std::string> param_emit_names;
     for (const auto& param : graph_func->params_) {
-      std::string name = auto_name::GetCompatibleBaseName(param->name_hint_);
-      emit_name_map[param.get()] = name;
-      param_emit_names.insert(std::move(name));
+      // Distinct IR parameters can normalize to the same identifier after
+      // unrolling or SSA suffix removal. Reserve the emitted name, not the IR
+      // hint, and use this exact mapping for both declarations and body uses.
+      std::string name =
+          auto_name::ReserveUniqueName(auto_name::GetCompatibleBaseName(param->name_hint_), param_emit_names);
+      emit_name_map[param.get()] = std::move(name);
     }
-    OrchestrationStmtCodegen body_codegen(program, registrations, std::move(emit_name_map),
+    OrchestrationStmtCodegen body_codegen(program, registrations, emit_name_map,
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
                                           /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
@@ -413,7 +417,7 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
     int tensor_index = 0;
     int scalar_index = 0;
     for (const auto& param : graph_func->params_) {
-      const std::string name = auto_name::GetCompatibleBaseName(param->name_hint_);
+      const std::string& name = emit_name_map.at(param.get());
       if (AsTensorTypeLike(param->GetType())) {
         oss << "    const Tensor& " << name << " = args.tensor(" << tensor_index << ").ref();\n";
         ++tensor_index;
@@ -433,7 +437,7 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
     for (const auto* def : graph_body_vars.var_defs) graph_defined.insert(GetSSABaseName(def->name_hint_));
     for (const auto& param : graph_func->params_) {
       if (!AsTensorTypeLike(param->GetType())) {
-        graph_defined.insert(auto_name::GetCompatibleBaseName(param->name_hint_));
+        graph_defined.insert(emit_name_map.at(param.get()));
       }
     }
     oss << GenerateDynamicDimDefs(graph_func->params_, graph_body_code, &body_codegen,

@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from . import _specialize_values as values
+from ._call_syntax import SUBMIT_DISPATCH_KEYWORDS, dependency_call
 from ._specialize_types import DynDim, TensorMeta
 
 
@@ -511,9 +512,17 @@ class BodyTransformer(ast.NodeTransformer):
         Inter-function calls inside ``@pl.program`` only accept positional
         args — preserving keyword form would make the parser reject the call.
         """
-        if isinstance(node.func, ast.Name) and node.func.id in self._dep_names:
+        original = node
+        normalized = dependency_call(node)
+        if (
+            normalized is not None
+            and isinstance(normalized.func, ast.Name)
+            and normalized.func.id in self._dep_names
+        ):
+            callee_name = normalized.func.id
+            node = normalized
             dep_name = self._dep_call_targets.get(
-                id(node), self._dep_func_names.get(node.func.id, node.func.id)
+                id(original), self._dep_func_names.get(callee_name, callee_name)
             )
             new_func = ast.Attribute(
                 value=ast.Name(id="self", ctx=ast.Load()),
@@ -523,13 +532,16 @@ class BodyTransformer(ast.NodeTransformer):
             param_order = self._dep_param_names.get(dep_name)
             constexpr_params = self._dep_constexpr_params.get(dep_name, set())
             if param_order is not None and (node.keywords or constexpr_params):
-                pos_args = list(node.args)
+                bound_args = [
+                    (param_order[index] if index < len(param_order) else None, arg)
+                    for index, arg in enumerate(node.args)
+                ]
                 kw_by_name = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
                 # Append keyword-bound args in dep's parameter order, skipping
                 # params already covered by positional args.
-                for param in param_order[len(pos_args) :]:
+                for param in param_order[len(node.args) :]:
                     if param in kw_by_name:
-                        pos_args.append(kw_by_name.pop(param))
+                        bound_args.append((param, kw_by_name.pop(param)))
                 # Any remaining keywords (e.g. **kwargs splats or unknown names)
                 # are kept as-is so we don't silently drop them; the parser
                 # will surface them as a clear error.
@@ -538,19 +550,23 @@ class BodyTransformer(ast.NodeTransformer):
                     # Drop the callee's compile-time arguments. It resolved them
                     # during specialization and its generated signature no longer
                     # declares them, so passing one would be an arity mismatch.
-                    # Filter by position against the *declared* order, which still
-                    # includes them; anything beyond it is left alone for the
-                    # parser to report.
-                    pos_args = [
-                        arg
-                        for index, arg in enumerate(pos_args)
-                        if index >= len(param_order) or param_order[index] not in constexpr_params
-                    ]
+                    # Preserve formal identities before compacting omitted Out
+                    # slots: a later keyword constexpr is not the missing output.
+                    bound_args = [(param, arg) for param, arg in bound_args if param not in constexpr_params]
                     remaining_kw = [kw for kw in remaining_kw if kw.arg not in constexpr_params]
-                new_node = ast.Call(func=new_func, args=pos_args, keywords=remaining_kw)
+                new_node = ast.Call(func=new_func, args=[arg for _, arg in bound_args], keywords=remaining_kw)
             else:
                 new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
-            ast.copy_location(new_node, node)
+            if original is not normalized:
+                # Keep dispatch metadata on Submit while specializing the callee's
+                # constexpr/keyword arguments exactly like an ordinary JIT call.
+                dispatch_keywords = [kw for kw in original.keywords if kw.arg in SUBMIT_DISPATCH_KEYWORDS]
+                new_node = ast.Call(
+                    func=original.func,
+                    args=[new_func, *new_node.args],
+                    keywords=[*new_node.keywords, *dispatch_keywords],
+                )
+            ast.copy_location(new_node, original)
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
 

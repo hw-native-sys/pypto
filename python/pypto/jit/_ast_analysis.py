@@ -18,6 +18,7 @@ import inspect
 import textwrap
 from typing import Any
 
+from ._call_syntax import dependency_call
 from .specializer import (
     DynDim,
     _collect_annotation_dynamic_dims,
@@ -71,8 +72,9 @@ def collect_all_called_names(func_def: ast.FunctionDef) -> tuple[str, ...]:
     names: list[str] = []
     seen: set[str] = set()
     for node in ast.walk(func_def):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = node.func.id
+        call = dependency_call(node)
+        if call is not None and isinstance(call.func, ast.Name):
+            name = call.func.id
             if name not in seen:
                 names.append(name)
                 seen.add(name)
