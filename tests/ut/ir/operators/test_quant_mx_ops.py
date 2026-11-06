@@ -225,7 +225,8 @@ class TestQuantMxTypes:
         call = ir.op.tile.tquant_mx_raw(
             src,
             _tile("max", (1, 32), pl.FP16),
-            _tile("scaling", (1, 32), pl.FP16),
+            # 32 groups, but B16 scaling capacity rounds up to 128 elements.
+            _tile("scaling", (1, 128), pl.FP16, valid_shape=[1, 32]),
             dtype=pl.FP8E4M3FN,
             group_axis=1,
         )
@@ -239,8 +240,73 @@ class TestQuantMxTypes:
             ir.op.tile.tquant_mx_raw(
                 _tile("src", (16, 64), pl.FP16),
                 _tile("max", (1, 31), pl.FP16),
-                _tile("scaling", (1, 32), pl.FP16),
+                _tile("scaling", (1, 128), pl.FP16, valid_shape=[1, 32]),
                 group_axis=1,
+            )
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "scaling_cols", "required_bytes"),
+        [
+            # B16 rounds the 32 groups up to 128 elements (256 bytes); FP32
+            # rounds to 64 elements (256 bytes) and the 16x64 source is too
+            # small for the unrolled double-buffer path.
+            (pl.FP16, 127, 256),
+            (pl.BF16, 64, 256),
+            (pl.FP32, 63, 256),
+        ],
+    )
+    def test_raw_rejects_undersized_axis1_scaling(self, source_dtype, scaling_cols, required_bytes):
+        """PTOAS sizes axis1 scaling from a vector-aligned group count, not the count."""
+        with pytest.raises(ValueError, match=f"scaling scratch capacity of {required_bytes} bytes"):
+            ir.op.tile.tquant_mx_raw(
+                _tile("src", (16, 64), source_dtype),
+                _tile("max", (1, 32), source_dtype),
+                _tile("scaling", (1, scaling_cols), source_dtype, valid_shape=[1, 32]),
+                group_axis=1,
+            )
+
+    def test_raw_requires_doubled_scaling_for_unrolled_fp32(self):
+        """A large FP32 source takes the unrolled path, which doubles the scaling buffer."""
+        # 64x256 FP32: 16,384 physical elements (> 1024 and a multiple of 256),
+        # so 512 groups become 1024 elements = 4096 bytes.
+        src = _tile("src", (64, 256), pl.FP32)
+        max_ws = _tile("max", (1, 512), pl.FP32)
+        with pytest.raises(ValueError, match="scaling scratch capacity of 4096 bytes"):
+            ir.op.tile.tquant_mx_raw(
+                src, max_ws, _tile("scaling", (1, 512), pl.FP32, valid_shape=[1, 512]), group_axis=1
+            )
+        call = ir.op.tile.tquant_mx_raw(
+            src, max_ws, _tile("scaling", (1, 1024), pl.FP32, valid_shape=[1, 512]), group_axis=1
+        )
+        assert isinstance(call.type, ir.TupleType)
+
+    def test_raw_rejects_noncompact_axis1_workspace(self):
+        with pytest.raises(ValueError, match="multi-row group_axis=1 max scratch to be compact"):
+            ir.op.tile.tquant_mx_raw(
+                _tile("src", (16, 64), pl.FP16),
+                _tile("max", (16, 4), pl.FP16, valid_shape=[16, 2]),
+                _tile("scaling", (1, 128), pl.FP16, valid_shape=[1, 32]),
+                group_axis=1,
+            )
+
+    @pytest.mark.parametrize(
+        ("max_shape", "max_valid", "message"),
+        [
+            # Axis0 has no legacy-flat workspace form, ...
+            ((1, 64), (1, 64), r"group_axis=0 max scratch valid_shape \[2, 32\]"),
+            # ... keeps the source's physical column stride, ...
+            ((2, 32), (2, 32), "physical column stride \\(64\\)"),
+            # ... and must cover one group row per 32 source rows.
+            ((1, 64), (2, 32), "group_axis=0 max scratch capacity for 128 elements"),
+        ],
+    )
+    def test_raw_rejects_axis0_workspace_geometry(self, max_shape, max_valid, message):
+        with pytest.raises(ValueError, match=message):
+            ir.op.tile.tquant_mx_raw(
+                _tile("src", (64, 64), pl.BF16, valid_shape=[64, 32]),
+                _tile("max", max_shape, pl.BF16, valid_shape=list(max_valid)),
+                _tile("scaling", (2, 64), pl.BF16, valid_shape=[2, 32]),
+                group_axis=0,
             )
 
     def test_tmov_x2zz_value_return_and_axis0_tmp(self):
@@ -261,6 +327,46 @@ class TestQuantMxTypes:
             ir.op.tile.tmov_x2zz(src0, _tile("tiny", (1, 16), pl.UINT8), group_axis=0)
         with pytest.raises(ValueError, match="requires dst_rows and dst_cols"):
             ir.op.tile.tmov_x2zz(src, tmp, group_axis=1)
+
+    def test_tmov_x2zz_shaped_src_uses_padded_rows(self):
+        """The documented shape for an unaligned row count: padded physical rows.
+
+        A shaped axis1 source must be compact in its columns *and* carry
+        capacity for ``align16(dst_rows) * dst_cols``, because the conversion
+        zeroes the row padding in place. For ``dst_rows=17`` that is physically
+        ``[32, 2]`` with valid ``[17, 2]``.
+        """
+        call = ir.op.tile.tmov_x2zz(
+            _tile("src", (32, 2), pl.UINT8, valid_shape=[17, 2]),
+            _tile("tmp", (1, 96), pl.UINT8),
+            group_axis=1,
+            dst_rows=17,
+            dst_cols=2,
+        )
+        assert isinstance(call.type, ir.TileType)
+        assert _shape_values(call.type) == (32, 2)
+        # Unpadded physical rows cannot hold the zeroed padding.
+        with pytest.raises(ValueError, match="src capacity for align16"):
+            ir.op.tile.tmov_x2zz(
+                _tile("src", (17, 2), pl.UINT8),
+                _tile("tmp", (1, 96), pl.UINT8),
+                group_axis=1,
+                dst_rows=17,
+                dst_cols=2,
+            )
+
+    def test_tmov_x2zz_rejects_noncompact_axis1_src(self):
+        """A shaped multi-row source must have no row padding: PTOAS reads one run."""
+        padded = _tile("src", (16, 4), pl.UINT8, valid_shape=[16, 2])
+        with pytest.raises(ValueError, match="multi-row axis1 src to be compact"):
+            ir.op.tile.tmov_x2zz(
+                padded, _tile("tmp", (1, 96), pl.UINT8), group_axis=1, dst_rows=16, dst_cols=2
+            )
+        tight = _tile("src", (16, 2), pl.UINT8)
+        call = ir.op.tile.tmov_x2zz(
+            tight, _tile("tmp", (1, 96), pl.UINT8), group_axis=1, dst_rows=16, dst_cols=2
+        )
+        assert _shape_values(call.type) == (16, 2)
 
 
 class TestTensorQuantMxTypes:
