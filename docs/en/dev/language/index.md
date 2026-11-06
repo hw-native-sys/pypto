@@ -18,3 +18,5 @@ The Python DSL as the compiler sees it.
 
 - [Register operations](06-register-operations.md): P0 schemas, implicit captures,
   region ownership and Builder construction (VF backend emission requires PR3).
+
+- [Internal external-kernel contract](07-external-kernel-contract.md): v1 interfaces and IR semantic prototypes.
