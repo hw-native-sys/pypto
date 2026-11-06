@@ -33,6 +33,7 @@ TOTAL = NR * MAX_RECV
 
 _KERNEL_NAME = "__builtin_all_to_all_v__fp32"
 _ALL_TO_ALL_V = ir.get_op("pld.tensor.all_to_all_v").name
+_AVAILABLE_AIV_COUNT = ir.get_op("system.available_aiv_count").name
 
 
 def _build_program(core_num: int = 1):
@@ -836,6 +837,46 @@ def test_dynamic_core_num_uses_the_static_rank_count():
     width = call.attrs["core_num"]
     assert isinstance(width, ir.Var), width
     assert width.name_hint.startswith("a2av_blocks_"), width.name_hint
+
+
+def _build_call_valued_width():
+    """A CHIP pipeline whose ``core_num`` is a scalar *call*, not a Var."""
+
+    @pl.program
+    class CallWidth:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.all_to_all_v(
+                stage, data, signal, counts, recv, core_num=pl.system.available_aiv_count()
+            )
+
+    return CallWidth
+
+
+def test_call_valued_core_num_is_bound_once():
+    """A call-valued request is bound before it is expanded into ``B``.
+
+    Splicing the call into the remainder, comparison and subtraction would
+    nest a Call under arithmetic (rejected by ``LegalizeSpmdLaunches``'s
+    ``NoNestedCalls`` prerequisite) and ``FlattenCallExpr`` would evaluate the
+    call three times instead.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_call_valued_width())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    calls = [c.op.name for c in _collect_calls(pipeline.body)]
+    assert calls.count(_AVAILABLE_AIV_COUNT) == 1, calls
+    width = _kernel_call(after).attrs["core_num"]
+    assert isinstance(width, ir.Var), width
+    # The bound prelude leaves no Call nested under the width arithmetic.
+    passes.legalize_spmd_launches()(after)
 
 
 def test_literal_core_num_needs_no_runtime_prelude():
