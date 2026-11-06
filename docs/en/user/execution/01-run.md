@@ -149,11 +149,13 @@ HF8 tensor is named `DataType::UNKNOWN` rather than carried as bytes.)
 You do not opt in, and there is nothing to configure. The one visible consequence is that
 an E5M2 tensor is described as UINT8 in runtime-level logs and descriptors.
 
-The carrier is about **transfer and storage only — it does not widen any operator**. MX
-matmul in particular still requires E4M3FN data operands: `tile.matmul_mx`,
-`tile.matmul_mx_acc`, `tile.matmul_mx_bias` and `tensor.matmul_mx` reject an E5M2 lhs or
-rhs during IR construction, before the carrier is ever reached. Use the carrier to move
-E5M2 data in and out; cast to `pl.FP8E4M3FN` before an MX matmul consumes it.
+The carrier is about **transfer and storage only — it does not widen any operator**. What
+an operator accepts is decided separately, during IR construction, and is unaffected by
+how the bytes crossed. On A5 the MX matmul family — `tile.matmul_mx`,
+`tile.matmul_mx_acc`, `tile.matmul_mx_bias` and `tensor.matmul_mx` — accepts `pl.FP8E4M3FN`
+or `pl.FP8E5M2` for each data operand, chosen independently, so a mixed pair is legal and
+each operand keeps its own dtype; native packed FP4 operands are still rejected, and must
+be cast to one of the two FP8 formats first.
 
 ### `RunConfig` fields that affect dispatch
 

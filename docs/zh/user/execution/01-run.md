@@ -128,10 +128,11 @@ PyPTO 不会拒绝这种张量，而是按原始字节搬运，使框架已持�
 这一行为无需显式开启，也没有可配置项。唯一可见的影响是：在 runtime 级别的日志与 descriptor 中，
 E5M2 张量会被描述为 UINT8。
 
-该载体**只涉及传输与存储，不会放宽任何算子的类型约束**。MX 矩阵乘尤其仍然要求 E4M3FN 数据
-操作数：`tile.matmul_mx`、`tile.matmul_mx_acc`、`tile.matmul_mx_bias` 与
-`tensor.matmul_mx` 会在构建 IR 时就拒绝 E5M2 的 lhs 或 rhs，根本到不了字节载体这一步。
-请用该载体搬运 E5M2 数据，并在 MX 矩阵乘消费它之前先转成 `pl.FP8E4M3FN`。
+该载体**只涉及传输与存储，不会放宽任何算子的类型约束**。算子接受什么类型，是在构建 IR 时
+单独决定的，与字节以何种方式跨越边界无关。在 A5 上，MX 矩阵乘家族 —— `tile.matmul_mx`、
+`tile.matmul_mx_acc`、`tile.matmul_mx_bias` 与 `tensor.matmul_mx` —— 的每个数据操作数都可
+独立地取 `pl.FP8E4M3FN` 或 `pl.FP8E5M2`，因此混合组合是合法的，且每个操作数都保留自己的
+dtype；原生 packed FP4 操作数仍然不被接受，需要先转成这两种 FP8 格式之一。
 
 ### 影响派发的 `RunConfig` 字段
 
