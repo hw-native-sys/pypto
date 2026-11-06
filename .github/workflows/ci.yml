@@ -2462,14 +2462,21 @@ jobs:
         # the same generator in _matmul_mx_data.py. Measured: the two surfaces
         # feed _matmul_mx_golden identical shapes and dtypes ((32,256) / (32,8)
         # / (256,96) / (8,96), k_valid=256), so operand size is NOT the
-        # difference -- only where the operands are built is.
+        # difference -- only where the operands are built is. Nor is size a safe
+        # screen for "this parent-side work is small enough to be harmless":
+        # torch.randint over 16,384 elements does not arm the fault while an
+        # advanced-indexing gather over the same 16,384 does, and 16,384 is
+        # below ATen's 32,768 grain size. What matters is whether the kernel
+        # opens a parallel region in the parent, not how big its input is.
         #
         # Ruled out, so nobody re-derives them:
         #   - *harness style*. `st.case` vs `PTOTestCase` is irrelevant:
         #     test_quant_mx.py mixes both inside mx-tests-a5 itself, and
         #     test_cross_core.py mixes them in mixed-kernel-tests-a5. Both pass.
         #   - *case count*. mixed-kernel-tests-a5 passes with 167 collected
-        #     while mx-tests-a5 hung with 20.
+        #     while mx-tests-a5 hung with 20 -- that 20 was the merged session
+        #     (this step's 16 at the time, plus these 4 appended), not any
+        #     composition the file list produces today.
         #   - *adding cases to an already-selected file*. The tile MX change
         #     added three cases to test_matmul_mx.py, which mx-tests-a5 already
         #     selected wholesale, and that step is green at 19 collected.
