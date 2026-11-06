@@ -323,6 +323,19 @@ class PTOCodegen : public CodegenBase {
   std::string EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name);
 
   /**
+   * @brief Emit the integer cast that widens an expression to i64
+   *
+   * Rank coordinates carried across the device boundary are i64 in the helper
+   * ABI. Narrowing a wider value to i32 first would truncate a rank index
+   * instead of rejecting it, so callers cast to the full width.
+   *
+   * @param expr IR expression whose type determines the cast
+   * @param mlir_name Current MLIR SSA name for the expression value
+   * @return SSA name of the i64-typed value (original if already i64)
+   */
+  std::string EmitCastToI64(const ir::ExprPtr& expr, const std::string& mlir_name);
+
+  /**
    * @brief Register a variable to an MLIR SSA name
    *
    * @param var IR variable
@@ -642,11 +655,12 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
    *
-   * Functions containing ``pld.system.defer_wait`` receive one hidden
+   * Functions containing ``pld.system.defer_wait`` or an async URMA transfer
+   * (``pld.tensor.put_async`` / ``get_async``) receive one hidden
    * ``!pto.ptr<i64>`` parameter after dynamic dimensions and before other
    * runtime-owned parameters. The kernel wrapper forwards its ``args`` pointer
-   * through this slot so deferred-completion lowering can reach the runtime's
-   * per-task AsyncCtx. Returns empty for functions without deferred waits.
+   * through this slot so deferred-completion and URMA-transfer lowering can
+   * reach the runtime's per-task AsyncCtx. Returns empty otherwise.
    */
   [[nodiscard]] std::string GetDeferredCompletionRawArgsSSA() const {
     return fs_.deferred_completion_raw_args_ssa;
@@ -662,6 +676,20 @@ class PTOCodegen : public CodegenBase {
    * @return Stable adapter symbol name.
    */
   std::string RegisterDeferredCompletionAdapter();
+
+  /**
+   * @brief Register the module-level URMA async transfer adapter.
+   *
+   * PR-5 calls this when it emits a helper call. The symbol is dtype-suffixed
+   * (``pypto_urma_put_async_f32`` / ``pypto_urma_get_async_f32``) because the
+   * external helper takes typed base pointers. The declaration is emitted once
+   * at module scope and implemented by the generated C++ kernel wrapper.
+   *
+   * @param is_put True for the put helper, false for get.
+   * @param dtype Element data type of the transfer.
+   * @return The adapter symbol to call.
+   */
+  std::string RegisterUrmaTransferAdapter(bool is_put, DataType dtype);
 
   /**
    * @brief SSA name of the synthetic SPMD block_idx param.
@@ -911,6 +939,10 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::BitNotPtr& op) override;
 
  private:
+  /// Shared implementation for `EmitCastToI32` / `EmitCastToI64`.
+  std::string EmitCastToInt(const ir::ExprPtr& expr, const std::string& mlir_name, unsigned target_bits,
+                            const char* api_name);
+
   /// Whether `expr` cannot be negative at run time, evaluated at `dtype` -- the
   /// width the enclosing operation is emitted at, since `EmitArithOperand`
   /// narrows operands into it.
@@ -957,6 +989,9 @@ class PTOCodegen : public CodegenBase {
 
   /// Emit the external declaration implemented by the generated kernel wrapper.
   void EmitDeferredCompletionAdapterDeclaration();
+
+  /// Emit the external URMA async transfer helper declarations.
+  void EmitUrmaTransferAdapterDeclarations();
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -1368,6 +1403,9 @@ class PTOCodegen : public CodegenBase {
 
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
+
+  /// URMA async transfer helper symbol -> MLIR element type.
+  std::map<std::string, std::string> urma_adapter_element_types_;
 
   /// Sites already reported by WarnIfHighPrecisionIgnored, cleared by Generate
   /// so a second compilation in the same process warns again.

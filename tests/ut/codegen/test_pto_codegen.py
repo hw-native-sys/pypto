@@ -2410,6 +2410,59 @@ class TestGenerateKernelWrapper:
         assert ") + signal_tensor->start_offset;" in wrapper
         assert "deferred_kernel(signal, expected, args);" in wrapper
 
+    def test_urma_transfer_wrapper_injects_adapter_and_forwards_raw_args(self):
+        @pl.program
+        class UrmaWrapperProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        func = UrmaWrapperProgram.get_function("kernel")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+
+        assert '#include "backend/urma/urma_completion_kernel.h"' in wrapper
+        assert '#include "platform_comm/comm_context.h"' in wrapper
+        assert "static __aicore__ void pypto_urma_put_async_f16(" in wrapper
+        assert "pypto_urma_transfer_impl<half, true>" in wrapper
+        assert "comm_workspace<CommWorkspaceKind::URMA>" in wrapper
+        assert "UrmaTput(" in wrapper
+        assert "pipe_barrier(PIPE_ALL)" in wrapper
+        # Dynamic subregions are bounded against each endpoint tensor's extent,
+        # not only against the whole communication window.
+        assert "int64_t dst_extent, int64_t src_extent" in wrapper
+        assert "bytes > local_extent - local_off" in wrapper
+        assert "bytes > remote_extent - remote_view_off" in wrapper
+        # The kernel wrapper forwards the raw dispatch args required by the ABI.
+        assert ", args);" in wrapper
+        assert "pypto_register_counter_completion" not in wrapper
+
+    def test_urma_transfer_adapter_covers_fp8(self):
+        """FP8 async transfers are accepted by the op and need an adapter too."""
+
+        @pl.program
+        class Fp8Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP8E4M3FN],
+                src: pld.DistributedTensor[[16, 64], pl.FP8E4M3FN],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        func = Fp8Program.get_function("kernel")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+
+        assert "static __aicore__ void pypto_urma_put_async_f8E4M3FN(" in wrapper
+        assert "pypto_urma_transfer_impl<float8_e4m3_t, true>" in wrapper
+
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)

@@ -843,6 +843,11 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// Drives the hidden raw dispatch-args pointer shared with the kernel wrapper.
   [[nodiscard]] bool UsesDeferredCompletion() const { return uses_deferred_completion_; }
 
+  /// Returns true when the visited body invokes an async URMA transfer. Drives
+  /// the hidden raw dispatch-args parameter shared with deferred completion and
+  /// the wrapper-defined URMA transfer adapter.
+  [[nodiscard]] bool UsesUrmaTransfer() const { return uses_urma_transfer_; }
+
   /// Returns true when the visited body invokes tile.get_block_idx or
   /// tile.get_block_num. Drives PTOCodegen's decision to append two synthetic
   /// i32 params to the emitted func.func signature; the kernel wrapper
@@ -887,6 +892,10 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
         uses_deferred_completion_ = true;
       }
+      if (!uses_urma_transfer_ &&
+          (ir::IsOp(op, "pld.tensor.put_async") || ir::IsOp(op, "pld.tensor.get_async"))) {
+        uses_urma_transfer_ = true;
+      }
       if (!uses_spmd_block_ops_ &&
           (ir::IsOp(op, "tile.get_block_idx") || ir::IsOp(op, "tile.get_block_num"))) {
         uses_spmd_block_ops_ = true;
@@ -914,6 +923,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::set<uint64_t> iter_arg_ids_;
   bool uses_sdma_workspace_ = false;
   bool uses_deferred_completion_ = false;
+  bool uses_urma_transfer_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
   bool uses_l2_bypass_load_ = false;
@@ -1020,6 +1030,7 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
+  urma_adapter_element_types_.clear();
   reported_precision_sites_.clear();
   for (const auto& [_, function] : program->functions_) {
     if (function->func_type_ == ir::FunctionType::SIMT) simt_functions_.emplace(function->name_, function);
@@ -1061,7 +1072,15 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
     }
   }
 
+  for (const auto& entry : urma_adapter_element_types_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != entry.first, func->span_)
+          << "Function name '" << entry.first << "' is reserved for PyPTO's URMA async transfer adapter";
+    }
+  }
+
   EmitDeferredCompletionAdapterDeclaration();
+  EmitUrmaTransferAdapterDeclarations();
   for (const auto& helper : vf_helpers_) {
     for (const auto& [gvar, func] : program->functions_) {
       CHECK_SPAN(func->name_ != helper.symbol && func->name_ != helper.adapter_symbol, func->span_)
@@ -1212,6 +1231,22 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
           << "(!pto.ptr<i64>, !pto.ptr<i32>, i64, i64)\n";
 }
 
+std::string PTOCodegen::RegisterUrmaTransferAdapter(bool is_put, DataType dtype) {
+  const std::string element = DataTypeToMLIR(dtype);
+  CHECK(element.rfind("!pto.", 0) != 0 && element != "index" && element != "i1")
+      << "URMA async transfer does not support element type '" << element << "'";
+  const std::string symbol = std::string("pypto_urma_") + (is_put ? "put" : "get") + "_async_" + element;
+  urma_adapter_element_types_[symbol] = element;
+  return symbol;
+}
+
+void PTOCodegen::EmitUrmaTransferAdapterDeclarations() {
+  for (const auto& entry : urma_adapter_element_types_) {
+    stream_ << "  func.func private @" << entry.first << "(!pto.ptr<i64>, !pto.ptr<i64>, !pto.ptr<"
+            << entry.second << ">, !pto.ptr<" << entry.second << ">, i64, i64, i64, i64, i64, i64)\n";
+  }
+}
+
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   if (!simt_functions_.empty()) SimtTileProvenanceChecker().Check(func->body_);
   parameter_backed_tile_bases_.clear();
@@ -1289,6 +1324,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
   const bool uses_deferred_completion = collector.UsesDeferredCompletion();
+  const bool uses_urma_transfer = collector.UsesUrmaTransfer();
+  const bool uses_raw_dispatch_args = uses_deferred_completion || uses_urma_transfer;
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
   // A2/A3 reaches the uncached mapping of a page by adding a driver-owned
@@ -1302,7 +1339,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
   }
-  if (uses_deferred_completion) {
+  if (uses_raw_dispatch_args) {
     fs_.used_ssa_names.insert("__pypto_deferred_raw_args");
   }
   if (uses_l2_cache_offset) {
@@ -1468,11 +1505,11 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     BindVarToMlir(dyn_var, arg_name);
   }
 
-  // Deferred completion registration needs the scheduler-owned AsyncCtx,
-  // which is reachable only from kernel_entry's raw dispatch args. Keep this
-  // hidden ABI before other runtime-owned arguments; the Python wrapper mirrors
-  // the order exactly.
-  if (uses_deferred_completion) {
+  // Deferred completion and async URMA transfers both need the scheduler-owned
+  // AsyncCtx, which is reachable only from kernel_entry's raw dispatch args.
+  // Keep this hidden ABI before other runtime-owned arguments; the Python
+  // wrapper mirrors the order exactly.
+  if (uses_raw_dispatch_args) {
     if (!first_param) stream_ << ", ";
     first_param = false;
     fs_.deferred_completion_raw_args_ssa = "%__pypto_deferred_raw_args";
