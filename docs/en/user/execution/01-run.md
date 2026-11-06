@@ -129,8 +129,9 @@ must have a `DataType` for it. It has one for every ordinary dtype and for the M
 `float8_e5m2`, which the runtime omits on purpose because its MX paths were specified
 around E4M3FN plus the E8M0 scale.
 
-A5 MX matmul nevertheless accepts E5M2 on either operand, so PyPTO carries such a tensor
-across as raw bytes rather than refusing it:
+PyPTO carries such a tensor across as raw bytes rather than refusing it, so E5M2 data a
+framework already holds can be transferred, stored and copied without a host-side
+conversion:
 
 | What you pass | What crosses the wire | What the kernel sees |
 | ------------- | --------------------- | -------------------- |
@@ -147,6 +148,12 @@ HF8 tensor is named `DataType::UNKNOWN` rather than carried as bytes.)
 
 You do not opt in, and there is nothing to configure. The one visible consequence is that
 an E5M2 tensor is described as UINT8 in runtime-level logs and descriptors.
+
+The carrier is about **transfer and storage only — it does not widen any operator**. MX
+matmul in particular still requires E4M3FN data operands: `tile.matmul_mx`,
+`tile.matmul_mx_acc`, `tile.matmul_mx_bias` and `tensor.matmul_mx` reject an E5M2 lhs or
+rhs during IR construction, before the carrier is ever reached. Use the carrier to move
+E5M2 data in and out; cast to `pl.FP8E4M3FN` before an MX matmul consumes it.
 
 ### `RunConfig` fields that affect dispatch
 

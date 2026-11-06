@@ -2323,6 +2323,12 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # fp8e5m2_transfer is the wire-level sibling of those: one harness case
+        # (+1 to this step's 16) asserting that a host-prequantized FP8E5M2
+        # tensor survives the runtime's UINT8 byte carrier bit-for-bit. It is
+        # here rather than in a directory-glob step because every such step runs
+        # at the default --platform=a2a3, which deselects its platforms("a5")
+        # marker; this is the only job that gives it a5 device coverage.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
@@ -2332,6 +2338,7 @@ jobs:
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp8e5m2_transfer.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5

@@ -112,7 +112,8 @@ Host 端 `torch.Tensor` 实参在传输时按其 dtype 命名，因此固定版�
 `float4_e2m1fn_x2` 都有，但 **没有** `float8_e5m2`：runtime 有意省略它，因为其 MX 路径
 是按 E4M3FN 加 E8M0 scale 设计的。
 
-然而 A5 MX 矩阵乘的任一操作数都可以是 E5M2，所以 PyPTO 不会拒绝这种张量，而是按原始字节搬运：
+PyPTO 不会拒绝这种张量，而是按原始字节搬运，使框架已持有的 E5M2 数据无需在 host 侧做格式
+转换即可传输、存储与拷贝：
 
 | 你传入的 | 实际传输的 | kernel 看到的 |
 | -------- | ---------- | ------------- |
@@ -126,6 +127,11 @@ Host 端 `torch.Tensor` 实参在传输时按其 dtype 命名，因此固定版�
 
 这一行为无需显式开启，也没有可配置项。唯一可见的影响是：在 runtime 级别的日志与 descriptor 中，
 E5M2 张量会被描述为 UINT8。
+
+该载体**只涉及传输与存储，不会放宽任何算子的类型约束**。MX 矩阵乘尤其仍然要求 E4M3FN 数据
+操作数：`tile.matmul_mx`、`tile.matmul_mx_acc`、`tile.matmul_mx_bias` 与
+`tensor.matmul_mx` 会在构建 IR 时就拒绝 E5M2 的 lhs 或 rhs，根本到不了字节载体这一步。
+请用该载体搬运 E5M2 数据，并在 MX 矩阵乘消费它之前先转成 `pl.FP8E4M3FN`。
 
 ### 影响派发的 `RunConfig` 字段
 

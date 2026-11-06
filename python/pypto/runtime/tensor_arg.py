@@ -73,7 +73,7 @@ _WIRE_TENSOR_ATTR = "_pypto_wire_tensor"
 # Torch dtypes the pinned runtime has no ``DataType`` enumerator for. The wire
 # descriptor names them as the same-width UINT8 byte carrier, so the H2D/D2H copy
 # moves the identical bytes while the kernel signature keeps the real element
-# type. ``float8_e5m2`` is the A5 MX case; ``codegen_base.cpp`` maps it the same
+# type. ``float8_e5m2`` is the A5 low-precision case; ``codegen_base.cpp`` maps it the same
 # way for orchestration ``TensorCreateInfo`` (as it already does for FP4E1M2X2).
 _BYTE_CARRIER_TORCH_DTYPES = ("float8_e5m2",)
 
