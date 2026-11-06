@@ -14,7 +14,10 @@ The IR Builder provides a convenient API for constructing PyPTO IR incrementally
 
 ## Python API
 
-Uses context managers (`with` statements) for clean interface.
+Two construction surfaces share one builder: the context-manager forms
+below, and a direct `begin_*`/`end_*` surface (see
+[Direct Begin/End API](#direct-beginend-api-python)) for frontends that
+assemble a body outside a single statement walk.
 
 ### Basic Function
 
@@ -114,6 +117,54 @@ with ib.function("add_and_return") as f:
 
 func = f.get_result()
 ```
+
+### Direct Begin/End API (Python)
+
+The scope-creating context managers above are thin wrappers over direct
+`begin_*`/`end_*` primitives: `begin_function`/`end_function`,
+`begin_for_loop`/`end_for_loop`, `begin_while_loop`/`end_while_loop`,
+`begin_if`/`begin_else`/`end_if`, `begin_scope`/`end_scope`, and
+`begin_program`/`end_program`, plus the handle methods the tracing frontend
+calls directly (`func_arg`, `return_type`, `declare_function`, …). A
+value-oriented frontend — the trace interpreter lowering one operation at
+a time — calls these directly instead of bracketing a Python `with` block:
+the C++ builder's LIFO stack tracks the open region, and no
+`<X>Builder` handle or `inspect`-based span capture is involved.
+
+```python
+ib = IRBuilder()
+
+ib.begin_function("sum_to_n", ir.Span("kernel.py", 1, 0))
+n = ib.func_arg("n", ir.ScalarType(DataType.INT64), ir.Span("kernel.py", 2, 4))
+ib.return_type(ir.ScalarType(DataType.INT64))
+
+i = ib.var("i", ir.ScalarType(DataType.INT64))
+ib.begin_for_loop(i, 0, n, 1, ir.Span("kernel.py", 4, 4))
+# ... loop body, emitted statement by statement ...
+ib.end_for_loop(ir.Span("kernel.py", 6, 4))
+
+func = ib.end_function(ir.Span("kernel.py", 7, 0))
+```
+
+**Span contract.** An explicit `span` argument always wins. A `span=None`
+argument resolves through the *pinned span*
+(`pypto.ir.utils.current_pinned_span` — the DSL parser pins one per DSL
+call, the trace interpreter one per instrumented row) before falling back
+to `ir.Span.unknown()`. The direct surface never walks the Python stack:
+a value-oriented frontend sits too many frames below the user's source for
+frame capture to land anywhere useful. Without the pinned-span resolution,
+every traced `ForStmt`/`IfStmt`/`WhileStmt`/`ScopeStmt` degraded to
+`Span.unknown()`, losing the kernel's source location.
+
+**Mirror and error-path discipline.** `begin_scope` keeps Python-side
+mirrors of the open scope stack (`_scope_kinds`, `_scope_manuals`,
+`_incore_user_splits`) that trace-protocol objects read for wrap decisions.
+Both directions append/pop only after the native builder succeeds: a close
+rejected by the C++ builder (nothing open, or a mismatched context on top)
+raises and leaves the mirrors untouched, so they never report a scope
+closed that the native builder still has open. The other `begin_*`/`end_*`
+primitives keep no Python-side state — the C++ LIFO is the single source
+of truth.
 
 ## C++ API
 

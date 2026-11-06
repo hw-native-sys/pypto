@@ -9,12 +9,14 @@
 
 """Utility functions for IR construction."""
 
+import contextvars
 import inspect
 import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any, TypeGuard
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -24,6 +26,7 @@ from pypto.pypto_core import ir as _ir
 # to frame-capture, so nodes constructed inside DSL wrappers carry the
 # call-site span rather than the wrapper file's own line.
 _PARSER_SPAN: ContextVar[_ir.Span | None] = ContextVar("_PARSER_SPAN", default=None)
+_PYPTO_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
 @contextmanager
@@ -36,12 +39,34 @@ def use_parser_span(span: _ir.Span) -> Iterator[None]:
         _PARSER_SPAN.reset(token)
 
 
+def set_pinned_span(span: _ir.Span) -> "contextvars.Token[_ir.Span | None]":
+    """Set the pinned span and return its reset token.
+
+    Two pinners: the DSL parser pins per DSL call
+    (:func:`use_parser_span`), and the trace interpreter pins per
+    instrumented row (the Sema routes ``rt._span`` events here) so the op
+    and builder layers never walk the Python stack during a trace.
+    """
+    return _PARSER_SPAN.set(span)
+
+
+def reset_pinned_span(token: "contextvars.Token[_ir.Span | None]") -> None:
+    """Restore the pinned span to its pre-pin value."""
+    _PARSER_SPAN.reset(token)
+
+
+def current_pinned_span() -> _ir.Span | None:
+    """The pinned span, if the current context has one active."""
+    return _PARSER_SPAN.get()
+
+
 def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) -> _ir.Span:
     """Get explicit span, parser-pinned span, or captured frame span.
 
     Resolution order:
       1. Explicit ``span`` argument when provided.
-      2. ``_PARSER_SPAN`` contextvar (set by the DSL parser).
+      2. ``_PARSER_SPAN`` contextvar (set by the DSL parser per DSL call,
+         or by the trace interpreter per instrumented row).
       3. Frame capture from ``frame_offset`` levels up the Python stack.
 
     Args:
@@ -67,20 +92,36 @@ def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) ->
             break
         frame = frame.f_back
 
-    if frame is not None:
+    while frame is not None:
         info = inspect.getframeinfo(frame)
-        return _ir.Span(info.filename, info.lineno, -1)
+        try:
+            is_pypto_frame = Path(info.filename).resolve().is_relative_to(_PYPTO_PACKAGE_ROOT)
+        except ValueError:
+            is_pypto_frame = False
+        if not is_pypto_frame:
+            return _ir.Span(info.filename, info.lineno, -1)
+        frame = frame.f_back
 
     return _ir.Span.unknown()
 
 
+def _is_nonscalar_sequence(value: object) -> TypeGuard["Sequence[object]"]:
+    """A Sequence that is not str/bytes — the one-bracket-level-too-many mistake."""
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
 def _normalize_expr(
-    value: object,
+    value: Any,
     span: _ir.Span | None = None,
     int_dtype: DataType = DataType.INDEX,
     float_dtype: DataType = DataType.FP32,
 ) -> _ir.Expr:
     """Convert Python values to IR expressions.
+
+    The operand-boundary converter (``_submit_expr``'s doctrine): the value
+    arrives from dynamic callers, so the parameter is honestly ``Any`` and
+    the isinstance chain is the contract — everything but int/float/Expr is
+    loud.
 
     Args:
         value: Python int/float or existing Expr
@@ -98,19 +139,18 @@ def _normalize_expr(
         return value
 
     actual_span = span if span is not None else _ir.Span.unknown()
-    value_type = type(value)
 
     if isinstance(value, int):
         return _ir.ConstInt(value, int_dtype, actual_span)
     elif isinstance(value, float):
         return _ir.ConstFloat(value, float_dtype, actual_span)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+    elif _is_nonscalar_sequence(value):
         # A nested sequence where a scalar belongs — almost always one bracket
         # level too many in an offsets / shapes / valid_shape argument. No
         # operator accepts a nested tuple, so name the mistake here rather than
         # letting the generic "cannot convert" message stand.
         raise TypeError(
-            f"Cannot convert {value_type} to IR expression: expected a scalar, but got the "
+            f"Cannot convert {type(value)} to IR expression: expected a scalar, but got the "
             f"sequence {value!r}. Each element of an offsets / shapes / valid_shape argument is "
             f"one dimension's extent, so the argument takes a flat sequence of integer scalars "
             f"-- one bracket level, not nested pairs."
@@ -239,8 +279,8 @@ def default_saturation_mode_for(target_dtype: DataType | int | None) -> int | No
     """
     if target_dtype is None:
         return None
-    # NOTE: the int spelling has no runtime path — DataType has no constructor
-    # from a type code (mirrors pl.cast in unified_ops); kept verbatim under ignore.
+    # DataType has no constructor from a type code (mirrors pl.cast in
+    # unified_ops); kept verbatim under ignore.
     dtype = DataType(target_dtype) if isinstance(target_dtype, int) else target_dtype  # type: ignore[reportCallIssue]
     if not dtype.is_int():
         return None
@@ -668,4 +708,7 @@ __all__ = [
     "resolve_saturation_deviation",
     "resolve_saturation_mode",
     "use_parser_span",
+    "set_pinned_span",
+    "reset_pinned_span",
+    "current_pinned_span",
 ]

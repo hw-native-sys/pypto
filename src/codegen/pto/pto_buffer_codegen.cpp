@@ -523,6 +523,11 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
   stream_ = std::move(fs_.body_section);
   // This shared GM prologue renders tensor shape/stride metadata only. No
   // legacy on-chip allocation or handle-discovery helper runs on this path.
+  // Same contract as GenerateFunction's prologue: the synthesized parameter
+  // views carry the enclosing function's span, because the function definition
+  // line is the only truthful location for compiler-generated preamble.
+  const ir::Span* prologue_span = func->span_.is_valid() ? &func->span_ : nullptr;
+  SpanScope prologue_loc(this, prologue_span);
   EmitMakeTensorViews(func);
   if (func->body_) VisitStmt(func->body_);
   const std::string body = stream_.str();

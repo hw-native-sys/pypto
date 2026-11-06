@@ -14,7 +14,7 @@ IR 构建器 (Builder) 提供了一套便捷的 API，用于使用上下文管�
 
 ## Python API
 
-使用上下文管理器（`with` 语句 (Statement)）提供简洁的接口。
+两个构造面共用同一个 builder：下面的上下文管理器形式，以及面向“在单次语句遍历之外拼装函数体”的前端的直接 `begin_*`/`end_*` 面（见下文“直接 Begin/End API（Python）”一节）。
 
 ### 基本函数
 
@@ -114,6 +114,41 @@ with ib.function("add_and_return") as f:
 
 func = f.get_result()
 ```
+
+### 直接 Begin/End API（Python）
+
+上面的作用域型上下文管理器是对直接 `begin_*`/`end_*` 原语的薄封装：
+`begin_function`/`end_function`、`begin_for_loop`/`end_for_loop`、
+`begin_while_loop`/`end_while_loop`、`begin_if`/`begin_else`/`end_if`、
+`begin_scope`/`end_scope`，以及 `begin_program`/`end_program`，外加追踪前端直接调用的句柄方法
+（`func_arg`、`return_type`、`declare_function` 等）。面向值的前端 —— 逐个操作下沉的
+trace 解释器 —— 直接调用这些原语，而不必括起一个 Python `with` 块：C++ builder 的
+LIFO 栈跟踪打开的区域，不涉及 `<X>Builder` 句柄，也不做基于 `inspect` 的 span 捕获。
+
+```python
+ib = IRBuilder()
+
+ib.begin_function("sum_to_n", ir.Span("kernel.py", 1, 0))
+n = ib.func_arg("n", ir.ScalarType(DataType.INT64), ir.Span("kernel.py", 2, 4))
+ib.return_type(ir.ScalarType(DataType.INT64))
+
+i = ib.var("i", ir.ScalarType(DataType.INT64))
+ib.begin_for_loop(i, 0, n, 1, ir.Span("kernel.py", 4, 4))
+# ... loop body, emitted statement by statement ...
+ib.end_for_loop(ir.Span("kernel.py", 6, 4))
+
+func = ib.end_function(ir.Span("kernel.py", 7, 0))
+```
+
+**span 契约。**显式 `span` 参数永远优先。`span=None` 先经过*钉住的 span*
+（`pypto.ir.utils.current_pinned_span` —— DSL 解析器逐 DSL 调用钉一次，
+trace 解释器逐插桩行钉一次）解析，最后才回退到 `ir.Span.unknown()`。直接面从不遍历
+Python 调用栈：面向值的前端距离用户源码隔了太多层栈帧，帧捕获不会落到任何有用的位置。若没有钉住 span 的解析，被追踪的
+`ForStmt`/`IfStmt`/`WhileStmt`/`ScopeStmt` 全部退化为 `Span.unknown()`，丢失内核的源位置。
+
+**镜像与错误路径纪律。**`begin_scope` 在 Python 侧维护打开作用域栈的镜像
+（`_scope_kinds`、`_scope_manuals`、`_incore_user_splits`），供 trace 协议对象做包裹决策时读取。
+两个方向都只在原生 builder 成功后才追加/弹出：被 C++ builder 拒绝的关闭（没有打开的作用域，或栈顶上下文不匹配）会抛出异常且镜像保持不变，因此镜像绝不会把原生 builder 仍然打开着的作用域报告为已关闭。其余 `begin_*`/`end_*` 原语不持有 Python 侧状态 —— C++ LIFO 是唯一事实源。
 
 ## C++ API
 
