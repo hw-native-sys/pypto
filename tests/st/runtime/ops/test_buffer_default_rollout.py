@@ -590,5 +590,155 @@ def test_default_half_rounding(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
+def _indexed_gather_entry():
+    @pl.jit.incore
+    def kernel(a: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        source = pl.load(a, [0, 0], [8, 64])
+        indices = pl.load(idx, [0, 0], [4, 32])
+        scratch = pl.create_tile([4, 32], dtype=pl.INT32)
+        gathered = pl.tile.gather(source, indices, scratch)
+        out = pl.store(gathered, [0, 0], out)
+        return pl.store(source, [4, 0], out)
+
+    @pl.jit
+    def entry(a: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(a, idx, out)
+
+    return entry
+
+
+def _indexed_gather_golden(tensors):
+    result = tensors["out"].clone()
+    result[:4, :32] = tensors["a"].reshape(-1)[tensors["idx"].long()]
+    result[4:] = tensors["a"]
+    return result
+
+
+@st.cases(
+    *[
+        st.case(
+            _indexed_gather_entry(),
+            torch.arange(512).reshape(8, 64).to(dtype),
+            ((torch.arange(128).reshape(4, 32) * 37) % 512).to(torch.int32),
+            torch.full((12, 64), -777, dtype=dtype),
+            name=f"buffer_indexed_gather_{dtype}_{planner.name.lower()}",
+            golden=_indexed_gather_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for dtype in (torch.float16, torch.float32, torch.int32)
+        for planner in _PLANNERS
+    ]
+)
+def test_default_indexed_gather(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+def _indexed_scatter_entry(valid):
+    rows, cols = valid
+
+    @pl.jit.incore
+    def kernel(a: pl.Tensor, values: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        old = pl.load(a, [0, 0], [8, 64])
+        source = pl.load(values, [0, 0], [4, 32], valid_shape=[rows, cols])
+        indices = pl.load(idx, [0, 0], [4, 32], valid_shape=[rows, cols])
+        zero = pl.tile.full([8, 64], pl.FP32, 0.0)
+        scattered = pl.tile.scatter(zero, source, indices)
+        ones = pl.tile.full([4, 32], pl.FP32, 1.0)
+        active_ones = pl.tile.set_validshape(ones, rows, cols)
+        mask_zero = pl.tile.full([8, 64], pl.FP32, 0.0)
+        written = pl.tile.scatter(mask_zero, active_ones, indices)
+        predicate = pl.tile.cmps(written, 0.0, cmp_type=1)
+        scratch = pl.create_tile([1, 16], dtype=pl.UINT32)
+        result = pl.tile.sel(predicate, scattered, old, scratch)
+        out = pl.store(result, [0, 0], out)
+        out = pl.store(old, [8, 0], out)
+        return pl.store(source, [16, 0], out)
+
+    @pl.jit
+    def entry(a: pl.Tensor, values: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(a, values, idx, out)
+
+    return entry
+
+
+def _indexed_scatter_golden(tensors, valid):
+    rows, cols = valid
+    result = tensors["out"].clone()
+    result[:8] = tensors["a"]
+    result[8:16] = tensors["a"]
+    result[16 : 16 + rows, :cols] = tensors["values"][:rows, :cols]
+    # Distinct values at repeated indices expose scan order; negative base
+    # sentinels expose lost preservation or an accidentally skipped scatter.
+    for row in range(rows):
+        for col in range(cols):
+            result[:8].view(-1)[tensors["idx"][row, col]] = tensors["values"][row, col]
+    return result
+
+
+@st.cases(
+    *[
+        st.case(
+            _indexed_scatter_entry(valid),
+            -torch.arange(1, 513).reshape(8, 64).float(),
+            torch.arange(1, 129).reshape(4, 32).float(),
+            ((torch.arange(128).reshape(4, 32) // 2 * 7) % 512).to(torch.int32),
+            torch.full((20, 64), -777.0),
+            name=f"buffer_indexed_scatter_{valid[1]}_{planner.name.lower()}",
+            golden=lambda tensors, valid=valid: _indexed_scatter_golden(tensors, valid),
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for valid in ((4, 32), (3, 29))
+        for planner in _PLANNERS
+    ]
+)
+def test_default_indexed_scatter(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+def _tensor_scatter_entry():
+    @pl.jit.incore
+    def kernel(base: pl.Tensor, index: pl.Tensor, values: pl.Tensor, out: pl.Out[pl.Tensor]):
+        result = pl.tensor.scatter(base, dim=-1, index=index, src=values)
+        return pl.assemble(out, result, [0, 0])
+
+    @pl.jit
+    def entry(base: pl.Tensor, index: pl.Tensor, values: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return kernel(base, index, values, out)
+
+    return entry
+
+
+def _tensor_scatter_golden(tensors):
+    result = tensors["base"].clone()
+    for col in range(32):
+        result[0, tensors["index"][0, col]] = tensors["values"][0, col]
+    return result
+
+
+@st.cases(
+    *[
+        st.case(
+            _tensor_scatter_entry(),
+            -torch.arange(1, 65).reshape(1, 64).float(),
+            (torch.arange(32).reshape(1, 32) // 2 * 3).to(torch.int32),
+            torch.arange(1, 33).reshape(1, 32).float(),
+            torch.empty((1, 64)),
+            name=f"buffer_tensor_scatter_{planner.name.lower()}",
+            golden=_tensor_scatter_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+    ]
+)
+def test_default_tensor_scatter(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

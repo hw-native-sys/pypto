@@ -20,6 +20,7 @@
 #include <unordered_set>
 
 #include "pypto/backend/common/buffer_conversion_recipes.h"
+#include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -79,7 +80,8 @@ class BufferValidAnalysis : public IRVisitor {
     // Empty reduction axes have different semantics from empty elementwise
     // outputs; the first row recipes deliberately require a wholly static kernel.
     restricted_ |= backend::FindLogicalBufferRowRecipe(call->op_->name_) != nullptr ||
-                   backend::FindLogicalBufferConversionRecipe(call->op_->name_) != nullptr;
+                   backend::FindLogicalBufferConversionRecipe(call->op_->name_) != nullptr ||
+                   backend::FindLogicalBufferIndexedRecipe(call->op_->name_) != nullptr;
     if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") || IsOp(call, "tile.assemble") ||
         IsOp(call, "tile.move") || IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view") ||
         IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {

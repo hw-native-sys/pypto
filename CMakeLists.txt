@@ -124,6 +124,7 @@ set(PYPTO_SOURCES
     # IR - Operators
     src/ir/op/simt_ops.cpp
     src/ir/op/buffer_ops/conversion.cpp
+    src/ir/op/buffer_ops/indexed.cpp
     src/ir/op/buffer_ops/elementwise.cpp
     src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
@@ -430,6 +431,7 @@ set(PYPTO_SOURCES
     src/backend/common/isa_macro_resources_comm.cpp
     src/backend/common/isa_macro_resources_protocol.cpp
     src/backend/common/buffer_conversion_recipes.cpp
+    src/backend/common/buffer_indexed_recipes.cpp
     src/backend/common/buffer_elementwise_recipes.cpp
     src/backend/common/buffer_row_recipes.cpp
     src/backend/common/buffer_view_semantics.cpp

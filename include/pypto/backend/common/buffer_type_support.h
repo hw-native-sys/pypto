@@ -64,6 +64,18 @@ inline bool IsColumnVectorBuffer(const ir::BufferTypePtr& type) {
          type->compact_ == ir::CompactMode::null && type->valid_shape_[0] > 0 && type->valid_shape_[1] == 1;
 }
 
+/// Dense allocation descriptors shared by heterogeneous native recipes.
+inline bool IsAlignedDenseVecBuffer(const ir::BufferTypePtr& type) {
+  const auto element_bytes = type ? type->dtype_.GetBit() / 8 : 0;
+  // Check alignment without multiplying a potentially large physical extent.
+  return element_bytes > 0 && element_bytes <= 32 && 32 % element_bytes == 0 && type &&
+         type->shape_.size() == 2 && type->memory_space_ == ir::MemorySpace::Vec &&
+         type->blayout_ == ir::TileLayout::row_major && type->slayout_ == ir::TileLayout::none_box &&
+         type->fractal_ == 512 && type->pad_ == ir::PadValue::null &&
+         type->compact_ == ir::CompactMode::null && type->valid_shape_[0] > 0 && type->valid_shape_[1] > 0 &&
+         type->shape_[1] % (32 / element_bytes) == 0;
+}
+
 /// Static positive-valid logical descriptors shared by heterogeneous recipes.
 inline ir::BufferTypePtr StaticLogicalBufferDescriptor(const ir::TypePtr& type) {
   const auto tile = ir::As<ir::TileType>(type);
