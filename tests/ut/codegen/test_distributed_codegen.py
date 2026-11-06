@@ -367,6 +367,59 @@ class TestDistributedCodegen:
         # Generated stub must be syntactically valid Python.
         compile(module, "<sample>", "exec")
 
+    def test_sub_worker_rejects_fp8e5m2_parameter(self):
+        """A HOST SubWorker cannot receive a byte-carried FP8E5M2 tensor.
+
+        The generated unpacking reads its torch dtype from the wire descriptor,
+        which names FP8E5M2 as UINT8, so the body would silently be handed byte
+        codes instead of float values. Emission must refuse rather than produce
+        a module that computes wrong numbers without erroring.
+        """
+        from pypto.backend.pto_backend import _emit_sub_worker_module  # noqa: PLC0415
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+            def observe(x: pl.Tensor[[64], pl.FP8E5M2]):
+                pass
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, x: pl.Tensor[[64], pl.FP8E5M2]) -> pl.Tensor[[64], pl.FP8E5M2]:
+                self.observe(x)
+                return x
+
+        observe_fn = Input.get_function("observe")
+        assert observe_fn is not None
+        with pytest.raises(NotImplementedError, match="FP8E5M2"):
+            _emit_sub_worker_module(observe_fn)
+
+    def test_sub_worker_accepts_packed_fp4_parameter(self):
+        """The FP8E5M2 refusal must not catch FP4E1M2X2, which crosses correctly.
+
+        Control for the guard above. FP4E1M2X2 is also named UINT8 on the wire,
+        but torch has no dtype for it at all, so UINT8 is its faithful host
+        representation rather than a lossy stand-in -- rejecting it would break
+        a path that works.
+        """
+        from pypto.backend.pto_backend import _emit_sub_worker_module  # noqa: PLC0415
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+            def observe(x: pl.Tensor[[64], pl.FP4E1M2X2]):
+                pass
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, x: pl.Tensor[[64], pl.FP4E1M2X2]) -> pl.Tensor[[64], pl.FP4E1M2X2]:
+                self.observe(x)
+                return x
+
+        observe_fn = Input.get_function("observe")
+        assert observe_fn is not None
+        module = _emit_sub_worker_module(observe_fn)
+        assert "_tensor_from_continuous" in module
+        compile(module, "<observe>", "exec")
+
     def test_abstract_sub_worker_survives_pto_serialization(self):
         """requires_runtime_binding round-trips through binary .pto serialization."""
 
