@@ -1,0 +1,495 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/error.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/simt_analysis.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/pass_properties.h"
+#include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/scope_outline_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/verifier/verifier.h"
+
+namespace pypto::ir {
+namespace {
+
+// Index region-local definitions once. The caller walk subsequently rejects
+// escapes by identity, including uses before a region and same-spelling Vars.
+class RegionIndex : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> locals;
+  bool found = false;
+
+ protected:
+  void VisitStmt_(const SimtScopeStmtPtr& scope) override {
+    found = true;
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(scope->body_);
+    for (const auto* var : collector.var_defs) {
+      CHECK_SPAN(!As<TileType>(var->GetType()) && !As<TensorType>(var->GetType()), var->span_)
+          << "SIMT helpers cannot allocate or rebind storage handles";
+    }
+    for (const auto& var : scope->private_scalars_) collector.var_defs.erase(var.get());
+    locals.insert(collector.var_defs.begin(), collector.var_defs.end());
+  }
+};
+
+class RegionControlChecker : public IRVisitor {
+ protected:
+  void VisitStmt_(const ForStmtPtr& stmt) override {
+    ++loop_depth_;
+    ++yield_depth_;
+    IRVisitor::VisitStmt_(stmt);
+    --yield_depth_;
+    --loop_depth_;
+  }
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    ++loop_depth_;
+    ++yield_depth_;
+    IRVisitor::VisitStmt_(stmt);
+    --yield_depth_;
+    --loop_depth_;
+  }
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    ++yield_depth_;
+    IRVisitor::VisitStmt_(stmt);
+    --yield_depth_;
+  }
+  void VisitStmt_(const YieldStmtPtr& stmt) override {
+    CHECK_SPAN(yield_depth_ != 0, stmt->span_) << "yield cannot cross a SIMT region boundary";
+    IRVisitor::VisitStmt_(stmt);
+  }
+  void VisitStmt_(const BreakStmtPtr& stmt) override {
+    CHECK_SPAN(loop_depth_ != 0, stmt->span_) << "break cannot cross a SIMT region boundary";
+  }
+  void VisitStmt_(const ContinueStmtPtr& stmt) override {
+    CHECK_SPAN(loop_depth_ != 0, stmt->span_) << "continue cannot cross a SIMT region boundary";
+  }
+  void VisitStmt_(const ReturnStmtPtr& stmt) override {
+    CHECK_SPAN(false, stmt->span_) << "return cannot cross a SIMT region boundary";
+  }
+  void VisitStmt_(const SimtScopeStmtPtr& stmt) override {
+    CHECK_SPAN(false, stmt->span_) << "Nested simt_scope is not supported";
+  }
+
+ private:
+  size_t loop_depth_ = 0;
+  size_t yield_depth_ = 0;
+};
+
+// A conservative storage-alias partition is built once, before mutation. This
+// handles pre-SSA reassignments and branch/loop joins without choosing a single
+// reaching definition. Union by rank and path compression keep it near-linear.
+class StoragePermissions : public IRVisitor {
+ public:
+  explicit StoragePermissions(const FunctionPtr& function) {
+    for (size_t i = 0; i < function->params_.size(); ++i) {
+      const auto& param = function->params_[i];
+      if (!IsStorage(param)) continue;
+      const auto direction = function->param_directions_[i];
+      auto& root = nodes_[param.get()];
+      root.readonly = direction == ParamDirection::In;
+      root.uninitialized = direction == ParamDirection::Out;
+      if (root.uninitialized) root.initialization_base = param.get();
+    }
+    VisitStmt(function->body_);
+  }
+
+  const Var* Root(const Var* var) {
+    auto& node = nodes_[var];
+    if (!node.parent) return var;
+    return node.parent = Root(node.parent);
+  }
+  bool Known(const Var* var) { return !nodes_.at(Root(var)).unknown_provenance; }
+  bool Readonly(const Var* var) { return nodes_.at(Root(var)).readonly; }
+  bool Uninitialized(const Var* var) { return nodes_.at(Root(var)).uninitialized; }
+  const Var* InitializationBase(const Var* var) {
+    const auto& node = nodes_.at(Root(var));
+    return node.ambiguous_initialization ? nullptr : node.initialization_base;
+  }
+
+ protected:
+  void VisitStmt_(const SimtScopeStmtPtr&) override {}
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    if (As<TupleType>(stmt->var_->GetType())) {
+      auto tuple = ResolveTuple(stmt->value_);
+      auto [it, inserted] = tuples_.try_emplace(stmt->var_.get(), tuple);
+      if (!inserted && it->second != tuple) it->second = nullptr;
+      return;
+    }
+    if (!IsStorage(stmt->var_)) return;
+    if (auto source = AsVarLike(stmt->value_)) {
+      Unite(stmt->var_, source);
+    } else if (auto projection = As<TupleGetItemExpr>(stmt->value_)) {
+      auto tuple = ResolveTuple(projection->tuple_);
+      auto source = tuple && projection->index_ >= 0 &&
+                            static_cast<size_t>(projection->index_) < tuple->elements_.size()
+                        ? AsVarLike(tuple->elements_[projection->index_])
+                        : nullptr;
+      if (source)
+        Unite(stmt->var_, source);
+      else
+        nodes_[Root(stmt->var_.get())].unknown_provenance = true;
+    } else if (auto call = As<Call>(stmt->value_)) {
+      if (As<GlobalVar>(call->op_)) nodes_[Root(stmt->var_.get())].unknown_provenance = true;
+      if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
+        auto& root = nodes_[Root(stmt->var_.get())];
+        root.uninitialized = true;
+        if (root.initialization_base && root.initialization_base != stmt->var_.get()) {
+          root.ambiguous_initialization = true;
+        }
+        root.initialization_base = stmt->var_.get();
+      } else {
+        auto alias = ResultAliasedArgIndex(call);
+        // Tile arithmetic returns a fresh value even if a later memory planner
+        // may reuse an operand. Only views and handle copies inherit permission.
+        if (As<TileType>(stmt->var_->GetType())) alias = std::nullopt;
+        if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tensor.slice") ||
+            IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view"))
+          alias = 0;
+        if (alias && *alias < call->args_.size()) Unite(stmt->var_, AsVarLike(call->args_[*alias]));
+      }
+    }
+  }
+  void VisitStmt_(const ForStmtPtr& stmt) override {
+    Carries(stmt->iter_args_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+    YieldRoots(stmt->body_, stmt->return_vars_);
+  }
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    Carries(stmt->iter_args_, stmt->return_vars_);
+    IRVisitor::VisitStmt_(stmt);
+    YieldRoots(stmt->body_, stmt->return_vars_);
+  }
+  void VisitStmt_(const IfStmtPtr& stmt) override {
+    IRVisitor::VisitStmt_(stmt);
+    YieldRoots(stmt->then_body_, stmt->return_vars_);
+    if (stmt->else_body_) YieldRoots(*stmt->else_body_, stmt->return_vars_);
+  }
+
+ private:
+  struct Node {
+    const Var* parent = nullptr;
+    size_t rank = 0;
+    bool readonly = false;
+    bool uninitialized = false;
+    const Var* initialization_base = nullptr;
+    bool ambiguous_initialization = false;
+    bool unknown_provenance = false;
+  };
+  MakeTuplePtr ResolveTuple(const ExprPtr& expr) const {
+    if (auto tuple = As<MakeTuple>(expr)) return tuple;
+    if (auto var = AsVarLike(expr)) {
+      auto it = tuples_.find(var.get());
+      if (it != tuples_.end()) return it->second;
+    }
+    if (auto projection = As<TupleGetItemExpr>(expr)) {
+      auto var = AsVarLike(projection->tuple_);
+      auto it = var ? tuples_.find(var.get()) : tuples_.end();
+      if (it != tuples_.end() && it->second && projection->index_ >= 0 &&
+          static_cast<size_t>(projection->index_) < it->second->elements_.size()) {
+        return As<MakeTuple>(it->second->elements_[projection->index_]);
+      }
+    }
+    return nullptr;
+  }
+  static bool IsStorage(const VarPtr& var) {
+    return As<TileType>(var->GetType()) || As<TensorType>(var->GetType());
+  }
+  void Unite(const VarPtr& a, const VarPtr& b) {
+    if (!a || !b || !IsStorage(a) || !IsStorage(b)) return;
+    auto left = Root(a.get());
+    auto right = Root(b.get());
+    if (left == right) return;
+    if (nodes_.at(left).rank < nodes_.at(right).rank) std::swap(left, right);
+    auto& parent = nodes_.at(left);
+    auto& child = nodes_.at(right);
+    child.parent = left;
+    parent.rank += parent.rank == child.rank;
+    parent.readonly |= child.readonly;
+    parent.unknown_provenance |= child.unknown_provenance;
+    parent.uninitialized |= child.uninitialized;
+    parent.ambiguous_initialization |=
+        child.ambiguous_initialization || (parent.initialization_base && child.initialization_base &&
+                                           parent.initialization_base != child.initialization_base);
+    if (!parent.initialization_base) parent.initialization_base = child.initialization_base;
+  }
+  void Carries(const std::vector<IterArgPtr>& args, const std::vector<VarPtr>& results) {
+    for (size_t i = 0; i < args.size(); ++i) {
+      Unite(args[i], AsVarLike(args[i]->initValue_));
+      if (i < results.size()) Unite(results[i], args[i]);
+    }
+  }
+  void YieldRoots(const StmtPtr& body, const std::vector<VarPtr>& results) {
+    // Only the direct final yield belongs to this control-flow construct.
+    auto tail = body;
+    if (auto seq = As<SeqStmts>(body); seq && !seq->stmts_.empty()) {
+      tail = seq->stmts_.back();
+    }
+    if (auto yield = As<YieldStmt>(tail)) {
+      for (size_t i = 0; i < results.size() && i < yield->value_.size(); ++i) {
+        Unite(results[i], AsVarLike(yield->value_[i]));
+      }
+    }
+  }
+  std::unordered_map<const Var*, Node> nodes_;
+  std::unordered_map<const Var*, MakeTuplePtr> tuples_;
+};
+
+class ScopeOutliner : public IRMutator {
+ public:
+  ScopeOutliner(FunctionPtr function, const RegionIndex& index, std::set<std::string>& names,
+                std::vector<FunctionPtr>& helpers)
+      : function_(std::move(function)),
+        index_(index),
+        names_(names),
+        helpers_(helpers),
+        permissions_(function_) {}
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& var) override {
+    CheckEscape(var);
+    return IRMutator::VisitExpr_(var);
+  }
+  ExprPtr VisitExpr_(const IterArgPtr& var) override {
+    CheckEscape(var);
+    return IRMutator::VisitExpr_(var);
+  }
+  StmtPtr VisitStmt_(const AssignStmtPtr& stmt) override {
+    auto result = IRMutator::VisitStmt_(stmt);
+    if (auto call = As<Call>(stmt->value_)) {
+      if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
+        initialized_.erase(permissions_.Root(stmt->var_.get()));
+      }
+      RecordFullInitialization(call);
+    }
+    return result;
+  }
+  StmtPtr VisitStmt_(const EvalStmtPtr& stmt) override {
+    auto result = IRMutator::VisitStmt_(stmt);
+    if (auto call = As<Call>(stmt->expr_)) RecordFullInitialization(call);
+    return result;
+  }
+  StmtPtr VisitStmt_(const IfStmtPtr& stmt) override {
+    auto result = MutableCopy(stmt);
+    result->condition_ = VisitExpr(stmt->condition_);
+    result->then_body_ = VisitConditionalBody(stmt->then_body_);
+    if (stmt->else_body_) result->else_body_ = VisitConditionalBody(*stmt->else_body_);
+    return result;
+  }
+  StmtPtr VisitStmt_(const ForStmtPtr& stmt) override {
+    const auto checkpoint = initialization_log_.size();
+    auto result = IRMutator::VisitStmt_(stmt);
+    RestoreInitialization(checkpoint);
+    return result;
+  }
+  StmtPtr VisitStmt_(const WhileStmtPtr& stmt) override {
+    const auto checkpoint = initialization_log_.size();
+    auto result = IRMutator::VisitStmt_(stmt);
+    RestoreInitialization(checkpoint);
+    return result;
+  }
+  StmtPtr VisitStmt_(const RegScopeStmtPtr& scope) override {
+    ++reg_depth_;
+    auto result = IRMutator::VisitStmt_(scope);
+    --reg_depth_;
+    return result;
+  }
+  StmtPtr VisitStmt_(const SimtScopeStmtPtr& scope) override {
+    CHECK_SPAN(function_->func_type_ == FunctionType::AIV, scope->span_)
+        << "simt_scope requires an explicit AIV function";
+    CHECK_SPAN(reg_depth_ == 0, scope->span_) << "simt_scope is not allowed inside reg_scope";
+    RegionControlChecker control;
+    control.VisitStmt(scope->body_);
+    var_collectors::VarDefUseCollector uses;
+    uses.VisitStmt(scope->body_);
+    outline_utils::VarCollector objects;
+    objects.VisitStmt(scope->body_);
+    std::unordered_set<const Var*> private_scalars;
+    for (const auto& var : scope->private_scalars_) private_scalars.insert(var.get());
+    std::vector<VarPtr> captures;
+    for (const auto* var : uses.var_uses_ordered) {
+      if (!uses.var_defs.count(var) || private_scalars.count(var)) {
+        captures.push_back(objects.var_objects.at(var));
+      }
+    }
+    auto probe = std::make_shared<Function>(
+        "simt_capture_analysis", captures, std::vector<ParamDirection>(captures.size(), ParamDirection::In),
+        std::vector<TypePtr>{}, scope->body_, scope->span_, FunctionType::SIMT);
+    const auto accesses = AnalyzeSimtAccess(probe);
+    std::vector<VarPtr> params;
+    std::vector<ExprPtr> args;
+    std::vector<VarPtr> results;
+    std::vector<int> result_indices;
+    std::vector<ParamDirection> directions;
+    std::unordered_map<const Var*, ExprPtr> substitutions;
+    for (size_t i = 0; i < captures.size(); ++i) {
+      const auto& capture = captures[i];
+      CHECK_SPAN(permissions_.Known(capture.get()), capture->span_)
+          << "Cannot prove SIMT capture permissions through a call result or rebound tuple; "
+             "capture the original named storage";
+      if (accesses[i].writes) {
+        CHECK_SPAN(!permissions_.Readonly(capture.get()), capture->span_)
+            << "SIMT store cannot write an enclosing In parameter or its view; declare InOut";
+      }
+      CHECK_SPAN(
+          !permissions_.Uninitialized(capture.get()) || initialized_.count(permissions_.Root(capture.get())),
+          capture->span_)
+          << "SIMT capture requires initialized storage; use InOut or initialize Out before the region";
+      auto param = std::make_shared<Var>(capture->name_hint_, capture->GetType(), capture->span_);
+      params.push_back(param);
+      args.push_back(capture);
+      substitutions[capture.get()] = param;
+      directions.push_back(accesses[i].writes ? ParamDirection::InOut : ParamDirection::In);
+      if (accesses[i].writes) {
+        results.push_back(capture);
+        result_indices.push_back(static_cast<int>(i));
+      }
+    }
+    for (const auto& var : scope->private_scalars_) {
+      if (!substitutions.count(var.get())) {
+        substitutions[var.get()] = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
+      }
+    }
+    std::string name;
+    do {
+      name = function_->name_ + "_simt_" + std::to_string(next_name_++);
+    } while (!names_.insert(name).second);
+    // Pre-SSA assignments share definition identities. Preserve those identities
+    // within the helper while replacing every captured binding with a parameter.
+    auto body = DeepClone(scope->body_, substitutions, false).cloned_body;
+    helpers_.push_back(std::make_shared<Function>(name, params, directions, std::vector<TypePtr>{}, body,
+                                                  scope->span_, FunctionType::SIMT));
+    auto launch =
+        std::make_shared<SimtLaunchStmt>(std::make_shared<GlobalVar>(name), scope->block_dims_, args, results,
+                                         result_indices, scope->span_, scope->leading_comments_);
+    InferSimtResources(launch);
+    return launch;
+  }
+
+ private:
+  // A full, unmasked tile.store establishes Out contents. Partial writes do
+  // not. The fact is visible in the current branch/iteration, then rolled back
+  // at control-flow exits rather than being assumed for paths that did not run.
+  static bool SameShape(const std::vector<ExprPtr>& a, const std::vector<ExprPtr>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+      if (!structural_equal(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  void RecordFullInitialization(const CallPtr& call) {
+    if (!IsOp(call, "tile.store") || call->args_.size() < 3) return;
+    auto input = AsVarLike(call->args_[0]);
+    if (!input ||
+        (permissions_.Uninitialized(input.get()) && !initialized_.count(permissions_.Root(input.get()))))
+      return;
+    auto source = As<TileType>(call->args_[0]->GetType());
+    auto offsets = As<MakeTuple>(call->args_[1]);
+    auto destination = AsVarLike(call->args_[2]);
+    auto tensor = destination ? As<TensorType>(destination->GetType()) : nullptr;
+    if (!source || !offsets || !tensor || source->shape_.size() != tensor->shape_.size()) return;
+    if (!SameShape(source->shape_, tensor->shape_)) return;
+    if (source->tile_view_ && !source->tile_view_->valid_shape.empty() &&
+        !SameShape(source->tile_view_->valid_shape, source->shape_))
+      return;
+    for (const auto& offset : offsets->elements_) {
+      auto constant = As<ConstInt>(offset);
+      if (!constant || constant->value_ != 0) return;
+    }
+    // A view covers only part of its root. Initializing that view cannot prove
+    // the entire aliased root initialized.
+    const auto* root = permissions_.Root(destination.get());
+    const auto* base = permissions_.InitializationBase(destination.get());
+    if (!base || !structural_equal(destination->GetType(), base->GetType())) return;
+    if (initialized_.insert(root).second) initialization_log_.push_back(root);
+  }
+  StmtPtr VisitConditionalBody(const StmtPtr& body) {
+    const auto checkpoint = initialization_log_.size();
+    auto result = VisitStmt(body);
+    RestoreInitialization(checkpoint);
+    return result;
+  }
+  void RestoreInitialization(size_t checkpoint) {
+    while (initialization_log_.size() > checkpoint) {
+      initialized_.erase(initialization_log_.back());
+      initialization_log_.pop_back();
+    }
+  }
+  void CheckEscape(const VarPtr& var) const {
+    CHECK_SPAN(!index_.locals.count(var.get()), var->span_)
+        << "SIMT thread-private scalar cannot escape its region";
+  }
+  FunctionPtr function_;
+  const RegionIndex& index_;
+  std::set<std::string>& names_;
+  std::vector<FunctionPtr>& helpers_;
+  StoragePermissions permissions_;
+  std::unordered_set<const Var*> initialized_;
+  std::vector<const Var*> initialization_log_;
+  size_t next_name_ = 0;
+  size_t reg_depth_ = 0;
+};
+
+ProgramPtr Outline(const ProgramPtr& program) {
+  std::set<std::string> names;
+  for (const auto& [_, function] : program->functions_) names.insert(function->name_);
+  std::vector<FunctionPtr> helpers;
+  auto result = MutableCopy(program);
+  for (auto& [_, function] : result->functions_) {
+    RegionIndex index;
+    index.VisitStmt(function->body_);
+    if (!index.found) continue;
+    ScopeOutliner outliner(function, index, names, helpers);
+    function = outliner.VisitFunction(function);
+  }
+  for (const auto& helper : helpers)
+    result->functions_.emplace(std::make_shared<GlobalVar>(helper->name_), helper);
+  // Reuse the canonical helper legality contract, even when pass verification
+  // is disabled. No unsupported scalar op or storage operation can bypass it.
+  if (!helpers.empty()) {
+    std::vector<Diagnostic> diagnostics;
+    CreateSimtValidPropertyVerifier()->Verify(result, diagnostics);
+    for (const auto& diagnostic : diagnostics) {
+      CHECK_SPAN(diagnostic.severity != DiagnosticSeverity::Error, diagnostic.span) << diagnostic.message;
+    }
+  }
+  return helpers.empty() ? program : result;
+}
+}  // namespace
+
+namespace pass {
+Pass OutlineSimtScopes() {
+  return CreateProgramPass(Outline, "OutlineSimtScopes", kOutlineSimtScopesProperties);
+}
+}  // namespace pass
+}  // namespace pypto::ir

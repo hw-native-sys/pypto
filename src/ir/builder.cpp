@@ -316,6 +316,27 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
   return if_stmt;
 }
 
+void IRBuilder::BeginSimtScope(const std::vector<ExprPtr>& block_dims, const Span& span) {
+  CHECK(!context_stack_.empty()) << "SIMT scope requires an enclosing function";
+  context_stack_.push_back(std::make_unique<SimtScopeContext>(block_dims, span));
+}
+
+StmtPtr IRBuilder::EndSimtScope(const Span& end_span, const std::vector<VarPtr>& private_scalars) {
+  CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SIMT_SCOPE)
+      << "EndSimtScope requires an open SIMT scope";
+  const auto* context = static_cast<SimtScopeContext*>(CurrentContext());
+  const auto& stmts = context->GetStmts();
+  StmtPtr body = stmts.size() == 1 ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
+  const auto& begin = context->GetBeginSpan();
+  Span span(begin.filename_, begin.begin_line_, begin.begin_column_, end_span.begin_line_,
+            end_span.begin_column_);
+  auto scope = std::make_shared<SimtScopeStmt>(context->GetBlockDims(), body, span, private_scalars);
+  context_stack_.pop_back();
+  ApplyPendingLeadingComments(scope);
+  if (!context_stack_.empty()) CurrentContext()->AddStmt(scope);
+  return scope;
+}
+
 void IRBuilder::BeginRegScope(const Span& span) { BeginScope(ScopeKind::Reg, span); }
 
 StmtPtr IRBuilder::EndRegScope(const Span& span) {

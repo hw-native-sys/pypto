@@ -143,6 +143,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_STMT_TRAMPOLINE(ReturnStmt, visit_return_stmt)
   VISITOR_STMT_TRAMPOLINE(EvalStmt, visit_eval_stmt)
   VISITOR_STMT_TRAMPOLINE(SimtLaunchStmt, visit_simt_launch_stmt)
+  VISITOR_STMT_TRAMPOLINE(SimtScopeStmt, visit_simt_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(BreakStmt, visit_break_stmt)
   VISITOR_STMT_TRAMPOLINE(ContinueStmt, visit_continue_stmt)
 };
@@ -243,6 +244,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_STMT_TRAMPOLINE(ReturnStmt, visit_return_stmt)
   MUTATOR_STMT_TRAMPOLINE(EvalStmt, visit_eval_stmt)
   MUTATOR_STMT_TRAMPOLINE(SimtLaunchStmt, visit_simt_launch_stmt)
+  MUTATOR_STMT_TRAMPOLINE(SimtScopeStmt, visit_simt_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(BreakStmt, visit_break_stmt)
   MUTATOR_STMT_TRAMPOLINE(ContinueStmt, visit_continue_stmt)
 };
@@ -377,6 +379,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, ReturnStmt, visit_return_stmt);
   BIND_VISITOR(visitor_cls, EvalStmt, visit_eval_stmt);
   BIND_VISITOR(visitor_cls, SimtLaunchStmt, visit_simt_launch_stmt);
+  BIND_VISITOR(visitor_cls, SimtScopeStmt, visit_simt_scope_stmt);
   BIND_VISITOR(visitor_cls, BreakStmt, visit_break_stmt);
   BIND_VISITOR(visitor_cls, ContinueStmt, visit_continue_stmt);
 
@@ -478,6 +481,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, ReturnStmt, visit_return_stmt);
   BIND_MUTATOR(mutator_cls, EvalStmt, visit_eval_stmt);
   BIND_MUTATOR(mutator_cls, SimtLaunchStmt, visit_simt_launch_stmt);
+  BIND_MUTATOR(mutator_cls, SimtScopeStmt, visit_simt_scope_stmt);
   BIND_MUTATOR(mutator_cls, BreakStmt, visit_break_stmt);
   BIND_MUTATOR(mutator_cls, ContinueStmt, visit_continue_stmt);
 }
