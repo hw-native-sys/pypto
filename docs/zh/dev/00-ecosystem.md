@@ -110,12 +110,12 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 
 **编译器 CI 覆盖：** `pypto-lib-compile` job 只编译
 [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json)
-中列出的命名用例。初始名单基于 pypto-lib 版本
-`2562a862f917ed76b67cdb064d3a9b74e156e8b4` 下的原全量选择器，排除仅运行 CPU 自测的
-`models/glm5_3_flash/prefill_fwd.py`：
-A2/A3 共 139 个入口，A5 共 45 个入口，去重后共 173 个入口。
-库中新增文件不会自动加入。辅助模块通过调用入口覆盖；仅使用 CPU 的参考实现自测
-不属于编译用例。编译不需要 NPU，因此名单可以包含仅支持真机的入口。
+中列出的命名用例。当前只看护 `models/deepseek_v4_1_flash/` 下的 10 个独立算子入口：
+`compressor`、`sparse_attention`、`gate`、`expert_routed`、`expert_shared`、`hc`、
+`o_proj`、`engram`、`input_pack` 和 `lm_head`，均由 A5 编译 job 执行。
+名单不包含 layer、整网入口、decode/prefill 组合 attention 和 MoE 模块、DSpark 或 vision。
+库中新增文件不会自动加入；后续按需显式添加算子入口或参数组合。
+辅助模块通过调用入口覆盖，编译不需要 NPU。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
 当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。
@@ -123,15 +123,15 @@ A2/A3 共 139 个入口，A5 共 45 个入口，去重后共 173 个入口。
 同时阻止编译完成后进入设备执行分支。
 不构建设备二进制，也不验证数值结果；`pypto-lib-model` 提供独立的设备冒烟测试。
 
-增加覆盖时，只需在 JSON 列表中追加用例，无需修改 workflow 或编译脚本。
-名单使用 UTF-8 编码保存。例如，为某个入口指定不同的逻辑设备列表：
+增加 A5 算子覆盖时，只需在 JSON 列表中追加用例，无需修改 workflow 或编译脚本。
+名单使用 UTF-8 编码保存。例如，为 HC 添加独立的参数组合：
 
 ```json
 {
-  "name": "advanced-allreduce-two-ranks",
-  "entry": "examples/advanced/allreduce.py",
-  "platforms": ["a2a3", "a5"],
-  "args": ["-d", "0,1"]
+  "name": "models-deepseek_v4_1_flash-hc-prefill",
+  "entry": "models/deepseek_v4_1_flash/hc.py",
+  "platforms": ["a5"],
+  "args": ["--batch", "1", "--sequence", "128"]
 }
 ```
 
@@ -150,18 +150,19 @@ A2/A3 共 139 个入口，A5 共 45 个入口，去重后共 173 个入口。
 未知、文件缺失、当前平台未选出任何用例，都会使 job 失败。
 本地可用 `--cases /path/to/cases.json` 指定另一份名单。
 
-A2/A3 编译分支运行在安装了 CANN 的 `npu` 主机上，并激活工具包，
-以便外部 CCE 封装在导入时解析开发套件头文件。
-该分支不申请或执行 NPU；A5 分支运行在 `cpu` 主机上。
+A5 编译 job 运行在 `cpu` 主机上，不申请或执行 NPU。
+当前名单只选择 A5，因此 workflow 不再配置 A2/A3 分支。
+编译脚本仍支持自定义名单中的 A2/A3；若将该平台加入 CI，
+还需配置相应的 workflow 矩阵项和 CANN 环境。
 
 激活已构建的 PyPTO 环境并配置固定版本的 PTOAS 后，可本地复现：
 
 ```bash
 python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
-  --platform a2a3 --jobs 4 --output build/lib-compile-a2a3
+  --platform a5 --jobs 4 --output build/lib-compile-a5
 ```
 
-使用 `--platform a5` 重复测试。每个入口默认超时 1200 秒，可通过
+每个入口默认超时 1200 秒，可通过
 `--timeout` 修改。每个 PTOAS 内核编译另有默认 60 秒的超时限制。
 可将 `PYPTO_PTOAS_TIMEOUT_SECONDS` 设为正整数来覆盖该限制；非法值会报错。
 库编译 CI job 将其设为 `180`，为大型内核提供更多编译时间。

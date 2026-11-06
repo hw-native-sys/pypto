@@ -722,18 +722,15 @@ def test_case_configuration_is_utf8_under_ascii_locale(library, case_config):
     assert json.loads(result.stdout) == cases
 
 
-def test_default_cases_keep_glm_kernels_but_exclude_cpu_checks():
-    entries = {case["entry"] for case in json.loads(audit.DEFAULT_CASES.read_text())}
-    assert {
-        "models/glm5_3_flash/attention.py",
-        "models/glm5_3_flash/kda.py",
-        "models/glm5_3_flash/layer.py",
-    } <= entries
-    assert not entries & {
-        "models/glm5_3_flash/weights.py",
-        "models/glm5_3_flash/prefill_ref.py",
-        "models/glm5_3_flash/prefill_fwd.py",
-    }
+def test_default_cases_cover_deepseek_operators_only():
+    cases = json.loads(audit.DEFAULT_CASES.read_text(encoding="utf-8"))
+    assert cases
+    for case in cases:
+        entry = Path(case["entry"])
+        assert entry.parent.as_posix() == "models/deepseek_v4_1_flash"
+        assert case["platforms"] == ["a5"]
+        assert not entry.stem.startswith(("decode_", "prefill_", "dspark_"))
+        assert entry.stem != "vision"
 
 
 def test_duplicate_case_name_fails(library, case_config):
