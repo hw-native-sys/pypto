@@ -838,13 +838,21 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
                                                DataType dtype, int64_t nranks) {
     const Span& span = call->span_;
     ExprPtr width = core_num;
+    // A call-valued request (e.g. ``pl.system.available_aiv_count()``) must be
+    // bound once. Splicing it into the remainder, comparison and subtraction
+    // expressions would nest a Call under arithmetic -- rejected by
+    // LegalizeSpmdLaunches' NoNestedCalls prerequisite -- and FlattenCallExpr
+    // would instead evaluate the call three times.
+    if (!As<Var>(core_num)) {
+      width = BindPrefix("a2av_width_", core_num, span);
+    }
     if (!indexed) {
       // ``nranks`` is deducer-enforced positive, so no floored-divisor guard is
       // needed here; ``L % P`` is always defined.
       auto p = std::make_shared<ConstInt>(nranks, dtype, span);
-      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(core_num, p, span), span);
-      auto at_least_p = BindPrefix("a2av_atleast_", MakeCast(MakeGe(core_num, p, span), dtype, span), span);
-      width = BindPrefix("a2av_blocks_", MakeSub(core_num, MakeMul(rem, at_least_p, span), span), span);
+      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(width, p, span), span);
+      auto at_least_p = BindPrefix("a2av_atleast_", MakeCast(MakeGe(width, p, span), dtype, span), span);
+      width = BindPrefix("a2av_blocks_", MakeSub(width, MakeMul(rem, at_least_p, span), span), span);
     }
     return width;
   }
