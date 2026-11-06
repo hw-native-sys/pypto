@@ -533,6 +533,42 @@ def test_unsigned_wrapping_stop_exceeds_hardware_counter_range():
     assert any("65535" in diagnostic.message for diagnostic in verify(region(loop)))
 
 
+@pytest.mark.parametrize("narrowed", [0, 65535, 65536])
+def test_hardware_loop_checks_stop_after_narrowing_cast(narrowed: int):
+    policy = ir.HardwareLoopPolicy.Require
+    source = ir.ConstInt((1 << 32) + narrowed, DataType.UINT64, SPAN)
+    stop = ir.Cast(source, DataType.UINT32, SPAN)
+    body = sequence()
+    if narrowed == 0:
+        body = ir.ForStmt(
+            scalar("inner"),
+            integer(0),
+            integer(65536),
+            integer(1),
+            [],
+            body,
+            [],
+            SPAN,
+            hardware_loop_policy=policy,
+        )
+    loop = ir.ForStmt(
+        scalar("outer"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        body,
+        [],
+        SPAN,
+        hardware_loop_policy=policy,
+    )
+    diagnostics = verify(region(loop))
+    if narrowed > 65535:
+        assert any("65535" in diagnostic.message for diagnostic in diagnostics)
+    else:
+        assert diagnostics == []
+
+
 @pytest.mark.parametrize("policy", [ir.HardwareLoopPolicy.Auto, ir.HardwareLoopPolicy.Require])
 @pytest.mark.parametrize("outer_stop", [0, 1])
 @pytest.mark.parametrize("computed", [False, True])

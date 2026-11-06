@@ -25,6 +25,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -34,6 +35,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -513,6 +515,66 @@ inline ExprPtr TryConstFold(const ExprPtr& expr) {
     return TryConstFoldUnary(expr->GetKind(), un->operand_);
   }
   return nullptr;
+}
+
+/// Evaluate a constant integer expression without rewriting the IR.
+/// Return no value when the result cannot be proved in the int64_t domain.
+inline std::optional<int64_t> TryEvaluateIntConstant(const ExprPtr& expr) {
+  const auto type = As<ScalarType>(expr->GetType());
+  if (!type || !(type->dtype_.IsInt() || type->dtype_ == DataType::INDEX)) return std::nullopt;
+  const auto dtype = type->dtype_;
+  if (auto value = As<ConstInt>(expr)) {
+    return detail::ConstIntFitsDtype(value->value_, dtype) ? std::optional<int64_t>(value->value_)
+                                                           : std::nullopt;
+  }
+  if (auto cast = As<Cast>(expr)) {
+    const auto operand = TryEvaluateIntConstant(cast->operand_);
+    if (!operand) return std::nullopt;
+    if (detail::ConstIntFitsDtype(*operand, dtype)) return operand;
+    const auto bits = dtype.GetBit();
+    if (bits == 0 || bits >= GetScalarDtype(cast->operand_).GetBit() || bits >= 64) {
+      return std::nullopt;
+    }
+    const auto modulus = uint64_t{1} << bits;
+    const auto truncated = static_cast<uint64_t>(*operand) & (modulus - 1);
+    if (!dtype.IsUnsignedInt() && truncated >= modulus / 2) {
+      return -static_cast<int64_t>(modulus - truncated);
+    }
+    return static_cast<int64_t>(truncated);
+  }
+  ExprPtr folded;
+  if (auto binary = As<BinaryExpr>(expr)) {
+    const auto lhs = TryEvaluateIntConstant(binary->left_);
+    const auto rhs = TryEvaluateIntConstant(binary->right_);
+    if (!lhs || !rhs || !detail::ConstIntFitsDtype(*lhs, dtype) || !detail::ConstIntFitsDtype(*rhs, dtype)) {
+      return std::nullopt;
+    }
+    const auto kind = expr->GetKind();
+    if ((kind == ObjectKind::FloorDiv || kind == ObjectKind::FloorMod) &&
+        (*rhs == 0 || (*lhs == std::numeric_limits<int64_t>::min() && *rhs == -1))) {
+      return std::nullopt;
+    }
+    if (kind == ObjectKind::Pow && *rhs < 0) return std::nullopt;
+    if ((kind == ObjectKind::BitShiftLeft || kind == ObjectKind::BitShiftRight) &&
+        (*rhs < 0 || static_cast<uint64_t>(*rhs) >= dtype.GetBit())) {
+      return std::nullopt;
+    }
+    folded = TryConstFoldBinary(kind, MakeConstInt(*lhs, dtype), MakeConstInt(*rhs, dtype), dtype);
+  } else if (auto unary = As<UnaryExpr>(expr)) {
+    const auto operand = TryEvaluateIntConstant(unary->operand_);
+    if (!operand) return std::nullopt;
+    folded = TryConstFoldUnary(expr->GetKind(), MakeConstInt(*operand, dtype));
+  }
+  if (auto value = As<ConstInt>(folded)) {
+    if (detail::ConstIntFitsDtype(value->value_, dtype)) return value->value_;
+    // Unsigned arithmetic is modular. For narrow types its wrapped value
+    // fits in the signed host representation used by the constant folder.
+    if (dtype.IsUnsignedInt() && dtype.GetBit() < 64) {
+      const auto mask = (uint64_t{1} << dtype.GetBit()) - 1;
+      return static_cast<int64_t>(static_cast<uint64_t>(value->value_) & mask);
+    }
+  }
+  return std::nullopt;
 }
 
 }  // namespace arith

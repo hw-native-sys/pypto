@@ -8,8 +8,6 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include <cstdint>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -23,7 +21,6 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/const_fold.h"
-#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -40,58 +37,6 @@
 
 namespace pypto::ir {
 namespace {
-// Only use results whose integer semantics are known. An unknown bound is
-// neither a range violation nor proof that an ancestor is empty.
-std::optional<int64_t> ExactLoopConstant(const ExprPtr& expr) {
-  const auto type = As<ScalarType>(expr->GetType());
-  if (!type || !(type->dtype_.IsInt() || type->dtype_ == DataType::INDEX)) return std::nullopt;
-  const auto dtype = type->dtype_;
-  if (auto value = As<ConstInt>(expr)) {
-    return arith::detail::ConstIntFitsDtype(value->value_, dtype) ? std::optional<int64_t>(value->value_)
-                                                                  : std::nullopt;
-  }
-  if (auto cast = As<Cast>(expr)) {
-    const auto operand = ExactLoopConstant(cast->operand_);
-    if (operand && arith::detail::ConstIntFitsDtype(*operand, dtype)) return operand;
-    return std::nullopt;
-  }
-  ExprPtr folded;
-  if (auto binary = As<BinaryExpr>(expr)) {
-    const auto lhs = ExactLoopConstant(binary->left_);
-    const auto rhs = ExactLoopConstant(binary->right_);
-    if (!lhs || !rhs || !arith::detail::ConstIntFitsDtype(*lhs, dtype) ||
-        !arith::detail::ConstIntFitsDtype(*rhs, dtype)) {
-      return std::nullopt;
-    }
-    const auto kind = expr->GetKind();
-    if ((kind == ObjectKind::FloorDiv || kind == ObjectKind::FloorMod) &&
-        (*rhs == 0 || (*lhs == std::numeric_limits<int64_t>::min() && *rhs == -1))) {
-      return std::nullopt;
-    }
-    if (kind == ObjectKind::Pow && *rhs < 0) return std::nullopt;
-    if ((kind == ObjectKind::BitShiftLeft || kind == ObjectKind::BitShiftRight) &&
-        (*rhs < 0 || static_cast<uint64_t>(*rhs) >= dtype.GetBit())) {
-      return std::nullopt;
-    }
-    folded = arith::TryConstFoldBinary(kind, arith::MakeConstInt(*lhs, dtype),
-                                       arith::MakeConstInt(*rhs, dtype), dtype);
-  } else if (auto unary = As<UnaryExpr>(expr)) {
-    const auto operand = ExactLoopConstant(unary->operand_);
-    if (!operand) return std::nullopt;
-    folded = arith::TryConstFoldUnary(expr->GetKind(), arith::MakeConstInt(*operand, dtype));
-  }
-  if (auto value = As<ConstInt>(folded)) {
-    if (arith::detail::ConstIntFitsDtype(value->value_, dtype)) return value->value_;
-    // Unsigned arithmetic is modular. For narrow types its wrapped value
-    // fits in the signed host representation used by the constant folder.
-    if (dtype.IsUnsignedInt() && dtype.GetBit() < 64) {
-      const auto mask = (uint64_t{1} << dtype.GetBit()) - 1;
-      return static_cast<int64_t>(static_cast<uint64_t>(value->value_) & mask);
-    }
-  }
-  return std::nullopt;
-}
-
 /// Two linear walks separate ownership from uses, including uses preceding an
 /// illegal definition. Maps use Var identity, never spelling: rebinding a name
 /// to a Tile result must not accidentally authorize an earlier Reg escape.
@@ -268,9 +213,10 @@ class RegionChecker : public IRVisitor {
     const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
     if (hardware_loop) ++hardware_loop_depth_;
     const bool previous_empty = empty_hardware_loop_;
-    const auto exact_stop = collecting_ && !previous_empty ? ExactLoopConstant(op->stop_) : std::nullopt;
-    const auto start = exact_stop ? ExactLoopConstant(op->start_) : std::nullopt;
-    const auto step = start ? ExactLoopConstant(op->step_) : std::nullopt;
+    const auto exact_stop =
+        collecting_ && !previous_empty ? arith::TryEvaluateIntConstant(op->stop_) : std::nullopt;
+    const auto start = exact_stop ? arith::TryEvaluateIntConstant(op->start_) : std::nullopt;
+    const auto step = start ? arith::TryEvaluateIntConstant(op->step_) : std::nullopt;
     // Empty sequential ancestors suppress hardware realization requirements
     // even when the ancestor uses Auto policy rather than Require.
     if (exact_stop && start && step &&
