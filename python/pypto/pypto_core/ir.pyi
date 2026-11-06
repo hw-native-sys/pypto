@@ -553,8 +553,9 @@ class TensorType(ShapedType):
         """Create a tensor type with optional memory reference and tensor view.
 
         Args:
-            shape: Shape dimensions as Expr nodes or integers (ints are
-                auto-converted to ConstInt by the ``pypto.ir`` wrapper)
+            shape: Shape dimensions as Expr nodes or Python integers.
+                The native constructor converts integers to INDEX ConstInt
+                values and rejects bool elements.
             dtype: Element data type
             memref: Optional memory reference
             tensor_view: Optional tensor view information
@@ -693,8 +694,9 @@ class TileType(ShapedType):
         """Create a tile type with optional memory reference, tile view, and memory space.
 
         Args:
-            shape: Shape dimensions as Expr nodes or integers (ints are
-                auto-converted to ConstInt by the ``pypto.ir`` wrapper)
+            shape: Shape dimensions as Expr nodes or Python integers.
+                The native constructor converts integers to INDEX ConstInt
+                values and rejects bool elements.
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
