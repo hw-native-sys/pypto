@@ -509,6 +509,7 @@ def test_component_specific_compile_flag_is_not_injected(
         "    parser.add_argument('-p')\n"
         "    parser.add_argument('--compile-only', action='store_true')\n"
         "    args = parser.parse_args()\n"
+        "    assert args.compile_only\n"
         f"    run({verify_kernel!r}, [], compile_only=args.compile_only)\n"
         "projection()\n"
         "verify()\n"
@@ -517,6 +518,57 @@ def test_component_specific_compile_flag_is_not_injected(
     assert result["exit_code"] == 0
     assert result["passed"] is (verify_kernel == "ok")
     assert [record["passed"] for record in result["compilations"]] == [True, verify_kernel == "ok"]
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+@pytest.mark.parametrize("helper", ["known", "inactive", "strict"])
+@pytest.mark.parametrize("kernel", ["ok", "bad"])
+def test_multi_parser_compile_flag_prevents_post_compile_execution(
+    library, tmp_path, platform, helper, kernel
+):
+    # A5 decode/prefill first parse shape options, then compile through golden
+    # before an independent runtime branch guarded by the main CLI flag.
+    (library / "models/case.py").write_text(
+        "import argparse\n"
+        "from golden import run\n"
+        "helper = argparse.ArgumentParser(add_help=False)\n"
+        "helper.add_argument('-p')\n"
+        + (
+            "helper.add_argument('--compile-only', action='store_true')\n"
+            "assert helper.parse_args().compile_only\n"
+            if helper == "strict"
+            else "helper.parse_known_args()\n"
+            if helper == "known"
+            else ""
+        )
+        + "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "parser.add_argument('--compile-only', dest='compile_mode', action='store_true')\n"
+        "args = parser.parse_args()\n"
+        f"result = run({kernel!r}, [], compile_only=True)\n"
+        "if result.passed and not args.compile_mode:\n"
+        "    raise AssertionError('Device execution was attempted after compilation')\n"
+    )
+    result = audit.run_case(library, "models/case.py", platform, tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert result["passed"] is (kernel == "ok")
+    assert [record["passed"] for record in result["compilations"]] == [kernel == "ok"]
+
+
+def test_inactive_compile_flag_is_not_injected(library, tmp_path):
+    (library / "models/case.py").write_text(
+        "import argparse\n"
+        "from golden import run\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "if False:\n"
+        "    parser.add_argument('--compile-only', action='store_true')\n"
+        "parser.parse_args()\n"
+        "run('ok', [])\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["passed"]
+    assert len(result["compilations"]) == 1
 
 
 def test_entry_arguments_preserve_declared_ranks(tmp_path):
@@ -528,7 +580,6 @@ def test_entry_arguments_preserve_declared_ranks(tmp_path):
         "a5",
         "-d",
         "0,1,2,3",
-        "--compile-only",
     ]
 
 

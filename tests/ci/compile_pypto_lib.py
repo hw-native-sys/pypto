@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import count
 from pathlib import Path
@@ -82,15 +83,13 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         if count < 1:
             raise ValueError(f"Invalid device count in {path}: {count}")
         args += ["-d", ",".join(str(rank) for rank in range(count))]
-    calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)]
     options = [
-        node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
     ]
-    parser_count = sum(
-        (isinstance(node.func, ast.Attribute) and node.func.attr == "ArgumentParser")
-        or (isinstance(node.func, ast.Name) and node.func.id == "ArgumentParser")
-        for node in calls
-    )
     if not devices and any(
         any(isinstance(arg, ast.Constant) and arg.value == "--device" for arg in node.args)
         and any(
@@ -100,16 +99,8 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         for node in options
     ):
         args += ["-d", "0"]
-    # A component-specific flag (for example KDA's verify parser) need not be
-    # accepted by the default entry's other parsers. For multi-parser entries,
-    # rely on compile_entry's golden.run hook to enforce compile-only execution.
-    if parser_count <= 1 and any(
-        any(isinstance(arg, ast.Constant) and arg.value == "--compile-only" for arg in node.args)
-        for node in options
-    ):
-        args += ["--compile-only"]
-        if runtime_dir is not None:
-            args += ["--runtime-dir", str(runtime_dir)]
+    if runtime_dir is not None:
+        args += ["--runtime-dir", str(runtime_dir)]
     return args
 
 
@@ -170,6 +161,7 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
     original_compile = compile_module.compile
     in_golden = False
     original_popen = subprocess.Popen
+    original_parse_known_args = argparse.ArgumentParser.parse_known_args
     popen_signature = inspect.signature(original_popen)
     child_ids = count()
     children: list[tuple[Path, subprocess.Popen[Any]]] = []
@@ -250,6 +242,19 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
         record.update(passed=bool(result.passed), error=str(result.error or ""))
         return result
 
+    def parse_compile_args(
+        self: argparse.ArgumentParser,
+        args: Iterable[str] | None = None,
+        namespace: Any = None,
+    ) -> tuple[Any, list[str]]:
+        # The live parser owns this contract: a helper or inactive constructor
+        # says nothing about the parser consuming argv. Setting the CLI mode
+        # also prevents runtime branches after golden.run has compiled a case.
+        arguments = list(sys.argv[1:] if args is None else args)
+        if "--compile-only" in self._option_string_actions:
+            arguments.insert(0, "--compile-only")
+        return original_parse_known_args(self, arguments, namespace)
+
     def reject_execution(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("Compile-only audit attempted to prepare runtime inputs")
 
@@ -279,9 +284,13 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
             elif arg.startswith("--runtime-dir="):
                 child_args[index] = "--runtime-dir=" + tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent)
         sys.argv = [str(entry_path), *child_args]
+    # parse_args delegates to parse_known_args, including component and
+    # subparser dispatch. Install only while executing this isolated entry.
+    argparse.ArgumentParser.parse_known_args = parse_compile_args
     try:
         runpy.run_path(str(entry_path), run_name="__main__")
     finally:
+        argparse.ArgumentParser.parse_known_args = original_parse_known_args
         subprocess.Popen = original_popen
         for child_receipt, child in children:
             child_results = read_receipt(child_receipt)
