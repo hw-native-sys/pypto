@@ -975,7 +975,7 @@ def test_diagnostic_requests_neither_lookup_nor_insert(kernel, compile_calls, mo
         assert kernel.compile() is cached
 
 
-@pytest.mark.parametrize("env_name", ["PYPTO_PROG_BUILD_DIR", "PYPTO_COMPILE_PROFILING"])
+@pytest.mark.parametrize("env_name", ["PYPTO_COMPILE_PROFILING"])
 def test_environment_request_bypasses_warm_cache(kernel, compile_calls, monkeypatch, tmp_path, env_name):
     kernel.compile()
     before = dict(kernel._cache)
@@ -1018,6 +1018,43 @@ def test_pass_context_conflict_is_rejected_before_cache_lookup(kernel, compile_c
     with passes.PassContext([]), pytest.raises(RuntimeError, match="memory_planner.*PassContext"):
         kernel.compile(config=config)
     assert len(compile_calls) == 1
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_conflict_is_rejected_before_cache_lookup(kernel, compile_calls, enabled):
+    config = RunConfig(enable_software_pipeline=enabled)
+    kernel.compile(config=config)
+    with passes.PassContext([]), pytest.raises(RuntimeError, match="enable_software_pipeline.*PassContext"):
+        kernel.compile(config=config)
+    assert len(compile_calls) == 1
+
+
+def test_software_pipeline_cache_separates_effective_modes(kernel, compile_calls):
+    ordinary = kernel.compile()
+    enabled = kernel.compile(config=RunConfig(enable_software_pipeline=True))
+    assert enabled is not ordinary
+    assert kernel.compile(config=RunConfig(enable_software_pipeline=False)) is ordinary
+    with passes.PassContext([], enable_buffer_ir=False, enable_software_pipeline=True):
+        assert kernel.compile() is enabled
+    assert kernel.compile() is ordinary
+    assert len(compile_calls) == 2
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("entrypoint", ["lower", "compile"])
+def test_run_config_selects_software_pipeline_during_lowering(kernel, monkeypatch, enabled, entrypoint):
+    """Both JIT entrypoints apply RunConfig to the shared lowering pipeline."""
+    compile_module = importlib.import_module("pypto.ir.compile")
+    seen = []
+    run_pipeline = compile_module._run_pass_pipeline
+
+    def observe_pipeline(*args, **kwargs):
+        seen.append(kwargs["enable_software_pipeline"])
+        return run_pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "_run_pass_pipeline", observe_pipeline)
+    getattr(kernel, entrypoint)(config=RunConfig(enable_software_pipeline=enabled))
+    assert seen == [enabled]
 
 
 def test_failed_diagnostic_compile_preserves_ordinary_entry(kernel, compile_calls, monkeypatch):
@@ -1605,6 +1642,39 @@ def test_deprecated_and_explicit_target_share_cache(kernel, compile_calls, platf
         assert kernel.compile(config=legacy) is artifact
     assert len(compile_calls) == 1
     assert next(iter(kernel._cache)).platform == platform
+
+
+@pytest.mark.parametrize("env_name", ["PYPTO_EMIT_DEBUG_RUNNER", "PYPTO_REBUILD_FROM_PTO"])
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", " no "])
+def test_disabled_debug_request_preserves_warm_cache(kernel, compile_calls, monkeypatch, env_name, value):
+    cached = kernel.compile()
+    monkeypatch.setenv(env_name, value)
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 1
+
+
+@pytest.mark.parametrize("env_name", ["PYPTO_EMIT_DEBUG_RUNNER", "PYPTO_REBUILD_FROM_PTO"])
+@pytest.mark.parametrize("value", ["1", "true", ""])
+def test_explicit_debug_request_still_runs_compilation(kernel, compile_calls, monkeypatch, env_name, value):
+    # Empty-but-set retains the existing consumers' enabled/default spelling.
+    kernel.compile()
+    monkeypatch.setenv(env_name, value)
+    kernel.compile()
+    kernel.compile()
+    assert len(compile_calls) == 3
+
+
+def test_build_directory_selects_placement_without_forcing_compilation(
+    kernel, compile_calls, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "private"))
+    cached = kernel.compile()
+    assert kernel.compile() is cached
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "other"))
+    # Already-created objects keep their placement; there is no directory copy
+    # or recompilation just because a later request selects a different base.
+    assert kernel.compile() is cached
+    assert len(compile_calls) == 1
 
 
 if __name__ == "__main__":

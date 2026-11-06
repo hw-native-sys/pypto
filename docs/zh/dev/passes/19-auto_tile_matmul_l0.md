@@ -91,6 +91,24 @@ program_tiled = l0_tile_pass(program)
 
 本 pass 是 `ProgramPass`，对每个函数走 `IRMutator`；当函数内没有触发任何改写时，返回原函数（不会发生 `MutableCopy` 开销）。
 
+## 显式累加器阶段（Accumulator phases）
+
+`tile.matmul` 和 `tile.matmul_acc` 在自动切分时保留 `acc_phase`。省略阶段或
+使用 `Unspecified` 时保留现有调度；使用 `Partial` 时，所有生成的 K 分块都
+保持 `Partial`；使用 `Final` 时，中间分块使用 `Partial`，只有最后一个物理
+K 分块使用 `Final`。
+
+K 不能整除分块宽度时，已有的剥离尾块就是最后一个分块；K 可整除时，pass
+从流水线中剥离最后一个完整块，避免给每次循环迭代都标记 `Final`。中间只剩
+一个完整块时按直线代码生成，剩两个及以上时保留流水线。原始 `init_cond`
+仅作用于第一个分块，剥离的最后一个分块始终累加。因此 final 结果在 K 循环
+外定义，能够与 final store 位于同一个直线控制流区域。
+
+M/N 直接写回切分为每个输出子块生成独立的 final 生产者，并在对应 store 上
+保留 `st_phase=Final`，边界子块同样如此。final 结果需要这次显式排空，不能
+被替换成缺少配对 store 的 Mat-scratch assembly。这些变换保留现有同步；
+仅有阶段属性不足以说明存在性能收益。
+
 ## NZ GM 目标
 
 FP32 NZ 输出使用 [`BlockNzTensorViews`](16-block_nz_tensor_views.md#accumulator-写回)

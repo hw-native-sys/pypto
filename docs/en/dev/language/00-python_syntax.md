@@ -193,10 +193,12 @@ than Vec / Mat / Acc, a runtime valid shape, or a slot carried out of an `if` or
 phi. Those are errors naming the shape, not silent fallbacks, because a fallback would
 undo the separation you declared.
 
-The default PyPTO planner is unaffected: it bakes addresses and keeps the `alloc_tile`
-form. A region at `--pto-level=level3` needs an explicit base `addr`, which codegen does
-not emit yet; ptoas itself has supported that form since 0.55
-([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106), closed).
+With the default PyPTO planner, the default codegen still bakes addresses into
+`alloc_tile`. Opting into `enable_software_pipeline=True` allows eligible uniform
+slot allocations to become `alloc_multi_tile addr = <base>` regions at level3;
+PyPTO retains address assignment and reserves all slots. The same option lowers
+eligible Vec `pl.pipeline` loops to preload/main/drain with a prefetch distance
+of `stage - 1`; see [LowerPipelineToSlots](../passes/31-lower_pipeline_to_slots.md).
 
 A declared name lives in its own namespace — it never resolves to a Python variable that
 happens to share it. The memory space **is** required (a `TileType` always pairs a
@@ -228,8 +230,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-See [InitMemRef](../passes/35-init_memref.md#declared-allocations) and
-[MemoryReuse](../passes/37-memory_reuse.md#declared-allocations).
+See [InitMemRef](../passes/37-init_memref.md#declared-allocations) and
+[MemoryReuse](../passes/39-memory_reuse.md#declared-allocations).
 
 ### Tile Views (TileView)
 
@@ -429,7 +431,7 @@ guarding a whole call should catch both:
 
 ```python
 pl.matmul(tile_a, tile_b, b_trans=True)   # TypeError — tile transpose is a view, not a flag
-pl.rsqrt(tile, high_precision=True)       # TypeError — tile precision is selected by passing tmp
+pl.rsqrt(tile, high_precision=True)       # ValueError — high precision requires tmp=workspace
 pl.div(tile, 2.0, high_precision=True)    # TypeError — high_precision needs a Tile rhs
 pl.row_max(tile)                          # TypeError — Tile inputs require tmp_tile
 pl.slice(tile, [64, 64], [64, 0])         # ValueError — window runs off the source tile

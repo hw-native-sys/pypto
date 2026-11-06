@@ -10,13 +10,14 @@
 """Tests for the shared IR pass pipeline."""
 
 import json
+import os
 import re
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, LogLevel, get_log_level, ir, set_log_level
 from pypto.compile_profiling import CompileProfiler
 from pypto.ir.compile import _run_pass_pipeline
 from pypto.pypto_core import passes
@@ -82,6 +83,51 @@ def test_buffer_ir_option_survives_nested_pipeline_contexts(tmp_path, mode, enab
     assert seen and all(value == enabled for value in seen)
 
 
+@pytest.mark.parametrize("mode", ["plain", "dump", "profiling", "dump_and_profiling"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_option_survives_nested_pipeline_contexts(tmp_path, mode, enabled):
+    """Dump and profiling contexts must preserve the selected lowering strategy."""
+    seen: list[bool] = []
+
+    def observe(_pass: passes.Pass, _program: ir.Program) -> None:
+        ctx = passes.PassContext.current()
+        assert ctx is not None
+        seen.append(ctx.get_enable_software_pipeline())
+
+    instrument = passes.CallbackInstrument(before_pass=observe, name="ObserveSoftwarePipeline")
+    profiling = CompileProfiler() if "profiling" in mode else nullcontext()
+    with (
+        passes.PassContext([instrument], enable_buffer_ir=False, enable_software_pipeline=enabled),
+        profiling,
+    ):
+        _run_pass_pipeline(
+            _scalar_program(),
+            operation="lower",
+            dump_passes="dump" in mode,
+            passes_dump_dir=str(tmp_path / "passes"),
+        )
+        ctx = passes.PassContext.current()
+        assert ctx is not None and ctx.get_enable_software_pipeline() == enabled
+    assert seen and all(value == enabled for value in seen)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_explicit_software_pipeline_option_conflicts_with_active_context(enabled):
+    with passes.PassContext([]), pytest.raises(RuntimeError, match=r"lower\(\).*enable_software_pipeline"):
+        _run_pass_pipeline(_scalar_program(), operation="lower", enable_software_pipeline=enabled)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
+def test_software_pipeline_rejects_unsupported_planners(planner):
+    with pytest.raises(ValueError, match="enable_software_pipeline requires memory_planner=PYPTO"):
+        passes.PassContext([], memory_planner=planner, enable_buffer_ir=False, enable_software_pipeline=True)
+
+
+def test_software_pipeline_rejects_buffer_ir():
+    with pytest.raises(ValueError, match="enable_software_pipeline does not support enable_buffer_ir=True"):
+        passes.PassContext([], enable_buffer_ir=True, enable_software_pipeline=True)
+
+
 def test_run_pass_pipeline_names_diagnostic_conflict_for_lower():
     with passes.PassContext([]):
         with pytest.raises(RuntimeError, match=r"lower\(\).*diagnostic_phase"):
@@ -135,6 +181,94 @@ def test_compile_preserves_dump_and_report_artifacts(tmp_path):
     assert list(passes_dump.glob("*_after_*.py"))
     assert (output_dir / "report").is_dir()
     assert not (output_dir / "ptoas_passes").exists()
+
+
+def test_compile_logs_artifact_dir_at_debug(tmp_path, capfd):
+    """DEBUG names the output directory so a user can go read the codegen."""
+    output_dir = tmp_path / "compile_output"
+    saved = get_log_level()
+    set_log_level(LogLevel.DEBUG)
+    try:
+        compiled = ir.compile(
+            _scalar_program(),
+            output_dir=str(output_dir),
+            dump_passes=False,
+            skip_ptoas=True,
+        )
+    finally:
+        set_log_level(saved)
+
+    # The C++ logger writes to std::cerr, so capture at the FD level.
+    err = capfd.readouterr().err
+    assert f"PyPTO artifacts written to {os.path.realpath(compiled.output_dir)}" in err
+
+
+def test_compile_logs_absolute_path_for_relative_output_dir(tmp_path, monkeypatch, capfd):
+    """A relative output dir is still reported as a resolved absolute path."""
+    monkeypatch.chdir(tmp_path)
+    saved = get_log_level()
+    set_log_level(LogLevel.DEBUG)
+    try:
+        compiled = ir.compile(
+            _scalar_program(),
+            output_dir="relative_out",
+            dump_passes=False,
+            skip_ptoas=True,
+        )
+    finally:
+        set_log_level(saved)
+
+    # CompiledProgram normalizes the stored path; the log must still have
+    # resolved the relative input before it reached the wrapper.
+    assert Path(compiled.output_dir) == tmp_path / "relative_out"
+    err = capfd.readouterr().err
+    assert f"PyPTO artifacts written to {tmp_path / 'relative_out'}" in err
+
+
+def test_compile_logs_resolved_path_through_symlink(tmp_path, monkeypatch, capfd):
+    """A symlinked output path is logged at the directory actually written."""
+    target = tmp_path / "target"
+    (target / "sub").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(target / "sub")
+
+    monkeypatch.chdir(tmp_path)
+    saved = get_log_level()
+    set_log_level(LogLevel.DEBUG)
+    try:
+        compiled = ir.compile(
+            _scalar_program(),
+            output_dir="link/../out",
+            dump_passes=False,
+            skip_ptoas=True,
+        )
+    finally:
+        set_log_level(saved)
+
+    # abspath would lexically collapse link/.. to tmp_path; the filesystem
+    # follows the symlink, so the artifacts land in target/out.
+    expected = str(target / "out")
+    assert Path(compiled.output_dir) == target / "out"
+    err = capfd.readouterr().err
+    assert f"PyPTO artifacts written to {expected}" in err
+
+
+def test_compile_artifact_dir_log_is_debug_only(tmp_path, capfd):
+    """The artifact path must not add noise at the release default (INFO)."""
+    output_dir = tmp_path / "compile_output"
+    saved = get_log_level()
+    set_log_level(LogLevel.INFO)
+    try:
+        ir.compile(
+            _scalar_program(),
+            output_dir=str(output_dir),
+            dump_passes=False,
+            skip_ptoas=True,
+        )
+    finally:
+        set_log_level(saved)
+
+    err = capfd.readouterr().err
+    assert "PyPTO artifacts written to" not in err
 
 
 def test_compile_owned_profiler_writes_nested_pass_and_codegen_stages(tmp_path):

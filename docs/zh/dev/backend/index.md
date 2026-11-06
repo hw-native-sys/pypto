@@ -10,6 +10,7 @@ pass 从不对 `BackendType` 做分支判断。所有与架构相关的内容 �
 | ---- | ---- |
 | [BackendHandler：有原则的后端分派](00-backend_handler.md) | 该虚接口、pass 如何查询它，以及新增后端需要做什么 |
 | [同步硬件资源](01-sync_resources.md) | 资源域查询、ID 范围与编译器预留策略 |
+| [ISA 宏同步资源](02-macro_resources.md) | 后端维护的 ISA 信号占用声明与查询 |
 
 ## 已注册算子清单
 

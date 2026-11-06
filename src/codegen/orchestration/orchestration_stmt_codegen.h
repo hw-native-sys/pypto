@@ -344,6 +344,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     /// historical per-path emission order so generated orchestration C++ is
     /// byte-identical across the refactor. See ``BuildDirectCallDispatchPlan``.
     bool deps_before_launch{false};
+    /// Runtime operand checks emitted ahead of the task (see
+    /// ``BuildContiguityGuardLines``); empty for every kernel without
+    /// ``kAttrRequireContiguousOperands``, so other dispatches are unchanged.
+    std::vector<std::string> guard_lines;
 
     /// Emit the full task-dispatch sequence using the supplied codegen's emit surface.
     /// Consumes ``*this`` (rvalue-reference) — the plan is moved-from after emission.
@@ -389,6 +393,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                                const ir::FunctionPtr& aic_func,
                                                const ir::FunctionPtr& aiv_func,
                                                std::vector<ParamEntry>&& params, bool capture_plain_task_id);
+
+  std::vector<std::string> BuildContiguityGuardLines(const ir::CallPtr& call,
+                                                     const ir::FunctionPtr& callee_func);
+  void CheckWrapperNeedsNoContiguityGuard(const ir::FunctionPtr& kernel_func, const ir::CallPtr& call);
 
   void EmitDepArrayInsert(const std::string& name, const std::string& deps_arr, const std::string& deps_cnt);
   void EmitManualDeps(const ir::CallPtr& call, const std::string& task_var);
@@ -703,6 +711,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const ir::Var*> declared_var_ptrs_;
   std::unordered_set<const ir::Stmt*> batched_create_stmts_;
   std::unordered_set<const ir::Var*> effective_uses_;
+  ir::alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   std::unordered_map<std::string, int64_t> gm_pipe_workspace_elements_by_callee_;
   std::unordered_map<std::string, std::string> tensor_create_size_expr_by_emit_name_;
   std::unordered_map<std::string, std::string> dist_param_to_ctx_param_;

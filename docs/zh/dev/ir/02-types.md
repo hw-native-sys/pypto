@@ -74,10 +74,12 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 `Call` 和 `Submit` 的 attrs、kwargs 中的表达式值同样遵循此规则，
 在构造时即进行校验，通过 `ir.set_call_attrs` 附加属性时也会校验。
 
-这些类型是 Buffer IR 的初始基础设施，自动 tile-to-buffer lowering 尚未
-启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。直接 PTO 代码生成支持
+公开 Tile DSL 使用 `TileType`；默认完整 kernel 选择通过
+[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md) 转换支持的函数。直接 PTO 代码生成也支持
 显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/BF16/FP32/INT32
-描述符，标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数支持
+描述符，以及 `R` 为 8 的倍数、valid 为正静态值的 FP32 列优先 `[R,1]` 描述符，
+用于 [cast/compare/select 配方](../passes/57-lower_tile_to_buffer.md) 的 UINT8 谓词和 UINT32 工作空间描述符，
+标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数支持
 物理形状静态、列数大于一的稠密 ND 二维 FP16/BF16/FP32/INT32 Tensor。
 算术配方分别施加更窄的 dtype 契约。规范化后的 Tensor
 返回值是这些参数的别名，原生内核仍返回 void。Buffer 参数 ABI、原生函数
@@ -153,7 +155,7 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
 也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
-[LowerTileToBuffer](../passes/55-lower_tile_to_buffer.md) 转换 Tile IR。
+[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md) 转换 Tile IR。
 
 静态存储视图 (static storage view) 在同一 Buffer 阶段使用普通 SSA 别名边：
 
@@ -171,11 +173,12 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 存储根上整行的 `UINT8[N,32]`
 字节窗口是其中的静态特例。
 `buffer.reshape` 保持物理字节数完全相同，支持静态、紧密行主序的二维
-Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的字节数必须为 32 的倍数。
+Vec FP16、BF16、FP32、INT16、INT32、UINT8 和 UINT32 描述符，每个物理行的字节数必须为 32 的倍数。
 在 Mat、Left、Right 和 Acc 中，它只在同一空间内重新标注一个完整分形窗口
 （例如 NZ 到 ZN），要求元素类型、字节数相同且 valid extent 为静态值。
 两者均声明 `Alias(0)`、无数据访问和源元数据读效应，不分配存储，
-也不初始化数据。每个中间结果的形状、dtype 和 valid extent 均由结果
+也不初始化数据。FP32 列向量 reshape 保留物理 `[R,1]` 形状和列优先布局，只允许
+正静态 valid 行数不同；这不开放列向量 subview。每个中间结果的形状、dtype 和 valid extent 均由结果
 类型显式表达。`buffer.set_validshape` 不能修改这些静态视图句柄。
 
 运行时偏移的窗口只知道位于源窗口之内，因此 `BufferIR` 在证明不重叠时使用整个源范围，

@@ -50,6 +50,7 @@
 | `OutParamNotShadowed` | Out/InOut 参数未被创建 tensor 的算子重新赋值 |
 | `NoNestedInCore` | 无嵌套 InCore 作用域（ScopeStmt 内再嵌 ScopeStmt） |
 | `InOutUseValid` | 调用之后不再读取以 InOut/Out 传入的变量（RFC #1026） |
+| `HardwareLoopContractValid` | Require 策略合法且仅用于 Sequential 循环；资格及最终产物证据在 codegen 检查 |
 | `PipelineLoopValid` | 双向不变量：`ForStmt.kind_ == Pipeline` ⇔ 带有 `pipeline_stages` 属性 |
 | `PipelineResolved` | 不再残留 `ForKind::Pipeline`；由 CanonicalizeIOOrder 产生 |
 | `CallDirectionsResolved` | 每个非 builtin Call 都带有显式的 `attrs['arg_directions']` |
@@ -139,7 +140,9 @@ struct PassProperties {
 | LowerPipelineLoops | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | — |
 | CanonicalizeIOOrder | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, PipelineResolved | — |
 | MaterializeTensorStrides | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, TensorViewCanonical | — |
-| InitMemRef | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred | HasMemRefs, NormalizedStmtStructure | SSAForm |
+| MaterializeSimtOutputs | SSAForm, TileMemoryInferred | SimtOutputsMaterialized | HasMemRefs, AllocatedMemoryAddr |
+| SpecializeSimtHelpers | SSAForm | SimtSpecialized | — |
+| InitMemRef | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, SimtOutputsMaterialized | HasMemRefs, NormalizedStmtStructure | SSAForm |
 | MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, NormalizedStmtStructure | NormalizedStmtStructure | — |
 | MemoryReuse | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D, NormalizedStmtStructure | NormalizedStmtStructure | — |
 | VerifyTileStorage | — | TileStorageLegalized | — |
@@ -499,31 +502,33 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 15. [`StampTfreeSplit`](28-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
 16. `NormalizeReturnOrder`
 17. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
-18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md)（把合格的 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制；自门控于 `memory_planner=PTOAS`，未处理的循环原样留给 `LowerPipelineLoops`）
+18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md)（PyPTO 下 opt-in 固定地址单层 Vec 软流水，或 PTOAS 下同轮 slot 轮转；不支持的循环保留 unroll）
 19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
 20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
 21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
-22. `InitMemRef`
-23. [`MaterializeSemanticAliases`](36-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
-24. `MemoryReuse`
-25. `AllocateMemoryAddr`
-26. [`FoldNoOpReshape`](39-fold_no_op_reshape.md)
-27. [`FuseCreateAssembleToSlice`](40-fuse_create_assemble_to_slice.md)
-28. [`LowerL2TensorCollectives`](41-lower_l2_tensor_collectives.md)（分布式：写在 CHIP orchestration 函数体里的托管集合通信 -> 一个本地 builtin AIV task；放在此处是为了让改写后的调用像任何 kernel 调用一样推导出实参方向与 TensorMap 任务依赖边）
-29. [`LegalizeSpmdLaunches`](42-legalize_spmd_launches.md)
-30. [`DeriveCallDirections`](43-derive_call_directions.md)
-31. [`AutoDeriveTaskDependencies`](44-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
-32. [`ExpandManualPhaseFence`](45-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
-33. [`SynthesizeAllReduceSignals`](46-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
-34. [`MaterializeCommDomainScopes`](47-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
-35. [`LowerHostTensorCollectives`](48-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-36. [`MaterializeDistTensorCtx`](49-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
-37. `Simplify`
-38. [`LegalizeGraphBoundary`](50-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
-39. [`MaterializeRuntimeScopes`](51-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
-40. [`ClassifyIterArgCarry`](52-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
-41. [`InsertCommFence`](53-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
-42. [`MaterializeValidShapeSymbols`](54-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
+22. [`MaterializeSimtOutputs`](35-materialize_simt_outputs.md)
+23. [`SpecializeSimtHelpers`](36-specialize_simt_helpers.md)
+24. `InitMemRef`
+25. [`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
+26. `MemoryReuse`
+27. `AllocateMemoryAddr`
+28. [`FoldNoOpReshape`](41-fold_no_op_reshape.md)
+29. [`FuseCreateAssembleToSlice`](42-fuse_create_assemble_to_slice.md)
+30. [`LowerL2TensorCollectives`](43-lower_l2_tensor_collectives.md)（分布式：写在 CHIP orchestration 函数体里的托管集合通信 -> 一个本地 builtin AIV task；放在此处是为了让改写后的调用像任何 kernel 调用一样推导出实参方向与 TensorMap 任务依赖边）
+31. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md)
+32. [`DeriveCallDirections`](45-derive_call_directions.md)
+33. [`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
+34. [`ExpandManualPhaseFence`](47-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
+35. [`SynthesizeAllReduceSignals`](48-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
+36. [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
+37. [`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
+38. [`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
+39. `Simplify`
+40. [`LegalizeGraphBoundary`](52-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
+41. [`MaterializeRuntimeScopes`](53-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
+42. [`ClassifyIterArgCarry`](54-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+43. [`InsertCommFence`](55-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
+44. [`MaterializeValidShapeSymbols`](56-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
 
 [`ResolveBackendOpLayouts`](23-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO
@@ -583,7 +588,7 @@ print(p.get_produced_properties())   # {SSAForm}
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager 向后兼容性测试
 - `tests/ut/conftest.py` — 为所有测试启用 BEFORE_AND_AFTER 验证的 autouse fixture
 
-设置 `enable_buffer_ir=True` 时，最终的 [LowerTileToBuffer](55-lower_tile_to_buffer.md)
+设置 `enable_buffer_ir=True` 时，最终的 [LowerTileToBuffer](57-lower_tile_to_buffer.md)
 位于 `MaterializeValidShapeSymbols` 之后，将完成规划的设备 Tile 存储转换为经过验证的显式 Buffer 操作。
 创建和运行 pass manager 时必须保持该迁移选项一致。
 
@@ -594,4 +599,4 @@ print(p.get_produced_properties())   # {SSAForm}
 属性失效。pass 顺序不变。
 
 默认 Buffer 路径在存储合法化前选择完整支持的 kernel，详见
-[整函数选择](55-lower_tile_to_buffer.md#默认整函数选择)。
+[整函数选择](57-lower_tile_to_buffer.md#默认整函数选择)。

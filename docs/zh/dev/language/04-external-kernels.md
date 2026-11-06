@@ -108,6 +108,42 @@ def decode(query: pl.Tensor, ..., out: pl.Out[pl.Tensor]):
 
 单核写法：`@pl.jit.extern(core_type="aic"|"aiv", source="k.cpp")`。
 
+多输出时，用 tuple 声明每个返回值的完整形状和数据类型。JIT 会为 AIC、AIV 和 mixed
+extern 保留该返回类型注解，解析张量类型别名，并折叠模块常量、闭包常量或调用时绑定的
+`pl.constexpr` 值。已求值的注解还会保留仅用于签名的工厂函数局部变量，其值参与内存和
+磁盘缓存键（cache key）的计算。stub 函数体保持为 `...`，
+无需编写 Python `return` 语句：
+
+```python
+@pl.jit.extern(core_type="aiv", source="kernels/pair.cpp")
+def pair(a: pl.Tensor, y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]) -> tuple[
+    pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]
+]:
+    ...
+
+@pl.jit
+def entry(a: pl.Tensor, y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]):
+    y, z = pair(a, y, z)
+    return y, z
+```
+
+拆包后的输出也可以传给后续 JIT kernel。裸的 `tuple[pl.Tensor, pl.Tensor]` 无法为
+仅签名声明提供完整返回类型。已有的单输出 stub 在未提供完整返回类型注解时，仍可从
+第一个 `pl.Out` 参数推断返回类型。
+
+对于仅签名 stub，完整的显式返回类型注解必须按声明顺序匹配**全部** `pl.Out` 和 `pl.InOut` 参数，
+包括每个输出特化后的形状和数据类型。仅靠类型无法确定重排或部分输出的身份。
+若 stub 通过单条 return 语句列出参数名，则按返回顺序对这些参数校验注解，
+也支持只读别名（见下文）。不兼容的声明会在特化时报错。多个返回值应使用 Python `tuple[...]`（或
+`typing.Tuple[...]`）。`pl.Tuple[...]` 表示单个元组值（tuple-valued result），无法映射到
+各个张量输出缓冲区，因此 extern 不支持这种返回类型。
+显式 `tuple[()]`（或 `typing.Tuple[()]`）声明零个返回结果，对于仅签名 stub，仅在没有
+`pl.Out`/`pl.InOut` 参数时有效。显式 `return ()` 即使存在输出参数也可声明零个别名。
+`pl.Tuple[()]` 和旧式 `pl.Tuple([...])`
+仍表示单个 tuple 值，因此不支持。
+该校验不适用于缺失或裸返回注解的旧有推断路径。仅通过副作用写入多个缓冲区的 kernel
+仍可省略返回类型注解。
+
 对于无法通过入口源码相对引用找到的头文件，使用 `include_dirs=[...]`。与 `source`
 相同，每个目录既可以是绝对路径，也可以相对于定义 `@pl.jit.extern` stub 的 Python
 文件。解析后的目录会按给定顺序传给 CCEC；被引用头文件的内容和解析后的 include
@@ -131,10 +167,42 @@ def pa_aiv(self, query: pl.Tensor, out: pl.Out[pl.Tensor]): ...
 路径相对于定义该 kernel 的文件解析。修改所引用的 `.cpp` 会改变 JIT 缓存键，因此即使
 Python stub 未变，kernel 变更也会触发重新编译。
 
+## 返回 Tensor 的身份
+
+extern 的返回值是传入原生 kernel 的 Tensor 参数的别名（alias）。返回子集或调整
+返回顺序时，用一条 return 语句明确列出参数名：
+
+```python
+@pl.jit.extern(core_type="aiv", source="kernels/producer.cpp")
+def producer(
+    first: pl.Out[pl.Tensor],
+    second: pl.Out[pl.Tensor],
+    third: pl.Out[pl.Tensor],
+) -> tuple[pl.Tensor, pl.Tensor]:
+    return second, third
+```
+
+这条 return 用于声明别名，不会作为 kernel 计算在 Python 中执行。JIT 将参数引用
+保存在函数属性 `external_return_params` 中，保证删除未使用的返回值或提取 SPMD
+wrapper 后，后续消费者仍然读取正确的输出 buffer。重复返回同一个参数也会保留。
+调用方特化下游 kernel 时，形状、数据类型和布局的传播也遵循这些别名，
+包括带有可写临时参数的 extern 返回只读参数的情况。
+返回计算表达式、局部变量或通过控制流选择返回值的写法会被拒绝。
+
+在原始 `@pl.function` IR 中，可用函数体开头的
+`pl.func_attr({"external_return_params": [second, third]})` 声明相同映射，后面接 `...`。
+每个引用必须指向该函数自己的参数，并与相应返回类型的 dtype 和逻辑形状一致。
+这些引用会随 SSA 重命名、内存初始化、打印及序列化正确传递。
+
+若没有该属性，原始 extern 声明按参数声明顺序返回**全部** `Out`/`InOut` 参数，
+返回数量和 Tensor 类型必须匹配。有歧义的签名会被拒绝，避免按位置猜测返回身份。
+JIT 对只有签名的单返回值声明仍使用已有的首个 `Out` 默认值，并显式记录该映射；
+需要返回其他参数时，请明确写出 return。
+
 ## 编译器行为
 
-- **Passes**：仅有函数头的函数原样穿过 pass 流水线（空体对 tile passes 是 no-op）；它
-  仅豁免 `ReturnParamsExplicit` 属性 —— 该属性要求存在 `ReturnStmt`，而函数头本就没有。
+- **Passes**：声明没有可执行的 tile 函数体。`ReturnParamsExplicit` 验证返回参数契约，
+  `NormalizeReturnOrder` 使用该契约，将 Group/SPMD wrapper 的返回值规范化为参数引用。
 - **Orchestration 代码生成**：为该 kernel 分配 `func_id`，并像 DSL kernel 一样生成派发
   —— 单核 AIC/AIV 的 `rt_submit_*_task`，或 group 的 `MixedKernels{aic_id, aiv_id, ...}`
   - `rt_submit_task`。
@@ -145,7 +213,8 @@ Python stub 未变，kernel 变更也会触发重新编译。
 ## 约束
 
 - `external_source` 仅在 `FunctionType.AIC` / `FunctionType.AIV` 上有效。
-- 函数体必须是裸的 `...`（仅签名）。
+- 原始 `@pl.function` 函数体必须是 `...`（仅签名），前面可有 `pl.func_attr`。
+  `@pl.jit.extern` 还可以用上述单条参数 return 声明返回身份。
 - 一个 `Group` 必须全为外部 kernel 或全为 DSL kernel —— 不允许在同一 group 中混用外部
   与 DSL 成员。
 
@@ -241,7 +310,7 @@ CANNBotDSL 是可选依赖，仅在使用此适配器时导入。
 
 适配器将 PyPTO FP8E8M0 直接映射到 CANNBotDSL 的 `float8_e8m0` 存储类型。
 打包的 MX scale 布局需使用显式、等大小的 ND 存储视图；此操作只改元数据，保留原始
-scale 字节，不重新编码。CANNBotDSL 接入目前支持 A5/TMR、最内层连续的
+scale 字节，不重新编码。CANNBotDSL 接入目前支持 A5 的 TMR/HBG 两种运行时、最内层连续的
 ND Tensor、显式 runtime Scalar、AIV/AIC/MIX 和基本动态形状。
 `cb.get_block_idx()` 和 `cb.get_block_num()` 对应当前 simpler 任务的逻辑 SPMD
 编号及数量。PyPTO 在提供方编译器折叠占位启动维度之前，将查询替换为隐藏运行时参数，
@@ -279,3 +348,20 @@ PyPTO 通过 `external_hard_syncall` 保留外部源码的屏障约束，复用�
 `global_sync_all()`，PyPTO 保留该错误，不关闭提供方校验。
 SDK 安装若缺少可选的 CPU-debug 条件头文件，可能使持久缓存保守跳过；
 默认的进程内缓存仍可使用。
+
+### HBG 调用
+
+运行时由 PyPTO 的 `PassContext` 选择；算子代码及 `program(x, out, config=config)`
+调用保持一致。适配器根据该上下文生成 TMR 或 HBG 的张量描述符包装，
+并分别缓存；CANNBotDSL 只负责通用设备代码和 ABI。
+
+```python
+from pypto.pypto_core import passes
+
+with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+    program(x, out, config=config)
+```
+
+AIC、AIV 和 MIX 均采用相同选择方式，SPMD 及 `sync_start=True` 的全核屏障
+要求保持不变。HBG 调度器的选择与异步完成协议由 simpler 负责，桥接不覆盖
+其异步能力声明。执行后应从运行时诊断确认实际使用的调度模式。

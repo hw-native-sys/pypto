@@ -79,6 +79,9 @@ class TypeCollector : public IRVisitor {
   }
 
  protected:
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (const auto& result : op->results_) types[result.get()] = result->GetType();
+  }
   void VisitStmt_(const AssignStmtPtr& op) override {
     types[op->var_.get()] = GetAuthoritativeAssignmentType(op->var_->GetType(), op->value_);
   }
@@ -126,6 +129,13 @@ static std::unordered_set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr
 
 static std::unordered_set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt) {
   if (!stmt) return {};
+
+  if (auto op = As<SimtLaunchStmt>(stmt)) {
+    UseCollector uc;
+    for (const auto& dim : op->block_dims_) uc.CollectExpr(dim);
+    for (const auto& arg : op->args_) uc.CollectExpr(arg);
+    return uc.used;
+  }
 
   if (auto op = As<AssignStmt>(stmt)) {
     UseCollector uc;
@@ -444,6 +454,7 @@ class SSAConverter {
     if (kind == ObjectKind::ReturnStmt) return ConvertReturn(As<ReturnStmt>(s));
     if (kind == ObjectKind::YieldStmt) return ConvertYield(As<YieldStmt>(s));
     if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
+    if (kind == ObjectKind::SimtLaunchStmt) return ConvertSimtLaunch(As<SimtLaunchStmt>(s));
     if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::ClusterScopeStmt ||
         kind == ObjectKind::HierarchyScopeStmt || kind == ObjectKind::SpmdScopeStmt ||
         kind == ObjectKind::RuntimeScopeStmt || kind == ObjectKind::SplitAivScopeStmt ||
@@ -942,6 +953,18 @@ class SSAConverter {
     if (e == op->expr_) return op;
     auto result = MutableCopy(op);
     result->expr_ = e;
+    return result;
+  }
+
+  StmtPtr ConvertSimtLaunch(const SimtLaunchStmtPtr& op) {
+    auto result = MutableCopy(op);
+    // Resolve every input against the pre-launch environment before defining
+    // any output, including a non-SSA storage variable updated in place.
+    for (auto& dim : result->block_dims_) dim = SubstExpr(dim);
+    for (auto& arg : result->args_) arg = SubstExpr(arg);
+    for (auto& var : result->results_) {
+      var = AllocVersion(var.get(), SubstType(var->GetType()), var->span_);
+    }
     return result;
   }
 

@@ -194,8 +194,9 @@ stale the moment a later pass grows the param list.
 Precedence is per access: an explicit `pl.load(..., cache=...)` kwarg already on
 the load always wins over the scope declaration, in both directions, so
 `cache=pl.CachePolicy.DEFAULT` opts one read back into the cache inside a
-bypassing scope. From here the kwarg simply rides the op through the remaining
-passes to codegen, the way `target_memory` does. See
+bypassing scope. The same precedence applies to the new A5 CachePolicy modes.
+From here the kwarg simply rides the op through the remaining passes to codegen, the way
+`target_memory` does. See
 [GM Cache-Access Policy](../language/05-cache-policy.md).
 
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
@@ -319,7 +320,7 @@ two declarations at one address are the entire mechanism.
 A `tile.slice` of a Mat-resident parent is not a whole buffer. It reaches
 codegen as `pto.subview`, carrying a runtime offset and the **parent's** row
 pitch, and neither survives into an `alloc_tile`: a dynamic offset cannot fold
-into the constant `addr` (see [`AllocateMemoryAddr`](38-allocate_memory_addr.md))
+into the constant `addr` (see [`AllocateMemoryAddr`](40-allocate_memory_addr.md))
 and the pitch is not in the type. ptoas has no transposing read of such a window
 either — it refuses a mat-source `pto.tmov` on a view ("expects mat-source tmov
 to use matching src/dst shapes") and refuses `pto.treshape` on one at every

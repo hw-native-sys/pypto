@@ -323,7 +323,18 @@ void async_invoke(dim3 threads, Args... args) {
     for (threadIdx.x = 0; threadIdx.x < threads.x; ++threadIdx.x) F(args...);
 }
 }
-struct CommContext { uint64_t windowsIn[2]; uint64_t workSpace; uint32_t rankId; };
+enum class CommWorkspaceKind { SDMA = 0, URMA = 1, RDMA = 2, COUNT = 3 };
+struct CommWorkspace { uint64_t addr, size; };
+struct CommContext {
+    uint32_t rankId, rankNum;
+    uint64_t winSize;
+    uint64_t windowsIn[2];
+    uint64_t windowsOut[2];
+    CommWorkspace workspaces[3];
+};
+template <CommWorkspaceKind Kind> CommWorkspace &comm_workspace(CommContext &ctx) {
+    return ctx.workspaces[static_cast<size_t>(Kind)];
+}
 #define TASSIGN(tile, offset) (tile).address = (offset)
 namespace pto {
 constexpr int DYNAMIC = -1;
@@ -463,7 +474,11 @@ int main(int argc, char **argv) {
     uint64_t eid[2] = {1, 2};
     mem.eidAddr = reinterpret_cast<uint64_t>(eid);
     std::vector<int32_t> indices(rows, 0);
-    CommContext ctx{{0x200000000ULL, 0}, reinterpret_cast<uint64_t>(&info), 0};
+    CommContext ctx{};
+    ctx.windowsIn[0] = 0x200000000ULL;
+    ctx.windowsIn[1] = 0;
+    ctx.workspaces[static_cast<size_t>(CommWorkspaceKind::URMA)] = {reinterpret_cast<uint64_t>(&info), 0};
+    ctx.rankId = 0;
     try {
         for (int round = 0; round < 3; ++round) {
             const int before = polls;

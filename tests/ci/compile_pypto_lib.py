@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import count
 from pathlib import Path
@@ -98,13 +99,8 @@ def entry_args(path: Path, platform: str, runtime_dir: Path | None = None) -> li
         for node in options
     ):
         args += ["-d", "0"]
-    if any(
-        any(isinstance(arg, ast.Constant) and arg.value == "--compile-only" for arg in node.args)
-        for node in options
-    ):
-        args += ["--compile-only"]
-        if runtime_dir is not None:
-            args += ["--runtime-dir", str(runtime_dir)]
+    if runtime_dir is not None:
+        args += ["--runtime-dir", str(runtime_dir)]
     return args
 
 
@@ -121,8 +117,38 @@ def read_receipt(receipt: Path) -> list[dict[str, Any]]:
     return results
 
 
+def _python_script_index(command: list[Any] | tuple[Any, ...]) -> int | None:
+    """Locate a Python script without mistaking interpreter options for paths."""
+    index = 1
+    while index < len(command):
+        argument = os.fsdecode(command[index])
+        if argument == "--":
+            return index + 1 if index + 1 < len(command) else None
+        if argument == "-":
+            return None
+        if not argument.startswith("-"):
+            return index
+        if argument == "--check-hash-based-pycs":
+            index += 2
+            continue
+        # Short flags may be grouped. -W/-X consume the rest of their group
+        # or the next argument; -c/-m and unknown options are not script runs.
+        # -x skips the entry's first line, which runpy would execute unchanged.
+        for offset, flag in enumerate(argument[1:], start=1):
+            if flag in "WX":
+                if offset == len(argument) - 1:
+                    index += 1
+                break
+            if flag not in "bBdEiIOPqRsSuv":
+                return None
+        index += 1
+    return None
+
+
 def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: list[str] | None = None) -> None:
     """Force every golden.run call through its real compile-only pipeline."""
+    # A child's cwd must not change where its receipt is written or collected.
+    receipt = receipt.resolve()
     sys.path[:0] = [str(lib), str((lib / entry).parent)]
     golden: Any = importlib.import_module("golden")
     runner: Any = importlib.import_module("golden.runner")
@@ -135,6 +161,7 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
     original_compile = compile_module.compile
     in_golden = False
     original_popen = subprocess.Popen
+    original_parse_known_args = argparse.ArgumentParser.parse_known_args
     popen_signature = inspect.signature(original_popen)
     child_ids = count()
     children: list[tuple[Path, subprocess.Popen[Any]]] = []
@@ -150,17 +177,24 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
                 and Path(os.fsdecode(command[0])).resolve() == Path(sys.executable).resolve()
             ):
                 options = popen_signature.bind(args, *popenargs, **kwargs).arguments
-                script = Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[1])
+                script_index = _python_script_index(command)
+                script = (
+                    Path(os.fsdecode(options.get("cwd") or Path.cwd())) / os.fsdecode(command[script_index])
+                    if script_index is not None
+                    else None
+                )
                 if (
                     not options.get("shell")
                     and not options.get("executable")
+                    and script_index is not None
+                    and script is not None
                     and script.resolve() == entry_path
                 ):
                     # Self-dispatching entries need the same audit in each fresh interpreter.
                     child_receipt = receipt.with_name(f"{receipt.stem}.{next(child_ids)}.json")
                     child_receipt.unlink(missing_ok=True)
                     command = [
-                        command[0],
+                        *command[:script_index],
                         str(Path(__file__).resolve()),
                         "--lib",
                         str(lib),
@@ -171,7 +205,7 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
                         "--receipt",
                         str(child_receipt),
                         "--entry-args",
-                        json.dumps([os.fsdecode(arg) for arg in command[2:]]),
+                        json.dumps([os.fsdecode(arg) for arg in command[script_index + 1 :]]),
                     ]
             try:
                 super().__init__(command, *popenargs, **kwargs)
@@ -208,6 +242,19 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
         record.update(passed=bool(result.passed), error=str(result.error or ""))
         return result
 
+    def parse_compile_args(
+        self: argparse.ArgumentParser,
+        args: Iterable[str] | None = None,
+        namespace: Any = None,
+    ) -> tuple[Any, list[str]]:
+        # The live parser owns this contract: a helper or inactive constructor
+        # says nothing about the parser consuming argv. Setting the CLI mode
+        # also prevents runtime branches after golden.run has compiled a case.
+        arguments = list(sys.argv[1:] if args is None else args)
+        if "--compile-only" in self._option_string_actions:
+            arguments.insert(0, "--compile-only")
+        return original_parse_known_args(self, arguments, namespace)
+
     def reject_execution(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("Compile-only audit attempted to prepare runtime inputs")
 
@@ -237,9 +284,13 @@ def compile_entry(lib: Path, entry: str, platform: str, receipt: Path, argv: lis
             elif arg.startswith("--runtime-dir="):
                 child_args[index] = "--runtime-dir=" + tempfile.mkdtemp(prefix="runtime-", dir=receipt.parent)
         sys.argv = [str(entry_path), *child_args]
+    # parse_args delegates to parse_known_args, including component and
+    # subparser dispatch. Install only while executing this isolated entry.
+    argparse.ArgumentParser.parse_known_args = parse_compile_args
     try:
         runpy.run_path(str(entry_path), run_name="__main__")
     finally:
+        argparse.ArgumentParser.parse_known_args = original_parse_known_args
         subprocess.Popen = original_popen
         for child_receipt, child in children:
             child_results = read_receipt(child_receipt)

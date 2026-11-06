@@ -12,13 +12,16 @@
 #ifndef PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
 #define PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -119,6 +122,13 @@ struct L0CostModel {
                                  ///< bf16 and other <=2-byte inputs are 1 pass (unaffected).
 };
 
+/// Target SIMT resource envelope. Absent means scalar SIMT is unsupported.
+struct SimtLimits {
+  std::array<int, 3> max_block_dims;
+  int max_threads;
+  std::vector<std::pair<int, int>> register_tiers;
+};
+
 /**
  * @brief Backend-specific behavior dispatch interface
  *
@@ -137,6 +147,17 @@ struct L0CostModel {
 class BackendHandler {
  public:
   virtual ~BackendHandler() = default;
+
+  /// Unsupported by default: narrowing or MLIR loop syntax is not final evidence.
+  [[nodiscard]] virtual ir::HardwareLoopProfile GetHardwareLoopProfile() const { return {}; }
+
+  /// Final-artifact hook for future target lowering. Empty artifacts and ordinary
+  /// IR loops are never evidence; no installed backend currently overrides this.
+  [[nodiscard]] virtual bool HasHardwareLoopEvidence(const ir::HardwareLoopQualification& /*qualification*/,
+                                                     const std::string& /*artifact*/) const {
+    return false;
+  }
+  [[nodiscard]] virtual std::optional<SimtLimits> GetSimtLimits() const { return std::nullopt; }
 
   // ---------------------------------------------------------------------------
   // Codegen hooks
@@ -210,9 +231,10 @@ class BackendHandler {
    * parameter and never read it, so the request is silently dropped and the
    * result is bit-identical to the default algorithm.
    *
-   * `tile.rsqrt` is not covered by this hook: it opts into high precision by
-   * taking a scratch tile rather than by carrying `precisionType`, and that
-   * form is implemented on every backend.
+   * `tile.rsqrt` is not covered by this hook. Its explicit `high_precision`
+   * attribute requires scratch and emits `precisionType` for A5. A2/A3 honour
+   * the request through their scratch overload even though they ignore the
+   * selector, so this hook must not produce a false warning for rsqrt.
    */
   [[nodiscard]] virtual bool HonorsHighPrecisionAlgorithm() const = 0;
 
@@ -228,6 +250,15 @@ class BackendHandler {
    * Ascend950 uses on-chip cross-core hardware and does not need it.
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
+
+  /**
+   * @brief Whether this backend enables local Vec software-pipeline lowering
+   *        for loops with runtime trip counts.
+   *
+   * False preserves the existing loop fallback; it does not describe hardware
+   * event capabilities or cross-core transport.
+   */
+  [[nodiscard]] virtual bool SupportsRuntimeBoundLocalSoftwarePipeline() const { return false; }
 
   /// Whether frontend pipes can size local consumer storage independently of
   /// the transport ring. A5 local-to-local pipes use the transport depth itself.

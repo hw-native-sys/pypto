@@ -146,6 +146,10 @@ void BindBackend(nb::module_& m) {
   nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
+      .def("has_hardware_loop_evidence", &BackendHandler::HasHardwareLoopEvidence, nb::arg("qualification"),
+           nb::arg("artifact"), "Check final artifact evidence; unsupported backends always return false")
+      .def("get_hardware_loop_profile", &BackendHandler::GetHardwareLoopProfile,
+           "Versioned hardware-loop capability profile; unsupported by default")
       .def("supports_reg_type", &BackendHandler::SupportsRegType, nb::arg("type"),
            "Whether this target supports the logical VMI register type")
       .def("get_launch_spec_core_count_method", &BackendHandler::GetLaunchSpecCoreCountMethod,
@@ -160,6 +164,9 @@ void BindBackend(nb::module_& m) {
            "high_precision=True emits (ignored on Ascend910)")
       .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
+      .def("supports_runtime_bound_local_software_pipeline",
+           &BackendHandler::SupportsRuntimeBoundLocalSoftwarePipeline,
+           "Whether this backend enables local Vec software-pipeline lowering with runtime trip counts")
       .def("supports_local_pipe_depth", &BackendHandler::SupportsLocalPipeDepth,
            "Whether cross-core pipes support a local consumer depth independent of the transport ring")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
@@ -213,6 +220,10 @@ void BindBackend(nb::module_& m) {
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
       .def("get_registered_op_names", &Backend::GetRegisteredOpNames,
            "Get a sorted snapshot of this backend's registered operator names")
+      .def("find_isa_macro_resources", &Backend::FindIsaMacroResources, nb::arg("name"),
+           "Return symbolic signal claims for a qualified ISA macro, or None if unregistered")
+      .def("get_isa_macro_names", &Backend::GetIsaMacroNames,
+           "Return sorted qualified ISA macro names with registered signal occupancy")
       .def(
           "plan_op_scratch",
           [](const Backend& target, const std::string& op_name, std::optional<DataType> source_dtype,

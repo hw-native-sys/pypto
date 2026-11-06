@@ -12,7 +12,6 @@
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 
 #include <algorithm>
-#include <cctype>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -143,6 +142,20 @@ class LifetimeAnalyzer : public IRVisitor {
     CollectUsesFromExpr(op->expr_, order);
   }
 
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    const int order = current_order_++;
+    for (const auto& dim : op->block_dims_) CollectUsesFromExpr(dim, order);
+    for (const auto& arg : op->args_) CollectUsesFromExpr(arg, order);
+    for (const auto& result : op->results_) {
+      if (!As<TileType>(result->GetType())) continue;
+      // The seed and result share one allocation. Tracking both SSA values
+      // extends its lifetime through later consumers and loop backedges.
+      ordered_defs_.push_back(result);
+      var_def_order_[result] = order;
+      var_def_stmt_[result] = op;
+    }
+  }
+
   void VisitStmt_(const YieldStmtPtr& op) override { CollectUsesFromValues(op->value_); }
 
   void VisitStmt_(const ReturnStmtPtr& op) override { CollectUsesFromValues(op->value_); }
@@ -257,7 +270,7 @@ class LifetimeAnalyzer : public IRVisitor {
   std::map<VarPtr, int> var_raw_last_use_;  // Raw last use (without loop extension)
   std::map<VarPtr, StmtPtr> var_def_stmt_;
 
-  // Maps ForStmt/WhileStmt return_vars to their corresponding initValue vars.
+  // Maps ForStmt/WhileStmt return_vars directly to their tracked buffer owners.
   // YieldFixup will place return_vars into initValue's MemRef buffer,
   // so any post-loop use of a return_var must extend the initValue's lifetime.
   std::map<VarPtr, VarPtr> return_var_to_init_var_;
@@ -300,22 +313,23 @@ class LifetimeAnalyzer : public IRVisitor {
 
   /// Resolve a loop carry's init to the variable that actually owns the buffer.
   ///
-  /// A nested loop seeds its carry from the *enclosing* loop's IterArg, and an
-  /// IterArg is an alias of its own init rather than a definition in its own
-  /// right -- like return_vars, iter-args are deliberately absent from
-  /// `ordered_defs_` / `var_def_order_`, so they carry no lifetime of their own.
-  /// Walking the carry chain to the first non-IterArg therefore lands on the
-  /// AssignStmt-defined tile whose buffer the whole loop nest shares, which is
-  /// the variable a use of any return_var in that nest has to keep alive.
+  /// A nested loop can start from an enclosing IterArg, and a sequential loop
+  /// can start from a previous loop's return_var. Both are aliases deliberately
+  /// absent from `ordered_defs_` / `var_def_order_`, so later reads must extend
+  /// the lifetime of the tracked tile that actually owns their shared buffer.
   ///
-  /// Returns nullptr when the chain does not end at a tracked carrier; the
-  /// caller then records no mapping, exactly as before.
+  /// RegisterReturnVars records the resolved owner only when it has a tracked
+  /// definition; untracked values cannot contribute a lifetime.
   [[nodiscard]] VarPtr ResolveCarryInitCarrier(const ExprPtr& init_value) const {
     auto var = AsVarLike(init_value);
     // An init is always defined before its own loop, so the chain is acyclic in
     // well-formed IR; the visited set bounds it anyway rather than hanging.
     std::set<const Var*> seen;
     while (var) {
+      // Earlier returns already map directly to tracked owners. Keep that
+      // canonical form rather than walking the whole sequential loop chain.
+      auto return_it = return_var_to_init_var_.find(var);
+      if (return_it != return_var_to_init_var_.end()) return return_it->second;
       auto iter_arg = As<IterArg>(var);
       if (!iter_arg) return var;
       if (!seen.insert(var.get()).second) return nullptr;

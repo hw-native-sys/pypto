@@ -19,6 +19,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "pypto/backend/common/buffer_conversion_recipes.h"
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -45,10 +47,10 @@ inline bool NeedsRuntimeBufferValid(const TypePtr& type) {
   return false;
 }
 
-// A forward SSA scan proves that no alias of an old metadata version is used
-// after set_validshape. Window aliases retain their parent's version. This is
-// intentionally limited to straight-line dynamic state: no branch joins or
-// fixed-point iteration, and no recursive traversal of alias initializers.
+// Data consumers restore their logical operands' metadata; old SSA aliases
+// therefore remain usable after a setter. This bounded scan rejects operations
+// whose dynamic descriptors still have no conversion recipe. Region storage
+// and yield contracts are checked separately by the whole-kernel selector.
 class BufferValidAnalysis : public IRVisitor {
  public:
   explicit BufferValidAnalysis(const StmtPtr& body) : views_(body) { VisitStmt(body); }
@@ -61,41 +63,23 @@ class BufferValidAnalysis : public IRVisitor {
   }
 
  protected:
-  void VisitVarLike_(const VarPtr& var) override {
-    const auto found = versions_.find(var.get());
-    if (found != versions_.end()) {
-      const auto current = current_.find(found->second.root);
-      valid_ &= current != current_.end() && current->second == found->second.version;
-    }
+  // IterArg initializers are visited at loop entry, never recursively through
+  // references in the body (which could expand an entire enclosing loop nest).
+  void VisitVarLike_(const VarPtr&) override {}
+  void VisitExpr_(const IterArgPtr&) override {}
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    for (const auto& arg : loop->iter_args_) VisitExpr(arg->initValue_);
+    IRVisitor::VisitStmt_(loop);
   }
-  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
-
-  void VisitStmt_(const AssignStmtPtr& assign) override {
-    VisitExpr(assign->value_);
-    if (!As<TileType>(assign->var_->GetType())) return;
-    dynamic_ |= NeedsRuntimeBufferValid(assign->var_->GetType());
-    Version version{assign->var_.get(), assign->var_.get()};
-    ExprPtr alias = AsVarLike(assign->value_);
-    const auto call = As<Call>(assign->value_);
-    const bool setter = call && IsOp(call, "tile.set_validshape");
-    if (call && !call->args_.empty() &&
-        (setter || IsOp(call, "tile.slice") || IsOp(call, "tile.reshape") ||
-         IsOp(call, "tile.reinterpret_view"))) {
-      alias = call->args_[0];
-    }
-    if (const auto var = AsVarLike(alias)) {
-      const auto found = versions_.find(var.get());
-      if (found != versions_.end()) version = found->second;
-    }
-    if (setter) {
-      valid_ &= !views_.IsWindow(call->args_[0]);
-      version.version = assign->var_.get();
-    }
-    current_[version.root] = version.version;
-    versions_.emplace(assign->var_.get(), version);
+  void VisitStmt_(const WhileStmtPtr& loop) override {
+    for (const auto& arg : loop->iter_args_) VisitExpr(arg->initValue_);
+    IRVisitor::VisitStmt_(loop);
   }
-
   void VisitExpr_(const CallPtr& call) override {
+    // Empty reduction axes have different semantics from empty elementwise
+    // outputs; the first row recipes deliberately require a wholly static kernel.
+    restricted_ |= backend::FindLogicalBufferRowRecipe(call->op_->name_) != nullptr ||
+                   backend::FindLogicalBufferConversionRecipe(call->op_->name_) != nullptr;
     if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") || IsOp(call, "tile.assemble") ||
         IsOp(call, "tile.move") || IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view") ||
         IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {
@@ -103,34 +87,16 @@ class BufferValidAnalysis : public IRVisitor {
     }
     if (IsOp(call, "tile.slice") && !call->args_.empty() &&
         NeedsRuntimeBufferValid(call->args_[0]->GetType()) && views_.IsWindow(call->args_[0])) {
-      // Deferred dynamic windows are reconstructed only at guarded consumers.
-      // Nested dynamic-valid windows need an independent dominance/empty recipe.
+      // A child may be nonempty while its deferred parent is empty. That needs
+      // a flattened physical-window recipe rather than nested guarded views.
       valid_ = false;
     }
     IRVisitor::VisitExpr_(call);
   }
   void VisitExpr_(const SubmitPtr&) override { valid_ = false; }
-  void VisitStmt_(const IfStmtPtr& stmt) override {
-    restricted_ = true;
-    IRVisitor::VisitStmt_(stmt);
-  }
-  void VisitStmt_(const ForStmtPtr& stmt) override {
-    restricted_ = true;
-    IRVisitor::VisitStmt_(stmt);
-  }
-  void VisitStmt_(const WhileStmtPtr& stmt) override {
-    restricted_ = true;
-    IRVisitor::VisitStmt_(stmt);
-  }
 
  private:
-  struct Version {
-    const Var* root;
-    const Var* version;
-  };
   BufferViewAnalysis views_;
-  std::unordered_map<const Var*, Version> versions_;
-  std::unordered_map<const Var*, const Var*> current_;
   bool valid_ = true;
   bool dynamic_ = false;
   bool restricted_ = false;

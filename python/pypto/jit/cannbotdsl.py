@@ -28,7 +28,9 @@ import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .decorator import JITFunction
+from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
+
+from .decorator import JITFunction, _resolve_runtime
 from .foreign import ExternalKernelSpec
 from .specializer import DynDim
 
@@ -37,14 +39,24 @@ if TYPE_CHECKING:
     from .specializer import SpecializeContext
 
 
-def write_wrapper(exported: "SourceBundle", directory: str | Path) -> Path:
+def write_wrapper(
+    exported: "SourceBundle", directory: str | Path, *, runtime: RuntimeKind | None = None
+) -> Path:
     """将 CANNBotDSL 原生源码和编译器报告的 ABI 适配到 simpler。"""
+    selected = _resolve_runtime() if runtime is None else runtime
+    bindings = {
+        RuntimeKind.TENSORMAP_AND_RINGBUFFER: ("tensormap_and_ringbuffer", "simpler::tmr::Tensor"),
+        RuntimeKind.HOST_BUILD_GRAPH: ("host_build_graph", "simpler::hbg::Tensor"),
+    }
+    if selected not in bindings:
+        raise ValueError(f"CANNBotDSL requires TMR or HBG runtime, got {selected}")
+    header, tensor_type = bindings[selected]
     manifest = exported.manifest
     directory = exported.write(directory)
     symbol = manifest["symbol"]
     lines = [
         '#include "c_api/asc_simd.h"',
-        '#include "tensormap_and_ringbuffer/tensor.h"',
+        f'#include "{header}/tensor.h"',
         '#include "intrinsic.h"',
     ]
     # 将提供方启动入口嵌入为内联设备函数。
@@ -82,7 +94,7 @@ def write_wrapper(exported: "SourceBundle", directory: str | Path) -> Path:
         ]
         if parameter["kind"] == "tensor":
             lines += [
-                f"    auto* t{index} = reinterpret_cast<__gm__ simpler::tmr::Tensor*>(args[{index}]);",
+                f"    auto* t{index} = reinterpret_cast<__gm__ {tensor_type}*>(args[{index}]);",
                 f"    {cpp_type} {local}{{}};",
                 f"    {local}.ptr = reinterpret_cast<decltype({local}.ptr)>(t{index}->buffer.addr)"
                 f" + t{index}->start_offset;",
@@ -140,11 +152,14 @@ def include_directories() -> tuple[str, ...]:
     )
 
 
-def _materialize(exported: "SourceBundle") -> Path:
+def _materialize(exported: "SourceBundle", runtime: RuntimeKind) -> Path:
     # 发布完整且不可变的源码；其他编译器可能保留此路径。
     digest = hashlib.sha256(
         (
-            exported.source + json.dumps(exported.manifest, sort_keys=True) + Path(__file__).read_text()
+            exported.source
+            + json.dumps(exported.manifest, sort_keys=True)
+            + Path(__file__).read_text()
+            + runtime_kind_to_name(runtime)
         ).encode()
     ).hexdigest()
     root = Path(os.environ.get("CANNBOTDSL_PYPTO_CACHE_DIR", Path.home() / ".cache/cannbotdsl/pypto"))
@@ -153,7 +168,7 @@ def _materialize(exported: "SourceBundle") -> Path:
     if not target.is_dir():
         with tempfile.TemporaryDirectory(dir=root) as staging:
             staged = Path(staging) / "kernel"
-            write_wrapper(exported, staged)
+            write_wrapper(exported, staged, runtime=runtime)
             try:
                 staged.rename(target)
             except OSError:
@@ -205,8 +220,11 @@ def _build(kernel: Any, ctx: "SpecializeContext") -> "ExternalKernelSpec":
             if meta.layout is not None and meta.layout.name != "ND":
                 raise ValueError(f"PyPTO DSL parameter {name!r} requires ND layout, got {meta.layout}")
             shape: list[Any] = []
-            for dim in meta.shape:
-                if isinstance(dim, DynDim):
+            for axis, dim in enumerate(meta.shape):
+                if axis in meta.inexact_axes:
+                    # 上游标记的不精确轴只是容量上界；设备代码必须读取实际视图长度。
+                    shape.append(cb.Dim(f"__pypto_{name}_shape_{axis}"))
+                elif isinstance(dim, DynDim):
                     shape.append(dims.setdefault(dim.name, cb.Dim(dim.name)))
                 else:
                     shape.append(dim)
@@ -223,8 +241,9 @@ def _build(kernel: Any, ctx: "SpecializeContext") -> "ExternalKernelSpec":
     exporter = importlib.import_module("._cannbotdsl_source", __package__)
     exported = exporter.export_source_bundle(kernel, arguments)
     manifest = exported.manifest
+    runtime = _resolve_runtime()
     return ExternalKernelSpec(
-        source=str(_materialize(exported)),
+        source=str(_materialize(exported, runtime)),
         core_type=manifest["core_type"],
         parameter_access={
             p["name"]: "read" if p["access"] == "none" else p["access"]
@@ -235,7 +254,7 @@ def _build(kernel: Any, ctx: "SpecializeContext") -> "ExternalKernelSpec":
         dual_aiv_dispatch=manifest["core_type"] == "mixed",
         hard_syncall=manifest["hard_syncall"],
         backend="Ascend950",
-        runtime="tensormap_and_ringbuffer",
+        runtime=runtime_kind_to_name(runtime),
     )
 
 

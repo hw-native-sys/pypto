@@ -425,22 +425,20 @@ class PadValue(enum.Enum):
     """Min value padding."""
 
 class CachePolicy(enum.IntEnum):
-    """GM cache-access policy declared for a tensor read.
+    """GM cache policy. Supported modes depend on target and transfer direction.
 
-    A semantic contract the author states, never a hint the compiler invents.
-    Stored as ``int`` in the ``tile.load`` ``cache`` kwarg.
+    DEFAULT/BYPASS retain IDs 0/1. The six A5 modes use semantic IDs,
+    not raw ISA encodings. KEEP and DROP are load-only.
     """
 
     DEFAULT = 0
-    """Ordinary cached GM access."""
-
     BYPASS = 1
-    """Streaming access declared to bypass the cache.
-
-    Asserts this tensor has no reuse worth caching and that nothing writes
-    those bytes while the kernel runs — mixing a cached write and a bypassing
-    read of the same bytes is a coherency bug.
-    """
+    NORMAL_FIRST_VICTIM = 2
+    NORMAL_LAST_VICTIM = 3
+    NORMAL_PERSISTENT = 4
+    NOT_ALLOC_KEEP = 5
+    NOT_ALLOC_CLEAN = 6
+    NOT_ALLOC_DROP = 7
 
 class CompactMode(enum.Enum):
     """Partial-tile compact mode enumeration."""
@@ -857,6 +855,27 @@ class FunctionType(enum.Enum):
 
     Graph = ...
     """Recordable/replayable orchestration fragment."""
+
+    SIMT = ...
+    """Per-thread device helper launched inside an AIV task, returning void."""
+
+class SimtParamAccess:
+    reads: bool
+    writes: bool
+
+class SimtResources:
+    max_threads: int
+    max_regs: int
+
+def analyze_simt_access(function: Function) -> list[SimtParamAccess]: ...
+def infer_simt_resources(launch: SimtLaunchStmt) -> SimtResources: ...
+
+class SimtAxis(enum.Enum):
+    """Compile-time axis for SIMT thread, block, and grid queries."""
+
+    X = ...
+    Y = ...
+    Z = ...
 
 class Level(enum.Enum):
     """Hierarchy level in the Linqu machine model.
@@ -2559,6 +2578,9 @@ class CommDomainScopeStmt(ScopeStmt):
     the scope directly without rerunning materialization.
     """
 
+    engines: Final[list[str]]
+    """Required async workspace engines, materialized by the compiler pass."""
+
     devices: Final[list[int]]
     """Covered worker indices (ascending). Empty list = all devices
     (resolved at codegen to ``*range(world_size)``)."""
@@ -2574,6 +2596,7 @@ class CommDomainScopeStmt(ScopeStmt):
         *,
         body: Stmt,
         span: Span,
+        engines: list[str] = [],
     ) -> None:
         """Create a CommDomain scope statement.
 
@@ -2583,6 +2606,7 @@ class CommDomainScopeStmt(ScopeStmt):
             name_hint: Handle name hint (codegen derives ``__comm_d<n>``).
             body: Inner statement block.
             span: Source location.
+            engines: Required async workspace engines.
         """
 
 class SeqStmts(Stmt):
@@ -2628,6 +2652,27 @@ class SeqStmts(Stmt):
         Raises:
             IndexError: If index is out of range
         """
+
+class SimtLaunchStmt(Stmt):
+    """Launch a void SIMT helper; results name logical storage updates."""
+
+    callee: GlobalVar
+    block_dims: list[Expr]
+    args: list[Expr]
+    results: list[Var]
+    result_param_indices: list[int]
+
+    def __init__(
+        self,
+        callee: GlobalVar,
+        block_dims: list[Expr],
+        args: list[Expr],
+        results: list[Var],
+        result_param_indices: list[int],
+        span: Span,
+    ) -> None:
+        """Create a launch with three block dimensions and explicit result mappings."""
+        ...
 
 class EvalStmt(Stmt):
     """Evaluation statement: expr."""
@@ -2707,7 +2752,11 @@ class Function(IRNode):
     """Function role (None = unspecified)."""
 
     attrs: Final[dict[str, Any]]
-    """Function-level attributes (key-value metadata)."""
+    """Function-level attributes (key-value metadata).
+
+    ``external_return_params`` holds an ordered ``list[Var]`` referencing this
+    external function's parameters, one per returned tensor.
+    """
 
     ir_stage: Final[FunctionIRStage]
     """Function body representation; defaults to Functional."""
@@ -3137,7 +3186,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.
@@ -3159,7 +3208,7 @@ def create_op_call(
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
     span: Span,
 ) -> Call:
     """Create a Call expression for a compiler-internal operator. **Private.**
@@ -3191,7 +3240,7 @@ def _create_internal_op_call(
 def _create_internal_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue | SimtAxis],
     type: Type,
     span: Span,
 ) -> Call:
@@ -3216,6 +3265,10 @@ def set_call_attrs(call: Call, attrs: Mapping[str, object]) -> Call:
     Returns:
         A new Call with the given attrs
     """
+
+def is_device_function_type(func_type: FunctionType) -> bool:
+    """Whether this function executes device IR, including a SIMT helper."""
+    ...
 
 def is_incore_type(func_type: FunctionType) -> bool:
     """Check if a FunctionType is an InCore variant (InCore, AIC, or AIV).
@@ -3374,6 +3427,9 @@ class WriteChannel(enum.Enum):
 
     Scalar = ...
     """Scalar D-cache write path (tensor.write)."""
+
+    Simt = ...
+    """SIMT lane stores, separate from controller scalar stores and DMA."""
 
 def get_op_arg_effect(op_name: str, arg_index: int, **kwargs: Any) -> ArgEffect:
     """Effect an operator has on one positional argument.
@@ -3661,6 +3717,7 @@ class IRBuilder:
         span: Span,
         kind: ForKind = ForKind.Sequential,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
+        hardware_loop_policy: HardwareLoopPolicy = HardwareLoopPolicy.Auto,
     ) -> None:
         """Begin building a for loop.
 
@@ -3672,6 +3729,8 @@ class IRBuilder:
             span: Source location for loop definition
             kind: Loop kind (default: Sequential)
             attrs: Loop-level attributes (default: empty)
+            hardware_loop_policy: Auto (default) or Require. Require needs a Sequential
+                loop inside RegScope, INDEX start=0 and step=1, and empty attrs.
         """
 
     def add_iter_arg(self, iter_arg: IterArg) -> None:
@@ -3817,6 +3876,7 @@ class IRBuilder:
         devices: Sequence[int] = (),
         slots: Sequence[WindowBuffer] = (),
         attrs: dict[str, Any] | list[tuple[str, Any]] | None = None,
+        engines: Sequence[str] = (),
     ) -> ScopeStmt:
         """End building a scope statement.
 
@@ -3824,6 +3884,7 @@ class IRBuilder:
             end_span: Source location for end of scope
             devices: Device indices for a communication-domain scope.
             slots: Window allocations for a communication-domain scope.
+            engines: Required async workspace engines.
             attrs: Additional metadata resolved after body-local definitions.
 
         Returns:
@@ -4381,6 +4442,7 @@ class IRVisitor:
     def visit_yield_stmt(self, op: YieldStmt) -> None: ...
     def visit_return_stmt(self, op: ReturnStmt) -> None: ...
     def visit_eval_stmt(self, op: EvalStmt) -> None: ...
+    def visit_simt_launch_stmt(self, op: SimtLaunchStmt) -> None: ...
     def visit_break_stmt(self, op: BreakStmt) -> None: ...
     def visit_continue_stmt(self, op: ContinueStmt) -> None: ...
     def visit_inline_stmt(self, op: InlineStmt) -> None: ...
@@ -4465,6 +4527,7 @@ class IRMutator:
     def visit_yield_stmt(self, op: YieldStmt) -> Stmt: ...
     def visit_return_stmt(self, op: ReturnStmt) -> Stmt: ...
     def visit_eval_stmt(self, op: EvalStmt) -> Stmt: ...
+    def visit_simt_launch_stmt(self, op: SimtLaunchStmt) -> Stmt: ...
     def visit_break_stmt(self, op: BreakStmt) -> Stmt: ...
     def visit_continue_stmt(self, op: ContinueStmt) -> Stmt: ...
     def visit_inline_stmt(self, op: InlineStmt) -> Stmt: ...
@@ -4474,9 +4537,53 @@ def returned_param_indices(func: Function, program: Program) -> list[int | None]
     ...
 
 def get_reg_memory_effect(call: Call) -> dict[str, Any]:
-    """Get target, root, access, begin/end (None if unknown), and mask."""
+    """Get load/store/gather/scatter effects; indexed begin/end are unknown."""
     ...
 
 def get_reg_op_spec(op_name: str) -> dict[str, Any]:
     """Get register schema scope and emitter requirements."""
+    ...
+
+class HardwareLoopState(enum.Enum):
+    """Static qualification, independent of final artifact evidence."""
+
+    Eligible = 0
+    Ineligible = 1
+    Unknown = 2
+
+class HardwareLoopProfile:
+    """Target resource and dependency-preservation contract with unsigned counters."""
+
+    supported: bool
+    counter_bits: int
+    allow_negative_step: bool
+    max_trip_count: int
+    max_depth: int
+    max_body_nodes: int
+    allow_scalar_carry: bool
+    allow_reg_carry: bool
+    allow_tile_carry: bool
+    allowed_ops: list[str]
+    def __init__(self) -> None: ...
+
+class HardwareLoopQualification:
+    state: Final[HardwareLoopState]
+    reason: Final[str]
+    trip_count: Final[int | None]
+    post_iv: Final[int | None]
+    loop_id: Final[str]
+    lower: Final[int | None]
+    upper: Final[int | None]
+    step: Final[int | None]
+
+def analyze_hardware_loop(loop: ForStmt, profile: HardwareLoopProfile) -> HardwareLoopQualification:
+    """Reanalyze current loop and profile without persistent caches."""
+    ...
+
+def analyze_hardware_loops(program: Program, profile: HardwareLoopProfile) -> list[HardwareLoopQualification]:
+    """Analyze a program in one bottom-up walk, with deterministic loop IDs."""
+    ...
+
+def verify_hardware_loop_requirement(loop: ForStmt, profile: HardwareLoopProfile) -> None:
+    """Reject unqualified Require or missing hardware evidence, except static empty loops."""
     ...

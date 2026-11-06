@@ -54,9 +54,12 @@ TENSOR_OPTIMIZATION_PASSES = [
     "LowerPipelineLoops",
     "CanonicalizeIOOrder",
     "MaterializeTensorStrides",
+    "MaterializeSimtOutputs",
+    "SpecializeSimtHelpers",
     "InitMemRef",
     "SelectBufferIRFunctions",
     "MaterializeSemanticAliases",
+    "IRVerifier",
     "MemoryReuse",
     "VerifyTileStorage",
     "AllocateMemoryAddr",
@@ -78,6 +81,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "ClassifyIterArgCarry",
     "InsertCommFence",
     "MaterializeValidShapeSymbols",
+    "IRVerifier",
     "LowerTileToBuffer",
 ]
 

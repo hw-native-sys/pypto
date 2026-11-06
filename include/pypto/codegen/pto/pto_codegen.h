@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -76,6 +77,30 @@ std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 /// Explicit scalar parameters take precedence; identity, not name, deduplicates.
 std::vector<ir::VarPtr> CollectTensorShapeDynVars(const ir::FunctionPtr& func);
 
+/// Backend artifacts, not IR nodes. The adapter retains capture order. The
+/// caller retains storage handles for PTOAS sync; the separate VPTO helper
+/// receives UB/GM pointers. Effects conservatively cover the entire storage.
+struct VFHelper {
+  /// Execution family; both VF and SIMT exports use the device helper bundle.
+  std::string kind = "vf";
+  std::string symbol;
+  std::string adapter_symbol;
+  std::string source;
+  std::vector<std::string> parameter_types;
+  std::vector<std::string> caller_parameter_types;
+  std::vector<std::string> parameter_effects;
+  /// Helper argument -> caller argument; VF collapses memory onto one UB base,
+  /// while SIMT retains each storage pointer and scalar argument in ABI order.
+  std::vector<size_t> parameter_indices;
+  /// VF byte offsets from its shared UB base; zero for scalars and SIMT pointers.
+  std::vector<int64_t> capture_byte_offsets;
+};
+
+struct PTOCodegenBundle {
+  std::string caller_source;
+  std::vector<VFHelper> helpers;
+};
+
 /**
  * @brief PTO MLIR code generator
  *
@@ -107,7 +132,10 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Warn that `high_precision=True` will not run on the target backend.
    *
-   * Call this wherever a `precisionType` attribute is written. Two emitters do:
+   * Call this for precision attributes governed by HonorsHighPrecisionAlgorithm.
+   * rsqrt is excluded: high_precision=True supplies scratch for A2/A3 and a
+   * selector for A5, so both backends honour it regardless of this hook.
+   * Two emitters handle the remaining precision attributes:
    * the Tile op callbacks in `pto_ops_elementwise.cpp` and the Buffer IR
    * emitter in `pto_buffer_codegen.cpp`. Both lower the same `tile.div` /
    * `tile.log` / `tile.recip` onto the same `pto.*` op, so a backend that
@@ -148,6 +176,11 @@ class PTOCodegen : public CodegenBase {
    */
   std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true,
                        bool emit_source_loc = true);
+
+  /// Separate explicit RegScopes into A5/AIV no-Bridge helpers for execution.
+  /// Generate() retains the combined typed-VMI diagnostic representation.
+  PTOCodegenBundle GenerateBundle(const ir::ProgramPtr& program, bool emit_tile_addr = true,
+                                  bool emit_source_loc = true);
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
@@ -754,7 +787,6 @@ class PTOCodegen : public CodegenBase {
    * disjoint byte ranges within that parameter.
    */
   [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
-
   /**
    * @brief Whether physical addresses are baked into the emitted PTO.
    *
@@ -804,6 +836,7 @@ class PTOCodegen : public CodegenBase {
   void VisitStmt_(const ir::WhileStmtPtr& op) override;
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
+  void VisitStmt_(const ir::SimtLaunchStmtPtr& op) override;
 
   /// Emit a registered RegOp as typed VMI SSA; return false for ordinary calls
   /// so assignment emission can fall back to the normal Tile/scalar path.
@@ -814,8 +847,27 @@ class PTOCodegen : public CodegenBase {
   /// Accessed Tile variable -> UB pointer SSA hoisted before pto.vecscope.
   /// Store-result aliases may share one pointer; cleared after each RegScope.
   std::map<const ir::Var*, std::string> reg_addresses_;
+  /// Tuple SSA values have no aggregate MLIR representation. Keep each result
+  /// independently addressable, including when only one projection is consumed.
+  std::map<const ir::Var*, std::vector<std::string>> reg_tuple_values_;
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
+  bool separate_vf_ = false;
+  bool single_vf_function_ = false;
+  std::vector<VFHelper> vf_helpers_;
+  std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
+  void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
+  void EmitVFAdapter(const VFHelper& helper);
+  /// SIMT functions borrow storage through a pointer ABI, never Tile values.
+  bool inside_simt_function_ = false;
+  std::map<std::string, ir::FunctionPtr> simt_functions_;
+  std::map<std::string, std::vector<std::string>> simt_effects_;
+  std::map<std::pair<std::string, std::vector<std::string>>, size_t> simt_artifacts_;
+  std::set<std::string> used_simt_functions_;
+  std::string GenerateSimtFunction(const ir::FunctionPtr& function);
+  std::string SimtParameterType(const ir::TypePtr& type);
+  bool TryEmitSimtCall(const ir::CallPtr& call);
+  std::string SimtElementOffset(const ir::ExprPtr& storage, const ir::MakeTuplePtr& indices);
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;
@@ -850,6 +902,7 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::FloatDivPtr& op) override;
   void VisitExpr_(const ir::MinPtr& op) override;
   void VisitExpr_(const ir::MaxPtr& op) override;
+  void VisitExpr_(const ir::PowPtr& op) override;
   // Unary
   void VisitExpr_(const ir::NotPtr& op) override;
   void VisitExpr_(const ir::NegPtr& op) override;
@@ -893,7 +946,8 @@ class PTOCodegen : public CodegenBase {
   void GenerateBufferFunction(const ir::FunctionPtr& func);
   bool TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);
   std::string EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataType target);
-  std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs, const ir::ExprPtr& destination);
+  std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs, const ir::ExprPtr& destination,
+                                  const std::string& attributes = "");
 
   /**
    * @brief Collect deterministic GM slot buffer byte offsets for frontend pipe ids in a module.
@@ -945,14 +999,18 @@ class PTOCodegen : public CodegenBase {
 
   /// One author-declared multi-slot allocation (`pl.MemRef(slots=N)`), lowered to
   /// a ptoas `pto.alloc_multi_tile` region whose slots are selected per use by
-  /// `pto.multi_tile_get`. PTOAS-planner mode only — see PlanMultiBufferRegions.
+  /// `pto.multi_tile_get`. Also used with fixed addresses by software pipelines.
   struct MultiBufferRegion {
-    std::string region_ssa;     ///< The `%mb` handle the slots are taken from
-    std::string mtb_type_str;   ///< `!pto.multi_tile_buf<<slot>, count=N>`
-    std::string slot_type_str;  ///< The single-slot `!pto.tile_buf<...>` type
+    std::string region_ssa;       ///< The `%mb` handle the slots are taken from
+    std::string mtb_type_str;     ///< `!pto.multi_tile_buf<<slot>, count=N>`
+    std::string slot_type_str;    ///< The single-slot `!pto.tile_buf<...>` type
+    std::string parent_type_str;  ///< Optional flat parent for ordinary slot subviews
+    std::string flat_slot_type_str;
+    int64_t slot_elements = 0;
+    std::string addr_ssa;       ///< Constant base address under the PyPTO planner
     std::string valid_row_ssa;  ///< valid_row operand (shared by every slot)
     std::string valid_col_ssa;  ///< valid_col operand (shared by every slot)
-    uint64_t count = 1;         ///< Slot count, in [2, 16] (the ptoas bound)
+    uint64_t count = 1;         ///< Slots per backend region, in [2, 16]
   };
 
   /**
@@ -1014,27 +1072,21 @@ class PTOCodegen : public CodegenBase {
    * region and derive per-slot (dynamic event id) synchronization from the slot
    * expression. Emitting N unrelated `alloc_tile`s instead throws that away.
    *
-   * Runs only under the PTOAS memory planner (`emit_tile_addr_ == false`). Under
-   * the PyPTO planner, ptoas runs at `--pto-level=level3`, where a region needs an
-   * explicit `addr` base that codegen does not emit, so the baked-address
-   * `alloc_tile` path stays. ptoas itself handles such a region: given a constant
-   * `addr`, it has derived the same per-slot sync at level3 as at level2 since 0.55
-   * (hw-native-sys/PTOAS#1106, closed).
+   * Runs under the PTOAS planner or, when software pipelining is enabled, with
+   * a constant region base assigned by the PyPTO planner.
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
    * the slots share one tile_buf type and one static valid extent, at most one of
    * them is live per loop iteration, the memory space is a local one ptoas supports
-   * for multi_tile_buf (vec / mat / acc), and the count is within ptoas's `[2, 16]`.
+   * for multi_tile_buf (vec / mat / acc), and each backend region has 2..16 slots.
    *
-   * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
-   * typing one (hw-native-sys/PTOAS#1519 in the pinned ptoas) — see
-   * CoLiveSlotCollector.
+   * The opt-in fixed-address path additionally supports canonical co-live slots
+   * through addressed parent buffers and subviews, avoiding multi-tile startup
+   * and drain synchronization regressions in the assembler.
    *
-   * Anything else is a `ValueError` naming the shape, *not* a fallback: under this
-   * planner per-slot `alloc_tile`s would leave ptoas free to plan the slots on top
-   * of each other, which is the one thing the declaration exists to prevent. The
-   * ordinary `alloc_tile` path is reached only when no region is planned at all —
-   * under the PyPTO planner, or for an allocation that declares no slots.
+   * Unsupported declarations keep their addressed alloc_tile form under PyPTO.
+   * Under PTOAS they raise a ValueError: separate unaddressed alloc_tile ops
+   * would not preserve the declared separation between slots.
    *
    * @param func The function being generated (scanned for tile phis, which take a
    *             head-declared handle a per-use slot cannot provide)
@@ -1052,12 +1104,14 @@ class PTOCodegen : public CodegenBase {
    * Emitted where the ordinary `alloc_tile` would be — at the tile's definition —
    * so a runtime slot index (`l0c[i % 2]`) is read inside the loop that names it.
    *
-   * @return false when no region was planned for `memref`'s allocation — it
-   *         declares no slots, or the PyPTO planner is in use. An allocation that
-   *         declares slots this planner cannot describe never reaches here:
-   *         PlanMultiBufferRegions has already raised.
+   * @return false when no region was planned, including addressed declarations
+   *         that keep ordinary alloc_tile lowering. Unsupported declarations
+   *         under the PTOAS planner have already raised in PlanMultiBufferRegions.
    */
-  bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf, const ir::Span& span);
+  bool TryEmitMultiTileGet(const ir::TileTypePtr& type, const std::string& tile_buf, const ir::Span& span);
+
+  /// Existing operand whose region slot is also the in-place compute result.
+  [[nodiscard]] ir::VarPtr FindMultiTileInputAlias(const ir::AssignStmtPtr& stmt) const;
 
   /**
    * @brief Emit the `pto.alloc_multi_tile` declarations in the function head.
@@ -1077,6 +1131,8 @@ class PTOCodegen : public CodegenBase {
   /// Per-function mutable state that is reset at the start of each GenerateFunction call.
   struct FunctionState {
     bool buffer_ir = false;
+    /// Lowered slot producers require shared alias identity even through split APIs.
+    bool has_software_pipeline_slots = false;
     std::ostringstream constants_section;
     std::ostringstream body_section;
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
@@ -1141,6 +1197,10 @@ class PTOCodegen : public CodegenBase {
     /// The same regions in discovery order — the map is keyed by pointer, which
     /// is not a stable order to emit declarations in.
     std::vector<const ir::Var*> multi_buffer_region_order;
+    /// Slot remainders proven to have nonnegative operands in canonical loops.
+    std::set<const ir::Expr*> unsigned_slot_remainders;
+    /// Canonical (induction, offset, count) remainders in one statement region.
+    std::map<std::tuple<const ir::Expr*, int64_t, int64_t>, std::string> slot_index_ssa;
 
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
@@ -1228,6 +1288,7 @@ class PTOCodegen : public CodegenBase {
 
     void Reset() {
       buffer_ir = false;
+      has_software_pipeline_slots = false;
       constants_section.str("");
       constants_section.clear();
       body_section.str("");
@@ -1269,6 +1330,8 @@ class PTOCodegen : public CodegenBase {
       next_tile_alloc_scope = 0;
       multi_buffer_regions.clear();
       multi_buffer_region_order.clear();
+      unsigned_slot_remainders.clear();
+      slot_index_ssa.clear();
 
       tuple_element_index.clear();
       current_function.reset();

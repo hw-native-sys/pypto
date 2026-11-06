@@ -1,0 +1,152 @@
+// Copyright (c) PyPTO Contributors.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Static validation fixture: one common UB base preserves every displacement.
+// Caller buffers start at base + 0, base + 4096 and base + 8192 bytes.
+module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
+  func.func @run_vf(%base: !pto.ptr<f32, ub>, %n: i32) attributes {pto.aiv} {
+    %rhs_offset = arith.constant 1024 : index
+    %out_offset = arith.constant 2048 : index
+    %rhs = pto.addptr %base, %rhs_offset : <f32, ub> -> <f32, ub>
+    %out = pto.addptr %base, %out_offset : <f32, ub> -> <f32, ub>
+    %offset0 = arith.constant 0 : index
+    %lane0 = arith.constant 0 : i32
+    %offset1 = arith.constant 64 : index
+    %lane1 = arith.constant 64 : i32
+    %offset2 = arith.constant 128 : index
+    %lane2 = arith.constant 128 : i32
+    %offset3 = arith.constant 192 : index
+    %lane3 = arith.constant 192 : i32
+    %offset4 = arith.constant 256 : index
+    %lane4 = arith.constant 256 : i32
+    %offset5 = arith.constant 320 : index
+    %lane5 = arith.constant 320 : i32
+    %offset6 = arith.constant 384 : index
+    %lane6 = arith.constant 384 : i32
+    %offset7 = arith.constant 448 : index
+    %lane7 = arith.constant 448 : i32
+    %offset8 = arith.constant 512 : index
+    %lane8 = arith.constant 512 : i32
+    %offset9 = arith.constant 576 : index
+    %lane9 = arith.constant 576 : i32
+    %offset10 = arith.constant 640 : index
+    %lane10 = arith.constant 640 : i32
+    %offset11 = arith.constant 704 : index
+    %lane11 = arith.constant 704 : i32
+    %offset12 = arith.constant 768 : index
+    %lane12 = arith.constant 768 : i32
+    %offset13 = arith.constant 832 : index
+    %lane13 = arith.constant 832 : i32
+    %offset14 = arith.constant 896 : index
+    %lane14 = arith.constant 896 : i32
+    %offset15 = arith.constant 960 : index
+    %lane15 = arith.constant 960 : i32
+    pto.vecscope {
+      %count = builtin.unrealized_conversion_cast %n : i32 to si32
+      %limit = pto.vmi.vbrc %count : si32 -> !pto.vmi.vreg<64xsi32>
+      %all = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<64xpred>
+      %index0 = pto.vmi.vci %lane0 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask0 = pto.vmi.vcmp %index0, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a0 = pto.vmi.vload %base[%offset0] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b0 = pto.vmi.vload %rhs[%offset0] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum0 = pto.vmi.vadd %a0, %b0 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum0, %out[%offset0], %mask0 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index1 = pto.vmi.vci %lane1 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask1 = pto.vmi.vcmp %index1, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a1 = pto.vmi.vload %base[%offset1] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b1 = pto.vmi.vload %rhs[%offset1] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum1 = pto.vmi.vadd %a1, %b1 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum1, %out[%offset1], %mask1 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index2 = pto.vmi.vci %lane2 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask2 = pto.vmi.vcmp %index2, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a2 = pto.vmi.vload %base[%offset2] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b2 = pto.vmi.vload %rhs[%offset2] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum2 = pto.vmi.vadd %a2, %b2 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum2, %out[%offset2], %mask2 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index3 = pto.vmi.vci %lane3 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask3 = pto.vmi.vcmp %index3, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a3 = pto.vmi.vload %base[%offset3] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b3 = pto.vmi.vload %rhs[%offset3] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum3 = pto.vmi.vadd %a3, %b3 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum3, %out[%offset3], %mask3 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index4 = pto.vmi.vci %lane4 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask4 = pto.vmi.vcmp %index4, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a4 = pto.vmi.vload %base[%offset4] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b4 = pto.vmi.vload %rhs[%offset4] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum4 = pto.vmi.vadd %a4, %b4 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum4, %out[%offset4], %mask4 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index5 = pto.vmi.vci %lane5 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask5 = pto.vmi.vcmp %index5, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a5 = pto.vmi.vload %base[%offset5] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b5 = pto.vmi.vload %rhs[%offset5] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum5 = pto.vmi.vadd %a5, %b5 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum5, %out[%offset5], %mask5 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index6 = pto.vmi.vci %lane6 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask6 = pto.vmi.vcmp %index6, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a6 = pto.vmi.vload %base[%offset6] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b6 = pto.vmi.vload %rhs[%offset6] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum6 = pto.vmi.vadd %a6, %b6 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum6, %out[%offset6], %mask6 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index7 = pto.vmi.vci %lane7 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask7 = pto.vmi.vcmp %index7, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a7 = pto.vmi.vload %base[%offset7] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b7 = pto.vmi.vload %rhs[%offset7] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum7 = pto.vmi.vadd %a7, %b7 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum7, %out[%offset7], %mask7 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index8 = pto.vmi.vci %lane8 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask8 = pto.vmi.vcmp %index8, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a8 = pto.vmi.vload %base[%offset8] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b8 = pto.vmi.vload %rhs[%offset8] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum8 = pto.vmi.vadd %a8, %b8 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum8, %out[%offset8], %mask8 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index9 = pto.vmi.vci %lane9 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask9 = pto.vmi.vcmp %index9, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a9 = pto.vmi.vload %base[%offset9] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b9 = pto.vmi.vload %rhs[%offset9] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum9 = pto.vmi.vadd %a9, %b9 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum9, %out[%offset9], %mask9 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index10 = pto.vmi.vci %lane10 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask10 = pto.vmi.vcmp %index10, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a10 = pto.vmi.vload %base[%offset10] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b10 = pto.vmi.vload %rhs[%offset10] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum10 = pto.vmi.vadd %a10, %b10 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum10, %out[%offset10], %mask10 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index11 = pto.vmi.vci %lane11 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask11 = pto.vmi.vcmp %index11, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a11 = pto.vmi.vload %base[%offset11] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b11 = pto.vmi.vload %rhs[%offset11] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum11 = pto.vmi.vadd %a11, %b11 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum11, %out[%offset11], %mask11 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index12 = pto.vmi.vci %lane12 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask12 = pto.vmi.vcmp %index12, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a12 = pto.vmi.vload %base[%offset12] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b12 = pto.vmi.vload %rhs[%offset12] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum12 = pto.vmi.vadd %a12, %b12 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum12, %out[%offset12], %mask12 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index13 = pto.vmi.vci %lane13 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask13 = pto.vmi.vcmp %index13, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a13 = pto.vmi.vload %base[%offset13] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b13 = pto.vmi.vload %rhs[%offset13] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum13 = pto.vmi.vadd %a13, %b13 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum13, %out[%offset13], %mask13 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index14 = pto.vmi.vci %lane14 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask14 = pto.vmi.vcmp %index14, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a14 = pto.vmi.vload %base[%offset14] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b14 = pto.vmi.vload %rhs[%offset14] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum14 = pto.vmi.vadd %a14, %b14 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum14, %out[%offset14], %mask14 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+      %index15 = pto.vmi.vci %lane15 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %mask15 = pto.vmi.vcmp %index15, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %a15 = pto.vmi.vload %base[%offset15] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %b15 = pto.vmi.vload %rhs[%offset15] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      %sum15 = pto.vmi.vadd %a15, %b15 : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %sum15, %out[%offset15], %mask15 {pmode = "merge"} : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
+    }
+    return
+  }
+}

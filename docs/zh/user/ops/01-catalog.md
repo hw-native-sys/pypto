@@ -45,7 +45,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | 指数、自然对数。`log` 的 `high_precision=True` 在 A5 上选择更慢、更高精度的 PTO 路径；A2/A3 接受该参数但 PTO-ISA 会忽略它并返回默认结果，编译时会给出告警 |
-| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径，传给 Tile 会**抛异常** —— tile 级的精度由是否传入 scratch tile 决定：`pl.tile.rsqrt(src, tmp)` |
+| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`rsqrt` 在 Tensor 和 Tile 层均默认 `high_precision=False`。Tensor 高精度由编译器分配 scratch；Tile 高精度须写 `pl.tile.rsqrt(src, tmp=tmp, high_precision=True)`（或 `pl.rsqrt(src, high_precision=True, tmp=tmp)`）。仅传 scratch 而未开启高精度会报错；A5 codegen 显式生成 `RsqrtAlgorithm::HIGH_PRECISION`。 |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | 三角函数 |
 
 ## 比较与选择
@@ -137,16 +137,24 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式 |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor 并返回 FP32；`_acc` / `_bias` 仍只支持 tile。进入算子的 data 必须为 FP8E4M3FN；不支持原生 FP4×FP4 |
 
-分阶段 GEMV 累加通过 `pl.AccPhase` 选择生产者阶段。以 `pl.AccPhase.Final`
-结束的生产者必须与使用 `pl.STPhase.Final` 的 store 配对：
+`pl.tile.matmul`、`pl.tile.matmul_acc` 和 GEMV 家族通过
+`acc_phase=pl.AccPhase` 选择生产者阶段。默认 `Unspecified` 保持现有行为；
+中间 K 分块使用 `Partial`，最后一个生产者的 `Final` 必须与使用
+`pl.STPhase.Final` 的 store 配对：
 
 其中 `lhs0`、`rhs0`、`lhs1` 和 `rhs1` 是预加载的 tile，`output` 是目标 tensor。
 
 ```python
-partial = pl.tile.gemv(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
-final = pl.tile.gemv_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
+partial = pl.tile.matmul(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
+final = pl.tile.matmul_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
 pl.store(final, [0, 0], output, st_phase=pl.STPhase.Final)
 ```
+
+Matmul 的 `acc_phase` 仅接受关键字传参；`matmul_acc` 保留现有 `init_cond`
+位置，两者可一起使用。final 结果必须在同一个直线控制流区域内恰好排空一次；
+在这次 store 之前，只允许普通 SSA 别名转发该结果，其他操作不得消费它。条件执行或重复执行时，应把完整配对放在同一个分支或
+循环体内。自动 K 切分只给最后一个物理 K 分块分配 `Final`。选择阶段不会删除
+编译器的其他同步，也不意味着已经获得性能提升。
 
 ## Gather、Scatter、排序
 

@@ -19,6 +19,19 @@
 
 该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
+### 动态参数类型与返回类型
+
+生成的 AIC、AIV 和 Group 各自拥有独立的参数身份（parameter identity）。
+对于 `Tensor[[n, 16]]` 或 `Tensor[[n + 16, 16]]` 这类引用标量参数的类型，
+Pass 在克隆函数体之前，将类型中的 `n` 重映射为当前函数的新参数。
+所有参数映射会先完整建立，因此即使 IR 签名中的标量参数位于引用它的 Tensor
+参数之后，也能正确处理。形状和视图元数据（view metadata）由此与循环携带
+变量（loop carry）及其初始值保持一致。
+
+AIV 和 Group 的返回类型分别使用各自的参数映射。生成的 Group 内部调用 AIV
+时，调用结果类型使用 Group 的映射，元组结果也遵循相同规则。
+外部形状符号保留原有身份；变量打印名称相同并不能证明形状相等。
+
 ### 手写 Group 的共享参数 ABI
 
 一次运行时 `MixedKernels` 提交会创建一个协同调度的 AIC/AIV task，其中所有

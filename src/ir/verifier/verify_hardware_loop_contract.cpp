@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
+#include "pypto/ir/type.h"
+#include "pypto/ir/verifier/verifier.h"
+
+namespace pypto::ir {
+namespace {
+class ContractChecker : public IRVisitor {
+ public:
+  explicit ContractChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if ((op->hardware_loop_policy_ != HardwareLoopPolicy::Auto &&
+         op->hardware_loop_policy_ != HardwareLoopPolicy::Require) ||
+        (op->hardware_loop_policy_ == HardwareLoopPolicy::Require && op->kind_ != ForKind::Sequential)) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+                                "HardwareLoopPolicy.Require requires Sequential ForKind and a valid policy",
+                                op->span_);
+    }
+    if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !HasCanonicalHardwareLoopBounds(op)) {
+      diagnostics_.emplace_back(
+          DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+          "HardwareLoopPolicy.Require requires constant start=0 and step=1 with INDEX dtype", op->span_);
+    }
+    if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+                                "HardwareLoopPolicy.Require does not support loop attrs", op->span_);
+    }
+    if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
+      const auto stop_type = As<ScalarType>(op->stop_->GetType());
+      if (!stop_type || !(stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX)) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "HardwareLoopContractValid", 0,
+                                  "HardwareLoopPolicy.Require requires an integer scalar stop", op->span_);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+};
+class ContractVerifier : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "HardwareLoopContractValid"; }
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    ContractChecker checker(diagnostics);
+    checker.VisitProgram(program);
+  }
+};
+}  // namespace
+PropertyVerifierPtr CreateHardwareLoopContractPropertyVerifier() {
+  return std::make_shared<ContractVerifier>();
+}
+}  // namespace pypto::ir

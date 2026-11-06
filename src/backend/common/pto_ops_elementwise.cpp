@@ -292,20 +292,33 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
   return "";
 }
 
-static std::string GemvAccPhaseAttr(const CallPtr& op) {
+static std::string AccPhaseAttr(const CallPtr& op) {
   const int acc_phase = op->GetKwarg<int>("acc_phase", static_cast<int>(ir::AccPhase::kUnspecified));
   INTERNAL_CHECK_SPAN(ir::IsValidAccPhase(acc_phase), op->span_)
-      << "GEMV acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got " << acc_phase;
+      << op->op_->name_ << " acc_phase must encode AccPhase::kUnspecified, kPartial, or kFinal, got "
+      << acc_phase;
   if (acc_phase == static_cast<int>(ir::AccPhase::kUnspecified)) return "";
   return " {accPhase = #pto<acc_phase " + ir::AccPhaseToPTOString(static_cast<ir::AccPhase>(acc_phase)) +
          ">}";
 }
 
-static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
-                                      codegen::CodegenBase& codegen_base) {
+static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) {
+  auto attrs = (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_acc"))
+                   ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
+                   : "";
+  auto phase = AccPhaseAttr(op);
+  if (attrs.empty()) return phase;
+  if (phase.empty()) return attrs;
+  // Both formatters return one attribute dictionary; combine their entries.
+  attrs.pop_back();
+  return attrs + ", " + phase.substr(2);
+}
+
+static std::string MakePhasedMatmulCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
+                                              codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + GemvAccPhaseAttr(op));
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
   return "";
 }
 
@@ -929,9 +942,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
-    {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
     {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
+    // tile.matmul has phase-aware custom codegen.
     // tile.matmul_acc / tile.gemv_acc / tile.matmul_mx_acc have custom codegen
     // (in-place accumulation: ptoas requires ins(acc) == outs).
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
@@ -1160,15 +1173,22 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   }
 
   // tile.rsqrt accepts 1 arg (basic) or 2 args (high-precision with tmp workspace).
-  // Both forms emit pto.trsqrt with the appropriate ins() arity. Per ISA, both
-  // inputs (when present) and the output must be row_major.
+  // The explicit high_precision attribute selects the algorithm; tmp only supplies
+  // workspace. A5 needs the selector even when its scratch overload is used.
+  // Per ISA, both inputs (when present) and the output must be row_major.
   if (ShouldRegister(exclude_ops, "tile.rsqrt")) {
     backend.RegisterOp("tile.rsqrt")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
           size_t arity = op->args_.size();
           INTERNAL_CHECK_SPAN(arity == 1 || arity == 2, op->span_)
               << "tile.rsqrt requires 1 or 2 arguments, but got " << arity;
-          return MakeNaryCodegenPTO("pto.trsqrt", arity, op, codegen);
+          auto& pto_codegen = AsPto(codegen);
+          std::string code = "pto.trsqrt " + GenerateInsOutsClause(op, pto_codegen);
+          if (op->GetKwarg<bool>("high_precision", false)) {
+            code += " {precisionType = #pto<rsqrt_precision high_precision>}";
+          }
+          pto_codegen.Emit(code);
+          return std::string{};
         })
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_input_layout(1, ir::TileLayout::row_major)
@@ -1293,10 +1313,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
-      const std::string attrs =
-          ir::IsOp(op, "tile.matmul_acc")
-              ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
-              : GemvAccPhaseAttr(op);
+      const std::string attrs = MatmulAttrs(op, codegen);
 
       // ins() carries the accumulator only on the accumulating form; the
       // initializing form reads lhs/rhs alone and writes dst from scratch.
@@ -1417,14 +1434,17 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     };
   };
 
+  reg("tile.matmul", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePhasedMatmulCodegenPTO("pto.tmatmul", 2, op, codegen);
+  });
   reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc", "pto.tmatmul"));
   reg("tile.gemv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeGemvCodegenPTO("pto.tgemv", 2, op, codegen);
+    return MakePhasedMatmulCodegenPTO("pto.tgemv", 2, op, codegen);
   });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc", "pto.tgemv"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeGemvCodegenPTO("pto.tgemv.bias", 3, op, codegen);
+    return MakePhasedMatmulCodegenPTO("pto.tgemv.bias", 3, op, codegen);
   });
 }
 }  // namespace backend

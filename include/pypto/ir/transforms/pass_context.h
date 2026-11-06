@@ -16,11 +16,13 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 
 namespace pypto {
@@ -303,6 +305,9 @@ class PassContext {
    *        runtime switch on this rather than inspecting codegen options.
    * @param enable_buffer_ir Enable Buffer IR for supported whole kernels (default: true).
    *        Unsupported kernels retain Tile IR; selected-kernel failures propagate.
+   * @param enable_software_pipeline Lower eligible pipeline loops to rotating
+   *        slots with explicit prefetch (default: false). Requires PyPTO memory
+   *        planning and the tile IR pipeline.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
@@ -310,7 +315,8 @@ class PassContext {
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
-                       bool enable_buffer_ir = true);
+                       bool enable_buffer_ir = true, bool enable_software_pipeline = false,
+                       bool report_hardware_loops = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -383,6 +389,9 @@ class PassContext {
   /// Whether supported whole kernels use Buffer IR.
   [[nodiscard]] bool GetEnableBufferIR() const;
 
+  /** @brief Whether eligible pipeline loops use explicit software pipelining. */
+  [[nodiscard]] bool GetEnableSoftwarePipeline() const;
+
   /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
@@ -406,7 +415,21 @@ class PassContext {
    */
   [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
 
+  /// Host-only codegen may run without a device backend; its profile is unsupported.
+  [[nodiscard]] HardwareLoopProfile GetHardwareLoopProfile() const;
+
+  [[nodiscard]] bool GetReportHardwareLoops() const { return report_hardware_loops_; }
+  [[nodiscard]] const std::vector<HardwareLoopQualification>& GetHardwareLoopReports() const {
+    return hardware_loop_reports_;
+  }
+  /// Replace, never accumulate, reports at each codegen boundary. No cached proof.
+  void SetHardwareLoopReports(std::vector<HardwareLoopQualification> reports) {
+    hardware_loop_reports_ = std::move(reports);
+  }
+
  private:
+  bool report_hardware_loops_ = false;
+  std::vector<HardwareLoopQualification> hardware_loop_reports_;
   std::vector<PassInstrumentPtr> instruments_;
   VerificationLevel verification_level_;
   DiagnosticPhase diagnostic_phase_;
@@ -415,6 +438,7 @@ class PassContext {
   bool enable_pypto_l0c_double_buffer_;
   RuntimeKind runtime_;
   bool enable_buffer_ir_;
+  bool enable_software_pipeline_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

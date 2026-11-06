@@ -92,6 +92,28 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
 The pass is a `ProgramPass` and walks each function with an `IRMutator`; functions are returned unchanged when no rewrite fires (no `MutableCopy` cost for matmul-free programs).
 
+## Explicit accumulator phases
+
+`tile.matmul` and `tile.matmul_acc` retain their `acc_phase` through automatic
+tiling. Omitted or `Unspecified` phases preserve the existing schedule. With
+`Partial`, every generated K block remains `Partial`. With `Final`, every
+intermediate block is `Partial` and only the last physical K block is `Final`.
+
+For a non-divisor K, the existing peeled tail is the final block. For a
+divisible K, the pass peels the last full block from the pipeline instead of
+marking every loop iteration `Final`. A remaining single full block is emitted
+straight-line; two or more intermediate blocks retain their pipeline. The
+original `init_cond` applies only to the first block, so the peeled last block
+always accumulates. The final result is therefore defined outside the K loop
+and can be consumed by its final store in the same straight-line region.
+
+M/N direct-store tiling gives every output sub-tile its own final producer and
+preserves `st_phase=Final` on the corresponding store, including boundary
+sub-tiles. Final results require this explicit drain and cannot be replaced by
+a Mat-scratch assembly without a matching store. These transformations retain
+the existing synchronization; phase attributes alone establish no performance
+claim.
+
 ## NZ GM destinations
 
 An FP32 NZ output uses the blocked, four-argument `tile.store` produced by

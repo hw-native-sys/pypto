@@ -234,14 +234,16 @@ class PassManager:
             # LowerPipelineToSlots multi-buffers what it can via MemRef slots (one
             # body, one N-slot allocation) and demotes those loops; every loop it
             # declines stays ForKind.Pipeline for LowerPipelineLoops to replicate.
-            # It is self-gated on memory_planner=PTOAS, so the default path is
-            # unchanged — hence both passes run, rather than one replacing the other.
+            # Explicit software pipelining is opt-in under PYPTO; PTOAS retains
+            # its same-iteration slot rotation. The default PYPTO path is unchanged.
             passes.lower_pipeline_to_slots,
             passes.lower_pipeline_loops,
             passes.canonicalize_io_order,
             # MaterializeTensorStrides fills empty stride slots on every
             # TensorView with packed canonical strides (RFC #1300 §2.4).
             passes.materialize_tensor_strides,
+            passes.materialize_simt_outputs,
+            passes.specialize_simt_helpers,
             passes.init_mem_ref,
             # MaterializeSemanticAliases forces loop-carried / in-place buffers to
             # share one MemRef (semantics-required aliasing). It always runs; only
@@ -396,6 +398,8 @@ class PassManager:
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         )
+        phase_properties = passes.IRPropertySet()
+        phase_properties.insert(passes.IRProperty.AccStorePhaseValid)
         for pass_factory in pass_factories:
             pass_obj = pass_factory()
             if self._construction_buffer_ir and pass_obj.get_name() == "MaterializeSemanticAliases":
@@ -405,9 +409,17 @@ class PassManager:
             if pass_obj.get_name() in skipped_mem_planning_passes:
                 continue
             self._pipeline.add_pass(pass_obj)
+            if pass_obj.get_name() == "MaterializeSemanticAliases":
+                # Inline verifies exact Final/store pairing. Canonical MemRefs
+                # now let the same verifier guard old aliases and loop storage
+                # without reimplementing storage provenance before legalization.
+                self._pipeline.add_pass(passes.run_verifier(phase_properties))
             if self._construction_buffer_ir and pass_obj.get_name() == "AllocateMemoryAddr":
                 self._pipeline.add_pass(passes.verify_tile_storage(allocated=True))
 
+        # Subsequent storage rewrites may retarget MemRef windows. Recheck the
+        # final TileIR, including PTOAS paths that skip address allocation.
+        self._pipeline.add_pass(passes.run_verifier(phase_properties))
         if self._construction_buffer_ir:
             self._pipeline.add_pass(passes.lower_tile_to_buffer())
 
@@ -578,6 +590,7 @@ class PassManager:
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
+        software_pipeline = ctx.get_enable_software_pipeline() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -593,6 +606,7 @@ class PassManager:
             dbc_flag,
             runtime,
             buffer_ir,
+            software_pipeline,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -631,6 +645,7 @@ class PassManager:
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
+        software_pipeline = ctx.get_enable_software_pipeline() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
@@ -647,6 +662,7 @@ class PassManager:
             dbc_flag,
             runtime,
             buffer_ir,
+            software_pipeline,
         ):
             try:
                 return self._pipeline.run(input_ir)

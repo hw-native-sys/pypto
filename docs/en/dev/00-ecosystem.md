@@ -119,6 +119,9 @@ Other GLM kernel entries remain covered, including entries without a
 `--compile-only` option. Device-only entries are included because compilation
 needs no NPU. The adapter forces `golden.run` into compile-only mode, records direct compile calls, and requires PTOAS. Coverage
 includes frontend, passes, verification, codegen, and PTOAS.
+When an active argument parser declares `--compile-only`, the adapter supplies
+that flag to that parser. Other parsers keep their original arguments, preserving
+helper/component parsing while disabling post-compilation execution branches.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
 
@@ -134,7 +137,13 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 ```
 
 Repeat with `--platform a5`. Each entry has a 1200-second timeout (override with
-`--timeout`). Compilation failures, process failures, timeouts, and zero recorded
+`--timeout`). Separately, each PTOAS kernel compilation defaults to 60 seconds.
+Set `PYPTO_PTOAS_TIMEOUT_SECONDS` to a positive integer to override that deadline;
+invalid values raise an error. The library compilation CI job sets it to `180`
+for large kernels. Use `export PYPTO_PTOAS_TIMEOUT_SECONDS=180` to match CI locally.
+The setting applies to both fresh compilation and PTO rebuilds during debug replay.
+This does not change the per-entry `--timeout`.
+Compilation failures, process failures, timeouts, and zero recorded
 compilations fail the job. Malformed or unreadable receipts fail their entry
 without aborting the remaining entries or losing the matrix summary.
 When an entry dispatches cases by launching its own script with the current

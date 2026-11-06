@@ -1,0 +1,31 @@
+// Copyright (c) PyPTO Contributors.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Native ABI fixture: the caller supplies pointers already adjusted to the
+// Tensor subview origin. Inactive threads must preserve the initialized tail.
+module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
+  func.func @run_simt_copy(%src: !pto.ptr<f32, gm>, %dst: !pto.ptr<f32, gm>, %valid: i32) attributes {pto.aiv} {
+    %width = arith.constant 128 : i32
+    %one = arith.constant 1 : i32
+    pto.simt_launch @copy_body<<<%width, %one, %one>>>(%src, %dst, %valid) : (!pto.ptr<f32, gm>, !pto.ptr<f32, gm>, i32) -> ()
+    // Kernel-exit drain, matching PTOAS' native SIMT GM-access examples.
+    pto.barrier #pto.pipe<PIPE_ALL>
+    return
+  }
+
+  func.func @copy_body(%src: !pto.ptr<f32, gm>, %dst: !pto.ptr<f32, gm>, %valid: i32) attributes {pto.simt_entry, pto.simt_max_threads = 128 : i32} {
+    %tid = pto.get_tid_x : i32
+    %active = arith.cmpi slt, %tid, %valid : i32
+    scf.if %active {
+      %index = arith.index_cast %tid : i32 to index
+      %value = pto.ldg %src[%index] : !pto.ptr<f32, gm> -> f32
+      pto.stg %value, %dst[%index] : !pto.ptr<f32, gm>, f32
+    }
+    return
+  }
+}

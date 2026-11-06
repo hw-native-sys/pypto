@@ -12,7 +12,6 @@
 #include "src/codegen/orchestration/orchestration_stmt_codegen.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <map>

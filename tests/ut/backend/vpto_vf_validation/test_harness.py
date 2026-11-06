@@ -1,0 +1,229 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Regression checks for worker startup and retained subprocess diagnostics."""
+
+import ctypes
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from pypto.jit.decorator import JITFunction
+
+SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_validation.py")))
+RUN = SUPPORT["run"]
+
+
+@pytest.mark.parametrize("pin_available", [True, False])
+def test_vf_compiler_selection_honors_ptoas_root(tmp_path, monkeypatch, pin_available):
+    # CANN also installs a ptoas launcher on PATH. The acceptance harness must
+    # use the same pinned compiler as production, even when PATH points elsewhere.
+    path_dir = tmp_path / "cann-bin"
+    path_dir.mkdir()
+    fallback = path_dir / "ptoas"
+    fallback.write_text("#!/bin/sh\nexit 99\n")
+    fallback.chmod(0o755)
+    root = tmp_path / "pinned"
+    pinned = root / "bin/ptoas"
+    if pin_available:
+        pinned.parent.mkdir(parents=True)
+        pinned.write_text("#!/bin/sh\nexit 0\n")
+        pinned.chmod(0o755)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setenv("PTOAS_ROOT", str(root))
+    if pin_available:
+        assert SUPPORT["require_ptoas"]() == str(pinned)
+    else:
+        # A missing pin must fail rather than silently validating another compiler.
+        with pytest.raises(AssertionError, match="PTOAS_ROOT"):
+            SUPPORT["require_ptoas"]()
+
+
+def test_nonzero_exit_keeps_diagnostics(tmp_path):
+    with pytest.raises(AssertionError, match="exited 7"):
+        RUN(tmp_path, "failure", [sys.executable, "-c", "print('launch failed'); raise SystemExit(7)"])
+    assert "launch failed" in (tmp_path / "failure.log").read_text()
+    assert sys.executable in (tmp_path / "failure.command.txt").read_text()
+
+
+def test_timeout_keeps_partial_diagnostics(tmp_path):
+    with pytest.raises(subprocess.TimeoutExpired):
+        RUN(
+            tmp_path,
+            "timeout",
+            [
+                sys.executable,
+                "-c",
+                "import time; print('before launch', flush=True); time.sleep(30)",
+            ],
+            timeout=1,
+        )
+    assert (tmp_path / "timeout.log").read_text() == "TIMEOUT after 1s\nbefore launch\n"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "tests/st/runtime/vpto/test_alias_helper_sync.py",
+        "tests/st/runtime/vpto/test_tile_helper_sync.py",
+        "tests/st/runtime/vpto/test_reg_scope_onboard.py",
+        "tests/st/runtime/vpto/test_simt_gm_copy_onboard.py",
+        "tests/st/runtime/vpto/test_simt_ir_onboard.py",
+        "tests/st/runtime/vpto/test_vpto_vf_onboard.py",
+        "tests/ut/backend/vpto_vf_validation/test_alias_sync.py",
+        "examples/runtime/vf_emitc_vpto.py",
+        "examples/runtime/vf_adapter_ub_overlap.py",
+    ],
+)
+def test_worker_imports_outside_checkout(tmp_path, relative_path, run_without_optional_runtime):
+    root = Path(__file__).resolve().parents[4]
+    source = root / relative_path
+    # The shared guard disables installed PyTorch plugin autoload and rejects
+    # every attempted optional-runtime import, even if ImportError is caught.
+    result = run_without_optional_runtime(f"""
+import os, runpy, sys
+from pathlib import Path
+sys.path = [p for p in sys.path if p and Path(p).resolve() != Path({str(root)!r})]
+os.chdir({str(tmp_path)!r})
+assert {str(root)!r} not in sys.path
+sys.path.insert(0, {str(source.parent)!r})
+runpy.run_path({str(source)!r}, run_name="vpto_import_probe")
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "aclInit", "aclrtSetDevice", "aclrtGetDevice", "empty_name", "wrong_device"]
+)
+def test_acl_device_probe_selects_and_cleans_up(monkeypatch, failure):
+    root = Path(__file__).resolve().parents[4]
+    probe = runpy.run_path(str(root / "tests/st/runtime/vpto/device_probe.py"))["probe_device"]
+    calls = []
+
+    def operation(name):
+        def call(*args):
+            calls.append((name, args))
+            if name == failure:
+                return 17
+            if name == "aclrtGetDevice":
+                ctypes.cast(args[0], ctypes.POINTER(ctypes.c_int32))[0] = (
+                    3 if failure == "wrong_device" else 4
+                )
+            if name == "aclrtGetSocName":
+                return None if failure == "empty_name" else b"Ascend950PR_9599"
+            return 0
+
+        return call
+
+    acl = SimpleNamespace(
+        **{
+            name: operation(name)
+            for name in (
+                "aclInit",
+                "aclFinalize",
+                "aclrtSetDevice",
+                "aclrtResetDevice",
+                "aclrtGetDevice",
+                "aclrtGetSocName",
+            )
+        }
+    )
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: acl)
+    if failure:
+        with pytest.raises(RuntimeError):
+            probe(4)
+    else:
+        assert probe(4) == "Ascend950PR_9599"
+    names = [name for name, _ in calls]
+    if failure == "aclInit":
+        assert names == ["aclInit"]
+    else:
+        assert names[-1] == "aclFinalize"
+        assert ("aclrtSetDevice", (4,)) in calls
+        if failure != "aclrtSetDevice":
+            assert names[-2] == "aclrtResetDevice"
+            assert ("aclrtResetDevice", (4,)) in calls
+
+
+@pytest.mark.parametrize("name", ["Ascend950PR_9599", "Ascend910B"])
+def test_vf_preflight_retains_device_type_check(monkeypatch, tmp_path, name):
+    root = Path(__file__).resolve().parents[4]
+    fixture = runpy.run_path(str(root / "tests/st/runtime/vpto/conftest.py"))["vpto_onboard_session"]
+    monkeypatch.setenv("PYPTO_RUN_VPTO_ONBOARD", "1")
+    monkeypatch.setenv("PYPTO_VPTO_DEVICE_ID", "4")
+    monkeypatch.setenv("PYPTO_VPTO_RUNTIME_OUTPUT", str(tmp_path))
+
+    def run(command, **kwargs):
+        assert Path(command[1]).name == "device_probe.py"
+        assert command[2] == "4"
+        assert kwargs["timeout"] == 60
+        return SimpleNamespace(returncode=0, stdout=f"VPTO_DEVICE_NAME={name}\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if name.startswith("Ascend950"):
+        assert fixture.__wrapped__() == tmp_path
+    else:
+        with pytest.raises(AssertionError, match="requires an A5"):
+            fixture.__wrapped__()
+    assert name in (tmp_path / "device.txt").read_text()
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_onboard_caller_uses_selected_ptoas(monkeypatch, tmp_path, available):
+    root = Path(__file__).resolve().parents[4]
+    prepare = runpy.run_path(str(root / "tests/st/runtime/vpto/test_vpto_vf_onboard.py"))["_prepare"]
+    pinned = tmp_path / "pinned" / "bin" / "ptoas"
+    shadow = tmp_path / "system" / "ptoas"
+    for executable in (pinned, shadow) if available else (shadow,):
+        executable.parent.mkdir(parents=True)
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PTOAS_ROOT", str(pinned.parent.parent))
+    monkeypatch.setenv("PATH", str(shadow.parent))
+    source = tmp_path / "kernel.cpp"
+    source.write_text("int32_t n = args[3];")
+    (tmp_path / "kernel_config.py").write_text("")
+    config = SimpleNamespace(
+        KERNELS=[
+            {
+                "core_type": "aiv",
+                "signature": [SimpleNamespace(name=name) for name in ("IN", "IN", "INOUT")],
+                "source": str(source),
+            }
+        ]
+    )
+    compiled = object()
+    monkeypatch.setattr(JITFunction, "compile", lambda *args, **kwargs: compiled)
+    monkeypatch.setitem(prepare.__globals__, "read_kernel_config", lambda _: config)
+    monkeypatch.setitem(prepare.__globals__, "package_generated_sources", lambda *args: None)
+    commands = []
+
+    def run(directory, name, command):
+        assert name == "emit-caller"
+        commands.append(command)
+        Path(command[-1]).write_text("selected compiler output")
+
+    support = {"run": run, "make_wrapper": lambda text: text, "require_ptoas": SUPPORT["require_ptoas"]}
+    monkeypatch.setitem(prepare.__globals__, "runpy", SimpleNamespace(run_path=lambda _: support))
+    if available:
+        assert prepare(tmp_path) is compiled
+        assert len(commands) == 1
+        assert commands[0][0] == str(pinned)
+        assert source.read_text() == "selected compiler output"
+    else:
+        with pytest.raises(AssertionError, match="PTOAS_ROOT"):
+            prepare(tmp_path)
+        assert commands == []
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -232,6 +232,7 @@ enum class ArgEffect : uint8_t {
 enum class WriteChannel : uint8_t {
   Dma,     ///< MTE3 / DMA store path (tile.store, tensor.assemble, cross-rank put/get).
   Scalar,  ///< Scalar D-cache write path (tensor.write).
+  Simt,    ///< SIMT lane stores; distinct from controller scalar stores and DMA.
 };
 
 /**
@@ -367,7 +368,7 @@ struct OpLaneInvariantArgSpec {
   std::map<size_t, LaneInvariantArg> args;
 };
 
-/// Register schemas describe the future emitter without claiming backend support.
+/// Register schemas attach scope requirements and a VMI emitter to an operator.
 struct RegOpSpec {
   std::string emitter;
   bool requires_reg_scope = true;
@@ -384,12 +385,12 @@ struct RegMemoryEffect {
   // Half-open element interval, not byte offsets; either endpoint may be unknown.
   std::optional<int64_t> begin;
   std::optional<int64_t> end;
-  // Store predicate, or null for an unmasked access. A present mask does not
+  // Memory predicate, or null for an unmasked access. A present mask does not
   // imply that every lane is written; initialization must inspect its meaning.
   ExprPtr mask;
 };
 
-/// Validate a Reg load/store and describe its memory effect without changing IR.
+/// Validate a Reg load/store/gather/scatter and describe its memory effect.
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call);
 
 /**
@@ -982,17 +983,20 @@ class OpRegistryEntry {
   /// result is a `TupleType` with exactly N elements, and every element is an
   /// output: destination tiles must NOT appear in `add_argument()`, because a
   /// caller cannot pre-allocate a buffer that `InitMemRef` owns. Default 1.
+  /// SIMT operations may declare zero results: they access borrowed storage,
+  /// while updated functional values are defined by SimtLaunchStmt.
   inline OpRegistryEntry& set_output_arity(size_t arity) {
-    CHECK(arity >= 1 || ir_stage_ == OpIRStage::Buffer)
+    CHECK(arity >= 1 || ir_stage_ == OpIRStage::Buffer || op_category_ == "SimtOp")
         << "Operator '" << name_ << "' declared output arity " << arity
-        << "; functional operators produce at least one value. Select Buffer stage before declaring zero";
+        << "; functional operators produce at least one value. Select Buffer stage or SimtOp category before "
+           "declaring zero";
     output_arity_ = arity;
     output_arity_declared_ = true;
     return *this;
   }
 
   inline OpRegistryEntry& set_ir_stage(OpIRStage stage) {
-    CHECK(stage == OpIRStage::Buffer || output_arity_ > 0)
+    CHECK(stage == OpIRStage::Buffer || output_arity_ > 0 || op_category_ == "SimtOp")
         << "Operator '" << name_ << "' cannot give a zero-result operator Functional stage";
     ir_stage_ = stage;
     return *this;

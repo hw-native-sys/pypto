@@ -1,0 +1,32 @@
+module attributes {pto.target_arch = "a5", pto.backend = "vpto"} {
+  func.func @scatter_gather(%arg0: !pto.ptr<f32, ub>, %arg1: i32) attributes {pto.aiv} {
+    %c256_index = arith.constant 256 : index
+    %c0_i32 = arith.constant 0 : i32
+    %0 = arith.constant 0 : i32
+    %c0_ui32 = builtin.unrealized_conversion_cast %0 : i32 to ui32
+    %1 = arith.constant 3 : i32
+    %c3_ui32 = builtin.unrealized_conversion_cast %1 : i32 to ui32
+    %2 = arith.constant 255 : i32
+    %c255_ui32 = builtin.unrealized_conversion_cast %2 : i32 to ui32
+    %c0_index = arith.constant 0 : index
+    %c448_index = arith.constant 448 : index
+    %dst = pto.addptr %arg0, %c256_index : <f32, ub> -> <f32, ub>
+    pto.vecscope {
+      %idx = pto.vmi.vci %c0_i32 {order = "ASC"} : i32 -> !pto.vmi.vreg<64xsi32>
+      %broadcast_scalar = builtin.unrealized_conversion_cast %arg1 : i32 to si32
+      %limit = pto.vmi.vbrc %broadcast_scalar : si32 -> !pto.vmi.vreg<64xsi32>
+      %all = pto.vmi.pset "PAT_ALL" : !pto.vmi.mask<64xpred>
+      %mask = pto.vmi.vcmp %idx, %limit, %all {cmp = "lt"} : !pto.vmi.vreg<64xsi32>, !pto.vmi.vreg<64xsi32>, !pto.vmi.mask<64xpred> -> !pto.vmi.mask<64xpred>
+      %lane = pto.vmi.vci %c0_ui32 {order = "ASC"} : ui32 -> !pto.vmi.vreg<64xui32>
+      %three = pto.vmi.vbrc %c3_ui32 : ui32 -> !pto.vmi.vreg<64xui32>
+      %last = pto.vmi.vbrc %c255_ui32 : ui32 -> !pto.vmi.vreg<64xui32>
+      %scaled = pto.vmi.vmul %lane, %three {pmode = "zero"} : !pto.vmi.vreg<64xui32>, !pto.vmi.vreg<64xui32> -> !pto.vmi.vreg<64xui32>
+      %offsets = pto.vmi.vsub %last, %scaled {pmode = "zero"} : !pto.vmi.vreg<64xui32>, !pto.vmi.vreg<64xui32> -> !pto.vmi.vreg<64xui32>
+      %x = pto.vmi.vload %arg0[%c0_index] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vscatter %x, %dst, %offsets, %mask : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.vreg<64xui32>, !pto.vmi.mask<64xpred>
+      %reread = pto.vmi.vgather %dst, %offsets, %mask {pmode = "zero"} : !pto.ptr<f32, ub>, !pto.vmi.vreg<64xui32>, !pto.vmi.mask<64xpred> -> !pto.vmi.vreg<64xf32>
+      pto.vmi.vstore %reread, %dst[%c448_index] : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>
+    }
+    return
+  }
+}

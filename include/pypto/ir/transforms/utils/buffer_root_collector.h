@@ -89,6 +89,7 @@ class BufferRootCollector : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& for_stmt) override;
   void VisitStmt_(const WhileStmtPtr& while_stmt) override;
   void VisitStmt_(const AssignStmtPtr& assign) override;
+  void VisitStmt_(const SimtLaunchStmtPtr& launch) override;
 
  private:
   using RootCandidates = std::vector<const Var*>;

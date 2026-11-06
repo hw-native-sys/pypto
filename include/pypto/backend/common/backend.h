@@ -29,6 +29,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
+#include "pypto/sync/isa_macro_resources.h"
 
 namespace pypto {
 
@@ -265,6 +266,14 @@ class Backend {
   /// not supplied a rule, never "no scratch required" or "all inputs legal".
   [[nodiscard]] std::optional<OpScratchPlan> PlanOpScratch(const std::string& op_name,
                                                            const OpScratchRequest& request) const;
+
+  /// Look up a qualified ISA macro's signal occupancy independently of PyPTO lowering coverage.
+  /// The symbolic claims still require invocation binding. Missing names return nullopt, which does
+  /// not certify unknown external implementations as signal-free.
+  [[nodiscard]] std::optional<sync::IsaMacroResources> FindIsaMacroResources(const std::string& name) const;
+
+  /// Sorted snapshot of registered ISA macros with nonempty signal claims for this target.
+  [[nodiscard]] std::vector<std::string> GetIsaMacroNames() const;
 
   /**
    * @brief List the operators actually registered for this backend, sorted by name.

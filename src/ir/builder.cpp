@@ -121,14 +121,16 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
 
 void IRBuilder::BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
                              const ExprPtr& step, const Span& span, ForKind kind,
-                             std::vector<std::pair<std::string, std::any>> attrs) {
+                             std::vector<std::pair<std::string, std::any>> attrs, HardwareLoopPolicy policy) {
+  CHECK_SPAN(policy == HardwareLoopPolicy::Auto || kind == ForKind::Sequential, span)
+      << "HardwareLoopPolicy.Require requires Sequential ForKind";
   if (context_stack_.empty()) {
     throw pypto::RuntimeError("Cannot begin for loop: not inside a function or another valid context at " +
                               span.to_string());
   }
 
   context_stack_.push_back(
-      std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind, std::move(attrs)));
+      std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind, std::move(attrs), policy));
 }
 
 void IRBuilder::AddIterArg(const IterArgPtr& iter_arg) {
@@ -167,10 +169,10 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create for statement
-  auto for_stmt =
-      std::make_shared<ForStmt>(loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(),
-                                loop_ctx->GetStep(), loop_ctx->GetIterArgs(), body, loop_ctx->GetReturnVars(),
-                                combined_span, loop_ctx->GetKind(), loop_ctx->GetAttrs());
+  auto for_stmt = std::make_shared<ForStmt>(
+      loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(), loop_ctx->GetStep(),
+      loop_ctx->GetIterArgs(), body, loop_ctx->GetReturnVars(), combined_span, loop_ctx->GetKind(),
+      loop_ctx->GetAttrs(), std::vector<std::string>{}, loop_ctx->GetPolicy());
 
   // Pop context
   context_stack_.pop_back();
@@ -335,32 +337,20 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
     }
   }
   CHECK_SPAN(inside, span) << "EmitReg requires RegScope";
-  // Keep raw builder calls equivalent to the public DSL wrappers. The wrappers
-  // materialize these defaults before creating a Call, so omitting them here
-  // would make print/parse roundtrips structurally different despite identical
-  // op inference.
-  auto normalized_kwargs = kwargs;
-  auto has_kwarg = [&normalized_kwargs](const std::string& key) {
-    return std::any_of(normalized_kwargs.begin(), normalized_kwargs.end(),
-                       [&key](const auto& item) { return item.first == key; });
+  // The registry normalizes defaults for both Builder and raw IR calls.
+  const auto op = OpRegistry::GetInstance().GetOp(op_name);
+  auto has_kwarg = [&kwargs](const std::string& key) {
+    return std::any_of(kwargs.begin(), kwargs.end(), [&key](const auto& item) { return item.first == key; });
   };
-  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
-       op_name == "reg.minimum" || op_name == "reg.maximum") &&
-      !has_kwarg("pmode")) {
-    normalized_kwargs.emplace_back("pmode", std::string("zero"));
-  }
-  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
-    normalized_kwargs.emplace_back("order", std::string("ascending"));
-  }
-  auto call = OpRegistry::GetInstance().Create(op_name, args, normalized_kwargs, span);
+  auto call = OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
   auto var = Var(name, call->GetType(), span);
   // The DSL treats a same-dtype conversion without modifiers as a no-op and
   // returns its operand. Preserve that canonical form for raw builder users.
   bool no_op_convert = false;
-  if (op_name == "reg.convert" && args.size() == 1 && !has_kwarg("rounding") && !has_kwarg("saturate")) {
+  if (IsOp(op, "reg.convert") && args.size() == 1 && !has_kwarg("rounding") && !has_kwarg("saturate")) {
     auto source = std::dynamic_pointer_cast<const RegType>(args[0]->GetType());
     const DataType* dtype = nullptr;
-    for (const auto& [key, value] : normalized_kwargs) {
+    for (const auto& [key, value] : kwargs) {
       if (key == "dtype") dtype = std::any_cast<DataType>(&value);
     }
     no_op_convert = source != nullptr && dtype != nullptr && source->dtype_ == *dtype;
@@ -399,7 +389,8 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
 
 StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
                             std::vector<WindowBufferPtr> slots,
-                            std::vector<std::pair<std::string, std::any>> extra_attrs) {
+                            std::vector<std::pair<std::string, std::any>> extra_attrs,
+                            std::vector<std::string> engines) {
   CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
       << "Cannot end scope: not inside a scope context at " << end_span.to_string();
 
@@ -479,9 +470,9 @@ StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
                                                           std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::CommDomain:
-      scope_stmt = std::make_shared<const CommDomainScopeStmt>(std::move(devices), std::move(slots),
-                                                               std::move(name_hint), body, combined_span,
-                                                               std::vector<std::string>{}, std::move(attrs));
+      scope_stmt = std::make_shared<const CommDomainScopeStmt>(
+          std::move(devices), std::move(slots), std::move(name_hint), body, combined_span,
+          std::vector<std::string>{}, std::move(attrs), std::move(engines));
       break;
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has

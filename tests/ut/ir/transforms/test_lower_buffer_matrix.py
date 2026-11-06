@@ -533,6 +533,102 @@ def test_matmul_kwargs_are_rejected_rather_than_dropped():
         _lower_planned(kernel.program(), passes.MemoryPlanner.PTOAS)
 
 
+# Phase rejection is independent of rounding. Test all phases without TF32,
+# and both supported rounding modes on the accepted default-phase path.
+@pytest.mark.parametrize(
+    "phase, tf32_mode",
+    [(phase, None) for phase in pl.AccPhase]
+    + [(pl.AccPhase.Unspecified, mode) for mode in ("round_even", "round_away")],
+)
+@pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+def test_explicit_matrix_lowering_rejects_phases_it_cannot_preserve(phase, accumulate, tf32_mode):
+    """The direct lowering API must reject synchronization absent from BufferIR."""
+    kernel = _PlannedMatrixKernel()
+    input_dtype = DataType.FP16 if tf32_mode is None else DataType.FP32
+    input_bytes = 2 if tf32_mode is None else 4
+    lhs = kernel.tile(
+        "lhs",
+        kernel.allocation("left", ir.MemorySpace.Left, 16 * 64 * input_bytes),
+        0,
+        (16, 64),
+        input_dtype,
+        ir.MemorySpace.Left,
+    )
+    rhs = kernel.tile(
+        "rhs",
+        kernel.allocation("right", ir.MemorySpace.Right, 64 * 32 * input_bytes),
+        0,
+        (64, 32),
+        input_dtype,
+        ir.MemorySpace.Right,
+    )
+    acc = kernel.tile(
+        "acc",
+        kernel.allocation("acc_mem", ir.MemorySpace.Acc, 2048),
+        0,
+        (16, 32),
+        DataType.FP32,
+        ir.MemorySpace.Acc,
+    )
+    product = ir.Var("product", acc.type, _SPAN)
+    op_name = "tile.matmul_acc" if accumulate else "tile.matmul"
+    args = [acc, lhs, rhs] if accumulate else [lhs, rhs]
+    # Construct explicit Unspecified metadata too: it must stay a legal no-op
+    # even though the Python wrapper normally omits this default attribute.
+    kwargs: dict[str, int | str] = {"acc_phase": int(phase)}
+    if tf32_mode is not None:
+        kwargs["tf32_mode"] = tf32_mode
+    call = ir.Call(ir.get_op(op_name), args, kwargs, product.type, _SPAN)
+    kernel.body.append(ir.AssignStmt(product, call, _SPAN))
+    if phase == pl.AccPhase.Unspecified:
+        lowered = _lower_planned(kernel.program(), passes.MemoryPlanner.PTOAS)
+        expected = "buffer.matmul_acc" if accumulate else "buffer.matmul"
+        assert _call_names(lowered)[ir.get_op(expected).name] == 1
+        if tf32_mode is not None:
+            assert f'tf32_mode="{tf32_mode}"' in ir.python_print(lowered)
+        assert "acc_phase" not in ir.python_print(lowered)
+    else:
+        with pytest.raises(ValueError, match="nondefault acc_phase is not supported by BufferIR"):
+            _lower_planned(kernel.program(), passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("phase", [pl.AccPhase.Unspecified, pl.AccPhase.Partial, pl.AccPhase.Final])
+@pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+def test_default_matrix_selection_preserves_explicit_phases_on_tile_ir(planner, phase, accumulate):
+    """Partial must keep TileIR even without the independent final-store guard."""
+    expression = (
+        f"pl.tile.matmul_acc(seed, lhs, rhs, init_cond=True, acc_phase=pl.AccPhase.{phase.name})"
+        if accumulate
+        else f"pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.{phase.name})"
+    )
+    store_phase = "Final" if phase == pl.AccPhase.Final else "Unspecified"
+    program = pl.parse_program(f"""
+@pl.program
+class PhasedMatrix:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 64], pl.FP16], b: pl.Tensor[[64, 32], pl.FP16],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
+        a_mat = pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+        lhs = pl.move(a_mat, target_memory=pl.Mem.Left)
+        rhs = pl.move(b_mat, target_memory=pl.Mem.Right)
+        seed = pl.tile.create([16, 32], pl.FP32, target_memory=pl.Mem.Acc)
+        result = {expression}
+        return pl.store(result, [0, 0], out, st_phase=pl.STPhase.{store_phase})
+""")
+    with passes.PassContext([], memory_planner=planner):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+    kernel = lowered.get_function("kernel")
+    assert kernel is not None
+    if phase == pl.AccPhase.Unspecified:
+        assert kernel.ir_stage == ir.FunctionIRStage.Buffer
+    else:
+        assert kernel.ir_stage == ir.FunctionIRStage.Functional
+        text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=False, emit_source_loc=False)
+        assert f"#pto<acc_phase {phase.name.lower()}>" in text
+
+
 def _default_matrix(program, planner, enabled=None):
     options = {} if enabled is None else {"enable_buffer_ir": enabled}
     with passes.PassContext([], memory_planner=planner, **options):

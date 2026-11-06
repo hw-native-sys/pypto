@@ -174,6 +174,54 @@ def test_buffer_storage_views_alias_bytes_and_destination_writes():
     torch.testing.assert_close(output, source * 2)
 
 
+@pytest.mark.parametrize("storage", ["allocated", "addressed", "reshaped"])
+def test_uint32_scratch_replay_without_torch_uint32(monkeypatch, storage):
+    """Scratch keeps four-byte elements even when Torch has no unsigned dtype."""
+    span = ir.Span.unknown()
+    scratch_type = ir.BufferType([1, 16], pl.UINT32, ir.MemorySpace.Vec)
+    value_type = ir.BufferType([1, 16], pl.FP32, ir.MemorySpace.Vec)
+    scratch = ir.Var("scratch", scratch_type, span)
+    value = ir.Var("value", value_type, span)
+    out = ir.Var("out", ir.TensorType([1, 16], pl.FP32), span)
+
+    def dims(*values):
+        return ir.MakeTuple([ir.ConstInt(value, pl.INDEX, span) for value in values], span)
+
+    def call(name, args, type_):
+        return ir.Call(ir.get_op(name), args, {}, type_, span)
+
+    statements = []
+    if storage == "reshaped":
+        byte_type = ir.BufferType([2, 32], pl.UINT8, ir.MemorySpace.Vec)
+        root = ir.Var("root", byte_type, span)
+        statements.append(ir.AssignStmt(root, call("buffer.alloc", [dims()], byte_type), span))
+        allocation = call("buffer.reshape", [root], scratch_type)
+    else:
+        args = [dims(), ir.ConstInt(0, pl.INDEX, span)] if storage == "addressed" else [dims()]
+        allocation = call("buffer.alloc", args, scratch_type)
+    statements.extend(
+        [
+            ir.AssignStmt(scratch, allocation, span),
+            # This equal-width view also rejects an accidental INT64 fallback.
+            ir.AssignStmt(value, call("buffer.reshape", [scratch], value_type), span),
+            ir.EvalStmt(
+                call("buffer.full", [ir.ConstFloat(1.25, pl.FP32, span), value], ir.VoidType()), span
+            ),
+            ir.EvalStmt(call("buffer.store", [value, dims(0, 0), dims(1, 16), out], ir.VoidType()), span),
+        ]
+    )
+    function = ir.Function(
+        "kernel", [out], [], ir.SeqStmts(statements, span), span, ir_stage=ir.FunctionIRStage.Buffer
+    )
+    result = torch.empty((1, 16))
+    with monkeypatch.context() as legacy_torch:
+        legacy_torch.delattr(torch, "uint32", raising=False)
+        namespace = {}
+        exec(torch_codegen(function), namespace)  # noqa: S102
+        namespace["kernel"](result)
+    torch.testing.assert_close(result, torch.full_like(result, 1.25), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("address", [0, 64])
 @pytest.mark.parametrize("valid_rows", [1, 2])
 def test_addressed_vec_allocations_share_partial_storage(address, valid_rows):

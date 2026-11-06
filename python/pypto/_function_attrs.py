@@ -39,6 +39,10 @@ EXTERNAL_SOURCE_ATTR = "external_source"
 # 外部源码中的全核硬件屏障参与方：mix、aic_only 或 aiv_only。
 EXTERNAL_HARD_SYNCALL_ATTR = "external_hard_syncall"
 
+
+# Ordered parameter references returned by a declaration-only external kernel.
+EXTERNAL_RETURN_PARAMS_ATTR = "external_return_params"
+
 # Package-resource handle (":pypto.runtime.builtins.collectives.<op>") naming the
 # builtin template package that supplies a compiler-synthesized kernel's C++
 # source (str). Written by LowerL2TensorCollectives on the AIV function it
@@ -49,6 +53,12 @@ BUILTIN_TEMPLATE_DIR_ATTR = "builtin_template_dir"
 # Comma-separated ``key=value`` substitutions for the template named by
 # ``BUILTIN_TEMPLATE_DIR_ATTR`` (str), e.g. "dtype_cpp=float,ctx_arg_index=5".
 BUILTIN_TEMPLATE_VARS_ATTR = "builtin_template_vars"
+
+# Every tensor argument of a dispatch to this kernel must be a contiguous
+# row-major view at runtime (bool). Written by LowerL2TensorCollectives on the
+# managed CHIP/L2 collective kernel; orchestration codegen checks each argument's
+# runtime ``is_contiguous`` flag before the submit.
+REQUIRE_CONTIGUOUS_OPERANDS_ATTR = "require_contiguous_operands"
 
 # Opt-out of automatic ``RuntimeScopeStmt`` materialization (bool). Absent means
 # True, so only the opt-out (False) is ever stored.
@@ -61,6 +71,8 @@ __all__ = [
     "BUILTIN_TEMPLATE_VARS_ATTR",
     "DUAL_AIV_DISPATCH_ATTR",
     "EXTERNAL_HARD_SYNCALL_ATTR",
+    "EXTERNAL_RETURN_PARAMS_ATTR",
     "EXTERNAL_SOURCE_ATTR",
+    "REQUIRE_CONTIGUOUS_OPERANDS_ATTR",
     "SPLIT_AIV_ATTR",
 ]

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -66,6 +67,54 @@ ParamIndexMap IndexParams(const std::vector<VarPtr>& params) {
   return result;
 }
 
+// External functions have no executable IR body. Their result identities are
+// a declaration contract, not an inference from the set of writable arguments.
+// A missing contract is unambiguous only for a complete, ordered set of writable
+// parameters; subsets and reordered results require explicit references.
+std::vector<std::optional<size_t>> ExternalReturnedParamIndices(const FunctionPtr& func) {
+  std::vector<VarPtr> returned;
+  if (func->HasAttr(kAttrExternalReturnParams)) {
+    returned = func->GetAttr<std::vector<VarPtr>>(kAttrExternalReturnParams);
+  } else {
+    if (func->return_types_.empty()) return {};
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      const auto direction = func->param_directions_[i];
+      if (direction == ParamDirection::Out || direction == ParamDirection::InOut) {
+        returned.push_back(func->params_[i]);
+      }
+    }
+  }
+  CHECK_SPAN(returned.size() == func->return_types_.size(), func->span_)
+      << "External kernel '" << func->name_ << "' declares " << func->return_types_.size()
+      << " results but its returned parameter contract has " << returned.size()
+      << " entries. Declare the returned tensor parameters explicitly with " << kAttrExternalReturnParams;
+
+  const auto param_indices = IndexParams(func->params_);
+  std::vector<std::optional<size_t>> result;
+  result.reserve(returned.size());
+  for (size_t i = 0; i < returned.size(); ++i) {
+    auto it = param_indices.find(returned[i].get());
+    CHECK_SPAN(it != param_indices.end(), func->span_)
+        << "External kernel '" << func->name_ << "' return " << i << " must reference its own parameter";
+    const auto param_type = AsTensorTypeLike(returned[i]->GetType());
+    const auto return_type = AsTensorTypeLike(func->return_types_[i]);
+    CHECK_SPAN(param_type && return_type && param_type->dtype_ == return_type->dtype_ &&
+                   param_type->shape_.size() == return_type->shape_.size(),
+               func->span_)
+        << "External kernel '" << func->name_ << "' return " << i
+        << " must have the same tensor dtype and shape as its returned parameter";
+    // MemRefs and lowering-specific views may differ after memory assignment;
+    // the declaration promises the logical tensor shape, not storage metadata.
+    for (size_t axis = 0; axis < param_type->shape_.size(); ++axis) {
+      CHECK_SPAN(structural_equal(param_type->shape_[axis], return_type->shape_[axis]), func->span_)
+          << "External kernel '" << func->name_ << "' return " << i
+          << " has a different shape from its returned parameter at axis " << axis;
+    }
+    result.emplace_back(it->second);
+  }
+  return result;
+}
+
 // Per-body index: topmost ReturnStmt, per-var defining AssignStmt, loop-carry
 // edges (iter_arg / tensor return_var -> init value var), and optionally tensor
 // IfStmt merge edges. Return queries and scope outlining share branch consensus.
@@ -85,6 +134,16 @@ class BodyIndexCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& assign) override {
     if (assign->var_) var_def.emplace(assign->var_.get(), assign);
     IRVisitor::VisitStmt_(assign);
+  }
+  void VisitStmt_(const SimtLaunchStmtPtr& launch) override {
+    for (size_t i = 0; i < launch->results_.size(); ++i) {
+      const auto& result = launch->results_[i];
+      if (!AsTensorTypeLike(result->GetType())) continue;
+      if (auto source = AsVarLike(launch->args_[launch->result_param_indices_[i]])) {
+        carry_src[result.get()] = source.get();
+      }
+    }
+    IRVisitor::VisitStmt_(launch);
   }
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
     RecordCarries(for_stmt->iter_args_, for_stmt->return_vars_);
@@ -570,6 +629,8 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
     return result;
   };
 
+  if (func->HasAttr(kAttrExternalSource)) return record(ExternalReturnedParamIndices(func));
+
   // Graph boundary analyses do not propagate tensor roots through If merges yet.
   BodyIndexCollector index(/*collect_if_merges=*/func->func_type_ != FunctionType::Graph);
   index.VisitStmt(func->body_);
@@ -651,6 +712,7 @@ ReturnStmtPtr FindFirstReturn(const StmtPtr& body) {
 
 std::vector<std::optional<size_t>> ExplicitReturnedParamIndices(const FunctionPtr& func) {
   if (!func || !func->body_) return {};
+  if (func->HasAttr(kAttrExternalSource)) return ExternalReturnedParamIndices(func);
   auto ret = FindFirstReturn(func->body_);
   if (!ret || ret->value_.empty()) return {};
 

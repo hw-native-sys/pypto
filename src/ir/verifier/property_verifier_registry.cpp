@@ -62,6 +62,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::OutParamNotShadowed, CreateOutParamNotShadowedPropertyVerifier);
   Register(IRProperty::ArrayNotEscaped, CreateArrayNotEscapedPropertyVerifier);
   Register(IRProperty::RegScopeValid, CreateRegScopePropertyVerifier);
+  Register(IRProperty::HardwareLoopContractValid, CreateHardwareLoopContractPropertyVerifier);
   Register(IRProperty::NoNestedInCore, CreateNoNestedIncorePropertyVerifier);
   Register(IRProperty::InOutUseValid, CreateInOutUseValidPropertyVerifier);
   Register(IRProperty::PipelineLoopValid, CreatePipelineLoopValidPropertyVerifier);
@@ -92,6 +93,10 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // user-written signature at pipeline input and catching any pass that
   // synthesises one.
   Register(IRProperty::NoScalarKernelReturn, CreateNoScalarKernelReturnPropertyVerifier);
+
+  Register(IRProperty::SimtValid, CreateSimtValidPropertyVerifier);
+  Register(IRProperty::SimtOutputsMaterialized, CreateSimtOutputsMaterializedPropertyVerifier);
+  Register(IRProperty::SimtSpecialized, CreateSimtSpecializedPropertyVerifier);
 
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,

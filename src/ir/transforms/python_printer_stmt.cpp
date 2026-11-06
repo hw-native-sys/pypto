@@ -156,8 +156,6 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
-  CHECK_SPAN(op->hardware_loop_policy_ == HardwareLoopPolicy::Auto, op->span_)
-      << "HardwareLoopPolicy.Require Python DSL printing is not supported yet; use serialization";
   // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
   stream_ << "for " << GetVarName(op->loop_var_.get());
 
@@ -179,7 +177,8 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // structural invariant `kind == Pipeline ⇔ pipeline_stages attr present`
   // (PipelineLoopValid, always-on) lets us read `stage=` from the attr below
   // without a dual-mode branch.
-  const char* range_func = ".range(";
+  const char* range_func =
+      op->hardware_loop_policy_ == HardwareLoopPolicy::Require ? ".hardware_loop(" : ".range(";
   switch (op->kind_) {
     case ForKind::Unroll:
       range_func = ".unroll(";
@@ -215,7 +214,13 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   bool start_is_zero = is_const_int(op->start_, 0);
   bool step_is_one = is_const_int(op->step_, 1);
 
-  if (start_is_zero && step_is_one) {
+  if (op->hardware_loop_policy_ == HardwareLoopPolicy::Require) {
+    // Required loops have a stop-only surface. Never print removed overloads.
+    CHECK_SPAN(start_is_zero && step_is_one, op->span_)
+        << "HardwareLoopPolicy.Require requires constant start=0 and step=1 with INDEX dtype";
+    CHECK_SPAN(op->attrs_.empty(), op->span_) << "HardwareLoopPolicy.Require does not support loop attrs";
+    VisitExpr(op->stop_);
+  } else if (start_is_zero && step_is_one) {
     // range(stop)
     VisitExpr(op->stop_);
   } else if (step_is_one) {
@@ -826,6 +831,14 @@ void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
     stream_ << PrintWindowBuffer(op->slots_[i]);
   }
   stream_ << "]";
+  if (!op->engines_.empty()) {
+    stream_ << ", engines=[";
+    for (size_t i = 0; i < op->engines_.size(); ++i) {
+      if (i) stream_ << ", ";
+      stream_ << std::quoted(op->engines_[i]);
+    }
+    stream_ << "]";
+  }
   if (!op->attrs_.empty()) {
     stream_ << ", attrs={";
     for (size_t i = 0; i < op->attrs_.size(); ++i) {
@@ -844,6 +857,27 @@ void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
   }
   DecreaseIndent();
   --comm_domain_depth_;
+}
+
+void IRPythonPrinter::VisitStmt_(const SimtLaunchStmtPtr& op) {
+  for (size_t i = 0; i < op->results_.size(); ++i) {
+    if (i) stream_ << ", ";
+    VisitExpr(op->results_[i]);
+  }
+  if (!op->results_.empty()) stream_ << " = ";
+  stream_ << prefix_ << ".simt.launch(self." << op->callee_->name_;
+  for (const auto& arg : op->args_) {
+    stream_ << ", ";
+    VisitExpr(arg);
+  }
+  stream_ << ", block_dims=(";
+  for (size_t i = 0; i < op->block_dims_.size(); ++i) {
+    if (i) stream_ << ", ";
+    VisitExpr(op->block_dims_[i]);
+  }
+  stream_ << "), result_param_indices=(";
+  for (int index : op->result_param_indices_) stream_ << index << ", ";
+  stream_ << "))";
 }
 
 void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {

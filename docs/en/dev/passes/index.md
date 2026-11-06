@@ -64,31 +64,33 @@ Keep the English and Chinese documentation synchronized.
 | 28 | [StampTfreeSplit](28-stamp_tfree_split.md) | Copies each cross-core tpop's split and pipe id onto its matching tfree op |
 | 29 | [NormalizeReturnOrder](29-normalize_return_order.md) | Reorders every InCore function's return tuple into the canonical order |
 | 30 | [SkewCrossCorePipeline](30-skew_cross_core_pipeline.md) | Software-pipelines mixed cube/vector loops so the two cores overlap |
-| 31 | [LowerPipelineToSlots](31-lower_pipeline_to_slots.md) | Rotates a `pl.pipeline` body through the slots of one allocation instead of replicating it (`memory_planner=PTOAS`) |
+| 31 | [LowerPipelineToSlots](31-lower_pipeline_to_slots.md) | Opt-in single-level Vec prefetch and rotating slots under PyPTO, or same-iteration slot rotation under PTOAS; declined loops retain unroll |
 | 32 | [LowerPipelineLoops](32-lower_pipeline_loops.md) | Replicates `pl.pipeline(N, stage=F)` bodies `F` times to enable ping-pong buffering |
 | 33 | [CanonicalizeIOOrder](33-canonicalize_io_order.md) | Reorders pipeline-body statements along the scalar → load → compute → store ladder |
 | 34 | [MaterializeTensorStrides](34-materialize_tensor_strides.md) | Fills in the packed canonical stride for every tensor view that carries none |
-| 35 | [InitMemRef](35-init_memref.md) | Initializes MemRefs and creates alloc operations with unallocated addresses |
-| 36 | [SelectBufferIRFunctions / MaterializeSemanticAliases](36-materialize_semantic_aliases.md) | Forces buffers that program semantics require to be one allocation (loop-carry, in-place) |
-| 37 | [MemoryReuse](37-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs; skipped with `memory_planner=DSA_RP` or `PTOAS` |
-| 38 | [AllocateMemoryAddr](38-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations; skipped with `memory_planner=PTOAS` |
-| 39 | [FoldNoOpReshape](39-fold_no_op_reshape.md) | Folds `tile.reshape` calls that change neither physical shape nor allocation |
-| 40 | [FuseCreateAssembleToSlice](40-fuse_create_assemble_to_slice.md) | Fuses `tensor.create` + `tensor.assemble` into one `tensor.slice` view |
-| 41 | [LowerL2TensorCollectives](41-lower_l2_tensor_collectives.md) | Rewrites a managed collective written in a CHIP orchestration body into one local builtin AIV task, with no per-device fan-out and no nested L2 dispatch |
-| 42 | [LegalizeSpmdLaunches](42-legalize_spmd_launches.md) | Guard potentially empty SPMD launches |
-| 43 | [DeriveCallDirections](43-derive_call_directions.md) | Materializes wrapper `ParamDirection`s, then derives a per-argument `ArgDirection` at every call |
-| 44 | [AutoDeriveTaskDependencies](44-auto_derive_task_dependencies.md) | Derives conservative task-to-task dependency edges |
-| 45 | [ExpandManualPhaseFence](45-expand_manual_phase_fence.md) | Compresses profitable full-array `TaskId` dependencies in manual scopes |
-| 46 | [SynthesizeAllReduceSignals](46-synthesize_allreduce_signals.md) | Turns a host allreduce's optional signal into explicit internal signal IR |
-| 47 | [MaterializeCommDomainScopes](47-materialize_comm_domain_scopes.md) | Assembles `WindowBuffer` and `CommDomainScopeStmt` wrappers in each host orchestration body |
-| 48 | [LowerHostTensorCollectives](48-lower_host_tensor_collectives.md) | Rewrites host-level tensor collectives into internal builtin chip dispatches |
-| 49 | [MaterializeDistTensorCtx](49-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
-| 50 | [LegalizeGraphBoundary](50-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
-| 51 | [MaterializeRuntimeScopes](51-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
-| 52 | [ClassifyIterArgCarry](52-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
-| 53 | [InsertCommFence](53-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
-| 54 | [MaterializeValidShapeSymbols](54-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
-| 55 | [LowerTileToBuffer](55-lower_tile_to_buffer.md) | Final conversion of selected kernels from planned Tile storage to explicit Buffer operations |
+| 35 | [MaterializeSimtOutputs](35-materialize_simt_outputs.md) | Copies writable Tile inputs into dedicated initialized storage; preserves GM references |
+| 36 | [SpecializeSimtHelpers](36-specialize_simt_helpers.md) | Specializes helpers by block dimensions, storage metadata, and target; derives resources |
+| 37 | [InitMemRef](37-init_memref.md) | Initializes MemRefs and creates alloc operations with unallocated addresses |
+| 38 | [SelectBufferIRFunctions / MaterializeSemanticAliases](38-materialize_semantic_aliases.md) | Forces buffers that program semantics require to be one allocation (loop-carry, in-place) |
+| 39 | [MemoryReuse](39-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs; skipped with `memory_planner=DSA_RP` or `PTOAS` |
+| 40 | [AllocateMemoryAddr](40-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations; skipped with `memory_planner=PTOAS` |
+| 41 | [FoldNoOpReshape](41-fold_no_op_reshape.md) | Folds `tile.reshape` calls that change neither physical shape nor allocation |
+| 42 | [FuseCreateAssembleToSlice](42-fuse_create_assemble_to_slice.md) | Fuses `tensor.create` + `tensor.assemble` into one `tensor.slice` view |
+| 43 | [LowerL2TensorCollectives](43-lower_l2_tensor_collectives.md) | Rewrites a managed collective written in a CHIP orchestration body into one local builtin AIV task, with no per-device fan-out and no nested L2 dispatch |
+| 44 | [LegalizeSpmdLaunches](44-legalize_spmd_launches.md) | Guard potentially empty SPMD launches |
+| 45 | [DeriveCallDirections](45-derive_call_directions.md) | Materializes wrapper `ParamDirection`s, then derives a per-argument `ArgDirection` at every call |
+| 46 | [AutoDeriveTaskDependencies](46-auto_derive_task_dependencies.md) | Derives conservative task-to-task dependency edges |
+| 47 | [ExpandManualPhaseFence](47-expand_manual_phase_fence.md) | Compresses profitable full-array `TaskId` dependencies in manual scopes |
+| 48 | [SynthesizeAllReduceSignals](48-synthesize_allreduce_signals.md) | Turns a host allreduce's optional signal into explicit internal signal IR |
+| 49 | [MaterializeCommDomainScopes](49-materialize_comm_domain_scopes.md) | Assembles `WindowBuffer` and `CommDomainScopeStmt` wrappers in each host orchestration body |
+| 50 | [LowerHostTensorCollectives](50-lower_host_tensor_collectives.md) | Rewrites host-level tensor collectives into internal builtin chip dispatches |
+| 51 | [MaterializeDistTensorCtx](51-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
+| 52 | [LegalizeGraphBoundary](52-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
+| 53 | [MaterializeRuntimeScopes](53-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
+| 54 | [ClassifyIterArgCarry](54-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
+| 55 | [InsertCommFence](55-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
+| 56 | [MaterializeValidShapeSymbols](56-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
+| 57 | [LowerTileToBuffer](57-lower_tile_to_buffer.md) | Final conversion of selected kernels from planned Tile storage to explicit Buffer operations |
 
 ## Outside the default pipeline
 

@@ -54,11 +54,19 @@ StmtPtr MaterializeStorageSelections(const StmtPtr& body, const std::vector<VarP
 using HazardInputs = AllocationHazardInputs;
 using ForbidAliasMap = AllocationForbidAliasMap;
 
+// Access constraints keyed by individual outputs, before allocation lifetimes
+// exist. The selection planner already excludes declared and pipeline storage;
+// it folds these output constraints by physical base without copying alias groups.
+AllocationConstraintAnalysis CollectStorageSelectionConstraints(const FunctionPtr& function);
+
 // Offsets are bytes relative to the representative's existing MemRef window.
 // The representative owns the physical allocation; members retain their views.
 struct ReusePlacement {
   VarPtr representative;
   uint64_t byte_offset = 0;
+  // Forwarding a logical pipeline input also selects its slot. Ordinary byte
+  // reuse preserves the destination's own pool/slot identity.
+  bool forward_slot = false;
 };
 using ReuseMap = std::map<VarPtr, ReusePlacement>;
 
@@ -74,6 +82,10 @@ ReuseMap IdentifyReuseOpportunities(
 
 StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
                            const std::map<VarPtr, std::vector<VarPtr>>& var_sharing_groups);
+
+// Forward eligible computed results into their last-used software-pipeline input slot.
+StmtPtr ReuseSoftwarePipelineInputs(const StmtPtr& body, const LifetimeAnalysisResult& lifetimes,
+                                    const HazardInputs& hazard, const std::set<const Var*>& declared_bases);
 
 // Align carries after packing, then normalize aliases both before and after
 // yield repair. Keeping these separate preserves the planner-specific ordering.

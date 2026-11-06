@@ -11,6 +11,7 @@ means adding a handler, not editing passes.
 | ---- | -------------- |
 | [BackendHandler: principled backend dispatch](00-backend_handler.md) | The virtual interface, how passes query it, and what adding a new backend requires |
 | [Synchronization hardware resources](01-sync_resources.md) | Resource domain queries, ID ranges, and compiler reservation policy |
+| [ISA macro synchronization resources](02-macro_resources.md) | Backend-owned ISA signal occupancy declarations and queries |
 
 ## Registered operator inventory
 

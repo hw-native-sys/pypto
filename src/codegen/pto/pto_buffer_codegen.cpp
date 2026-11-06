@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -54,7 +56,8 @@ namespace {
 using ir::As;
 
 // BufferType is already a physical descriptor; no logical shape, layout, or
-// packing is inferred. Vec descriptors are dense row-major; Mat/Left/Right/Acc
+// packing is inferred. Vec descriptors are dense row-major or FP32 reduction
+// column vectors; Mat/Left/Right/Acc
 // descriptors carry their resolved fractal layout and must be whole boxes.
 std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span) {
   CHECK_SPAN(type->shape_.size() == 1 || type->shape_.size() == 2, span)
@@ -68,15 +71,16 @@ std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span
            "FP32/INT32 "
            "accumulators in "
         << ir::MemorySpaceToString(space);
-  } else {
+  } else if (!backend::IsColumnVectorBuffer(type)) {
     CHECK_SPAN(space == ir::MemorySpace::Vec &&
                    (backend::IsDenseBufferTransferDtype(type->dtype_) || type->dtype_ == DataType::UINT8 ||
-                    type->dtype_ == DataType::INT16) &&
+                    type->dtype_ == DataType::INT16 || type->dtype_ == DataType::UINT32) &&
                    type->blayout_ == ir::TileLayout::row_major &&
                    type->slayout_ == ir::TileLayout::none_box && type->fractal_ == 512 &&
                    type->pad_ == ir::PadValue::null && type->compact_ == ir::CompactMode::null,
                span)
-        << "Direct Buffer IR codegen currently requires dense row-major Vec FP16/BF16/FP32/INT32/INT16/UINT8 "
+        << "Direct Buffer IR codegen currently requires dense row-major Vec "
+           "FP16/BF16/FP32/INT32/INT16/UINT8/UINT32 "
            "buffers "
            "with fractal=512, no padding, and no compact mode";
   }
@@ -207,7 +211,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
  public:
   bool uses_spmd_blocks = false;
   bool uses_spmd_subblock = false;
-  explicit BufferEmissionPreflight(ir::FunctionPtr function) : function_(std::move(function)) {
+  explicit BufferEmissionPreflight(ir::FunctionPtr function, bool conversion_supported)
+      : function_(std::move(function)), conversion_supported_(conversion_supported) {
     for (size_t i = 0; i < function_->params_.size(); ++i) {
       if (auto tensor = As<ir::TensorType>(function_->params_[i]->GetType())) {
         CheckBufferTensorParameter(tensor, function_->params_[i]->span_);
@@ -364,18 +369,26 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   void VisitExpr_(const ir::CallPtr& call) override {
     uses_spmd_blocks |= ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num");
     uses_spmd_subblock |= ir::IsOp(call, "buffer.get_subblock_idx");
+    if (backend::FindBufferConversionRecipe(call->op_->name_)) {
+      CHECK_SPAN(conversion_supported_, call->span_)
+          << "Direct Buffer cast/compare/select currently supports A2/A3 only";
+    }
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
-                   ir::IsOp(call, "buffer.subview") || ir::IsOp(call, "buffer.reshape") ||
-                   ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
-                   ir::IsOp(call, "buffer.set_validshape") || ir::IsOp(call, "buffer.get_block_idx") ||
-                   ir::IsOp(call, "buffer.get_block_num") || ir::IsOp(call, "buffer.get_subblock_idx") ||
-                   ir::IsOp(call, "buffer.matmul") || ir::IsOp(call, "buffer.matmul_acc") ||
-                   ir::IsOp(call, "buffer.extract"),
+    CHECK_SPAN(recipe || backend::FindBufferRowRecipe(call->op_->name_) ||
+                   backend::FindBufferConversionRecipe(call->op_->name_) || ir::IsOp(call, "buffer.alloc") ||
+                   ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.subview") ||
+                   ir::IsOp(call, "buffer.reshape") || ir::IsOp(call, "buffer.load") ||
+                   ir::IsOp(call, "buffer.store") || ir::IsOp(call, "buffer.set_validshape") ||
+                   ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num") ||
+                   ir::IsOp(call, "buffer.get_subblock_idx") || ir::IsOp(call, "buffer.matmul") ||
+                   ir::IsOp(call, "buffer.matmul_acc") || ir::IsOp(call, "buffer.extract"),
                call->span_)
         << "Operation '" << call->op_->name_ << "' is not supported by direct Buffer IR codegen";
     if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
       const bool load = ir::IsOp(call, "buffer.load");
+      const auto buffer = As<ir::BufferType>(call->args_[load ? 3 : 0]->GetType());
+      CHECK_SPAN(!backend::IsColumnVectorBuffer(buffer), call->span_)
+          << "Direct Buffer IR GM transfers do not support reduction column vectors";
       auto tensor = ir::AsVarLike(call->args_[load ? 0 : 3]);
       auto parameter = tensor_parameters_.find(tensor.get());
       CHECK_SPAN(parameter != tensor_parameters_.end(), call->span_)
@@ -414,6 +427,7 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   bool returned_ = false;
   size_t depth_ = 0;
   ir::FunctionPtr function_;
+  bool conversion_supported_;
   std::unordered_map<const ir::Var*, ir::ParamDirection> tensor_parameters_;
   std::unordered_set<const ir::BufferType*> descriptors_;
 };
@@ -442,7 +456,7 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
         << "Direct Buffer IR codegen currently supports only scalar and ordinary GM tensor parameters; "
            "the device buffer-parameter ABI is not yet implemented";
   }
-  BufferEmissionPreflight preflight(func);
+  BufferEmissionPreflight preflight(func, GetBackendHandler()->GetPtoTargetArch() == "a2a3");
   preflight.VisitFunction(func);
   preflight.CheckReturns();
 
@@ -550,13 +564,14 @@ std::string PTOCodegen::EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataTy
 }
 
 std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
-                                            const ir::ExprPtr& destination) {
+                                            const ir::ExprPtr& destination, const std::string& attributes) {
   std::ostringstream clause;
   clause << "ins(";
   for (size_t i = 0; i < inputs.size(); ++i) {
     clause << (i == 0 ? "" : ", ") << GetExprAsCode(inputs[i]);
   }
-  clause << " : ";
+  // TCVT/TCMP put configuration inside ins, before its type annotations.
+  clause << attributes << " : ";
   for (size_t i = 0; i < inputs.size(); ++i) {
     clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(inputs[i]);
   }
@@ -668,6 +683,19 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const std::string tensor_operand = partition + " : " + partition_type;
     Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
               : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
+  } else if (const auto* conversion = backend::FindBufferConversionRecipe(call->op_->name_)) {
+    std::string attributes;
+    using K = backend::BufferConversionKind;
+    if (conversion->kind == K::Cast) {
+      const auto mode = call->GetKwarg<int>("mode", 0);
+      attributes = " {rmode = #pto<round_mode " + backend::pto_ops_detail::round_modes.at(mode) +
+                   ">, satmode = #pto<saturation_mode OFF>}";
+    } else if (conversion->kind == K::Compare || conversion->kind == K::CompareScalar) {
+      attributes = " {cmpMode = #pto<cmp " +
+                   backend::pto_ops_detail::cmp_modes.at(call->GetKwarg<int>("cmp_type")) + ">}";
+    }
+    Emit(std::string(conversion->native_op) + " " +
+         BufferInsOutsClause({call->args_.begin(), call->args_.end() - 1}, call->args_.back(), attributes));
   } else if (ir::IsOp(call, "buffer.matmul") || ir::IsOp(call, "buffer.matmul_acc")) {
     // The accumulating form names its destination as the running-sum input:
     // PTOAS requires ins(acc) and outs to be the same tile.
@@ -685,11 +713,15 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
          " : " + GetExprTypeAnnotation(call->args_[3]) + ")");
   } else {
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    INTERNAL_CHECK_SPAN(recipe || ir::IsOp(call, "buffer.copy"), call->span_)
+    const auto* row_recipe = backend::FindBufferRowRecipe(call->op_->name_);
+    INTERNAL_CHECK_SPAN(recipe || row_recipe || ir::IsOp(call, "buffer.copy"), call->span_)
         << "Internal error: missing preflighted buffer emitter for " << call->op_->name_;
-    const size_t input_count = recipe ? recipe->inputs.size() : 1;
+    const size_t input_count = recipe ? recipe->inputs.size() : row_recipe ? 2 : 1;
     std::ostringstream line;
-    line << (recipe ? recipe->native_op : "pto.tmov") << " "
+    line << (recipe       ? recipe->native_op
+             : row_recipe ? row_recipe->native_op
+                          : "pto.tmov")
+         << " "
          << BufferInsOutsClause(
                 {call->args_.begin(), call->args_.begin() + static_cast<std::ptrdiff_t>(input_count)},
                 call->args_.back());

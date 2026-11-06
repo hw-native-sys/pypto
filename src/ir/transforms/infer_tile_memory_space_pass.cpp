@@ -267,6 +267,22 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      if (!As<TileType>(op->results_[i]->GetType())) continue;
+      auto source = AsVarLike(op->args_[op->result_param_indices_[i]]);
+      if (!source) continue;
+      if (auto found = var_memory_.find(source); found != var_memory_.end()) {
+        var_memory_[op->results_[i]] = found->second;
+      } else if (auto tile = As<TileType>(source->GetType()); tile && tile->memory_space_) {
+        var_memory_[op->results_[i]] = *tile->memory_space_;
+      }
+    }
+    // Register definitions during analysis, before loop/branch yields feed
+    // their result placements back to the corresponding control-flow results.
+    IRVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const ForStmtPtr& op) override {
     SeedIterArgsFromInit(op->iter_args_);
     IRVisitor::VisitStmt_(op);
@@ -706,6 +722,17 @@ class TileMemorySpaceMutator : public IRMutator {
                                                         std::move(new_init_value), op->span_);
     var_cache_[op] = new_iter_arg;
     return new_iter_arg;
+  }
+
+  StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    auto result = As<SimtLaunchStmt>(IRMutator::VisitStmt_(op));
+    // Launch definitions inherit their rewritten operand's placement. The
+    // base mutator records that in var_remap_, while this pass consults its
+    // own cache; both must name the same definition for later consumers.
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      var_cache_[op->results_[i]] = result->results_[i];
+    }
+    return result;
   }
 
   using CallArgReplacements = std::unordered_map<const Expr*, std::vector<VarPtr>>;

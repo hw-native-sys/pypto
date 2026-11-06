@@ -30,6 +30,11 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.extract` | source buffer, row offset, column offset, destination buffer | Void |
 | `buffer.matmul` | Left buffer, Right buffer, Acc destination | Void |
 | `buffer.matmul_acc` | Left buffer, Right buffer, Acc buffer read and written | Void |
+| `buffer.cast` | FP16/FP32 source, destination; explicit rounding/saturation attrs | Void |
+| `buffer.cmp`, `buffer.cmps` | FP32 source, tile/scalar comparison operand, packed UINT8 destination | Void |
+| `buffer.sel`, `buffer.sels` | packed predicate, value operands, explicit scratch, destination | Void |
+| `buffer.row_max`, `buffer.row_sum` | FP32 matrix, explicit scratch, column-vector destination | Void |
+| `buffer.row_expand_sub`, `buffer.row_expand_div` | FP32 matrix, column vector, matrix destination | Void |
 
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.
@@ -265,7 +270,7 @@ For rank-2 FP32 operands on Ascend950, `matmul`, `matmul_acc`, and
 FP32; halfway values round to even or away from zero, respectively. Omitting
 the option preserves ordinary FP32 matmul. The setting survives tensor-to-tile
 lowering and automatic L0 tiling and applies only to that operation. This
-requires PTOAS v0.70 or newer and its PTO/EmitC path; it does not enable VPTO
+requires PTOAS v0.72 or newer and its PTO/EmitC path; it does not enable VPTO
 lowering. Other input dtypes, non-2D operands, and Ascend910 are rejected.
 The Torch reference generator rounds both multiplicands using the requested
 mode for Tensor, Tile, and Buffer IR; bias and accumulator values stay FP32.
@@ -479,11 +484,6 @@ are `INT8 x INT8 -> INT32` and same-type `FP16`, `BF16`, or `FP32` inputs to
 the same output dtype for `bias`. The bias valid shape must cover the logical
 output shape `[1, N]`; its valid N may be wider when the physical N matches.
 
-`tile.gemv`, `tile.gemv_acc`, and `tile.gemv_bias` accept `acc_phase` as
-`pl.AccPhase.Unspecified` (the default), `pl.AccPhase.Partial`, or
-`pl.AccPhase.Final`. Use `Partial` while more K chunks remain and `Final` for
-the last chunk.
-
 `tile.gemv_acc` additionally takes the optional `init_cond` predicate — see
 [Conditional accumulator initialization](#conditional-accumulator-initialization-init_cond).
 `tile.gemv_bias` carries none, mirroring `tile.matmul_bias`: a biased GEMV
@@ -502,6 +502,24 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # then gemv_acc(..., init_cond=(k0 
 Before `init_cond`, the peel did this implicitly — a straight-line `pl.tile.gemv`
 mints a correctly typed accumulator, at the cost of a phi between the branches.
 
+### Accumulator phases (A2/A3)
+
+`tile.matmul`, `tile.matmul_acc`, `tile.gemv`, `tile.gemv_acc`, and
+`tile.gemv_bias` accept `acc_phase` as `pl.AccPhase.Unspecified` (the default),
+`pl.AccPhase.Partial`, or `pl.AccPhase.Final`. `Unspecified` preserves the
+existing behavior. Use `Partial` while more K chunks remain and `Final` for
+the last chunk. The Matmul DSL entry points make `acc_phase` keyword-only,
+so `pl.tile.matmul_acc(acc, lhs, rhs, init_cond, acc_phase=...)` retains its
+existing fourth positional `init_cond`; the IR wrapper likewise preserves
+its positional `span`. Both initialization and accumulation codegen arms
+carry the selected phase.
+
+With `AccPhase.Final`, `matmul_acc` requires the product's valid M/N rectangle
+to provably equal the accumulator's valid rectangle. A smaller update of a
+wider accumulator is rejected: its Final store would check untouched blocks
+whose unit flags the MAD did not set. Use a matching accumulator window, or
+keep the update partial until the whole valid rectangle is finalized.
+
 On a unit-flag-aware path, the final accumulator producer must be paired with
 `pl.store(..., st_phase=pl.STPhase.Final)`. The final producer sets the unit flag
 and the final store checks and clears it; a plain store intentionally keeps the
@@ -511,6 +529,24 @@ lifecycle. Compilation verifies the supported final pairing in both directions:
 bind the final producer's result and store that exact value in the same
 straight-line control-flow region. A missing or mismatched pair is rejected
 before code generation because it can otherwise stall device execution.
+Before its matching store clears the flag, a final result may only be
+forwarded through a plain SSA alias; no other operation may consume it. This
+also prevents a view or copy from hiding an unsafe accumulator reuse. A complete pair inside a branch or loop body is supported; carrying a
+pending final result across a branch, loop, or scope boundary is rejected.
+[`AutoTileMatmulL0`](../passes/19-auto_tile_matmul_l0.md) preserves this contract:
+intermediate K blocks use `Partial`, and the last block alone uses `Final`.
+Explicit phases do not remove other automatically inserted synchronization.
+
+Storage checks follow registered in-place operations and views, including
+aliases made before a Final update and straight-line tuple forwarding or
+nested tuple projections. A branch selection retains its possible sources
+without identifying independent source accumulators with each other. Tuple
+values with unresolved provenance across a branch join, loop carry, or opaque
+result are rejected when they may contain Acc storage (including unresolved
+memory spaces) and the function uses a Final protocol. Unpack those tiles into
+separate aliases or tile loop arguments. Known non-Acc tile tuples, scalar
+tuples and unphased functions are unaffected. Storage analysis is built only
+when a Final producer is encountered; unmatched Final stores are always checked.
 
 ## Python Usage
 
@@ -898,6 +934,28 @@ Core definitions live in `include/pypto/core/common.h` and `include/pypto/ir/`; 
 
 ## Register operations
 
-The `reg.*` P0 schemas use category `RegOp`, explicit argument effects and
+The `reg.*` schemas use category `RegOp`, explicit argument effects and
 register-region requirements. See [register operations](../language/06-register-operations.md)
 for dtype, memory, conversion and ownership contracts.
+
+Ordinary RegOp extensions include unary, integer bitwise/shifts, vector-scalar,
+scalar compare, dynamic lane selection and single-lane reductions; see the linked
+register operations contract for exact dtype and mask restrictions.
+
+Fused arithmetic (`expdif`, `axpy`, `mula`, `lrelu`, `prelu`), paired results
+(`mull`, `addc`, `subc`, `addcs`, `subcs`, `intlv`, `dintlv`) and indexed UB
+access (`gather`, `scatter`) extend the initial register set. Paired operations
+declare output arity two and return a `TupleType`; scatter returns an alias of
+its destination Tile and declares argument 0 as written.
+
+`interpret_cast`, `chist`, `dhist` and `create_group_mask` are pure register
+operations with one result. Reinterpretation preserves bit capacity; histogram
+results match the UINT16 accumulator rather than the UINT8 source; grouped
+masks derive their lane count from static group geometry.
+
+## Scalar SIMT operations
+
+`pypto.ir.op.simt` exposes typed coordinate queries, `lane_id`, and scalar
+`load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and
+belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation,
+launch, cache-policy, and validation contracts.

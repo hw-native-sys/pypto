@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -64,6 +65,8 @@ struct MatmulTiling {
   /// Caller's ``init_cond`` predicate (``tile.matmul_acc`` arity 4); null
   /// otherwise.  Copied onto ``KLoopRewrite::init_cond`` by ``MakeKLoop``.
   ExprPtr init_cond = nullptr;
+  /// Source producer phase, preserved through schedule selection and emission.
+  AccPhase acc_phase = AccPhase::kUnspecified;
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;

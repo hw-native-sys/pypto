@@ -156,7 +156,11 @@ enum class IRProperty : uint64_t {
   TileStorageLegalized,  ///< Device If/For/While boundaries use canonical, nonoverlapping allocation windows
   TileStorageAllocated,  ///< Canonical device storage also has nonoverlapping effective address windows
   RegScopeValid,         ///< Register schemas, implicit captures and region ownership are valid
-  kCount                 ///< Sentinel (must be last)
+  HardwareLoopContractValid,  ///< Require loops are Sequential; final eligibility/evidence checked at codegen
+  SimtValid,                  ///< Canonical SIMT helper signatures, domains, and launch result mappings
+  SimtOutputsMaterialized,    ///< Writable SIMT Tiles use initialized, dedicated output storage
+  SimtSpecialized,            ///< Reachable helpers carry resources matching their launch dimensions
+  kCount                      ///< Sentinel (must be last)
 };
 
 static_assert(
@@ -285,15 +289,13 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, RegScopeValid, InlineFunctionsEliminated,
- * MixedKernelExpanded, AllocatedMemoryAddr,
- * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
- * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
- * AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid,
- * IterArgCarryClassified, RuntimeScopesMaterialized,
- * DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
- * FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid} —
- * lightweight checks that catch the most common IR errors.
+ * Returns {SSAForm, TypeChecked, SimtValid, SimtOutputsMaterialized, SimtSpecialized, RegScopeValid,
+ * HardwareLoopContractValid, InlineFunctionsEliminated, MixedKernelExpanded, AllocatedMemoryAddr,
+ * BreakContinueValid, NoRedundantBlocks, InOutUseValid, CallDirectionsResolved, ManualDepsOnSubmitOnly,
+ * ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D,
+ * HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized,
+ * GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid,
+ * AccStorePhaseValid} — lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 
@@ -302,9 +304,9 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * Never declared in per-pass PassProperties. VerificationInstrument checks
  * them before and after every pass; at pipeline start PassPipeline checks only
- * the intersection with GetVerifiedProperties(). Returns {TypeChecked, RegScopeValid,
- * BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
- * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
+ * the intersection with GetVerifiedProperties(). Returns {TypeChecked, SimtValid, RegScopeValid,
+ * HardwareLoopContractValid, BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed,
+ * NoNestedInCore, InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
  * AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}.
  */
 const IRPropertySet& GetStructuralProperties();
@@ -312,10 +314,9 @@ const IRPropertySet& GetStructuralProperties();
 /**
  * @brief Default property set for explicit verification
  *
- * Returns {SSAForm, TypeChecked, RegScopeValid, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
- * TileTypeCoherence, ArrayNotEscaped} — the properties checked by
- * run_verifier() when no explicit set is given.
+ * Returns {SSAForm, TypeChecked, SimtValid, RegScopeValid, HardwareLoopContractValid, NoNestedCalls,
+ * BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore, TileTypeCoherence,
+ * ArrayNotEscaped} — the properties checked by run_verifier() when no explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

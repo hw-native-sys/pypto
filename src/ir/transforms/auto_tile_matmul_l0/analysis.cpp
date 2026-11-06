@@ -29,6 +29,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -575,6 +576,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // original AssignStmt in the same SeqStmts and uses the predicate exactly
   // once, so its definition still dominates the new use.
   t.init_cond = has_init_cond ? call->args_[3] : nullptr;
+  t.acc_phase =
+      static_cast<AccPhase>(call->GetKwarg<int>("acc_phase", static_cast<int>(AccPhase::kUnspecified)));
   t.M = M;
   t.N = N;
   t.K = K;

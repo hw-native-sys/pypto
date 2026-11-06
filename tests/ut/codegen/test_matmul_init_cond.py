@@ -194,6 +194,142 @@ def test_runtime_predicate_branches_over_both_forms():
     )
 
 
+# Cover phase/init semantics independently, then combine both TF32 modes with
+# the initializing and accumulating instructions; their Cartesian product adds no branch.
+@pytest.mark.parametrize(
+    "phase, init_cond, tf32_mode",
+    [(phase, init, None) for phase in pl.AccPhase for init in (None, True, False)]
+    + [(pl.AccPhase.Final, init, mode) for init in (True, False) for mode in ("round_even", "round_away")],
+)
+def test_matmul_acc_literal_init_cond_preserves_phase(phase, init_cond, tf32_mode):
+    """Folding init_cond must keep the phase on the selected MAD instruction."""
+    if tf32_mode is not None:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+    store_phase = pl.STPhase.Final if phase == pl.AccPhase.Final else pl.STPhase.Unspecified
+
+    @pl.program
+    class PhasedInitCond:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP32],
+            rhs: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            a = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b = pl.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            acc = pl.tile.create([16, 16], pl.FP32, target_memory=pl.Mem.Acc)
+            result = pl.tile.matmul_acc(acc, a, b, init_cond=init_cond, tf32_mode=tf32_mode, acc_phase=phase)
+            return pl.store(result, [0, 0], output, st_phase=store_phase)
+
+    mlir = _generate_default_mlir(PhasedInitCond)
+    matmul_lines = [line for line in mlir.splitlines() if "pto.tmatmul" in line]
+    assert len(matmul_lines) == 1, mlir
+    assert ("pto.tmatmul.acc" in matmul_lines[0]) == (init_cond is not True)
+    assert "scf.if" not in mlir, mlir
+    if phase == pl.AccPhase.Unspecified:
+        assert "accPhase" not in matmul_lines[0]
+    else:
+        assert f"#pto<acc_phase {phase.name.lower()}>" in matmul_lines[0]
+    if tf32_mode is not None:
+        assert f"tf32_mode = #pto<tf32_mode {tf32_mode}>" in matmul_lines[0]
+        assert matmul_lines[0].count("{") == 1
+    assert ("#pto<st_phase final>" in mlir) == (phase == pl.AccPhase.Final)
+
+
+@pytest.mark.parametrize(
+    "phase, tf32_mode",
+    [
+        (pl.AccPhase.Partial, None),
+        (pl.AccPhase.Final, None),
+        (pl.AccPhase.Final, "round_even"),
+        (pl.AccPhase.Final, "round_away"),
+    ],
+)
+def test_matmul_acc_runtime_init_cond_preserves_phase_on_both_arms(phase, tf32_mode):
+    """Both runtime branches execute the same producer-side unit-flag protocol."""
+    if tf32_mode is not None:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+    store_phase = pl.STPhase.Final if phase == pl.AccPhase.Final else pl.STPhase.Unspecified
+
+    @pl.program
+    class PhasedRuntimeInitCond:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP32],
+            rhs: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            reset: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            a = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b = pl.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            acc = pl.tile.create([16, 16], pl.FP32, target_memory=pl.Mem.Acc)
+            result = pl.tile.matmul_acc(acc, a, b, reset, tf32_mode=tf32_mode, acc_phase=phase)
+            return pl.store(result, [0, 0], output, st_phase=store_phase)
+
+    mlir = _generate_default_mlir(PhasedRuntimeInitCond)
+    matmul_lines = [line for line in mlir.splitlines() if "pto.tmatmul" in line]
+    assert len(matmul_lines) == 2, mlir
+    assert any("pto.tmatmul ins(" in line for line in matmul_lines)
+    assert any("pto.tmatmul.acc ins(" in line for line in matmul_lines)
+    assert all(f"#pto<acc_phase {phase.name.lower()}>" in line for line in matmul_lines)
+    if tf32_mode is not None:
+        assert all(f"tf32_mode = #pto<tf32_mode {tf32_mode}>" in line for line in matmul_lines)
+        assert all(line.count("{") == 1 for line in matmul_lines)
+    assert "scf.if" in mlir and "= scf.if" not in mlir, mlir
+    assert ("#pto<st_phase final>" in mlir) == (phase == pl.AccPhase.Final)
+
+
+@pytest.mark.parametrize("mode", ["round_even", "round_away"])
+@pytest.mark.parametrize(
+    "m,k,n,accumulate",
+    [
+        (16, 1024, 64, False),
+        (16, 1024, 64, True),
+        (64, 544, 64, False),
+        (64, 544, 64, True),
+        (256, 64, 256, False),
+    ],
+)
+def test_matmul_phase_and_rounding_survive_auto_tiling(mode, m, k, n, accumulate):
+    """K prefixes, final tails, and M/N subtiles retain both independent attributes."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    seed = f"seed = pl.tile.create([{m}, {n}], pl.FP32, target_memory=pl.Mem.Acc)" if accumulate else ""
+    expression = (
+        f'pl.tile.matmul_acc(seed, a, b, init_cond=True, tf32_mode="{mode}", acc_phase=pl.AccPhase.Final)'
+        if accumulate
+        else f'pl.tile.matmul(a, b, tf32_mode="{mode}", acc_phase=pl.AccPhase.Final)'
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class PhasedRounding:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[{m}, {k}], pl.FP32], rhs: pl.Tensor[[{k}, {n}], pl.FP32],
+               output: pl.Out[pl.Tensor[[{m}, {n}], pl.FP32]]) -> pl.Tensor[[{m}, {n}], pl.FP32]:
+        a = pl.tile.load(lhs, [0, 0], [{m}, {k}], target_memory=pl.Mem.Mat)
+        b = pl.tile.load(rhs, [0, 0], [{k}, {n}], target_memory=pl.Mem.Mat)
+        {seed}
+        result = {expression}
+        return pl.tile.store(result, [0, 0], output, st_phase=pl.STPhase.Final)
+""")
+    mlir = _generate_default_mlir(program)
+    matmuls = [line for line in mlir.splitlines() if "pto.tmatmul" in line]
+    assert matmuls, mlir
+    assert all(f"tf32_mode = #pto<tf32_mode {mode}>" in line for line in matmuls), mlir
+    assert all(line.count("{") == 1 for line in matmuls), mlir
+    assert "#pto<acc_phase final>" in matmuls[-1], mlir
+    finals = sum("#pto<acc_phase final>" in line for line in matmuls)
+    drains = sum("pto.tstore " in line and "#pto<st_phase final>" in line for line in mlir.splitlines())
+    assert finals == drains, mlir
+    if k > 64:
+        assert any("#pto<acc_phase partial>" in line for line in matmuls), mlir
+
+
 def test_non_boolean_init_cond_is_rejected():
     with pytest.raises(InvalidOperationError, match="init_cond to have dtype BOOL"):
 

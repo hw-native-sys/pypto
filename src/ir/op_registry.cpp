@@ -203,7 +203,8 @@ void OpRegistryEntry::ValidateIRStage() const {
   CHECK(!validate_explicit_type_.has_value() || (ir_stage_ == OpIRStage::Buffer && internal_only_))
       << "Operator '" << name_ << "' explicit type validation requires an internal-only Buffer operator";
   if (ir_stage_ == OpIRStage::Functional) {
-    CHECK(output_arity_ > 0) << "Functional operator '" << name_ << "' must produce at least one value";
+    CHECK(output_arity_ > 0 || op_category_ == "SimtOp")
+        << "Functional operator '" << name_ << "' must produce at least one value";
     CHECK(buffer_arg_effects_.empty() && buffer_results_.empty())
         << "Functional operator '" << name_ << "' cannot carry buffer contracts";
     return;
@@ -242,7 +243,8 @@ void OpRegistryEntry::ValidateCall(const std::vector<ExprPtr>& args, const TypeP
   INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" << name_ << "'";
   auto tuple = As<TupleType>(result_type);
   if (output_arity_ == 0) {
-    INTERNAL_CHECK_SPAN(ir_stage_ == OpIRStage::Buffer && As<VoidType>(result_type), span)
+    INTERNAL_CHECK_SPAN(
+        (ir_stage_ == OpIRStage::Buffer || op_category_ == "SimtOp") && As<VoidType>(result_type), span)
         << "Operator '" << name_ << "' declares zero results but did not deduce VoidType";
   } else {
     INTERNAL_CHECK_SPAN(!As<VoidType>(result_type), span)
@@ -331,12 +333,15 @@ std::vector<std::pair<std::string, std::any>> NormalizeRegKwargs(
     return std::any_of(normalized.begin(), normalized.end(),
                        [&key](const auto& item) { return item.first == key; });
   };
-  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
-       op_name == "reg.minimum" || op_name == "reg.maximum") &&
-      !has_kwarg("pmode")) {
+  if (op_name.rfind("reg.", 0) != 0) return normalized;
+  const auto op = OpRegistry::GetInstance().GetOp(op_name);
+  // Every public register pmode currently defaults to zero. Drive this from
+  // the schema so DSL, Builder and raw IR construction cannot drift as new
+  // operations are added; carry ops have no pmode and remain attribute-free.
+  if (op->GetAttrs().count("pmode") && !has_kwarg("pmode")) {
     normalized.emplace_back("pmode", std::string("zero"));
   }
-  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
+  if (IsOp(op, "reg.index_gen") && !has_kwarg("order")) {
     normalized.emplace_back("order", std::string("ascending"));
   }
   return normalized;

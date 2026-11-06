@@ -30,7 +30,7 @@ each level.
 
 | Value | Name | Use |
 | ----- | ---- | --- |
-| 0 | `DEBUG` | Verbose pass tracing, IR dumps |
+| 0 | `DEBUG` | Verbose pass tracing; a successful compile prints the absolute artifact root |
 | 1 | `INFO` | Per-hint perf summaries, pipeline status |
 | 2 | `WARN` | Likely-mistake diagnostics |
 | 3 | `ERROR` | Recoverable compile errors |

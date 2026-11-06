@@ -60,9 +60,9 @@ ir::BufferTypePtr StaticViewDescriptor(const ir::TypePtr& type, const std::strin
   const auto bytes = DenseBufferBytes(buffer);
   CHECK(buffer && buffer->shape_.size() == 2 && buffer->memory_space_ == ir::MemorySpace::Vec &&
         (IsDenseBufferTransferDtype(buffer->dtype_) || buffer->dtype_ == DataType::INT16 ||
-         buffer->dtype_ == DataType::UINT8) &&
+         (buffer->dtype_ == DataType::UINT8 || buffer->dtype_ == DataType::UINT32)) &&
         bytes.has_value())
-      << name << " requires dense rank-2 row-major Vec FP16/BF16/FP32/INT16/INT32/UINT8 descriptors";
+      << name << " requires dense rank-2 row-major Vec FP16/BF16/FP32/INT16/INT32/UINT8/UINT32 descriptors";
   for (const auto extent : buffer->valid_shape_) {
     CHECK(extent >= 0) << name << " requires static valid extents";
   }
@@ -158,6 +158,13 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
 void ValidateBufferReshape(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
   INTERNAL_CHECK(args.size() == 1 && args[0]) << "Internal error: buffer.reshape requires exactly one source";
   auto matrix_source = ir::As<ir::BufferType>(args[0]->GetType());
+  const auto destination_type = ir::As<ir::BufferType>(result);
+  if (IsColumnVectorBuffer(matrix_source) || IsColumnVectorBuffer(destination_type)) {
+    CHECK(IsColumnVectorBuffer(matrix_source) && IsColumnVectorBuffer(destination_type) &&
+          matrix_source->shape_ == destination_type->shape_)
+        << "buffer.reshape of a column vector must preserve its physical descriptor";
+    return;
+  }
   if (matrix_source && IsMatrixBufferSpace(matrix_source->memory_space_)) {
     ValidateMatrixReshape(matrix_source, ir::As<ir::BufferType>(result));
     return;

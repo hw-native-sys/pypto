@@ -19,6 +19,20 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+### Dynamic parameter and return types
+
+Each generated AIC, AIV, and Group owns fresh parameter identities. Types that
+reference a scalar parameter, such as `Tensor[[n, 16]]` or `Tensor[[n + 16, 16]]`,
+are remapped to that function's fresh `n` before cloning its body. All parameter
+mappings are established first, including for scalar parameters that follow
+the tensors using them in the IR signature. Shape and view metadata therefore
+agree with loop-carried types and their initializers.
+
+AIV and Group return types use their respective parameter mappings. The AIV
+call inside a generated Group uses the Group's mapping for its result type,
+including tuple results. External shape symbols retain their existing identity;
+matching printed variable names never establishes shape equality.
+
 ### Shared argument ABI for hand-written Groups
 
 One runtime `MixedKernels` submission creates a co-scheduled AIC/AIV task whose

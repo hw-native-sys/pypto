@@ -16,6 +16,7 @@
 import importlib
 import json
 import os
+import runpy
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from pypto.backend import BackendType
 from pypto.jit import cannbotdsl as adapter
 from pypto.jit.decorator import _discover_dep_bindings
 from pypto.jit.specializer import DynDim, SpecializeContext, Specializer, TensorMeta
+from pypto.pypto_core import passes
 from pypto.runtime import RunConfig
 
 
@@ -118,7 +120,10 @@ def test_configured_kernel_rejected_after_binding():
         adapter.try_bind_kernel(leaf)
 
 
-def test_source_bundle_uses_native_scalar_order_and_dynamic_fields(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH]
+)
+def test_source_bundle_uses_native_scalar_order_and_dynamic_fields(tmp_path, monkeypatch, runtime):
     cb = pytest.importorskip("cannbotdsl")
 
     @cb.kernel
@@ -141,7 +146,8 @@ def test_source_bundle_uses_native_scalar_order_and_dynamic_fields(tmp_path, mon
         constexpr_values={},
     )
     monkeypatch.setenv("CANNBOTDSL_PYPTO_CACHE_DIR", str(tmp_path))
-    spec = adapter._build(scaled, context)
+    with passes.PassContext([], runtime=runtime):
+        spec = adapter._build(scaled, context)
     path = Path(spec.source)
     manifest = json.loads(path.with_name("manifest.json").read_text())
     assert [p["logical_index"] for p in manifest["device_abi"]["parameters"]] == [1, 2, 3, 0]
@@ -151,6 +157,88 @@ def test_source_bundle_uses_native_scalar_order_and_dynamic_fields(tmp_path, mon
     assert "arg1.shape[0] = t1->shapes[0];" in wrapper
     assert "arg1.stride[0] = t1->strides[0];" in wrapper
     assert "reinterpret_cast<__gm__ Arg0*>(&args[0])" in wrapper
+    runtime_name = passes.runtime_kind_to_name(runtime)
+    namespace = "hbg" if runtime == passes.RuntimeKind.HOST_BUILD_GRAPH else "tmr"
+    assert spec.runtime == runtime_name
+    assert f'#include "{runtime_name}/tensor.h"' in wrapper
+    assert f"simpler::{namespace}::Tensor*" in wrapper
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_same_kernel_switches_runtime_without_reusing_foreign_wrapper(tmp_path, monkeypatch, ascend_backend):
+    """同一个 JIT 对象在嵌套运行时上下文中必须使用对应 ABI，并正确恢复外层。"""
+    cb = pytest.importorskip("cannbotdsl")
+    monkeypatch.setenv("CANNBOTDSL_PYPTO_CACHE_DIR", str(tmp_path / "exports"))
+
+    @cb.kernel
+    def copy_row(source, output):
+        staging = cb.Buffer(cb.MemLoc.UB, cb.dtypes.float32, cb.make_layout((1, 32)))
+        cb.mem_copy(staging, source)
+        cb.mem_copy(output, staging)
+
+    @pl.jit
+    def entry(source: pl.Tensor, output: pl.Out[pl.Tensor]):
+        with pl.spmd(1):
+            copy_row(source, output)
+        return output
+
+    args = (torch.zeros(1, 32), torch.zeros(1, 32))
+    config = RunConfig(backend_type=ascend_backend)
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        tmr = entry.compile(*args, config=config)
+        with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+            hbg = entry.compile(*args, config=config)
+        restored = entry.compile(*args, config=config)
+    # 只检查编译产物；runtime_name 属性会触发装配，不属于这个 CPU 单元测试。
+    runtimes = [
+        runpy.run_path(str(Path(c.output_dir) / "kernel_config.py"))["RUNTIME_CONFIG"]["runtime"]
+        for c in (tmr, hbg, restored)
+    ]
+    assert runtimes == ["tensormap_and_ringbuffer", "host_build_graph", "tensormap_and_ringbuffer"]
+    assert tmr.output_dir != hbg.output_dir
+    wrappers = [p.read_text() for p in (tmp_path / "exports").glob("*/entry.cpp")]
+    assert len(wrappers) == 2
+    assert sum("simpler::hbg::Tensor*" in s for s in wrappers) == 1
+    assert sum("simpler::tmr::Tensor*" in s for s in wrappers) == 1
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_bare_inline_helper_specializes_runtime_slice_extent(tmp_path, monkeypatch, ascend_backend):
+    """动态切片经过裸 Tensor 辅助函数的 dim/reshape 后，仍从描述符读取有效行数。"""
+    cb = pytest.importorskip("cannbotdsl")
+    monkeypatch.setenv("CANNBOTDSL_PYPTO_CACHE_DIR", str(tmp_path / "exports"))
+
+    @cb.kernel
+    def fill(output):
+        for row in cb.range(output.shape[0]):
+            for col in cb.range(output.shape[1]):
+                output[row, col] = 1.0
+
+    @pl.jit.inline(auto_scope=False)
+    def helper(output: pl.Tensor):
+        rows = pl.tensor.dim(output, 0)
+        view = pl.reshape(output, [rows, 32])
+        with pl.spmd(1):
+            fill(view)
+
+    @pl.jit
+    def entry(output: pl.InOut[pl.Tensor[[17, 32], pl.FP32]], rows: pl.Scalar[pl.INDEX]):
+        view = output[0:rows, :]
+        helper(view)
+        return output
+
+    # 此处验证 JIT 元数据及导出 ABI；动态局部形状的 outlining 往返问题由 #2047 跟踪。
+    program = entry.specialize(torch.zeros(17, 32), 3)
+    assert program is not None
+    wrappers = list((tmp_path / "exports").glob("*/entry.cpp"))
+    assert len(wrappers) == 1
+    source = wrappers[0].read_text()
+    assert "arg0.shape[0] = t0->shapes[0];" in source
+    manifest = json.loads(wrappers[0].with_name("manifest.json").read_text())
+    shape_fields = [
+        f["dimension"] for f in manifest["parameters"][0]["dynamic_fields"] if f["field"] == "shape"
+    ]
+    assert shape_fields == [0]
 
 
 def test_optional_provider_is_not_imported_for_other_callables(monkeypatch):

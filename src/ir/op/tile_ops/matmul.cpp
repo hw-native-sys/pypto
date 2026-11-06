@@ -191,6 +191,19 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
       << " requires acc valid N to cover rhs valid N, but got acc N=" << PythonPrint(n_dim_acc)
       << " and rhs N=" << PythonPrint(geometry.valid_shape[1]);
 
+  if (GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified)) ==
+      static_cast<int>(AccPhase::kFinal)) {
+    // The result retains the accumulator's full valid rectangle. A Final
+    // store drains that rectangle, so every block it checks must have been
+    // produced by this MAD. A partial update of a wider accumulator leaves
+    // unit flags unset for untouched blocks, even though the SSA pair matches.
+    CHECK(ProveValidExtentEqual(geometry.valid_shape[0], m_dim_acc) == ProofResult::kTrue &&
+          ProveValidExtentEqual(geometry.valid_shape[1], n_dim_acc) == ProofResult::kTrue)
+        << "The operator " << op_name
+        << " with AccPhase.Final requires the product valid shape to match the accumulator valid shape; "
+           "a final store of a wider accumulator can wait on unit flags for untouched blocks";
+  }
+
   CHECK(acc_type->dtype_ == geometry.accumulator_dtype)
       << "The operator " << op_name << " requires accumulator dtype " << geometry.accumulator_dtype.ToString()
       << ", but got " << acc_type->dtype_.ToString();
@@ -287,8 +300,8 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
 
 namespace {
 
-void ValidateGemvAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
-                          const std::string& op_name) {
+void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const std::string& op_name) {
   const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
   CHECK(IsValidAccPhase(acc_phase)) << "The operator " << op_name
                                     << " requires acc_phase to be AccPhase.Unspecified, AccPhase.Partial, "
@@ -343,7 +356,7 @@ TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_
 TypePtr DeduceTileGemvType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
-  ValidateGemvAccPhase(kwargs, op_name);
+  ValidateAccPhase(kwargs, op_name);
   TypePtr inferred = DeduceTileMatMulType(args, kwargs, op_name);
   auto lhs_type = As<TileType>(args[0]->GetType());
   auto rhs_type = As<TileType>(args[1]->GetType());
@@ -354,7 +367,7 @@ TypePtr DeduceTileGemvType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileGemvAccType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs,
                               const std::string& op_name) {
-  ValidateGemvAccPhase(kwargs, op_name);
+  ValidateAccPhase(kwargs, op_name);
   CHECK(args.size() == 3 || args.size() == 4)
       << "The operator " << op_name << " requires 3 arguments (acc, lhs, rhs) or 4 with the optional "
       << "init_cond predicate, but got " << args.size();
@@ -396,7 +409,7 @@ TypePtr DeduceTileGemvAccType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileGemvBiasType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
-  ValidateGemvAccPhase(kwargs, op_name);
+  ValidateAccPhase(kwargs, op_name);
   TypePtr inferred = DeduceTileMatMulBiasType(args, kwargs, op_name);
   auto lhs_type = As<TileType>(args[0]->GetType());
   auto rhs_type = As<TileType>(args[1]->GetType());
@@ -419,6 +432,10 @@ TypePtr DeduceTileGemvBiasType(const std::vector<ExprPtr>& args,
 // Registration Function for Block Matrix Multiplication Operations
 // ============================================================================
 
+// Matmul kwargs also carry compiler-owned expression metadata. Keep their
+// historical open schema: declaring only acc_phase with set_attr would close
+// it and reject that metadata during registered-call rebuilds. Validate the
+// phase's type and value explicitly in type deduction instead.
 REGISTER_OP("tile.matmul")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
@@ -428,9 +445,9 @@ REGISTER_OP("tile.matmul")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::Right)
     .set_output_memory(MemorySpace::Acc)
-    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      ValidateAccPhase(kwargs, "tile.matmul");
       return DeduceTileMatMulType(args, kwargs, "tile.matmul");
     });
 
@@ -451,9 +468,9 @@ REGISTER_OP("tile.matmul_acc")
     .set_output_reuses_input(0)
     // Accumulates into `acc`: C += A@B reads the running sum it adds to.
     .set_arg_effect(0, ArgEffect::ReadWrite)
-    .set_attr<std::string>("tf32_mode")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      ValidateAccPhase(kwargs, "tile.matmul_acc");
       return DeduceTileMatMulAccType(args, kwargs, "tile.matmul_acc");
     });
 

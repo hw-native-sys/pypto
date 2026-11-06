@@ -81,10 +81,13 @@ Expression values in `Call` and `Submit` attrs and kwargs follow the same
 rule at construction, including when attributes are attached with
 `ir.set_call_attrs`.
 
-These are initial buffer IR building blocks. Automatic tile-to-buffer lowering
-is not yet enabled; the public Tile DSL and default pipeline still use
-`TileType`. Direct PTO emission accepts explicitly constructed buffer programs
+The public Tile DSL uses `TileType`; default whole-kernel selection converts
+supported functions through [LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md).
+Direct PTO emission also accepts explicitly constructed buffer programs
 with dense row-major Vec FP16/BF16/FP32/INT32 descriptors of rank one or two,
+and static positive-valid FP32 column-major `[R,1]` descriptors with `R` a multiple of eight,
+UINT8 predicate and UINT32 workspace descriptors for
+[cast/compare/select recipes](../passes/57-lower_tile_to_buffer.md),
 scalar parameters and control flow, and the buffer operations below. Ordinary GM
 parameters support dense ND rank-2 FP16/BF16/FP32/INT32 tensors with static
 physical shapes and more than one column. Arithmetic recipes impose their own
@@ -177,7 +180,7 @@ Address emission depends only on the allocation operand; the legacy
 operands remain in their lexical scope. No logical `TileType` or `MemRef` is
 reconstructed, and no implicit tile allocation pass runs on this path. The
 pipeline with `enable_buffer_ir=True` converts Tile IR before emission through
-[LowerTileToBuffer](../passes/55-lower_tile_to_buffer.md).
+[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md).
 
 Static storage views use ordinary SSA alias edges in the same Buffer stage:
 
@@ -197,11 +200,13 @@ valid extent is smaller than the physical shape. Constant valid operands must
 be positive and no larger than the corresponding window dimension; zero-valid
 windows are not supported. Full-width
 `UINT8[N,32]` byte windows of a storage root are the static special case. `buffer.reshape` preserves the exact physical byte count and accepts
-static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32 and UINT8 descriptors, with physical
+static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32, UINT8 and UINT32 descriptors, with physical
 rows aligned to 32 bytes. In Mat, Left, Right and Acc it only relabels one
 whole fractal window in the same space (for example NZ to ZN) with the same
 element type, byte count and static valid extents. Both operations declare `Alias(0)`, no data access, and
 source-metadata read. They neither allocate storage nor initialize data.
+FP32 column-vector reshapes preserve their physical `[R,1]` shape and column-major
+layout; only positive static valid rows may differ. They do not enable column-vector subviews.
 Every intermediate shape, dtype and valid extent is explicit in its result type.
 `buffer.set_validshape` cannot mutate these static view handles.
 

@@ -50,7 +50,7 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 // --- IRVisitor trampoline ---
 struct PyIRVisitor : IRVisitor {
-  NB_TRAMPOLINE(IRVisitor, 64);  // All virtual handlers, including grouped handlers and dispatchers.
+  NB_TRAMPOLINE(IRVisitor, 65);  // All virtual handlers, including grouped handlers and dispatchers.
 
   // Top-level entry points
   void VisitProgram(const ProgramPtr& p) override { NB_OVERRIDE_NAME("visit_program", VisitProgram, p); }
@@ -142,13 +142,14 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_STMT_TRAMPOLINE(YieldStmt, visit_yield_stmt)
   VISITOR_STMT_TRAMPOLINE(ReturnStmt, visit_return_stmt)
   VISITOR_STMT_TRAMPOLINE(EvalStmt, visit_eval_stmt)
+  VISITOR_STMT_TRAMPOLINE(SimtLaunchStmt, visit_simt_launch_stmt)
   VISITOR_STMT_TRAMPOLINE(BreakStmt, visit_break_stmt)
   VISITOR_STMT_TRAMPOLINE(ContinueStmt, visit_continue_stmt)
 };
 
 // --- IRMutator trampoline ---
 struct PyIRMutator : IRMutator {
-  NB_TRAMPOLINE(IRMutator, 63);  // All virtual handlers, including grouped handlers and dispatchers.
+  NB_TRAMPOLINE(IRMutator, 64);  // All virtual handlers, including grouped handlers and dispatchers.
 
   // Top-level entry points
   ProgramPtr VisitProgram(const ProgramPtr& p) override {
@@ -241,6 +242,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_STMT_TRAMPOLINE(YieldStmt, visit_yield_stmt)
   MUTATOR_STMT_TRAMPOLINE(ReturnStmt, visit_return_stmt)
   MUTATOR_STMT_TRAMPOLINE(EvalStmt, visit_eval_stmt)
+  MUTATOR_STMT_TRAMPOLINE(SimtLaunchStmt, visit_simt_launch_stmt)
   MUTATOR_STMT_TRAMPOLINE(BreakStmt, visit_break_stmt)
   MUTATOR_STMT_TRAMPOLINE(ContinueStmt, visit_continue_stmt)
 };
@@ -374,6 +376,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, YieldStmt, visit_yield_stmt);
   BIND_VISITOR(visitor_cls, ReturnStmt, visit_return_stmt);
   BIND_VISITOR(visitor_cls, EvalStmt, visit_eval_stmt);
+  BIND_VISITOR(visitor_cls, SimtLaunchStmt, visit_simt_launch_stmt);
   BIND_VISITOR(visitor_cls, BreakStmt, visit_break_stmt);
   BIND_VISITOR(visitor_cls, ContinueStmt, visit_continue_stmt);
 
@@ -474,6 +477,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, YieldStmt, visit_yield_stmt);
   BIND_MUTATOR(mutator_cls, ReturnStmt, visit_return_stmt);
   BIND_MUTATOR(mutator_cls, EvalStmt, visit_eval_stmt);
+  BIND_MUTATOR(mutator_cls, SimtLaunchStmt, visit_simt_launch_stmt);
   BIND_MUTATOR(mutator_cls, BreakStmt, visit_break_stmt);
   BIND_MUTATOR(mutator_cls, ContinueStmt, visit_continue_stmt);
 }

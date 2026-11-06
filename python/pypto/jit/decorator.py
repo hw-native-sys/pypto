@@ -69,6 +69,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
+from pypto._environment import explicit_env_request
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
 from pypto._target import _platform_string
@@ -92,6 +93,7 @@ from .specializer import (
     TensorMeta,
     _classify_params,
     build_specialize_context,
+    extern_return_annotation_fingerprint,
     free_name_source,
     func_name_lookup,
     tile_annotation_fingerprints,
@@ -200,6 +202,8 @@ def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
     }
     if run_config.memory_planner is not None:
         kwargs["memory_planner"] = run_config.memory_planner
+    if run_config.enable_software_pipeline is not None:
+        kwargs["enable_software_pipeline"] = run_config.enable_software_pipeline
     return kwargs
 
 
@@ -221,10 +225,22 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     return _passes.MemoryPlanner.PYPTO
 
 
-def _resolve_enable_buffer_ir() -> bool:
-    """Resolve the staged Buffer IR option inherited by ``ir.compile()``."""
+def _resolve_enable_buffer_ir(software_pipeline: bool | None = None) -> bool:
+    """Mirror compile's Tile IR selection for an explicit software pipeline."""
     ctx = _passes.PassContext.current()
-    return ctx.get_enable_buffer_ir() if ctx is not None else True
+    return (
+        ctx.get_enable_buffer_ir()
+        if ctx is not None
+        else not _resolve_enable_software_pipeline(software_pipeline)
+    )
+
+
+def _resolve_enable_software_pipeline(explicit: bool | None = None) -> bool:
+    """Resolve the explicit option, active context, then the default for caching."""
+    if explicit is not None:
+        return explicit
+    ctx = _passes.PassContext.current()
+    return ctx.get_enable_software_pipeline() if ctx is not None else False
 
 
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:
@@ -278,6 +294,7 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         diagnostic_phase=kwargs.get("diagnostic_phase"),
         memory_planner=kwargs.get("memory_planner"),
         runtime=kwargs.get("runtime"),
+        enable_software_pipeline=kwargs.get("enable_software_pipeline"),
     )
     bypass = (
         kwargs["dump_passes"] is not PassDumpLevel.NONE
@@ -285,9 +302,8 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         or kwargs["profiling"]
         or get_active_profiler() is not None
         or kwargs.get("output_dir") is not None
-        or bool(os.environ.get("PYPTO_PROG_BUILD_DIR"))
-        or os.environ.get("PYPTO_EMIT_DEBUG_RUNNER") is not None
-        or os.environ.get("PYPTO_REBUILD_FROM_PTO") is not None
+        or explicit_env_request(os.environ.get("PYPTO_EMIT_DEBUG_RUNNER"))
+        or explicit_env_request(os.environ.get("PYPTO_REBUILD_FROM_PTO"))
         or kwargs.get("verification_level") is not None
         or kwargs["diagnostic_phase"] is not None
         or kwargs["disabled_diagnostics"] is not None
@@ -638,6 +654,16 @@ class JITFunction:
                     records.append(
                         (index, func.__module__, func.__qualname__, f"<annotation:{name}>", source)
                     )
+            if jit_func._func_type == "extern":
+                records.append(
+                    (
+                        index,
+                        func.__module__,
+                        func.__qualname__,
+                        "<extern-return>",
+                        extern_return_annotation_fingerprint(func),
+                    )
+                )
         return compute_source_hash([source_hash, json.dumps(records, separators=(",", ":"))])
 
     def _resolve_constexpr_bindings(self, entry_constexpr: Mapping[str, str]) -> _call_binding.VariantPlan:
@@ -1228,7 +1254,10 @@ class JITFunction:
             emit_source_loc=compile_kwargs["emit_source_loc"],
             memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
-            enable_buffer_ir=_resolve_enable_buffer_ir(),
+            enable_buffer_ir=_resolve_enable_buffer_ir(compile_kwargs.get("enable_software_pipeline")),
+            enable_software_pipeline=_resolve_enable_software_pipeline(
+                compile_kwargs.get("enable_software_pipeline")
+            ),
             runtime=_resolve_runtime(),
         )
 
@@ -1290,6 +1319,7 @@ class JITFunction:
                 for name, source in tile_annotation_fingerprints(fn._func).items():
                     values.append((index, f"<annotation:{name}>", source))
             if fn._func_type == "extern":
+                values.append((index, "<extern-return>", extern_return_annotation_fingerprint(fn._func)))
                 external = external_source_digest(
                     fn._external_source_paths(),
                     include_dirs=fn._external_include_dirs,

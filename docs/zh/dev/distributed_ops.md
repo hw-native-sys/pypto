@@ -394,6 +394,15 @@ shape 更窄的 `valid_shape`，或同一个操作数同时充当两种角色—
 CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的溯源能力，因此互不相同是
 调用方的义务。
 
+在托管 CHIP/L2 通路上，于 orchestration 中构建的操作数必须可证明为行主序，否则
+`LowerL2TensorCollectives` 会拒绝它（证明范围及原因见
+[pass 参考](passes/43-lower_l2_tensor_collectives.md#当前限制)）。作为兜底，orchestration
+codegen 在其 `rt_submit_aiv_task` 之前为每个操作数生成一条 `is_contiguous` 检查。第一个不连续的
+操作数会锁存 `SIMPLER_ERROR_INVALID_ARGS` 并给出其名称
+（`__builtin_all_to_all_v__fp32: signal must be a contiguous row-major view`），
+随后运行时丢弃该次提交。非零视图偏移是允许的——kernel 会加上 `start_offset`——
+只有非行主序的步长向量会被拒绝。
+
 `MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
 `[0, MAX_RECV]`，并填充接收侧计数向量 `recv_counts[src, 0]`。builtin 内核
 （HOST 与托管 CHIP/L2 通路）以**拉取**方式完成：每个 rank 先把自身的发送向量
@@ -477,14 +486,14 @@ InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直�
 信息中指明 CHIP 路径。下文的 CHIP/L2 路径接受编译期的 `core_num`：它在降级时折叠出
 同一个 `B = CalAllToAllVBlocks(P, L)`，并在 `B > 1` 时把它作为启动规格
 （`core_num=B`、`sync_start`）附加到调用上。该路径暂不支持运行期 `core_num`——见
-[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md)。
+[`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md)。
 
 **CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP
 `Orchestration` 函数体中，而不是 `host_orch` 中。它会被改写成对合成 AIV kernel 的
 调用，该 kernel 由 HOST 路径使用的*同一份* builtin 模板渲染而来，因此链路行为完全
 一致，差别只在派发结构：该集合通信成为调用方自身 pipeline 中的一个 AIV task——不按
 设备扇出，也不产生嵌套 L2 dispatch——并通过普通 TensorMap 依赖与前后计算排序。参见
-[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md)。
+[`43-lower_l2_tensor_collectives.md`](passes/43-lower_l2_tensor_collectives.md)。
 
 **HOST builtin**（`LowerHostTensorCollectives`）：同样的 5 参数调用，在
 `host_orch` 函数中发起时，会按设备下降为 `builtin.tensor.all_to_all_v`——
@@ -550,7 +559,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
-[`SynthesizeAllReduceSignals`](passes/46-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/48-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
@@ -654,6 +663,18 @@ InCore 下降在一点上比推导器更严格：其屏障按 rank 索引一格�
 而一维 `[NR]` 仅适用于 HOST。为 ring `allreduce` 设计的信号（`[2*(NR-1), NR]`）
 在两条路径上都不能与本集合通信算子共用，应给它独立的窗口。
 
+### `pld.tensor.reduce_scatter`
+
+```text
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+```
+
+`target` 形状为 `[NR, SIZE]`，每个 rank 在调用前暂存全部 `NR` 个 chunk；调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素归约结果（按 `ReduceOp` 取 Sum/Max/Min/Prod）。signal 形状为 `[NR, 1]`。
+
+该行按不超过 16 KiB 的 UB chunk 遍历。静态且按 32 字节对齐的 `SIZE` 能放进一个 chunk 时沿用单 tile 路径（ready 屏障、peer 循环、post-reduce 屏障、store、尾声）；更大的 `SIZE`、未按 32 字节对齐的 `SIZE` 或符号化 `SIZE` 走分块路径：一个 ready 屏障，随后每个 chunk 在 generation `2 + chunk_index` 上做一次自己的读完成屏障，末尾不整齐的 chunk 以 `valid_shape = min(chunk_cols, SIZE - offset)` 承载。两种路径都用自清理尾声恢复 signal（见[屏障-信号协议](#屏障-信号协议)），因此同一个 signal 可用于连续调用。
+
+分块是让大 `SIZE`、未对齐 `SIZE` 或符号化 `SIZE` 得以表达的前提：单 tile 形式会把整行分配成一个 VEC tile，真实负载下会超出 VEC 预算，且行字节宽度不是 32 字节对齐时会被 PTOAS 拒绝。因此，小于一个 chunk 但未按 32 字节对齐的静态 `SIZE` 也走分块路径：它把物理 chunk 宽度向上取整到对齐范围，并用 `valid_shape` 保留逻辑宽度。符号化 `SIZE` 必须由 kernel 标量、循环变量或物理 tensor 形状参数在运行时绑定。
+
 ### `pld.system.notify`（TNOTIFY）
 
 ```text
@@ -738,14 +759,14 @@ peer 算术；而*远程*操作数
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/49-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
 分布式 codegen 将每个槽位的物理分配向上取整到 64 字节，并对补齐后的大小求和作为通信域窗口大小。
 `CommBufferSpec.count` 和 `DistributedTensor` 的 shape 保留逻辑范围。这使独立槽位位于不同的 A2/A3 数据缓存行：
 标量写入后的 DCCI 会写回整条 64 字节缓存行，不应覆盖相邻 signal 槽位的 credit。
 该补齐同时满足 32 字节远端传输的对齐和尾部空间要求。
-随后 [`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/50-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试
@@ -763,6 +784,9 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_l3_tensor_allreduce_ring_intrinsic.py`、
   `test_l3_tensor_allgather_runtime_width.py`（运行时范围的 composite allgather：
   一次编译在三种不同范围上执行）、
+  `test_l3_tensor_reduce_scatter_intrinsic.py`、
+  `test_l3_tensor_reduce_scatter_chunked.py`、
+  `test_l3_tensor_reduce_scatter_runtime_size.py`（一次编译在运行时范围 1001 / 12288 / 12289 上执行）、
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
   `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、

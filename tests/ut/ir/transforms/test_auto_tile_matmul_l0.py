@@ -4420,5 +4420,292 @@ def test_non_page_store_keeps_k_only_fallback(planner, ascend_backend, window):
     ir.assert_structural_equal(After, Expected)
 
 
+class TestAutoTileMatmulAccPhase:
+    """Each physical reduction sets its unit flag once, immediately before drain."""
+
+    def test_final_matmul_uniform_k_peels_last_block(self):
+        """An eight-block K reduction emits seven Partial blocks and one Final.
+
+        Keeping Final on the loop body would set the unit flag on the first
+        iteration and make the second iteration wait before the store can run.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(a, b, acc_phase=pl.AccPhase.Final)
+                out = pl.store(c, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                seed = pl.tile.create([16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for ko, (acc,) in pl.pipeline(0, 1792, 256, init_values=(seed,), stage=2):
+                    sa = pl.tile.extract(a, 0, ko, [16, 256], target_memory=pl.Mem.Left)
+                    sb = pl.tile.extract(b, ko, 0, [256, 64], target_memory=pl.Mem.Right)
+                    partial = pl.tile.matmul_acc(
+                        acc, sa, sb, init_cond=(ko == 0), acc_phase=pl.AccPhase.Partial
+                    )
+                    main = pl.yield_(partial)
+                sa_last = pl.tile.extract(a, 0, 1792, [16, 256], target_memory=pl.Mem.Left)
+                sb_last = pl.tile.extract(b, 1792, 0, [256, 64], target_memory=pl.Mem.Right)
+                final = pl.tile.matmul_acc(main, sa_last, sb_last, acc_phase=pl.AccPhase.Final)
+                out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+        self._verify_pairing(After)
+
+    @pytest.mark.parametrize(
+        "M,K,step,stop,last_width", [(16, 2048, 256, 1792, 256), (64, 544, 192, 384, 160)]
+    )
+    def test_final_acc_loop_preserves_init_cond_and_uses_existing_tail(self, M, K, step, stop, last_width):
+        """Initialization stays on the first block; the final block only accumulates."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, 64], pl.BF16],
+                seed: pl.Tile[[M, 64], pl.FP32, pl.Mem.Acc],
+                first: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[M, 64], pl.FP32]],
+            ) -> pl.Tensor[[M, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [K, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_acc(seed, a, b, init_cond=(first == 0), acc_phase=pl.AccPhase.Final)
+                out = pl.store(c, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, 64], pl.BF16],
+                seed: pl.Tile[[M, 64], pl.FP32, pl.Mem.Acc],
+                first: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[M, 64], pl.FP32]],
+            ) -> pl.Tensor[[M, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [K, 64], target_memory=pl.Mem.Mat)
+                for ko, (acc,) in pl.pipeline(0, stop, step, init_values=(seed,), stage=2):
+                    sa = pl.tile.extract(a, 0, ko, [M, step], target_memory=pl.Mem.Left)
+                    sb = pl.tile.extract(b, ko, 0, [step, 64], target_memory=pl.Mem.Right)
+                    partial = pl.tile.matmul_acc(
+                        acc, sa, sb, init_cond=(first == 0 and ko == 0), acc_phase=pl.AccPhase.Partial
+                    )
+                    main = pl.yield_(partial)
+                sa_last = pl.tile.extract(a, 0, stop, [M, last_width], target_memory=pl.Mem.Left)
+                sb_last = pl.tile.extract(b, stop, 0, [last_width, 64], target_memory=pl.Mem.Right)
+                final = pl.tile.matmul_acc(main, sa_last, sb_last, acc_phase=pl.AccPhase.Final)
+                out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+        self._verify_pairing(After)
+
+    @pytest.mark.parametrize("K,step", [(272, 144), (512, 256)])
+    def test_final_acc_single_main_block_keeps_user_predicate(self, K, step):
+        """A one-block prefix carries the user's initialization predicate verbatim.
+
+        K=512 has two equal blocks, so peeling its Final leaves just one prefix
+        block. K=272 already has a short tail. Neither needs a pipeline loop.
+        """
+        last_width = K - step
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, K], pl.BF16],
+                rhs: pl.Tensor[[K, 64], pl.BF16],
+                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc],
+                first: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [64, K], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [K, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_acc(seed, a, b, init_cond=(first == 0), acc_phase=pl.AccPhase.Final)
+                out = pl.store(c, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, K], pl.BF16],
+                rhs: pl.Tensor[[K, 64], pl.BF16],
+                seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc],
+                first: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [64, K], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [K, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.extract(a, 0, 0, [64, step], target_memory=pl.Mem.Left)
+                sb = pl.tile.extract(b, 0, 0, [step, 64], target_memory=pl.Mem.Right)
+                partial = pl.tile.matmul_acc(
+                    seed, sa, sb, init_cond=(first == 0), acc_phase=pl.AccPhase.Partial
+                )
+                sa_last = pl.tile.extract(a, 0, step, [64, last_width], target_memory=pl.Mem.Left)
+                sb_last = pl.tile.extract(b, step, 0, [last_width, 64], target_memory=pl.Mem.Right)
+                final = pl.tile.matmul_acc(partial, sa_last, sb_last, acc_phase=pl.AccPhase.Final)
+                out = pl.store(final, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+        self._verify_pairing(After)
+
+    @pytest.mark.parametrize("phase", [pl.AccPhase.Unspecified, pl.AccPhase.Partial])
+    def test_nonfinal_phase_keeps_uniform_k_loop(self, phase):
+        """Partial never sets a flag; Unspecified retains the default loop shape."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(a, b, acc_phase=phase)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                seed = pl.tile.create([16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for ko, (acc,) in pl.pipeline(0, 2048, 256, init_values=(seed,), stage=2):
+                    sa = pl.tile.extract(a, 0, ko, [16, 256], target_memory=pl.Mem.Left)
+                    sb = pl.tile.extract(b, ko, 0, [256, 64], target_memory=pl.Mem.Right)
+                    partial = pl.tile.matmul_acc(acc, sa, sb, init_cond=(ko == 0), acc_phase=phase)
+                    result = pl.yield_(partial)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+        self._verify_pairing(After)
+
+    @pytest.mark.parametrize("K", [64, 544])
+    @pytest.mark.parametrize("alias", [False, True])
+    def test_final_mn_subtiles_each_have_a_matching_drain(self, K, alias):
+        """M/N tiling expands the logical pair into physical producer/store pairs.
+
+        This also covers single-use plain aliases: after folding there is no
+        whole-size accumulator left for those alias definitions to reference.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[384, K], pl.BF16],
+                rhs: pl.Tensor[[K, 640], pl.BF16],
+                out: pl.Out[pl.Tensor[[384, 640], pl.FP32]],
+            ) -> pl.Tensor[[384, 640], pl.FP32]:
+                a = pl.tile.load(lhs, [0, 0], [384, K], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [K, 640], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(a, b, acc_phase=pl.AccPhase.Final)
+                alias1 = c
+                alias2 = alias1
+                out = pl.store(alias2, [0, 0], out, st_phase=pl.STPhase.Final)
+                return out
+
+        if not alias:
+
+            @pl.program
+            class Direct:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[384, K], pl.BF16],
+                    rhs: pl.Tensor[[K, 640], pl.BF16],
+                    out: pl.Out[pl.Tensor[[384, 640], pl.FP32]],
+                ) -> pl.Tensor[[384, 640], pl.FP32]:
+                    a = pl.tile.load(lhs, [0, 0], [384, K], target_memory=pl.Mem.Mat)
+                    b = pl.tile.load(rhs, [0, 0], [K, 640], target_memory=pl.Mem.Mat)
+                    c = pl.tile.matmul(a, b, acc_phase=pl.AccPhase.Final)
+                    out = pl.store(c, [0, 0], out, st_phase=pl.STPhase.Final)
+                    return out
+
+            Before = Direct
+        After = passes.auto_tile_matmul_l0()(Before)
+        _assert_ssa_valid(After, "final_mn_subtiles")
+        self._verify_pairing(After)
+        printed = ir.python_print(After)
+        assert "alias1" not in printed and "alias2" not in printed
+
+        class PhysicalPairs(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.final_count = 0
+                self.store_count = 0
+
+            def visit_call(self, op):
+                if op.op.name in {ir.get_op("tile.matmul").name, ir.get_op("tile.matmul_acc").name}:
+                    phase = dict(op.kwargs).get("acc_phase", 0)
+                    assert phase in {int(pl.AccPhase.Partial), int(pl.AccPhase.Final)}
+                    self.final_count += phase == int(pl.AccPhase.Final)
+                    assert isinstance(op.type, ir.TileType)
+                    assert all(isinstance(dim, ir.ConstInt) for dim in op.type.shape)
+                    rows, cols = (int(dim.value) for dim in op.type.shape if isinstance(dim, ir.ConstInt))
+                    assert rows * cols * 4 <= 131072
+                if op.op.name == ir.get_op("tile.store").name:
+                    self.store_count += 1
+                    assert dict(op.kwargs)["st_phase"] == int(pl.STPhase.Final)
+                super().visit_call(op)
+
+        pairs = PhysicalPairs()
+        pairs.visit_program(After)
+        assert pairs.final_count == pairs.store_count > 0
+
+    @staticmethod
+    def _verify_pairing(program):
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.AccStorePhaseValid)
+        assert passes.PropertyVerifierRegistry.verify(props, program) == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -74,6 +74,16 @@ print(pypto.get_log_level())
 
 `NONE` / `FATAL` / `ERROR` / `WARN` / `INFO` / `EVENT` / `DEBUG`，依次更吵。默认是 `INFO`。
 
+`DEBUG` 级别下，成功的编译会打印产物根目录的绝对路径：
+
+```text
+2026-11-03 08:47:25.652 D | PyPTO artifacts written to /tmp/build_output/_jit_tile_add_20261103_084725_ksde7qr6
+```
+
+该目录包含 `kernels/`（编译后的 kernel；`skip_ptoas=True` 时是原始 `.pto`，包括没有 ptoas 的
+`@pl.jit`）、`ptoas/`（运行 ptoas 时的 `.pto` 输入和其他中间产物），以及启用后的
+`passes_dump/`。用 `export PYPTO_LOG_LEVEL=debug` 打开。
+
 ### 环境变量
 
 | 变量 | 控制 |

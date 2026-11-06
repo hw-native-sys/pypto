@@ -14,7 +14,7 @@ from types import TracebackType
 from typing import Any, overload
 
 from pypto.pypto_core.backend import Backend
-from pypto.pypto_core.ir import Function, Program, Span, Stmt
+from pypto.pypto_core.ir import Function, HardwareLoopProfile, HardwareLoopQualification, Program, Span, Stmt
 
 class IRProperty(Enum):
     """Verifiable IR properties."""
@@ -71,6 +71,10 @@ class IRProperty(Enum):
     TileStorageLegalized = ...
     TileStorageAllocated = ...
     RegScopeValid = ...
+    HardwareLoopContractValid = ...
+    SimtValid = ...
+    SimtOutputsMaterialized = ...
+    SimtSpecialized = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -300,6 +304,8 @@ class PassContext:
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir: bool = True,
+        enable_software_pipeline: bool = False,
+        report_hardware_loops: bool = False,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -315,6 +321,10 @@ class PassContext:
 
         ``enable_buffer_ir`` defaults to true and selects supported whole kernels
         for Buffer IR. Unsupported kernels retain Tile; false selects Tile for all.
+
+        ``enable_software_pipeline`` uses explicit prefetch and rotating slots for
+        eligible pipeline loops. It requires ``PYPTO`` memory planning and cannot
+        be combined with ``enable_buffer_ir``. The default keeps unroll lowering.
         """
         ...
 
@@ -349,8 +359,15 @@ class PassContext:
         """Get the target Simpler runtime ABI for this context."""
         ...
 
+    def get_report_hardware_loops(self) -> bool: ...
+    def get_hardware_loop_profile(self) -> HardwareLoopProfile: ...
+    def get_hardware_loop_reports(self) -> list[HardwareLoopQualification]: ...
     def get_enable_buffer_ir(self) -> bool:
         """Whether supported whole kernels use Buffer IR."""
+        ...
+
+    def get_enable_software_pipeline(self) -> bool:
+        """Get whether eligible pipeline loops use explicit software pipelining."""
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
@@ -385,6 +402,12 @@ class PassPipeline:
         """Get copies of all passes in execution order."""
 
 # Factory functions
+
+def specialize_simt_helpers() -> Pass:
+    """Specialize SIMT helpers by dimensions and storage ABI; pass dynamic metadata explicitly."""
+
+def materialize_simt_outputs() -> Pass:
+    """Copy writable SIMT Tile inputs into dedicated output storage; preserve GM references."""
 
 def init_mem_ref() -> Pass:
     """Create an init memref pass."""
@@ -465,23 +488,17 @@ def skew_cross_core_pipeline() -> Pass:
 def lower_pipeline_to_slots() -> Pass:
     """Create a pass that multi-buffers ``pl.pipeline`` loops via MemRef slots.
 
-    Runs immediately before ``lower_pipeline_loops``. Instead of replicating the
-    body ``F`` times, keeps one body and rebinds every top-level ``tile.load`` /
-    ``tile.read`` whose arguments read the induction variable onto
-    ``pl.MemRef(name, slots=F)[iv % F]``, then demotes the loop to
-    ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Bounds, step and
-    ``iter_args`` are untouched, so no remainder dispatch is needed.
+    Runs immediately before ``lower_pipeline_loops``. With ``PYPTO`` memory
+    planning and ``enable_software_pipeline=True``, emits explicit preload,
+    steady-state and drain phases using existing loops, MemRef slots and tile
+    ops. The prefetch distance is ``stage - 1``; no new IR nodes are introduced.
 
-    Self-gated on ``memory_planner=PTOAS``: only that planner's codegen path emits
-    a ptoas multi-buffer region today, so under the default PyPTO planner the pass
-    returns every function untouched. The gate tracks that codegen limitation, not
-    a ptoas one — an addressed region synchronizes identically at level3, and
-    widening the gate is follow-up work in the address allocator. Loops it
-    declines — an unsupported
-    slot count, a step other than 1, a start not a multiple of ``F``, no eligible
-    load, an unsupported memory space or runtime valid shape, a tile carried out as
-    a phi or consumed by a view op, or nesting under a declined pipeline loop — are
-    left intact for ``lower_pipeline_loops`` to replicate.
+    With ``PTOAS`` memory planning, preserves the existing same-iteration slot
+    rotation: eligible top-level loads are rebound onto
+    ``pl.MemRef(name, slots=F)[iv % F]`` without explicit prefetch. Accepted loops
+    become ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Declined
+    loops remain intact for ``lower_pipeline_loops`` to replicate. The default
+    ``PYPTO`` path remains unchanged when the software pipeline flag is off.
 
     Returns:
         Function-level pass
@@ -1110,6 +1127,8 @@ __all__ = [
     "PassContext",
     "PassPipeline",
     "init_mem_ref",
+    "materialize_simt_outputs",
+    "specialize_simt_helpers",
     "memory_reuse",
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",

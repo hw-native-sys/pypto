@@ -12,7 +12,7 @@
 from typing import ClassVar, overload
 
 from pypto import ir
-from pypto.pypto_core.sync import ResourceCatalog
+from pypto.pypto_core.sync import IsaMacroResources, ResourceCatalog
 
 class BackendType:
     """Backend type for passes and codegen."""
@@ -108,6 +108,14 @@ class BackendHandler:
     """
 
     def get_pto_target_arch(self) -> str: ...
+    def has_hardware_loop_evidence(self, qualification: ir.HardwareLoopQualification, artifact: str) -> bool:
+        """Check final artifact evidence; unsupported targets return false."""
+        ...
+
+    def get_hardware_loop_profile(self) -> ir.HardwareLoopProfile:
+        """Return target capabilities; eligibility does not imply final evidence."""
+        ...
+
     def supports_reg_type(self, type: ir.RegType) -> bool:
         """Whether the target supports this logical VMI register type."""
         ...
@@ -118,6 +126,9 @@ class BackendHandler:
     def get_extra_ptoas_flags(self) -> list[str]: ...
     def honors_high_precision_algorithm(self) -> bool: ...
     def requires_gm_pipe_buffer(self) -> bool: ...
+    def supports_runtime_bound_local_software_pipeline(self) -> bool:
+        """Whether this backend enables local Vec software-pipeline lowering with runtime trip counts."""
+        ...
     def supports_local_pipe_depth(self) -> bool: ...
     def requires_split_load_tpop_workaround(self) -> bool: ...
     def requires_level3_tmp_scratch(self) -> bool: ...
@@ -180,6 +191,15 @@ class Backend:
     """Abstract backend base class."""
 
     def get_type_name(self) -> str: ...
+    def find_isa_macro_resources(self, name: str) -> IsaMacroResources | None:
+        """Return symbolic signal claims, or None for an unregistered macro.
+
+        Absence does not certify an unknown external implementation as signal-free.
+        """
+        ...
+    def get_isa_macro_names(self) -> list[str]:
+        """Sorted qualified macro names with registered signal occupancy for this target."""
+        ...
     def plan_op_scratch(
         self,
         op_name: str,

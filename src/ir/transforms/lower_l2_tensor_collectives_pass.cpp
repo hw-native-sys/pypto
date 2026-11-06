@@ -78,6 +78,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -95,7 +97,11 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -256,9 +262,13 @@ struct BuiltinKernelSpec {
         spec.param_names[i], CanonicalParamType(spec.param_distributed[i], call->args_[i], call->span_),
         call->span_));
   }
+  // The builtin kernel addresses every operand as dense row-major from its view
+  // origin. LowerCollective proves that at compile time; this attr asks
+  // orchestration codegen for a runtime backstop.
   std::vector<std::pair<std::string, std::any>> attrs = {
       {kAttrBuiltinTemplateDir, spec.template_dir},
       {kAttrBuiltinTemplateVars, spec.template_vars},
+      {kAttrRequireContiguousOperands, true},
   };
   // Window-as-result: the kernel returns `target`, matching the public op's
   // result so the call site stays a plain rebind.
@@ -275,9 +285,109 @@ struct BuiltinKernelSpec {
                                     std::nullopt, std::nullopt, std::move(attrs));
 }
 
+/// Every value that can flow into each Var of an orchestration body: AssignStmt
+/// values, a loop-carried value's initial and yielded values, the yielded values
+/// bound to If return vars, and a loop return var's carry. Lets an operand be
+/// traced back to the definitions that fix its runtime layout. One walk; lookups
+/// are hash-map hits.
+class ValueSourceIndex : public IRVisitor {
+ public:
+  std::unordered_map<const Var*, std::vector<ExprPtr>> sources;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    sources[op->var_.get()].push_back(op->value_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    AddYields(op->return_vars_, op->then_body_);
+    if (op->else_body_.has_value()) AddYields(op->return_vars_, *op->else_body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    AddLoop(op->iter_args_, op->return_vars_, op->body_, op->span_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    AddLoop(op->iter_args_, op->return_vars_, op->body_, op->span_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  template <typename VarPtrT>
+  void AddYields(const std::vector<VarPtrT>& vars, const StmtPtr& body) {
+    if (vars.empty()) return;
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    INTERNAL_CHECK(yield && yield->value_.size() == vars.size())
+        << "Internal error: a control-flow body binding " << vars.size()
+        << " values must end in a matching yield";
+    for (size_t i = 0; i < vars.size(); ++i) sources[vars[i].get()].push_back(yield->value_[i]);
+  }
+
+  void AddLoop(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars,
+               const StmtPtr& body, const Span& span) {
+    for (const auto& iter_arg : iter_args) sources[iter_arg.get()].push_back(iter_arg->initValue_);
+    AddYields(iter_args, body);
+    // A loop that runs zero times returns its initializer, and the trip count
+    // can differ per rank, so a result takes both of its carry's sources.
+    INTERNAL_CHECK_SPAN(return_vars.size() == iter_args.size(), span)
+        << "Internal error: a loop has " << return_vars.size() << " return vars for " << iter_args.size()
+        << " iter_args";
+    for (size_t i = 0; i < return_vars.size(); ++i) sources[return_vars[i].get()].push_back(iter_args[i]);
+  }
+};
+
+/// True when `slice` keeps a row-major parent row-major: static shapes, and every
+/// dimension after the first taken whole from offset 0. Only the leading
+/// dimension may be narrowed, which moves the view origin but keeps the packed
+/// strides. A `drop_dims` slice is not proven.
+[[nodiscard]] bool SliceKeepsRowMajor(const CallPtr& slice) {
+  if (slice->args_.size() < 3 || slice->args_.size() > 4) return false;
+  auto parent = AsTensorTypeLike(slice->args_[0]->GetType());
+  auto shape = As<MakeTuple>(slice->args_[1]);
+  auto offset = As<MakeTuple>(slice->args_[2]);
+  if (!parent || !shape || !offset || shape->elements_.size() != parent->shape_.size() ||
+      offset->elements_.size() != parent->shape_.size()) {
+    return false;
+  }
+  for (size_t i = 1; i < parent->shape_.size(); ++i) {
+    auto parent_dim = As<ConstInt>(parent->shape_[i]);
+    auto dim = As<ConstInt>(shape->elements_[i]);
+    auto off = As<ConstInt>(offset->elements_[i]);
+    if (!parent_dim || !dim || !off || dim->value_ != parent_dim->value_ || off->value_ != 0) return false;
+  }
+  return true;
+}
+
+/// Empty when `type` is provably packed row-major; otherwise an article and
+/// adjective naming why not, for the error message. A view without explicit
+/// strides is packed for its layout. An explicit stride must match
+/// BuildRowMajorStrides entry by entry, which is how MaterializeTensorStrides
+/// fills an ND view; a stride that is packed but spelled differently is not
+/// proven.
+[[nodiscard]] std::string UnpackedViewDescription(const TensorTypePtr& type) {
+  if (!type || !type->tensor_view_.has_value()) return "";
+  const auto& view = *type->tensor_view_;
+  if (view.layout != TensorLayout::ND) return "a " + TensorLayoutToString(view.layout) + "-layout ";
+  if (view.stride.empty()) return "";
+  auto packed = tensor_view_semantics::BuildRowMajorStrides(type->shape_);
+  bool is_packed = view.stride.size() == packed.size();
+  for (size_t i = 0; is_packed && i < packed.size(); ++i) {
+    auto actual = As<ConstInt>(view.stride[i]);
+    auto expected = As<ConstInt>(packed[i]);
+    is_packed =
+        actual && expected ? actual->value_ == expected->value_ : structural_equal(view.stride[i], packed[i]);
+  }
+  return is_packed ? "" : "a non-packed-stride ";
+}
+
 class LowerL2TensorCollectivesMutator : public IRMutator {
  public:
-  explicit LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels) : kernels_(kernels) {}
+  LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels, StmtPtr body,
+                                  ProgramPtr program)
+      : kernels_(kernels), body_(std::move(body)), program_(std::move(program)) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -285,7 +395,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     auto visited = As<Call>(VisitExpr(op->value_));
     INTERNAL_CHECK_SPAN(IsManagedCollective(visited), op->span_)
         << "LowerL2TensorCollectives: collective AssignStmt rewrote to a non-collective expression";
-    auto kernel_call = LowerCollective(visited);
+    auto kernel_call = LowerCollective(visited, call);
     auto result_var = std::make_shared<Var>(op->var_->name_hint_, kernel_call->GetType(), op->var_->span_);
     var_remap_[op->var_.get()] = result_var;
     return std::make_shared<AssignStmt>(result_var, kernel_call, op->span_);
@@ -297,7 +407,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     auto visited = As<Call>(VisitExpr(op->expr_));
     INTERNAL_CHECK_SPAN(IsManagedCollective(visited), op->span_)
         << "LowerL2TensorCollectives: collective EvalStmt rewrote to a non-collective expression";
-    return std::make_shared<EvalStmt>(LowerCollective(visited), op->span_);
+    return std::make_shared<EvalStmt>(LowerCollective(visited, call), op->span_);
   }
 
   /// ``return pld.tensor.all_to_all_v(...)`` — the collective is embedded in
@@ -314,7 +424,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
         INTERNAL_CHECK_SPAN(IsManagedCollective(visited), op->span_)
             << "LowerL2TensorCollectives: collective ReturnStmt value rewrote to a non-collective "
                "expression";
-        values.push_back(LowerCollective(visited));
+        values.push_back(LowerCollective(visited, call));
         changed = true;
         continue;
       }
@@ -329,7 +439,9 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     return call && call->op_ && (IsOp(call, kAllToAllV) || IsOp(call, "pld.tensor.indexed_all_to_all_v"));
   }
 
-  [[nodiscard]] CallPtr LowerCollective(const CallPtr& call) {
+  /// @p original is the call as written: its operands name Vars of the body the
+  /// ValueSourceIndex was built from, whereas @p call's may be rewritten ones.
+  [[nodiscard]] CallPtr LowerCollective(const CallPtr& call, const CallPtr& original) {
     const bool indexed = IsOp(call, "pld.tensor.indexed_all_to_all_v");
     INTERNAL_CHECK_SPAN(call->args_.size() == (indexed ? 7 : 6), call->span_)
         << "LowerL2TensorCollectives: " << call->op_->name_
@@ -421,6 +533,11 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       spec.param_directions.push_back(ParamDirection::In);
       spec.param_distributed.push_back(false);
     }
+    // Every kernel operand, named as the kernel names it, so a variant's extra
+    // operand (the indexed op's `index`) is covered without a second list.
+    for (size_t i = 0; i < spec.param_names.size(); ++i) {
+      CheckOperandIsRowMajor(original->args_[i], call->op_->name_, spec.param_names[i], call->span_);
+    }
     // One kernel per dtype, shared by every call site in the Program. The
     // kernel reads each extent from the runtime `Tensor` descriptor
     // (`target_tensor->shapes[]`, `ndims`), so shape is deliberately *not* part
@@ -480,7 +597,152 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
                                   call->args_[1]->GetType(), call->span_);
   }
 
+  /// Require an operand to be row-major by construction, decided at compile time.
+  ///
+  /// The kernel reads every operand as dense row-major from its view origin, and
+  /// a runtime verdict would be per rank: a rank that rejects skips only its own
+  /// launch while its peers block in ExchangeBarrier. A view built in this body
+  /// can differ per rank (a `[R, C]` slice of a `[R, width]` tensor with a
+  /// per-rank runtime `width`), so the decision is made here, where it is the
+  /// same on every rank.
+  ///
+  /// The trace is an allow-list (see ProvenLayoutSource): every value that can
+  /// reach the operand must be a row-major root or a proven layout-preserving
+  /// alias of one; anything else is rejected.
+  void CheckOperandIsRowMajor(const ExprPtr& operand, const std::string& op_name, const std::string& role,
+                              const Span& span) {
+    std::vector<ExprPtr> pending{operand};
+    while (!pending.empty()) {
+      ExprPtr value = pending.back();
+      pending.pop_back();
+      if (!traced_.insert(value.get()).second) continue;
+      auto var = AsVarLike(value);
+      if (var) {
+        const auto& sources = Sources().sources;
+        auto it = sources.find(var.get());
+        if (it != sources.end()) {
+          pending.insert(pending.end(), it->second.begin(), it->second.end());
+          continue;
+        }
+      }
+      // Each value on the chain must itself be packed row-major, because the steps
+      // below assume a packed source and drop its strides: a slice narrowing the
+      // leading dimension of a DN or padded-stride tensor is not contiguous, and
+      // an ND view of a DN tensor lowers to a runtime Tensor::transpose that the
+      // runtime guard rejects. A defined Var is covered by its sources, so this is
+      // tested on producers and parameters, where the error can name them.
+      std::string unpacked = UnpackedViewDescription(AsTensorTypeLike(value->GetType()));
+      std::string producer;
+      std::optional<ExprPtr> source;
+      if (var) {
+        // A Var with no source in this body is a parameter: a window, or a tensor
+        // the caller passes in, whose runtime layout the guard checks (see
+        // kAttrRequireContiguousOperands). A Graph parameter would come from
+        // a CHIP caller instead, but a Graph holding this collective cannot be
+        // compiled: its window operands gain CommCtx params, which
+        // LegalizeGraphBoundary rejects. If that changes, trace the callers' args.
+        if (unpacked.empty()) continue;
+        producer = unpacked + "parameter '" + var->name_hint_ + "'";
+      } else if (!unpacked.empty()) {
+        auto call = As<Call>(value);
+        producer = unpacked + (call ? call->op_->name_ : value->TypeName());
+      } else {
+        source = ProvenLayoutSource(value, &producer);
+      }
+      CHECK_SPAN(source.has_value(), span)
+          << "CHIP " << op_name << ": " << role << " is derived from " << producer
+          << ", which is not provably row-major. The kernel reads every operand as dense row-major, and a "
+             "runtime check would decide per rank (see the LowerL2TensorCollectives pass docs). Pass a "
+             "parameter or a freshly created tensor, or a slice that narrows only the leading dimension of a "
+             "statically shaped tensor";
+      if (*source) pending.push_back(*source);
+    }
+  }
+
+  /// Allow-list step of CheckOperandIsRowMajor for a non-Var value. Returns
+  /// nullopt (and names the producer) when the layout is not proven; nullptr for
+  /// a fresh row-major allocation; otherwise the value whose layout this one
+  /// shares (a view, writeback, or returned argument of it).
+  [[nodiscard]] std::optional<ExprPtr> ProvenLayoutSource(const ExprPtr& value, std::string* producer) {
+    // A tuple element of a kernel or submit result (`x, n = self.kernel(...)`,
+    // `x, tid = pl.submit(...)`) is that result at the element's position.
+    size_t result_index = 0;
+    ExprPtr produced = value;
+    if (auto item = As<TupleGetItemExpr>(value)) {
+      result_index = static_cast<size_t>(item->index_);
+      produced = item->tuple_;
+      if (auto var = AsVarLike(produced)) {
+        const auto& sources = Sources().sources;
+        auto it = sources.find(var.get());
+        produced = it != sources.end() && it->second.size() == 1 ? it->second[0] : nullptr;
+      }
+    }
+    if (auto submit = As<Submit>(produced)) {
+      *producer = "a submit of " + submit->op_->name_;
+      return ReturnedArgument(submit->op_, submit->args_, result_index);
+    }
+    auto call = As<Call>(produced);
+    *producer = call ? call->op_->name_ : value->TypeName();
+    if (!call) return std::nullopt;
+    if (IsOp(call->op_, "tensor.create")) return ExprPtr(nullptr);
+    if (IsOp(call->op_, "tensor.reshape") || IsOp(call->op_, "tensor.view") ||
+        IsOp(call->op_, "tensor.set_validshape") || IsOp(call->op_, "tensor.assemble")) {
+      return call->args_[0];  // assemble writes back into, and returns, its target
+    }
+    if (IsOp(call->op_, "tensor.slice")) {
+      return SliceKeepsRowMajor(call) ? std::optional<ExprPtr>(call->args_[0]) : std::nullopt;
+    }
+    if (IsManagedCollective(call)) return call->args_[1];  // returns its target
+    return ReturnedArgument(call->op_, call->args_, result_index);
+  }
+
+  /// A kernel's result at @p result_index is the argument bound to the parameter
+  /// the kernel writes back there, or a fresh allocation when a submit leaves
+  /// that parameter to the runtime; anything else (not a kernel, a non-writeback
+  /// result, a submit's trailing TaskId) is not proven.
+  [[nodiscard]] std::optional<ExprPtr> ReturnedArgument(const OpPtr& op, const std::vector<ExprPtr>& args,
+                                                        size_t result_index) {
+    auto gvar = As<GlobalVar>(op);
+    auto callee = gvar ? program_->GetFunction(gvar->name_) : nullptr;
+    if (!callee) return std::nullopt;
+    // This pass runs after NormalizeReturnOrder, so the writeback map is read
+    // straight off the callee's ReturnStmt.
+    auto [it, inserted] = returned_params_.try_emplace(callee.get());
+    if (inserted) it->second = return_lineage::ExplicitReturnedParamIndices(callee);
+    const auto& returned = it->second;
+    if (result_index >= returned.size()) return std::nullopt;
+    const auto& param = returned[result_index];
+    if (!param) return std::nullopt;
+    // args[i] binds params[i]: a Submit has no CommCtx suffix before
+    // MaterializeDistTensorCtx. A param past `args` is an Out the runtime
+    // allocates from TensorCreateInfo(shapes, ndim, dtype), packed like a
+    // tensor.create; the caller's per-value packed check still rejects a
+    // non-packed type.
+    return *param < args.size() ? args[*param] : ExprPtr(nullptr);
+  }
+
+  /// The source index of the body as written, built on the first collective so
+  /// a body without one never pays for it.
+  const ValueSourceIndex& Sources() {
+    if (!sources_) {
+      sources_.emplace();
+      sources_->VisitStmt(body_);
+    }
+    return *sources_;
+  }
+
   std::map<std::string, FunctionPtr>* kernels_;
+  StmtPtr body_;
+  std::optional<ValueSourceIndex> sources_;
+  ProgramPtr program_;
+  /// Writeback map per callee, read once however many results trace into it.
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_params_;
+  /// Values already traced by CheckOperandIsRowMajor in this function. A trace
+  /// that fails throws and aborts the pass, so every value left here is proven,
+  /// and sharing the set across collectives makes the tracing O(N) per function
+  /// (each value is walked once) rather than once per collective. It also stops
+  /// the walk on loop-carried cycles.
+  std::unordered_set<const Expr*> traced_;
 };
 
 /// Guard the pass' own postcondition: no managed collective survives in an
@@ -542,7 +804,7 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
       new_functions[gvar] = func;
       continue;
     }
-    LowerL2TensorCollectivesMutator mutator(&kernels);
+    LowerL2TensorCollectivesMutator mutator(&kernels, func->body_, program);
     auto new_func = mutator.VisitFunction(func);
     new_functions[gvar] = new_func;
     if (new_func.get() != func.get()) modified = true;

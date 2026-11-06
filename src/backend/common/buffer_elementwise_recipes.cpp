@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -244,6 +245,9 @@ bool SupportsLogicalBufferElementwise(const BufferElementwiseRecipe& recipe, con
   const auto dtype = destination->dtype_;
   if (!SupportsElementwiseDtype(recipe, dtype)) return false;
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*destination);
+  // Column-vector descriptors are admitted only by their row recipes. Do not
+  // broaden every existing arithmetic recipe when default type support grows.
+  if (!IsDenseVecBufferTile(destination, view)) return false;
   const auto& valid = view.valid_shape.empty() ? destination->shape_ : view.valid_shape;
   for (const auto& input : recipe.inputs) {
     if (input.logical_index >= call->args_.size()) return false;

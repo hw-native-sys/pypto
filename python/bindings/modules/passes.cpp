@@ -173,7 +173,13 @@ void BindPass(nb::module_& m) {
              "Device region boundaries use canonical, nonoverlapping allocation windows")
       .value("TileStorageAllocated", IRProperty::TileStorageAllocated,
              "Device region storage and transfers also have nonoverlapping effective address windows")
-      .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas");
+      .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas")
+      .value("HardwareLoopContractValid", IRProperty::HardwareLoopContractValid,
+             "Required hardware loops retain Sequential intent")
+      .value("SimtValid", IRProperty::SimtValid, "Canonical SIMT helper and launch contracts")
+      .value("SimtOutputsMaterialized", IRProperty::SimtOutputsMaterialized,
+             "Writable SIMT Tiles have dedicated initialized output storage")
+      .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -354,23 +360,27 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, RuntimeKind, bool>(),
+                    MemoryPlanner, bool, RuntimeKind, bool, bool, bool>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
-           nb::arg("enable_buffer_ir") = true,
+           nb::arg("enable_buffer_ir") = true, nb::arg("enable_software_pipeline") = false,
+           nb::arg("report_hardware_loops") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the stored legacy "
            "L0C double-buffer compatibility flag, the target Simpler runtime ABI, and default-on "
-           "whole-kernel Buffer IR selection. Automatic dbC remains disabled for PyPTO and DSA-RP; "
+           "whole-kernel Buffer IR selection, plus software pipeline opt-in. Automatic dbC remains disabled "
+           "for PyPTO and DSA-RP; "
            "PTOAS retains its existing selection regardless of the flag")
-      .def("__enter__",
-           [](PassContext& self) -> PassContext& {
-             self.EnterContext();
-             return self;
-           })
+      .def(
+          "__enter__",
+          [](PassContext& self) -> PassContext& {
+            self.EnterContext();
+            return self;
+          },
+          nb::rv_policy::reference_internal)
       .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
       .def("get_verification_level", &PassContext::GetVerificationLevel,
            "Get the verification level for this context")
@@ -388,8 +398,16 @@ void BindPass(nb::module_& m) {
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
            "Return the stored legacy flag; it does not override the planner's automatic dbC policy")
       .def("get_runtime", &PassContext::GetRuntime, "Get the target Simpler runtime ABI for this context")
+      .def("get_report_hardware_loops", &PassContext::GetReportHardwareLoops,
+           "Whether optional hardware-loop reports are enabled")
+      .def("get_hardware_loop_profile", &PassContext::GetHardwareLoopProfile,
+           "Current backend profile, or unsupported for backend-independent host codegen")
+      .def("get_hardware_loop_reports", &PassContext::GetHardwareLoopReports,
+           "Latest transient codegen qualification reports; never final hardware evidence")
       .def("get_enable_buffer_ir", &PassContext::GetEnableBufferIR,
            "Whether supported whole kernels use Buffer IR")
+      .def("get_enable_software_pipeline", &PassContext::GetEnableSoftwarePipeline,
+           "Get whether eligible pipeline loops use explicit software pipelining")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 
@@ -402,6 +420,12 @@ void BindPass(nb::module_& m) {
       .def("get_passes", &PassPipeline::GetPasses, "Get copies of all passes in execution order");
 
   // Factory functions with snake_case names
+  passes.def("specialize_simt_helpers", &pass::SpecializeSimtHelpers,
+             "Specialize SIMT helpers by dimensions and storage ABI");
+
+  passes.def("materialize_simt_outputs", &pass::MaterializeSimtOutputs,
+             "Initialize writable SIMT Tile outputs while preserving GM reference semantics");
+
   passes.def("init_mem_ref", &pass::InitMemRef,
              "Create an init memref pass\n\n"
              "Initializes MemRef for all variables in functions.\n"
@@ -511,14 +535,13 @@ void BindPass(nb::module_& m) {
              "Output is Sequential with no pipeline marker, so lower_pipeline_loops and\n"
              "canonicalize_io_order leave it alone. Non-cross-core loops are untouched.");
   passes.def("lower_pipeline_to_slots", &pass::LowerPipelineToSlots,
-             "Rotate ``pl.pipeline`` loops through the slots of one declared allocation;\n"
-             "runs immediately before lower_pipeline_loops. Rebinds each top-level\n"
-             "``tile.load`` / ``tile.read`` whose args read the induction variable onto\n"
-             "``pl.MemRef(name, slots=F)[iv % F]`` and demotes the loop to Sequential,\n"
-             "keeping ONE body instead of F copies (no remainder dispatch needed).\n"
-             "Self-gated on ``memory_planner=PTOAS`` — the only planner under which codegen\n"
-             "emits a ptoas multi-buffer region today. Any loop it declines is left intact\n"
-             "for lower_pipeline_loops to replicate.");
+             "Lower eligible ``pl.pipeline`` loops through declared MemRef slots;\n"
+             "runs immediately before lower_pipeline_loops. With PYPTO memory planning\n"
+             "and enable_software_pipeline=True, emits preload / main / drain using\n"
+             "existing loops and tile ops, with prefetch distance stage - 1.\n"
+             "With PTOAS memory planning, preserves the existing same-iteration slot\n"
+             "rotation. Accepted loops become Sequential; declined loops remain intact\n"
+             "for lower_pipeline_loops to replicate. The default PYPTO path is unchanged.");
   passes.def("lower_pipeline_loops", &pass::LowerPipelineLoops,
              "Lower ``pl.pipeline(N, stage=F)`` loops at the tile level (triggers on F > 1):\n"
              "replicate the body F times per outer iteration with a bare-SeqStmts remainder\n"

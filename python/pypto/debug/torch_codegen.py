@@ -623,6 +623,23 @@ def _buffer_active(buffer):
 def _buffer_copy(source, destination):
     _buffer_write(destination, _buffer_active(source))
 
+def _buffer_pack_predicate(values, destination):
+    # Preserve the physical byte layout rather than storing a logical bool tile.
+    # Zero-fill unused bits of the final valid byte; later selection trims them.
+    rows, cols = values.shape
+    padded = torch.zeros((rows, ((cols + 7) // 8) * 8), dtype=torch.int64)
+    padded[:, :cols] = values.to(torch.int64)
+    bits = torch.arange(8, dtype=torch.int64)
+    packed = (padded.reshape(rows, -1, 8) << bits).sum(dim=-1).to(torch.uint8)
+    _buffer_write(destination, packed)
+
+def _buffer_select(mask, lhs, rhs, destination):
+    rows, cols = destination._pypto_valid_shape
+    bit = torch.arange(cols, dtype=torch.int64)
+    packed = _buffer_active(mask).to(torch.int64)
+    condition = ((packed[:rows, bit // 8] >> (bit % 8)) & 1).bool()
+    _buffer_write(destination, torch.where(condition, _buffer_active(lhs), rhs))
+
 def _buffer_extract(source, row, column, destination):
     rows, cols = destination._pypto_valid_shape
     data = _buffer_active(source)[int(row):int(row) + rows, int(column):int(column) + cols]
@@ -860,6 +877,12 @@ def _handle_tensor_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
 def _tile_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
     """Accumulating tile matmul; `.float()` matches hardware FP32 accumulation."""
     return _acc_expr(a[0], f"{_matmul_expr(a[1], a[2], kw)}.float()", _init_cond_arg(a, 3))
+
+
+def _torch_buffer_dtype(dtype: DataType) -> str:
+    # UINT32 is opaque scratch storage here. INT32 preserves its four-byte
+    # width on older supported Torch versions that do not expose torch.uint32.
+    return "torch.int32" if dtype == DataType.UINT32 else _torch_dtype(dtype)
 
 
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
@@ -1323,6 +1346,25 @@ def _register_ops() -> None:  # noqa: PLR0915
             f"{fn([f'_buffer_active({a[0]})', f'torch.as_tensor({a[1]}, dtype={a[0]}.dtype)'], kw)})"
         )
     m["buffer.full"] = lambda a, _kw: f"_buffer_active({a[1]}).fill_({a[0]})"
+    m["buffer.cast"] = lambda a, _kw: f"_buffer_write({a[1]}, _buffer_active({a[0]}).to({a[1]}.dtype))"
+    m["buffer.cmp"] = lambda a, kw: (
+        "_buffer_pack_predicate("
+        f"{_handle_cmp([f'_buffer_active({a[0]})', f'_buffer_active({a[1]})'], kw)}, {a[2]})"
+    )
+    m["buffer.cmps"] = lambda a, kw: (
+        f"_buffer_pack_predicate({_handle_cmp([f'_buffer_active({a[0]})', a[1]], kw)}, {a[2]})"
+    )
+    m["buffer.sel"] = lambda a, _kw: f"_buffer_select({a[0]}, {a[1]}, _buffer_active({a[2]}), {a[4]})"
+    m["buffer.sels"] = lambda a, _kw: f"_buffer_select({a[0]}, {a[1]}, {a[3]}, {a[4]})"
+
+    for suffix, reduction in (("row_max", "amax"), ("row_sum", "sum")):
+        m[f"buffer.{suffix}"] = lambda a, _kw, fn=reduction: (
+            f"_buffer_write({a[2]}, torch.{fn}(_buffer_active({a[0]}), dim=-1, keepdim=True))"
+        )
+    for suffix, operation in (("row_expand_sub", "-"), ("row_expand_div", "/")):
+        m[f"buffer.{suffix}"] = lambda a, _kw, op=operation: (
+            f"_buffer_write({a[2]}, _buffer_active({a[0]}) {op} _buffer_active({a[1]}))"
+        )
 
     m["buffer.get_block_idx"] = lambda _a, _kw: "0"
     m["buffer.get_block_num"] = lambda _a, _kw: "1"
@@ -1687,11 +1729,20 @@ class TorchCodegen(_ir.IRVisitor):
         if not isinstance(descriptor, _ir.BufferType):
             raise ValueError("torch_codegen requires a Buffer descriptor")
         if descriptor.memory_space == _ir.MemorySpace.Vec:
+            # A single physical column is contiguous in both tensor views;
+            # retaining its descriptor layout still matters to native codegen.
+            column_vector = (
+                descriptor.dtype == DataType.FP32
+                and len(descriptor.shape) == 2
+                and descriptor.shape[1] == 1
+                and descriptor.blayout == _ir.TileLayout.col_major
+            )
             if (
-                descriptor.blayout != _ir.TileLayout.row_major
-                or descriptor.slayout != _ir.TileLayout.none_box
-            ):
-                raise ValueError("torch_codegen requires dense row-major Vec Buffer descriptors")
+                descriptor.blayout != _ir.TileLayout.row_major and not column_vector
+            ) or descriptor.slayout != _ir.TileLayout.none_box:
+                raise ValueError(
+                    "torch_codegen requires dense row-major Vec or FP32 column-vector descriptors"
+                )
         elif (
             descriptor.memory_space
             not in (_ir.MemorySpace.Mat, _ir.MemorySpace.Left, _ir.MemorySpace.Right, _ir.MemorySpace.Acc)
@@ -1706,7 +1757,7 @@ class TorchCodegen(_ir.IRVisitor):
     @staticmethod
     def _matrix_descriptor_args(descriptor: _ir.BufferType) -> str:
         return (
-            f"{tuple(descriptor.shape)!r}, {_torch_dtype(descriptor.dtype)}, "
+            f"{tuple(descriptor.shape)!r}, {_torch_buffer_dtype(descriptor.dtype)}, "
             f"{tuple(descriptor.valid_shape)!r}, "
             f"{descriptor.blayout == _ir.TileLayout.row_major}, "
             f"{descriptor.slayout == _ir.TileLayout.row_major}, {descriptor.fractal}"
@@ -1720,7 +1771,7 @@ class TorchCodegen(_ir.IRVisitor):
             if descriptor.memory_space == _ir.MemorySpace.Vec:
                 self._expr_result = (
                     f"_buffer_alloc({self._buffer_pools_name}, {descriptor.memory_space.value}, {address}, "
-                    f"{tuple(descriptor.shape)!r}, {_torch_dtype(descriptor.dtype)}, "
+                    f"{tuple(descriptor.shape)!r}, {_torch_buffer_dtype(descriptor.dtype)}, "
                     f"{tuple(descriptor.valid_shape)!r}, {arg_strs[0]})"
                 )
             else:
@@ -1738,7 +1789,7 @@ class TorchCodegen(_ir.IRVisitor):
             descriptor = self._buffer_descriptor(op)
             if descriptor.memory_space == _ir.MemorySpace.Vec:
                 self._expr_result = (
-                    f"_buffer_set_valid({arg_strs[0]}.view({_torch_dtype(descriptor.dtype)})"
+                    f"_buffer_set_valid({arg_strs[0]}.view({_torch_buffer_dtype(descriptor.dtype)})"
                     f".view({tuple(descriptor.shape)!r}), {tuple(descriptor.valid_shape)!r})"
                 )
             else:

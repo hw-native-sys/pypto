@@ -11,8 +11,10 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, codegen, ir, passes
 from pypto.arith import Analyzer
+from pypto.backend import pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 
 _SLOT_BYTES = 4 * 8 * 4
 _POOL_BYTES = 2 * _SLOT_BYTES
@@ -243,6 +245,186 @@ def test_ordinary_allocation_reuses_dead_selection_pool(
             return out
 
     _assert_reused(Before, planner, pass_verification_instruments, ordinary=True)
+
+
+def _conditional_reset_program(
+    *, reset_in_else: bool = False, old_use: str = "none", protection: str = "none"
+) -> ir.Program:
+    """Vary the old payload's observation without changing the selected result."""
+    old_store = "old_out = pl.tile.store(current, [4, 0], out)"
+    before = old_store if old_use == "before" else ""
+    tail = old_store if old_use == "tail" else ""
+    producer = (
+        "pl.tile.recip(current)" if old_use == "operand" else "pl.tile.full([4, 8], dtype=pl.FP32, value=0.0)"
+    )
+    current_annotation = (
+        ': pl.Tile[[4, 8], pl.FP32, pl.MemRef("current_storage", slots=2)[0], pl.Mem.Vec]'
+        if protection == "pinned"
+        else ""
+    )
+    load_attrs = ', attrs={"pipeline_membership": "0:0"}' if protection == "pipeline" else ""
+    if protection == "pipeline":
+        producer = 'pl.tile.full([4, 8], dtype=pl.FP32, value=0.0, attrs={"pipeline_membership": "0:1"})'
+    workspace = ""
+    if protection == "workspace":
+        workspace = """source = pl.tile.full([4, 8], dtype=pl.FP32, value=1.0)
+        mask = pl.tile.cmps(source, 0.0, cmp_type=4)
+        workspace_result = pl.tile.sels(mask, source, current, -1.0)
+        workspace_out = pl.tile.store(workspace_result, [4, 0], out)"""
+    reset = f"""{before}
+            reset = {producer}
+            {tail}
+            selected = pl.yield_(reset)"""
+    keep = "selected = pl.yield_(current)"
+    if old_use == "sibling":
+        keep = f"{old_store}\n            {keep}"
+    then, otherwise = (keep, reset) if reset_in_else else (reset, keep)
+    early_alias = "alias = current" if old_use == "alias_after" else ""
+    after = {
+        "after": old_store,
+        "alias_after": "old_out = pl.tile.store(alias, [4, 0], out)",
+        "late_alias": "alias = current\n        old_out = pl.tile.store(alias, [4, 0], out)",
+    }.get(old_use, "")
+    return pl.parse_program(f"""
+@pl.program
+class ConditionalReset:
+    @pl.function(type=pl.FunctionType.AIV)
+    def main(self, pool: pl.Tensor[[4, 8], pl.FP32], flag: pl.Scalar[pl.INT32],
+             out: pl.Out[pl.Tensor[[8, 8], pl.FP32]]) -> pl.Tensor[[8, 8], pl.FP32]:
+        current{current_annotation} = pl.tile.load(pool, [0, 0], [4, 8], target_memory=pl.Mem.Vec{load_attrs})
+        {workspace}
+        {early_alias}
+        if flag != 0:
+            {then}
+        else:
+            {otherwise}
+        {after}
+        result = pl.tile.store(selected, [0, 0], out)
+        return result
+""")
+
+
+@pytest.mark.parametrize("planner", [*_PLANNERS, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("reset_in_else", [False, True])
+@pytest.mark.parametrize(
+    "old_use", ["none", "before", "sibling", "tail", "after", "alias_after", "late_alias", "operand"]
+)
+def test_conditional_selection_slot_liveness(
+    planner, reset_in_else, old_use, pass_verification_instruments, ascend_backend
+) -> None:
+    """Only observations that cannot follow the overwrite allow one shared slot."""
+    before = _conditional_reset_program(reset_in_else=reset_in_else, old_use=old_use)
+    with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=False):
+        materialized = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        tiles, allocations, branches = _storage(materialized)
+        current, reset, selected = (tiles[name] for name in ("current", "reset", "selected"))
+        shared = old_use in {"none", "before", "sibling"}
+        assert ir.MemRef.same_allocation(current, reset)
+        assert current.slot_count_ == reset.slot_count_ == selected.slot_count_ == (1 if shared else 2)
+        assert _constant(current.byte_offset_) == 0
+        assert _constant(reset.byte_offset_) == (0 if shared else _SLOT_BYTES)
+        assert _constant(allocations[current.base_.name_hint].args[1]) == (
+            _SLOT_BYTES if shared else _POOL_BYTES
+        )
+        if shared:
+            assert all(ref.slot_index_ is None for ref in (current, reset, selected))
+            assert _constant(selected.byte_offset_) == 0
+            assert _yielded_slot(branches[0].then_body) == _yielded_slot(branches[0].else_body) == 0
+            body = branches[0].else_body if reset_in_else else branches[0].then_body
+            assert isinstance(body, ir.SeqStmts)
+            # Sharing storage must leave overwrite synchronization to PTOAS.
+            assert not any(
+                isinstance(stmt, ir.EvalStmt)
+                and isinstance(stmt.expr, ir.Call)
+                and stmt.expr.op.name == ir.get_op("system.bar_all").name
+                for stmt in body.stmts
+            )
+        # Once the choice has become scalar control flow, rerunning semantic
+        # materialization must preserve the lowered selection.
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(materialized), materialized)
+        if planner == passes.MemoryPlanner.PYPTO:
+            materialized = passes.memory_reuse()(materialized)
+        if planner != passes.MemoryPlanner.PTOAS:
+            passes.allocate_memory_addr()(materialized)
+
+
+@pytest.mark.parametrize("protection", ["pinned", "pipeline", "workspace"])
+@pytest.mark.parametrize("planner", [*_PLANNERS, passes.MemoryPlanner.PTOAS])
+def test_conditional_selection_preserves_storage_constraints(
+    protection, planner, pass_verification_instruments, ascend_backend
+) -> None:
+    """A branch-dead payload does not override independent storage constraints."""
+    before = _conditional_reset_program(protection=protection)
+    with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=False):
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+    tiles, _, _ = _storage(after)
+    current, reset = tiles["current"], tiles["reset"]
+    assert not ir.MemRef.same_allocation(current, reset) or (
+        _constant(current.byte_offset_) + current.size_ <= _constant(reset.byte_offset_)
+        or _constant(reset.byte_offset_) + reset.size_ <= _constant(current.byte_offset_)
+    )
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("planner", [*_PLANNERS, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("reset_in_else", [False, True])
+@pytest.mark.parametrize("old_use", ["none", "before"])
+def test_conditional_selection_single_slot_ptoas(
+    planner, reset_in_else, old_use, pass_verification_instruments, ascend_backend, tmp_path
+) -> None:
+    """PTOAS handles shared-window accesses, including a store before overwrite."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    before = _conditional_reset_program(reset_in_else=reset_in_else, old_use=old_use)
+    with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=False):
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        if planner == passes.MemoryPlanner.PYPTO:
+            after = passes.memory_reuse()(after)
+        if planner != passes.MemoryPlanner.PTOAS:
+            after = passes.allocate_memory_addr()(after)
+        modules = codegen.PTOCodegen().generate(after, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        mlir = modules if isinstance(modules, str) else "\n".join(modules.values())
+        assert "pto.alloc_multi_tile" not in mlir
+        cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path), memory_planner=planner)
+        assert "main" in cpp
+
+
+@pytest.mark.parametrize("planner", [*_PLANNERS, passes.MemoryPlanner.PTOAS])
+def test_conditional_selection_preserves_old_value_forwarded_by_another_if(
+    planner, pass_verification_instruments, ascend_backend
+) -> None:
+    """A later selection may demand the old value without a direct payload read."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            pool: pl.Tensor[[4, 8], pl.FP32],
+            flag: pl.Scalar[pl.INT32],
+            other_flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            current = pl.tile.load(pool, [0, 0], [4, 8], target_memory=pl.Mem.Vec)
+            if flag != 0:
+                reset = pl.tile.full([4, 8], dtype=pl.FP32, value=0.0)
+                first = pl.yield_(reset)
+            else:
+                first = pl.yield_(current)
+            if other_flag != 0:
+                selected = pl.yield_(current)
+            else:
+                selected = pl.yield_(first)
+            return pl.tile.store(selected, [0, 0], out)
+
+    with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=False):
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+    tiles, allocations, branches = _storage(after)
+    current, reset = tiles["current"], tiles["reset"]
+    assert len(branches) == 2
+    assert current.slot_count_ == reset.slot_count_ == 2
+    assert _constant(allocations[current.base_.name_hint].args[1]) == _POOL_BYTES
+    assert _constant(current.byte_offset_) != _constant(reset.byte_offset_)
 
 
 if __name__ == "__main__":

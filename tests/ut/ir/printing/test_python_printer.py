@@ -1997,6 +1997,39 @@ def test_acc_init_cond_print_parse_roundtrip():
     assert python_print(reparsed, format=False) == printed
 
 
+@pytest.mark.parametrize("phase", ["Partial", "Final"])
+def test_matmul_acc_phase_print_parse_roundtrip(phase):
+    """Explicit tile printing preserves phase without widening the tensor API."""
+    source = textwrap.dedent(f"""\
+        @pl.program
+        class PhasedMatmul:
+            @pl.function(type=pl.FunctionType.InCore)
+            def base(
+                self,
+                lhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+                rhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                return pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.{phase})
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def acc(
+                self,
+                acc: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc],
+                lhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+                rhs: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+                k0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]:
+                return pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0, acc_phase=pl.AccPhase.{phase})
+    """)
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+    assert f"pl.tile.matmul(lhs, rhs, acc_phase=pl.AccPhase.{phase})" in printed
+    assert f"pl.tile.matmul_acc(acc, lhs, rhs, k0 == 0, acc_phase=pl.AccPhase.{phase})" in printed
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+
 def test_full_special_case_preserves_serialized_attrs():
     """Special full-call printing must not drop pipeline membership."""
     source = textwrap.dedent("""\

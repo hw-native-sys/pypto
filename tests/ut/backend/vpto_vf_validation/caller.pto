@@ -1,0 +1,47 @@
+// Copyright (c) PyPTO Contributors.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// EmitC owns the three UB buffers, transfers, and explicit pipeline barriers.
+// Nonzero UB offsets expose address truncation or address-space ABI mistakes.
+module attributes {pto.target_arch = "a5", pto.backend = "emitc"} {
+  func.func private @run_vf(!pto.ptr<f32, ub>, i32)
+  func.func @mixed_ub_vadd(%lhs: !pto.ptr<f32, gm>, %rhs: !pto.ptr<f32, gm>,
+                           %out: !pto.ptr<f32, gm>, %n: i32)
+      attributes {pto.aicore} {
+    pto.section.vector {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c1024 = arith.constant 1024 : index
+    %addr_lhs = arith.constant 4096 : i64
+    %ub_lhs = pto.castptr %addr_lhs : i64 -> !pto.ptr<f32, ub>
+    %tile_lhs = pto.alloc_tile addr = %addr_lhs : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %view_lhs = pto.make_tensor_view %lhs, shape = [%c1, %c1024], strides = [%c1024, %c1] : !pto.tensor_view<?x?xf32>
+    %part_lhs = pto.partition_view %view_lhs, offsets = [%c0, %c0], sizes = [%c1, %c1024] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x1024xf32>
+    pto.tload ins(%part_lhs : !pto.partition_tensor_view<1x1024xf32>) outs(%tile_lhs : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %addr_rhs = arith.constant 8192 : i64
+    %ub_rhs = pto.castptr %addr_rhs : i64 -> !pto.ptr<f32, ub>
+    %tile_rhs = pto.alloc_tile addr = %addr_rhs : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %view_rhs = pto.make_tensor_view %rhs, shape = [%c1, %c1024], strides = [%c1024, %c1] : !pto.tensor_view<?x?xf32>
+    %part_rhs = pto.partition_view %view_rhs, offsets = [%c0, %c0], sizes = [%c1, %c1024] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x1024xf32>
+    pto.tload ins(%part_rhs : !pto.partition_tensor_view<1x1024xf32>) outs(%tile_rhs : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %addr_out = arith.constant 12288 : i64
+    %ub_out = pto.castptr %addr_out : i64 -> !pto.ptr<f32, ub>
+    %tile_out = pto.alloc_tile addr = %addr_out : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %view_out = pto.make_tensor_view %out, shape = [%c1, %c1024], strides = [%c1024, %c1] : !pto.tensor_view<?x?xf32>
+    %part_out = pto.partition_view %view_out, offsets = [%c0, %c0], sizes = [%c1, %c1024] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x1024xf32>
+    pto.tload ins(%part_out : !pto.partition_tensor_view<1x1024xf32>) outs(%tile_out : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    pto.barrier #pto.pipe<PIPE_ALL>
+    func.call @run_vf(%ub_lhs, %n)
+        : (!pto.ptr<f32, ub>, i32) -> ()
+    pto.barrier #pto.pipe<PIPE_ALL>
+    pto.tstore ins(%tile_out : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=1024, v_row=1, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%part_out : !pto.partition_tensor_view<1x1024xf32>)
+    pto.barrier #pto.pipe<PIPE_ALL>
+    }
+    return
+  }
+}

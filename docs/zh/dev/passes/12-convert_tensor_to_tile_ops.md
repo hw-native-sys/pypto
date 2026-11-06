@@ -169,7 +169,8 @@ body 中本就存在的任何 `tile.load`（用户手写的，或更早的 pass 
 
 优先级按单次访问判定：load 上已有的显式 `pl.load(..., cache=...)` kwarg 在两个方向上
 都优先于作用域声明，因此 `cache=pl.CachePolicy.DEFAULT` 可以在 bypass 作用域内把某一次
-读取单独放回缓存。从这里开始，该 kwarg 只是像 `target_memory` 一样随 op 穿过剩余的
+读取单独放回缓存。A5 上单次 load 的显式 `cache` 也优先，因此本 pass 不会对该 load
+添加作用域的 `cache` kwarg。从这里开始，该 kwarg 只是像 `target_memory` 一样随 op 穿过剩余的
 pass 抵达 codegen。参见 [GM 缓存访问策略](../language/05-cache-policy.md)。
 
 ### 阶段二a：通过 Spmd/Group 包装函数转发新增 Out 参数
@@ -270,7 +271,7 @@ load 会把同一个操作数放进同一块 buffer。
 
 Mat 驻留 parent 的 `tile.slice` 并不是整块 buffer。它以 `pto.subview` 到达 codegen，
 携带运行期 offset 与 **parent 的**行间距，而两者都无法进入 `alloc_tile`：动态 offset
-无法折叠进常量 `addr`（见 [`AllocateMemoryAddr`](38-allocate_memory_addr.md)），行间距
+无法折叠进常量 `addr`（见 [`AllocateMemoryAddr`](40-allocate_memory_addr.md)），行间距
 也不在类型里。ptoas 同样没有针对该窗口的转置读取 —— 它拒绝以 view 作为 mat 源的
 `pto.tmov`（"expects mat-source tmov to use matching src/dst shapes"），也在任意目标
 尺寸下拒绝对其做 `pto.treshape`（"expects src and dst to have the same total byte

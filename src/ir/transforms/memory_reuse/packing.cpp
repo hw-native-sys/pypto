@@ -10,8 +10,6 @@
  */
 
 #include <algorithm>
-#include <cctype>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -38,9 +36,11 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
@@ -50,6 +50,8 @@
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 #include "src/ir/transforms/memory_reuse/storage.h"
@@ -78,7 +80,7 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
   return !(a.last_use_point <= b.def_point || b.last_use_point <= a.def_point);
 }
 
-// Cross-group shed objective (see docs/en/dev/passes/37-memory_reuse.md, pipeline-stage guard): when a
+// Cross-group shed objective (see docs/en/dev/passes/39-memory_reuse.md, pipeline-stage guard): when a
 // space overflows at every group's max-affordable depth,
 // the packer lowers one pipeline group's double-buffering depth by a residue. The MaxRelief heuristic
 // selects **which** group loses a level — lower score sheds first; ties always break by lowest group id
@@ -103,6 +105,8 @@ struct PackedBuffer {
   uint64_t capacity = 0;
   bool pinned = false;
   BufferRootCompatibility::Root buffer_root;
+  bool contains_retired_scratch = false;
+  bool all_retired_scratch_peers = true;
 };
 
 }  // namespace
@@ -295,15 +299,30 @@ ReuseMap IdentifyReuseOpportunities(
     return in_workspace_set(interval, hazard.looping_written_workspaces,
                             hazard.looping_written_workspace_bases);
   };
-  auto workspace_blocks = [&is_written_workspace, &is_looping_written_workspace](
-                              const LifetimeInterval& workspace, const LifetimeInterval& other) {
-    // Inside a loop the directional argument collapses: the back edge re-writes
-    // the workspace from the scalar pipe on iteration i+1 while iteration i's
-    // vector reads of anything sharing that buffer -- the TSELS `dst`, say, and
-    // whatever consumes it -- can still be in flight. Lifetime order within one
-    // iteration proves nothing about the next, so a looping workspace takes an
-    // exclusive buffer.
-    if (is_looping_written_workspace(workspace)) return true;
+  // Preserve affordable layouts: even safe sharing can add an unnecessary
+  // cross-pipe dependency. Only a capacity-relief retry enables retirement.
+  bool allow_retired_scratch_reuse = false;
+  auto workspace_blocks = [&hazard, &allow_retired_scratch_reuse, &is_written_workspace,
+                           &is_looping_written_workspace](const LifetimeInterval& workspace,
+                                                          const LifetimeInterval& other) {
+    if (is_looping_written_workspace(workspace)) {
+      const Var* base = TileMemRefBase(workspace.variable);
+      const Var* other_base = TileMemRefBase(other.variable);
+      if (!allow_retired_scratch_reuse || hazard.retirable_pipeline_scratch_bases.count(base) == 0 ||
+          hazard.retired_scratch_peer_bases.count(other_base) == 0) {
+        return true;
+      }
+      // Full allocation lifetimes include every alias and drain use. A later
+      // allocation is safe only outside all common repeating scopes: a parent's
+      // next iteration can otherwise rewrite scratch while DMA still reads it.
+      if (other.def_point <= workspace.last_use_point) return true;
+      const auto wi = hazard.allocation_loop_ranges.find(base);
+      const auto oi = hazard.allocation_loop_ranges.find(other_base);
+      if (wi == hazard.allocation_loop_ranges.end() || oi == hazard.allocation_loop_ranges.end()) return true;
+      const auto& a = wi->second;
+      const auto& b = oi->second;
+      return a.first != 0 && b.first != 0 && a.first <= b.second && b.first <= a.second;
+    }
     return is_written_workspace(workspace) && other.last_use_point <= workspace.def_point;
   };
 
@@ -489,6 +508,9 @@ ReuseMap IdentifyReuseOpportunities(
   auto alloc_policy = pack_be ? pack_be->CreateMemoryAllocatorPolicy() : nullptr;
 
   for (auto& [space_binding, indices_binding] : by_space) {
+    // Each space starts with the original predicate, independently of whether
+    // an earlier space needed and accepted the retired-scratch retry.
+    allow_retired_scratch_reuse = false;
     // Bind the structured bindings to regular local references: the lambdas below capture by `[&]`,
     // and capturing a structured binding name directly is only a C++20 extension (project is C++17).
     auto& space = space_binding;
@@ -559,15 +581,31 @@ ReuseMap IdentifyReuseOpportunities(
     auto pack = [&](bool allow_subranges) {
       std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
+        const Var* base = TileMemRefBase(lifetimes[idx].variable);
+        const bool retired_scratch =
+            allow_retired_scratch_reuse && hazard.retirable_pipeline_scratch_bases.count(base) != 0;
+        const bool local_peer =
+            allow_retired_scratch_reuse && hazard.retired_scratch_peer_bases.count(base) != 0;
         if (is_pinned[idx]) {
-          buffers.push_back(
-              PackedBuffer{{PackedMember{idx, 0}}, lifetimes[idx].size, true, buffer_roots[idx]});
+          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}},
+                                         lifetimes[idx].size,
+                                         true,
+                                         buffer_roots[idx],
+                                         retired_scratch,
+                                         local_peer});
           continue;
         }
         const auto& cand = lifetimes[idx];
         bool placed = false;
         for (PackedBuffer& buffer : buffers) {
           if (buffer.pinned || cand.size > buffer.capacity) continue;
+          // Even disjoint subranges acquire the arena's symbolic allocation
+          // base. Keep unknown families out of a retired-scratch arena in both
+          // insertion orders, without rescanning all prior members.
+          if ((buffer.contains_retired_scratch && !local_peer) ||
+              (retired_scratch && !buffer.all_retired_scratch_peers)) {
+            continue;
+          }
           // A disjoint subrange is still the same symbolic byte root. Dynamic
           // metadata requires a compatible full-capacity typed allocation even
           // when the original lifetimes do not overlap.
@@ -617,11 +655,14 @@ ReuseMap IdentifyReuseOpportunities(
                                       });
           buffer.members.insert(pos, placement);
           buffer.buffer_root = BufferRootCompatibility::Merge(buffer.buffer_root, buffer_roots[idx]);
+          buffer.contains_retired_scratch |= retired_scratch;
+          buffer.all_retired_scratch_peers &= local_peer;
           placed = true;
           break;
         }
         if (!placed) {
-          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, cand.size, false, buffer_roots[idx]});
+          buffers.push_back(PackedBuffer{
+              {PackedMember{idx, 0}}, cand.size, false, buffer_roots[idx], retired_scratch, local_peer});
         }
       }
       return buffers;
@@ -656,6 +697,23 @@ ReuseMap IdentifyReuseOpportunities(
       // Preserve the legacy layout whenever it fits. Only an actual overflow
       // enables subdivision, before sacrificing software-pipeline depth.
       retry_with_subranges();
+      if (cap != 0 && footprint(buffers) > cap &&
+          std::any_of(indices.begin(), indices.end(), [&](size_t index) {
+            return hazard.retirable_pipeline_scratch_bases.count(TileMemRefBase(lifetimes[index].variable)) !=
+                   0;
+          })) {
+        // One retry at unchanged stage depths. FFD is not monotone under a
+        // relaxed predicate: accept only a complete fit, otherwise restore the
+        // original packing and predicate before the existing shedding path.
+        auto original = std::move(buffers);
+        allow_retired_scratch_reuse = true;
+        buffers = pack(/*allow_subranges=*/false);
+        retry_with_subranges();
+        if (footprint(buffers) > cap) {
+          buffers = std::move(original);
+          allow_retired_scratch_reuse = false;
+        }
+      }
       // Bound the shed re-packs so the loop stays within the pass-complexity budget
       // (.claude/rules/pass-complexity.md). A legitimate shed converges in Σ_g(F_g−1) steps over the few
       // co-live groups, but the pipeline-group count can grow with generated IR, so cap the full re-packs
@@ -867,6 +925,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
         auto rebase_memref = [&](const TileTypePtr& tile) -> std::optional<MemRefPtr> {
           if (!tile->memref_.has_value() || !curr_memref) return source_memref;
           const auto& old = tile->memref_.value();
+          const auto& slot = placement.forward_slot ? source_memref : old;
           auto old_off = As<ConstInt>(old->byte_offset_);
           auto curr_off = As<ConstInt>(curr_memref->byte_offset_);
           if (!old_off || !curr_off) {
@@ -883,7 +942,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
             auto target_offset = AddByteOffsets(source_memref->byte_offset_, placement_expr);
             auto rebased_offset = AddByteOffsets(target_offset, relative);
             return std::make_shared<MemRef>(source_memref->base_, rebased_offset, old->size_, old->span_,
-                                            old->is_pinned_, old->slot_count_, old->slot_index_);
+                                            slot->is_pinned_, slot->slot_count_, slot->slot_index_);
           }
           const __int128 wide_rel = static_cast<__int128>(old_off->value_) - curr_off->value_;
           const __int128 wide_placement = placement.byte_offset;
@@ -902,7 +961,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
           auto rel_expr = std::make_shared<ConstInt>(placed_rel, DataType::INDEX, Span::unknown());
           return std::make_shared<MemRef>(source_memref->base_,
                                           AddByteOffsets(source_memref->byte_offset_, rel_expr), old->size_,
-                                          old->span_, old->is_pinned_, old->slot_count_, old->slot_index_);
+                                          old->span_, slot->is_pinned_, slot->slot_count_, slot->slot_index_);
         };
 
         // Rebase the representative through the same path as every member of
@@ -976,6 +1035,116 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
 
   MemRefSharingMutator mutator(reuse_map, var_sharing_groups, allocation_sizes);
   return mutator.VisitStmt(stmt);
+}
+
+/// Forward a last-used logical input version through an in-place-safe op.
+/// Scheduling only declares input versions. This placement decision runs after
+/// InitMemRef and uses the shared lifetime facts and operator alias contracts.
+/// A fixed number of indexed walks keeps the additional work O(N log N).
+StmtPtr ReuseSoftwarePipelineInputs(const StmtPtr& body, const LifetimeAnalysisResult& lifetimes,
+                                    const HazardInputs& hazard, const std::set<const Var*>& declared_bases) {
+  class Facts : public IRVisitor {
+   public:
+    std::vector<AssignStmtPtr> assigns;
+    std::map<const Var*, const Var*> aliases;
+    std::set<const Var*> version_bases;
+    std::set<const Var*> partial_view_bases;
+    const Var* Root(const Var* var) const {
+      auto it = aliases.find(var);
+      return it == aliases.end() ? var : it->second;
+    }
+    void VisitStmt_(const AssignStmtPtr& stmt) override {
+      if (auto tile = As<TileType>(stmt->var_->GetType()); tile && tile->memref_) {
+        assigns.push_back(stmt);
+        auto call = As<Call>(stmt->value_);
+        auto source = AsVarLike(stmt->value_);
+        if (call && op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
+          source = AsVarLike(call->args_[0]);
+        }
+        if (source) {
+          const auto* root = Root(source.get());
+          aliases.emplace(stmt->var_.get(), root);
+          const auto source_type = As<TileType>(root->GetType());
+          const auto& ref = *tile->memref_;
+          // Moving an ordinary result into a uniform slot must preserve every
+          // view in its allocation family, not just the defining result type.
+          if (ref->slot_count_ == 1 && source_type && source_type->memref_ &&
+              (!TileBufSignature::FromTileType(*tile).IsFullSlotAlias(
+                   TileBufSignature::FromTileType(*source_type)) ||
+               !structural_equal(ref->byte_offset_, (*source_type->memref_)->byte_offset_))) {
+            partial_view_bases.insert(ref->base_.get());
+          }
+        }
+        if (call && call->GetAttr<bool>(kSoftwarePipelineSlotsAttr, false)) {
+          version_bases.insert((*tile->memref_)->base_.get());
+        }
+      }
+      IRVisitor::VisitStmt_(stmt);
+    }
+  } facts;
+  facts.VisitStmt(body);
+  if (facts.version_bases.empty()) return body;
+  std::map<const Var*, int> last_use;
+  for (const auto& [var, interval] : lifetimes.var_liveness) {
+    last_use[facts.Root(var)] = std::max(last_use[facts.Root(var)], interval.second);
+  }
+  ReuseMap reuse;
+  std::map<const Var*, VarPtr> storage;
+  for (const auto& stmt : facts.assigns) {
+    auto call = As<Call>(stmt->value_);
+    if (!call || !OpRegistry::GetInstance().IsRegistered(call->op_->name_) ||
+        facts.aliases.count(stmt->var_.get())) {
+      continue;
+    }
+    auto output = As<TileType>(stmt->var_->GetType());
+    INTERNAL_CHECK_SPAN(output, stmt->span_) << "Internal error: software pipeline reuse requires a tile";
+    INTERNAL_CHECK_SPAN(output->memref_.has_value(), stmt->span_)
+        << "Internal error: software pipeline reuse requires an allocated tile";
+    const auto* output_base = (*output->memref_)->base_.get();
+    if (declared_bases.count(output_base) || facts.partial_view_bases.count(output_base)) continue;
+    const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+    if (!entry.IsInplaceSafe() || entry.GetCrossCoreRole()) continue;
+    auto def = lifetimes.var_liveness.find(stmt->var_.get());
+    if (def == lifetimes.var_liveness.end()) continue;
+    auto resolved = [&](const VarPtr& var) {
+      auto it = storage.find(facts.Root(var.get()));
+      return it == storage.end() ? var : it->second;
+    };
+    std::set<const Var*> forbidden;
+    for (const auto arg : entry.ForbidOutputAliasArgs()) {
+      if (arg >= call->args_.size()) continue;
+      auto var = AsVarLike(call->args_[arg]);
+      if (!var) continue;
+      auto ref = GetTypeMemRef(resolved(var)->GetType());
+      if (ref && *ref) forbidden.insert((*ref)->base_.get());
+    }
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      if (entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read || entry.IsWorkspaceArg(i)) continue;
+      auto input = AsVarLike(call->args_[i]);
+      if (!input || !last_use.count(facts.Root(input.get())) ||
+          last_use.at(facts.Root(input.get())) != def->second.first) {
+        continue;
+      }
+      auto source = resolved(input);
+      auto tile = As<TileType>(source->GetType());
+      if (!tile || !tile->memref_) continue;
+      const auto& ref = *tile->memref_;
+      if (ref->slot_count_ <= 1 || !facts.version_bases.count(ref->base_.get()) ||
+          forbidden.count(ref->base_.get()) || output->memory_space_ != tile->memory_space_ ||
+          output->dtype_.GetBit() != tile->dtype_.GetBit() ||
+          !TileBufSignature::FromTileType(*output).IsFullSlotAlias(TileBufSignature::FromTileType(*tile))) {
+        continue;
+      }
+      // Marked slot regions originate only from pipeline loads, including their
+      // tile.create consumer views and forwarded chains. Preserve the target
+      // load/TPOP constraint even though those views are not tile.load defs.
+      if (hazard.reads_tpop.count(stmt->var_.get())) continue;
+      reuse.emplace(stmt->var_, ReusePlacement{source, 0, true});
+      storage.emplace(stmt->var_.get(), source);
+      break;
+    }
+  }
+  return reuse.empty() ? body : ApplyMemRefSharing(body, reuse, lifetimes.var_sharing_groups);
 }
 
 }  // namespace memory_reuse

@@ -722,9 +722,9 @@ class TestBitwiseScalarFamilyCodegen:
 class TestRsqrtHighPrecisionCodegen:
     """Tests for the high-precision path of tile.rsqrt (2-arg form)."""
 
-    def _generate_mlir(self, program_cls) -> str:
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend910) -> str:
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
+        backend.set_backend_type(backend_type)
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program_cls)
@@ -734,8 +734,9 @@ class TestRsqrtHighPrecisionCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
-    def test_tile_rsqrt_with_tmp_emits_two_operand_trsqrt(self):
-        """pl.tile.rsqrt(src, tmp=...) emits pto.trsqrt with two ins operands."""
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    def test_tile_rsqrt_with_tmp_emits_two_operand_trsqrt(self, backend_type):
+        """pl.tile.rsqrt(src, tmp=..., high_precision=True) emits two ins operands."""
 
         @pl.program
         class Prog:
@@ -749,15 +750,18 @@ class TestRsqrtHighPrecisionCodegen:
                 tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.rsqrt(input_tile, tmp=tmp_tile)
+                result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.rsqrt(
+                    input_tile, tmp=tmp_tile, high_precision=True
+                )
                 updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
                 return updated_output
 
-        mlir = self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog, backend_type)
         assert "pto.trsqrt" in mlir
         # Two ins operands separated by a comma must appear inside a single ins(...) clause.
         trsqrt_line = next((line for line in mlir.splitlines() if "pto.trsqrt" in line), "")
         assert trsqrt_line, f"pto.trsqrt not found in MLIR:\n{mlir}"
+        assert strip_loc(trsqrt_line).endswith("{precisionType = #pto<rsqrt_precision high_precision>}")
         ins_start = trsqrt_line.find("ins(")
         assert ins_start != -1, f"ins(...) clause not found in: {trsqrt_line}"
         ins_end = trsqrt_line.find(")", ins_start)
@@ -768,7 +772,8 @@ class TestRsqrtHighPrecisionCodegen:
             f"Expected 2 ins operands for high-precision pto.trsqrt, got: {trsqrt_line}"
         )
 
-    def test_tensor_rsqrt_high_precision_end_to_end(self):
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    def test_tensor_rsqrt_high_precision_end_to_end(self, backend_type):
         """pl.rsqrt(x, high_precision=True) at the tensor level also emits the 2-operand form."""
 
         @pl.program
@@ -782,9 +787,10 @@ class TestRsqrtHighPrecisionCodegen:
                 y: pl.Tensor[[16, 16], pl.FP32] = pl.rsqrt(x, high_precision=True)
                 return y
 
-        mlir = self._generate_mlir(Prog)
+        mlir = self._generate_mlir(Prog, backend_type)
         assert "pto.trsqrt" in mlir
         trsqrt_line = next((line for line in mlir.splitlines() if "pto.trsqrt" in line), "")
+        assert strip_loc(trsqrt_line).endswith("{precisionType = #pto<rsqrt_precision high_precision>}")
         ins_start = trsqrt_line.find("ins(")
         ins_end = trsqrt_line.find(")", ins_start)
         ins_body = trsqrt_line[ins_start + len("ins(") : ins_end]
@@ -792,6 +798,53 @@ class TestRsqrtHighPrecisionCodegen:
         assert operand_str.count(",") >= 1, (
             f"Expected 2 ins operands for tensor-level high_precision rsqrt, got: {trsqrt_line}"
         )
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    @pytest.mark.parametrize("dtype", [pl.FP16, pl.FP32])
+    @pytest.mark.parametrize("entry", ["tensor", "tile"])
+    @pytest.mark.parametrize("high_precision", [False, True])
+    def test_rsqrt_algorithm_in_generated_cpp(self, tmp_path, backend_type, dtype, entry, high_precision):
+        """Scratch alone used to leave A5 on DEFAULT; check the actual ISA selector."""
+        if entry == "tensor":
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, x: pl.Tensor[[16, 32], dtype], out: pl.Out[pl.Tensor[[16, 32], dtype]]):
+                    y = pl.rsqrt(x, high_precision=high_precision)
+                    return pl.tensor.assemble(out, y, [0, 0])
+
+        elif high_precision:
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, x: pl.Tensor[[16, 32], dtype], out: pl.Out[pl.Tensor[[16, 32], dtype]]):
+                    a = pl.load(x, [0, 0], [16, 32])
+                    tmp = pl.tile.create([16, 32], dtype=dtype, target_memory=pl.MemorySpace.Vec)
+                    return pl.store(pl.tile.rsqrt(a, tmp=tmp, high_precision=True), [0, 0], out)
+
+        else:
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, x: pl.Tensor[[16, 32], dtype], out: pl.Out[pl.Tensor[[16, 32], dtype]]):
+                    a = pl.load(x, [0, 0], [16, 32])
+                    return pl.store(pl.tile.rsqrt(a), [0, 0], out)
+
+        mlir = self._generate_mlir(Prog, backend_type)
+        line = next(line for line in mlir.splitlines() if "pto.trsqrt" in line)
+        assert ("#pto<rsqrt_precision high_precision>" in line) == high_precision
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        if high_precision:
+            assert "TRSQRT<pto::RsqrtAlgorithm::HIGH_PRECISION>" in cpp
+        else:
+            assert "TRSQRT(" in cpp
+            assert "RsqrtAlgorithm::HIGH_PRECISION" not in cpp
 
 
 class TestB01PrecisionAndRowExpandAddCodegen:

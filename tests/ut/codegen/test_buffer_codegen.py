@@ -260,6 +260,19 @@ def test_gm_transfers_reject_incompatible_parameter_directions(name, direction):
         _emit(program)
 
 
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+def test_gm_transfers_reject_reduction_columns(name):
+    tensor = ir.Var("tensor", ir.TensorType([16, 64], DataType.FP32), SPAN)
+    buffer, allocation = _alloc("column", _type((16, 1), blayout=ir.TileLayout.col_major))
+    source, destination = (tensor, buffer) if name == "buffer.load" else (buffer, tensor)
+    program = _program(
+        [allocation, _eval(name, source, _window(0, 0), _window(16, 1), destination)],
+        [(tensor, ir.ParamDirection.InOut)],
+    )
+    with pytest.raises(ValueError, match="GM transfers do not support reduction column vectors"):
+        _emit(program)
+
+
 @pytest.mark.parametrize(
     "tensor_type,message",
     [

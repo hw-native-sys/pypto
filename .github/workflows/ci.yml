@@ -494,7 +494,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x64]
+        arch: [x64, arm64]
     runs-on: [self-hosted, linux, "${{ matrix.arch }}", cpu]
     env:
       PTOAS_ROOT: ${{ github.workspace }}/prebuild-checkout/ptoas-bin
@@ -532,6 +532,10 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-prebuild
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          # CPU prebuilds do not activate CANN on either architecture. Build
+          # simulator assets here; SDK-equipped NPU jobs cache their own
+          # onboard runtime wheels under the separate target-specific keys.
+          runtime-targets: build_package_sim
 
   prebuild-wheels-github:
     # prebuild-wheels for the GitHub-hosted jobs. Same idea, different
@@ -883,6 +887,7 @@ jobs:
           needs-device: 'false'
           pip-cache-name: pip-docs
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_sim
 
       - name: Run the user manual's runnable code blocks
         run: |
@@ -975,6 +980,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-examples
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_sim
 
       # Every example and every documented alternate invocation, plus the
       # manual's runnable blocks. All three ladders are lists of independent
@@ -1171,6 +1177,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-st
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
           # Python and GCC come from the pypto-toolchain bundle rather than a
           # per-machine conda env. Per job on purpose: clang-tidy is still on
           # conda, and a job is reverted by deleting this one line.
@@ -1308,6 +1315,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-st-direct
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Test system tests (batched shard B — ops + cross_core, cheap compiles)
         timeout-minutes: 30
@@ -1562,6 +1570,7 @@ jobs:
           pip-cache-name: pip-dist
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
           unset-ring: 'true'
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Test distributed system tests
         # task-submit --timeout is the total wait for queueing plus execution;
@@ -1639,6 +1648,11 @@ jobs:
           - platform: a5
             runner: cpu
             needs-cann: 'false'
+            # Compile-only: no device and no A5 runtime assets required. Building
+            # the A5 onboard runtime needs a CANN with HcclChannelAcquireWithConfig,
+            # which this CPU runner's SDK does not provide; the sim wheel supplies
+            # the Python SDK and source tree the kernel compiler reads.
+            runtime-targets: build_package_sim
     defaults:
       run:
         working-directory: lib-compile-checkout
@@ -1655,6 +1669,8 @@ jobs:
       PYPTO_GOLDEN_NUM_THREADS: 1
       OMP_NUM_THREADS: 1
       PYPTO_CODEGEN_MAX_WORKERS: 2
+      # Large software FP32 kernels need headroom for PTOAS sync analysis.
+      PYPTO_PTOAS_TIMEOUT_SECONDS: '180'
     steps:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
@@ -1672,6 +1688,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-lib
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: ${{ matrix['runtime-targets'] || format('build_package_{0};build_package_sim', matrix.platform) }}
 
       - name: Clone current pypto-lib
         run: |
@@ -1778,6 +1795,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-lib
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Clone pypto-lib (Qwen3-14B + DeepSeek-V4-Flash models)
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of lib-checkout, so
@@ -2012,6 +2030,7 @@ jobs:
           toolchain: bundle
           pip-cache-name: pip-serving-guard
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a2a3;build_package_sim
 
       - name: Clone pypto-serving
         # A sibling of serving-checkout, so actions/checkout leaves it alone on
@@ -2147,9 +2166,10 @@ jobs:
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Two steps share one checkout / install:
+    # npu-a5 card. Three steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
     #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2267,6 +2287,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-a5
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5;build_package_sim
           # Python and GCC come from the pypto-toolchain bundle, like every
           # other self-hosted job. The npu-a5 pool is provisioned with the
           # bundle and carries no conda env, so this is not optional here.
@@ -2281,7 +2302,8 @@ jobs:
         # (no precompile pipeline), executed in-process on the borrowed card. The
         # suite is parametrized over the platform ids, so --platform=a5 selects
         # exactly the a5 variants and deselects the a2a3-marked ones. The FP32
-        # cases verify entry initialization after deliberately enabling HF32.
+        # matmul cases verify entry initialization after deliberately enabling HF32.
+        # The rsqrt cases check both API entries against a FP64 ULP reference.
         # --forked isolates each case's device init, as the daily a5 job does.
         run: |
           source activate.sh
@@ -2291,6 +2313,7 @@ jobs:
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
+              tests/st/runtime/ops/test_rsqrt.py::test_a5_rsqrt_precision_ulp \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
@@ -2310,6 +2333,79 @@ jobs:
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: vf-tests-a5
+        id: vf-tests
+        shell: bash
+        timeout-minutes: 125
+        # Each acceptance test already isolates its Worker in a bounded child
+        # process. Keep pytest serial and use the card reserved by task-submit.
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          mkdir -p build
+          output=$(mktemp -d "$PWD/build/vpto-ci.XXXXXX")
+          echo "artifacts=$output" >> "$GITHUB_OUTPUT"
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID=\$TASK_DEVICE \
+                PYPTO_VPTO_TIMEOUT=900 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 \
+                PYPTO_VPTO_RUNTIME_OUTPUT='$output' && \
+              python -m pytest tests/st/runtime/vpto --platform=a5 -k persistent -v \
+                --junitxml='$output/junit.xml'" 2>&1 | tee "$output/task-submit.log"
+
+      - name: Upload VF A5 results
+        if: always() && steps.vf-tests.outputs.artifacts != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: vf-a5-results
+          path: ${{ steps.vf-tests.outputs.artifacts }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build extended register ST artifacts
+        id: reg-extended-build
+        shell: bash
+        timeout-minutes: 125
+        # Compile without reserving an NPU. Execution below consumes these
+        # production artifacts and checks all 18 ops across 126 numerical cases.
+        run: |
+          source activate.sh
+          mkdir -p build
+          output=$(mktemp -d "$PWD/build/reg-extended-ci.XXXXXX")
+          echo "artifacts=$output" >> "$GITHUB_OUTPUT"
+          task-submit --no-device --timeout 7200 --max-time 1800 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 && \
+              python tests/st/runtime/vpto/test_reg_extended_onboard.py --build '$output'" \
+            2>&1 | tee "$output/build.log"
+
+      - name: reg-extended-tests-a5
+        shell: bash
+        timeout-minutes: 125
+        env:
+          REG_EXTENDED_OUTPUT: ${{ steps.reg-extended-build.outputs.artifacts }}
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 900 \
+            --run "cd '$GITHUB_WORKSPACE/a5-checkout' && source activate.sh && \
+              export TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYPTO_SKIP_RUNTIME_PIN_CHECK=0 \
+                PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID=\$TASK_DEVICE \
+                PYPTO_VPTO_RUNTIME_OUTPUT='$REG_EXTENDED_OUTPUT' && \
+              python -m pytest tests/st/runtime/vpto/test_reg_extended_onboard.py \
+                --platform=a5 --device=\$TASK_DEVICE -v \
+                --junitxml='$REG_EXTENDED_OUTPUT/junit.xml'" \
+            2>&1 | tee "$REG_EXTENDED_OUTPUT/task-submit.log"
+
+      - name: Upload extended register A5 results
+        if: always() && steps.reg-extended-build.outputs.artifacts != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: reg-extended-a5-results
+          path: ${{ steps.reg-extended-build.outputs.artifacts }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Kill orphaned task-submit tasks
         if: always()
@@ -2420,13 +2516,6 @@ jobs:
           "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
           "$PTOAS_ROOT/bin/ptoas" --version
 
-      - name: Test PTOAS compilation regressions
-        # Reuse the pinned compiler above. Missing or incompatible PTOAS must
-        # fail this step instead of skipping the native compilation assertions.
-        run: >-
-          python -m pytest tests/ut/codegen/
-          --require-ptoas -m ptoas_compile -v
-
       - name: Install simpler
         run: |
           whl="$(ls wheelhouse/simpler-*.whl 2>/dev/null | head -1)"
@@ -2439,6 +2528,13 @@ jobs:
             pip install -v ./runtime
           fi
           python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
+
+      - name: Test PTOAS compilation regressions
+        # Reuse the pinned compiler above. Missing or incompatible PTOAS must
+        # fail this step instead of skipping the native compilation assertions.
+        run: >-
+          python -m pytest tests/ut/codegen/
+          --require-ptoas -m ptoas_compile -v
 
       - name: Test CPU simulator target admission
         # The unit-test job lacks Simpler. Require both optional prerequisites

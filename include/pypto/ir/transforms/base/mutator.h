@@ -123,6 +123,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt_(const RegScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override;
+  StmtPtr VisitStmt_(const SimtLaunchStmtPtr& op) override;
   StmtPtr VisitStmt_(const BreakStmtPtr& op) override;
   StmtPtr VisitStmt_(const ContinueStmtPtr& op) override;
   StmtPtr VisitStmt_(const InlineStmtPtr& op) override;

@@ -114,7 +114,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/51-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/53-materialize_runtime_scopes.md) |
 
 `pl.scope(..., name_hint="label")` 和 `pl.manual_scope(name_hint="label")`
 接受可选的字符串字面量，默认值为 `""`。print/parse 精确保留该标签，包括空白和转义字符。
@@ -139,7 +139,7 @@ IR 结构相等和哈希契约，因此不会被规范化删除。与提取作�
 除非算术分析能证明个数为正，否则每个 Out/InOut Tensor 都必须由调用方提供。
 遗漏输出会产生包含 Tensor 名称和参数位置的编译错误。空路径保留返回 Tensor
 已有的内容，不执行初始化。参见
-[LegalizeSpmdLaunches](../passes/42-legalize_spmd_launches.md)。
+[LegalizeSpmdLaunches](../passes/44-legalize_spmd_launches.md)。
 
 可选 `optimizations=[...]`。各条目彼此正交，可在同一列表中组合
 （例如 `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`）：
@@ -238,3 +238,47 @@ sum_final: pl.INT64 = sum  # captures final value
 - [Python IR 语法规范](00-python_syntax.md) —— 类型与表达式
 - [手工依赖原语](02-manual_dependencies.md) —— 退出自动依赖跟踪
 - [函数与程序结构](03-functions.md) —— 函数类型与参数方向
+
+## 强制硬件循环
+
+`pl.range` 对应 `HardwareLoopPolicy.Auto`。
+`pl.hardware_loop(stop, *, init_values=None)` 对应 `Require`，创建 `[0, stop)` 的
+Sequential 循环，固定 `start=0`、`step=1`。仅接受 `stop` 和可选的循环携带初始值
+`init_values`；拒绝 start、step 和 attrs 参数。`init_values` 重载保留携带值的类型推导。
+`Require` 只能位于外层 `pl.reg_scope()` 内，包括空循环。循环体内部的作用域不能满足
+这一要求。普通 `pl.range` 循环仍可在寄存器作用域外使用。
+
+```python
+@pl.jit.incore
+def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+    with pl.reg_scope():
+        for i, (acc,) in pl.hardware_loop(8, init_values=(x,)):
+            _result = pl.yield_(acc + i)
+    return x
+```
+
+该 API 表达意图。A5 检查规范循环资格，并在生成的 PTO 中保留循环，
+见 [VF 执行](../codegen/03-vpto-vf-integration.md#required-hardware-loops)。其他目标和未支持的循环形式仍会被拒绝。
+`ir.analyze_hardware_loop(loop, profile)` 区分 Eligible、Ineligible 和 Unknown；
+Eligible 表示 IR 资格，不等于机器码层面的硬件证据。
+动态整数 `stop` 无需静态范围证明，也不插入运行时范围检查；其迭代次数和终止归纳变量
+保持未知，但仍检查循环体、嵌套及后端能力。浮点及其他非整数上界会被拒绝。
+动态步长或未知效应保持 Unknown；Auto 在三态下均保持普通循环语义。
+
+静态零次 Sequential 循环豁免资格和证据要求，由 Simplify 消除并返回初始 iter_args；
+可能为空的动态循环不豁免。Require 在单次循环中也不能丢失意图。
+Builder 和手工构造的 IR 同样必须使用常量 `start=0`、`step=1`，零次循环也不例外。
+静态上界按无符号 16 位计数器检查：`stop=65535` 合法，`stop=65536` 超出范围。
+动态上界由调用者保证在目标支持的范围内，资格分析不要求提供范围证明。
+当 `stop=65535` 时，循环执行 65535 次，归纳变量依次为 0 至 65534，
+终止时归纳变量为 65535。
+
+目标 profile 定义无符号计数器、次数、嵌套和资源限制以及允许的循环携带类型。
+未显式认证的操作按未知处理。分析在当前 IR 上重新计算，结果不进入序列化
+和结构哈希。`passes.PassContext([], report_hardware_loops=True)` 可启用 codegen 报告，
+由 `context.get_hardware_loop_reports()` 读取；报告不是可复用的正确性证明。
+此可选 profile 分析独立于 A5 codegen 准入。A5 backend 当前未提供经过认证的
+hardware-loop profile，因此即使 codegen 接受某个非空循环，报告仍可能为
+`Unknown` / `HWL_UNSUPPORTED_PROFILE`。循环是否能生成 PTO 应以 codegen 诊断为准。
+硬件循环候选内部的嵌套 `for` 也必须使用同一 profile 进行资格分析。内层循环即使保持
+`Auto`，只要满足资格即可；内层循环若为 Ineligible 或 Unknown，外层硬件循环也不能通过资格分析。

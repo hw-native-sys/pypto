@@ -700,6 +700,33 @@ class TestTileUnaryOps:
         ir_str = str(Program)
         assert "tile.sqrt" in ir_str
 
+    @pytest.mark.parametrize("high_precision", [False, True])
+    @pytest.mark.parametrize("with_tmp", [False, True])
+    def test_tile_rsqrt_explicit_precision_contract(self, high_precision, with_tmp):
+        """Scratch must never silently select precision, including raw IR calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        args = [src, tmp] if with_tmp else [src]
+        if high_precision != with_tmp:
+            message = "requires a tmp" if high_precision else "tmp requires high_precision=True"
+            with pytest.raises(ValueError, match=message):
+                ir.create_op_call("tile.rsqrt", args, {"high_precision": high_precision}, span)
+            return
+        call = tile.rsqrt(src, tmp=tmp, high_precision=True) if with_tmp else tile.rsqrt(src)
+        assert dict(call.kwargs).get("high_precision", False) == high_precision
+        assert len(call.args) == len(args)
+        default = tile.rsqrt(src) if not high_precision else call
+        ir.assert_structural_equal(call, default)
+
+    def test_tile_rsqrt_tmp_requires_explicit_high_precision(self):
+        """The IR Python wrapper must reject legacy scratch-only calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            tile.rsqrt(src, tmp=tmp)
+
     def test_tile_rsqrt_rejects_tmp_shape_mismatch(self):
         """tile.rsqrt rejects a tmp tile whose per-dim shape differs from the input."""
         span = ir.Span.unknown()
@@ -709,10 +736,10 @@ class TestTileUnaryOps:
         tmp_var = ir.Var("tmp", tmp_type, span)
 
         with pytest.raises(ValueError, match="shape mismatch"):
-            tile.rsqrt(input_var, tmp_var)
+            tile.rsqrt(input_var, tmp_var, high_precision=True)
 
     def test_tile_rsqrt_high_precision(self):
-        """tile.rsqrt accepts an optional tmp tile for the high-precision path."""
+        """tile.rsqrt carries an explicit high_precision attribute and scratch."""
 
         @pl.program
         class Program:
@@ -726,7 +753,7 @@ class TestTileUnaryOps:
                 tmp: pl.Tile[[32, 32], pl.FP32] = pl.tile.create(
                     [32, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp)
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp, high_precision=True)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2761,6 +2788,48 @@ class TestTileMatMulOps:
         assert _const_values(result.shape) == [16, 32]
         assert _valid_of(result) == [16, 32]
 
+    @pytest.mark.parametrize("phase", [ir.AccPhase.Unspecified, ir.AccPhase.Partial, ir.AccPhase.Final])
+    @pytest.mark.parametrize(
+        ("acc_valid", "lhs_valid", "rhs_valid", "matches_product"),
+        [
+            ((16, 32), (8, 16), (16, 32), False),
+            ((16, 32), (16, 16), (16, 24), False),
+            ((8, 24), (8, 16), (16, 24), True),
+        ],
+        ids=["wider_rows", "wider_columns", "equal_valid_padded_physical"],
+    )
+    def test_final_matmul_acc_requires_matching_product_valid_shape(
+        self, phase, acc_valid, lhs_valid, rhs_valid, matches_product
+    ):
+        """Final stores cannot wait for untouched accumulator blocks to be set."""
+        span = ir.Span.unknown()
+        acc = ir.Var(
+            "acc",
+            ir.TileType([16, 32], DataType.FP32, tile_view=ir.TileView(valid_shape=acc_valid)),
+            span,
+        )
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([16, 16], DataType.FP16, tile_view=ir.TileView(valid_shape=lhs_valid)),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([16, 32], DataType.FP16, tile_view=ir.TileView(valid_shape=rhs_valid)),
+            span,
+        )
+        if phase == ir.AccPhase.Final and not matches_product:
+            with pytest.raises(
+                ValueError,
+                match="AccPhase.Final requires the product valid shape to match the accumulator valid shape",
+            ):
+                tile.matmul_acc(acc, lhs, rhs, acc_phase=phase)
+        else:
+            result_type = tile.matmul_acc(acc, lhs, rhs, acc_phase=phase).type
+            assert isinstance(result_type, ir.TileType)
+            assert _valid_of(result_type) == list(acc_valid)
+            assert _const_values(result_type.shape) == [16, 32]
+
     @pytest.mark.parametrize(
         ("acc_valid", "lhs_valid", "rhs_valid", "message"),
         [
@@ -2880,6 +2949,67 @@ class TestTileMatMulOps:
 
         ir_str = str(Program)
         assert "tile.matmul_acc" in ir_str
+
+    @pytest.mark.parametrize("phase", [ir.AccPhase.Unspecified, ir.AccPhase.Partial, ir.AccPhase.Final])
+    @pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+    def test_matmul_phase_preserves_span_and_legacy_init_cond(self, phase, accumulate):
+        """The new keyword must not displace IR spans or DSL init_cond operands."""
+        span = ir.Span("matmul_phase_compat.py", 7, 3, 7, 21)
+        lhs = ir.Var("lhs", ir.TileType([16, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 16], DataType.FP32), span)
+        acc = ir.Var("acc", ir.TileType([16, 16], DataType.FP32), span)
+        predicate = ir.ConstBool(True, span)
+        if accumulate:
+            call = tile.matmul_acc(acc, lhs, rhs, span, init_cond=predicate, acc_phase=phase)
+            dsl_call = pl.tile.matmul_acc(
+                pl.Tile(expr=acc), pl.Tile(expr=lhs), pl.Tile(expr=rhs), True, acc_phase=phase
+            ).unwrap()
+            assert isinstance(dsl_call, ir.Call)
+            assert len(call.args) == 4
+            assert isinstance(call.args[3], ir.ConstBool) and call.args[3].value
+            assert len(dsl_call.args) == 4
+            assert isinstance(dsl_call.args[3], ir.ConstBool) and dsl_call.args[3].value
+            assert dsl_call.args[3].dtype == DataType.BOOL
+            default_call = tile.matmul_acc(acc, lhs, rhs)
+        else:
+            call = tile.matmul(lhs, rhs, span, acc_phase=phase)
+            dsl_call = pl.tile.matmul(pl.Tile(expr=lhs), pl.Tile(expr=rhs), acc_phase=phase).unwrap()
+            assert isinstance(dsl_call, ir.Call)
+            default_call = tile.matmul(lhs, rhs)
+        expected = {} if phase == ir.AccPhase.Unspecified else {"acc_phase": int(phase)}
+        assert dict(call.kwargs) == dict(dsl_call.kwargs) == expected
+        assert dict(default_call.kwargs) == {}
+        assert call.span.filename == "matmul_phase_compat.py"
+
+    @pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+    @pytest.mark.parametrize("phase", [1, 99, "final"])
+    def test_matmul_rejects_invalid_acc_phase(self, accumulate, phase):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 16], DataType.FP32), span)
+        acc = ir.Var("acc", ir.TileType([16, 16], DataType.FP32), span)
+        with pytest.raises(ValueError, match="acc_phase|invalid literal for int"):
+            if accumulate:
+                tile.matmul_acc(acc, lhs, rhs, acc_phase=cast(Any, phase))
+            else:
+                tile.matmul(lhs, rhs, acc_phase=cast(Any, phase))
+
+    def test_matmul_acc_phase_is_keyword_only(self):
+        for wrapper in (pl.tile.matmul, pl.tile.matmul_acc, tile.matmul, tile.matmul_acc):
+            assert inspect.signature(wrapper).parameters["acc_phase"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    @pytest.mark.parametrize("accumulate", [False, True], ids=["base", "acc"])
+    @pytest.mark.parametrize("phase", ["final", 3.0], ids=["string", "double"])
+    def test_raw_matmul_phase_requires_an_integer_even_with_open_kwargs(self, accumulate, phase):
+        """Native construction bypasses Python coercion; phase still has a fixed type."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 16], DataType.FP32), span)
+        acc = ir.Var("acc", ir.TileType([16, 16], DataType.FP32), span)
+        op_name = "tile.matmul_acc" if accumulate else "tile.matmul"
+        args = [acc, lhs, rhs] if accumulate else [lhs, rhs]
+        with pytest.raises(TypeError, match="Invalid type for kwarg key: acc_phase, expected int"):
+            ir.create_op_call(op_name, args, {"acc_phase": phase}, span)
 
     def test_tile_matmul_bias(self):
         """Test tile.matmul_bias operator - matrix multiplication with bias add."""
@@ -9607,6 +9737,93 @@ def test_matmul_tf32_mode_rejects_unsupported_inputs(namespace, accumulate, mode
             ops.matmul_acc(acc, lhs, rhs, tf32_mode=mode)
         else:
             ops.matmul(lhs, rhs, tf32_mode=mode)
+
+
+@pytest.mark.parametrize("policy", [-1, 8, 255, 256])
+def test_load_rejects_invalid_cache_policy(policy):
+    src = ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="invalid CachePolicy value"):
+        tile.load(src, [0, 0], [32, 32], cache=policy)
+
+
+@pytest.mark.parametrize("policy", [-1, 8, 255, 256])
+def test_store_rejects_invalid_cache_policy(policy):
+    src = _partial_tile([32, 32], [32, 32])
+    dst = ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="invalid CachePolicy value"):
+        tile.store(src, [0, 0], dst, cache=policy)
+
+
+@pytest.mark.parametrize("policy", [pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP])
+def test_store_rejects_load_only_cache_policy(policy):
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    with pytest.raises(ValueError, match="load-only CachePolicy"):
+        pl.store(src, [0, 0], dst, cache=policy)
+
+
+@pytest.mark.parametrize("policy", list(pl.CachePolicy))
+def test_dsl_load_preserves_semantic_cache_policy(policy):
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    call = pl.load(src, [0, 0], [32, 32], cache=policy).unwrap()
+    assert isinstance(call, ir.Call)
+    assert dict(call.kwargs)["cache"] == int(policy)
+    assert "l2_hint" not in dict(call.kwargs)
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        p
+        for p in list(pl.CachePolicy)
+        if p not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
+    ],
+)
+def test_dsl_store_preserves_semantic_cache_policy(policy):
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    call = pl.store(src, [0, 0], dst, cache=policy).unwrap()
+    assert isinstance(call, ir.Call)
+    assert dict(call.kwargs)["cache"] == int(policy)
+    assert "l2_hint" not in dict(call.kwargs)
+
+
+def test_dsl_cache_rejects_unrelated_enum_types():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    value = pl.load(src, [0, 0], [32, 32])
+    for hint in (pl.AtomicType.Add, pl.STPhase.Final):
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
+            pl.load(src, [0, 0], [32, 32], cache=cast(Any, hint))
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
+            pl.store(value, [0, 0], src, cache=cast(Any, hint))
+
+
+def test_cache_policy_unifies_all_modes_and_keeps_legacy_values():
+    assert {policy.name: int(policy) for policy in pl.CachePolicy} == {
+        "DEFAULT": 0,
+        "BYPASS": 1,
+        "NORMAL_FIRST_VICTIM": 2,
+        "NORMAL_LAST_VICTIM": 3,
+        "NORMAL_PERSISTENT": 4,
+        "NOT_ALLOC_KEEP": 5,
+        "NOT_ALLOC_CLEAN": 6,
+        "NOT_ALLOC_DROP": 7,
+    }
+    assert not hasattr(pl, "A2A3CachePolicy")
+    assert not hasattr(pl, "A5CachePolicy")
+    assert not hasattr(pl, "LoadL2Hint")
+    assert not hasattr(pl, "StoreL2Hint")
+
+
+def test_omitted_cache_policy_stays_absent():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    value = pl.load(src, [0, 0], [32, 32])
+    load_call = value.unwrap()
+    store_call = pl.store(value, [0, 0], src).unwrap()
+    assert isinstance(load_call, ir.Call)
+    assert isinstance(store_call, ir.Call)
+    assert "cache" not in dict(load_call.kwargs)
+    assert "cache" not in dict(store_call.kwargs)
 
 
 if __name__ == "__main__":

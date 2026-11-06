@@ -46,12 +46,12 @@ inline constexpr std::size_t kCommCtxSize = sizeof(::CommContext);
 // MTE/CCU alignment and leaves tail room for rounded FP16 remote TLOADs.
 inline constexpr std::size_t kCommBufferAlignmentBytes = 64;
 
-static_assert(kRankIdOffset == 16, "CommContext.rankId offset drift");
-static_assert(kRankNumOffset == 20, "CommContext.rankNum offset drift");
-static_assert(kWindowsInOffset == 32, "CommContext.windowsIn offset drift");
-static_assert(kWindowsOutOffset == 544, "CommContext.windowsOut offset drift");
+static_assert(kRankIdOffset == 0, "CommContext.rankId offset drift");
+static_assert(kRankNumOffset == 4, "CommContext.rankNum offset drift");
+static_assert(kWindowsInOffset == 16, "CommContext.windowsIn offset drift");
+static_assert(kWindowsOutOffset == 528, "CommContext.windowsOut offset drift");
 static_assert(kWindowSlotStride == 8, "CommContext window slot stride drift");
-static_assert(kCommCtxSize == 1056, "CommContext size drift");
+static_assert(kCommCtxSize == 1088, "CommContext size drift");
 
 }  // namespace comm_layout
 }  // namespace distributed

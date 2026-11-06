@@ -1671,5 +1671,79 @@ def test_unknown_canonical_trip_count_keeps_selected_k_without_assuming_repetiti
     assert "single-C cost lower bound" in capfd.readouterr().err
 
 
+class _StampCanonicalPhase(ir.IRMutator):
+    """Add the explicit tile phase after the shared tensor/JIT lowering prefix."""
+
+    def __init__(self, phase):
+        super().__init__()
+        self.phase = phase
+
+    def visit_call(self, op):
+        call = super().visit_call(op)
+        if not isinstance(call, ir.Call) or call.op.name not in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+            return call
+        kwargs = dict(call.kwargs)
+        if self.phase == pl.AccPhase.Unspecified:
+            kwargs.pop("acc_phase", None)
+        else:
+            kwargs["acc_phase"] = int(self.phase)
+        return ir.Call(call.op, list(call.args), kwargs, dict(call.attrs), call.type, call.span)
+
+
+class _CanonicalMadPhases(ir.IRVisitor):
+    def __init__(self):
+        super().__init__()
+        self.phases = []
+
+    def visit_call(self, op):
+        if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+            self.phases.append(dict(op.kwargs).get("acc_phase", int(pl.AccPhase.Unspecified)))
+        super().visit_call(op)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize(
+    "source",
+    [canonical_split_k_n_boundary_retiles_k, canonical_split_k_n_boundary_retiles_k_predicated],
+    ids=["peeled", "predicated"],
+)
+@pytest.mark.parametrize("phase", [pl.AccPhase.Unspecified, pl.AccPhase.Partial])
+def test_canonical_split_k_preserves_nonfinal_phase_across_planners(planner, source, phase):
+    """The selected-K emitter must preserve phase just like PTOAS's rebuild path.
+
+    This source needs both an output grid and inner-K blocking. Testing only
+    an ordinary K-only matmul would miss CanonicalSplitKRetiler's separate plan
+    constructor, which used to silently reset explicit Partial to Unspecified.
+    """
+    original = _lower_to_auto_tile_input(_jit_program(source))
+    before = _StampCanonicalPhase(phase).visit_program(original)
+    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
+    assert choice.k < COMPOSE_K_TILE
+    assert _canonical_grid_size(WIDE_M, WIDE_N, choice) > 1
+    with passes.PassContext([ir.make_roundtrip_instrument()], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+        if phase == pl.AccPhase.Unspecified:
+            expected_default = passes.auto_tile_matmul_l0()(original)
+            ir.assert_structural_equal(after, expected_default)
+
+    collector = _CanonicalMadPhases()
+    collector.visit_program(after)
+    assert len(_collect_store_calls(after)) > 1
+    assert collector.phases
+    assert set(collector.phases) == {int(phase)}
+    if planner != passes.MemoryPlanner.PTOAS:
+        # PyPTO/DSA-RP construct and immediately emit their selected inner-K
+        # plan, whereas PTOAS deliberately retains its compatibility schedule.
+        expected_ks = {choice.k}
+        if COMPOSE_K_TILE % choice.k:
+            expected_ks.add(COMPOSE_K_TILE % choice.k)
+        operands = _CanonicalMadOperands()
+        operands.visit_program(after)
+        assert operands.ks == expected_ks
+    assert all(dict(store.kwargs).get("st_phase", 0) == 0 for store in _collect_store_calls(after))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

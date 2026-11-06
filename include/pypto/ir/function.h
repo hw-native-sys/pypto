@@ -63,7 +63,8 @@ enum class FunctionType : uint8_t {
   Group = 5,          ///< Co-scheduled group of AIC + AIV kernels
   Spmd = 6,           ///< SPMD data-parallel dispatch
   Inline = 7,         ///< Whole-body substitution at every call site
-  Graph = 8           ///< Recordable/replayable orchestration fragment
+  Graph = 8,          ///< Recordable/replayable orchestration fragment
+  SIMT = 9            ///< Per-thread device helper launched inside an AIV task
 };
 
 /** @brief Function body representation, independent of its execution context. */
@@ -283,6 +284,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Inline";
     case FunctionType::Graph:
       return "Graph";
+    case FunctionType::SIMT:
+      return "SIMT";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -316,6 +319,12 @@ inline Level FunctionTypeToLevel(FunctionType type) {
  */
 inline bool IsInCoreType(FunctionType type) {
   return type == FunctionType::InCore || type == FunctionType::AIC || type == FunctionType::AIV;
+}
+
+/// Device helpers participate in device IR transforms without becoming
+/// independently scheduled InCore tasks or inheriting a SubWorker role.
+inline bool IsDeviceFunctionType(FunctionType type) {
+  return IsInCoreType(type) || type == FunctionType::SIMT;
 }
 
 /**
@@ -371,6 +380,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Inline;
   } else if (str == "Graph") {
     return FunctionType::Graph;
+  } else if (str == "SIMT") {
+    return FunctionType::SIMT;
   } else {
     throw pypto::TypeError("Unknown FunctionType: " + str);
   }
@@ -480,11 +491,11 @@ inline constexpr const char* kAttrSplitAiv = "split_aiv";
  *
  * Value type: ``std::string`` (an absolute path). Written by the
  * ``@pl.function(external_source=...)`` decorator.
- * 函数体仅含空声明或写回参数的 return 契约，实际执行代码来自该源码。
+ * 函数体仅含空声明，写回参数契约由 external_return_params 属性表达。
  * Read by ``ExpandMixedKernel`` (external members cannot
  * be ABI-normalised or inferred into dual dispatch),
- * ``VerifyReturnParamsExplicit`` (a declaration-only body legitimately has no
- * ``ReturnStmt``), the Python printer, and the backend, which compiles the named
+ * ``VerifyReturnParamsExplicit`` (validates the declaration's return contract),
+ * the Python printer, and the backend, which compiles the named
  * ``.cpp`` in place of PyPTO codegen. Never stripped.
  *
  * Decorator-only: the printer emits it as an ``@pl.function(external_source=...)``
@@ -502,6 +513,24 @@ inline constexpr const char* kAttrExternalSource = "external_source";
  * sync_start 和实际运行时核数，覆盖动态启动规模及没有 SPMD 作用域的调用。
  */
 inline constexpr const char* kAttrExternalHardSyncall = "external_hard_syncall";
+
+/**
+ * @brief Ordered parameter references returned by an external kernel declaration.
+ *
+ * Value type: ``std::vector<VarPtr>``. The JIT records explicit parameter returns
+ * here before replacing the extern body with an empty declaration. Each entry
+ * corresponds to one flat return type; subsets, permutations, and repetitions
+ * are preserved. References (rather than parameter offsets) follow SSA renaming
+ * and signature changes through the existing attribute remapping machinery.
+ *
+ * Read and validated by return_lineage for both tracing and structural lookups,
+ * including ReturnParamsExplicit verification. Never stripped. Printed as a
+ * ``pl.func_attr`` prologue and serialized with the ordinary Var-list payload.
+ * Without this attr, a declaration returns all Out/InOut parameters in order
+ * only when their count and tensor types match its declared results; an
+ * ambiguous signature must supply the explicit contract.
+ */
+inline constexpr const char* kAttrExternalReturnParams = "external_return_params";
 
 /**
  * @brief Reserved Function attr key naming the builtin template package that
@@ -529,6 +558,24 @@ inline constexpr const char* kAttrBuiltinTemplateDir = "builtin_template_dir";
  * splits it back into the template variable map.
  */
 inline constexpr const char* kAttrBuiltinTemplateVars = "builtin_template_vars";
+
+/**
+ * @brief Reserved Function attr key requiring every tensor argument of a
+ * dispatch to this kernel to be a contiguous row-major view at runtime.
+ *
+ * Value type: ``bool``; absent means false. Written by
+ * ``LowerL2TensorCollectives`` on the AIV function it synthesizes for a managed
+ * CHIP/L2 collective, whose hand-written kernel addresses every operand as
+ * ``buffer.addr + start_offset`` followed by dense row-major indexing. Read by
+ * orchestration codegen, which emits a check on each tensor argument's runtime
+ * ``Tensor::is_contiguous`` flag ahead of that kernel's submit and latches
+ * ``SIMPLER_ERROR_INVALID_ARGS`` on the first violation. The pass already
+ * proves every operand built in the orchestration row-major at compile time, so
+ * this is a backstop for operands the caller supplies: argument packing
+ * rejects a non-contiguous host torch tensor, but a prebuilt runtime ``Tensor``
+ * is checked only here.
+ */
+inline constexpr const char* kAttrRequireContiguousOperands = "require_contiguous_operands";
 
 /**
  * @brief Reserved Function attr key opting a function out of automatic
@@ -598,6 +645,12 @@ class Function : public IRNode {
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();
+    if (func_type_ == FunctionType::SIMT) {
+      CHECK_SPAN(return_types_.empty(), span_)
+          << "SIMT helpers return void; launch results name updated storage";
+      CHECK_SPAN(!level_ && !role_ && !requires_runtime_binding_, span_)
+          << "SIMT helpers cannot carry runtime task level, role, or binding metadata";
+    }
     if (IsInCoreType(func_type_) || func_type_ == FunctionType::Group || IsOrchestrationLike(func_type_)) {
       Level derived_level = FunctionTypeToLevel(func_type_);
       // A Graph body orchestrates tasks, so it is an Orchestrator like any other

@@ -48,6 +48,7 @@
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/simt.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
@@ -316,6 +317,8 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     // ``builtin.tensor.<collective>`` call. Printed in the ``pl.<DTYPE>`` DSL
     // form the dtype resolver reads back (ast_parser._parse_attr_value).
     stream_ << prefix_ << "." << DataTypeToString(std::any_cast<DataType>(value));
+  } else if (t == typeid(SimtAxis)) {
+    stream_ << prefix_ << ".SimtAxis." << SimtAxisToString(std::any_cast<SimtAxis>(value));
   } else if (t == typeid(MemorySpace)) {
     stream_ << prefix_ << ".Mem." << MemorySpaceToString(std::any_cast<MemorySpace>(value));
   } else if (t == typeid(TensorLayout)) {
@@ -1010,6 +1013,9 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         stream_ << prefix_ << ".AtomicType." << AtomicTypeToString(static_cast<AtomicType>(int_val));
       } else if (key == "acc_phase") {
         stream_ << prefix_ << ".AccPhase." << AccPhaseToString(static_cast<AccPhase>(int_val));
+      } else if (key == "cache" && (int_val > 1 || IsOp(op, "tile.store"))) {
+        stream_ << prefix_ << ".CachePolicy."
+                << AttrValueToEnumMember(CachePolicyToString(static_cast<CachePolicy>(int_val)));
       } else if (key == "st_phase") {
         stream_ << prefix_ << ".STPhase." << STPhaseToString(static_cast<STPhase>(int_val));
       } else {
@@ -1040,6 +1046,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "printing kwarg: " + key)));
     } else if (value.type() == typeid(DataType)) {
       stream_ << prefix_ << "." << DataTypeToString(AnyCast<DataType>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(SimtAxis)) {
+      stream_ << prefix_ << ".SimtAxis." << SimtAxisToString(AnyCast<SimtAxis>(value, key));
     } else if (value.type() == typeid(MemorySpace)) {
       stream_ << prefix_ << ".Mem."
               << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));

@@ -6,12 +6,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Read-only hardware synchronization resource queries, independent of global backend state.
+"""Hardware synchronization catalogs and backend macro resource descriptions.
 
-Pool keys are mutable lookup values. Catalogs and query results are immutable;
+Pool keys are mutable lookup values. Query results are immutable;
 collection and nested-key properties return snapshots rather than writable aliases.
-Pools model resource identity and ID capacity; backend instruction-legality checks
-remain separate from these queries.
+Macro queries belong to an explicit Backend. Pools and macro resource summaries
+do not replace backend instruction-legality checks.
 """
 
 from enum import Enum
@@ -91,3 +91,69 @@ class ResourceCatalog:
 
 def find_resource_catalog(target: str) -> ResourceCatalog | None:
     """Borrow a backend catalog without ISA discovery or changing the active target; unknown is None."""
+
+class IsaSyncMode(Enum):
+    """ISA build mode; Auto takes precedence over FlagTest when both are defined."""
+
+    Manual = 0
+    Auto = 1
+    FlagTest = 2
+
+class IsaIdSource(Enum):
+    """Fixed IDs, caller parameters, or candidates for an ISA helper's compiler token."""
+
+    Fixed = 0
+    Parameter = 1
+    CompilerAllocated = 2
+
+class IsaResourceLifetime(Enum):
+    """Reserve resources for one invocation or across calls sharing an owner."""
+
+    Invocation = 0
+    Owner = 1
+
+class IsaResourceClaim:
+    """Immutable signal demand; collections and nested keys are detached snapshots."""
+
+    @property
+    def pool(self) -> PoolKey:
+        """Signal pool, including core and pipe direction."""
+        ...
+    @property
+    def source(self) -> IsaIdSource: ...
+    @property
+    def ids(self) -> list[int]:
+        """Fixed IDs or token candidates; this declaration does not select or control a compiler token."""
+        ...
+    @property
+    def parameter(self) -> str:
+        """Operand or template role to bind for a Parameter claim; empty otherwise."""
+        ...
+    @property
+    def offsets(self) -> list[int]:
+        """Offsets added to the parameter binding to obtain logical IDs."""
+        ...
+    @property
+    def lifetime(self) -> IsaResourceLifetime: ...
+    @property
+    def owner(self) -> str:
+        """Role whose concrete identity the caller supplies for a shared binding."""
+        ...
+    @property
+    def modes(self) -> list[IsaSyncMode]:
+        """Build modes in which the implementation occupies these signals."""
+        ...
+
+class IsaMacroResources:
+    """Nonempty signal rule set for a public ISA macro on one target."""
+
+    @property
+    def name(self) -> str:
+        """Qualified ISA macro name, such as pto::comm::TPUT."""
+        ...
+    @property
+    def target(self) -> str: ...
+    @property
+    def claims(self) -> list[IsaResourceClaim]:
+        """Claims across variants; the backend must select and bind them for an actual call."""
+        ...

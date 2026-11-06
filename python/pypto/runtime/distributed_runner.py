@@ -836,10 +836,12 @@ def _run_l3_swimlane_two_pass(
 
     The two passes are two runs, and the ChipWorker child numbers its capture
     directories per process — so the graph pass's ``deps.json`` and the timing
-    pass's records land in *different* ``rank{r}/d{k}`` directories.
-    :func:`_collect_l3_swimlane` pairs them back up from the child's identity
-    sidecars; without that pairing the converter sees no task graph and renders
-    a swimlane with no dependency edges.
+    pass's records land in *different* ``rank{r}/d{k}`` directories. The DFX
+    marker counter mirrors that process-scoped numbering
+    (:func:`_reset_dfx_dispatch_state`), so each pass is marked where it lands.
+    :func:`_collect_l3_swimlane` still pairs the two captures from the child's
+    identity sidecars; without that pairing the converter sees no task graph and
+    renders a swimlane with no dependency edges.
 
     Both calls execute the program. As with the existing one-shot L3 protocol,
     mutable arguments are not snapshotted or restored between passes.
@@ -946,11 +948,20 @@ def _resolve_chip_worker(orch: Any, worker: int | None) -> int:
     return seq % chip_count
 
 
-def _reset_dfx_dispatch_state(orch: Any, chip_cids: dict[str, Any]) -> None:
-    """Reset the per-run dispatch state :func:`_submit_chip` reads off ``orch``.
+def _reset_dfx_dispatch_state(
+    orch: Any,
+    chip_cids: dict[str, Any],
+    *,
+    dispatch_idx: dict[str, int] | None = None,
+) -> None:
+    """Install the dispatch state :func:`_submit_chip` reads off ``orch``.
 
-    ``_dfx_dispatch_idx`` numbers each card's dispatches ``d0, d1, ...`` fresh per
-    run, so the swimlane two-pass files one dispatch under one directory.
+    ``_dfx_dispatch_idx`` numbers each card's dispatches ``d0, d1, ...`` and must
+    mirror the ChipWorker child's ``local_capture_index``, which spans the
+    *process*. Callers on a long-lived child (prepared and persistent workers)
+    therefore pass the worker-owned dict here so the numbering continues across
+    runs; the one-shot path, which forks a fresh child per pass, passes nothing
+    and gets a fresh counter. Reset when the child resets.
 
     ``_dfx_chip_names`` reverses the registered ``callables`` mapping so
     ``_submit_chip`` can name the L2 program behind an otherwise opaque
@@ -958,7 +969,7 @@ def _reset_dfx_dispatch_state(orch: Any, chip_cids: dict[str, Any]) -> None:
     hashable, and ``chip_cids`` holds every one alive for the whole run, so the
     ids are stable and unique.
     """
-    orch._dfx_dispatch_idx = {}
+    orch._dfx_dispatch_idx = {} if dispatch_idx is None else dispatch_idx
     orch._dfx_chip_names = {id(cid): name for name, cid in chip_cids.items()}
 
 
@@ -1011,14 +1022,14 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     this wrapper only derives the same directory — for the marker below and the
     offline post-pass — and forwards ``config`` untouched.
 
-    ``k`` comes from a per-card counter on ``orch`` reset at the top of every
-    run (see :func:`_reset_dfx_dispatch_state`), so it is this run's dispatch
-    ordinal. The child's own counter spans the whole process, so the two
-    numberings agree only on a worker's first run: the marker
-    :func:`_record_dispatch_program` stamps here therefore lands on the first
-    run's capture directory — the graph pass of a swimlane two-pass — and
-    :func:`_collect_l3_swimlane` reads it back through the capture pairing
-    rather than expecting it beside the records.
+    ``k`` comes from a per-card counter on ``orch`` that mirrors the child's own
+    ``local_capture_index``. Both are process-scoped: a prepared or persistent
+    worker carries the counter across runs, while a one-shot worker — which
+    forks a fresh child for each pass — starts it over. The marker
+    :func:`_record_dispatch_program` stamps therefore lands in the same
+    ``rank{w}/d{k}`` the child files that capture under, on the graph pass of a
+    swimlane two-pass; :func:`_collect_l3_swimlane` still resolves it through the
+    capture pairing.
 
     When DFX is off (``output_prefix`` unset) the call is forwarded unchanged.
 
@@ -1038,9 +1049,15 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
         idx_map = orch._dfx_dispatch_idx = cast("dict[str, int]", {})
     rank_label = _dfx_rank_label(worker)
     k = idx_map.get(rank_label, 0)
-    idx_map[rank_label] = k + 1
     _record_dispatch_program(orch, callable_id, Path(f"{base}/{rank_label}/d{k}"))
-    return orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    handle = orch.submit_next_level(callable_id, task_args, config, worker=worker)
+    # Advance only once the submit is accepted. A synchronous rejection creates
+    # no capture, so counting it would leave every later marker one directory
+    # ahead of the child's own numbering -- self-correcting when the counter was
+    # reset per run, permanent now that a prepared worker carries it across
+    # runs. The marker already at ``d{k}`` is overwritten by the next submit.
+    idx_map[rank_label] = k + 1
+    return handle
 
 
 def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
@@ -1214,12 +1231,11 @@ def _consolidate_two_pass_captures(rank_dir: Path, pairs: dict[Path, Path]) -> N
     merged trace: a tool that selects directories by "has ``deps.json`` and a
     name map" matches neither half.
 
-    Fold forward, into the graph capture. The graph pass runs first, so its
-    captures carry the lower indices — for a card dispatching ``N`` times they
-    are ``d0..d(N-1)``, the dispatch ordinals themselves, while the timing pass's
-    ``dN..d(2N-1)`` are only that offset repeated. Keeping the first of each pair
-    therefore restores both halves of the layout every consumer expects: one
-    directory per dispatch, named by the dispatch.
+    Fold forward, into the graph capture. The graph pass runs first, so within a
+    dispatch its captures carry the lower indices; the timing pass's follow. The
+    counter spans the child process, so the absolute numbers need not start at
+    zero — only the graph-before-timing order matters. Keeping the first of each
+    pair restores the layout every consumer expects: one directory per dispatch.
 
     Only paired captures are touched (see :func:`_pair_rank_captures`), only
     after both passes have finished, and only where the pairing is one-to-one.
@@ -1244,6 +1260,18 @@ def _consolidate_two_pass_captures(rank_dir: Path, pairs: dict[Path, Path]) -> N
             for artifact in sorted(timing_dir.iterdir()):
                 if artifact.name == _DISPATCH_IDENTITY_FILE:
                     target = graph_dir / "dispatch_identity.timing.json"
+                elif artifact.name == _DISPATCH_PROGRAM_FILE:
+                    # Both passes are marked now that the counter spans the child
+                    # process. Keep the timing pass's marker beside the graph
+                    # pass's rather than colliding with it -- unless the graph
+                    # pass left none (that write is best-effort), in which case
+                    # this is the only program name the capture has and it must
+                    # land where :func:`_read_dispatch_program` looks for it.
+                    target = (
+                        graph_dir / "dispatch_program.timing.json"
+                        if (graph_dir / _DISPATCH_PROGRAM_FILE).exists()
+                        else graph_dir / _DISPATCH_PROGRAM_FILE
+                    )
                 else:
                     target = graph_dir / artifact.name
                 if target.exists():
@@ -1484,6 +1512,8 @@ def _make_dispatch_orchestration(
     call_config: Any,
     device_nums: int,
     keepalive: list[Any],
+    *,
+    dfx_dispatch_idx: dict[str, int] | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1491,14 +1521,14 @@ def _make_dispatch_orchestration(
     # and comm-less paths.
 
     def orch_fn(orch: Any, _unused_args: Any, _unused_cfg: Any) -> None:
-        # Reset the per-card DFX dispatch counter at the start of every run so
-        # a card's dispatches are numbered ``d0, d1, ...`` fresh each pass.
-        # Two-pass swimlane reissues the same dispatch order, so pass 1
-        # (deps.json) and pass 2 (records) land the same dispatch in the same
-        # ``rank{w}/d{k}`` dir — letting the converter join them. The same call
-        # publishes the callable -> L2 program names ``_submit_chip`` stamps into
-        # each dispatch dir.
-        _reset_dfx_dispatch_state(orch, chip_cids)
+        # Install the per-card DFX dispatch counter. On a prepared or persistent
+        # worker the child survives across runs, so ``dfx_dispatch_idx`` is the
+        # worker-owned dict and its numbering continues (the child's
+        # ``local_capture_index`` does the same); a one-shot call passes nothing
+        # and gets a fresh counter, because its child is forked per pass. The
+        # same call publishes the callable -> L2 program names ``_submit_chip``
+        # stamps into each dispatch dir.
+        _reset_dfx_dispatch_state(orch, chip_cids, dispatch_idx=dfx_dispatch_idx)
         # Comm-less dispatches carry no rank, so ``_resolve_chip_worker`` hands
         # them out round-robin over the program's chips; both the count and the
         # sequence live on ``orch`` so the wrapper stays a pure function of the
@@ -1529,6 +1559,8 @@ def _submit_dispatch(
     call_config: Any,
     device_nums: int,
     keepalive: list[Any],
+    *,
+    dfx_dispatch_idx: dict[str, int] | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1539,6 +1571,7 @@ def _submit_dispatch(
         call_config,
         device_nums,
         keepalive,
+        dfx_dispatch_idx=dfx_dispatch_idx,
     )
     return w.submit(orch_fn)
 
@@ -1943,6 +1976,11 @@ class DistributedWorker(Worker):
         # per chip through this path, so the cache, owner, and counter are guarded together.
         self._named_host_buffer_mu = threading.Lock()
         self._persistent = bool(persistent)
+        # DFX dispatch counter, scoped to this worker's child process. A prepared
+        # worker reuses one child across runs, so the counter must continue like
+        # the child's ``local_capture_index``; a new Worker (new child) starts
+        # fresh. See ``_reset_dfx_dispatch_state`` / ``_submit_chip``.
+        self._dfx_dispatch_idx: dict[str, int] = {}
         self._reset_persistent_windows = reset_persistent_windows
         self._persistent_error: BaseException | None = None
         self._persistent_error_reported = False
@@ -2385,7 +2423,7 @@ class DistributedWorker(Worker):
             program_domains = domains_by_program.get(program_id)
             if program_domains and self._reset_persistent_windows:
                 self._reset_persistent_domains(orch, program_domains, reset_buffers)
-            _reset_dfx_dispatch_state(orch, state["chip_cids"])
+            _reset_dfx_dispatch_state(orch, state["chip_cids"], dispatch_idx=self._dfx_dispatch_idx)
             state["entry_fn"](
                 orch,
                 None,
@@ -2422,6 +2460,9 @@ class DistributedWorker(Worker):
         """Submit through either the ordinary or persistent prepared path."""
         if self._persistent:
             return self._submit_persistent(state, tensors, call_config, keepalive, cleanup)
+        # The prepared worker reuses one child across submits, so the DFX
+        # dispatch counter must continue across runs like the child's own
+        # capture counter does.
         return _submit_dispatch(
             self._w,
             state["entry_fn"],
@@ -2431,6 +2472,7 @@ class DistributedWorker(Worker):
             call_config,
             state["device_nums"],
             keepalive,
+            dfx_dispatch_idx=self._dfx_dispatch_idx,
         )
 
     def _submit_native_dispatch(
@@ -3217,7 +3259,9 @@ class DistributedWorker(Worker):
 
         # This worker reuses one output_dir across dispatches, so stale
         # ``rank*/d{k}`` dirs from an earlier, larger run must be cleared before
-        # this run rewrites ``d0, d1, ...``.
+        # this run writes new ones. The numbering does not restart with the run
+        # on a prepared worker — the child's capture counter spans the process —
+        # so the new dirs may start above zero.
         if config.dfx_options().any():
             # Every dispatch writes below the same output directory. Finish
             # earlier work before clearing or repopulating those paths.

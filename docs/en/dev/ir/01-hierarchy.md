@@ -213,6 +213,7 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator runtime region (`SIMPLER_SCOPE`); `manual_=true` selects manual dependency mode |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
+| **SimtLaunchStmt** | `callee_`, `block_dims_`, `args_`, `results_` (DefField), `result_param_indices_` | Launch a void SIMT helper and define updated storage versions; see [Scalar SIMT IR](11-simt.md) |
 | **SeqStmts** | `stmts_` | General statement sequence |
 | **BreakStmt** | *(none)* | Exit loop |
 | **ContinueStmt** | *(none)* | Skip to next loop iteration |
@@ -652,6 +653,7 @@ Consequences:
 | `Spmd` | SPMD data-parallel dispatch wrapper |
 | `Inline` | Whole-body substitution at every call site; eliminated by `InlineFunctions` before any other pass |
 | `Graph` | Callable orchestration fragment, recorded once and replayed by the `host_build_graph` runtime |
+| `SIMT` | Void device helper invoked only by `SimtLaunchStmt`; no runtime task metadata |
 
 `IsInCoreType(type)` / `ir.is_incore_type(type)` returns `True` for `InCore`, `AIC`, and `AIV`.
 
@@ -692,7 +694,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 17 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, SplitAivScopeStmt, GraphScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt, InlineStmt |
+| **Statements** | 18 | SimtLaunchStmt, AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, SplitAivScopeStmt, GraphScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt, InlineStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

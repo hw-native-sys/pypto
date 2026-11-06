@@ -50,7 +50,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | Exponential, natural logarithm. For `log`, `high_precision=True` selects the slower, higher-precision PTO path on A5; on A2/A3 PTO-ISA ignores it and returns the default result, which compilation warns about |
-| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `high_precision=` is tensor-only and **raises** on a Tile — at tile level precision is selected by passing the scratch tile to `pl.tile.rsqrt(src, tmp)` |
+| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `rsqrt` defaults to `high_precision=False` at both levels. Tensor high precision allocates scratch automatically; Tile high precision requires `pl.tile.rsqrt(src, tmp=tmp, high_precision=True)` (or `pl.rsqrt(src, high_precision=True, tmp=tmp)`). Scratch without the flag is rejected. A5 codegen emits `RsqrtAlgorithm::HIGH_PRECISION`. |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | Trigonometric |
 
 ## Comparison and selection
@@ -146,17 +146,27 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | Matrix-vector forms |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX block-scale multiply. Tensor `matmul_mx` consumes oriented 2D data/scale tensors and returns FP32; `_acc` / `_bias` remain tile-only. Data reaching the op must be FP8E4M3FN; native FP4×FP4 is unsupported |
 
-For phased GEMV accumulation, select producer phases with `pl.AccPhase`. A producer
-ending with `pl.AccPhase.Final` must be paired with a store using `pl.STPhase.Final`:
+`pl.tile.matmul`, `pl.tile.matmul_acc`, and the GEMV family accept producer
+phases through `acc_phase=pl.AccPhase`. `Unspecified` is the default and keeps
+the existing behavior. Use `Partial` for intermediate K chunks and pair the
+last producer's `Final` with a store using `pl.STPhase.Final`:
 
 Here `lhs0`, `rhs0`, `lhs1`, and `rhs1` are preloaded tiles, and `output` is the
 destination tensor.
 
 ```python
-partial = pl.tile.gemv(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
-final = pl.tile.gemv_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
+partial = pl.tile.matmul(lhs0, rhs0, acc_phase=pl.AccPhase.Partial)
+final = pl.tile.matmul_acc(partial, lhs1, rhs1, acc_phase=pl.AccPhase.Final)
 pl.store(final, [0, 0], output, st_phase=pl.STPhase.Final)
 ```
+
+For Matmul, `acc_phase` is keyword-only; `matmul_acc` retains its existing
+`init_cond` position and both options can be used together. A final result
+must be drained exactly once in the same straight-line region. Before that
+store, only a plain SSA alias may forward it; other operations may not consume it. Put the entire pair inside a branch or loop body when
+execution is conditional or repeated. Automatic K tiling assigns `Final` only
+to the last physical K block. Selecting phases does not remove the compiler's
+other synchronization or imply a performance improvement.
 
 ## Gather, scatter, sort
 

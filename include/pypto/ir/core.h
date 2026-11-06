@@ -135,6 +135,9 @@ enum class ObjectKind {
   // Op kinds
   Op,
   GlobalVar,
+
+  // Append new kinds to preserve existing serialized numeric kind values.
+  SimtLaunchStmt
 };
 
 /**

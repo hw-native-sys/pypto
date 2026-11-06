@@ -493,6 +493,42 @@ def test_pto_codegen_matmul_acc_accepts_acc_valid_shape_containment():
     assert "pto.tmatmul.acc" in mlir_code
 
 
+@pytest.mark.parametrize("phase", [pl.AccPhase.Unspecified, pl.AccPhase.Partial, pl.AccPhase.Final])
+@pytest.mark.parametrize("tf32_mode", [None, "round_even", "round_away"])
+def test_pto_codegen_matmul_unit_flag_phase(phase, tf32_mode):
+    """Exercise the default pipeline, including the matching final FIX drain."""
+    if tf32_mode is not None:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+    store_phase = pl.STPhase.Final if phase == pl.AccPhase.Final else pl.STPhase.Unspecified
+
+    @pl.program
+    class MatmulPhaseProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            lhs = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            result = pl.tile.matmul(lhs, rhs, tf32_mode=tf32_mode, acc_phase=phase)
+            return pl.store(result, [0, 0], out, st_phase=store_phase)
+
+    mlir_code = _generate_default_mlir(MatmulPhaseProgram)
+    matmul_lines = [line for line in mlir_code.splitlines() if "pto.tmatmul " in line]
+    assert len(matmul_lines) == 1, mlir_code
+    if phase == pl.AccPhase.Unspecified:
+        assert "accPhase" not in matmul_lines[0]
+    else:
+        assert f"#pto<acc_phase {phase.name.lower()}>" in matmul_lines[0]
+    if tf32_mode is not None:
+        assert f"tf32_mode = #pto<tf32_mode {tf32_mode}>" in matmul_lines[0]
+        assert matmul_lines[0].count("{") == 1
+    assert ("#pto<st_phase final>" in mlir_code) == (phase == pl.AccPhase.Final)
+
+
 def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
     """GEMV base/acc/bias must retain their canonical PTO ops and row-vector layout."""
 
@@ -1506,9 +1542,9 @@ def test_signed_floor_div_uses_floor_semantics(dtype):
     assert "arith.remsi" in mlir
 
 
-@pytest.mark.parametrize("dtype, opcode", [(DataType.FP32, "arith.divf"), (DataType.UINT32, "arith.divsi")])
+@pytest.mark.parametrize("dtype, opcode", [(DataType.FP32, "arith.divf"), (DataType.UINT32, "arith.divui")])
 def test_floor_div_preserves_float_and_unsigned_paths(dtype, opcode):
-    """Signed floor rounding must not alter the existing float and unsigned paths."""
+    """Float division and unsigned floor division retain their respective semantics."""
     span = ir.Span.unknown()
     ib = IRBuilder()
     with ib.function("scalar_division", type=ir.FunctionType.InCore) as f:
@@ -1519,6 +1555,10 @@ def test_floor_div_preserves_float_and_unsigned_paths(dtype, opcode):
     mlir = _generate_mlir(ir.Program([f.get_result()], "ScalarDivision", span))
     assert opcode in mlir
     assert "arith.floordivsi" not in mlir
+    if dtype == DataType.UINT32:
+        assert re.search(r"arith.divui .* : i32", mlir)
+        assert "ui32 to i32" in mlir
+        assert "arith.divsi" not in mlir
 
 
 @pytest.mark.parametrize(
@@ -4630,6 +4670,34 @@ class Program:
     orch = (tmp_path / "orchestration" / "main.cpp").read_text()
     assert ".add_scalar(B)" in orch
     assert "int64_t B =" in orch
+
+
+def test_embedded_helper_forward_declaration_matches_definition():
+    source = "AICORE void helper(int32_t);\nAICORE void helper(int32_t n) {}"
+    result = _preprocess_ptoas_output(source)
+    assert result.count("static __aicore__ void helper") == 2
+
+
+def test_external_vpto_declaration_keeps_linkage():
+    source = (
+        'extern "C" AICORE void run_vf(__ubuf__ float*, int32_t);\n'
+        'extern "C" __global__ AICORE void kernel(float* p) { run_vf(nullptr, 0); }'
+    )
+    result = _preprocess_ptoas_output(source)
+    assert 'extern "C" __aicore__ void run_vf(__ubuf__ float*, int32_t);' in result
+    assert "static __aicore__ void kernel(float* p) {" in result
+    assert "static __aicore__ void run_vf" not in result
+
+
+def test_tile_adapter_existing_static_qualifier_is_preserved_once():
+    source = (
+        'extern "C" AICORE void run_vf(__ubuf__ float*, int32_t);\n'
+        "static AICORE void adapter(Tile tile, int32_t n) { run_vf(tile.data(), n); }"
+    )
+    result = _preprocess_ptoas_output(source)
+    assert "static static" not in result
+    assert "static __aicore__ void adapter(" in result
+    assert 'extern "C" __aicore__ void run_vf(' in result
 
 
 if __name__ == "__main__":

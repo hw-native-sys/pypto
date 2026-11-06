@@ -30,21 +30,24 @@ from .syntax_helpers import is_const_int, is_dsl_call
 from .type_resolver import (
     _const_int_value,  # noqa: PLC2701
     _is_dump_call,  # noqa: PLC2701
+    _is_index_expr_type,  # noqa: PLC2701
 )
 
-VALID_ITERATORS = {"range", "parallel", "unroll", "pipeline", "while_", "spmd", "split_aiv"}
+VALID_ITERATORS = {"hardware_loop", "range", "parallel", "unroll", "pipeline", "while_", "spmd", "split_aiv"}
 
 ITERATOR_ERROR = (
-    "For loop must use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), "
+    "For loop must use pl.range(), pl.hardware_loop(), pl.parallel(), pl.unroll(), "
+    "pl.pipeline(), pl.while_(), "
     "pl.spmd(), or pl.split_aiv()"
 )
 
 ITERATOR_HINT = (
-    "Use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), pl.spmd(), "
+    "Use pl.range(), pl.hardware_loop(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), pl.spmd(), "
     "or pl.split_aiv() as the iterator"
 )
 
 ITERATOR_KEYWORDS = {
+    "hardware_loop": ("init_values",),
     "range": ("init_values", "attrs"),
     "parallel": ("init_values", "attrs"),
     "unroll": ("init_values", "attrs"),
@@ -53,6 +56,7 @@ ITERATOR_KEYWORDS = {
 
 # Maps iterator type name to ForKind enum value.
 ITERATOR_TO_KIND = {
+    "hardware_loop": ir.ForKind.Sequential,
     "range": ir.ForKind.Sequential,
     "parallel": ir.ForKind.Parallel,
     "unroll": ir.ForKind.Unroll,
@@ -156,11 +160,11 @@ class ControlFlowParser:
                     self.services.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
     def validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, str]:
-        """Validate that for loop uses pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_().
+        """Validate the range, hardware_loop, parallel, unroll, pipeline and while iterators.
 
         Returns:
             Tuple of (call_node, iterator_type) where iterator_type is
-            "range", "parallel", "unroll", "pipeline", or "while_"
+            "range", "hardware_loop", "parallel", "unroll", "pipeline", or "while_"
         """
         if not isinstance(stmt.iter, ast.Call):
             raise ParserSyntaxError(
@@ -248,6 +252,12 @@ class ControlFlowParser:
         """
         iter_call, iterator_type = self.validate_for_loop_iterator(stmt)
 
+        if iterator_type == "hardware_loop" and not self.scopes.regions.is_inside_scope(ir.ScopeKind.Reg):
+            raise ParserSyntaxError(
+                "pl.hardware_loop() requires an enclosing pl.reg_scope()",
+                span=self.services.span_tracker.get_span(iter_call),
+            )
+
         # Handle pl.while_() case
         if iterator_type == "while_":
             self.parse_while_as_for(stmt, iter_call)
@@ -332,20 +342,25 @@ class ControlFlowParser:
         # Infer loop var dtype from range bounds to preserve roundtrip fidelity.
         # Bare Python ints still map to INDEX, but explicitly typed INT64 bounds
         # should rebuild an INT64 loop var when the printer emitted them that way.
+        # Hardware-loop lowering binds the induction SSA value to MLIR's
+        # index type regardless of the stop scalar dtype (for example a
+        # UINT32/INT32 dynamic bound). Keep the raw-IR verifier contract
+        # stable while preserving bound-type inference for ordinary ranges.
         _loop_var_dtype = DataType.INDEX
-        saw_index_bound = False
-        saw_int64_bound = False
-        for _bound in (range_args.get("start"), range_args.get("stop"), range_args.get("step")):
-            if isinstance(_bound, ir.ConstInt):
-                if _bound.dtype == DataType.INDEX:
-                    saw_index_bound = True
-                elif _bound.dtype == DataType.INT64:
-                    saw_int64_bound = True
-                else:
-                    _loop_var_dtype = _bound.dtype
-                    break
-        if _loop_var_dtype == DataType.INDEX and saw_int64_bound and not saw_index_bound:
-            _loop_var_dtype = DataType.INT64
+        if iterator_type != "hardware_loop":
+            saw_index_bound = False
+            saw_int64_bound = False
+            for _bound in (range_args.get("start"), range_args.get("stop"), range_args.get("step")):
+                if isinstance(_bound, ir.ConstInt):
+                    if _bound.dtype == DataType.INDEX:
+                        saw_index_bound = True
+                    elif _bound.dtype == DataType.INT64:
+                        saw_int64_bound = True
+                    else:
+                        _loop_var_dtype = _bound.dtype
+                        break
+            if _loop_var_dtype == DataType.INDEX and saw_int64_bound and not saw_index_bound:
+                _loop_var_dtype = DataType.INT64
         loop_var = self.services.builder.var(loop_var_name, ir.ScalarType(_loop_var_dtype))
         span = self.services.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
@@ -365,6 +380,11 @@ class ControlFlowParser:
             span,
             kind,
             attrs=attrs_dict,
+            hardware_loop_policy=(
+                ir.HardwareLoopPolicy.Require
+                if iterator_type == "hardware_loop"
+                else ir.HardwareLoopPolicy.Auto
+            ),
         ) as loop:
             self.flow.current_loop_builder = loop
             self.flow.in_for_loop = True
@@ -451,6 +471,41 @@ class ControlFlowParser:
         Returns:
             Dictionary with start, stop, step, init_values
         """
+        if iterator_type == "hardware_loop":
+            stop_keywords = [keyword for keyword in call.keywords if keyword.arg == "stop"]
+            if not (
+                (len(call.args) == 1 and not stop_keywords) or (not call.args and len(stop_keywords) == 1)
+            ):
+                raise ParserSyntaxError(
+                    "pl.hardware_loop() requires exactly one stop argument; start=0 and step=1",
+                    span=self.services.span_tracker.get_span(call),
+                )
+            stop_node = call.args[0] if call.args else stop_keywords[0].value
+            stop = self.callbacks.expression(stop_node)
+            if not _is_index_expr_type(stop.type):
+                raise ParserTypeError(
+                    f"pl.hardware_loop() requires an integer scalar stop, got {stop.type}",
+                    span=self.services.span_tracker.get_span(stop_node),
+                )
+            hardware_args: dict[str, Any] = {
+                "start": 0,
+                "stop": stop,
+                "step": 1,
+                "init_values": [],
+                "unroll": None,
+                "attrs": {},
+            }
+            for keyword in call.keywords:
+                if keyword.arg == "stop":
+                    continue
+                if keyword.arg != "init_values":
+                    raise ParserSyntaxError(
+                        "pl.hardware_loop() supports only stop and init_values",
+                        span=self.services.span_tracker.get_span(keyword),
+                    )
+                self.parse_range_keyword(keyword, hardware_args, iterator_type)
+            return hardware_args
+
         if len(call.args) < 1:
             raise ParserSyntaxError(
                 f"pl.{iterator_type}() requires at least 1 argument (stop)",

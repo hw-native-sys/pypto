@@ -16,8 +16,20 @@ from dataclasses import replace
 import pypto.language as pl
 import pytest
 import torch
+from pypto.pypto_core import passes
 
 pytestmark = pytest.mark.platforms("a5")
+
+
+@pytest.fixture(
+    autouse=True,
+    params=[passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH],
+    ids=["tmr", "hbg"],
+)
+def dsl_runtime(request):
+    """将编译、装配与执行置于同一运行时上下文。"""
+    with passes.PassContext([], runtime=request.param):
+        yield request.param
 
 
 def _context_kernel():
@@ -91,6 +103,35 @@ def test_cannbotdsl_partial_spmd_context(test_config):
     torch.testing.assert_close(output[:, :4], expected[:, :4], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("active", [0, 3, 17])
+def test_cannbotdsl_runtime_slice_preserves_tail(active, test_config):
+    """静态父容量上的动态切片必须保留有效区外的数据，覆盖 #3324。"""
+    cb = pytest.importorskip("cannbotdsl")
+
+    @cb.kernel
+    def fill(output):
+        for row in cb.range(cb.get_block_idx(), output.shape[0], cb.get_block_num()):
+            for col in cb.range(output.shape[1]):
+                output[row, col] = 1.0
+
+    @pl.jit
+    def program(output: pl.InOut[pl.Tensor[[17, 32], pl.FP32]], rows: pl.Scalar[pl.INDEX]):
+        view = output[0:rows, :]
+        with pl.spmd(4):
+            fill(view)
+        return output
+
+    output = torch.full((17, 32), -37.0)
+    config = replace(test_config, platform="a5", rtol=0, atol=0)
+    if test_config.codegen_only:
+        program.compile(output, active, config=config)
+        return
+    program(output, active, config=config)
+    expected = torch.full_like(output, -37.0)
+    expected[:active] = 1.0
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("mixed", [False, True])
 def test_cannbotdsl_full_grid_barrier(mixed, test_config):
     kernel = _exchange_kernel(mixed)
@@ -131,7 +172,7 @@ def test_cannbotdsl_full_grid_barrier(mixed, test_config):
         torch.testing.assert_close(output[:, :count], expected, rtol=0, atol=0)
 
 
-def test_cannbotdsl_rejects_partial_dynamic_barrier(test_config):
+def test_cannbotdsl_rejects_partial_dynamic_barrier(test_config, dsl_runtime):
     kernel = _exchange_kernel(True)
 
     @pl.jit
@@ -158,7 +199,9 @@ def test_cannbotdsl_rejects_partial_dynamic_barrier(test_config):
         return
     # 核数来自运行时标量，必须在提交前以 simpler 的 INVALID_ARGS（-5）终止，
     # 不能让部分核进入屏障并造成 AICore 超时。
-    with pytest.raises(RuntimeError, match=r"finalize_native_run failed with code -5\b"):
+    # HBG 在 Host 准备图时拒绝非法启动；TMR 在设备编排结束时返回错误。
+    phase = "prepare" if dsl_runtime == passes.RuntimeKind.HOST_BUILD_GRAPH else "finalize"
+    with pytest.raises(RuntimeError, match=rf"{phase}_native_run failed with code -5\b"):
         program(*args, 4, config=config)
 
 

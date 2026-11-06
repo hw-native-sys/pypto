@@ -177,6 +177,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -294,6 +295,18 @@ AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, 
                                         {std::move(valid_m), std::move(valid_n)}, dtype, name_hint, span);
 }
 
+/// Override only the phase, retaining arithmetic attributes and compiler metadata.
+std::vector<std::pair<std::string, std::any>> MatmulPhaseKwargs(
+    const std::vector<std::pair<std::string, std::any>>& kwargs, AccPhase phase) {
+  std::vector<std::pair<std::string, std::any>> result;
+  result.reserve(kwargs.size() + 1);
+  for (const auto& kwarg : kwargs) {
+    if (kwarg.first != "acc_phase") result.push_back(kwarg);
+  }
+  if (phase != AccPhase::kUnspecified) result.emplace_back("acc_phase", static_cast<int>(phase));
+  return result;
+}
+
 struct KLoopRewrite {
   AssignStmtPtr original;
   MatmulKind kind = MatmulKind::kFresh;
@@ -309,6 +322,7 @@ struct KLoopRewrite {
   /// with the generated ``ko == 0`` in the pipelined body, passed through
   /// unmodified on a lone straight-line full block, and dropped on the tail.
   ExprPtr init_cond = nullptr;
+  AccPhase acc_phase = AccPhase::kUnspecified;
   int64_t M = 0;
   int64_t N = 0;
   int64_t K = 0;
@@ -478,6 +492,17 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const int64_t k_full = num_full * r.k;
   const int64_t k_eff = r.K - k_full;
   const bool has_tail = k_eff > 0;
+  // Final performs check-and-set, so it must occur exactly once, after all K
+  // contributions. An existing remainder is already the last block. Otherwise
+  // peel one complete block rather than setting the flag on every loop trip.
+  // Keep the last producer outside the loop so its final store can consume its
+  // exact SSA value in the same straight-line region.
+  const bool peel_final = r.acc_phase == AccPhase::kFinal && !has_tail && num_full > 1;
+  const int64_t main_blocks = num_full - static_cast<int64_t>(peel_final);
+  const int64_t main_stop = main_blocks * r.k;
+  const bool has_last_block = has_tail || peel_final;
+  const AccPhase main_phase =
+      r.acc_phase == AccPhase::kFinal && has_last_block ? AccPhase::kPartial : r.acc_phase;
 
   std::vector<StmtPtr> out;
 
@@ -494,7 +519,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   // here would be dead.
   ExprPtr loop_init;
   TypePtr loop_iter_type;
-  if (num_full >= 2 && !is_bias) {
+  if (main_blocks >= 2 && !is_bias) {
     if (is_acc) {
       loop_init = r.acc_init;
       loop_iter_type = r.acc_init->GetType();
@@ -533,7 +558,8 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   // legal alongside ``acc_in`` — it is the caller's predicate, emitted verbatim
   // (a straight-line block has no loop variable to compose ``ko == 0`` from).
   auto emit_block = [&](int64_t ko, int64_t kb, const ExprPtr& acc_in, const ExprPtr& init_cond,
-                        const std::string& tag) -> VarPtr {
+                        const std::string& tag, AccPhase acc_phase) -> VarPtr {
+    const auto block_kwargs = MatmulPhaseKwargs(kwargs, acc_phase);
     auto sa = BuildExtract(lhs_extract_src, {r.m, kb}, mi_off, MakeIndex(ko, sp), MemorySpace::Left,
                            base + "_l0_a" + tag, sp);
     auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
@@ -544,11 +570,11 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     if (acc_in) {
       std::vector<ExprPtr> mm_args{acc_in, sa->var_, sb->var_};
       if (init_cond) mm_args.push_back(init_cond);
-      call = reg.Create("tile.matmul_acc", mm_args, kwargs, sp);
+      call = reg.Create("tile.matmul_acc", mm_args, block_kwargs, sp);
     } else if (bias_operand) {
       call = reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, kwargs, sp);
     } else {
-      call = reg.Create("tile.matmul", {sa->var_, sb->var_}, kwargs, sp);
+      call = reg.Create("tile.matmul", {sa->var_, sb->var_}, block_kwargs, sp);
     }
     auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
     out.push_back(sa);
@@ -557,10 +583,10 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     return cvar;
   };
 
-  // Emit the pipelined K-loop over the full blocks in ``[k_lo, k_full)``,
-  // accumulating into ``seed_init``.  Shared by the ordinary path (all
-  // ``num_full`` blocks, seeded by a placeholder or the caller's accumulator)
-  // and the bias path (the blocks after the peeled first one).
+  // Emit the pipelined prefix in ``[k_lo, main_stop)``, accumulating into
+  // ``seed_init``. A Final phase may reserve the last complete block for the
+  // straight-line drain below; an unphased reduction retains all full blocks.
+  // Bias uses this same prefix after peeling its initializing first block.
   auto emit_k_loop = [&](int64_t k_lo, const ExprPtr& seed_init, const ExprPtr& user_cond) -> VarPtr {
     auto ko_var = std::make_shared<Var>(base + "_l0_ko", std::make_shared<ScalarType>(DataType::INDEX), sp);
     auto iter_type = seed_init->GetType();
@@ -572,15 +598,17 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // an accumulate seeded by a real accumulator must not, unless the caller
     // predicated it.  The bias path passes neither: its seed already holds the
     // first block's product, so every block here accumulates.
+    const auto main_kwargs = MatmulPhaseKwargs(kwargs, main_phase);
     StmtPtr body = (k_lo == 0 && r.kind == MatmulKind::kFresh)
-                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, kwargs)
-                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, kwargs);
+                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, main_kwargs)
+                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, main_kwargs);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
-    // Loop return var: an intermediate when a partial tail follows (named
+    // Loop return var: an intermediate when a final block follows (named
     // distinctly so round-trip names stay unique), else the final result.
-    auto rv = std::make_shared<Var>(has_tail ? base + "_l0_kmain" : base, iter_type, r.original->var_->span_);
+    auto rv =
+        std::make_shared<Var>(has_last_block ? base + "_l0_kmain" : base, iter_type, r.original->var_->span_);
     auto for_stmt =
-        std::make_shared<ForStmt>(ko_var, MakeIndex(k_lo, sp), MakeIndex(k_full, sp), MakeIndex(r.k, sp),
+        std::make_shared<ForStmt>(ko_var, MakeIndex(k_lo, sp), MakeIndex(main_stop, sp), MakeIndex(r.k, sp),
                                   std::vector<IterArgPtr>{c_iter}, body, std::vector<VarPtr>{rv}, sp,
                                   ForKind::Pipeline, std::move(attrs));
     out.push_back(for_stmt);
@@ -590,7 +618,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   // --- Full blocks: a pipelined K-loop when there are >= 2 of them, else a
   //     single straight-line block (a 1-trip pipeline loop would be degenerate).
   VarPtr main_var;
-  if (is_bias && num_full >= 2) {
+  if (is_bias && main_blocks >= 2) {
     // Head-peel the first K block.  ``tile.matmul_bias`` applies the bias
     // exactly once *and* mints the accumulator, so the remaining blocks
     // accumulate into it uniformly and the whole chain stays on one L0C buffer.
@@ -598,32 +626,32 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // ``tile.matmul_acc`` — gives one logical value two producers on two Acc
     // buffers, which no target can realize (there is no Acc->Acc copy), and
     // ``tile.matmul_bias`` has no ``init_cond`` operand to predicate instead.
-    auto seed = emit_block(/*ko=*/0, /*kb=*/r.k, /*acc_in=*/nullptr, /*init_cond=*/nullptr, "0");
+    auto seed = emit_block(/*ko=*/0, /*kb=*/r.k, /*acc_in=*/nullptr, /*init_cond=*/nullptr, "0", main_phase);
     // A 1-trip pipeline loop would be degenerate, so two full blocks means the
     // second one is straight-line too.
-    main_var = (num_full - 1 >= 2)
-                   ? emit_k_loop(/*k_lo=*/r.k, ExprPtr(seed), /*user_cond=*/nullptr)
-                   : emit_block(/*ko=*/r.k, /*kb=*/r.k, ExprPtr(seed), /*init_cond=*/nullptr, "1");
-  } else if (num_full >= 2) {
+    main_var = (main_blocks - 1 >= 2) ? emit_k_loop(/*k_lo=*/r.k, ExprPtr(seed), /*user_cond=*/nullptr)
+                                      : emit_block(/*ko=*/r.k, /*kb=*/r.k, ExprPtr(seed),
+                                                   /*init_cond=*/nullptr, "1", main_phase);
+  } else if (main_blocks >= 2) {
     main_var = emit_k_loop(/*k_lo=*/0, loop_init, is_acc ? r.init_cond : nullptr);
   } else {
-    // num_full == 1: emit the single full block directly, without a degenerate
-    // one-trip pipeline.  Canonical full-K plans use this path with k == K;
-    // plans with K/2 < k < K also use it before emitting their partial tail.
+    // One prefix block: emit it directly, without a degenerate one-trip
+    // pipeline. This also covers two full blocks whose Final was peeled off.
+    // Canonical full-K plans use this path with k == K, and plans with
+    // K/2 < k < K use it before emitting their partial tail.
     // The caller's predicate passes through unmodified: this block *is* the
     // first (and only) full K block, so a generated ``ko == 0`` term would be
     // statically true and would only add a foldable node.
     main_var = emit_block(/*ko=*/0, /*kb=*/r.k, is_acc ? ExprPtr(r.acc_init) : nullptr,
-                          /*init_cond=*/is_acc ? r.init_cond : nullptr, "0");
+                          /*init_cond=*/is_acc ? r.init_cond : nullptr, "0", main_phase);
   }
 
-  // --- Partial tail: matmul_acc the [m, k_eff] x [k_eff, n] block onto the
-  //     full-blocks accumulator (no-op when k divides K).  Never predicated:
-  //     the tail runs at K offset k_full >= r.k > 0, so it is never the first
-  //     block and the caller's predicate is dead by construction there —
-  //     emit the plain 3-operand accumulating call instead of `cond && false`. ---
-  VarPtr result_var =
-      has_tail ? emit_block(k_full, k_eff, ExprPtr(main_var), /*init_cond=*/nullptr, "t") : main_var;
+  // Drain block: either the natural partial tail or the complete block peeled
+  // for Final. Both follow at least one prefix block, so neither may re-apply
+  // the caller's initialization predicate and erase the preceding partial sum.
+  VarPtr result_var = has_last_block ? emit_block(main_stop, has_tail ? k_eff : r.k, ExprPtr(main_var),
+                                                  /*init_cond=*/nullptr, "t", r.acc_phase)
+                                     : main_var;
   return RewriteResult{std::move(out), result_var};
 }
 
@@ -642,6 +670,7 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
   r.stage_lhs_to_mat = t.stage_lhs_to_mat;
   r.acc_init = t.acc_init;
   r.init_cond = t.init_cond;
+  r.acc_phase = t.acc_phase;
   r.M = t.M;
   r.N = t.N;
   r.K = t.K;
@@ -806,9 +835,9 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
 /// One-shot index over a SeqStmts' children, built lazily on the first
 /// oversized matmul and reused for the rest so M/N folding stays O(N):
 ///   * ``use_counts[v]`` — number of reads of ``v`` (excluding defs).
-///   * ``store_of[v]`` — the top-level direct ``tile.store`` whose source operand
-///     is ``v`` (its sole direct consumer when ``use_counts[v] == 1``).
-///     Includes ordinary 2-D stores, ND batch pages, and blocked rank-5 NZ partitions.
+///   * ``store_of[v]`` — the top-level ``tile.store`` that consumes ``v``
+///     directly or through a chain of single-use plain aliases. Includes
+///     ordinary 2-D stores, ND batch pages, and blocked rank-5 NZ partitions.
 /// Counts/sites reflect the original (pre-rewrite) siblings, which is what the
 /// foldability check needs (a matmul result is freshly defined; its uses do
 /// not change until we rewrite it).
@@ -817,6 +846,9 @@ struct SiblingIndex {
   std::unordered_map<const Var*, int> matmul_operand_uses;  ///< reads at a matmul-operand position
   std::unordered_map<const Var*, const AssignStmt*> store_of;
   std::unordered_map<const Var*, const AssignStmt*> cast_of;  ///< ``cb = tile.cast(v, dtype)`` by source
+  /// Single-use plain aliases leading to an indexed store. Keep links rather
+  /// than copied chains so indexing and successful-fold cleanup remain O(N).
+  std::unordered_map<const Var*, const Var*> store_alias_next;
 };
 
 SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
@@ -840,6 +872,20 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
   }
   idx.use_counts = std::move(counter.counts);
   idx.matmul_operand_uses = std::move(counter.matmul_operand_uses);
+  // The phase verifier permits a bare alias between a Final producer and its
+  // store. Follow only single-use aliases in this same SeqStmts: a copy/view or
+  // an additional reader still needs the original full accumulator. Reverse
+  // order propagates the store endpoint through a chain with constant work per
+  // definition. The aliases are removed only after the producer/store fold wins.
+  for (auto it = stmts.rbegin(); it != stmts.rend(); ++it) {
+    auto assign = As<AssignStmt>(*it);
+    auto source = assign ? AsVarLike(assign->value_) : nullptr;
+    if (!source || idx.use_counts[source.get()] != 1 || idx.use_counts[assign->var_.get()] != 1) continue;
+    auto store = idx.store_of.find(assign->var_.get());
+    if (store == idx.store_of.end()) continue;
+    idx.store_of.emplace(source.get(), store->second);
+    idx.store_alias_next.emplace(source.get(), assign->var_.get());
+  }
   return idx;
 }
 
@@ -1488,6 +1534,9 @@ class CanonicalSplitKRetiler : public IRMutator {
       plan.rhs_src = AsVarLike(rebuilt->args_[lhs_index + 1]);
       plan.acc_init = is_acc ? AsVarLike(rebuilt->args_[0]) : nullptr;
       plan.init_cond = is_acc && rebuilt->args_.size() == 4 ? rebuilt->args_[3] : nullptr;
+      // This emitter bypasses MakeKLoop, so retain the source phase here too.
+      plan.acc_phase = static_cast<AccPhase>(
+          rebuilt->GetKwarg<int>("acc_phase", static_cast<int>(AccPhase::kUnspecified)));
       plan.M = plan.m = window_.physical_m;
       plan.N = plan.n = window_.physical_n;
       plan.K = k_;
@@ -2139,6 +2188,9 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // Arbitrary matmul_acc / Vec-left are deferred (the direct-store path already
   // hinted these). Canonical split-K is rewritten at the enclosing-loop level.
   if (t.is_acc() || t.stage_lhs_to_mat) return std::nullopt;
+  // A Final producer must drain through a Final store. Mat-scratch placement
+  // emits assemble/tinsert, which has no matching consumer phase contract.
+  if (t.acc_phase == AccPhase::kFinal) return std::nullopt;
   // Every use must be a matmul operand: a non-operand use (store, elementwise,
   // matmul_acc accumulator) means substituting an upstream Mat scratch is illegal.
   if (result_uses < 1 || operand_uses != result_uses) return std::nullopt;
@@ -2525,6 +2577,13 @@ class AutoTileMutator : public IRMutator {
                 retroactively_dropped.insert(tiling->bias_load_def->var_.get());
               }
               remap[fold->store_result_var.get()] = fold->return_var;
+              const Var* alias_source = assign->var_.get();
+              for (auto alias = sibling_index.store_alias_next.find(alias_source);
+                   alias != sibling_index.store_alias_next.end();
+                   alias = sibling_index.store_alias_next.find(alias_source)) {
+                dropped.insert(alias->second);
+                alias_source = alias->second;
+              }
               pending_folds.emplace(static_cast<const Stmt*>(fold->store), std::move(*fold));
               changed = true;
               continue;  // drop the matmul; sub-tile stmts emit at the store site

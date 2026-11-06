@@ -304,6 +304,7 @@ nav:
           - en/dev/ir/08-param-directions.md
           - en/dev/ir/09-multi_output_ops.md
           - en/dev/ir/10-operator-effects.md
+          - en/dev/ir/11-simt.md
       - Passes:
           - en/dev/passes/index.md
           - en/dev/passes/00-pass_manager.md
@@ -341,27 +342,29 @@ nav:
           - en/dev/passes/32-lower_pipeline_loops.md
           - en/dev/passes/33-canonicalize_io_order.md
           - en/dev/passes/34-materialize_tensor_strides.md
-          - en/dev/passes/35-init_memref.md
-          - en/dev/passes/36-materialize_semantic_aliases.md
-          - en/dev/passes/37-memory_reuse.md
-          - en/dev/passes/38-allocate_memory_addr.md
-          - en/dev/passes/39-fold_no_op_reshape.md
-          - en/dev/passes/40-fuse_create_assemble_to_slice.md
-          - en/dev/passes/41-lower_l2_tensor_collectives.md
-          - en/dev/passes/42-legalize_spmd_launches.md
-          - en/dev/passes/43-derive_call_directions.md
-          - en/dev/passes/44-auto_derive_task_dependencies.md
-          - en/dev/passes/45-expand_manual_phase_fence.md
-          - en/dev/passes/46-synthesize_allreduce_signals.md
-          - en/dev/passes/47-materialize_comm_domain_scopes.md
-          - en/dev/passes/48-lower_host_tensor_collectives.md
-          - en/dev/passes/49-materialize_dist_tensor_ctx.md
-          - en/dev/passes/50-legalize_graph_boundary.md
-          - en/dev/passes/51-materialize_runtime_scopes.md
-          - en/dev/passes/52-classify_iter_arg_carry.md
-          - en/dev/passes/53-insert_comm_fence.md
-          - en/dev/passes/54-materialize_valid_shape_symbols.md
-          - en/dev/passes/55-lower_tile_to_buffer.md
+          - en/dev/passes/35-materialize_simt_outputs.md
+          - en/dev/passes/36-specialize_simt_helpers.md
+          - en/dev/passes/37-init_memref.md
+          - en/dev/passes/38-materialize_semantic_aliases.md
+          - en/dev/passes/39-memory_reuse.md
+          - en/dev/passes/40-allocate_memory_addr.md
+          - en/dev/passes/41-fold_no_op_reshape.md
+          - en/dev/passes/42-fuse_create_assemble_to_slice.md
+          - en/dev/passes/43-lower_l2_tensor_collectives.md
+          - en/dev/passes/44-legalize_spmd_launches.md
+          - en/dev/passes/45-derive_call_directions.md
+          - en/dev/passes/46-auto_derive_task_dependencies.md
+          - en/dev/passes/47-expand_manual_phase_fence.md
+          - en/dev/passes/48-synthesize_allreduce_signals.md
+          - en/dev/passes/49-materialize_comm_domain_scopes.md
+          - en/dev/passes/50-lower_host_tensor_collectives.md
+          - en/dev/passes/51-materialize_dist_tensor_ctx.md
+          - en/dev/passes/52-legalize_graph_boundary.md
+          - en/dev/passes/53-materialize_runtime_scopes.md
+          - en/dev/passes/54-classify_iter_arg_carry.md
+          - en/dev/passes/55-insert_comm_fence.md
+          - en/dev/passes/56-materialize_valid_shape_symbols.md
+          - en/dev/passes/57-lower_tile_to_buffer.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md
@@ -381,10 +384,14 @@ nav:
           - en/dev/codegen/00-pto_codegen.md
           - en/dev/codegen/01-orchestration_codegen.md
           - en/dev/codegen/02-kernel_wrapper.md
+          - en/dev/codegen/03-vpto-vf-integration.md
+          - en/dev/codegen/04-simt-native-validation.md
+          - en/dev/codegen/05-simt-lowering.md
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md
           - en/dev/backend/01-sync_resources.md
+          - en/dev/backend/02-macro_resources.md
       - Debug:
           - en/dev/debug/index.md
           - en/dev/debug/00-torch_codegen.md

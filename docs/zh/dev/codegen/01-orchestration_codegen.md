@@ -6,7 +6,7 @@
 
 例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/29-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
 
-同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/52-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
+同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/54-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
 
 ## 概述
 
@@ -133,7 +133,7 @@ const ChipTensor& tmp = alloc_0.get_ref(0);
 ### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `SIMPLER_SCOPE()` 中。codegen 不再依据 `for` / `if` 结构
-决定 scope 位置：[MaterializeRuntimeScopes](../passes/51-materialize_runtime_scopes.md)
+决定 scope 位置：[MaterializeRuntimeScopes](../passes/53-materialize_runtime_scopes.md)
 pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以及每个
 `for` / `if` 体），codegen 从这些节点 1:1 地 emit `SIMPLER_SCOPE`（manual scope
 降级为 `SIMPLER_SCOPE(ScopeMode::MANUAL)`）：
@@ -165,6 +165,14 @@ SIMPLER_SCOPE() {
 外部张量借用通过 `ChipTaskArgs` 传入的设备侧描述符。内部张量在 scope 入口处通过 `alloc_tensors()` 预分配——同一 scope（函数体、for 循环体、if 分支体）中的所有 `tensor.create` 被批量合并为一条 `alloc_tensors` 调用。预分配的张量随后通过 `add_output(const ChipTensor&)`（OUTPUT_EXISTING 重载）传递给核函数。
 
 只有尺寸在 scope 入口处已经可见（entry-valid）的 create 才会被提升到入口。若尺寸读取了函数体自身定义的值——普通局部变量，或 `if` / `for` / `while` 的 return_var（其 C++ 声明在对应语句处才emit）——该 create 会保留在语句顺序上，从而保证生成的 C++ 不会在声明之前使用某个名字。`__gm_pipe_buffer` 占位符同样适用此规则：它的真实尺寸是 `slot_bytes * core_num`，而非其 IR shape。
+
+GM pipe 的分配容量必须等于实际消费内核的每 block 环形缓冲区容量乘以有效 launch
+`core_num`；注入的 `tensor.create([1])` 形状只是占位值。当 `LegalizeGraphBoundary`
+将分配移到 Graph 调用方时，容量分析沿该边界张量形参追踪到具体内核的 `Call` 或
+`Submit`。与任务提交一致，调用点属性优先于被调函数属性。Graph 容器本身没有 block
+数；不同缓冲区分别保留各自的布局和 launch 宽度，即使其内核复用了相同的 pipe ID。
+代码生成与分配批处理共用消费者查询。无法确定兼容具体消费者的转发会被拒绝，不能
+静默退化成只分配一个 block 的容量。
 
 ### 参数方向
 
@@ -586,7 +594,7 @@ parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg 写入类
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
 契约保留该 attr。编译器推导的依赖边来自
-[`AutoDeriveTaskDependencies`](../passes/44-auto_derive_task_dependencies.md)，
+[`AutoDeriveTaskDependencies`](../passes/46-auto_derive_task_dependencies.md)，
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
 call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual_scope()` 内，
 显式的 `deps=[...]` 仍是唯一的依赖边来源。它只分析 AUTO 区域，且仅当编译期开关
@@ -651,7 +659,7 @@ yield 读取的。把它恢复掉会让该 yield 把 Array 值误判为标量 Ta
 
 来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
 它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与
-[`ExpandManualPhaseFence`](../passes/45-expand_manual_phase_fence.md) 给自己合成的
+[`ExpandManualPhaseFence`](../passes/47-expand_manual_phase_fence.md) 给自己合成的
 barrier 打的完全相同，因此所有 `manual_dep_edges` 载体一律强制校验。合成的 barrier
 只会引用其所改写的 manual scope 内仍然活跃的 TaskId，故其 fanin 必然可解析。
 

@@ -162,13 +162,30 @@ def test_reject_nonvec_and_noncontiguous_and_uninitialized():
         DataType.UINT16,
         DataType.INT32,
         DataType.UINT32,
+        DataType.INT64,
+        DataType.UINT64,
+        DataType.INT4,
+        DataType.FP8E4M3FN,
+        DataType.INDEX,
     ],
 )
 @pytest.mark.parametrize("name", ["add", "sub", "mul", "div", "minimum", "maximum", "compare", "select"])
 def test_dtype_matrix(name, dtype):
     v = vec(dtype=dtype)
     rejected = (
-        (name == "mul" and dtype in (DataType.INT8, DataType.UINT8))
+        dtype
+        not in {
+            DataType.FP16,
+            DataType.BF16,
+            DataType.FP32,
+            DataType.INT8,
+            DataType.UINT8,
+            DataType.INT16,
+            DataType.UINT16,
+            DataType.INT32,
+            DataType.UINT32,
+        }
+        or (name == "mul" and dtype in (DataType.INT8, DataType.UINT8))
         or (name == "div" and dtype not in (DataType.FP16, DataType.FP32))
         or (
             name == "compare" and dtype not in (DataType.FP16, DataType.FP32, DataType.INT32, DataType.UINT32)
@@ -274,6 +291,122 @@ def test_schema_fixture_declares_scope_and_future_emitter():
 def test_ops_without_attributes_reject_unknown_kwargs(name, args):
     with pytest.raises(ValueError, match="pmode|keyword|attribute"):
         call(name, args, pmode="zero")
+
+
+def test_index_gen_rejects_bf16_during_type_deduction():
+    # This must fail at construction, without a backend or PTOCodegen instance.
+    with pytest.raises(ValueError, match="index_gen.*BF16|BF16.*VCI"):
+        call("index_gen", [ir.ConstFloat(0.0, DataType.BF16, SPAN)], lanes=64, dtype=DataType.BF16)
+
+
+_INTEGER_DTYPES = {
+    DataType.INT8,
+    DataType.UINT8,
+    DataType.INT16,
+    DataType.UINT16,
+    DataType.INT32,
+    DataType.UINT32,
+}
+_FLOAT_DTYPES = {DataType.FP16, DataType.FP32}
+_ORDINARY_DTYPES = _INTEGER_DTYPES | _FLOAT_DTYPES
+_WIDE_DTYPES = _ORDINARY_DTYPES - {DataType.INT8, DataType.UINT8}
+_COMPUTE_DTYPES = {
+    "abs": _FLOAT_DTYPES | {DataType.INT8, DataType.INT16, DataType.INT32},
+    "neg": _ORDINARY_DTYPES,
+    "relu": _FLOAT_DTYPES | {DataType.INT32},
+    "exp": _FLOAT_DTYPES,
+    "log": _FLOAT_DTYPES,
+    "sqrt": _FLOAT_DTYPES,
+    "bitwise_not": _INTEGER_DTYPES,
+    "bitwise_and": _INTEGER_DTYPES,
+    "bitwise_or": _INTEGER_DTYPES,
+    "bitwise_xor": _INTEGER_DTYPES,
+    "shift_left": _INTEGER_DTYPES,
+    "shift_right": _INTEGER_DTYPES,
+    "adds": _ORDINARY_DTYPES,
+    "muls": _WIDE_DTYPES,
+    "maximums": _ORDINARY_DTYPES,
+    "minimums": _ORDINARY_DTYPES,
+    "shift_lefts": _INTEGER_DTYPES,
+    "shift_rights": _INTEGER_DTYPES,
+    "compares": _FLOAT_DTYPES | {DataType.INT32, DataType.UINT32},
+    "gather_lanes": _ORDINARY_DTYPES,
+    "reduce_sum": _WIDE_DTYPES,
+    "reduce_max": _WIDE_DTYPES,
+    "reduce_min": _WIDE_DTYPES,
+}
+_DTYPE_CANDIDATES = [
+    DataType.FP16,
+    DataType.BF16,
+    DataType.FP32,
+    DataType.INT8,
+    DataType.UINT8,
+    DataType.INT16,
+    DataType.UINT16,
+    DataType.INT32,
+    DataType.UINT32,
+    DataType.INT64,
+    DataType.UINT64,
+    DataType.INT4,
+    DataType.FP8E4M3FN,
+    DataType.INDEX,
+]
+
+
+def _construct_compute(name, dtype):
+    value = vec(dtype=dtype)
+    m = mask()
+    if name in ("abs", "neg", "relu", "exp", "log", "sqrt", "bitwise_not"):
+        return call(name, [value, m])
+    if name in ("bitwise_and", "bitwise_or", "bitwise_xor", "shift_left", "shift_right"):
+        return call(name, [value, value, m])
+    if name.startswith("reduce_"):
+        return call(name, [value, m], **({"reassoc": True} if name == "reduce_sum" else {}))
+    if name == "gather_lanes":
+        index_dtype = {8: DataType.UINT8, 16: DataType.UINT16, 32: DataType.UINT32}.get(
+            dtype.get_bit(), DataType.UINT32
+        )
+        return call(name, [value, vec(dtype=index_dtype)])
+    scalar_dtype = DataType.INT16 if name in ("shift_lefts", "shift_rights") else dtype
+    scalar = ir.Var("scalar", ir.ScalarType(scalar_dtype), SPAN)
+    return call(name, [value, scalar, m], **({"predicate": "eq"} if name == "compares" else {}))
+
+
+@pytest.mark.parametrize("dtype", _DTYPE_CANDIDATES)
+@pytest.mark.parametrize("name", _COMPUTE_DTYPES)
+def test_compute_dtype_matrix_before_codegen(name, dtype):
+    # Exercise the registry directly: unsupported inputs must never need codegen.
+    if dtype not in _COMPUTE_DTYPES[name]:
+        with pytest.raises(ValueError, match="dtype|type|FP16|BF16"):
+            _construct_compute(name, dtype)
+    else:
+        result = _construct_compute(name, dtype)
+        expected_lanes = 1 if name.startswith("reduce_") else 64
+        assert reg_type(result).lanes == expected_lanes
+        assert reg_type(result).dtype == (DataType.BOOL if name == "compares" else dtype)
+
+
+@pytest.mark.parametrize("name", ["load", "store", "broadcast", "index_gen"])
+@pytest.mark.parametrize("dtype", _DTYPE_CANDIDATES)
+def test_memory_generator_dtype_matrix_before_codegen(name, dtype):
+    def construct():
+        if name in ("load", "store"):
+            target = ir.Var("tile", ir.TileType([128], dtype, memory_space=ir.MemorySpace.Vec), SPAN)
+            args = [target, integer(0)]
+            if name == "store":
+                args.append(vec(dtype=dtype))
+            return call(name, args, **({"lanes": 64} if name == "load" else {}))
+        scalar = ir.Var("scalar", ir.ScalarType(dtype), SPAN)
+        return call(name, [scalar], lanes=64, dtype=dtype)
+
+    supported = _ORDINARY_DTYPES | ({DataType.BF16} if name != "index_gen" else set())
+    if dtype not in supported:
+        with pytest.raises(ValueError, match="dtype|type|BF16"):
+            construct()
+    else:
+        result_type = construct().type
+        assert isinstance(result_type, (ir.RegType, ir.TileType))
+        assert result_type.dtype == dtype
 
 
 if __name__ == "__main__":

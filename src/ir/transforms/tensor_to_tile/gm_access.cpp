@@ -27,6 +27,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -40,6 +41,7 @@
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/tensor_to_tile/internal.h"
+#include "src/ir/transforms/utils/simt_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -584,7 +586,8 @@ ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap&
 /// on a sub-region never reads the untouched remainder.
 void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, std::vector<bool>& has_read,
                        std::vector<bool>& has_write, std::vector<std::optional<Span>>& dma_store_spans,
-                       std::vector<std::optional<Span>>& scalar_store_spans) {
+                       std::vector<std::optional<Span>>& scalar_store_spans,
+                       std::vector<std::optional<Span>>& simt_store_spans) {
   if (!call) return;
 
   // A call to a user function reaches here with a GlobalVar callee and no
@@ -606,8 +609,19 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     // operator that writes a tile, an array or a signal slot declares no
     // channel and is skipped.
     if (auto channel = entry->GetWriteChannel()) {
-      RecordFirstStoreSpan(origins, *channel == WriteChannel::Scalar ? scalar_store_spans : dma_store_spans,
-                           call->span_);
+      switch (*channel) {
+        case WriteChannel::Scalar:
+          RecordFirstStoreSpan(origins, scalar_store_spans, call->span_);
+          break;
+        case WriteChannel::Dma:
+          RecordFirstStoreSpan(origins, dma_store_spans, call->span_);
+          break;
+        case WriteChannel::Simt:
+          // Lane writes must not inherit controller D-cache maintenance or
+          // silently enter the DMA path; native SIMT synchronization is separate.
+          RecordFirstStoreSpan(origins, simt_store_spans, call->span_);
+          break;
+      }
     }
   }
 }
@@ -632,7 +646,8 @@ YieldAliasInfo MergeYieldInfos(const YieldAliasInfo& lhs, const YieldAliasInfo& 
 YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_map,
                                   std::vector<bool>& has_read, std::vector<bool>& has_write,
                                   std::vector<std::optional<Span>>& dma_store_spans,
-                                  std::vector<std::optional<Span>>& scalar_store_spans);
+                                  std::vector<std::optional<Span>>& scalar_store_spans,
+                                  std::vector<std::optional<Span>>& simt_store_spans);
 
 void BindLoopOrigins(const std::vector<IterArgPtr>& iter_args, const std::vector<ParamOrigins>& origins,
                      AliasOriginMap& origin_map) {
@@ -650,7 +665,8 @@ std::vector<ParamOrigins> AnalyzeLoopCarriedOrigins(const StmtPtr& body,
                                                     const AliasOriginMap& origin_map,
                                                     std::vector<bool>& has_read, std::vector<bool>& has_write,
                                                     std::vector<std::optional<Span>>& dma_store_spans,
-                                                    std::vector<std::optional<Span>>& scalar_store_spans) {
+                                                    std::vector<std::optional<Span>>& scalar_store_spans,
+                                                    std::vector<std::optional<Span>>& simt_store_spans) {
   std::vector<ParamOrigins> carried_origins(iter_args.size());
   for (size_t i = 0; i < iter_args.size(); ++i) {
     carried_origins[i] = GetAliasOrigins(iter_args[i]->initValue_, origin_map);
@@ -658,8 +674,8 @@ std::vector<ParamOrigins> AnalyzeLoopCarriedOrigins(const StmtPtr& body,
 
   auto body_map = origin_map;
   BindLoopOrigins(iter_args, carried_origins, body_map);
-  auto yield_info =
-      AnalyzeStmtAliases(body, body_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+  auto yield_info = AnalyzeStmtAliases(body, body_map, has_read, has_write, dma_store_spans,
+                                       scalar_store_spans, simt_store_spans);
 
   bool origins_widened = false;
   if (yield_info.has_yield) {
@@ -676,7 +692,8 @@ std::vector<ParamOrigins> AnalyzeLoopCarriedOrigins(const StmtPtr& body,
   if (origins_widened) {
     body_map = origin_map;
     BindLoopOrigins(iter_args, carried_origins, body_map);
-    yield_info = AnalyzeStmtAliases(body, body_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+    yield_info = AnalyzeStmtAliases(body, body_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                                    simt_store_spans);
     if (yield_info.has_yield) {
       for (size_t i = 0; i < carried_origins.size() && i < yield_info.origins.size(); ++i) {
         MergeOrigins(carried_origins[i], yield_info.origins[i]);
@@ -689,11 +706,12 @@ std::vector<ParamOrigins> AnalyzeLoopCarriedOrigins(const StmtPtr& body,
 YieldAliasInfo AnalyzeStmtSequenceAliases(const std::vector<StmtPtr>& stmts, AliasOriginMap& origin_map,
                                           std::vector<bool>& has_read, std::vector<bool>& has_write,
                                           std::vector<std::optional<Span>>& dma_store_spans,
-                                          std::vector<std::optional<Span>>& scalar_store_spans) {
+                                          std::vector<std::optional<Span>>& scalar_store_spans,
+                                          std::vector<std::optional<Span>>& simt_store_spans) {
   YieldAliasInfo last_yield;
   for (const auto& stmt : stmts) {
-    auto yield_info =
-        AnalyzeStmtAliases(stmt, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+    auto yield_info = AnalyzeStmtAliases(stmt, origin_map, has_read, has_write, dma_store_spans,
+                                         scalar_store_spans, simt_store_spans);
     if (yield_info.has_yield) {
       last_yield = yield_info;
     }
@@ -704,12 +722,32 @@ YieldAliasInfo AnalyzeStmtSequenceAliases(const std::vector<StmtPtr>& stmts, Ali
 YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_map,
                                   std::vector<bool>& has_read, std::vector<bool>& has_write,
                                   std::vector<std::optional<Span>>& dma_store_spans,
-                                  std::vector<std::optional<Span>>& scalar_store_spans) {
+                                  std::vector<std::optional<Span>>& scalar_store_spans,
+                                  std::vector<std::optional<Span>>& simt_store_spans) {
   if (!stmt) return {};
+
+  if (auto launch = As<SimtLaunchStmt>(stmt)) {
+    for (const auto& argument : launch->args_) {
+      MarkAccess(CollectReferencedOrigins(argument, origin_map), has_read);
+    }
+    for (size_t i = 0; i < launch->results_.size(); ++i) {
+      if (!AsTensorTypeLike(launch->results_[i]->GetType())) continue;
+      auto origins = GetAliasOrigins(launch->args_[launch->result_param_indices_[i]], origin_map);
+      // A partial GM update consumes the previous logical version, even if
+      // its helper contains only physical stores. Follow result lineage so
+      // later launches and loop carries keep the same enclosing parameter.
+      MarkAccess(origins, has_read);
+      MarkAccess(origins, has_write);
+      RecordFirstStoreSpan(origins, simt_store_spans, launch->span_);
+      UpdateTensorAliasOrigin(launch->results_[i], origins, origin_map);
+    }
+    return {};
+  }
 
   if (auto assign = As<AssignStmt>(stmt)) {
     if (auto call = As<Call>(assign->value_)) {
-      AnalyzeCallAccess(call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
 
     if (AsTensorTypeLike(assign->var_->GetType())) {
@@ -721,33 +759,35 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
   if (auto eval = As<EvalStmt>(stmt)) {
     if (auto call = As<Call>(eval->expr_)) {
-      AnalyzeCallAccess(call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
     return {};
   }
 
   if (auto seq = As<SeqStmts>(stmt)) {
     return AnalyzeStmtSequenceAliases(seq->stmts_, origin_map, has_read, has_write, dma_store_spans,
-                                      scalar_store_spans);
+                                      scalar_store_spans, simt_store_spans);
   }
 
   if (auto scope = As<ScopeStmt>(stmt)) {
     return AnalyzeStmtAliases(scope->body_, origin_map, has_read, has_write, dma_store_spans,
-                              scalar_store_spans);
+                              scalar_store_spans, simt_store_spans);
   }
 
   if (auto if_stmt = As<IfStmt>(stmt)) {
     if (auto cond_call = As<Call>(if_stmt->condition_)) {
-      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
     auto then_map = origin_map;
     auto then_yield = AnalyzeStmtAliases(if_stmt->then_body_, then_map, has_read, has_write, dma_store_spans,
-                                         scalar_store_spans);
+                                         scalar_store_spans, simt_store_spans);
     YieldAliasInfo else_yield;
     if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
       auto else_map = origin_map;
-      else_yield =
-          AnalyzeStmtAliases(else_body, else_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      else_yield = AnalyzeStmtAliases(else_body, else_map, has_read, has_write, dma_store_spans,
+                                      scalar_store_spans, simt_store_spans);
     }
     auto merged_yield = MergeYieldInfos(then_yield, else_yield);
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
@@ -762,18 +802,21 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
   if (auto for_stmt = As<ForStmt>(stmt)) {
     if (auto start_call = As<Call>(for_stmt->start_)) {
-      AnalyzeCallAccess(start_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(start_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
     if (auto stop_call = As<Call>(for_stmt->stop_)) {
-      AnalyzeCallAccess(stop_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(stop_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
     if (auto step_call = As<Call>(for_stmt->step_)) {
-      AnalyzeCallAccess(step_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(step_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
 
     auto carried_origins =
         AnalyzeLoopCarriedOrigins(for_stmt->body_, for_stmt->iter_args_, origin_map, has_read, has_write,
-                                  dma_store_spans, scalar_store_spans);
+                                  dma_store_spans, scalar_store_spans, simt_store_spans);
     for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
       ParamOrigins origins = i < carried_origins.size() ? carried_origins[i] : ParamOrigins{};
       UpdateTensorAliasOrigin(for_stmt->return_vars_[i], origins, origin_map);
@@ -783,12 +826,13 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
   if (auto while_stmt = As<WhileStmt>(stmt)) {
     if (auto cond_call = As<Call>(while_stmt->condition_)) {
-      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans,
+                        simt_store_spans);
     }
 
     auto carried_origins =
         AnalyzeLoopCarriedOrigins(while_stmt->body_, while_stmt->iter_args_, origin_map, has_read, has_write,
-                                  dma_store_spans, scalar_store_spans);
+                                  dma_store_spans, scalar_store_spans, simt_store_spans);
     for (size_t i = 0; i < while_stmt->return_vars_.size(); ++i) {
       ParamOrigins origins = i < carried_origins.size() ? carried_origins[i] : ParamOrigins{};
       UpdateTensorAliasOrigin(while_stmt->return_vars_[i], origins, origin_map);
@@ -811,7 +855,11 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
 struct ParamAccessInfo {
   explicit ParamAccessInfo(size_t count)
-      : has_read(count, false), has_write(count, false), dma_store_spans(count), scalar_store_spans(count) {}
+      : has_read(count, false),
+        has_write(count, false),
+        dma_store_spans(count),
+        scalar_store_spans(count),
+        simt_store_spans(count) {}
 
   [[nodiscard]] bool HasMixedStores() const {
     for (size_t i = 0; i < dma_store_spans.size(); ++i) {
@@ -824,6 +872,7 @@ struct ParamAccessInfo {
   std::vector<bool> has_write;
   std::vector<std::optional<Span>> dma_store_spans;
   std::vector<std::optional<Span>> scalar_store_spans;
+  std::vector<std::optional<Span>> simt_store_spans;
 };
 
 ParamAccessInfo AnalyzeParamAccess(const std::vector<StmtPtr>& stmts, const std::vector<VarPtr>& params) {
@@ -834,7 +883,7 @@ ParamAccessInfo AnalyzeParamAccess(const std::vector<StmtPtr>& stmts, const std:
     if (AsTensorTypeLike(params[i]->GetType())) origin_map[params[i].get()] = ParamOrigins{i};
   }
   AnalyzeStmtSequenceAliases(stmts, origin_map, access.has_read, access.has_write, access.dma_store_spans,
-                             access.scalar_store_spans);
+                             access.scalar_store_spans, access.simt_store_spans);
   return access;
 }
 
@@ -854,11 +903,40 @@ void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, cons
              "one UB tile (use tile.write, then one tile.store), or use tensor.write for every GM "
              "element written to this tensor.";
     }
-    if (param_directions[i] != ParamDirection::In || !access.has_write[i]) {
+    if (!access.has_write[i] ||
+        (param_directions[i] != ParamDirection::In && !access.simt_store_spans[i].has_value())) {
       continue;
     }
     param_directions[i] = access.has_read[i] ? ParamDirection::InOut : ParamDirection::Out;
   }
+}
+
+ProgramPtr PropagateSimtKernelDirections(const ProgramPtr& program) {
+  auto result = MutableCopy(program);
+  bool changed = false;
+  for (auto& [_, function] : result->functions_) {
+    if (!IsInCoreType(function->func_type_)) continue;
+    // DeriveCallDirections can run again after Buffer lowering. Only SIMT
+    // callers need this Functional-IR access analysis; ordinary Buffer
+    // kernels retain the directions already derived before their lowering.
+    if (!simt_detail::ContainsLaunch(function->body_)) continue;
+    CHECK_SPAN(function->ir_stage_ == FunctionIRStage::Functional, function->span_)
+        << "SIMT currently supports Functional IR only";
+    const auto access = AnalyzeParamAccess(FlattenToStmts(function->body_), function->params_);
+    auto directions = function->param_directions_;
+    bool function_changed = false;
+    for (size_t i = 0; i < directions.size(); ++i) {
+      if (!access.simt_store_spans[i] || directions[i] == ParamDirection::InOut) continue;
+      directions[i] = ParamDirection::InOut;
+      function_changed = true;
+    }
+    if (!function_changed) continue;
+    auto updated = MutableCopy(function);
+    updated->param_directions_ = std::move(directions);
+    function = std::move(updated);
+    changed = true;
+  }
+  return changed ? result : program;
 }
 
 StmtPtr CanonicalizeScalarUpdates(const FunctionPtr& func) {

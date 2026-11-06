@@ -69,8 +69,11 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
 //    That ordering constraint is a pipeline-position fact, not an IRProperty.
 //    The rewrite swaps one call for another within the existing vocabulary, and
 //    the synthesized function returns its InOut `target` parameter through an
-//    explicit ReturnStmt, so no property is required, produced or invalidated.
-inline const PassProperties kLowerL2TensorCollectivesProperties{};
+//    explicit ReturnStmt, so nothing is produced or invalidated. The contiguity
+//    check reads each kernel's writeback map off its ReturnStmt, hence the
+//    ReturnParamsExplicit requirement.
+inline const PassProperties kLowerL2TensorCollectivesProperties{
+    .required = {IRProperty::ReturnParamsExplicit}};
 
 // Rebuild control flow before direction/dependency/runtime-scope analysis.
 // ReturnParamsExplicit supplies the unambiguous return-slot -> parameter map.
@@ -402,9 +405,17 @@ inline const PassProperties kSplitVectorKernelProperties{
 
 // -- Memory / codegen passes --------------------------------------------------
 
+inline const PassProperties kSpecializeSimtHelpersProperties{.required = {IRProperty::SSAForm},
+                                                             .produced = {IRProperty::SimtSpecialized}};
+
+inline const PassProperties kMaterializeSimtOutputsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::TileMemoryInferred},
+    .produced = {IRProperty::SimtOutputsMaterialized},
+    .invalidated = {IRProperty::HasMemRefs, IRProperty::AllocatedMemoryAddr}};
+
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred},
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::SimtOutputsMaterialized},
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 

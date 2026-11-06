@@ -6,19 +6,9 @@
       "reason": "Restores caller-provided runtime overrides; each actual compilation input still needs classification at its consumer."
     },
     {
-      "function": "_elf_inputs",
-      "path": "python/pypto/jit/_toolchain.py",
-      "reason": "Copies the compiler subprocess environment; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
-    },
-    {
-      "function": "_ptoas_inputs",
-      "path": "python/pypto/jit/_toolchain.py",
-      "reason": "Copies the compiler subprocess environment; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
-    },
-    {
-      "function": "_run",
-      "path": "python/pypto/jit/_toolchain.py",
-      "reason": "Copies the compiler subprocess environment so a probe sees the tool selection the build does, with the C locale pinned over it; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
+      "function": "toolchain_probe_env",
+      "path": "python/pypto/_environment.py",
+      "reason": "Copies an existing metadata probe environment, omitting runtime-only loader injection, tracing and profiling under the documented deployment contract. Actual builds retain the caller environment; compiler and dependency search settings remain visible to probes."
     }
   ],
   "schema": 1,
@@ -104,16 +94,32 @@
       "reason": "Character interpretation in compiler subprocesses; account for locale precedence."
     },
     "LD_AUDIT": {
-      "category": "tool_resolution",
-      "reason": "Injected loader code requires a complete dependency inventory or unavailable identity."
+      "category": "nonsemantic",
+      "reason": "Supported deployments use loader injection only for allocation or observation, without changing compiler selection, inputs or generated semantics. Probes omit it; unobserved semantic inputs require an explicit deployment fingerprint/epoch or disabled caching."
+    },
+    "LD_DEBUG": {
+      "category": "nonsemantic",
+      "reason": "Loader diagnostics/profiling are omitted from metadata probes to avoid contaminating identity or adding probe output work; actual execution keeps the caller setting."
+    },
+    "LD_DEBUG_OUTPUT": {
+      "category": "nonsemantic",
+      "reason": "Loader diagnostics/profiling are omitted from metadata probes to avoid contaminating identity or adding probe output work; actual execution keeps the caller setting."
     },
     "LD_LIBRARY_PATH": {
       "category": "tool_resolution",
       "reason": "Dynamic dependency search input; fingerprint the libraries actually selected."
     },
     "LD_PRELOAD": {
-      "category": "tool_resolution",
-      "reason": "Injected dynamic code requires a complete dependency inventory or unavailable identity."
+      "category": "nonsemantic",
+      "reason": "Supported deployments use loader injection only for allocation or observation, without changing compiler selection, inputs or generated semantics. Probes omit it; unobserved semantic inputs require an explicit deployment fingerprint/epoch or disabled caching."
+    },
+    "LD_PROFILE": {
+      "category": "nonsemantic",
+      "reason": "Loader diagnostics/profiling are omitted from metadata probes to avoid contaminating identity or adding probe output work; actual execution keeps the caller setting."
+    },
+    "LD_PROFILE_OUTPUT": {
+      "category": "nonsemantic",
+      "reason": "Loader diagnostics/profiling are omitted from metadata probes to avoid contaminating identity or adding probe output work; actual execution keeps the caller setting."
     },
     "LIBRARY_PATH": {
       "category": "tool_resolution",
@@ -181,7 +187,7 @@
     },
     "PYPTO_EMIT_DEBUG_RUNNER": {
       "category": "fresh_request",
-      "reason": "Controls generated replay files; integration must honor output requests."
+      "reason": "Controls generated replay files; integration must honor output requests. Only an explicit enabled value requests fresh compilation; 0/false/no do not."
     },
     "PYPTO_EMIT_PTO_LOC": {
       "category": "semantic",
@@ -192,12 +198,16 @@
       "reason": "Logging threshold; does not select compiler transformations."
     },
     "PYPTO_PROG_BUILD_DIR": {
-      "category": "fresh_request",
-      "reason": "An explicit nonempty output root requests fresh JIT artifacts."
+      "category": "nonsemantic",
+      "reason": "Selects the base for new private build/runtime directories. Does not force compilation or change artifact identity; existing objects retain their directories."
+    },
+    "PYPTO_PTOAS_TIMEOUT_SECONDS": {
+      "category": "nonsemantic",
+      "reason": "Bounds each PTOAS kernel compilation; successful generated output is unchanged."
     },
     "PYPTO_REBUILD_FROM_PTO": {
       "category": "fresh_request",
-      "reason": "Explicitly rebuilds edited artifacts; incompatible with immutable reuse."
+      "reason": "Explicitly rebuilds edited artifacts; incompatible with immutable reuse. Only an explicit enabled value requests fresh compilation; 0/false/no do not."
     },
     "PYPTO_RUNTIME_LOG": {
       "category": "nonsemantic",

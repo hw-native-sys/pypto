@@ -10,7 +10,6 @@
  */
 
 #include <any>
-#include <cctype>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -93,6 +92,9 @@ int KernelRegistrations::GetOrCreate(const std::string& name, CoreType core_type
 void OrchestrationStmtCodegen::TaskDispatchPlan::Emit(OrchestrationStmtCodegen& cg) && {
   cg.EmitBlankLine();
   cg.EmitIndentedLine(comment);
+  for (const auto& line : guard_lines) {
+    cg.EmitIndentedLine(line);
+  }
   cg.EmitTaskParamsDecl(task_var);
   for (const auto& p : params) {
     cg.EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
@@ -996,7 +998,70 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildDirect
       std::move(submit.pre_lines));
   // Direct calls historically emit set_dependencies before the launch spec.
   plan.deps_before_launch = true;
+  plan.guard_lines = BuildContiguityGuardLines(call, callee_func);
   return plan;
+}
+
+/// Assert that a wrapper-dispatched kernel does not need operand guards.
+///
+/// ``BuildContiguityGuardLines`` is wired into the direct-call plan only.
+/// ``kAttrRequireContiguousOperands`` is written by ``LowerL2TensorCollectives``, which runs
+/// after every outlining pass that builds a ``Spmd`` / ``Group`` wrapper, so the kernel it
+/// synthesizes cannot be a wrapper's inner kernel and the direct path is the only one that can
+/// carry the attr. That is a pipeline-ordering invariant, not a property of this file:
+/// reordering the passes would silently drop the guard and let a strided operand reach the
+/// kernel again. Fail loudly here instead.
+void OrchestrationStmtCodegen::CheckWrapperNeedsNoContiguityGuard(const FunctionPtr& kernel_func,
+                                                                  const CallPtr& call) {
+  INTERNAL_CHECK_SPAN(!kernel_func->GetAttr<bool>(kAttrRequireContiguousOperands, false), call->span_)
+      << "Internal error: kernel '" << kernel_func->name_
+      << "' requires contiguous operands but is dispatched through a wrapper plan, which emits no "
+         "operand guards; LowerL2TensorCollectives must run after every outlining pass";
+}
+
+/// Runtime half of a kernel's ``kAttrRequireContiguousOperands`` contract:
+/// one ``is_contiguous`` check per tensor argument, chained with ``else if``
+/// so only the first violation is reported.
+///
+/// The checks latch ``SIMPLER_ERROR_INVALID_ARGS`` and deliberately do not
+/// ``return``: this dispatch may sit inside a scope, a loop, or a function
+/// whose return type is not ``void``, and the runtime already turns every
+/// later ``submit_task`` / scope boundary into a no-op once a fatal is
+/// latched, so the guarded submit below never launches.
+///
+/// ``call->args_[i]`` binds ``callee_func->params_[i]`` for every tensor
+/// argument: a Call has full coverage, and a Submit's caller-supplied args are
+/// the leading region (its gap and CommCtx suffix carry no tensor operands).
+///
+/// Backstop for caller-supplied operands; see kAttrRequireContiguousOperands.
+std::vector<std::string> OrchestrationStmtCodegen::BuildContiguityGuardLines(const CallPtr& call,
+                                                                             const FunctionPtr& callee_func) {
+  std::vector<std::string> lines;
+  if (!callee_func->GetAttr<bool>(kAttrRequireContiguousOperands, false)) {
+    return lines;
+  }
+  const std::string prefix = "rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, \"" + callee_func->name_ + ": ";
+  std::string keyword = "if";
+  for (size_t i = 0; i < call->args_.size() && i < callee_func->params_.size(); ++i) {
+    const auto& arg = call->args_[i];
+    if (!AsTensorTypeLike(arg->GetType())) {
+      continue;
+    }
+    const std::string var_name = TryGetVarName(arg);
+    INTERNAL_CHECK_SPAN(!var_name.empty(), call->span_)
+        << "Internal error: tensor argument " << i << " of '" << callee_func->name_
+        << "' does not resolve to a variable, so its contiguity cannot be checked";
+    lines.push_back(keyword + " (!" + GetExternalTensorName(var_name) + ".is_contiguous) {");
+    lines.push_back("    " + prefix + callee_func->params_[i]->name_hint_ +
+                    " must be a contiguous row-major view\");");
+    keyword = "} else if";
+  }
+  if (!lines.empty()) {
+    lines.insert(lines.begin(), "// " + callee_func->name_ +
+                                    " reads every operand as dense row-major (require_contiguous_operands)");
+    lines.emplace_back("}");
+  }
+  return lines;
 }
 
 /// ``kernel_func`` is the AIC/AIV kernel the wrapper dispatches (``spmd_func`` is
@@ -1005,6 +1070,7 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildSpmdCa
     const CallPtr& call, const FunctionPtr& spmd_func, const FunctionPtr& kernel_func,
     const std::string& callee_name, CoreType core_type, int func_id, std::vector<ParamEntry>&& params,
     bool capture_plain_task_id) {
+  CheckWrapperNeedsNoContiguityGuard(kernel_func, call);
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
   auto submit = BuildSingleKernelSubmit(core_type, kernel_func, func_id, task_var);
@@ -1019,6 +1085,7 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildSpmdCa
 OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildAivOnlyGroupDispatchPlan(
     const CallPtr& call, const FunctionPtr& launch_func, const std::string& group_name,
     const FunctionPtr& aiv_func, int aiv_id, std::vector<ParamEntry>&& params, bool capture_plain_task_id) {
+  CheckWrapperNeedsNoContiguityGuard(aiv_func, call);
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
   auto submit = BuildSingleKernelSubmit(CoreType::VECTOR, aiv_func, aiv_id, task_var);
@@ -1033,6 +1100,7 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildMixedG
     const CallPtr& call, const FunctionPtr& launch_func, const std::string& group_name, int aic_id,
     int aiv_id, const FunctionPtr& aic_func, const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params,
     bool capture_plain_task_id) {
+  CheckWrapperNeedsNoContiguityGuard(aiv_func, call);
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
   std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";

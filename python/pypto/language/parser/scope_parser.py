@@ -296,7 +296,12 @@ class ScopeParser:
                     "no binding — are not supported."
                 ),
             )
-        policy = extract_enum_value(call.args[1], CACHE_POLICY_MAP, "CachePolicy", "pl.CachePolicy")
+        policy_node = call.args[1]
+        enum_node = policy_node.value if isinstance(policy_node, ast.Attribute) else None
+        enum_name = enum_node.attr if isinstance(enum_node, ast.Attribute) else getattr(enum_node, "id", "")
+        if enum_name != "CachePolicy":
+            raise ParserSyntaxError("Expected CachePolicy")
+        policy = extract_enum_value(policy_node, CACHE_POLICY_MAP, "CachePolicy", "pl.CachePolicy")
 
         # Resolved against the bindings live *at the scope*, not inside it: the
         # declaration names a tensor the scope body captures from outside, which
@@ -2612,7 +2617,7 @@ class ScopeParser:
             raise ParserSyntaxError("comm_domain accepts keyword arguments and no 'as' target", span=span)
         keywords: dict[str, ast.expr] = {}
         for keyword in call.keywords:
-            if keyword.arg not in {"name", "devices", "slots", "attrs"} or keyword.arg in keywords:
+            if keyword.arg not in {"name", "devices", "slots", "attrs", "engines"} or keyword.arg in keywords:
                 raise ParserSyntaxError("Unknown or duplicate comm_domain keyword", span=span)
             keywords[keyword.arg] = keyword.value
         if not {"name", "devices", "slots"} <= keywords.keys():
@@ -2634,7 +2639,16 @@ class ScopeParser:
         devices = [cast(int, cast(ast.Constant, device).value) for device in devices_node.elts]
         attrs: list[tuple[str, Any]] = []
         slots: list[ir.WindowBuffer] = []
-        with self.services.builder.comm_domain_scope(devices, slots, name_node.value, span, attrs):
+        engines: list[str] = []
+        if "engines" in keywords:
+            engine_node = keywords["engines"]
+            if not isinstance(engine_node, ast.List) or any(
+                not isinstance(item, ast.Constant) or not isinstance(item.value, str)
+                for item in engine_node.elts
+            ):
+                raise ParserSyntaxError("comm_domain engines must be a list of string literals", span=span)
+            engines = [cast(str, cast(ast.Constant, item).value) for item in engine_node.elts]
+        with self.services.builder.comm_domain_scope(devices, slots, name_node.value, span, attrs, engines):
             with self.regions.scope_kind_context(ir.ScopeKind.CommDomain):
                 self.services.scope_manager.enter_scope("scope")
                 self.callbacks.body(stmt.body)

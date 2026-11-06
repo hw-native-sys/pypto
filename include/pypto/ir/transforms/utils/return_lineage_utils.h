@@ -60,9 +60,10 @@ class ScopedTraceCache {
 std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramPtr& program);
 
 /// Per-position generalization of ReturnedParamIndex over all return values.
+/// External declarations resolve through their validated returned-parameter contract.
 ///
-/// @return empty vector when @p func has no traceable top-level ReturnStmt
-///         and is not a wrapper resolvable through its inner call; otherwise
+/// @return empty vector when @p func has no traceable top-level ReturnStmt,
+///         external contract, or wrapper returning through its inner call; otherwise
 ///         one entry per return position (nullopt = not a param writeback).
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program);
 
@@ -86,7 +87,12 @@ struct ReturnedValueBinding {
 /// inner call when recognizable; otherwise their typed slots remain unknown.
 std::vector<ReturnedValueBinding> AnalyzeReturnedValues(const FunctionPtr& func, const ProgramPtr& program);
 
-/// Read the return->param map straight off @p func's ReturnStmt.
+/// Read the return->param map from @p func's explicit return contract.
+///
+/// External declarations use kAttrExternalReturnParams instead of a ReturnStmt.
+/// Both this structural reader and the general tracer validate that contract;
+/// absent metadata permits only the complete ordered Out/InOut parameter list.
+/// Ambiguous or malformed external contracts raise a user-facing error.
 ///
 /// `NormalizeReturnOrder` rewrites every tensor param-writeback return value to
 /// reference its param directly, and `IRProperty::ReturnParamsExplicit` verifies
@@ -109,7 +115,7 @@ std::vector<ReturnedValueBinding> AnalyzeReturnedValues(const FunctionPtr& func,
 /// an `int64_t` (issue #1580).
 ///
 /// @return one entry per return position (nullopt = not a param writeback);
-///         empty when @p func has no ReturnStmt.
+///         empty when @p func has neither a ReturnStmt nor an external return contract.
 std::vector<std::optional<size_t>> ExplicitReturnedParamIndices(const FunctionPtr& func);
 
 /// First-position convenience wrapper over ExplicitReturnedParamIndices.

@@ -75,6 +75,87 @@ def test_while_outside_register_scope_is_allowed():
     assert verify(body) == []
 
 
+@pytest.mark.parametrize("placement", ["outside", "inside", "after_scope", "contains_scope"])
+@pytest.mark.parametrize("stop", [0, 8])
+def test_hardware_loop_policy_requires_lexical_reg_scope(placement, stop):
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    body = region(sequence()) if placement == "contains_scope" else sequence()
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        integer(stop),
+        integer(1),
+        [],
+        body,
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    stmt = region(loop) if placement == "inside" else loop
+    if placement == "after_scope":
+        stmt = sequence(region(sequence()), loop)
+    diagnostics = verify(stmt)
+    if placement == "inside":
+        assert diagnostics == []
+    else:
+        assert len(diagnostics) == 1
+        assert "HardwareLoopPolicy.Require requires RegScope" in diagnostics[0].message
+
+
+@pytest.mark.parametrize("depth", [1, 4, 5])
+@pytest.mark.parametrize("stop", [65535, 65536])
+@pytest.mark.parametrize("computed", [False, True])
+def test_hardware_loop_limits_are_checked_by_ir_verifier(depth, stop, computed):
+    # Reject invalid loops during IR verification, without invoking codegen or
+    # a target profile. Dynamic integer counts need no compile-time range proof.
+    body = sequence()
+    for level in range(depth):
+        body = ir.ForStmt(
+            scalar(f"i{level}"),
+            integer(0),
+            ir.Add(integer(stop - 1), integer(1), DataType.INDEX, SPAN) if computed else integer(stop),
+            integer(1),
+            [],
+            body,
+            [],
+            SPAN,
+            hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+        )
+    diagnostics = verify(region(body))
+    messages = [diagnostic.message for diagnostic in diagnostics]
+    if depth > 4:
+        assert any("HWL_DEPTH" in message for message in messages)
+    if stop > 65535:
+        assert any("65535" in message for message in messages)
+    if depth <= 4 and stop <= 65535:
+        assert diagnostics == []
+
+
+@pytest.mark.parametrize("cast_result", [False, True])
+def test_hardware_loop_folds_nested_constant_stop(cast_result: bool):
+    subtotal = ir.Add(integer(20000), integer(20000), DataType.INDEX, SPAN)
+    stop: ir.Expr = ir.Mul(subtotal, integer(2), DataType.INDEX, SPAN)
+    if cast_result:
+        stop = ir.Cast(stop, DataType.INT64, SPAN)
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("65535" in d.message for d in verify(region(loop)))
+
+
+def test_auto_loop_outside_reg_scope_remains_legal():
+    loop = ir.ForStmt(scalar("i"), integer(0), integer(8), integer(1), [], sequence(), [], SPAN)
+    assert verify(loop) == []
+
+
 @pytest.mark.parametrize(
     "kind",
     [
@@ -375,6 +456,277 @@ def test_tuple_cannot_hide_local_scalar_escape():
         ir.EvalStmt(packed, SPAN),
     )
     assert any("escape" in d.message for d in verify(body))
+
+
+@pytest.mark.parametrize("control_flow", ["if", "for"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+def test_register_control_flow_requires_unpacked_values(control_flow, nested, packed):
+    r = register()
+    initial = r
+    statements: list[ir.Stmt] = [definition(r)]
+    if packed:
+        value = ir.MakeTuple([r], SPAN)
+        if nested:
+            value = ir.MakeTuple([value], SPAN)
+        initial = ir.Var("pair", value.type, SPAN)
+        statements.append(ir.AssignStmt(initial, value, SPAN))
+    result = ir.Var("result", initial.type, SPAN)
+    if control_flow == "if":
+        branch = ir.YieldStmt([initial], SPAN)
+        flow = ir.IfStmt(ir.ConstBool(True, SPAN), branch, branch, [result], SPAN)
+    else:
+        carry = ir.IterArg("carry", initial.type, initial, SPAN)
+        flow = ir.ForStmt(
+            scalar("i"),
+            integer(0),
+            integer(4),
+            integer(1),
+            [carry],
+            ir.YieldStmt([carry], SPAN),
+            [result],
+            SPAN,
+        )
+    statements.extend([flow, ir.EvalStmt(result, SPAN)])
+    diagnostics = verify(region(sequence(*statements)))
+    # Reject tuples before codegen can lose their components at an SCF join;
+    # carrying the unpacked register remains supported.
+    if packed:
+        assert any("unpack the tuple first" in d.message for d in diagnostics)
+    else:
+        assert diagnostics == []
+
+
+@pytest.mark.parametrize(
+    "dtype,value", [(DataType.UINT32, -1), (DataType.UINT8, 256), (DataType.UINT32, 65536)]
+)
+def test_hardware_loop_static_unsigned_stop_is_checked_before_emission(dtype, value):
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        ir.ConstInt(value, dtype, SPAN),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    diagnostics = verify(region(loop))
+    assert bool(diagnostics) == (value > 65535)
+
+
+def test_unsigned_wrapping_stop_exceeds_hardware_counter_range():
+    dtype = DataType.UINT32
+    stop = ir.Sub(ir.ConstInt(0, dtype, SPAN), ir.ConstInt(1, dtype, SPAN), dtype, SPAN)
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("65535" in diagnostic.message for diagnostic in verify(region(loop)))
+
+
+@pytest.mark.parametrize("kind", ["same_width_cast", "widening_cast", "product"])
+def test_wrapped_constant_stop_exceeds_hardware_counter_range(kind: str):
+    dtype = DataType.UINT32
+    if kind == "product":
+        stop: ir.Expr = ir.Mul(
+            ir.ConstInt(0xFFFFFFFF, dtype, SPAN), ir.ConstInt(0xFFFF0000, dtype, SPAN), dtype, SPAN
+        )
+    else:
+        source_dtype = DataType.INT32 if kind == "same_width_cast" else DataType.INT16
+        stop = ir.Cast(ir.ConstInt(-1, source_dtype, SPAN), dtype, SPAN)
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("65535" in diagnostic.message for diagnostic in verify(region(loop)))
+
+
+@pytest.mark.parametrize("narrowed", [0, 65535, 65536])
+def test_hardware_loop_checks_stop_after_narrowing_cast(narrowed: int):
+    policy = ir.HardwareLoopPolicy.Require
+    source = ir.ConstInt((1 << 32) + narrowed, DataType.UINT64, SPAN)
+    stop = ir.Cast(source, DataType.UINT32, SPAN)
+    body = sequence()
+    if narrowed == 0:
+        body = ir.ForStmt(
+            scalar("inner"),
+            integer(0),
+            integer(65536),
+            integer(1),
+            [],
+            body,
+            [],
+            SPAN,
+            hardware_loop_policy=policy,
+        )
+    loop = ir.ForStmt(
+        scalar("outer"),
+        integer(0),
+        stop,
+        integer(1),
+        [],
+        body,
+        [],
+        SPAN,
+        hardware_loop_policy=policy,
+    )
+    diagnostics = verify(region(loop))
+    if narrowed > 65535:
+        assert any("65535" in diagnostic.message for diagnostic in diagnostics)
+    else:
+        assert diagnostics == []
+
+
+@pytest.mark.parametrize("policy", [ir.HardwareLoopPolicy.Auto, ir.HardwareLoopPolicy.Require])
+@pytest.mark.parametrize("outer_stop", [0, 1])
+@pytest.mark.parametrize("computed", [False, True])
+def test_hardware_loop_empty_ancestor_suppresses_only_hardware_limits(outer_stop, policy, computed):
+    body = sequence()
+    for level in range(5):
+        body = ir.ForStmt(
+            scalar(f"i{level}"),
+            integer(0),
+            integer(65536),
+            integer(1),
+            [],
+            body,
+            [],
+            SPAN,
+            hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+        )
+    body = ir.ForStmt(
+        scalar("outer"),
+        ir.Add(integer(0), integer(0), DataType.INDEX, SPAN)
+        if computed and policy == ir.HardwareLoopPolicy.Auto
+        else integer(0),
+        ir.Sub(integer(outer_stop + 1), integer(1), DataType.INDEX, SPAN)
+        if computed
+        else integer(outer_stop),
+        ir.Add(integer(0), integer(1), DataType.INDEX, SPAN)
+        if computed and policy == ir.HardwareLoopPolicy.Auto
+        else integer(1),
+        [],
+        body,
+        [],
+        SPAN,
+        hardware_loop_policy=policy,
+    )
+    diagnostics = verify(region(body))
+    assert bool(diagnostics) == bool(outer_stop)
+
+
+@pytest.mark.parametrize("value", [-129, 128])
+def test_signed_stop_source_width_does_not_restrict_admission(value):
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        ir.ConstInt(value, DataType.INT8, SPAN),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert verify(region(loop)) == []
+
+
+def test_return_inside_hardware_loop_is_rejected_by_ir_verifier():
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        integer(2),
+        integer(1),
+        [],
+        ir.ReturnStmt([], SPAN),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("ReturnStmt" in d.message for d in verify(region(loop)))
+
+
+@pytest.mark.parametrize("stmt_type", [ir.BreakStmt, ir.ContinueStmt])
+@pytest.mark.parametrize("stop", [0, 2])
+def test_hardware_loop_rejects_break_continue_even_when_empty(stmt_type, stop):
+    loop = ir.ForStmt(
+        scalar("i"),
+        integer(0),
+        integer(stop),
+        integer(1),
+        [],
+        stmt_type(SPAN),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    diagnostics = verify(region(loop))
+    assert any("is not supported inside hardware_loop" in d.message for d in diagnostics)
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.INT64])
+@pytest.mark.parametrize("stop", [0, 2])
+def test_hardware_loop_requires_index_induction_variable(dtype, stop):
+    # Raw IR can bypass the DSL's INDEX induction-variable construction.
+    loop = ir.ForStmt(
+        ir.Var("i", ir.ScalarType(dtype), SPAN),
+        integer(0),
+        integer(stop),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    assert any("induction variable must have INDEX" in d.message for d in verify(region(loop)))
+
+
+@pytest.mark.parametrize(
+    "start,step",
+    [(128, 1), (0, -129)],
+)
+def test_invalid_auto_ancestor_literals_do_not_hide_hardware_limits(start, step):
+    # INT8 narrowing changes 128 to -128 and -129 to 127; neither
+    # pre-narrowing comparison can certify that the emitted loop is empty.
+    inner = ir.ForStmt(
+        scalar("inner"),
+        integer(0),
+        integer(65536),
+        integer(1),
+        [],
+        sequence(),
+        [],
+        SPAN,
+        hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+    )
+    outer = ir.ForStmt(
+        scalar("outer"),
+        ir.ConstInt(start, DataType.INT8, SPAN),
+        integer(1 if step < 0 else 0),
+        ir.ConstInt(step, DataType.INT8, SPAN),
+        [],
+        region(inner),
+        [],
+        SPAN,
+    )
+    assert any("65535" in d.message for d in verify(outer))
 
 
 if __name__ == "__main__":

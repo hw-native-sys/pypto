@@ -11,10 +11,10 @@
 
 /**
  * @file sync.cpp
- * @brief Expose typed hardware resource domains and immutable built-in catalogs.
+ * @brief Expose hardware resource catalogs and backend macro resource descriptions.
  *
  * Queries require neither an installed ISA nor global backend selection. Python
- * can construct lookup keys, but cannot register catalogs or modify target facts.
+ * can construct lookup keys, but cannot modify query results.
  * Pool identity and capacity do not certify an instruction's backend legality.
  */
 
@@ -28,6 +28,7 @@
 
 #include "../module.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/sync/isa_macro_resources.h"
 #include "pypto/sync/resource_catalog.h"
 
 namespace nb = nanobind;
@@ -37,7 +38,7 @@ namespace pypto::python {
 /// Register hardware queries after IR pipe enums; built-in catalogs remain native-owned for process lifetime.
 void BindSync(nb::module_& m) {
   namespace s = pypto::sync;
-  auto mod = m.def_submodule("sync", "Hardware synchronization resource catalogs");
+  auto mod = m.def_submodule("sync", "Hardware catalogs and ISA macro resource descriptions");
 
   // Separate resource families even when their numeric IDs or user-facing names coincide.
   nb::enum_<s::ResourceKind>(mod, "ResourceKind")
@@ -81,6 +82,32 @@ void BindSync(nb::module_& m) {
   // Backends own these immutable objects. Reference policy prevents Python from deleting them.
   mod.def("find_resource_catalog", &s::FindResourceCatalog, nb::arg("target"), nb::rv_policy::reference,
           "Borrow a backend's process-lifetime catalog, or return None for an unknown target");
+
+  // Macro declarations are owned read-only snapshots; nested keys and ID lists are copied.
+  nb::enum_<s::IsaSyncMode>(mod, "IsaSyncMode")
+      .value("Manual", s::IsaSyncMode::Manual)
+      .value("Auto", s::IsaSyncMode::Auto)
+      .value("FlagTest", s::IsaSyncMode::FlagTest);
+  nb::enum_<s::IsaIdSource>(mod, "IsaIdSource")
+      .value("Fixed", s::IsaIdSource::Fixed)
+      .value("Parameter", s::IsaIdSource::Parameter)
+      .value("CompilerAllocated", s::IsaIdSource::CompilerAllocated);
+  nb::enum_<s::IsaResourceLifetime>(mod, "IsaResourceLifetime")
+      .value("Invocation", s::IsaResourceLifetime::Invocation)
+      .value("Owner", s::IsaResourceLifetime::Owner);
+  nb::class_<s::IsaResourceClaim>(mod, "IsaResourceClaim")
+      .def_prop_ro("pool", [](const s::IsaResourceClaim& value) { return value.pool; })
+      .def_ro("source", &s::IsaResourceClaim::source)
+      .def_prop_ro("ids", [](const s::IsaResourceClaim& value) { return value.ids; })
+      .def_ro("parameter", &s::IsaResourceClaim::parameter)
+      .def_prop_ro("offsets", [](const s::IsaResourceClaim& value) { return value.offsets; })
+      .def_ro("lifetime", &s::IsaResourceClaim::lifetime)
+      .def_ro("owner", &s::IsaResourceClaim::owner)
+      .def_prop_ro("modes", [](const s::IsaResourceClaim& value) { return value.modes; });
+  nb::class_<s::IsaMacroResources>(mod, "IsaMacroResources")
+      .def_ro("name", &s::IsaMacroResources::name)
+      .def_ro("target", &s::IsaMacroResources::target)
+      .def_prop_ro("claims", [](const s::IsaMacroResources& value) { return value.claims; });
 }
 
 }  // namespace pypto::python

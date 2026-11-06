@@ -31,6 +31,11 @@ namespace ir {
 /// deliberately do not carry it.
 inline constexpr const char* kCompilerTensorToTileMatBridgeAttr = "__compiler_tensor_to_tile_mat_bridge";
 
+/// Compiler-owned software-pipeline provenance: loops carry the slot count;
+/// slot load/create Calls carry true through MemoryReuse to codegen, including
+/// schedules with no steady loop. This is not a private PTOAS scheduling contract.
+inline constexpr const char* kSoftwarePipelineSlotsAttr = "software_pipeline_slots";
+
 /// Attribute key for ``pl.pipeline(N, stage=F)`` — appears on ``ForStmt.attrs_``
 /// if and only if ``ForStmt.kind_ == ForKind::Pipeline`` (bidirectional invariant
 /// enforced by the structural verifier ``PipelineLoopValid``).
@@ -214,7 +219,7 @@ inline constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler
 //
 // The rebind attr is stamped for **every** iter_arg (even when false) so its
 // presence proves the pass ran; the array-size attr is stamped only when
-// positive. See ``docs/en/dev/passes/52-classify_iter_arg_carry.md``.
+// positive. See ``docs/en/dev/passes/54-classify_iter_arg_carry.md``.
 
 /// Prefix of the per-iter_arg ``bool`` "needs a materialised carry" attr.
 inline constexpr const char* kIterArgRebindAttrPrefix = "iter_arg_rebind_";

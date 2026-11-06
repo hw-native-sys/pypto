@@ -109,7 +109,7 @@ class RuntimePinStatus:
         return f"pip install --no-build-isolation -e {shlex.quote(str(target))}"
 
 
-def check_runtime_pin() -> RuntimePinStatus:
+def check_runtime_pin(*, checkout_root: Path | None = None) -> RuntimePinStatus:
     """Refuse an installed ``simpler`` built from a revision other than ``runtime/``.
 
     Called at import time from every PyPTO module that imports simpler at module scope.
@@ -119,13 +119,25 @@ def check_runtime_pin() -> RuntimePinStatus:
     Set ``PYPTO_SKIP_RUNTIME_PIN_CHECK=1`` to bypass it -- at the cost of the silent
     struct corruption the check exists to prevent.
 
+    Args:
+        checkout_root: Explicit source checkout whose runtime pin should be checked.
+            Acceptance tests can supply this when PyPTO itself is wheel-installed.
+            By default, use the checkout of the imported PyPTO, never the cwd.
+
     Returns:
         The collected status, so a caller can inspect it even when the check passes.
 
     Raises:
         RuntimePinMismatch: The installed simpler and ``runtime/`` are different revisions.
+        ValueError: The explicit checkout is not a Git checkout with an initialized runtime.
     """
-    status = runtime_pin_status()
+    if checkout_root is None:
+        status = runtime_pin_status()
+    else:
+        root = checkout_root.resolve()
+        if not (root / ".git").exists() or not _is_own_checkout(root / "runtime"):
+            raise ValueError(f"Expected a Git checkout with an initialized runtime submodule: {root}")
+        status = _runtime_pin_status(root)
     if _skip_requested():
         return status
     if status.off_pin and not _state["warned"]:
@@ -154,8 +166,12 @@ def runtime_pin_status() -> RuntimePinStatus:
     Returns:
         The resolved :class:`RuntimePinStatus`.
     """
+    return _runtime_pin_status(_pypto_root())
+
+
+def _runtime_pin_status(root: Path | None) -> RuntimePinStatus:
+    """Compare the installed extension with one selected source checkout."""
     installed, stamp_missing, extension_path = _installed_revision()
-    root = _pypto_root()
     if root is None:
         return RuntimePinStatus(None, None, None, installed, stamp_missing, extension_path)
     runtime_dir = root / "runtime"

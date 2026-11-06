@@ -63,6 +63,7 @@ from .syntax_helpers import (
     is_empty_body,
     is_pl_call,
     is_pld_call,
+    is_simt_launch,
 )
 from .type_resolver import (
     TypeResolver,
@@ -96,8 +97,9 @@ OMIT_ATTR: Any = object()
 # declaration would arrive too late to have any effect. These keep their
 # dedicated ``@pl.function(...)`` keyword and are rejected in ``pl.func_attr``:
 #   - ``auto_scope``      gates implicit scope insertion during the body walk
-#   - ``external_source`` 在解析函数体前确定外部核声明；函数体仅允许空声明
-#                         或写回参数的 return 契约。
+#   - ``external_source`` selects the no-DSL-body path entirely (the body must
+#                         be a bare ``...``, so there is nowhere to put a
+#                         prologue in the first place)
 DECORATOR_ONLY_FUNC_ATTRS: frozenset[str] = frozenset({AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR})
 
 
@@ -371,7 +373,6 @@ class ASTParser:
             # A scalar parameter shadowing one of these arrives too late to bind it.
             symbols_used_so_far: set[int] = set()
 
-            external_outputs: set[str] = set()
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
                 param_name = arg.arg
@@ -388,11 +389,6 @@ class ASTParser:
                     )
 
                 param_type, param_direction = self.type_resolver.resolve_param_type(arg.annotation)
-                if isinstance(param_type, ir.TensorType) and param_direction in (
-                    ir.ParamDirection.Out,
-                    ir.ParamDirection.InOut,
-                ):
-                    external_outputs.add(param_name)
                 param_span = self.span_tracker.get_span(arg)
 
                 # Add parameter to function with direction
@@ -437,7 +433,10 @@ class ASTParser:
             # via ``inline_body`` and are not parsed as DSL.
             external_source = (func_attrs or {}).get(EXTERNAL_SOURCE_ATTR)
             if external_source is not None:
-                # 外部核只解析签名及可选的写回契约；设备实现仍完全来自引用的 C++。
+                # Header-only external C++ kernel: no DSL body to parse. The
+                # signature (params + directions + return types) is the contract
+                # the orchestration submits against; the backend compiles the
+                # referenced ``.cpp`` as the InCore kernel by func_id.
                 if func_type not in (ir.FunctionType.AIC, ir.FunctionType.AIV):
                     raise ParserTypeError(
                         f"external_source is only valid on FunctionType.AIC or "
@@ -445,7 +444,14 @@ class ASTParser:
                         span=func_span,
                         hint="Declare the external kernel as pl.FunctionType.AIC or pl.FunctionType.AIV.",
                     )
-                self._parse_external_contract(body_stmts, func_name, func_span, external_outputs)
+                if not is_empty_body(body_stmts):
+                    raise ParserSyntaxError(
+                        f"External kernel '{func_name}' must have an empty '...' body "
+                        "(signature only) — its implementation is the C++ source "
+                        "given by external_source.",
+                        span=func_span,
+                        hint="Replace the function body with a bare '...'.",
+                    )
             elif inline_body is not None:
                 self.builder.inline_stmt(inline_body, ir.InlineLanguage.Python, func_span)
             else:
@@ -456,33 +462,6 @@ class ASTParser:
         self.scope_manager.exit_scope()
 
         return f.get_result()
-
-    def _parse_external_contract(
-        self, body: list[ast.stmt], name: str, span: ir.Span, outputs: set[str]
-    ) -> None:
-        """外部核的 return 仅声明写回别名，供动态 SPMD 及依赖分析使用。"""
-        if is_empty_body(body):
-            return
-        # 与普通函数一致，允许说明字符串位于声明之前。
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
-        ):
-            body = body[1:]
-        contract = body[0] if len(body) == 1 else None
-        value = contract.value if isinstance(contract, ast.Return) else None
-        names = value.elts if isinstance(value, ast.Tuple) else [value]
-        if not names or not all(isinstance(item, ast.Name) and item.id in outputs for item in names):
-            raise ParserSyntaxError(
-                f"External kernel '{name}' must have an empty '...' body "
-                "or return only Out/InOut tensor parameters; its implementation "
-                "is the C++ source given by external_source.",
-                span=span,
-                hint="Use '...' or a single 'return output' / 'return first, second'.",
-            )
-        self._parse_body_siblings(body)
 
     def _consume_func_attr_prologue(self, body: list[ast.stmt], func_name: str) -> list[ast.stmt]:
         """Merge leading ``pl.func_attr({...})`` directives, return the rest of the body.
@@ -1059,6 +1038,11 @@ class ASTParser:
         Args:
             stmt: Assign AST node
         """
+        if len(stmt.targets) == 1 and is_simt_launch(stmt.value):
+            assert isinstance(stmt.value, ast.Call)
+            self._parse_simt_launch(stmt.value, stmt.targets[0])
+            return
+
         # Intercept ``buf = pld.[tensor.]alloc_window_buffer(...)``: the alloc
         # op derives its ``name`` kwarg from the LHS, and the LHS name must be
         # globally unique within the @pl.program.
@@ -1542,6 +1526,58 @@ class ASTParser:
             return_expr = self.parse_expression(stmt.value)
             self.builder.return_stmt([return_expr], span)
 
+    def _parse_simt_launch(self, call: ast.Call, target: ast.expr | None) -> None:
+        """Read the canonical launch spelling emitted by the IR printer."""
+        span = self.span_tracker.get_span(call)
+        if not call.args or not isinstance(call.args[0], ast.Attribute):
+            raise ParserSyntaxError("SIMT launch requires self.<helper> as its first argument", span=span)
+        ref = call.args[0]
+        if not isinstance(ref.value, ast.Name) or ref.value.id != "self":
+            raise ParserSyntaxError("SIMT launch requires self.<helper>", span=span)
+        callee = self.bindings.global_vars.get(ref.attr)
+        if callee is None:
+            raise ParserSyntaxError(f"Unknown SIMT helper '{ref.attr}'", span=span)
+        args = [self.parse_expression(arg) for arg in call.args[1:]]
+        kwargs = {kw.arg: kw.value for kw in call.keywords}
+        if len(kwargs) != len(call.keywords) or set(kwargs) != {"block_dims", "result_param_indices"}:
+            raise ParserSyntaxError(
+                "Canonical SIMT launch requires block_dims and result_param_indices", span=span
+            )
+        dims_node = kwargs["block_dims"]
+        indices_node = kwargs["result_param_indices"]
+        if not isinstance(dims_node, (ast.Tuple, ast.List)) or not isinstance(
+            indices_node, (ast.Tuple, ast.List)
+        ):
+            raise ParserSyntaxError("SIMT dimensions and result indices must be sequences", span=span)
+        dims = [self.parse_expression(dim) for dim in dims_node.elts]
+        indices: list[int] = []
+        for node in indices_node.elts:
+            if (
+                not isinstance(node, ast.Constant)
+                or type(node.value) is not int
+                or not 0 <= node.value < len(args)
+            ):
+                raise ParserSyntaxError("SIMT result indices must be integer argument positions", span=span)
+            indices.append(node.value)
+        targets = [] if target is None else list(target.elts) if isinstance(target, ast.Tuple) else [target]
+        if len(targets) != len(indices) or any(not isinstance(item, ast.Name) for item in targets):
+            raise ParserSyntaxError(
+                "SIMT launch needs one named result per result parameter index", span=span
+            )
+        results: list[ir.Var] = []
+        for item, index in zip(targets, indices):
+            assert isinstance(item, ast.Name)
+            previous = self.scope_manager.lookup_var(item.id)
+            if type(previous) is ir.Var and not self.scope_manager.strict_ssa:
+                result = previous
+            else:
+                result = ir.Var(item.id, args[index].type, span)
+            results.append(result)
+        launch = ir.SimtLaunchStmt(callee, dims, args, results, indices, span)
+        for result in results:
+            self.scope_manager.define_var(result.name_hint, result, span=span)
+        self.builder.emit(launch)
+
     def parse_evaluation_statement(self, stmt: ast.Expr) -> None:
         """Parse evaluation statement (EvalStmt).
 
@@ -1551,6 +1587,11 @@ class ASTParser:
         Args:
             stmt: Expr AST node
         """
+        if is_simt_launch(stmt.value):
+            assert isinstance(stmt.value, ast.Call)
+            self._parse_simt_launch(stmt.value, None)
+            return
+
         # Intercept compile-time-only constructs (produce no IR)
         if is_dsl_call(stmt, "static_print"):
             self._handle_static_print(stmt)

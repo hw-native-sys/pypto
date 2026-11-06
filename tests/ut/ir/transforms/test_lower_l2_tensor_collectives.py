@@ -23,6 +23,7 @@ public collective.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
 from pypto.pypto_core import ir, passes
 
 SIZE = 64
@@ -155,6 +156,20 @@ def test_synthesized_kernel_carries_builtin_template_attrs():
     # them (asserted end-to-end in the ST).
     template_vars = dict(item.split("=", 1) for item in attrs["builtin_template_vars"].split(","))
     assert template_vars == {"dtype_cpp": "float"}
+
+
+def test_synthesized_kernel_requires_contiguous_operands():
+    """The kernel opts in to the runtime contiguity check (RFC #2521 O1 criterion 7).
+
+    The builtin kernel reads every operand as dense row-major; this attribute is
+    what makes orchestration codegen check each operand's runtime
+    ``is_contiguous`` flag before the submit.
+    """
+    result = passes.lower_l2_tensor_collectives()(_build_program())
+
+    kernel = _get_func(result, _KERNEL_NAME)
+    assert kernel is not None
+    assert dict(kernel.attrs)[REQUIRE_CONTIGUOUS_OPERANDS_ATTR] is True
 
 
 def test_synthesized_kernel_returns_its_target_parameter():
@@ -326,6 +341,260 @@ def test_plain_tensor_send_counts_is_rejected():
 
     with pytest.raises(ValueError, match="send_counts must be a DistributedTensor"):
         passes.lower_l2_tensor_collectives()(PlainCounts)
+
+
+_NOT_ROW_MAJOR = "{role} is derived from {op}, which is not provably row-major"
+
+
+def _input_program(body: str, params: str = "", kernels: str = ""):
+    """A CHIP pipeline whose collective input ``x`` is built by ``body`` (8-space indented)."""
+    return pl.parse_program(f"""
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+@pl.program
+class P:
+{kernels}
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip_pipeline(
+        self,{params}
+        data: pl.InOut[pld.DistributedTensor[[{TOTAL}, {SIZE}], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[{NR}, 1], pl.INT32]],
+        counts: pl.InOut[pld.DistributedTensor[[{NR}, 1], pl.INT32]],
+        recv: pl.InOut[pld.DistributedTensor[[{NR}, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[{TOTAL}, {SIZE}], pl.FP32]:
+{body}
+        return pld.tensor.all_to_all_v(x, data, signal, counts, recv)
+""")
+
+
+_STRIDED = f"""        tmp = pl.create_tensor([{TOTAL}, {2 * SIZE}], dtype=pl.FP32)
+        s = pl.slice(tmp, [{TOTAL}, {SIZE}], [0, 0])
+"""
+_INP = f"\n        inp: pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32],"
+_FILL_KERNEL = f"""    @pl.function(type=pl.FunctionType.InCore)
+    def fill(self, inp: pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32],
+             out: pl.Out[pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32]]) -> pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32]:
+        t = pl.load(inp, [0, 0], [{TOTAL}, {SIZE}])
+        out = pl.store(t, [0, 0], out)
+        return out
+"""
+_PAIR_KERNEL = f"""    @pl.function(type=pl.FunctionType.InCore)
+    def fill_pair(self, inp: pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32],
+                  a: pl.Out[pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32]],
+                  b: pl.Out[pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32]],
+                  ) -> tuple[pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32], pl.Tensor[[{TOTAL}, {SIZE}], pl.FP32]]:
+        t = pl.load(inp, [0, 0], [{TOTAL}, {SIZE}])
+        a = pl.store(t, [0, 0], a)
+        b = pl.store(t, [0, 0], b)
+        return a, b
+"""
+_FRESH = f"        f = pl.create_tensor([{TOTAL}, {SIZE}], dtype=pl.FP32)\n"
+
+# One case per way a strided view can reach the operand. The trace is an allow-list,
+# so each producer it looks through, and each place a value can come from (control
+# flow), must lead it to the offending value.
+_REJECTED = {
+    # The per-rank divergence case: packed only where the runtime `width` equals 64.
+    "runtime_width_slice": (
+        f"""        tmp = pl.create_tensor([{TOTAL}, width], dtype=pl.FP32)
+        x = pl.slice(tmp, [{TOTAL}, {SIZE}], [0, 0])
+""",
+        "\n        width: pl.Scalar[pl.INDEX],",
+        "",
+        "tensor.slice",
+    ),
+    # A slice's type carries no strides, so the type deducer cannot see this one.
+    "static_strided_slice": (_STRIDED + "        x = s\n", "", "", "tensor.slice"),
+    # A direct transpose has a non-ND type the deducer rejects; a reshape hides it.
+    "transpose_behind_reshape": (
+        f"""        tmp = pl.create_tensor([{SIZE}, {TOTAL}], dtype=pl.FP32)
+        t = pl.transpose(tmp, 0, 1)
+        x = pl.reshape(t, [{TOTAL}, {SIZE}])
+""",
+        "",
+        "",
+        "a DN-layout tensor.transpose",
+    ),
+    "behind_view": (
+        _STRIDED + f"        x = pl.tensor.view(s, shape=[{TOTAL}, {SIZE}])\n",
+        "",
+        "",
+        "tensor.slice",
+    ),
+    "behind_set_validshape": (
+        _STRIDED + f"        x = pl.tensor.set_validshape(s, {TOTAL}, {SIZE})\n",
+        "",
+        "",
+        "tensor.slice",
+    ),
+    # Narrowing the leading dimension keeps a row-major parent packed, but not a DN one.
+    "dn_slice_behind_nd_view": (
+        f"""        tmp = pl.create_tensor([{2 * SIZE}, {TOTAL}], dtype=pl.FP32, layout=pl.DN)
+        s = pl.slice(tmp, [{SIZE}, {TOTAL}], [0, 0])
+        x = pl.tensor.view(s, layout=pl.ND)
+""",
+        "",
+        "",
+        "a DN-layout tensor.slice",
+    ),
+    # A slice drops its parent's stride, so a padded parent must be caught at the parent.
+    "slice_of_padded_stride_parameter": (
+        f"        x = pl.slice(w, [{TOTAL}, {SIZE}], [0, 0])\n",
+        f"\n        w: pl.Tensor[[{2 * TOTAL}, {SIZE}], pl.FP32,"
+        f" pl.TensorView(stride=[{2 * SIZE}, 1], layout=pl.TensorLayout.ND)],",
+        "",
+        "a non-packed-stride parameter 'w'",
+    ),
+    # An ND view of a DN parameter lowers to a runtime transpose, which is not contiguous.
+    "dn_parameter_behind_nd_view": (
+        "        x = pl.tensor.view(dn, layout=pl.ND)\n",
+        f"\n        dn: pl.Tensor[[{SIZE}, {TOTAL}], pl.FP32,"
+        f" pl.TensorView(stride=[1, {SIZE}], layout=pl.TensorLayout.DN)],",
+        "",
+        "a DN-layout parameter 'dn'",
+    ),
+    "assemble_into_slice": (_STRIDED + "        x = pl.assemble(s, inp, [0, 0])\n", _INP, "", "tensor.slice"),
+    # A kernel returns its Out argument, which here is the strided slice.
+    "kernel_out_result": (_STRIDED + "        x = self.fill(inp, s)\n", _INP, _FILL_KERNEL, "tensor.slice"),
+    # A tuple element of a kernel result is the argument returned at that position.
+    "tuple_kernel_result": (
+        _STRIDED + _FRESH + "        y, x = self.fill_pair(inp, f, s)\n",
+        _INP,
+        _PAIR_KERNEL,
+        "tensor.slice",
+    ),
+    "submit_out_result": (
+        _STRIDED
+        + """        with pl.manual_scope():
+            x, tid = pl.submit(self.fill, inp, s)
+""",
+        _INP,
+        _FILL_KERNEL,
+        "tensor.slice",
+    ),
+    "if_yield": (
+        _STRIDED
+        + f"""        if flag > 0:
+            x = pl.yield_(s)
+        else:
+            x = pl.yield_(pl.create_tensor([{TOTAL}, {SIZE}], dtype=pl.FP32))
+""",
+        "\n        flag: pl.Scalar[pl.INDEX],",
+        "",
+        "tensor.slice",
+    ),
+    "loop_carry": (
+        _STRIDED
+        + """        for _, (c,) in pl.range(2, init_values=(s,)):
+            x = pl.yield_(c)
+""",
+        "",
+        "",
+        "tensor.slice",
+    ),
+    # Zero trips return the initializer; the trip count may differ per rank.
+    "zero_trip_initializer": (
+        _STRIDED
+        + f"""        for _, (c,) in pl.range(n, init_values=(s,)):
+            x = pl.yield_(pl.create_tensor([{TOTAL}, {SIZE}], dtype=pl.FP32))
+""",
+        "\n        n: pl.Scalar[pl.INDEX],",
+        "",
+        "tensor.slice",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_REJECTED))
+def test_operand_not_provably_row_major_is_rejected(case):
+    """The kernel reads operands as dense row-major and a runtime verdict would be per rank
+    (a one-sided rejection hangs the peers), so the lowering rejects any operand it cannot
+    prove row-major, wherever the strided view enters."""
+    body, params, kernels, op = _REJECTED[case]
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(role="input", op=op)):
+        passes.lower_l2_tensor_collectives()(_input_program(body, params, kernels))
+
+
+_ACCEPTED = {
+    # Narrowing only the leading dimension of a static tensor keeps packed strides.
+    "leading_dimension_slice": (
+        f"""        tmp = pl.create_tensor([{2 * TOTAL}, {SIZE}], dtype=pl.FP32)
+        x = pl.slice(tmp, [{TOTAL}, {SIZE}], [{TOTAL}, 0])
+""",
+        "",
+        "",
+    ),
+    # An explicit stride that is the packed one proves the parent row-major.
+    "slice_of_packed_stride_parameter": (
+        f"        x = pl.slice(w, [{TOTAL}, {SIZE}], [0, 0])\n",
+        f"\n        w: pl.Tensor[[{2 * TOTAL}, {SIZE}], pl.FP32,"
+        f" pl.TensorView(stride=[{SIZE}, 1], layout=pl.TensorLayout.ND)],",
+        "",
+    ),
+    # The tuple element traces to a fresh allocation, as #3123's benchmark relies on.
+    "tuple_kernel_result": (_FRESH + "        y, x = self.fill_pair(inp, f, f)\n", _INP, _PAIR_KERNEL),
+    # A submitted kernel's result is the argument it returns, like a called one's.
+    "submit_result": (
+        _FRESH
+        + """        with pl.manual_scope():
+            x, tid = pl.submit(self.fill, inp, f)
+""",
+        _INP,
+        _FILL_KERNEL,
+    ),
+    # An Out param the submit leaves to the runtime is a fresh packed allocation.
+    "submit_runtime_allocated_out": (
+        """        with pl.manual_scope():
+            x, tid = pl.submit(self.fill, inp)
+""",
+        _INP,
+        _FILL_KERNEL,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_ACCEPTED))
+def test_provably_row_major_operand_is_accepted(case):
+    body, params, kernels = _ACCEPTED[case]
+    pipeline = _get_func(
+        passes.lower_l2_tensor_collectives()(_input_program(body, params, kernels)), "chip_pipeline"
+    )
+    assert pipeline is not None
+    assert _KERNEL_NAME in _callee_names(pipeline)
+
+
+def test_operand_carried_from_an_earlier_collective_is_traced():
+    """The check reads the call as written. Lowering the first collective rebuilds the
+    loop around the second, and those rebuilt Vars are not in the source index, so a
+    trace of the rewritten operand would stop there and miss the yielded slice."""
+
+    @pl.program
+    class Carried:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[TOTAL, SIZE], pl.FP32],
+            wide: pl.InOut[pld.DistributedTensor[[TOTAL, 2 * SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data2: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            r = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
+            for _, (c,) in pl.range(2, init_values=(r,)):
+                d = pld.tensor.all_to_all_v(c, data2, signal, counts, recv)  # noqa: F841
+                _ = pl.yield_(pl.slice(wide, [TOTAL, SIZE], [0, 0]))
+            return r
+
+    # The loop reuses its windows without carrying them, which the property verifier
+    # would flag after the pass; run without it so the rejection is the operand check's.
+    with (
+        passes.PassContext([]),
+        pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(role="input", op="tensor.slice")),
+    ):
+        passes.lower_l2_tensor_collectives()(Carried)
 
 
 def test_collective_in_a_graph_body_is_lowered():
@@ -655,6 +924,29 @@ def test_indexed_collective_launches_exact_extra_local_aivs(cores):
     assert isinstance(launch_width, ir.ConstInt)
     assert launch_width.value == cores
     assert calls[0].attrs["sync_start"] is True
+
+
+def test_indexed_strided_index_is_rejected():
+    """The indexed kernel reads its sixth operand, `index`, as dense row-major too, so the
+    check covers every kernel operand, not only the five the plain op has."""
+
+    @pl.program
+    class StridedIndex:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            inp: pl.Tensor[[13, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, NR], pl.INT32]],
+            counts: pld.DistributedTensor[[NR, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            wide = pl.create_tensor([NR, 2 * MAX_RECV], dtype=pl.INT32)
+            index = pl.slice(wide, [NR, MAX_RECV], [0, 0])
+            return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=NR)
+
+    with pytest.raises(ValueError, match=_NOT_ROW_MAJOR.format(role="index", op="tensor.slice")):
+        passes.lower_l2_tensor_collectives()(StridedIndex)
 
 
 if __name__ == "__main__":
