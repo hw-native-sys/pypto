@@ -10,19 +10,23 @@
  */
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -199,6 +203,36 @@ class RegionChecker : public IRVisitor {
     if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
       Error("HardwareLoopPolicy.Require does not support loop attrs", op->span_);
     }
+    const auto induction_type = As<ScalarType>(op->loop_var_->GetType());
+    if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require &&
+        (!induction_type || induction_type->dtype_ != DataType::INDEX)) {
+      Error("Hardware loop induction variable must have INDEX dtype", op->span_);
+    }
+    // Enforce target-independent hardware-loop limits during the existing IR
+    // walk. No target profile or repeated per-loop body analysis is needed.
+    const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
+    if (hardware_loop) ++hardware_loop_depth_;
+    const bool previous_empty = empty_hardware_loop_;
+    const auto exact_stop =
+        collecting_ && !previous_empty ? arith::TryEvaluateIntConstant(op->stop_) : std::nullopt;
+    const auto start = exact_stop ? arith::TryEvaluateIntConstant(op->start_) : std::nullopt;
+    const auto step = start ? arith::TryEvaluateIntConstant(op->step_) : std::nullopt;
+    // Empty sequential ancestors suppress hardware realization requirements
+    // even when the ancestor uses Auto policy rather than Require.
+    if (exact_stop && start && step &&
+        ((*step > 0 && *start >= *exact_stop) || (*step < 0 && *start <= *exact_stop))) {
+      empty_hardware_loop_ = true;
+    }
+    if (collecting_ && hardware_loop && !previous_empty) {
+      if (!empty_hardware_loop_) {
+        if (hardware_loop_depth_ > 4) {
+          Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
+        }
+        if (exact_stop && *exact_stop > 65535) {
+          Error("Hardware loop stop must not exceed 65535", op->span_);
+        }
+      }
+    }
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
@@ -207,6 +241,8 @@ class RegionChecker : public IRVisitor {
       for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
+    if (hardware_loop) --hardware_loop_depth_;
+    empty_hardware_loop_ = previous_empty;
     yield_region_ = previous;
   }
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -228,7 +264,20 @@ class RegionChecker : public IRVisitor {
     IRVisitor::VisitStmt_(op);
     region_ = previous;
   }
+  void VisitStmt_(const BreakStmtPtr& op) override {
+    if (collecting_ && hardware_loop_depth_ > 0) {
+      Error("BreakStmt is not supported inside hardware_loop", op->span_);
+    }
+  }
+  void VisitStmt_(const ContinueStmtPtr& op) override {
+    if (collecting_ && hardware_loop_depth_ > 0) {
+      Error("ContinueStmt is not supported inside hardware_loop", op->span_);
+    }
+  }
   void VisitStmt_(const ReturnStmtPtr& op) override {
+    if (collecting_ && region_) {
+      Error("ReturnStmt is not supported inside RegScope", op->span_);
+    }
     auto previous = region_;
     region_ = nullptr;
     IRVisitor::VisitStmt_(op);
@@ -278,6 +327,8 @@ class RegionChecker : public IRVisitor {
   FunctionPtr function_;
   std::vector<Diagnostic>& diagnostics_;
   bool final_;
+  int hardware_loop_depth_ = 0;
+  bool empty_hardware_loop_ = false;
   bool incore_;
   bool collecting_ = true;
   bool blocked_ = false;

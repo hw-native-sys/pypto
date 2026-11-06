@@ -90,16 +90,34 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 | 属性 | 当前支持 |
 | ---- | -------- |
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
-| 作用域 | 当前 VF emitter 支持直线寄存器操作 |
+| 作用域 | 寄存器操作和最多四层嵌套的规范硬件循环 |
 | 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；不同 Tile dtype 共用 UB 基址 |
 | 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
 Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流
-仍不在当前可执行前端的支持范围内。移除 LLVM 同步校验不会扩展 VF emitter 的
-控制流支持。访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
+仍不在当前可执行前端的支持范围内。访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
 具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
+
+## Required hardware loops
+
+A5 PTO codegen 支持 `pl.reg_scope()` 内的规范 `pl.hardware_loop(stop)`，
+最多嵌套四层，不支持 loop-carried value。`start` 固定为 0，`step` 固定为 1。
+整数 stop 可以是静态或动态值。标量捕获 ABI 支持有符号和无符号的 8、16、32、64 位整数以及 index 值。
+对于非空循环，只有在静态算出的 stop 超过 65535 时才拒绝。静态求值在能够证明结果时遵循结果 dtype 的语义，
+包括窄位宽无符号整数的回绕。无法证明范围的 stop 继续放行；
+调用方需要保证计数和内存访问处于有效范围。
+运行时分支和 while 会被拒绝。
+
+指数为非负常量的整数幂（如 `n ** 2`）降低为标量乘法，不增加循环。
+标量 PTO emitter 当前不支持动态或负指数；这是算子实现限制，不是 hardware loop 的范围要求。
+
+Codegen 在 `pto.vecscope` 内生成使用 `index` 归纳变量的 `scf.for`。
+运行时 `i32` stop 作为标量参数捕获，通过 `arith.index_cast` 转换。
+资格检查和回归验证截止于生成 PTO 的边界；PyPTO 不添加硬件循环标记、不改写
+LLVM 计数器、不插入内存屏障，也不增加链接后指令校验。后续降低（lowering）、
+同步和优化由 PTOAS 负责。
 
 ## 运行完整示例
 

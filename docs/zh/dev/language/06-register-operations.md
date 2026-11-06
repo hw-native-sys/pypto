@@ -41,6 +41,8 @@ def kernel(
 只能位于该词法作用域内，零次循环也不例外。循环 API 和 hardware-loop policy 参见
 [语句](01-statements.md)。
 
+当前 A5 codegen 边界及后端执行限制见 [VF 执行](../codegen/03-vpto-vf-integration.md#required-hardware-loops)。
+
 ## 通用参数与 dtype 记法
 
 | 参数 | 含义 |
@@ -223,7 +225,7 @@ with pl.reg_scope():
 | 源类型 | 目标类型 | `rounding` | `saturate` |
 | ------ | -------- | ---------- | ---------- |
 | FP16 | FP32 | 必须省略 | 必须省略 |
-| FP32 | FP16 | R/A/H/Z；DSL 默认 R | 必需：True 或 False |
+| FP32 | FP16 | R/A/Z；DSL 默认 R | 必需：True 或 False |
 | FP32 | INT32 | R/A/F/C/Z；DSL 默认 Z | 必需：True 或 False |
 | INT32 | FP32 | 必须省略 | 必须省略 |
 | INT8 | FP16 | 必须省略 | 必须省略 |
@@ -234,7 +236,7 @@ with pl.reg_scope():
 | INT32 | INT8 | 必须省略 | 必需：False |
 
 R 为最近偶数舍入；A 为远离零舍入；F 为向负无穷舍入；C 为向正无穷舍入；
-Z 为向零舍入。H 为 PTOAS 的特定 H 舍入模式，用于 FP32→FP16 收窄，原样传给后端。
+Z 为向零舍入。FP32→FP16 收窄不支持 H 模式，会在 codegen 前拒绝。
 `saturate=True` 表示饱和转换，限制到目标类型范围；`saturate=False` 表示非饱和转换。
 同 dtype 的 DSL 转换在两个可选属性均省略时返回原寄存器。
 其余 dtype 转换对均拒绝，包括 BF16 转换。原始 IR/Builder 调用必须在要求舍入属性

@@ -40,9 +40,11 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::map<const Var*, VarPtr> aliases;
   std::map<const Var*, VarPtr> references;
   bool has_control_flow = false;
+  std::vector<ForStmtPtr> loops;
 
   void VisitStmt(const StmtPtr& stmt) override {
-    has_control_flow |= As<ForStmt>(stmt) || As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    has_control_flow |= As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    if (auto loop = As<ForStmt>(stmt)) loops.push_back(loop);
     var_collectors::VarDefUseCollector::VisitStmt(stmt);
   }
 
@@ -66,10 +68,18 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter")) {
       memory.push_back(call);
+      // VMI adds the view origin when materializing an address. Its scalar
+      // dependencies live in the Tile type, so ordinary operand traversal
+      // would otherwise omit them from the helper's scalar captures.
+      const auto tile = As<TileType>(call->args_[0]->GetType());
+      if (tile && tile->tile_view_ && tile->tile_view_->start_offset) {
+        VisitExpr(tile->tile_view_->start_offset);
+      }
     }
     IRVisitor::VisitExpr_(call);
   }
 };
+
 }  // namespace
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
@@ -82,10 +92,19 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       << "VF execution requires the PyPTO Tile memory planner";
   VFOperands operands;
   operands.VisitStmt(scope->body_);
-  // Keep the execution subset within the straight-line synchronization proof.
-  // Diagnostic codegen still supports register control flow.
+  // Preserve canonical hardware loops in the generated PTO. Backend lowering
+  // and synchronization belong to PTOAS; runtime branches are not admitted here.
   CHECK_SPAN(!operands.has_control_flow, scope->span_)
-      << "VF execution currently requires straight-line RegScope; unroll static loops before codegen";
+      << "VF execution supports straight-line RegScope or canonical hardware loops nested up to four levels";
+  if (!operands.loops.empty()) {
+    for (const auto& loop : operands.loops) {
+      const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
+      CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
+                     stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
+                 loop->span_)
+          << "VF hardware loop lowering requires canonical integer loops without loop-carried values";
+    }
+  }
 
   // Collapse SSA store versions to their existing caller view. Memoization
   // bounds chained stores to O(N log N); identity, never names, identifies views.
@@ -138,11 +157,11 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
-    // Contiguous accesses require statically admitted intervals. Indexed
-    // accesses instead capture the whole Tile conservatively; the caller owns
-    // active-index bounds, while the allocation base must still be static.
+    // Loop offsets need not be static. Preserve capture provenance, but leave
+    // loop access ranges and synchronization to the caller and PTOAS respectively.
     auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN(effect.root && (effect.begin || IsOp(call, "reg.gather") || IsOp(call, "reg.scatter")),
+    CHECK_SPAN(effect.root && (effect.begin || !operands.loops.empty() || IsOp(call, "reg.gather") ||
+                               IsOp(call, "reg.scatter")),
                call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
@@ -223,10 +242,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     auto scalar = ir::As<ir::ScalarType>(var->GetType());
     CHECK_SPAN(scalar, var->span_) << "VF captures must be UB views or supported scalars";
     const auto dtype = scalar->dtype_;
-    CHECK_SPAN(dtype == DataType::INT32 || dtype == DataType::UINT32 || dtype == DataType::FP32 ||
-                   dtype == DataType::INDEX,
-               var->span_)
-        << "VF scalar capture supports i32, u32, f32 and index only";
+    CHECK_SPAN(dtype.IsInt() || dtype == DataType::FP32 || dtype == DataType::INDEX, var->span_)
+        << "VF scalar capture supports integers, f32 and index only";
     // Reserve manually spelled parameters before body emission, just as the
     // normal function emitter does. Local DSL names may also be argN/captureN.
     const auto argument_name = "arg" + std::to_string(artifact.parameter_types.size());

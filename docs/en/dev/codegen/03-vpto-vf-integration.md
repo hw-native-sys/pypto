@@ -98,7 +98,7 @@ is position independent; helpers still have to obey the device-call ABI.
 | Property | Current support |
 | -------- | --------------- |
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
-| Scope | Straight-line register operations in the current VF emitter |
+| Scope | Register operations and canonical hardware loops nested up to four levels |
 | Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed Tile dtypes share one UB base |
 | Aliasing | Common UB base, static view displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
@@ -106,11 +106,33 @@ is position independent; helpers still have to obey the device-call ABI.
 
 Grouped/peer functions, CPU simulation of device objects, Bridge calls and
 general helper control flow remain outside the current executable frontend.
-Removing LLVM synchronization validation does not extend the VF emitter's
-control-flow support. Memory-mode and alignment constraints are checked by the
+Memory-mode and alignment constraints are checked by the
 frontend and toolchain; supported combinations require compiler and hardware
 coverage. See the [register operation reference](../language/06-register-operations.md)
 for dtype, mask and indexed-access contracts.
+
+## Required hardware loops
+
+A5 PTO codegen accepts canonical `pl.hardware_loop(stop)` inside `pl.reg_scope()`
+with nesting up to four levels and no loop-carried values. `start` is zero and
+`step` is one. Integer stops may be static or dynamic. The scalar capture ABI supports signed
+and unsigned 8-, 16-, 32-, and 64-bit integers and index values. The verifier
+rejects a nonempty loop when the computed stop exceeds 65535. Static evaluation accounts for the result dtype when it can prove the value,
+including narrow unsigned wraparound. Unproven bounds pass through; callers must keep counts
+and memory accesses within their valid ranges.
+Runtime branches and while loops are rejected.
+
+Scalar integer powers with nonnegative constant exponents, such as `n ** 2`,
+lower to scalar multiplications without adding loops. Dynamic or negative
+exponents are currently unsupported by the scalar PTO emitter; this is an
+operator limitation rather than a hardware-loop range requirement.
+
+Codegen preserves these loops as `scf.for` with `index` induction variables inside
+`pto.vecscope`. A runtime `i32` stop is captured as a scalar parameter and converted
+with `arith.index_cast`. Qualification and regression testing stop at the generated
+PTO boundary. PyPTO adds no hardware-loop marker, LLVM counter rewrite, memory
+barrier insertion or post-link instruction checker. PTOAS owns subsequent lowering,
+synchronization and optimization.
 
 ## Run the complete examples
 

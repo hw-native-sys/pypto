@@ -466,9 +466,14 @@ def test_vpto_object_artifact_is_not_wrapped_as_cpp(tmp_path, monkeypatch):
     assert '"artifact_kind": "fatobj"' in files["kernels/aiv/register_kernel.o.json"]
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize(
     "operation,opcode",
     [
+        ("add", "vadd"),
+        ("sub", "vsub"),
+        ("mul", "vmul"),
+        ("div", "vdiv"),
         ("minimum", "vmin"),
         ("maximum", "vmax"),
         ("compare", "vcmp"),
@@ -478,13 +483,14 @@ def test_vpto_object_artifact_is_not_wrapped_as_cpp(tmp_path, monkeypatch):
         ("mask_not", "vnot"),
     ],
 )
-def test_schema_opcode_and_typed_operands(operation, opcode):
+def test_schema_opcode_and_typed_operands(operation, opcode, tmp_path):
     mlir = generate(build_kernel(operation))
     assert "pto.vmi." + opcode + " " in mlir
     assert "!pto.vmi.mask<64xpred>" in mlir
     if operation == "compare":
         assert 'cmp = "lt"' in mlir
         assert "pto.vmi.vsel" in mlir
+    compile_review_pto(mlir, tmp_path)
 
 
 @pytest.mark.parametrize("dtype,spelling", [(DataType.INT32, "si32"), (DataType.UINT32, "ui32")])
@@ -507,6 +513,123 @@ def test_dynamic_valid_shape_passes_through_to_vpto(tmp_path):
     source = generate(build_kernel(dynamic_valid=True))
     assert "valid_col = %arg0" in source
     compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        DataType.FP16,
+        DataType.BF16,
+        DataType.FP32,
+        DataType.INT8,
+        DataType.UINT8,
+        DataType.INT16,
+        DataType.UINT16,
+        DataType.INT32,
+        DataType.UINT32,
+    ],
+)
+@pytest.mark.parametrize("active", [0, 32, 64])
+def test_vf_storage_generators_and_masks_compile(dtype, active, tmp_path):
+    """Exercise each documented storage dtype and empty/partial/full predication."""
+    ib = IRBuilder()
+    with ib.function("generators", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = ib.let("src", tile.full([128], dtype=dtype, value=1))
+        dst = ib.let("dst", tile.full([128], dtype=dtype, value=0))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg("x", "reg.load", [src, integer(0)], {"lanes": 64}, SPAN)
+            literal = ir.ConstFloat(1, dtype, SPAN) if dtype.is_float() else ir.ConstInt(1, dtype, SPAN)
+            value = ib.emit_reg("value", "reg.broadcast", [literal], {"lanes": 64, "dtype": dtype}, SPAN)
+            if dtype != DataType.BF16:
+                zero = ir.ConstFloat(0, dtype, SPAN) if dtype.is_float() else ir.ConstInt(0, dtype, SPAN)
+                value = ib.emit_reg("indices", "reg.index_gen", [zero], {"lanes": 64, "dtype": dtype}, SPAN)
+            full = ib.emit_reg("full", "reg.full_mask", [], {"lanes": 64}, SPAN)
+            prefix = ib.emit_reg("prefix", "reg.active_mask", [integer(active)], {"lanes": 64}, SPAN)
+            predicate = ib.emit_reg("predicate", "reg.mask_and", [full, prefix], span=SPAN)
+            result = ib.emit_reg("sum", "reg.add", [x, value, predicate], span=SPAN)
+            ib.emit_reg_store("out", dst, result, mask=predicate, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Generators", SPAN))
+    source = generate(program)
+    assert "pto.vmi.vbr" in source and "pto.vmi.pset" in source
+    assert "pto.vmi.vload" in source and "pto.vmi.vstore" in source
+    assert 'pmode = "merge"' in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("predicate", ["eq", "ne", "lt", "le", "gt", "ge"])
+@pytest.mark.parametrize("scalar", [False, True])
+def test_vf_comparison_predicates_compile(predicate, scalar, tmp_path):
+    ib = IRBuilder()
+    with ib.function("comparison", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.full([128], dtype=DataType.FP32, value=0))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg(
+                "x",
+                "reg.broadcast",
+                [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                {"lanes": 64, "dtype": DataType.FP32},
+                SPAN,
+            )
+            seed = ib.emit_reg("seed", "reg.full_mask", [], {"lanes": 64}, SPAN)
+            rhs = ir.ConstFloat(0, DataType.FP32, SPAN) if scalar else x
+            condition = ib.emit_reg(
+                "condition",
+                "reg.compares" if scalar else "reg.compare",
+                [x, rhs, seed],
+                {"predicate": predicate},
+                SPAN,
+            )
+            value = ib.emit_reg("value", "reg.select", [condition, x, x], span=SPAN)
+            ib.emit_reg_store("out", dst, value, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Comparison", SPAN))
+    source = generate(program)
+    assert f'cmp = "{predicate}"' in source
+    assert "pto.vmi.vsel " in source
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "dtype,index_dtype,lanes",
+    [
+        (DataType.INT8, DataType.UINT8, 64),
+        (DataType.INT8, DataType.UINT8, 128),
+        (DataType.INT8, DataType.UINT8, 256),
+        (DataType.FP16, DataType.UINT16, 64),
+        (DataType.FP16, DataType.UINT16, 128),
+        (DataType.FP32, DataType.UINT32, 64),
+    ],
+)
+def test_vf_gather_lane_widths_compile(dtype, index_dtype, lanes, tmp_path):
+    ib = IRBuilder()
+    with ib.function("gather", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.full([256], dtype=dtype, value=0))
+        with ib.reg_scope(SPAN):
+            value = ib.emit_reg("value", "reg.load", [dst, integer(0)], {"lanes": lanes}, SPAN)
+            indices = ib.emit_reg(
+                "indices",
+                "reg.index_gen",
+                [ir.ConstInt(0, index_dtype, SPAN)],
+                {"lanes": lanes, "dtype": index_dtype},
+                SPAN,
+            )
+            result = ib.emit_reg("result", "reg.gather_lanes", [value, indices], span=SPAN)
+            ib.emit_reg_store("out", dst, result, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Gather", SPAN))
+    source = generate(program)
+    assert "pto.vmi.vselr" in source
+    compile_review_pto(source, tmp_path)
+
+
+def test_vf_fp32_to_fp16_rejects_backend_unsupported_h_rounding():
+    x = vector(DataType.FP32)
+    with pytest.raises(ValueError, match="Unsupported rounding"):
+        pl.reg.convert(x, dtype=DataType.FP16, rounding="H", saturate=False)
 
 
 def test_non_a5_codegen_rejects_registers():
@@ -547,8 +670,23 @@ def test_review_masked_store_preserves_inactive_lanes(tmp_path):
     "src_dtype,dst_dtype,attrs",
     [
         (DataType.FP16, DataType.FP32, {}),
+        (DataType.INT32, DataType.FP32, {}),
+        (DataType.INT8, DataType.FP16, {}),
+        (DataType.INT8, DataType.INT16, {}),
+        (DataType.INT16, DataType.INT32, {}),
+        (DataType.UINT8, DataType.UINT16, {}),
+        (DataType.UINT16, DataType.UINT32, {}),
         (DataType.INT32, DataType.INT8, {"saturate": False}),
-        (DataType.FP32, DataType.INT32, {"saturate": False, "rounding": "Z"}),
+        *[
+            (DataType.FP32, DataType.FP16, {"saturate": sat, "rounding": rounding})
+            for rounding in ("R", "A", "Z")
+            for sat in (False, True)
+        ],
+        *[
+            (DataType.FP32, DataType.INT32, {"saturate": sat, "rounding": rounding})
+            for rounding in ("R", "A", "F", "C", "Z")
+            for sat in (False, True)
+        ],
     ],
 )
 def test_review_conversion_attribute_presence(src_dtype, dst_dtype, attrs, tmp_path):

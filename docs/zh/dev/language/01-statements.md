@@ -257,9 +257,10 @@ def required_loop(x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
     return x
 ```
 
-该 API 表达意图。当前后端对保留的 Require 循环报告不支持的资格状态。
+该 API 表达意图。A5 检查规范循环资格，并在生成的 PTO 中保留循环，
+见 [VF 执行](../codegen/03-vpto-vf-integration.md#required-hardware-loops)。其他目标和未支持的循环形式仍会被拒绝。
 `ir.analyze_hardware_loop(loop, profile)` 区分 Eligible、Ineligible 和 Unknown；
-Eligible 仍不等于最终产物的硬件证据，计数器窄化与 `scf.for` 均不能替代证据。
+Eligible 表示 IR 资格，不等于机器码层面的硬件证据。
 动态整数 `stop` 无需静态范围证明，也不插入运行时范围检查；其迭代次数和终止归纳变量
 保持未知，但仍检查循环体、嵌套及后端能力。浮点及其他非整数上界会被拒绝。
 动态步长或未知效应保持 Unknown；Auto 在三态下均保持普通循环语义。
@@ -276,5 +277,8 @@ Builder 和手工构造的 IR 同样必须使用常量 `start=0`、`step=1`，�
 未显式认证的操作按未知处理。分析在当前 IR 上重新计算，结果不进入序列化
 和结构哈希。`passes.PassContext([], report_hardware_loops=True)` 可启用 codegen 报告，
 由 `context.get_hardware_loop_reports()` 读取；报告不是可复用的正确性证明。
+此可选 profile 分析独立于 A5 codegen 准入。A5 backend 当前未提供经过认证的
+hardware-loop profile，因此即使 codegen 接受某个非空循环，报告仍可能为
+`Unknown` / `HWL_UNSUPPORTED_PROFILE`。循环是否能生成 PTO 应以 codegen 诊断为准。
 硬件循环候选内部的嵌套 `for` 也必须使用同一 profile 进行资格分析。内层循环即使保持
 `Auto`，只要满足资格即可；内层循环若为 Ineligible 或 Unknown，外层硬件循环也不能通过资格分析。

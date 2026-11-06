@@ -101,17 +101,13 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
 
 void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
-  // Qualification is recomputed at the emission boundary. Installed backends
-  // default to unsupported; no cached report can authorize a Require loop.
   auto* context = PassContext::Current();
   const auto profile = context ? context->GetHardwareLoopProfile() : HardwareLoopProfile{};
   if (context && context->GetReportHardwareLoops()) {
     context->SetHardwareLoopReports(AnalyzeHardwareLoops(program, profile));
   }
-  VerifyHardwareLoopRequirements(program, profile);
 
-  // Check lexical register ownership before emission. Hardware-loop Require
-  // remains unsupported until its separate lowering and evidence contract.
+  // Reuse the IR verifier for register ownership and hardware-loop contracts.
   class VFInfrastructureChecker : public ir::IRVisitor {
    public:
     void VisitFunction(const ir::FunctionPtr& func) override {
