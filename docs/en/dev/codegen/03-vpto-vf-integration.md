@@ -65,10 +65,11 @@ reconstructing memory dependencies or imposing an LLVM instruction whitelist.
 PTOAS/Bisheng diagnostics propagate to the caller. The separate external-symbol
 and device-image checks below enforce the helper packaging contract.
 
-Indexed gather/scatter currently retain explicit `VV_ALL` barriers as a
-workaround for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730).
-Remove that workaround only after the upstream fix passes numerical validation;
-removing the duplicate LLVM validator does not fix the indexed-memory issue.
+Indexed gather/scatter rely on the pinned PTOAS 0.72 or newer for conservative
+RAW/WAR/WAW synchronization of unknown footprints within a vecscope. This
+includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730);
+PyPTO does not add per-access `VV_ALL` fences. Caller/helper boundary and GM
+synchronization continue to use their existing mechanisms.
 
 ## Device code and ABI
 

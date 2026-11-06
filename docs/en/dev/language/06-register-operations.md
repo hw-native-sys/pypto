@@ -330,10 +330,12 @@ they do not establish static initialization proofs. VF helpers capture the
 whole accessed Tile conservatively (`read` for gather, `readwrite` for scatter).
 Mixed-dtype captures use typed pointers derived from the same UB base.
 
-Indexed codegen emits a `VV_ALL` barrier before and after each gather/scatter
-as a workaround for the reproduced missing scatter-to-gather barrier in
-[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730). PTOAS owns
-VF dependency analysis; PyPTO does not recheck barrier coverage in emitted LLVM.
+Indexed codegen relies on PTOAS 0.72 or newer to synchronize unknown indexed
+footprints within a vecscope, including RAW, WAR and WAW dependencies. This
+version includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730),
+so PyPTO emits no per-access `VV_ALL` fences. PTOAS owns VF dependency analysis;
+PyPTO does not recheck barrier coverage in emitted LLVM. Caller/helper boundary
+and GM synchronization retain their existing mechanisms.
 
 ```python
 with pl.reg_scope():

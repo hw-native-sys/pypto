@@ -256,10 +256,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
            ", ub>");
       pointer = adjusted;
     }
-    // Indexed footprints are unknown. PTOAS 0.71 does not insert all of
-    // their dependencies, so fence both sides against any surrounding UB
-    // access, including aliased Tile views and later contiguous stores.
-    Emit("pto.mem_bar \"VV_ALL\"");
+    // PTOAS >= 0.72 conservatively synchronizes unknown indexed footprints,
+    // including aliased views and surrounding contiguous UB accesses.
     if (indexed_read) {
       auto name = NewNamedTemp(result->name_hint_);
       Emit(name + " = " + spec->emitter + " " + pointer + ", " + GetExprAsCode(args[1]) + ", " +
@@ -277,7 +275,6 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
       auto ctx = GetCommCtxSSAFor(target.get());
       if (!ctx.empty()) RegisterCommCtxFor(result, ctx);
     }
-    Emit("pto.mem_bar \"VV_ALL\"");
     return true;
   }
   const bool store = ir::IsOp(call, "reg.store");

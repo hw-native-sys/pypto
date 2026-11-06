@@ -136,6 +136,54 @@ def _reinterpret_body():
     return body
 
 
+def _indexed_body(dtype):
+    index_dtype = pl.UINT16 if dtype == pl.FP16 else pl.UINT32
+
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], dtype],
+        out: pl.InOut[pl.Tensor[[1, 1024], dtype]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], dtype]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
+            limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
+            seed = pl.reg.full_mask(lanes=64)
+            mask = pl.reg.compare(idx, limit, seed, predicate="lt")
+            offsets = pl.reg.index_gen(0, lanes=64, dtype=index_dtype)
+            three = pl.reg.broadcast(3, lanes=64, dtype=index_dtype)
+            last = pl.reg.broadcast(255, lanes=64, dtype=index_dtype)
+            scaled = pl.reg.mul(offsets, three)
+            reverse = pl.reg.sub(last, scaled)
+            values = pl.reg.gather(a, reverse, mask)
+            x = pl.reg.load(a, lanes=64)
+            y = pl.reg.load(a, offset=64, lanes=64)
+            z = pl.reg.load(a, offset=128, lanes=64)
+            # Preserve reads from both sides of a write (WAR/RAW), then
+            # overwrite twice with independent payloads (WAW). PTOAS must
+            # provide ordering without frontend VV_ALL fences.
+            before = pl.reg.gather(c, reverse, mask)
+            c = pl.reg.scatter(c, reverse, x, mask)
+            reread = pl.reg.gather(c, reverse, mask)
+            c = pl.reg.scatter(c, reverse, y, mask)
+            c = pl.reg.scatter(c, reverse, z, mask)
+            final = pl.reg.gather(c, reverse, mask)
+            repeated = pl.reg.broadcast(7, lanes=64, dtype=index_dtype)
+            repeats = pl.reg.gather(a, repeated, mask)
+            c = pl.reg.store(c, offset=320, value=values)
+            c = pl.reg.store(c, offset=448, value=reread)
+            c = pl.reg.store(c, offset=576, value=repeats)
+            c = pl.reg.store(c, offset=704, value=before)
+            c = pl.reg.store(c, offset=832, value=final)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
+
+
 def _program(case):
     dtype = {
         "integer_u32": pl.UINT32,
@@ -148,7 +196,6 @@ def _program(case):
     }.get(case, pl.FP32)
     output_dtype = pl.UINT16 if case.startswith("histogram") else dtype
     bins = 128 if case == "histogram128" else 256
-    index_dtype = pl.UINT16 if case == "indexed_f16" else pl.UINT32
     if case == "float32":
 
         @pl.jit.incore
@@ -234,37 +281,7 @@ def _program(case):
             pl.store(c, [0, 0], out)
             return out
     else:
-
-        @pl.jit.incore
-        def body(
-            src: pl.Tensor[[1, 256], dtype],
-            out: pl.InOut[pl.Tensor[[1, 1024], dtype]],
-            n: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, 1024], dtype]:
-            a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
-            c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
-            with pl.reg_scope():
-                idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
-                limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
-                seed = pl.reg.full_mask(lanes=64)
-                mask = pl.reg.compare(idx, limit, seed, predicate="lt")
-                offsets = pl.reg.index_gen(0, lanes=64, dtype=index_dtype)
-                three = pl.reg.broadcast(3, lanes=64, dtype=index_dtype)
-                last = pl.reg.broadcast(255, lanes=64, dtype=index_dtype)
-                scaled = pl.reg.mul(offsets, three)
-                reverse = pl.reg.sub(last, scaled)
-                values = pl.reg.gather(a, reverse, mask)
-                x = pl.reg.load(a, lanes=64)
-                c = pl.reg.scatter(c, reverse, x, mask)
-                reread = pl.reg.gather(c, reverse, mask)
-                repeated = pl.reg.broadcast(7, lanes=64, dtype=index_dtype)
-                repeats = pl.reg.gather(a, repeated, mask)
-                c = pl.reg.store(c, offset=320, value=values)
-                c = pl.reg.store(c, offset=448, value=reread)
-                c = pl.reg.store(c, offset=576, value=repeats)
-            c = pl.reshape(c, [1, 1024])
-            pl.store(c, [0, 0], out)
-            return out
+        body = _indexed_body(dtype)
 
     @pl.jit
     def dispatch(
@@ -320,6 +337,8 @@ def _build(output):
         for op in ops:
             mnemonic = op if op == "create_group_mask" else f"v{op}"
             assert any(f"pto.vmi.{mnemonic}" in helper for helper in helpers), (case, op)
+        if case.startswith("indexed_"):
+            assert all('pto.mem_bar "VV_ALL"' not in helper for helper in helpers)
         evidence = Path(tempfile.mkdtemp(prefix="compilation-", dir=directory))
         with recorder(evidence):
             compiled.load()  # Production PTOAS -> LLVM -> Bisheng -> linked .text, no device.
@@ -432,8 +451,15 @@ def _golden(case, data, n):
         ]
     else:
         indices = 255 - np.arange(64) * 3
-        expected[indices[:n]] = x[:n]
-        for start, values in ((320, data[indices]), (448, x), (576, np.full(64, data[7], dtype=data.dtype))):
+        before = expected[indices].copy()
+        expected[indices[:n]] = z[:n]
+        for start, values in (
+            (320, data[indices]),
+            (448, x),
+            (576, np.full(64, data[7], dtype=data.dtype)),
+            (704, before),
+            (832, z),
+        ):
             expected[start : start + 64] = 0
             expected[start : start + n] = values[:n]
         return expected
