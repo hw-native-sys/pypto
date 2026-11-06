@@ -23,6 +23,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -369,13 +370,15 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   void VisitExpr_(const ir::CallPtr& call) override {
     uses_spmd_blocks |= ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num");
     uses_spmd_subblock |= ir::IsOp(call, "buffer.get_subblock_idx");
-    if (backend::FindBufferConversionRecipe(call->op_->name_)) {
+    if (backend::FindBufferConversionRecipe(call->op_->name_) ||
+        backend::FindBufferIndexedRecipe(call->op_->name_)) {
       CHECK_SPAN(conversion_supported_, call->span_)
-          << "Direct Buffer cast/compare/select currently supports A2/A3 only";
+          << "Direct Buffer cast/compare/select and indexed operations currently supports A2/A3 only";
     }
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
     CHECK_SPAN(recipe || backend::FindBufferRowRecipe(call->op_->name_) ||
-                   backend::FindBufferConversionRecipe(call->op_->name_) || ir::IsOp(call, "buffer.alloc") ||
+                   backend::FindBufferConversionRecipe(call->op_->name_) ||
+                   backend::FindBufferIndexedRecipe(call->op_->name_) || ir::IsOp(call, "buffer.alloc") ||
                    ir::IsOp(call, "buffer.copy") || ir::IsOp(call, "buffer.subview") ||
                    ir::IsOp(call, "buffer.reshape") || ir::IsOp(call, "buffer.load") ||
                    ir::IsOp(call, "buffer.store") || ir::IsOp(call, "buffer.set_validshape") ||
@@ -683,6 +686,9 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const std::string tensor_operand = partition + " : " + partition_type;
     Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
               : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
+  } else if (const auto* indexed = backend::FindBufferIndexedRecipe(call->op_->name_)) {
+    Emit(std::string(indexed->native_op) + " " +
+         BufferInsOutsClause({call->args_.begin(), call->args_.end() - 1}, call->args_.back()));
   } else if (const auto* conversion = backend::FindBufferConversionRecipe(call->op_->name_)) {
     std::string attributes;
     using K = backend::BufferConversionKind;

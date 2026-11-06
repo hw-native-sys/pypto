@@ -653,6 +653,23 @@ def _buffer_active(buffer):
 def _buffer_copy(source, destination):
     _buffer_write(destination, _buffer_active(source))
 
+def _buffer_gather(source, indices, destination):
+    index = _buffer_active(indices).to(torch.int64)
+    if torch.any(index < 0) or torch.any(index >= source.numel()):
+        raise ValueError("buffer.gather index is outside the source allocation")
+    _buffer_write(destination, source.reshape(-1)[index])
+
+def _buffer_scatter(source, indices, destination):
+    index = _buffer_active(indices).to(torch.int64).reshape(-1)
+    if torch.any(index < 0) or torch.any(index >= destination.numel()):
+        raise ValueError("buffer.scatter index is outside the destination allocation")
+    destination.zero_()
+    values = _buffer_active(source).reshape(-1)
+    # Preserve the native ascending scan order for repeated destination indices.
+    flat = destination.view(-1)
+    for i in range(index.numel()):
+        flat[index[i]] = values[i]
+
 def _buffer_pack_predicate(values, destination):
     # Preserve the physical byte layout rather than storing a logical bool tile.
     # Zero-fill unused bits of the final valid byte; later selection trims them.
@@ -1394,6 +1411,8 @@ def _register_ops() -> None:  # noqa: PLR0915
             f"{fn([f'_buffer_active({a[0]})', f'torch.as_tensor({a[1]}, dtype={a[0]}.dtype)'], kw)})"
         )
     m["buffer.full"] = lambda a, _kw: f"_buffer_active({a[1]}).fill_({a[0]})"
+    m["buffer.gather"] = lambda a, _kw: f"_buffer_gather({a[0]}, {a[1]}, {a[3]})"
+    m["buffer.scatter"] = lambda a, _kw: f"_buffer_scatter({a[0]}, {a[1]}, {a[2]})"
     m["buffer.cast"] = lambda a, _kw: f"_buffer_write({a[1]}, _buffer_active({a[0]}).to({a[1]}.dtype))"
     m["buffer.cmp"] = lambda a, kw: (
         "_buffer_pack_predicate("
