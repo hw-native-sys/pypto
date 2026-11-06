@@ -286,6 +286,11 @@ def is_direct_cast(call: ir.Call, handler: BackendHandler) -> bool:
 
     Requery after changing shape or layout. IR construction and TypeCheck
     validate the operator contract; this query only selects a native rule.
+
+    This is a capability query for tests and tooling, not part of the DSL
+    compile path: LegalizeTileCast, the layout passes and codegen call the C++
+    ``backend::IsDirectCast`` directly, so compiling a kernel never routes
+    through this binding.
     """
     ...
 

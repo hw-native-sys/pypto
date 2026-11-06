@@ -94,8 +94,10 @@ bytes, and valid rows and columns must be static positive extents. Tiles must ha
 needed because every E2M1 value is exactly representable in E4M3FN, including
 signed zero. PTOAS v0.72 also requires signed 32-bit byte spans and logical
 columns, at most 65,535 rows, and a source register count (`packed_cols / 256`)
-that fits 16 bits. Unsupported geometry retains the BF16/FP32 legalization
-path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts, or NZ output.
+that fits 16 bits. Unsupported ND geometry retains the BF16/FP32 legalization
+path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts, NZ output, or
+any DN packed→FP8 cast — see the DN paragraph below, which rejects rather than
+falls back.
 Static-valid descriptors alias the actual source handle, preserving runtime
 addresses from tile parameters, cross-core pipes, and rotating allocations.
 All three memory planners use this direct ND route. After vector splitting,
@@ -118,6 +120,22 @@ prepare a column-major BF16 source. Tensor casts preserve the same contract.
 PYPTO or DSA_RP must supply static tile addresses; codegen binds full static
 valid descriptors to select the safe native conversion path. Dynamic-valid
 DN descriptors can fault even for a full rectangle and remain unsupported.
+
+**ND and DN fail differently, and only ND degrades.** An ND packed cast whose
+geometry misses the direct conditions is legalized through BF16/FP32 and still
+compiles. A DN packed cast to any FP8 target is instead rejected by
+`tile.cast` type deduction, before any backend rule is consulted:
+
+```python
+# DN packed source: pl.TileView(blayout=pl.TileLayout.col_major, stride=[1, 32])
+pl.cast(dn_packed_tile, pl.FP8E4M3FN)
+# ValueError: packed FP4 DN cast supports only BF16 and packed FP4 endpoints;
+#             use ND storage for wider cast chains
+```
+
+The check is target-independent — it raises identically with no backend
+configured, on Ascend910, and on Ascend950 — so prepare an ND source when the
+destination is FP8.
 
 ## Decode a UINT8 carrier through a UB alias (Ascend950)
 

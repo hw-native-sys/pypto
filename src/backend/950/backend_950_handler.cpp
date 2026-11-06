@@ -105,6 +105,15 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
         if (from == DataType::FP4E2M1X2 && to == DataType::FP8E4M3FN) {
           // PTOAS v0.72 direct packed decode: ND only for this frontend path.
           // All values/strides count byte carriers on the packed side.
+          //
+          // This REPLACES the generic packed {nd, dn} pair above rather than
+          // extending it: the generic `nd` alternative accepts dynamic validity
+          // and any column count, which the direct decode cannot implement, so
+          // an appended rule would be matched first and admit a cast that
+          // MakeTcvtCodegenPTO then rejects. Dropping `dn` costs nothing --
+          // DeduceTileCastType rejects every DN packed cast whose endpoints are
+          // not BF16 or packed FP4, so a DN packed->FP8 cast never reaches this
+          // table and the ND alternative is the only reachable one.
           TcvtConditions direct;
           direct.layout = ir::TileLayout::row_major;
           direct.unboxed = true;

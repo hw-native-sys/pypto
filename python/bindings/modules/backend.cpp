@@ -209,7 +209,10 @@ void BindBackend(nb::module_& m) {
         return backend::IsDirectCast(call, handler.GetTcvtAdjacency());
       },
       nb::arg("call"), nb::arg("handler"),
-      "Query native implementation conditions for a well-typed cast using an explicit target");
+      "Query native implementation conditions for a well-typed cast using an explicit target. "
+      "A capability query for tests and tooling: the DSL compile path calls the C++ "
+      "backend::IsDirectCast directly from LegalizeTileCast, the layout passes and codegen, "
+      "so this binding is never on a user's compilation route");
 
   nb::enum_<backend::OpScratchStatus>(backend_mod, "OpScratchStatus")
       .value("Required", backend::OpScratchStatus::Required)

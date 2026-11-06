@@ -81,8 +81,8 @@ Tile 须使用规范的连续步长，UB `start_offset` 为零。
 输出的物理列数与有效列数均加倍；E2M1 的所有数值（包括有符号零）都能被 E4M3FN
 精确表示，因此无需舍入。PTOAS v0.72 还要求字节跨度与逻辑列数可用有符号 32 位
 整数表示，行数不超过 65,535，源寄存器计数（`packed_cols / 256`）可用 16 位表示。
-不满足几何约束时仍经 BF16/FP32 合法化。此路径不开放直接 E1M2→FP8、E2M1→E5M2
-转换或 NZ 输出。
+ND 几何不满足约束时仍经 BF16/FP32 合法化。此路径不开放直接 E1M2→FP8、E2M1→E5M2
+转换、NZ 输出，也不开放任何 DN 打包→FP8 转换 —— 见下文 DN 段落，该情况是拒绝而非回退。
 静态有效描述符对实际源 handle 创建别名，保留 tile 参数、跨核管道与轮转分配的运行时地址。
 三种内存规划器均使用此直接 ND 路径。向量切分后会重新检查最终 lane 几何；若打包行
 不再满足对齐要求或有效维度变为动态，则恢复回退链。空 replay lane 保留存储且不发射转换。
@@ -100,6 +100,20 @@ DN 转换要求完整静态二维矩形、规范的连续列主序步长、零 t
 Tensor 转换遵守相同契约。PYPTO 或 DSA_RP 必须提供静态 tile 地址；代码生成绑定
 完整静态有效描述符，以选择安全的原生转换路径。动态有效 DN 描述符即使针对完整矩形
 也可能触发故障，因此仍不支持。
+
+**ND 与 DN 的失败方式不同，只有 ND 会降级。** ND 打包转换在几何不满足直接条件时，
+会经 BF16/FP32 合法化并仍能编译成功。而 DN 打包转换到任何 FP8 目标，会在
+`tile.cast` 类型推导阶段直接被拒绝，根本不会查询后端规则：
+
+```python
+# DN 打包源：pl.TileView(blayout=pl.TileLayout.col_major, stride=[1, 32])
+pl.cast(dn_packed_tile, pl.FP8E4M3FN)
+# ValueError: packed FP4 DN cast supports only BF16 and packed FP4 endpoints;
+#             use ND storage for wider cast chains
+```
+
+该检查与目标无关 —— 未配置 backend、Ascend910、Ascend950 三种情况下的报错完全相同
+—— 因此当目标类型为 FP8 时，请准备 ND 源。
 
 ## 通过 UB 别名解码 UINT8 载体（Ascend950）
 
