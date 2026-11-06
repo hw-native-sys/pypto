@@ -1630,8 +1630,7 @@ jobs:
           checkout-path: dist-checkout
 
   pypto-lib-compile:
-    # Compile the named library cases without executing device code.
-    # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
+    # Compile selected DeepSeek V4.1 operator cases on A5 without device execution.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
     permissions:
@@ -1642,9 +1641,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: a2a3
-            runner: npu
-            needs-cann: 'true'
           - platform: a5
             runner: cpu
             needs-cann: 'false'
