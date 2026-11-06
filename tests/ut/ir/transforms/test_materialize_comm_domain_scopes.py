@@ -249,6 +249,78 @@ def test_program_wide_engine_requirements(uses_urma, pre_materialized):
     assert all(list(scope.engines) == (["urma"] if uses_urma else []) for scope in scopes)
 
 
+def test_put_async_requests_the_urma_engine():
+    """An async transfer anywhere in the program provisions URMA on every domain.
+
+    The URMA descriptor is fixed at window-allocation time and the transfer has
+    no synchronous fallback, so a host domain that omits the engine would abort
+    at run time. The requirement therefore has to reach the IR ``engines``
+    field here — codegen only renders what this pass records.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, data: pld.DistributedTensor[[16], pl.FP32]):
+            return data
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def unused(
+            self,
+            dst: pld.DistributedTensor[[16], pl.FP32],
+            src: pld.DistributedTensor[[16], pl.FP32],
+        ) -> pld.DistributedTensor[[16], pl.FP32]:
+            return pld.tensor.put_async(dst, 1, src)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            a = pld.alloc_window_buffer(64)
+            b = pld.alloc_window_buffer(64)
+            x = pld.window(a, [16], dtype=pl.FP32)
+            y = pld.window(b, [16], dtype=pl.FP32)
+            self.chip(x, device=0)
+            self.chip(y, device=1)
+
+    program = ir.Program(list(Before.functions.values()), "async_engine_scan", ir.Span.unknown())
+    after = passes.materialize_comm_domain_scopes()(program)
+    scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
+    assert len(scopes) == 2
+    assert all(list(scope.engines) == ["urma"] for scope in scopes)
+
+
+def test_get_async_requests_the_urma_engine():
+    """GET is the second async op the engine scan must recognise."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, data: pld.DistributedTensor[[16], pl.FP32]):
+            return data
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def unused(
+            self,
+            dst: pld.DistributedTensor[[16], pl.FP32],
+            src: pld.DistributedTensor[[16], pl.FP32],
+        ) -> pld.DistributedTensor[[16], pl.FP32]:
+            return pld.tensor.get_async(dst, 1, src)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            a = pld.alloc_window_buffer(64)
+            b = pld.alloc_window_buffer(64)
+            x = pld.window(a, [16], dtype=pl.FP32)
+            y = pld.window(b, [16], dtype=pl.FP32)
+            self.chip(x, device=0)
+            self.chip(y, device=1)
+
+    program = ir.Program(list(Before.functions.values()), "async_engine_scan_get", ir.Span.unknown())
+    after = passes.materialize_comm_domain_scopes()(program)
+    scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
+    assert len(scopes) == 2
+    assert all(list(scope.engines) == ["urma"] for scope in scopes)
+
+
 def test_single_alloc_all_devices_world_size_loop():
     """``for r in pl.range(pld.world_size())`` + ``device=r`` ⇒ kAll."""
 
