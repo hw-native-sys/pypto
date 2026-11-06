@@ -647,19 +647,17 @@ std::optional<TileView> HalvedTileView(const std::shared_ptr<const TileType>& tt
     // A contiguous descriptor's pitch follows its physical box, not its valid
     // rectangle. Column splitting ND (or row splitting DN) changes that pitch.
     // Preserve strided views and boxed layouts: their storage cannot be
-    // reconstructed from the logical shape alone.
-    if (tt->shape_.size() == 2 && tv.slayout == TileLayout::none_box && !tv.stride.empty() &&
-        (tv.blayout == TileLayout::row_major || tv.blayout == TileLayout::col_major)) {
+    // reconstructed from the logical shape alone. An empty stride list is the
+    // implicit dense descriptor, which already tracks the new shape and must
+    // stay implicit — hence the explicit emptiness guard in front of the shared
+    // canonical-stride predicate, which treats empty as dense.
+    if (!tv.stride.empty() && tile_view_semantics::HasCanonicalDenseStrides(*tt, tv)) {
       const auto& span = tt->shape_.back()->span_;
-      auto old_strides = RowMajorStridesFromShape(tt->shape_, span);
       auto new_strides = RowMajorStridesFromShape(new_shape, span);
       if (tv.blayout == TileLayout::col_major) {
-        old_strides = {old_strides.back(), tt->shape_.front()};
         new_strides = {new_strides.back(), new_shape.front()};
       }
-      if (tile_view_semantics::ShapeExprListsEquivalent(tv.stride, old_strides)) {
-        tv.stride = std::move(new_strides);
-      }
+      tv.stride = std::move(new_strides);
     }
     return tv;
   }
