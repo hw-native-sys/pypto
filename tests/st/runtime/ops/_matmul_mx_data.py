@@ -185,9 +185,22 @@ def _exact_fp8(values: tuple[float, ...], dtype: DataType) -> torch.Tensor:
 
 
 def _tile_choices(values: torch.Tensor, shape: tuple[int, int], generator: torch.Generator):
-    """Pick from *values* into *shape*, deterministically."""
+    """Pick from *values* into *shape*, deterministically.
+
+    The gather runs on a ``uint8`` view rather than on *values* directly. Torch's
+    CPU advanced-indexing dispatch covers FP8 only from 2.10 (what CI pins);
+    before that ``values[picks]`` raises ``"index_cpu" not implemented for
+    'Float8_e4m3fn'``. That reaches further than tidiness here because the
+    Tensor-surface module builds its operands while ``st.cases(...)`` is being
+    constructed -- at import, before any marker is consulted -- so on an older
+    torch the error would fail *collection* for the whole file rather than skip
+    it. Every pick list this helper takes is one byte wide, so moving the bytes
+    and reinterpreting them is the identical gather; *picks* is drawn exactly as
+    before, so the generator stream and the chosen data are unchanged.
+    """
+    assert values.element_size() == 1, f"{values.dtype} is not a one-byte pick list"
     picks = torch.randint(0, values.numel(), shape, generator=generator)
-    return values[picks]
+    return values.view(torch.uint8)[picks].view(values.dtype)
 
 
 def _make_inputs(lhs_dtype: DataType, rhs_dtype: DataType) -> tuple[torch.Tensor, ...]:

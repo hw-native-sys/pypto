@@ -2498,7 +2498,15 @@ jobs:
         # --max-time 600 rather than 3600: these four cases need ~53 s of device
         # time, so a hang here is reported in 10 minutes instead of consuming
         # the hour and starving vf-tests-a5 of the card.
-        timeout-minutes: 20
+        #
+        # timeout-minutes covers task-submit's *queue wait* (--timeout 1800, i.e.
+        # 30 min) plus five for reporting and cleanup, the same wait+5 shape the
+        # three sibling steps use for their 120 min wait. At the previous 20 it
+        # sat BELOW the wait budget: a card busy for more than 20 minutes would
+        # have GitHub kill the step while task-submit was still legitimately
+        # queued, losing the verdict and skipping every step below it -- the
+        # failure mode that is indistinguishable from a real hang in the log.
+        timeout-minutes: 35
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
