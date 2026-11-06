@@ -121,10 +121,10 @@ Neither rail passes a rank-count scalar. The kernel reads
 `CommContext::rankNum`, which is the same number the HOST dispatch used to pass
 as `domain_size`: `comm_derive_context` builds a context **per comm domain**, so
 its `rankNum` is that domain's rank count. Dropping the scalar costs one GM load
-at kernel entry and buys a single shared source. It was also once the only option on
-the CHIP rail, which could not compute a rank count at all. That changed with
-RFC #2521 O2: `pld.system.nranks` now has an orchestration codegen too, so the
-rail can read the count from the context it already holds (see *Launch width*).
+at kernel entry and buys a single shared source. The orchestration-side launch
+width does not read that context: a CHIP orchestration receives the per-rank
+*device* pointer, so the width uses the signal's static `NR` instead (see
+*Launch width*).
 
 The `args[6..7]` duplicates are an artifact of `MaterializeDistTensorCtx`
 appending **one `CommCtx` parameter per `DistributedTensor` parameter**. The
@@ -157,18 +157,17 @@ of the dispatch, branch-free because the expression codegen has no ternary and `
 express the split:
 
 ```text
-P = nranks(get_comm_ctx(target))      # read from the context the orchestration already holds
-D = max(P, 1)
-B = L - (L % D) * (L >= D)
+NR = signal.shape[0]                  # static; must equal the runtime domain size
+B = L - (L % NR) * (L >= NR)
 ```
 
-`D` is a total-arithmetic floor, not a check: it keeps the generated C++ defined when the communicator
-reports `P = 0`, where a raw `L % P` would be undefined behaviour. The resulting `B` is attached to the
-launch spec as computed. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md) cannot prove a runtime `B`
+`NR` is deducer-enforced positive, so the divisor is always defined; no runtime
+context read and no floored-divisor guard is emitted. The resulting `B` is
+attached to the launch spec as computed. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md) cannot prove a runtime `B`
 positive, so it emits the dispatch inside `if (B > 0)` and preserves the empty path; clamping the width to
 `max(B, 1)` would instead launch one block for a malformed call.
 
-Dynamic parameter validity — `L > 0`, `P > 0`, `P == NR`, `S >= B`, and admission within the AIV count — is
+Dynamic parameter validity — `L > 0`, `P == NR`, `S >= B`, and admission within the AIV count — is
 the caller's responsibility and is **not** validated by this pass. The runtime still enforces launch
 admission: an over-capacity `require_sync_start` launch is rejected at submit instead of being part-started.
 
@@ -185,7 +184,7 @@ generated entry; all sites are pinned to RFC #2521's worked-example table.
 | --------- | ---------- |
 | compile-time `core_num` outside `[1, INT32_MAX]` | rejected — the same bound the HOST rail's entry enforces at runtime |
 | compile-time `signal` stride `S < B` | rejected — `B` is the folded block count (see *Launch width*), not the raw `core_num` |
-| runtime `core_num` / rank count / signal stride | not diagnosed here — dynamic validity is the caller's responsibility (RFC #2521 frozen item #10); the runtime still rejects an over-capacity sync-start launch at submit |
+| runtime `core_num` / signal stride | not diagnosed here — dynamic validity is the caller's responsibility (RFC #2521 frozen item #10); the runtime still rejects an over-capacity sync-start launch at submit |
 | `dtype != FP32 && dtype != INT8` | rejected — FP32 and INT8 are supported (same allowlist as the HOST rail) |
 | collective left in a non-HOST orchestration body | rejected by the pass's own postcondition check |
 
@@ -207,7 +206,7 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 
 ## Current limitations
 
-- **Runtime `core_num` validation is deferred.** A dynamic `L`, a non-positive rank count, `NR != P`, and
+- **Runtime `core_num` validation is deferred.** A dynamic `L`, a non-positive `L`, `NR != P`, and
   `S < B` are not diagnosed at compile time, and no runtime guard is emitted in this change. RFC #2521
   §12.3 asks for those checks; representing them in IR (a side-effecting runtime assertion lowered by
   common codegen) is a follow-up. Until then the caller owns dynamic parameter validity, and a one-sided
