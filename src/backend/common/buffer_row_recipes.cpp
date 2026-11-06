@@ -12,19 +12,16 @@
 #include "pypto/backend/common/buffer_row_recipes.h"
 
 #include <cstddef>
-#include <cstdint>
-#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::backend {
@@ -97,47 +94,13 @@ const char* OperandError(const BufferRowRecipe& recipe, const std::vector<ir::Bu
   return nullptr;
 }
 
-ir::BufferTypePtr LogicalDescriptor(const ir::TypePtr& type) {
-  const auto tile = ir::As<ir::TileType>(type);
-  if (!tile || tile->shape_.size() != 2) return nullptr;
-  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
-  if (!IsDenseVecBufferTile(tile, view) && !IsColumnVectorBufferTile(tile, view)) return nullptr;
-  const auto offset = ir::As<ir::ConstInt>(view.start_offset);
-  if (view.start_offset && (!offset || offset->value_ != 0)) return nullptr;
-  std::vector<int64_t> shape;
-  std::vector<int64_t> valid;
-  const auto& extents = view.valid_shape.empty() ? tile->shape_ : view.valid_shape;
-  if (extents.size() != 2) return nullptr;
-  for (size_t i = 0; i < 2; ++i) {
-    const auto dimension = ir::As<ir::ConstInt>(tile->shape_[i]);
-    const auto extent = ir::As<ir::ConstInt>(extents[i]);
-    if (!dimension || dimension->value_ <= 0 || !extent || extent->value_ <= 0 ||
-        extent->value_ > dimension->value_) {
-      return nullptr;
-    }
-    shape.push_back(dimension->value_);
-    valid.push_back(extent->value_);
-  }
-  if (!view.stride.empty()) {
-    const std::vector<int64_t> expected = view.blayout == ir::TileLayout::col_major
-                                              ? std::vector<int64_t>{1, shape[0]}
-                                              : std::vector<int64_t>{shape[1], 1};
-    if (view.stride.size() != 2) return nullptr;
-    for (size_t i = 0; i < 2; ++i) {
-      const auto stride = ir::As<ir::ConstInt>(view.stride[i]);
-      if (!stride || stride->value_ != expected[i]) return nullptr;
-    }
-  }
-  return std::make_shared<ir::BufferType>(shape, tile->dtype_, ir::MemorySpace::Vec, valid, view.blayout);
-}
-
 }  // namespace
 
 bool SupportsLogicalBufferRow(const BufferRowRecipe& recipe, const ir::CallPtr& call) {
   if (call->args_.size() != 2 || !call->kwargs_.empty()) return false;
   std::vector<ir::BufferTypePtr> types;
-  for (const auto& arg : call->args_) types.push_back(LogicalDescriptor(arg->GetType()));
-  types.push_back(LogicalDescriptor(call->GetType()));
+  for (const auto& arg : call->args_) types.push_back(StaticLogicalBufferDescriptor(arg->GetType()));
+  types.push_back(StaticLogicalBufferDescriptor(call->GetType()));
   return OperandError(recipe, types) == nullptr;
 }
 

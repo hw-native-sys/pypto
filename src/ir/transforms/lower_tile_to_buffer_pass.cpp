@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
@@ -89,7 +90,7 @@ std::vector<int64_t> DescriptorValid(const std::vector<ExprPtr>& valid, const st
 
 void CheckDenseVecTile(const TileTypePtr& tile, const TileView& view, const Span& span) {
   CHECK_SPAN(backend::IsDenseVecBufferTile(tile, view), span)
-      << "LowerTileToBuffer: this recipe requires dense rank-2 Vec FP16/BF16/FP32/INT32 tiles";
+      << "LowerTileToBuffer: this recipe requires dense rank-2 Vec tiles with a supported storage dtype";
 }
 
 BufferTypePtr DenseDescriptor(const TileTypePtr& tile, const Span& span) {
@@ -1056,6 +1057,32 @@ class TileToBufferMutator : public IRMutator {
     // it). Every other attribute still needs an explicit conversion contract.
     CHECK_SPAN(StripAttr(call->attrs_, kPipelineMembershipAttr).empty(), call->span_)
         << "LowerTileToBuffer: device-call attributes require an explicit conversion contract";
+    if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
+      CHECK_SPAN(result && backend::SupportsLogicalBufferConversion(*conversion, call), call->span_)
+          << "LowerTileToBuffer: unsupported cast, comparison or selection operands";
+      std::vector<ExprPtr> args;
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        if (static_cast<int>(i) == conversion->scalar_index) {
+          auto scalar = VisitExpr(call->args_[i]);
+          if (GetScalarDtype(scalar) == DataType::INDEX) {
+            scalar = MakeCast(scalar, DataType::INT64, call->span_);
+          }
+          args.push_back(GetScalarDtype(scalar) == DataType::FP32
+                             ? scalar
+                             : MakeCast(scalar, DataType::FP32, call->span_));
+        } else {
+          args.push_back(Handle(call->args_[i]));
+        }
+      }
+      args.push_back(Handle(result));
+      auto kwargs = call->kwargs_;
+      if (conversion->kind == backend::BufferConversionKind::Cast) {
+        // Destination dtype is already in its descriptor. Resolve saturation
+        // here so PTOAS defaults cannot change a logical float conversion.
+        kwargs = {{"mode", call->GetKwarg<int>("mode", 0)}, {"saturation_mode", 0}};
+      }
+      return Operation(conversion->buffer_op, args, call->span_, kwargs);
+    }
     if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
       CHECK_SPAN(result && backend::SupportsLogicalBufferRow(*row_recipe, call), call->span_)
           << "LowerTileToBuffer: row recipes require supported static FP32 operands";

@@ -66,6 +66,24 @@ row_expand_div` softmax chain. Row recipes in kernels with runtime/empty valid
 state, window operands, other dtypes or other reduction operations retain Tile
 IR. Empty reduction axes do not inherit the elementwise no-data behavior.
 
+Cast/compare/select chains also qualify with positive static valid extents and
+allocation-backed dense operands. `cast` supports FP16 to FP32 and FP32 to FP16
+with `none`/`rint` rounding and saturation off; both directions require disjoint
+storage on A2/A3. Other dtype pairs, modes, and explicit cast scratch remain Tile.
+
+`cmp`/`cmps` support FP32 and all six comparison modes. Their UINT8 predicate
+has one bit per value, least-significant bit first: physical columns are
+`round_up(ceil(C / 8), 32)`, valid columns are `ceil(valid_C / 8)`, and rows
+match the values. Mask and value layouts are independently validated.
+`sel`/`sels` consume that mask and matching FP32 values. A2/A3 scratch is
+full-valid UINT32 `[1,16]` for `sel`, or FP32 `[1,C]` for `sels`. Its write
+effect and disjointness constraints are explicit; the destination may exactly
+reuse a value input but must be disjoint from mask and scratch. Unsigned
+predicate/workspace descriptors do not enable unsigned GM transfers or arithmetic.
+Runtime/empty valid state and window operands remain outside this rollout.
+Torch replay packs and unpacks the predicate bytes and preserves physical
+UINT32 scratch widths when allocations share storage.
+
 Structured If/For/While regions may carry Tiles, scalars and aliases of one GM
 parameter. Both branch arms must resolve a GM result to the same parameter;
 loop backedges must preserve the initial GM alias. For loops require an INDEX

@@ -50,6 +50,18 @@ FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归�
 链。包含运行时/空 valid 状态、窗口操作数、其他 dtype 或其他归约操作的行配方 kernel
 继续 Tile。空归约轴不沿用逐元素操作的无数据路径语义。
 
+cast/compare/select 链也支持正静态 valid 和 allocation-backed 稠密操作数。
+`cast` 支持 FP16→FP32 和 FP32→FP16，舍入模式为 `none`/`rint`，饱和模式为 off；
+A2/A3 上两个方向的源和目的地都必须互不重叠。其他 dtype 对、模式和显式 cast scratch 保留 Tile。
+
+`cmp`/`cmps` 支持 FP32 和六种比较模式。UINT8 谓词每个值占一位，低位在前：
+物理列数为 `round_up(ceil(C / 8), 32)`，有效列数为 `ceil(valid_C / 8)`，
+行数与值相同；掩码和值的布局分别验证。`sel`/`sels` 读取该掩码和匹配的 FP32 值。
+A2/A3 的 scratch 为 full-valid UINT32 `[1,16]`（`sel`）或 FP32 `[1,C]`（`sels`）。
+scratch 的写效果和不重叠约束显式表达；目的地可精确复用值输入，但必须与掩码和 scratch 分离。
+无符号谓词/工作空间描述符不开放无符号 GM 传输或算术。运行时/空 valid 和窗口操作数尚未开放。
+Torch 回放显式打包/解包谓词字节，并在共享存储时保留 UINT32 scratch 的物理字宽。
+
 结构化 If/For/While 可携带 Tile、标量和同一 GM 参数的别名。
 分支两臂的 GM 结果必须解析到同一参数；循环回边必须保持初始 GM 别名。
 For 要求 INDEX 归纳变量和可证明为正的常量步长。动态/负步长、变化的 GM 别名、

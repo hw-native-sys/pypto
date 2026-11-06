@@ -12,11 +12,17 @@
 #ifndef PYPTO_BACKEND_COMMON_BUFFER_TYPE_SUPPORT_H_
 #define PYPTO_BACKEND_COMMON_BUFFER_TYPE_SUPPORT_H_
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::backend {
@@ -30,7 +36,9 @@ inline bool IsDenseBufferTransferDtype(DataType dtype) {
 
 /// Logical descriptor shape shared by default selection and final lowering.
 inline bool IsDenseVecBufferTile(const ir::TileTypePtr& tile, const ir::TileView& view) {
-  return tile->shape_.size() == 2 && IsDenseBufferTransferDtype(tile->dtype_) &&
+  return tile->shape_.size() == 2 &&
+         (IsDenseBufferTransferDtype(tile->dtype_) || tile->dtype_ == DataType::UINT8 ||
+          tile->dtype_ == DataType::UINT32) &&
          tile->GetMemorySpace() == ir::MemorySpace::Vec && view.blayout == ir::TileLayout::row_major &&
          view.slayout == ir::TileLayout::none_box && view.fractal == 512 && view.pad == ir::PadValue::null &&
          view.compact == ir::CompactMode::null;
@@ -54,6 +62,41 @@ inline bool IsColumnVectorBuffer(const ir::BufferTypePtr& type) {
          type->blayout_ == ir::TileLayout::col_major && type->slayout_ == ir::TileLayout::none_box &&
          type->fractal_ == 512 && type->pad_ == ir::PadValue::null &&
          type->compact_ == ir::CompactMode::null && type->valid_shape_[0] > 0 && type->valid_shape_[1] == 1;
+}
+
+/// Static positive-valid logical descriptors shared by heterogeneous recipes.
+inline ir::BufferTypePtr StaticLogicalBufferDescriptor(const ir::TypePtr& type) {
+  const auto tile = ir::As<ir::TileType>(type);
+  if (!tile || tile->shape_.size() != 2) return nullptr;
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
+  if (!IsDenseVecBufferTile(tile, view) && !IsColumnVectorBufferTile(tile, view)) return nullptr;
+  const auto offset = ir::As<ir::ConstInt>(view.start_offset);
+  if (view.start_offset && (!offset || offset->value_ != 0)) return nullptr;
+  std::vector<int64_t> shape;
+  std::vector<int64_t> valid;
+  const auto& extents = view.valid_shape.empty() ? tile->shape_ : view.valid_shape;
+  if (extents.size() != 2) return nullptr;
+  for (size_t i = 0; i < 2; ++i) {
+    const auto dimension = ir::As<ir::ConstInt>(tile->shape_[i]);
+    const auto extent = ir::As<ir::ConstInt>(extents[i]);
+    if (!dimension || dimension->value_ <= 0 || !extent || extent->value_ <= 0 ||
+        extent->value_ > dimension->value_) {
+      return nullptr;
+    }
+    shape.push_back(dimension->value_);
+    valid.push_back(extent->value_);
+  }
+  if (!view.stride.empty()) {
+    const std::vector<int64_t> expected = view.blayout == ir::TileLayout::col_major
+                                              ? std::vector<int64_t>{1, shape[0]}
+                                              : std::vector<int64_t>{shape[1], 1};
+    if (view.stride.size() != 2) return nullptr;
+    for (size_t i = 0; i < 2; ++i) {
+      const auto stride = ir::As<ir::ConstInt>(view.stride[i]);
+      if (!stride || stride->value_ != expected[i]) return nullptr;
+    }
+  }
+  return std::make_shared<ir::BufferType>(shape, tile->dtype_, ir::MemorySpace::Vec, valid, view.blayout);
 }
 
 /// On-chip spaces whose descriptors carry a cube fractal layout. Their bytes

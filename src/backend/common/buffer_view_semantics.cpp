@@ -60,9 +60,9 @@ ir::BufferTypePtr StaticViewDescriptor(const ir::TypePtr& type, const std::strin
   const auto bytes = DenseBufferBytes(buffer);
   CHECK(buffer && buffer->shape_.size() == 2 && buffer->memory_space_ == ir::MemorySpace::Vec &&
         (IsDenseBufferTransferDtype(buffer->dtype_) || buffer->dtype_ == DataType::INT16 ||
-         buffer->dtype_ == DataType::UINT8) &&
+         (buffer->dtype_ == DataType::UINT8 || buffer->dtype_ == DataType::UINT32)) &&
         bytes.has_value())
-      << name << " requires dense rank-2 row-major Vec FP16/BF16/FP32/INT16/INT32/UINT8 descriptors";
+      << name << " requires dense rank-2 row-major Vec FP16/BF16/FP32/INT16/INT32/UINT8/UINT32 descriptors";
   for (const auto extent : buffer->valid_shape_) {
     CHECK(extent >= 0) << name << " requires static valid extents";
   }

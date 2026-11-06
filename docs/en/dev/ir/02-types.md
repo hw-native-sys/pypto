@@ -86,6 +86,8 @@ supported functions through [LowerTileToBuffer](../passes/57-lower_tile_to_buffe
 Direct PTO emission also accepts explicitly constructed buffer programs
 with dense row-major Vec FP16/BF16/FP32/INT32 descriptors of rank one or two,
 and static positive-valid FP32 column-major `[R,1]` descriptors with `R` a multiple of eight,
+UINT8 predicate and UINT32 workspace descriptors for
+[cast/compare/select recipes](../passes/57-lower_tile_to_buffer.md),
 scalar parameters and control flow, and the buffer operations below. Ordinary GM
 parameters support dense ND rank-2 FP16/BF16/FP32/INT32 tensors with static
 physical shapes and more than one column. Arithmetic recipes impose their own
@@ -198,7 +200,7 @@ valid extent is smaller than the physical shape. Constant valid operands must
 be positive and no larger than the corresponding window dimension; zero-valid
 windows are not supported. Full-width
 `UINT8[N,32]` byte windows of a storage root are the static special case. `buffer.reshape` preserves the exact physical byte count and accepts
-static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32 and UINT8 descriptors, with physical
+static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32, UINT8 and UINT32 descriptors, with physical
 rows aligned to 32 bytes. In Mat, Left, Right and Acc it only relabels one
 whole fractal window in the same space (for example NZ to ZN) with the same
 element type, byte count and static valid extents. Both operations declare `Alias(0)`, no data access, and

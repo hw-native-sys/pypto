@@ -27,6 +27,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -326,6 +327,15 @@ class ForbidAliasCollector : public IRVisitor {
           for (size_t i = 0; i < forbidden_arg_count; ++i) forbid_arg(i);
         } else {
           for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
+        }
+        // Buffer conversion contracts constrain packing before lowering. This
+        // is scoped to selected kernels, preserving legacy Tile allocation.
+        if (views_) {
+          if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
+            for (const auto& pair : backend::BufferConversionAliasPairs(*conversion)) {
+              if (pair.second == conversion->input_count && !pair.exact_allowed) forbid_arg(pair.first);
+            }
+          }
         }
         // Narrowing is also unsafe on A2/A3: TCVT writes every row's head
         // before reading the tails, clobbering earlier rows' unread source.

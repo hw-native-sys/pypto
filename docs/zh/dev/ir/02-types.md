@@ -78,6 +78,7 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 [LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md) 转换支持的函数。直接 PTO 代码生成也支持
 显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/BF16/FP32/INT32
 描述符，以及 `R` 为 8 的倍数、valid 为正静态值的 FP32 列优先 `[R,1]` 描述符，
+用于 [cast/compare/select 配方](../passes/57-lower_tile_to_buffer.md) 的 UINT8 谓词和 UINT32 工作空间描述符，
 标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数支持
 物理形状静态、列数大于一的稠密 ND 二维 FP16/BF16/FP32/INT32 Tensor。
 算术配方分别施加更窄的 dtype 契约。规范化后的 Tensor
@@ -172,7 +173,7 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 存储根上整行的 `UINT8[N,32]`
 字节窗口是其中的静态特例。
 `buffer.reshape` 保持物理字节数完全相同，支持静态、紧密行主序的二维
-Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的字节数必须为 32 的倍数。
+Vec FP16、BF16、FP32、INT16、INT32、UINT8 和 UINT32 描述符，每个物理行的字节数必须为 32 的倍数。
 在 Mat、Left、Right 和 Acc 中，它只在同一空间内重新标注一个完整分形窗口
 （例如 NZ 到 ZN），要求元素类型、字节数相同且 valid extent 为静态值。
 两者均声明 `Alias(0)`、无数据访问和源元数据读效应，不分配存储，
