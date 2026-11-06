@@ -1103,10 +1103,106 @@ class TensorToTileMutator : public TypePropagatingMutator {
     }
   }
 
+  /// Track static 2D windows in the same SSA traversal as allocation facts.
+  /// Reusing the full base lets gather encode pitch/offset in its flat indices
+  /// instead of copying a strided window to a new packed allocation.
+  void RecordGatherSourceWindow(const VarPtr& var, const ExprPtr& value, bool packed) {
+    auto type = As<TileType>(var->GetType());
+    if (!type || type->shape_.size() != 2 || type->dtype_.IsPackedFp4()) return;
+    auto rows = As<ConstInt>(type->shape_[0]);
+    auto cols = As<ConstInt>(type->shape_[1]);
+    if (!rows || !cols || rows->value_ <= 0 || cols->value_ <= 0) return;
+
+    auto& windows = conversion_context_.gather_source_windows;
+    if (auto known = windows.find(value); known != windows.end()) {
+      windows.emplace(var, known->second);
+      return;
+    }
+    if (auto call = As<Call>(value); call && !call->args_.empty()) {
+      auto source = As<TileType>(call->args_[0]->GetType());
+      auto known = windows.find(call->args_[0]);
+      if (source && known != windows.end()) {
+        if (IsOp(call, "tile.slice") && call->args_.size() >= 3 && source->shape_.size() == 2) {
+          auto offsets = As<MakeTuple>(call->args_[2]);
+          auto source_rows = As<ConstInt>(source->shape_[0]);
+          auto source_cols = As<ConstInt>(source->shape_[1]);
+          if (offsets && offsets->elements_.size() == 2 && source_rows && source_cols) {
+            auto row = As<ConstInt>(offsets->elements_[0]);
+            auto col = As<ConstInt>(offsets->elements_[1]);
+            // Check the requested rectangle before accumulating offsets. This
+            // also bounds their sums by the original base's static dimensions.
+            if (row && col && row->value_ >= 0 && col->value_ >= 0 && rows->value_ <= source_rows->value_ &&
+                cols->value_ <= source_cols->value_ && row->value_ <= source_rows->value_ - rows->value_ &&
+                col->value_ <= source_cols->value_ - cols->value_) {
+              auto window = known->second;
+              window.row_offset += row->value_;
+              window.col_offset += col->value_;
+              windows.emplace(var, std::move(window));
+              return;
+            }
+          }
+        } else if (IsOp(call, "tile.set_validshape")) {
+          windows.emplace(var, known->second);
+          return;
+        } else {
+          auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+          // Assemble declares target-buffer inheritance without an explicit
+          // output-reuse argument; its result has the target's dense geometry.
+          if (IsOp(call, "tile.assemble")) writeback = 0;
+          if (writeback && *writeback == 0 && known->second.base == call->args_[0] &&
+              tile_view_semantics::ShapeExprListsEquivalent(source->shape_, type->shape_)) {
+            // A writeback creates a new value of the target. Point at that SSA
+            // result, never the pre-write producer whose contents may differ.
+            windows.emplace(var, GatherSourceWindow{var, 0, 0});
+            return;
+          }
+        }
+      }
+    }
+    const auto view = tile_view_semantics::GetEffectiveTileView(*type);
+    auto offset = As<ConstInt>(view.start_offset);
+    // Allocation geometry is known even before initialization. A following
+    // assemble must then rebind the fact to its initialized result SSA value.
+    auto call = As<Call>(value);
+    const bool dense_allocation = packed || (call && IsOp(call, "tile.create"));
+    if (dense_allocation && (!view.start_offset || (offset && offset->value_ == 0)) &&
+        (cols->value_ % 32) * type->dtype_.GetByte() % 32 == 0) {
+      // Aligned dense rows have no padding between the logical rows. Unknown
+      // views, explicit strides and control-flow values deliberately get no fact.
+      windows.emplace(var, GatherSourceWindow{var, 0, 0});
+    }
+  }
+
   /// Track packed storage in O(N); views can inherit pitch absent from TileView.
   void RecordPackedTile(const VarPtr& var, const ExprPtr& value) {
     auto type = As<TileType>(var->GetType());
     if (!type) return;
+    // Record backing storage independently of packing: a narrow/strided view
+    // still keeps its full parent allocation live beside a materialized copy.
+    std::optional<TileStorageOrigin> origin;
+    auto known = conversion_context_.storage_origins.find(value);
+    if (known != conversion_context_.storage_origins.end()) origin = known->second;
+    if (auto call = As<Call>(value)) {
+      const auto* entry = LookupOpEntry(call->op_);
+      if (entry && entry->GetOpCategory() == "TileOp") {
+        auto source = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+        // Assemble inherits a target buffer but has no registered reuse arg.
+        // Functional writebacks may need a copy when an older value stays live.
+        if (IsOp(call, "tile.assemble")) source = 0;
+        const bool writeback = source.has_value();
+        if (!source && !call->args_.empty() && op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+          source = 0;
+        }
+        if (source) {
+          auto backing = conversion_context_.storage_origins.find(call->args_[*source]);
+          if (backing != conversion_context_.storage_origins.end()) origin = backing->second;
+          if (origin && writeback) origin->version = var;
+        } else if (!op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+          origin = TileStorageOrigin{var, var};
+        }
+      }
+    }
+    if (origin) conversion_context_.storage_origins.emplace(var, *origin);
     const auto view = tile_view_semantics::GetEffectiveTileView(*type);
     if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
         !view.stride.empty()) {
@@ -1118,11 +1214,35 @@ class TensorToTileMutator : public TypePropagatingMutator {
       packed = entry && entry->GetOpCategory() == "TileOp" &&
                entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional &&
                !op_predicates::OutputInheritsSourceBuffer(call->op_->name_);
-      if (entry && IsOp(call, "tile.set_validshape")) {
-        packed = conversion_context_.packed_tiles.count(call->args_[0]) != 0;
+      if (entry && !call->args_.empty() && conversion_context_.packed_tiles.count(call->args_[0])) {
+        auto source = As<TileType>(call->args_[0]->GetType());
+        if (IsOp(call, "tile.set_validshape")) {
+          packed = true;
+        } else if (IsOp(call, "tile.slice") && source && call->args_.size() >= 3) {
+          auto offsets = As<MakeTuple>(call->args_[2]);
+          packed = tile_view_semantics::ShapeExprListsEquivalent(source->shape_, type->shape_) && offsets &&
+                   offsets->elements_.size() == source->shape_.size() &&
+                   std::all_of(offsets->elements_.begin(), offsets->elements_.end(), [](const auto& e) {
+                     auto offset = As<ConstInt>(e);
+                     return offset && offset->value_ == 0;
+                   });
+        } else if (IsOp(call, "tile.reshape") && source) {
+          // A reshape preserves packing only when physical row padding cannot
+          // separate the logical rows in either descriptor.
+          auto aligned_row = [](const std::shared_ptr<const TileType>& tile) {
+            auto cols = tile->shape_.size() == 2 ? As<ConstInt>(tile->shape_.back()) : nullptr;
+            return cols && cols->value_ > 0 && !tile->dtype_.IsPackedFp4() &&
+                   (cols->value_ % 32) * tile->dtype_.GetByte() % 32 == 0;
+          };
+          const auto source_view = tile_view_semantics::GetEffectiveTileView(*source);
+          auto offset = As<ConstInt>(source_view.start_offset);
+          packed = aligned_row(source) && aligned_row(type) &&
+                   (!source_view.start_offset || (offset && offset->value_ == 0));
+        }
       }
     }
     if (packed) conversion_context_.packed_tiles.insert(var);
+    RecordGatherSourceWindow(var, value, packed);
   }
 
   StmtPtr HandlePassThroughAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {

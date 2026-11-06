@@ -14,6 +14,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <optional>
@@ -64,10 +65,30 @@ using ConversionFunc = std::function<ConversionResult(
     const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
     const Span& span)>;
 
+/// A rectangular view of a proven dense, row-major 2D tile. Offsets are in
+/// elements/rows of base, not bytes; base's last dimension is its physical pitch.
+struct GatherSourceWindow {
+  ExprPtr base;
+  int64_t row_offset = 0;
+  int64_t col_offset = 0;
+};
+
+/// Allocation geometry and current value identity are independent: views can
+/// change shape/dtype while retaining a version, and writebacks create versions
+/// whose old values may need separate storage. Neither fact proves a layout.
+struct TileStorageOrigin {
+  ExprPtr allocation;
+  ExprPtr version;
+};
+
 /// Facts about already-lowered values. Absence means unknown, not strided.
 /// Keep owning references so replaced SSA values cannot leave recycled pointer keys.
 struct ConversionContext {
   std::unordered_set<ExprPtr> packed_tiles;
+  // Views retain their full allocation extent and current writeback version.
+  std::unordered_map<ExprPtr, TileStorageOrigin> storage_origins;
+  // Static slice windows retain their original pitch and current SSA producer.
+  std::unordered_map<ExprPtr, GatherSourceWindow> gather_source_windows;
 };
 
 using ContextualConversionFunc = std::function<ConversionResult(

@@ -578,11 +578,37 @@ explicitly for `tile.gather`. See the [operator contract](../ir/05-tensor-tile-o
 for dtype, shape, alignment, and bounds requirements.
 
 Strided sources are packed using `tile.extract` for floating point or exact integer
-`tile.adds(..., 0)` for INT16/INT32, which A2/A3 TEXTRACT cannot copy.
+`tile.adds(..., 0)` for INT16/INT32, which TEXTRACT cannot copy.
+Last-axis gather uses full-tile flat indices on A2/A3 and A5. A static rank-2
+window of a proven dense, row-major parent is gathered directly from that parent:
+`flat_index[r,c] = (r + row_offset) * parent_cols + col_offset + index[r,c]`.
+For example, `local[:,64:128]` of a `[16,128]` tile uses `r*128 + 64 + index[r,c]`,
+without an extract or integer packing copy. Static nested slices accumulate their
+offsets; writeback results retain their current SSA producer. The full parent
+remains live through gather and is charged once in the capacity estimate, without
+a window-copy allocation. Unknown layouts retain packing. INT16 indices retain
+packing when the parent-relative offsets exceed their signed range.
+When the estimated full-tile working set exceeds Vec capacity, GM and local
+sources use a shared row-at-a-time lowering instead, as do sources whose
+logical row width is not 32-byte aligned and no direct parent is proven; the output accumulator and
+any existing local source still need to fit. Local rank-3 sources and indices
+require packed-storage proof before merging their leading dimensions.
+Full-shape packed local rank-3 operands are reshaped directly: the source's
+original proof avoids an extra packing copy of the synthesized 2D view, keeping
+the emitted allocations consistent with the capacity estimate.
+Partial leading-dimension windows of packed local rank-3 sources always use
+the row path, even when they fit Vec, so slicing follows flattening the parent.
 The converter receives a read-only `ConversionContext` containing packed-storage
-facts collected from earlier lowered producers in one SSA traversal. Registered
+facts collected from earlier lowered producers in one SSA traversal. A separate
+allocation-origin fact follows aliases and views so capacity checks count the
+full backing storage of local source/index windows, plus required source copies
+when direct parent addressing is unavailable and the requested shape differs.
+Current allocation versions propagate through aliases independently of window
+geometry, including reinterpret views. Writebacks create distinct versions for
+capacity accounting even when index layout or INT16 range disables direct addressing. Registered
 functional tile results with fresh storage are proven packed; plain aliases and
-`tile.set_validshape` preserve that proof. Other views, parameters, and control-flow
+`tile.set_validshape`, full-shape zero-offset slices, and reshapes with 32-byte-aligned
+source and destination rows preserve that proof. Other views, parameters, and control-flow
 results remain unknown and keep the copy. An empty `TileView.stride` alone is not
 proof: `tile.slice` can retain its parent's physical pitch without storing it there.
 

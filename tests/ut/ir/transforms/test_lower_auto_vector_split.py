@@ -3771,38 +3771,45 @@ def test_scatter_update_partitioned_destination_is_rejected():
 
 
 @pytest.mark.parametrize("ascend_backend", [_backend.BackendType.Ascend950], indirect=True)
-def test_tensor_gather_in_a_split_region_is_diagnosed_through_the_pipeline(ascend_backend):
-    """The user-level path reaches the guard, not just hand-written tile IR.
+@pytest.mark.parametrize(
+    "rows,diagnostic,operation",
+    [
+        pytest.param(32, "ABSOLUTE indices", "tile.gather", id="full_tile"),
+        pytest.param(256, "full-width operand", "tile.assemble", id="row_fallback"),
+    ],
+)
+def test_tensor_gather_in_a_split_region_is_diagnosed_through_the_pipeline(
+    ascend_backend, rows, diagnostic, operation
+):
+    """Both tensor-gather lowerings reject unsafe automatically split regions.
 
     ``pl.gather`` over a tensor lowers to a ``tile.load`` of the table feeding
-    ``tile.gather`` (`op_conversion_registry.cpp`), and only then does
-    ``LowerAutoVectorSplit`` run — so the table is produced *inside* the split
-    region as a matter of course, and this is the ordinary A5 spelling rather
-    than a hand-built corner. Driving the real pipeline is what proves the guard
-    is reachable the way an author would hit it; the tile-level tests above pass
-    the table as a parameter, which is exactly the shape that never gets halved.
+    ``tile.gather``, and only then does ``LowerAutoVectorSplit`` run. The small
+    case fits Vec and reaches the absolute-index source guard: its table is
+    produced inside the region, unlike the parameter tables in tile-level tests.
+    The large case selects row lowering; its full-width output accumulator must
+    also be rejected instead of allowing both lanes to update the whole tile.
     """
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
         def main(
-            tbl: pl.Tensor[[256, 128], pl.FP32],
-            idx: pl.Tensor[[256, 128], pl.INT32],
+            tbl: pl.Tensor[[rows, 128], pl.FP32],
+            idx: pl.Tensor[[rows, 128], pl.INT32],
             w: pl.Tensor[[128, 128], pl.FP32],
-            out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
-        ) -> pl.Tensor[[256, 128], pl.FP32]:
+            out_0: pl.Out[pl.Tensor[[rows, 128], pl.FP32]],
+        ) -> pl.Tensor[[rows, 128], pl.FP32]:
             picked = pl.gather(tbl, dim=-1, index=idx)
             acc = pl.matmul(picked, w)
-            out_0[0:256, 0:128] = acc
+            out_0[0:rows, 0:128] = acc
             return out_0
 
     manager = PassManager(OptimizationStrategy.Default)
-    with pytest.raises(ValueError, match="ABSOLUTE indices") as exc_info:
+    with pytest.raises(ValueError, match=diagnostic) as exc_info:
         with passes.PassContext([]):
             manager.run_passes(Before)
-    # The operand named is the tile.load the tensor->tile conversion synthesized.
-    assert "tile.gather" in str(exc_info.value)
+    assert operation in str(exc_info.value)
 
 
 def test_transpose_view_of_full_width_source_is_rejected():
