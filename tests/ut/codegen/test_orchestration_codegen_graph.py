@@ -1199,5 +1199,39 @@ class PipeCapacities:
     _assert_orchestration_compiles(source)
 
 
+def test_graph_distributed_context_is_replay_linked(tmp_path):
+    """A new window context must reach kernels on replay, not freeze at record."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Graph)
+        def publish(self, signal: pld.DistributedTensor[[16], pl.INT32]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pld.system.notify(
+                    target=signal,
+                    peer=0,
+                    offsets=[0],
+                    value=1,
+                    op=pld.NotifyOp.AtomicAdd,
+                )
+            return signal
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[16], pl.INT32]):
+            signal = self.publish(signal)
+            return signal
+
+    orch = _compile_orch(Prog)
+    body = orch[orch.index("static void pypto_graph_publish") : orch.index("aicpu_orchestration_entry")]
+    assert "const auto signal_ctx = args.scalar(0);" in body
+    assert re.search(r"\.add_scalar\(signal_ctx\)", body)
+    # Encoding the pointer as a construction value would make every window
+    # address a distinct recording, or retain the first address on replay.
+    assert "from_u64<uint64_t>" not in body
+    cpp = tmp_path / "main.cpp"
+    cpp.write_text(orch)
+    _assert_orchestration_compiles(cpp)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

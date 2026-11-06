@@ -1152,7 +1152,7 @@ void CheckGraphSignature(const FunctionPtr& func) {
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const auto dir = i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
-    if (IsScalarType(param->GetType())) {
+    if (IsScalarType(param->GetType()) || As<CommCtxType>(param->GetType())) {
       CHECK_SPAN(dir == ParamDirection::In, param->span_)
           << "Graph function '" << func->name_ << "' declares scalar parameter '" << param->name_hint_
           << "' as " << (dir == ParamDirection::Out ? "Out" : "InOut")

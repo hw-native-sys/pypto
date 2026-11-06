@@ -28,6 +28,12 @@ The third produces correct answers that run out of memory, or merely slower, as
 the layer count grows. The last is rejected at runtime; compile-time checks
 report statically decidable problems against the source program earlier.
 
+Materialized `CommCtxType` parameters use input scalar slots containing device
+communication-context pointers. Their `InheritableScalar` origin is preserved
+when forwarded to recorded tasks, so replay refreshes the pointer for each
+invocation. They count toward the scalar boundary limit; unrelated pointer,
+tile, and tuple types remain unsupported.
+
 ## Step A — derived boundary scalars
 
 A boundary scalar carries its **parameter origin** in the runtime's
