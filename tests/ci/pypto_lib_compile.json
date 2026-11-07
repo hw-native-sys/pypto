@@ -1,0 +1,72 @@
+[
+  {
+    "name": "models-deepseek_v4_1_flash-compressor",
+    "entry": "models/deepseek_v4_1_flash/compressor.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-engram",
+    "entry": "models/deepseek_v4_1_flash/engram.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-expert_routed",
+    "entry": "models/deepseek_v4_1_flash/expert_routed.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-expert_shared",
+    "entry": "models/deepseek_v4_1_flash/expert_shared.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-gate",
+    "entry": "models/deepseek_v4_1_flash/gate.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-hc",
+    "entry": "models/deepseek_v4_1_flash/hc.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-input_pack",
+    "entry": "models/deepseek_v4_1_flash/input_pack.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-lm_head",
+    "entry": "models/deepseek_v4_1_flash/lm_head.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-o_proj",
+    "entry": "models/deepseek_v4_1_flash/o_proj.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-sparse_attention",
+    "entry": "models/deepseek_v4_1_flash/sparse_attention.py",
+    "platforms": [
+      "a5"
+    ]
+  }
+]

@@ -75,7 +75,9 @@ def library(tmp_path):
 )
 def test_compile_receipts_gate_success(library, tmp_path, body, passed, count):
     (library / "models/case.py").write_text(body)
-    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, "a2a3", tmp_path / "out", 10
+    )
     assert result["passed"] is passed
     assert len(result["compilations"]) == count
 
@@ -138,7 +140,9 @@ def test_python_subprocess_compilations_are_audited(
         "        if args.case == 'partial_exit':\n"
         "            raise SystemExit(3)\n"
     )
-    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, "a2a3", tmp_path / "out", 10
+    )
     assert result["passed"] is passed
     assert len(result["compilations"]) == count
 
@@ -156,7 +160,7 @@ def test_python_subprocess_preserves_other_commands(library, tmp_path):
         "subprocess.run([b'true'], check=True)\n"
         "run('ok', [])\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -195,7 +199,7 @@ def test_python_subprocess_preserves_popen_options(library, tmp_path, interprete
         "    run('ok', [])\n"
         "    print('child-output')\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -216,7 +220,7 @@ def test_source_skipping_subprocess_is_not_wrapped(library, tmp_path, interprete
         "else:\n"
         "    print('first-line-skipped')\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -270,9 +274,9 @@ def test_empty_child_receipt_cannot_reuse_previous_success(library, tmp_path, mo
         "    run('ok', [])\n"
     )
     output = tmp_path / "out"
-    assert audit.run_case(library, "models/case.py", "a5", output, 10)["passed"]
+    assert audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", output, 10)["passed"]
     monkeypatch.setenv("AUDIT_EMPTY_CHILD", "1")
-    result = audit.run_case(library, "models/case.py", "a5", output, 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", output, 10)
     assert not result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -288,7 +292,7 @@ def test_caught_child_start_failure_cannot_pass(library, tmp_path):
         "    pass\n"
         "run('ok', [])\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert not result["passed"]
     assert len(result["compilations"]) == 2
 
@@ -330,7 +334,9 @@ def test_self_dispatch_collects_each_case(library, tmp_path, keyword_args):
         "            raise AssertionError('Runtime guard was not installed')\n"
         "        run('ok', [])\n"
     )
-    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 20)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, "a2a3", tmp_path / "out", 20
+    )
     assert result["passed"]
     assert len(result["compilations"]) == 6
 
@@ -356,7 +362,7 @@ def test_self_dispatch_cannot_hide_failed_or_unobserved_child(library, tmp_path,
         "    from golden import run\n"
         "    run('ok', [])\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["exit_code"] == 0
     assert not result["passed"]
     assert any(not record["passed"] for record in result["compilations"])
@@ -372,7 +378,7 @@ def test_unrelated_subprocess_preserves_arguments_and_output(library, tmp_path):
         "from golden import run\n"
         "run('ok', [])\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -381,9 +387,9 @@ def test_timeout_cannot_reuse_previous_receipt(library, tmp_path):
     script = library / "models/case.py"
     output = tmp_path / "out"
     script.write_text("from golden import run\nrun('ok', [])")
-    assert audit.run_case(library, "models/case.py", "a5", output, 10)["passed"]
+    assert audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", output, 10)["passed"]
     script.write_text("import time\ntime.sleep(60)")
-    result = audit.run_case(library, "models/case.py", "a5", output, 1)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", output, 1)
     assert not result["passed"]
     assert result["timed_out"]
     assert result["compilations"] == []
@@ -395,7 +401,9 @@ def test_invalid_receipt_fails_without_aborting(library, tmp_path, receipt):
         "from golden import run\nrun('ok', [])\n"
         f"import json\njson.dumps = lambda *args, **kwargs: {receipt!r}\n"
     )
-    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, "a2a3", tmp_path / "out", 10
+    )
     assert result["exit_code"] == 0
     assert not result["passed"]
     assert result["compilations"] == []
@@ -411,7 +419,7 @@ def test_unreadable_receipt_fails_without_aborting(library, tmp_path, monkeypatc
         return original_read(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["exit_code"] == 0
     assert not result["passed"]
     assert result["compilations"] == []
@@ -439,7 +447,9 @@ def test_self_spawned_entry_preserves_audit_and_child_arguments(library, tmp_pat
         "    if sys.argv[2] == 'exit':\n"
         "        raise SystemExit(3)\n"
     )
-    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, "a2a3", tmp_path / "out", 10
+    )
     assert result["exit_code"] == 0
     assert result["passed"] is passed
     statuses = [record["passed"] for record in result["compilations"]]
@@ -453,11 +463,11 @@ def test_cpu_prefill_entry_without_compilations_still_fails(library, tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text("raise SystemExit(0)\n")
     output = tmp_path / "out"
-    result = audit.run_case(library, entry, "a2a3", output, 10)
+    result = audit.run_case(library, {"name": "case", "entry": entry}, "a2a3", output, 10)
     assert result["exit_code"] == 0
     assert not result["passed"]
     assert result["compilations"] == []
-    assert not list((output / Path(entry).with_suffix("")).glob("runtime-*"))
+    assert not list((output / "case").glob("runtime-*"))
 
 
 @pytest.mark.parametrize("entry", ["hc", "prefill_fwd", "sparse_attention"])
@@ -482,7 +492,13 @@ def test_compile_does_not_enable_replay_or_checkpoint_arguments(library, tmp_pat
         "assert args.compile_only\n"
         "compile('ok')\n"
     )
-    result = audit.run_case(library, f"models/deepseek_v4_1_flash/{entry}.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(
+        library,
+        {"name": "case", "entry": f"models/deepseek_v4_1_flash/{entry}.py"},
+        "a5",
+        tmp_path / "out",
+        10,
+    )
     assert result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -514,7 +530,9 @@ def test_component_specific_compile_flag_is_not_injected(
         "projection()\n"
         "verify()\n"
     )
-    result = audit.run_case(library, "models/case.py", platform, tmp_path / "out", 10)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, platform, tmp_path / "out", 10
+    )
     assert result["exit_code"] == 0
     assert result["passed"] is (verify_kernel == "ok")
     assert [record["passed"] for record in result["compilations"]] == [True, verify_kernel == "ok"]
@@ -549,7 +567,9 @@ def test_multi_parser_compile_flag_prevents_post_compile_execution(
         "if result.passed and not args.compile_mode:\n"
         "    raise AssertionError('Device execution was attempted after compilation')\n"
     )
-    result = audit.run_case(library, "models/case.py", platform, tmp_path / "out", 10)
+    result = audit.run_case(
+        library, {"name": "case", "entry": "models/case.py"}, platform, tmp_path / "out", 10
+    )
     assert result["exit_code"] == 0
     assert result["passed"] is (kernel == "ok")
     assert [record["passed"] for record in result["compilations"]] == [kernel == "ok"]
@@ -566,7 +586,7 @@ def test_inactive_compile_flag_is_not_injected(library, tmp_path):
         "parser.parse_args()\n"
         "run('ok', [])\n"
     )
-    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    result = audit.run_case(library, {"name": "case", "entry": "models/case.py"}, "a5", tmp_path / "out", 10)
     assert result["passed"]
     assert len(result["compilations"]) == 1
 
@@ -583,73 +603,223 @@ def test_entry_arguments_preserve_declared_ranks(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(("component", "count"), [("all", 2), ("projection", 1), ("verify", 1)])
+def test_components_with_different_compile_only_options(library, tmp_path, component, count):
+    # GLM kda.py forwards the same remaining argv to every selected component.
+    (library / "models/case.py").write_text(
+        "import argparse\n"
+        "from golden import run\n"
+        "def projection(argv):\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('-p')\n"
+        "    args = parser.parse_args(argv)\n"
+        "    assert not hasattr(args, 'compile_only')\n"
+        "    run('ok', [])\n"
+        "def verify(argv):\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('-p')\n"
+        "    parser.add_argument('--compile-only', dest='only_compile', action='store_true')\n"
+        "    args = parser.parse_args(argv)\n"
+        "    assert args.only_compile, 'Must not proceed to device execution'\n"
+        "    run('ok', [], compile_only=args.only_compile)\n"
+        "parser = argparse.ArgumentParser(add_help=False)\n"
+        "parser.add_argument('--component', default='all')\n"
+        "options, remaining = parser.parse_known_args()\n"
+        "if options.component in ('all', 'projection'):\n"
+        "    projection(remaining)\n"
+        "if options.component in ('all', 'verify'):\n"
+        "    verify(remaining)\n"
+    )
+    case = {"name": "case", "entry": "models/case.py", "args": ["--component", component]}
+    assert "--compile-only" not in audit.entry_args(library / case["entry"], "a2a3", case["args"])
+    result = audit.run_case(library, case, "a2a3", tmp_path / "out", 10)
+    assert result["passed"], (tmp_path / "out" / result["log"]).read_text()
+    assert len(result["compilations"]) == count
+
+
 def test_required_device_argument_without_marker(tmp_path):
     script = tmp_path / "distributed.py"
     script.write_text('parser.add_argument("-d", "--device", required=True)\n')
     assert audit.entry_args(script, "a5") == [str(script), "-p", "a5", "-d", "0"]
 
 
-@pytest.mark.parametrize("entries", [[], ["models/case_draft.py"], ["../outside.py"]])
-def test_empty_or_invalid_selection_fails(library, entries):
-    selector = library / ".github/scripts/detect_changes.py"
-    selector.parent.mkdir(parents=True)
-    selector.write_text(f"print({' '.join(entries)!r})\n")
-    with pytest.raises(ValueError, match="No formal|Invalid formal"):
-        audit.select_entries(library, "a2a3")
+@pytest.fixture
+def case_config(library, tmp_path):
+    (library / "models/case.py").write_text("from golden import run\nrun('ok', [])\n")
+    config = tmp_path / "cases.json"
+    config.write_text(json.dumps([{"name": "case", "entry": "models/case.py", "platforms": ["a5"]}]))
+    return config
 
 
-def test_selector_failure_is_not_empty_success(library):
-    selector = library / ".github/scripts/detect_changes.py"
-    selector.parent.mkdir(parents=True)
-    selector.write_text("raise SystemExit(2)\n")
-    with pytest.raises(audit.subprocess.CalledProcessError):
-        audit.select_entries(library, "a5")
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"name": "../escape"},
+        {"name": "manifest.json"},
+        {"name": "results.json"},
+        {"name": ""},
+        {"name": None},
+        {"entry": ""},
+        {"entry": "."},
+        {"entry": "../outside.py"},
+        {"entry": "/tmp/outside.py"},
+        {"entry": "models/./case.py"},
+        {"entry": "models/missing.py"},
+        {"entry": "models/*"},
+        {"entry": "models/case_draft.py"},
+        {"platforms": []},
+        {"platforms": "a5"},
+        {"platforms": ["a6"]},
+        {"platforms": ["a5", "a5"]},
+        {"platforms": [{}]},
+        {"args": "--batch-size 8"},
+        {"args": [8]},
+        {"args": ["--platform", "a5"]},
+        {"args": ["--platform=a5"]},
+        {"args": ["--plat=a5"]},
+        {"args": ["-p", "a5"]},
+        {"args": ["-pa5"]},
+        {"args": ["bad\0argument"]},
+        {"arg": ["--typo"]},
+    ],
+)
+def test_invalid_case_configuration_fails(library, case_config, change):
+    cases = json.loads(case_config.read_text())
+    cases[0].update(change)
+    case_config.write_text(json.dumps(cases))
+    with pytest.raises(ValueError, match="case|platform"):
+        audit.select_cases(library, "a5", case_config)
 
 
-@pytest.mark.parametrize("platform", ["a2a3", "a5"])
-@pytest.mark.parametrize("include_kernel", [False, True])
-def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, include_kernel, platform):
-    # These CPU-only self-tests can pass without compiling a PyPTO kernel.
-    entries = [
-        "models/glm5_3_flash/weights.py",
-        "models/glm5_3_flash/prefill_ref.py",
-        "models/glm5_3_flash/prefill_fwd.py",
+@pytest.mark.parametrize("contents", ["{}", "[]", "[null]", "[42]", "["])
+def test_invalid_or_empty_case_list_fails(library, case_config, contents):
+    case_config.write_text(contents)
+    with pytest.raises(ValueError):
+        audit.select_cases(library, "a5", case_config)
+
+
+def test_case_configuration_is_utf8_under_ascii_locale(library, case_config):
+    cases = json.loads(case_config.read_text())
+    cases[0]["args"] = ["--label", "caf\u00e9"]
+    case_config.write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+    result = audit.subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, locale, runpy, sys; from pathlib import Path; "
+            "assert locale.getpreferredencoding(False).lower() in ('ascii', 'ansi_x3.4-1968'); "
+            "audit = runpy.run_path(sys.argv[1]); "
+            "print(json.dumps(audit['select_cases'](Path(sys.argv[2]), 'a5', Path(sys.argv[3]))))",
+            str(_RUNNER),
+            str(library),
+            str(case_config),
+        ],
+        env=audit.os.environ | {"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == cases
+
+
+def test_default_cases_cover_deepseek_operators_only():
+    cases = json.loads(audit.DEFAULT_CASES.read_text(encoding="utf-8"))
+    assert cases
+    for case in cases:
+        entry = Path(case["entry"])
+        assert entry.parent.as_posix() == "models/deepseek_v4_1_flash"
+        assert case["platforms"] == ["a5"]
+        assert not entry.stem.startswith(("decode_", "prefill_", "dspark_"))
+        assert entry.stem != "vision"
+
+
+def test_duplicate_case_name_fails(library, case_config):
+    cases = json.loads(case_config.read_text())
+    case_config.write_text(json.dumps(cases * 2))
+    with pytest.raises(ValueError, match="Duplicate case name"):
+        audit.select_cases(library, "a5", case_config)
+
+
+def test_platform_without_cases_fails(library, case_config):
+    with pytest.raises(ValueError, match="No pypto-lib cases selected for a2a3"):
+        audit.select_cases(library, "a2a3", case_config)
+
+
+def test_explicit_selection_filters_platform_without_discovery(library, case_config):
+    cases = json.loads(case_config.read_text())
+    cases += [{"name": "other-platform", "entry": "models/case.py", "platforms": ["a2a3"]}]
+    case_config.write_text(json.dumps(cases))
+    # No library selector is installed, and new entries must not join implicitly.
+    (library / "models/new.py").write_text("raise RuntimeError('Must not run')\n")
+    assert audit.select_cases(library, "a5", case_config) == [{**cases[0], "args": []}]
+
+
+def test_entry_symlink_outside_library_fails(library, case_config, tmp_path):
+    target = tmp_path / "outside.py"
+    target.write_text("")
+    path = library / "models/case.py"
+    path.unlink()
+    path.symlink_to(target)
+    with pytest.raises(ValueError, match="Invalid or missing entry"):
+        audit.select_cases(library, "a5", case_config)
+
+
+@pytest.mark.parametrize("device_args", [["-d", "2,3"], ["--device=2,3"], ["-d2,3"]])
+@pytest.mark.parametrize("marker", ["", "# ci: devices=4\n"])
+def test_custom_device_arguments_replace_inferred_ranks(tmp_path, device_args, marker):
+    path = tmp_path / "case.py"
+    path.write_text(marker + 'parser.add_argument("--device", required=True)\n')
+    extra = device_args + ["--label", "two words"]
+    assert audit.entry_args(path, "a5", extra) == [str(path), "-p", "a5", *extra]
+
+
+@pytest.mark.parametrize("dispatch", [False, True])
+def test_argument_variants_have_separate_receipts_and_logs(library, tmp_path, dispatch):
+    (library / "models/case.py").write_text(
+        "# ci: devices=4\n"
+        "import argparse, subprocess, sys\n"
+        "from golden import run\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('-p')\n"
+        "parser.add_argument('-d', '--device')\n"
+        "parser.add_argument('--compile-only', action='store_true')\n"
+        "parser.add_argument('--kernel')\n"
+        "parser.add_argument('--label')\n"
+        "parser.add_argument('--child', action='store_true')\n"
+        "args = parser.parse_args()\n"
+        "assert args.p == 'a5' and args.device == '2,3' and args.compile_only\n"
+        "assert args.label == 'two words; $(not-a-command)'\n"
+        "print(args.kernel)\n"
+        f"if {dispatch!r} and not args.child:\n"
+        "    subprocess.run([sys.executable, __file__, *sys.argv[1:], '--child'], check=True)\n"
+        "else:\n"
+        "    run(args.kernel, [])\n"
+    )
+    cases = [
+        {
+            "name": f"case-{kernel}",
+            "entry": "models/case.py",
+            "args": ["--kernel", kernel, "--label", "two words; $(not-a-command)", "-d", "2,3"],
+        }
+        for kernel in ("ok", "bad")
     ]
-    for entry in entries:
-        path = library / entry
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("raise SystemExit(0)\n")
-    if include_kernel:
-        # Real GLM kernels need coverage even when they lack --compile-only.
-        kernels = ["attention", "kda", "prefill_layer"]
-        for kernel in kernels:
-            entry = f"models/glm5_3_flash/{kernel}.py"
-            entries.append(entry)
-            (library / entry).write_text("from golden import run\nrun('ok', [])")
-    selector = library / ".github/scripts/detect_changes.py"
-    selector.parent.mkdir(parents=True)
-    selector.write_text(f"print({' '.join(entries)!r})\n")
-
-    if include_kernel:
-        assert audit.select_entries(library, platform) == [
-            "models/glm5_3_flash/attention.py",
-            "models/glm5_3_flash/kda.py",
-            "models/glm5_3_flash/prefill_layer.py",
-        ]
-    else:
-        with pytest.raises(ValueError, match="No formal pypto-lib entries"):
-            audit.select_entries(library, platform)
+    with audit.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(lambda case: audit.run_case(library, case, "a5", tmp_path / "out", 10), cases)
+        )
+    assert [result["passed"] for result in results] == [True, False]
+    for result, case in zip(results, cases):
+        assert result["name"] == case["name"]
+        assert result["args"] == ["-p", "a5", *case["args"]]
+        assert result["log"] == f"{case['name']}/compile.log"
+        assert (tmp_path / "out" / result["log"]).read_text().strip() == "\n".join(
+            [case["args"][1]] * (2 if dispatch else 1)
+        )
+        assert len(result["compilations"]) == 1
 
 
 @pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1), ("truncated", 1)])
-def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, status):
-    selector = library / ".github/scripts/detect_changes.py"
-    selector.parent.mkdir(parents=True)
-    selector.write_text(
-        "import sys\nassert sys.argv[1:] == ['--all', '--platform', 'a5']\n"
-        "print('models/case.py models/glm5_3_flash/weights.py '\n"
-        "      'models/glm5_3_flash/prefill_ref.py models/glm5_3_flash/prefill_fwd.py')\n"
-    )
+def test_manifest_uses_configured_cases(library, case_config, tmp_path, monkeypatch, kernel, status):
     body = f"from golden import run\nrun({kernel!r}, [])"
     if kernel == "truncated":
         body += "\nimport json\njson.dumps = lambda *args, **kwargs: '['\n"
@@ -684,6 +854,8 @@ def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, 
             str(library),
             "--platform",
             "a5",
+            "--cases",
+            str(case_config),
             "--output",
             str(output),
             "--jobs",
@@ -693,6 +865,9 @@ def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, 
     assert audit.main() == status
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["entries"] == ["models/case.py"]
+    assert manifest["cases"] == [
+        {"name": "case", "entry": "models/case.py", "platforms": ["a5"], "args": [], "argv": ["-p", "a5"]}
+    ]
     assert len(manifest["lib_revision"]) == 40
     assert json.loads((output / "results.json").read_text())[0]["passed"] is (status == 0)
 
