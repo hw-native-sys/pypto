@@ -276,6 +276,50 @@ class BodyTransformer(ast.NodeTransformer):
                 return None
         return cast("ast.stmt", self.generic_visit(node))
 
+    def _expand_shape_unpacking(
+        self, node: ast.Assign, param_name: str, target_names: list[ast.expr]
+    ) -> list[ast.stmt]:
+        """Expand known shape dimensions without introducing tuple values."""
+        meta = self._meta[param_name]
+        stmts: list[ast.stmt] = []
+        for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
+            if not isinstance(tgt, ast.Name):
+                continue
+            if self._simt_depth and tgt.id in self._simt_runtime_names:
+                # Keep scalar expansion even when a conditional write
+                # prevents folding. A generic tuple temporary is illegal
+                # inside SIMT before simplification removes it.
+                value = (
+                    self._dyn_dim_expr(param_name, i)
+                    if isinstance(dim, DynDim) or param_name in self._alias_to_original
+                    else ast.Constant(value=dim)
+                )
+                assignment = ast.Assign(
+                    targets=[tgt], value=value, lineno=node.lineno, col_offset=node.col_offset
+                )
+                stmts.append(self._visit_simple_assign(assignment))
+            elif isinstance(dim, DynDim) or param_name in self._alias_to_original:
+                # Dynamic dim: emit M = pl.tensor.dim(<param>, i) so the
+                # DynVar name never appears as a runtime expression.
+                lhs_name = tgt.id
+                if lhs_name in self._assign_count:
+                    lhs_name = self._rebind(lhs_name)
+                else:
+                    self._record_first_assign(tgt.id)
+                stmts.append(
+                    ast.Assign(
+                        targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
+                        value=self._dyn_dim_expr(param_name, i),
+                        lineno=node.lineno,
+                        col_offset=node.col_offset,
+                    )
+                )
+            else:
+                # Static dim: inline constant, suppress assignment
+                self._record_first_assign(tgt.id)
+                self._shape_inlined[tgt.id] = dim
+        return stmts
+
     def visit_Assign(self, node: ast.Assign) -> ast.stmt | list[ast.stmt] | None:
         """Handle special assignment patterns.
 
@@ -321,44 +365,7 @@ class BodyTransformer(ast.NodeTransformer):
             meta = self._meta[param_name]
             target_names = node.targets[0].elts
             if len(target_names) == len(meta.shape):
-                stmts: list[ast.stmt] = []
-                for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
-                    if not isinstance(tgt, ast.Name):
-                        continue
-                    if self._simt_depth and tgt.id in self._simt_runtime_names:
-                        # Keep scalar expansion even when a conditional write
-                        # prevents folding. A generic tuple temporary is illegal
-                        # inside SIMT before simplification removes it.
-                        value = (
-                            self._dyn_dim_expr(param_name, i)
-                            if isinstance(dim, DynDim) or param_name in self._alias_to_original
-                            else ast.Constant(value=dim)
-                        )
-                        assignment = ast.Assign(
-                            targets=[tgt], value=value, lineno=node.lineno, col_offset=node.col_offset
-                        )
-                        stmts.append(self._visit_simple_assign(assignment))
-                    elif isinstance(dim, DynDim) or param_name in self._alias_to_original:
-                        # Dynamic dim: emit M = pl.tensor.dim(<param>, i) so the
-                        # DynVar name never appears as a runtime expression.
-                        lhs_name = tgt.id
-                        if lhs_name in self._assign_count:
-                            lhs_name = self._rebind(lhs_name)
-                        else:
-                            self._record_first_assign(tgt.id)
-                        stmts.append(
-                            ast.Assign(
-                                targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
-                                value=self._dyn_dim_expr(param_name, i),
-                                lineno=node.lineno,
-                                col_offset=node.col_offset,
-                            )
-                        )
-                    else:
-                        # Static dim: inline constant, suppress assignment
-                        self._record_first_assign(tgt.id)
-                        self._shape_inlined[tgt.id] = dim
-                return stmts if stmts else None
+                return self._expand_shape_unpacking(node, param_name, target_names) or None
 
         # Case 3: K = a.shape[1]  →  inline static dim, suppress assignment
         if (
