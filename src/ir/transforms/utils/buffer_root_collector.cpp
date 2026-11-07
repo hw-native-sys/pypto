@@ -65,7 +65,13 @@ std::optional<size_t> BackingAliasSlot(const CallPtr& call) {
 using StorageKey = std::pair<ProgramPtr, FunctionPtr>;
 struct StorageReturnValue {
   std::vector<size_t> roots;
-  std::vector<StorageReturnValue> elements;
+  std::shared_ptr<std::vector<StorageReturnValue>> elements;
+  std::optional<size_t> tuple_sources;
+};
+
+struct StorageTupleSources {
+  std::shared_ptr<const TupleType> type;
+  std::vector<StorageReturnValue> sources;
 };
 
 // A transfer is a shared union of formal roots. Retaining the union graph
@@ -107,6 +113,8 @@ struct StorageReturnSummary {
   std::vector<std::pair<size_t, size_t>> formal_bindings;
   std::vector<StorageReturnValue> outputs;
   std::vector<StorageSummaryCall> calls;
+  // Shared tuple values retain their source edges, including loop cycles.
+  std::vector<StorageTupleSources> tuples;
   mutable std::vector<StorageMappedTransfer> mapped_nodes;
   mutable std::unordered_map<size_t, const StorageFormalTransfer*> formal_transfers;
   mutable std::vector<std::unique_ptr<const StorageFormalTransfer>> transfer_storage;
@@ -820,18 +828,36 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       }
       return it->second;
     };
+    std::unordered_map<const LoopTupleRoots*, size_t> tuple_ids;
+    std::unordered_map<std::shared_ptr<const std::vector<RootInfo>>,
+                       std::shared_ptr<std::vector<StorageReturnValue>>>
+        element_summaries;
     const auto summarize = [&](const auto& self, const RootInfo& value) -> StorageReturnValue {
       StorageReturnValue result;
       if (value.loop_tuple) {
-        const size_t count = value.loop_tuple->type->types_.size();
-        result.elements.reserve(count);
-        for (size_t i = 0; i < count; ++i) {
-          result.elements.push_back(self(self, nested.ProjectBackingElement(value, i)));
+        const auto& tuple = *value.loop_tuple;
+        auto [entry, inserted] = tuple_ids.try_emplace(&tuple, built.tuples.size());
+        const size_t index = entry->second;
+        result.tuple_sources = index;
+        if (inserted) {
+          // Enter the tuple before following sources, which can refer back
+          // to it. No fields are projected while exporting a loop result.
+          built.tuples.push_back({tuple.type, {}});
+          std::vector<StorageReturnValue> sources;
+          sources.reserve(tuple.sources.size());
+          for (const auto& source : tuple.sources) sources.push_back(self(self, source));
+          built.tuples[index].sources = std::move(sources);
         }
       } else if (value.elements) {
-        result.elements.reserve(value.elements->size());
-        for (const auto& element : *value.elements) result.elements.push_back(self(self, element));
+        auto [entry, inserted] = element_summaries.try_emplace(value.elements);
+        if (inserted) entry->second = std::make_shared<std::vector<StorageReturnValue>>();
+        result.elements = entry->second;
+        if (inserted) {
+          result.elements->reserve(value.elements->size());
+          for (const auto& element : *value.elements) result.elements->push_back(self(self, element));
+        }
       }
+      result.roots.reserve(value.roots.size());
       for (const Var* root : value.roots) result.roots.push_back(intern(root));
       return result;
     };
@@ -870,6 +896,8 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     // The caller references one node per returned buffer. Keeping the
     // alternatives inside this graph avoids multiplying boundary projections
     // when successive callers merge the results of different call sites.
+    std::unordered_set<const std::vector<StorageReturnValue>*> joined_elements;
+    std::unordered_set<size_t> joined_tuples;
     const auto join_returns = [&](const auto& self, StorageReturnValue& value) -> void {
       if (value.roots.size() > 1) {
         const auto root = built.nodes.size();
@@ -877,7 +905,12 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
         built.nodes.push_back({std::move(type), std::nullopt, std::move(value.roots)});
         value.roots = {root};
       }
-      for (auto& element : value.elements) self(self, element);
+      if (value.elements && joined_elements.insert(value.elements.get()).second) {
+        for (auto& element : *value.elements) self(self, element);
+      }
+      if (const auto tuple = value.tuple_sources; tuple.has_value() && joined_tuples.insert(*tuple).second) {
+        for (auto& source : built.tuples[*tuple].sources) self(self, source);
+      }
     };
     for (auto& output : built.outputs) join_returns(join_returns, output);
     ctx.active.erase(key);
@@ -932,18 +965,37 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     }
     return {{it->second}, false};
   };
+  std::unordered_map<size_t, RootInfo> bound_tuples;
+  std::unordered_map<const std::vector<StorageReturnValue>*, std::shared_ptr<std::vector<RootInfo>>>
+      bound_elements;
   const auto bind = [&](const auto& self, const StorageReturnValue& result) -> RootInfo {
     RootInfo info;
-    if (!result.elements.empty()) {
-      auto elements = std::make_shared<std::vector<RootInfo>>();
-      elements->reserve(result.elements.size());
-      for (const auto& element : result.elements) elements->push_back(self(self, element));
-      info.elements = elements;
+    if (const auto index = result.tuple_sources; index.has_value()) {
+      auto [entry, inserted] = bound_tuples.try_emplace(*index);
+      auto& tuple = entry->second;
+      if (inserted) {
+        const auto& source_tuple = summary->tuples[*index];
+        tuple = MakeLoopStorageValue(source_tuple.type, call->span_, nullptr);
+        for (const auto& source : source_tuple.sources) LinkLoopStorageValues(tuple, self(self, source));
+      }
+      info = tuple;
+    } else if (result.elements) {
+      auto [entry, inserted] = bound_elements.try_emplace(result.elements.get());
+      if (inserted) entry->second = std::make_shared<std::vector<RootInfo>>();
+      auto elements = entry->second;
+      if (inserted) {
+        elements->reserve(result.elements->size());
+        for (const auto& element : *result.elements) elements->push_back(self(self, element));
+      }
+      info.elements = std::move(elements);
     }
     std::unordered_set<const Var*> seen;
     for (size_t root : result.roots) {
       const auto actual = project(root);
-      if (actual.elements) info.elements = actual.elements;
+      if (actual.elements || actual.loop_tuple) {
+        info.elements = actual.elements;
+        info.loop_tuple = actual.loop_tuple;
+      }
       for (const Var* candidate : actual.roots) {
         if (seen.insert(candidate).second) info.roots.push_back(candidate);
       }

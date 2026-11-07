@@ -886,5 +886,45 @@ class Before:
     assert directions["b"] == (ir.ParamDirection.InOut if whole_tuple else ir.ParamDirection.Out)
 
 
+@pytest.mark.parametrize("field", [0, 1])
+def test_shared_tuple_carry_return_preserves_projection_roots(field):
+    source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def build(
+        self, a: pl.Out[pl.Tensor[[64], pl.FP32]], b: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> pl.Tuple[
+        pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]],
+        pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]],
+    ]:
+        pair = (a, a)
+        tree = (pair, pair)
+        for i, (carry,) in pl.range(2, init_values=(tree,)):
+            result = pl.yield_((carry[0], (b, carry[1][1])))
+        return result
+
+    @pl.function
+    def main(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]):
+        with pl.graph("layer"):
+            tree = self.build(a, b)
+            value = pl.tensor.read(tree[{field}][0], [32])
+            pl.tensor.write(a, [0], value)
+            pl.tensor.write(b, [0], value)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    directions = {param.name_hint: kind for param, kind in zip(layer.params, layer.param_directions)}
+    names = ("a", "b")
+    assert directions[names[field]] == ir.ParamDirection.InOut
+    assert directions[names[1 - field]] == ir.ParamDirection.Out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
