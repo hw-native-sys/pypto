@@ -275,11 +275,13 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
+    const BackingValueMemoScope scope(*this);
     VisitDescriptorOrValue(op->value_);
     RecordAssignmentRoots(op);
   }
 
   void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    const BackingValueMemoScope scope(*this);
     RecordCalleeWrites(op->callee_, op->args_, /*is_submit=*/false);
     const auto slots = CalleeWriteOnlySlots(op->callee_, op->args_.size(), /*is_submit=*/false);
     for (size_t i = 0; i < op->args_.size(); ++i) {
@@ -441,6 +443,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
   }
 
   void VisitExpr_(const CallPtr& op) override {
+    const BackingValueMemoScope scope(*this);
     for (const auto& target : CallWriteTargets(op)) RecordWrite(target.var);
     RecordCalleeWrites(op->op_, op->args_, /*is_submit=*/false);
     const auto* entry = LookupOpEntry(op->op_);
@@ -477,6 +480,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
   /// dependency of issue #2415, for exactly the ``manual_scope`` programs that
   /// launch work asynchronously.
   void VisitExpr_(const SubmitPtr& op) override {
+    const BackingValueMemoScope scope(*this);
     RecordCalleeWrites(op->op_, op->args_, /*is_submit=*/true);
     const auto callee_out_slots = CalleeWriteOnlySlots(op->op_, op->args_.size(), /*is_submit=*/true);
     for (size_t i = 0; i < op->args_.size(); ++i) {

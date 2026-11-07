@@ -108,6 +108,7 @@ struct StorageReturnSummary {
   std::vector<StorageSummaryNode> nodes;
   std::vector<StorageFormalBinding> formal_bindings;
   std::vector<StorageReturnValue> outputs;
+  std::optional<StorageReturnValue> packed_outputs;
   std::vector<StorageSummaryCall> calls;
   // Shared tuple values retain their source edges, including loop cycles.
   std::vector<StorageTupleSources> tuples;
@@ -117,6 +118,22 @@ struct StorageReturnSummary {
   mutable std::unordered_map<size_t, const StorageFormalTransfer*> formal_leaves;
   mutable std::map<std::pair<size_t, size_t>, const StorageFormalTransfer*> transfer_branches;
   mutable std::map<std::pair<size_t, size_t>, const StorageFormalTransfer*> transfer_unions;
+
+  void PackOutputs() {
+    if (outputs.size() < 2) return;
+    // A call exposes one tuple descriptor for multiple returns. Share its
+    // fields and whole-value transfer across all callers.
+    auto& packed = packed_outputs.emplace();
+    packed.elements = std::make_shared<std::vector<StorageReturnValue>>(outputs);
+    std::vector<size_t> edges;
+    for (const auto& output : outputs) {
+      edges.insert(edges.end(), output.roots.begin(), output.roots.end());
+      edges.insert(edges.end(), output.contents.begin(), output.contents.end());
+    }
+    if (edges.empty()) return;
+    packed.contents = {nodes.size()};
+    nodes.push_back({GetUnknownType(), std::nullopt, std::move(edges)});
+  }
 
   const StorageFormalTransfer* FormalLeaf(size_t parameter) const {
     auto [leaf, inserted] = formal_leaves.try_emplace(parameter);
@@ -318,11 +335,16 @@ struct BufferRootCollector::BoundStorageTuple {
 
 struct BufferRootCollector::StorageCallInstance {
   StorageCallInstance(std::shared_ptr<const StorageReturnSummary> callee, Span span)
-      : callee(std::move(callee)), span(std::move(span)), arguments(this->callee->formal_bindings.size()) {}
+      : callee(std::move(callee)), span(std::move(span)) {}
 
   std::shared_ptr<const StorageReturnSummary> callee;
   Span span;
-  std::vector<RootInfo> arguments;
+  // Capture actual values before local variables can be rebound. Individual
+  // formal fields are resolved only when a result or effect needs them.
+  std::unordered_map<size_t, RootInfo> actual_parameters;
+  std::unordered_map<size_t, RootInfo> bindings;
+  StorageCallInstance* parent = nullptr;
+  const StorageSummaryCall* local_call = nullptr;
   std::unordered_map<size_t, const Var*> projections;
   std::unordered_map<size_t, RootInfo> bound_loops;
   std::unordered_map<const StorageReturnValue*, BoundStorageTuple> bound_tuples;
@@ -675,19 +697,18 @@ BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(c
   return it != root_candidates_.end() ? it->second : RootCandidates{};
 }
 
+BufferRootCollector::BackingValueMemoScope::BackingValueMemoScope(BufferRootCollector& collector)
+    : collector_(collector) {
+  ++collector_.backing_value_depth_;
+}
+
+BufferRootCollector::BackingValueMemoScope::~BackingValueMemoScope() {
+  if (--collector_.backing_value_depth_ == 0) collector_.backing_value_memo_.clear();
+}
+
 void BufferRootCollector::VisitBackingStorageOperand(const ExprPtr& expr,
                                                      const std::function<void(const Var*)>& record_read) {
-  // Resolve nested expressions once during this operand walk. Statement
-  // boundaries are outside this scope, so pre-SSA rebindings cannot reuse it.
-  struct MemoScope {
-    size_t& depth;
-    std::unordered_map<ExprPtr, RootInfo>& memo;
-    ~MemoScope() {
-      if (--depth == 0) memo.clear();
-    }
-  };
-  ++backing_value_depth_;
-  const MemoScope scope{backing_value_depth_, backing_value_memo_};
+  const BackingValueMemoScope scope(*this);
   for (const Var* root : ResolveBackingContentRoots(expr)) record_read(root);
   VisitExpr(expr);
 }
@@ -705,13 +726,7 @@ BufferRootCollector::RootInfo BufferRootCollector::ProjectBackingElement(const R
       const auto& elements = *tuple.value->elements;
       return index < elements.size() ? BindStorageValue(*tuple.instance, elements[index]) : RootInfo{};
     }
-    const auto& reference = tuple.value->tuple_call;
-    if (!reference) return {};
-    if (!tuple.forwarded) {
-      const auto& [call, result] = *reference;
-      tuple.forwarded = BindStorageValue(BindNestedStorageCall(*tuple.instance, call), *result);
-    }
-    return ProjectBackingElement(*tuple.forwarded, index);
+    return ProjectBackingElement(ForwardStorageTuple(tuple), index);
   }
   if (!value.loop_tuple || index >= value.loop_tuple->type->types_.size()) return {};
 
@@ -936,8 +951,8 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       return it->second;
     };
     std::unordered_map<const StorageCallInstance*, size_t> local_calls;
-    std::vector<const StorageCallInstance*> pending_calls;
-    const auto intern_call = [&](const StorageCallInstance* instance) {
+    std::vector<StorageCallInstance*> pending_calls;
+    const auto intern_call = [&](StorageCallInstance* instance) {
       auto [it, inserted] = local_calls.try_emplace(instance, built.calls.size());
       if (inserted) {
         built.calls.push_back({instance->callee, {}, {}, {}});
@@ -968,8 +983,15 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
           built.tuples[index].sources = std::move(sources);
         }
       } else if (value.bound_tuple) {
-        const auto& tuple = *value.bound_tuple;
-        result.tuple_call = std::pair{intern_call(tuple.instance), tuple.value};
+        auto* tuple = value.bound_tuple;
+        // Export the forwarded field shape once in the shared summary.
+        // Later callers bind the already-composed actuals directly.
+        while (tuple->value->tuple_call) {
+          const auto forwarded = nested.ForwardStorageTuple(*tuple);
+          if (!forwarded.bound_tuple) break;
+          tuple = forwarded.bound_tuple;
+        }
+        result.tuple_call = std::pair{intern_call(tuple->instance), tuple->value};
       } else if (value.elements) {
         auto [entry, inserted] = element_summaries.try_emplace(value.elements);
         if (inserted) entry->second = std::make_shared<std::vector<StorageReturnValue>>();
@@ -979,7 +1001,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
           for (const auto& element : *value.elements) result.elements->push_back(self(self, element));
         }
       }
-      if (result.elements || result.tuple_call) {
+      if (result.elements || result.tuple_call || result.tuple_sources) {
         for (const Var* root : nested.CollectBackingContentRoots(value)) {
           result.contents.push_back(intern(root));
         }
@@ -1004,12 +1026,14 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     while (node_cursor < pending.size() || call_cursor < pending_calls.size()) {
       if (node_cursor == pending.size()) {
         const size_t index = call_cursor++;
-        const auto& actuals = pending_calls[index]->arguments;
+        auto& call = *pending_calls[index];
+        const size_t count = call.callee->formal_bindings.size();
         std::vector<StorageReturnValue> arguments;
         std::vector<std::vector<size_t>> argument_roots;
-        arguments.reserve(actuals.size());
-        argument_roots.reserve(actuals.size());
-        for (const auto& actual : actuals) {
+        arguments.reserve(count);
+        argument_roots.reserve(count);
+        for (size_t binding = 0; binding < count; ++binding) {
+          const auto& actual = nested.ResolveStorageBinding(call, binding);
           arguments.push_back(summarize(summarize, actual));
           std::vector<size_t> roots;
           for (const Var* root : nested.CollectBackingContentRoots(actual)) roots.push_back(intern(root));
@@ -1056,6 +1080,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       }
     };
     for (auto& output : built.outputs) join_returns(join_returns, output);
+    built.PackOutputs();
     ctx.active.erase(key);
     summary = std::make_shared<StorageReturnSummary>(std::move(built));
     ctx.memo.emplace(key, summary);
@@ -1076,6 +1101,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     const size_t union_id = recursive.nodes.size();
     recursive.nodes.push_back({callee->return_types_[0], std::nullopt, std::move(edges)});
     for (auto& output : recursive.outputs) output.roots.push_back(union_id);
+    recursive.PackOutputs();
     summary = std::make_shared<StorageReturnSummary>(std::move(recursive));
   }
 
@@ -1085,16 +1111,14 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       callee->params_.size() >= call->args_.size() ? callee->params_.size() - call->args_.size() : 0;
   auto instance = std::make_shared<StorageCallInstance>(summary, call->span_);
   storage_calls_.push_back(instance);
-  std::unordered_map<size_t, RootInfo> actual_parameters;
-  for (size_t i = 0; i < summary->formal_bindings.size(); ++i) {
-    const auto& binding = summary->formal_bindings[i];
-    const size_t parameter = binding.parameter;
-    if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
-    const size_t argument = parameter < prefix ? parameter : parameter - gap;
-    if (argument >= call->args_.size()) continue;
-    auto [actual, inserted] = actual_parameters.try_emplace(parameter);
-    if (inserted) actual->second = ResolveBackingValue(call->args_[argument]);
-    instance->arguments[i] = BindStorageField(actual->second, binding.path);
+  for (size_t argument = 0; argument < call->args_.size(); ++argument) {
+    const size_t parameter = argument < prefix ? argument : argument + gap;
+    if (parameter < callee->params_.size()) {
+      instance->actual_parameters.emplace(parameter, ResolveBackingValue(call->args_[argument]));
+    }
+  }
+  if (summary->packed_outputs && As<TupleType>(call->GetType())) {
+    return {{BindStorageValue(*instance, *summary->packed_outputs), call->GetType()}};
   }
   std::vector<OutputRoot> roots;
   roots.reserve(summary->outputs.size());
@@ -1130,7 +1154,7 @@ BufferRootCollector::RootInfo BufferRootCollector::ProjectStorageRoot(StorageCal
                                                                       size_t index) {
   const auto& node = instance.callee->nodes[index];
   if (const auto binding = node.binding; binding.has_value()) {
-    return instance.arguments[*binding];
+    return ResolveStorageBinding(instance, *binding);
   }
   if (node.successors.empty() && !node.projection) return {};
   auto [it, inserted] = instance.projections.try_emplace(index, nullptr);
@@ -1151,11 +1175,37 @@ BufferRootCollector::StorageCallInstance& BufferRootCollector::BindNestedStorage
     auto instance = std::make_shared<StorageCallInstance>(call.callee, parent.span);
     it->second = instance.get();
     storage_calls_.push_back(instance);
-    for (size_t i = 0; i < call.arguments.size(); ++i) {
-      instance->arguments[i] = BindStorageValue(parent, call.arguments[i]);
-    }
+    instance->parent = &parent;
+    instance->local_call = &call;
   }
   return *it->second;
+}
+
+const BufferRootCollector::RootInfo& BufferRootCollector::ResolveStorageBinding(StorageCallInstance& instance,
+                                                                                size_t index) {
+  auto [it, inserted] = instance.bindings.try_emplace(index);
+  auto& result = it->second;
+  if (!inserted) return result;
+  if (instance.local_call) {
+    result = BindStorageValue(*instance.parent, instance.local_call->arguments[index]);
+  } else {
+    const auto& binding = instance.callee->formal_bindings[index];
+    if (auto actual = instance.actual_parameters.find(binding.parameter);
+        actual != instance.actual_parameters.end()) {
+      result = BindStorageField(actual->second, binding.path);
+    }
+  }
+  return result;
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::ForwardStorageTuple(BoundStorageTuple& tuple) {
+  const auto& reference = tuple.value->tuple_call;
+  if (!reference) return {};
+  if (!tuple.forwarded) {
+    const auto& [call, result] = *reference;
+    tuple.forwarded = BindStorageValue(BindNestedStorageCall(*tuple.instance, call), *result);
+  }
+  return *tuple.forwarded;
 }
 
 BufferRootCollector::RootInfo BufferRootCollector::BindStorageValue(StorageCallInstance& instance,
@@ -1221,7 +1271,7 @@ void BufferRootCollector::PropagateStorageEffects(std::unordered_map<const Var*,
     }
     if (auto it = storage_call_roots_.find(root); it != storage_call_roots_.end()) {
       const auto& projection = it->second;
-      const auto& instance = *projection.instance;
+      auto& instance = *projection.instance;
       const auto* transfer = GetStorageTransfer(*instance.callee, projection.node);
       if (!transfer) continue;
       auto& visited = applied[&instance];
@@ -1233,7 +1283,7 @@ void BufferRootCollector::PropagateStorageEffects(std::unordered_map<const Var*,
         if (!(bits & ~current)) continue;
         current |= bits;
         if (next->split == 0) {
-          const auto& actual = instance.arguments[next->first];
+          const auto& actual = ResolveStorageBinding(instance, next->first);
           if (actual.IsTuple()) {
             for (const Var* target : CollectBackingContentRoots(actual)) add(target, bits);
           } else {

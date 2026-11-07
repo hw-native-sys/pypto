@@ -114,6 +114,19 @@ class BufferRootCollector : public IRVisitor {
  protected:
   using RootCandidates = std::vector<const Var*>;
 
+  // A single operand evaluation observes a stable set of SSA bindings.
+  // Nested accesses share the memo; the outermost scope clears it.
+  class BackingValueMemoScope {
+   public:
+    explicit BackingValueMemoScope(BufferRootCollector& collector);
+    ~BackingValueMemoScope();
+    BackingValueMemoScope(const BackingValueMemoScope&) = delete;
+    BackingValueMemoScope& operator=(const BackingValueMemoScope&) = delete;
+
+   private:
+    BufferRootCollector& collector_;
+  };
+
   // Effect analyses visit RHS uses before installing the new binding and skip
   // descriptor-only yields, while sharing all storage/control-flow propagation.
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
@@ -196,6 +209,8 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] RootInfo BindStorageField(const RootInfo& actual,
                                           const std::shared_ptr<const StorageFormalPath>& path);
   [[nodiscard]] RootInfo ProjectStorageRoot(StorageCallInstance& instance, size_t index);
+  [[nodiscard]] const RootInfo& ResolveStorageBinding(StorageCallInstance& instance, size_t binding);
+  [[nodiscard]] RootInfo ForwardStorageTuple(BoundStorageTuple& tuple);
   [[nodiscard]] StorageCallInstance& BindNestedStorageCall(StorageCallInstance& parent, size_t index);
   void RecordBackingValue(const VarPtr& var, const RootInfo& value);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
@@ -223,7 +238,7 @@ class BufferRootCollector : public IRVisitor {
   ViewRootPolicy view_policy_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
   struct StorageCallProjection {
-    const StorageCallInstance* instance;
+    StorageCallInstance* instance;
     size_t node;
   };
   std::vector<VarPtr> storage_proxy_vars_;
