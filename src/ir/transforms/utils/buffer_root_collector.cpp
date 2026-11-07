@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -319,50 +320,62 @@ void BufferRootCollector::RecordIfReturnRoots(const IfStmtPtr& if_stmt) {
   auto else_yield = transform_utils::GetLastYieldStmt(else_body.value());
   if (!then_yield || !else_yield) return;
 
-  const auto resolve = [&](const ExprPtr& value) -> RootInfo {
-    if (view_policy_ == ViewRootPolicy::kBackingStorage) return ResolveBackingValue(value);
-    return {ResolveRootCandidates(value), IsAmbiguous(value)};
-  };
-  const auto merge_elements = [](const auto& self, const RootInfo& lhs, const RootInfo& rhs) -> RootInfo {
-    if (lhs.elements || rhs.elements) {
-      const size_t left_size = lhs.elements ? lhs.elements->size() : 0;
-      const size_t right_size = rhs.elements ? rhs.elements->size() : 0;
-      auto elements = std::make_shared<std::vector<RootInfo>>();
-      const RootInfo unknown;
-      const size_t size = std::max(left_size, right_size);
-      elements->reserve(size);
-      for (size_t index = 0; index < size; ++index) {
-        const auto& left = index < left_size ? (*lhs.elements)[index] : unknown;
-        const auto& right = index < right_size ? (*rhs.elements)[index] : unknown;
-        elements->push_back(self(self, left, right));
-      }
-      return {{}, false, std::move(elements)};
-    }
-    auto roots = lhs.roots;
-    std::unordered_set<const Var*> seen(roots.begin(), roots.end());
-    for (const Var* root : rhs.roots) {
-      if (seen.insert(root).second) roots.push_back(root);
-    }
-    const bool ambiguous =
-        lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
-    return {std::move(roots), ambiguous};
-  };
   for (size_t i = 0;
        i < if_stmt->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
        ++i) {
-    auto then_root = resolve(then_yield->value_[i]);
-    auto else_root = resolve(else_yield->value_[i]);
     const auto& result = if_stmt->return_vars_[i];
-    if (then_root.elements || else_root.elements) {
-      backing_tuple_roots_[result.get()] = merge_elements(merge_elements, then_root, else_root).elements;
-      RecordRootCandidates(result, {});
+    const auto& then_value = then_yield->value_[i];
+    const auto& else_value = else_yield->value_[i];
+    if (view_policy_ == ViewRootPolicy::kBackingStorage) {
+      RecordBackingValue(result,
+                         MergeBackingValues(ResolveBackingValue(then_value), ResolveBackingValue(else_value),
+                                            result->GetType(), result->span_));
       continue;
     }
+
+    auto then_roots = ResolveRootCandidates(then_value);
+    auto else_roots = ResolveRootCandidates(else_value);
     const bool unresolved =
-        then_root.roots.empty() || else_root.roots.empty() || then_root.ambiguous || else_root.ambiguous;
-    then_root.roots.insert(then_root.roots.end(), else_root.roots.begin(), else_root.roots.end());
-    RecordRootCandidates(result, then_root.roots, unresolved);
+        then_roots.empty() || else_roots.empty() || IsAmbiguous(then_value) || IsAmbiguous(else_value);
+    then_roots.insert(then_roots.end(), else_roots.begin(), else_roots.end());
+    RecordRootCandidates(result, then_roots, unresolved);
   }
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::MergeBackingValues(const RootInfo& lhs,
+                                                                      const RootInfo& rhs,
+                                                                      const TypePtr& type, const Span& span) {
+  if (lhs.elements || rhs.elements) {
+    if (lhs.elements == rhs.elements) return lhs;
+    const auto tuple = As<TupleType>(type);
+    INTERNAL_CHECK(tuple) << "Storage join with tuple elements must have TupleType";
+    auto elements = std::make_shared<std::vector<RootInfo>>();
+    const RootInfo unknown;
+    elements->reserve(tuple->types_.size());
+    for (size_t i = 0; i < tuple->types_.size(); ++i) {
+      const auto& left = lhs.elements && i < lhs.elements->size() ? (*lhs.elements)[i] : unknown;
+      const auto& right = rhs.elements && i < rhs.elements->size() ? (*rhs.elements)[i] : unknown;
+      elements->push_back(MergeBackingValues(left, right, tuple->types_[i], span));
+    }
+    return {{}, false, std::move(elements)};
+  }
+
+  auto roots = lhs.roots;
+  std::unordered_set<const Var*> seen(roots.begin(), roots.end());
+  for (const Var* root : rhs.roots) {
+    if (seen.insert(root).second) roots.push_back(root);
+  }
+  const bool ambiguous =
+      lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
+  if (roots.size() <= 1) return {std::move(roots), ambiguous};
+
+  // One symbolic edge set per join. A later join references this identity
+  // without copying its transitive alternatives.
+  auto join = std::make_shared<Var>("storage_branch_join", type, span);
+  const Var* root = join.get();
+  storage_successors_[root] = std::move(roots);
+  storage_proxy_vars_.push_back(std::move(join));
+  return {{root}, true};
 }
 
 void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
@@ -413,9 +426,13 @@ void BufferRootCollector::LinkLoopStorageValues(const RootInfo& target, const Ro
   successors.insert(successors.end(), source.roots.begin(), source.roots.end());
 }
 
-void BufferRootCollector::RecordLoopStorageValue(const VarPtr& var, RootInfo value) {
-  if (value.elements) backing_tuple_roots_[var.get()] = std::move(value.elements);
-  RecordRootCandidates(var, value.roots);
+void BufferRootCollector::RecordBackingValue(const VarPtr& var, RootInfo value) {
+  if (value.elements) {
+    backing_tuple_roots_[var.get()] = std::move(value.elements);
+  } else {
+    backing_tuple_roots_.erase(var.get());
+  }
+  RecordRootCandidates(var, value.roots, value.ambiguous);
 }
 
 std::vector<BufferRootCollector::RootCandidates> BufferRootCollector::InitializeLoopCarryRoots(
@@ -427,7 +444,7 @@ std::vector<BufferRootCollector::RootCandidates> BufferRootCollector::Initialize
       // may later connect it to a different buffer in subsequent iterations.
       auto carry = MakeLoopStorageValue(iter_arg->GetType(), iter_arg->span_, iter_arg.get());
       LinkLoopStorageValues(carry, ResolveBackingValue(iter_arg->initValue_));
-      RecordLoopStorageValue(iter_arg, std::move(carry));
+      RecordBackingValue(iter_arg, std::move(carry));
     }
     return init_roots;
   }
@@ -461,7 +478,7 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
         if (!guaranteed_to_run) LinkLoopStorageValues(result, carry);
         if (may_repeat) LinkLoopStorageValues(carry, yielded);
       }
-      RecordLoopStorageValue(var, std::move(result));
+      RecordBackingValue(var, std::move(result));
     }
     return;
   }
@@ -582,11 +599,42 @@ BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(c
   return it != root_candidates_.end() ? it->second : RootCandidates{};
 }
 
-BufferRootCollector::RootCandidates BufferRootCollector::ResolveBackingDescriptorRoots(const ExprPtr& expr) {
-  return ResolveBackingValue(expr).roots;
+void BufferRootCollector::VisitBackingStorageOperand(const ExprPtr& expr,
+                                                     const std::function<void(const Var*)>& record_read) {
+  // Resolve nested expressions once during this operand walk. Statement
+  // boundaries are outside this scope, so pre-SSA rebindings cannot reuse it.
+  struct MemoScope {
+    size_t& depth;
+    std::unordered_map<ExprPtr, RootInfo>& memo;
+    ~MemoScope() {
+      if (--depth == 0) memo.clear();
+    }
+  };
+  ++backing_value_depth_;
+  const MemoScope scope{backing_value_depth_, backing_value_memo_};
+  const auto backing = ResolveBackingValue(expr);
+  std::vector<const RootInfo*> pending{&backing};
+  std::unordered_set<const std::vector<RootInfo>*> seen_elements;
+  while (!pending.empty()) {
+    const auto* value = pending.back();
+    pending.pop_back();
+    for (const Var* root : value->roots) record_read(root);
+    if (value->elements && seen_elements.insert(value->elements.get()).second) {
+      for (const auto& element : *value->elements) pending.push_back(&element);
+    }
+  }
+  VisitExpr(expr);
 }
 
 BufferRootCollector::RootInfo BufferRootCollector::ResolveBackingValue(const ExprPtr& expr) {
+  if (backing_value_depth_ == 0) return ResolveBackingValueUncached(expr);
+  auto [it, inserted] = backing_value_memo_.try_emplace(expr);
+  auto& value = it->second;
+  if (inserted) value = ResolveBackingValueUncached(expr);
+  return value;
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::ResolveBackingValueUncached(const ExprPtr& expr) {
   if (auto var = AsVarLike(expr)) {
     auto it = backing_tuple_roots_.find(var.get());
     if (it != backing_tuple_roots_.end()) return {{}, false, it->second};

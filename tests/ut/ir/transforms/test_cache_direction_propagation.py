@@ -811,5 +811,28 @@ class Before:
     assert directions["b"] == ir.ParamDirection.InOut
 
 
+def test_graph_read_through_tuple_operand_preserves_backing_storage():
+    @pl.program
+    class Before:
+        @pl.function
+        def read_pair(
+            self, pair: pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]
+        ) -> pl.Scalar[pl.FP32]:
+            return pl.tensor.read(pair[0], [32])
+
+        @pl.function
+        def main(self, cache: pl.Tensor[[2, 32], pl.FP32]):
+            with pl.graph("layer"):
+                pair = (pl.tensor.reshape(cache, [64]), pl.tensor.reshape(cache, [64]))
+                value = self.read_pair(pair)
+                pl.tensor.write(cache, [0, 0], value)
+
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(Before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    assert layer.param_directions == [ir.ParamDirection.InOut]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -257,10 +257,12 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
   void VisitConsumedOperand(const ExprPtr& value) {
     // A consuming op reads the backing storage of an inline view as well as
     // evaluating the expression that produces the view descriptor.
-    if (!AsVarLike(value) && (AsTensorTypeLike(value->GetType()) || As<TileType>(value->GetType()))) {
-      for (const Var* root : ResolveBackingDescriptorRoots(value)) RecordRootAccess(root, kRead);
+    if (As<TupleType>(value->GetType()) ||
+        (!AsVarLike(value) && (AsTensorTypeLike(value->GetType()) || As<TileType>(value->GetType())))) {
+      VisitBackingStorageOperand(value, [this](const Var* root) { RecordRootAccess(root, kRead); });
+    } else {
+      VisitExpr(value);
     }
-    VisitExpr(value);
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {

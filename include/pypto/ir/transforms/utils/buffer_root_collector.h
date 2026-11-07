@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -113,7 +114,7 @@ class BufferRootCollector : public IRVisitor {
   // descriptor-only yields, while sharing all storage/control-flow propagation.
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
   void RecordAssignmentRoots(const AssignStmtPtr& assign);
-  [[nodiscard]] RootCandidates ResolveBackingDescriptorRoots(const ExprPtr& expr);
+  void VisitBackingStorageOperand(const ExprPtr& expr, const std::function<void(const Var*)>& record_read);
 
   // Symbolic storage identities share edges until the consumer propagates effects.
   std::unordered_map<const Var*, RootCandidates> storage_successors_;
@@ -152,10 +153,13 @@ class BufferRootCollector : public IRVisitor {
 
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] RootInfo ResolveBackingValue(const ExprPtr& expr);
+  [[nodiscard]] RootInfo ResolveBackingValueUncached(const ExprPtr& expr);
+  [[nodiscard]] RootInfo MergeBackingValues(const RootInfo& lhs, const RootInfo& rhs, const TypePtr& type,
+                                            const Span& span);
   [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call);
   [[nodiscard]] RootInfo MakeLoopStorageValue(const TypePtr& type, const Span& span, const Var* identity);
   void LinkLoopStorageValues(const RootInfo& target, const RootInfo& source);
-  void RecordLoopStorageValue(const VarPtr& var, RootInfo value);
+  void RecordBackingValue(const VarPtr& var, RootInfo value);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call);
 
@@ -189,6 +193,8 @@ class BufferRootCollector : public IRVisitor {
   std::unordered_map<const Var*, StorageCallProjection> storage_call_roots_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
   std::unordered_map<const Var*, std::shared_ptr<const std::vector<RootInfo>>> backing_tuple_roots_;
+  size_t backing_value_depth_ = 0;
+  std::unordered_map<ExprPtr, RootInfo> backing_value_memo_;
 };
 
 }  // namespace buffer_root
