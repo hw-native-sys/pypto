@@ -688,8 +688,12 @@ void BufferRootCollector::VisitBackingStorageOperand(const ExprPtr& expr,
   };
   ++backing_value_depth_;
   const MemoScope scope{backing_value_depth_, backing_value_memo_};
-  for (const Var* root : CollectBackingContentRoots(ResolveBackingValue(expr))) record_read(root);
+  for (const Var* root : ResolveBackingContentRoots(expr)) record_read(root);
   VisitExpr(expr);
+}
+
+BufferRootCollector::RootCandidates BufferRootCollector::ResolveBackingContentRoots(const ExprPtr& expr) {
+  return CollectBackingContentRoots(ResolveBackingValue(expr));
 }
 
 BufferRootCollector::RootInfo BufferRootCollector::ProjectBackingElement(const RootInfo& value,
@@ -1082,17 +1086,6 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   auto instance = std::make_shared<StorageCallInstance>(summary, call->span_);
   storage_calls_.push_back(instance);
   std::unordered_map<size_t, RootInfo> actual_parameters;
-  std::unordered_map<const StorageFormalPath*, RootInfo> actual_fields;
-  const auto bind_field = [&](const auto& self, const RootInfo& actual,
-                              const std::shared_ptr<const StorageFormalPath>& path) -> RootInfo {
-    if (!path) return actual;
-    auto [entry, inserted] = actual_fields.try_emplace(path.get());
-    auto& field = entry->second;
-    if (inserted) {
-      field = ProjectBackingElement(self(self, actual, path->parent), path->index);
-    }
-    return field;
-  };
   for (size_t i = 0; i < summary->formal_bindings.size(); ++i) {
     const auto& binding = summary->formal_bindings[i];
     const size_t parameter = binding.parameter;
@@ -1101,7 +1094,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     if (argument >= call->args_.size()) continue;
     auto [actual, inserted] = actual_parameters.try_emplace(parameter);
     if (inserted) actual->second = ResolveBackingValue(call->args_[argument]);
-    instance->arguments[i] = bind_field(bind_field, actual->second, binding.path);
+    instance->arguments[i] = BindStorageField(actual->second, binding.path);
   }
   std::vector<OutputRoot> roots;
   roots.reserve(summary->outputs.size());
@@ -1109,6 +1102,28 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     roots.push_back(OutputRoot{BindStorageValue(*instance, summary->outputs[i]), callee->return_types_[i]});
   }
   return roots;
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::BindStorageField(
+    const RootInfo& actual, const std::shared_ptr<const StorageFormalPath>& path) {
+  if (!path) return actual;
+  if (!actual.IsTuple()) return {};
+  // Tuple shapes identify values, so rebinding a variable to a new tuple
+  // cannot reuse the former fields. Keep explicit tuples and paths alive.
+  StorageTupleIdentity identity = actual.elements;
+  if (actual.loop_tuple) identity = actual.loop_tuple;
+  if (actual.bound_tuple) identity = actual.bound_tuple;
+  auto& fields = storage_field_projections_[std::move(identity)];
+  const auto bind = [&](const auto& self, const std::shared_ptr<const StorageFormalPath>& path) -> RootInfo {
+    if (!path) return actual;
+    auto [entry, inserted] = fields.try_emplace(path);
+    auto& field = entry->second;
+    if (inserted) {
+      field = ProjectBackingElement(self(self, path->parent), path->index);
+    }
+    return field;
+  };
+  return bind(bind, path);
 }
 
 BufferRootCollector::RootInfo BufferRootCollector::ProjectStorageRoot(StorageCallInstance& instance,

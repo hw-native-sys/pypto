@@ -1010,5 +1010,40 @@ class Before:
     assert directions["b"] == (ir.ParamDirection.Out if field == 0 else ir.ParamDirection.InOut)
 
 
+@pytest.mark.parametrize(
+    ("declared", "callee", "expected"),
+    [
+        ("", "Out", ir.ParamDirection.Out),
+        ("Out", "InOut", ir.ParamDirection.InOut),
+    ],
+)
+def test_tuple_alias_retains_callee_writes(declared, callee, expected):
+    tensor = "pl.Tensor[[64], pl.FP32]"
+    pair = f"pl.Tuple[{tensor}, {tensor}]"
+    caller_type = f"pl.{declared}[{pair}]" if declared else pair
+    source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def update(self, pair: pl.{callee}[{pair}]):
+        first = pair[0]
+        pl.tensor.write(first, [0], pl.const(1.0, pl.FP32))
+
+    @pl.function
+    def wrapper(self, pair: {caller_type}):
+        alias = pair
+        self.update(alias)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.convert_tensor_to_tile_ops()(before)
+    wrapper = after.get_function("wrapper")
+    assert wrapper is not None
+    assert wrapper.param_directions == [expected]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -17,6 +17,7 @@
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -118,6 +119,7 @@ class BufferRootCollector : public IRVisitor {
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
   void RecordAssignmentRoots(const AssignStmtPtr& assign);
   void VisitBackingStorageOperand(const ExprPtr& expr, const std::function<void(const Var*)>& record_read);
+  [[nodiscard]] RootCandidates ResolveBackingContentRoots(const ExprPtr& expr);
 
   // Symbolic storage identities share edges until the consumer propagates effects.
   std::unordered_map<const Var*, RootCandidates> storage_successors_;
@@ -191,6 +193,8 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] const Var* AggregateExplicitTupleRoots(
       const std::shared_ptr<const std::vector<RootInfo>>& elements);
   [[nodiscard]] RootInfo BindStorageValue(StorageCallInstance& instance, const StorageReturnValue& value);
+  [[nodiscard]] RootInfo BindStorageField(const RootInfo& actual,
+                                          const std::shared_ptr<const StorageFormalPath>& path);
   [[nodiscard]] RootInfo ProjectStorageRoot(StorageCallInstance& instance, size_t index);
   [[nodiscard]] StorageCallInstance& BindNestedStorageCall(StorageCallInstance& parent, size_t index);
   void RecordBackingValue(const VarPtr& var, const RootInfo& value);
@@ -225,6 +229,11 @@ class BufferRootCollector : public IRVisitor {
   std::vector<VarPtr> storage_proxy_vars_;
   std::vector<std::shared_ptr<StorageCallInstance>> storage_calls_;
   std::unordered_map<std::shared_ptr<const std::vector<RootInfo>>, const Var*> explicit_tuple_contents_;
+  using StorageTupleIdentity = std::variant<std::shared_ptr<const std::vector<RootInfo>>,
+                                            const LoopTupleRoots*, const BoundStorageTuple*>;
+  std::unordered_map<StorageTupleIdentity,
+                     std::unordered_map<std::shared_ptr<const StorageFormalPath>, RootInfo>>
+      storage_field_projections_;
   std::unordered_map<const Var*, StorageCallProjection> storage_call_roots_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
   std::unordered_map<const Var*, RootInfo> backing_tuple_roots_;

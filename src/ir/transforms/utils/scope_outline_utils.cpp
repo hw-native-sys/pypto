@@ -433,10 +433,10 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     const auto* dirs = CalleeDirections(op, args.size(), is_submit);
     if (!dirs) return;
     for (size_t i = 0; i < args.size(); ++i) {
-      if ((*dirs)[i] == ParamDirection::Out || (*dirs)[i] == ParamDirection::InOut) RecordWrite(args[i]);
-      if ((*dirs)[i] == ParamDirection::InOut) {
-        if (auto var = AsVarLike(args[i])) RecordAccess(var.get(), kCalleeInOut);
-      }
+      const auto direction = (*dirs)[i];
+      if (direction == ParamDirection::In) continue;
+      const auto effects = direction == ParamDirection::InOut ? kWrite | kCalleeInOut : kWrite;
+      for (const Var* root : ResolveBackingContentRoots(args[i])) RecordRootAccess(root, effects);
     }
   }
 
