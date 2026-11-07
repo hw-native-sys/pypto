@@ -417,5 +417,73 @@ def test_vmi_register_capture_rejected(kind, dtype):
             passes.outline_simt_scopes()(ir.Program([kernel], "VmiCapture", span))
 
 
+@pytest.mark.parametrize("write_to", ["a", "tmp"])
+def test_possible_alias_does_not_share_initialization(write_to):
+    # A branch can make tmp refer to b, but storing a (or tmp) does not prove
+    # that the distinct Out buffer b was initialized on every path.
+    before = parse_program(f"""
+@pl.program
+class Kernel:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, src: pl.Tensor[[1, 32], pl.FP32],
+               a: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+               b: pl.Out[pl.Tensor[[1, 32], pl.FP32]], n: pl.Scalar[pl.INT32]):
+        tmp = a
+        if n > 0:
+            tmp = b
+        value = pl.tile.load(src, [0, 0], [1, 32])
+        {write_to} = pl.tile.store(value, [0, 0], {write_to})
+        with pl.simt_scope(dims=(32, 1, 1)):
+            pl.simt.store(b, (0, 0), pl.const(1.0, pl.FP32))
+""")
+    with pytest.raises((Error, ValueError), match="initialized storage"):
+        passes.outline_simt_scopes()(before)
+
+
+def test_definite_alias_store_initializes_original_output():
+    before = program(
+        """
+alias = dst
+value = pl.tile.load(src, [0, 0], [1, 32])
+alias = pl.tile.store(value, [0, 0], alias)
+with pl.simt_scope(dims=(32, 1, 1)):
+    pl.simt.store(dst, (0, 0), pl.const(1.0, pl.FP32))
+""",
+        direction="Out",
+    )
+    assert len(launches(passes.outline_simt_scopes()(before))) == 1
+
+
+@pytest.mark.parametrize("capture,accepted", [("local", True), ("old", False)])
+def test_loaded_tile_reassignment_preserves_old_initialization(capture, accepted):
+    before = program(f"""
+local = pl.tile.create([1, 32], pl.FP32)
+old = local
+for i in pl.range(2):
+    local = pl.tile.load(src, [0, 0], [1, 32])
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store({capture}, (0, 0), pl.const(1.0, pl.FP32))
+""")
+    if accepted:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
+    else:
+        with pytest.raises((Error, ValueError), match="initialized storage"):
+            passes.outline_simt_scopes()(before)
+
+
+def test_conditional_tile_reallocation_invalidates_initialization():
+    # A conditional allocation must not revive the previously loaded value's
+    # initialization at the join, even though both definitions share a Var.
+    before = program("""
+local = pl.tile.load(src, [0, 0], [1, 32])
+if n > 0:
+    local = pl.tile.create([1, 32], pl.FP32)
+with pl.simt_scope(dims=(32, 1, 1)):
+    pl.simt.store(local, (0, 0), pl.const(1.0, pl.FP32))
+""")
+    with pytest.raises((Error, ValueError), match="initialized storage"):
+        passes.outline_simt_scopes()(before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

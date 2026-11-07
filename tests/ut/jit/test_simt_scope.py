@@ -81,5 +81,61 @@ def test_jit_aiv_specialize_preserves_transient_scope():
     assert len(scopes) == 1
 
 
+@pl.jit.aiv
+def shape_shadow_scope(
+    src: pl.Tensor[[1, 32], pl.FP32],
+    dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]],
+    n: pl.Scalar[pl.INT32],
+):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        n = src.shape[1]
+        pl.simt.store(dst, (0, 0), pl.cast(n, pl.FP32))
+    with pl.simt_scope(dims=(32, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < n:
+            value = pl.simt.load(src, (0, tid))
+            pl.simt.store(dst, (0, tid), value)
+    return dst
+
+
+@pl.jit.aiv
+def loaded_tile_scope(src: pl.Tensor[[1, 32], pl.FP32]):
+    local = pl.tile.create([1, 32], pl.FP32)
+    for i in pl.range(2):
+        local = pl.tile.load(src, [0, 0], [1, 32])
+        with pl.simt_scope(dims=(32, 1, 1)):
+            pl.simt.store(local, (0, 0), pl.const(1.0, pl.FP32))
+
+
+def test_jit_shape_shadow_keeps_runtime_guard():
+    lowered = shape_shadow_scope.specialize()
+    kernel = lowered.get_function("shape_shadow_scope")
+    assert kernel is not None
+    conditions: list[ir.Expr] = []
+
+    class Collector(ir.IRVisitor):
+        def visit_if_stmt(self, op: ir.IfStmt) -> None:
+            conditions.append(op.condition)
+
+    Collector().visit_program(lowered)
+    assert len(conditions) == 1
+    # The first scope folds n to 32 locally. The later guard must still use
+    # the caller's runtime parameter, otherwise partial-tail bounds are lost.
+    assert isinstance(conditions[0], ir.Lt)
+    assert conditions[0].right is kernel.params[2]
+
+
+def test_jit_loaded_tile_reassignment_can_be_captured():
+    from pypto import passes
+
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    try:
+        outlined = passes.outline_simt_scopes()(loaded_tile_scope.specialize())
+        assert any(fn.func_type == ir.FunctionType.SIMT for fn in outlined.functions.values())
+    finally:
+        backend.reset_for_testing()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

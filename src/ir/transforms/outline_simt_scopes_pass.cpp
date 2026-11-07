@@ -20,6 +20,8 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -37,6 +39,7 @@
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto::ir {
@@ -119,7 +122,6 @@ class StoragePermissions : public IRVisitor {
       auto& root = nodes_[param.get()];
       root.readonly = direction == ParamDirection::In;
       root.uninitialized = direction == ParamDirection::Out;
-      if (root.uninitialized) root.initialization_base = param.get();
     }
     VisitStmt(function->body_);
   }
@@ -132,10 +134,6 @@ class StoragePermissions : public IRVisitor {
   bool Known(const Var* var) { return !nodes_.at(Root(var)).unknown_provenance; }
   bool Readonly(const Var* var) { return nodes_.at(Root(var)).readonly; }
   bool Uninitialized(const Var* var) { return nodes_.at(Root(var)).uninitialized; }
-  const Var* InitializationBase(const Var* var) {
-    const auto& node = nodes_.at(Root(var));
-    return node.ambiguous_initialization ? nullptr : node.initialization_base;
-  }
 
  protected:
   void VisitStmt_(const SimtScopeStmtPtr&) override {}
@@ -155,27 +153,25 @@ class StoragePermissions : public IRVisitor {
                             static_cast<size_t>(projection->index_) < tuple->elements_.size()
                         ? AsVarLike(tuple->elements_[projection->index_])
                         : nullptr;
-      if (source)
+      if (source) {
         Unite(stmt->var_, source);
-      else
+      } else {
         nodes_[Root(stmt->var_.get())].unknown_provenance = true;
+      }
     } else if (auto call = As<Call>(stmt->value_)) {
       if (As<GlobalVar>(call->op_)) nodes_[Root(stmt->var_.get())].unknown_provenance = true;
       if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
         auto& root = nodes_[Root(stmt->var_.get())];
         root.uninitialized = true;
-        if (root.initialization_base && root.initialization_base != stmt->var_.get()) {
-          root.ambiguous_initialization = true;
-        }
-        root.initialization_base = stmt->var_.get();
       } else {
         auto alias = ResultAliasedArgIndex(call);
         // Tile arithmetic returns a fresh value even if a later memory planner
         // may reuse an operand. Only views and handle copies inherit permission.
         if (As<TileType>(stmt->var_->GetType())) alias = std::nullopt;
         if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tensor.slice") ||
-            IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view"))
+            IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view")) {
           alias = 0;
+        }
         if (alias && *alias < call->args_.size()) Unite(stmt->var_, AsVarLike(call->args_[*alias]));
       }
     }
@@ -202,8 +198,6 @@ class StoragePermissions : public IRVisitor {
     size_t rank = 0;
     bool readonly = false;
     bool uninitialized = false;
-    const Var* initialization_base = nullptr;
-    bool ambiguous_initialization = false;
     bool unknown_provenance = false;
   };
   MakeTuplePtr ResolveTuple(const ExprPtr& expr) const {
@@ -238,10 +232,6 @@ class StoragePermissions : public IRVisitor {
     parent.readonly |= child.readonly;
     parent.unknown_provenance |= child.unknown_provenance;
     parent.uninitialized |= child.uninitialized;
-    parent.ambiguous_initialization |=
-        child.ambiguous_initialization || (parent.initialization_base && child.initialization_base &&
-                                           parent.initialization_base != child.initialization_base);
-    if (!parent.initialization_base) parent.initialization_base = child.initialization_base;
   }
   void Carries(const std::vector<IterArgPtr>& args, const std::vector<VarPtr>& results) {
     for (size_t i = 0; i < args.size(); ++i) {
@@ -273,7 +263,14 @@ class ScopeOutliner : public IRMutator {
         index_(index),
         names_(names),
         helpers_(helpers),
-        permissions_(function_) {}
+        permissions_(function_) {
+    for (size_t i = 0; i < function_->params_.size(); ++i) {
+      const auto& param = function_->params_[i];
+      if (IsStorage(param)) {
+        BindFresh(param, function_->param_directions_[i] != ParamDirection::Out);
+      }
+    }
+  }
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& var) override {
@@ -286,11 +283,17 @@ class ScopeOutliner : public IRMutator {
   }
   StmtPtr VisitStmt_(const AssignStmtPtr& stmt) override {
     auto result = IRMutator::VisitStmt_(stmt);
-    if (auto call = As<Call>(stmt->value_)) {
-      if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
-        initialized_.erase(permissions_.Root(stmt->var_.get()));
+    if (auto call = As<Call>(stmt->value_)) RecordFullInitialization(call);
+    if (IsStorage(stmt->var_)) {
+      auto value = ResolveStorage(stmt->value_);
+      if (value.storage) {
+        Bind(stmt->var_, value);
+      } else {
+        auto call = As<Call>(stmt->value_);
+        const bool fresh_tile = call && As<TileType>(stmt->var_->GetType()) && !IsOp(call, "tile.create") &&
+                                !As<GlobalVar>(call->op_);
+        BindFresh(stmt->var_, fresh_tile && InitializedOperands(call));
       }
-      RecordFullInitialization(call);
     }
     return result;
   }
@@ -307,15 +310,15 @@ class ScopeOutliner : public IRMutator {
     return result;
   }
   StmtPtr VisitStmt_(const ForStmtPtr& stmt) override {
-    const auto checkpoint = initialization_log_.size();
+    const auto parent_scope = EnterConditional();
     auto result = IRMutator::VisitStmt_(stmt);
-    RestoreInitialization(checkpoint);
+    LeaveConditional(parent_scope);
     return result;
   }
   StmtPtr VisitStmt_(const WhileStmtPtr& stmt) override {
-    const auto checkpoint = initialization_log_.size();
+    const auto parent_scope = EnterConditional();
     auto result = IRMutator::VisitStmt_(stmt);
-    RestoreInitialization(checkpoint);
+    LeaveConditional(parent_scope);
     return result;
   }
   StmtPtr VisitStmt_(const RegScopeStmtPtr& scope) override {
@@ -361,9 +364,7 @@ class ScopeOutliner : public IRMutator {
         CHECK_SPAN(!permissions_.Readonly(capture.get()), capture->span_)
             << "SIMT store cannot write an enclosing In parameter or its view; declare InOut";
       }
-      CHECK_SPAN(
-          !permissions_.Uninitialized(capture.get()) || initialized_.count(permissions_.Root(capture.get())),
-          capture->span_)
+      CHECK_SPAN(IsInitialized(capture), capture->span_)
           << "SIMT capture requires initialized storage; use InOut or initialize Out before the region";
       auto param = std::make_shared<Var>(capture->name_hint_, capture->GetType(), capture->span_);
       params.push_back(param);
@@ -397,9 +398,90 @@ class ScopeOutliner : public IRMutator {
   }
 
  private:
-  // A full, unmasked tile.store establishes Out contents. Partial writes do
-  // not. The fact is visible in the current branch/iteration, then rolled back
-  // at control-flow exits rather than being assumed for paths that did not run.
+  // Permissions are may-alias facts; initialization needs the reaching storage
+  // value. Each fresh Tile/allocation gets a separate identity, while copies
+  // and views share their actual source. A branch-local identity/proof expires
+  // at its join. We deliberately do not infer a reaching alias across joins.
+  // Scope stamps avoid rescanning or copying state at nested branches: each
+  // binding/write is processed once, and lookups are constant-time on average.
+  struct Storage {
+    TypePtr type;
+    std::optional<size_t> initialized_scope;
+  };
+  struct Binding {
+    std::shared_ptr<Storage> storage;
+    bool whole = false;
+    size_t scope = 0;
+  };
+  static bool IsStorage(const VarPtr& var) {
+    return As<TileType>(var->GetType()) || AsTensorTypeLike(var->GetType());
+  }
+  Binding ResolveStorage(const ExprPtr& expr) {
+    if (auto var = AsVarLike(expr)) {
+      auto it = bindings_.find(var.get());
+      if (it != bindings_.end() && active_scopes_[it->second.scope]) return it->second;
+    } else if (auto call = As<Call>(expr)) {
+      auto alias = ResultAliasedArgIndex(call);
+      if (As<TileType>(call->GetType())) alias = std::nullopt;
+      if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tensor.slice") ||
+          IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view")) {
+        alias = 0;
+      }
+      if (alias && *alias < call->args_.size()) {
+        auto source = ResolveStorage(call->args_[*alias]);
+        // Only unchanged storage geometry can prove an entire allocation
+        // initialized. A full write to a subview is not a full root write.
+        source.whole = source.whole && structural_equal(call->GetType(), call->args_[*alias]->GetType());
+        return source;
+      }
+    }
+    return {};
+  }
+  bool IsInitialized(const VarPtr& var) {
+    if (!IsStorage(var)) return true;
+    auto binding = ResolveStorage(var);
+    if (binding.storage) {
+      const auto scope = binding.storage->initialized_scope;
+      return scope && active_scopes_[*scope];
+    }
+    // At joins where no reaching value is known, retain only the conservative
+    // guarantee that no possible source is Out or an uninitialized allocation.
+    return !permissions_.Uninitialized(var.get());
+  }
+  bool InitializedOperands(const CallPtr& call) {
+    var_collectors::VarDefUseCollector uses;
+    uses.VisitExpr(call);
+    outline_utils::VarCollector objects;
+    objects.VisitExpr(call);
+    for (const auto* var : uses.var_uses) {
+      if (!IsInitialized(objects.var_objects.at(var))) return false;
+    }
+    return true;
+  }
+  void Bind(const VarPtr& var, Binding binding) {
+    auto previous = ResolveStorage(var);
+    if (previous.storage == binding.storage && previous.whole == binding.whole) return;
+    binding.scope = current_scope_;
+    bindings_[var.get()] = std::move(binding);
+  }
+  void BindFresh(const VarPtr& var, bool initialized) {
+    auto storage = std::make_shared<Storage>();
+    storage->type = var->GetType();
+    if (initialized) storage->initialized_scope = current_scope_;
+    Bind(var, {std::move(storage), true, current_scope_});
+  }
+  size_t EnterConditional() {
+    const auto parent = current_scope_;
+    current_scope_ = active_scopes_.size();
+    active_scopes_.push_back(true);
+    return parent;
+  }
+  void LeaveConditional(size_t parent) {
+    active_scopes_[current_scope_] = false;
+    current_scope_ = parent;
+  }
+  // A full, unmasked tile.store proves only its definite destination initialized.
+  // Existing unconditional proofs are retained when a conditional store runs.
   static bool SameShape(const std::vector<ExprPtr>& a, const std::vector<ExprPtr>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -410,9 +492,7 @@ class ScopeOutliner : public IRMutator {
   void RecordFullInitialization(const CallPtr& call) {
     if (!IsOp(call, "tile.store") || call->args_.size() < 3) return;
     auto input = AsVarLike(call->args_[0]);
-    if (!input ||
-        (permissions_.Uninitialized(input.get()) && !initialized_.count(permissions_.Root(input.get()))))
-      return;
+    if (!input || !IsInitialized(input)) return;
     auto source = As<TileType>(call->args_[0]->GetType());
     auto offsets = As<MakeTuple>(call->args_[1]);
     auto destination = AsVarLike(call->args_[2]);
@@ -420,30 +500,25 @@ class ScopeOutliner : public IRMutator {
     if (!source || !offsets || !tensor || source->shape_.size() != tensor->shape_.size()) return;
     if (!SameShape(source->shape_, tensor->shape_)) return;
     if (source->tile_view_ && !source->tile_view_->valid_shape.empty() &&
-        !SameShape(source->tile_view_->valid_shape, source->shape_))
+        !SameShape(source->tile_view_->valid_shape, source->shape_)) {
       return;
+    }
     for (const auto& offset : offsets->elements_) {
       auto constant = As<ConstInt>(offset);
       if (!constant || constant->value_ != 0) return;
     }
-    // A view covers only part of its root. Initializing that view cannot prove
-    // the entire aliased root initialized.
-    const auto* root = permissions_.Root(destination.get());
-    const auto* base = permissions_.InitializationBase(destination.get());
-    if (!base || !structural_equal(destination->GetType(), base->GetType())) return;
-    if (initialized_.insert(root).second) initialization_log_.push_back(root);
+    auto binding = ResolveStorage(destination);
+    if (!binding.storage || !binding.whole ||
+        !structural_equal(destination->GetType(), binding.storage->type)) {
+      return;
+    }
+    if (!IsInitialized(destination)) binding.storage->initialized_scope = current_scope_;
   }
   StmtPtr VisitConditionalBody(const StmtPtr& body) {
-    const auto checkpoint = initialization_log_.size();
+    const auto parent_scope = EnterConditional();
     auto result = VisitStmt(body);
-    RestoreInitialization(checkpoint);
+    LeaveConditional(parent_scope);
     return result;
-  }
-  void RestoreInitialization(size_t checkpoint) {
-    while (initialization_log_.size() > checkpoint) {
-      initialized_.erase(initialization_log_.back());
-      initialization_log_.pop_back();
-    }
   }
   void CheckEscape(const VarPtr& var) const {
     CHECK_SPAN(!index_.locals.count(var.get()), var->span_)
@@ -454,8 +529,9 @@ class ScopeOutliner : public IRMutator {
   std::set<std::string>& names_;
   std::vector<FunctionPtr>& helpers_;
   StoragePermissions permissions_;
-  std::unordered_set<const Var*> initialized_;
-  std::vector<const Var*> initialization_log_;
+  std::unordered_map<const Var*, Binding> bindings_;
+  std::vector<bool> active_scopes_{true};
+  size_t current_scope_ = 0;
   size_t next_name_ = 0;
   size_t reg_depth_ = 0;
 };
@@ -472,8 +548,9 @@ ProgramPtr Outline(const ProgramPtr& program) {
     ScopeOutliner outliner(function, index, names, helpers);
     function = outliner.VisitFunction(function);
   }
-  for (const auto& helper : helpers)
+  for (const auto& helper : helpers) {
     result->functions_.emplace(std::make_shared<GlobalVar>(helper->name_), helper);
+  }
   // Reuse the canonical helper legality contract, even when pass verification
   // is disabled. No unsupported scalar op or storage operation can bypass it.
   if (!helpers.empty()) {

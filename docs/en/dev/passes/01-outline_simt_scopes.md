@@ -27,6 +27,12 @@ Outer `In` permissions survive storage copies/views. Captures must already be
 initialized. A complete, unmasked `tile.store` can initialize an `Out` Tensor
 before capture; a partial or conditional write is not proof at a later join.
 Initialization inside a branch is usable by a later scope in that same branch.
+Initialization follows the reaching storage value, separately from conservative
+alias permissions. A full store proves only its definite destination and aliases
+initialized; a fresh Tile load replaces an earlier uninitialized value without
+initializing old aliases. Branch-local proofs and changed storage identities are
+not assumed after a join. JIT shape folding and scalar renaming inside a SIMT
+scope do not affect subsequent caller code.
 
 Storage returned by a function call or projected from a rebound tuple is rejected
 when its provenance cannot be proved. Capture the original named storage instead.
