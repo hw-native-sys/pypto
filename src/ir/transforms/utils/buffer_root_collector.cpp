@@ -67,11 +67,22 @@ struct StorageReturnValue {
   std::vector<StorageReturnValue> elements;
 };
 
+// A transfer is a shared union of formal roots. Retaining the union graph
+// avoids materializing an increasingly large formal set at every output.
+struct StorageFormalTransfer {
+  size_t id;
+  size_t first;
+  size_t split;
+  const StorageFormalTransfer* left = nullptr;
+  const StorageFormalTransfer* right = nullptr;
+};
+
 struct StorageReturnSummary;
 
 struct StorageSummaryCall {
   std::shared_ptr<const StorageReturnSummary> callee;
   std::vector<StorageReturnValue> arguments;
+  mutable std::unordered_map<const StorageFormalTransfer*, size_t> mapped_transfers;
 };
 
 struct StorageSummaryNode {
@@ -82,86 +93,174 @@ struct StorageSummaryNode {
   std::optional<std::pair<size_t, size_t>> projection = std::nullopt;
 };
 
-// Each summary owns only local transitions. Call sites refer to another
-// summary and bind its formal roots to local nodes.
+struct StorageMappedTransfer {
+  size_t call;
+  const StorageFormalTransfer* transfer;
+};
+
+// Each summary owns its local transitions and transfers. A call binds a
+// callee's shared transfer to its arguments, using one local node per binding
+// and callee transfer. Caches live as long as the enclosing summary.
 struct StorageReturnSummary {
   std::vector<StorageSummaryNode> nodes;
-  // Index only reachable formal roots for call binding and effect extraction.
   std::vector<std::pair<size_t, size_t>> formal_bindings;
   std::vector<StorageReturnValue> outputs;
   std::vector<StorageSummaryCall> calls;
+  mutable std::vector<StorageMappedTransfer> mapped_nodes;
+  mutable std::unordered_map<size_t, const StorageFormalTransfer*> formal_transfers;
+  mutable std::vector<std::unique_ptr<const StorageFormalTransfer>> transfer_storage;
+  mutable std::unordered_map<size_t, const StorageFormalTransfer*> formal_leaves;
+  mutable std::map<std::pair<size_t, size_t>, const StorageFormalTransfer*> transfer_branches;
+
+  const StorageFormalTransfer* FormalLeaf(size_t parameter) const {
+    auto [leaf, inserted] = formal_leaves.try_emplace(parameter);
+    if (inserted) {
+      leaf->second = OwnTransfer({transfer_storage.size(), parameter, 0});
+    }
+    return leaf->second;
+  }
+
+  const StorageFormalTransfer* TransferBranch(size_t split, const StorageFormalTransfer* left,
+                                              const StorageFormalTransfer* right) const {
+    if (!left) return right;
+    if (!right) return left;
+    auto [branch, inserted] = transfer_branches.try_emplace(std::pair{left->id, right->id});
+    if (inserted) {
+      branch->second = OwnTransfer({transfer_storage.size(), left->first, split, left, right});
+    }
+    return branch->second;
+  }
+
+  const StorageFormalTransfer* OwnTransfer(StorageFormalTransfer transfer) const {
+    transfer_storage.push_back(std::make_unique<const StorageFormalTransfer>(transfer));
+    return transfer_storage.back().get();
+  }
 };
 
-using StorageDemand = std::vector<std::pair<size_t, unsigned char>>;
-
-// Sibling calls can alternate among different demands on a shared summary.
-// Memoize each observed demand for the duration of effect propagation.
-using StorageTransferCache =
-    std::unordered_map<const StorageReturnSummary*, std::map<StorageDemand, StorageDemand>>;
-
-StorageDemand CanonicalDemand(StorageDemand demand) {
-  std::sort(demand.begin(), demand.end());
-  size_t count = 0;
-  for (const auto& [node, bits] : demand) {
-    if (count > 0 && demand[count - 1].first == node) {
-      demand[count - 1].second |= bits;
-    } else {
-      demand[count++] = {node, bits};
-    }
+// Canonical persistent sets of formal indices. The split bit is the
+// highest differing bit in a branch. Swapping bindings or regrouping a
+// union produces the same identity, so callers share equivalent transfers.
+const StorageFormalTransfer* UnionStorageTransfers(const StorageReturnSummary& summary,
+                                                   const StorageFormalTransfer* lhs,
+                                                   const StorageFormalTransfer* rhs) {
+  if (!lhs || lhs == rhs) return rhs;
+  if (!rhs) return lhs;
+  size_t differing_bit = lhs->first ^ rhs->first;
+  // Clear lower set bits until only the highest differing bit remains.
+  while ((differing_bit & (differing_bit - 1)) != 0) {
+    differing_bit &= differing_bit - 1;
   }
-  demand.resize(count);
-  return demand;
+  const size_t split = std::max({lhs->split, rhs->split, differing_bit});
+  const auto children = [split](const StorageFormalTransfer* transfer) {
+    if (transfer->split == split) return std::pair{transfer->left, transfer->right};
+    const bool right = (transfer->first & split) != 0;
+    return std::pair{right ? nullptr : transfer, right ? transfer : nullptr};
+  };
+  const auto [left_lhs, right_lhs] = children(lhs);
+  const auto [left_rhs, right_rhs] = children(rhs);
+  const auto* left = UnionStorageTransfers(summary, left_lhs, left_rhs);
+  const auto* right = UnionStorageTransfers(summary, right_lhs, right_rhs);
+  return summary.TransferBranch(split, left, right);
 }
 
-StorageDemand TransferStorageEffects(const StorageReturnSummary& summary, StorageDemand request,
-                                     StorageTransferCache& cache) {
-  request = CanonicalDemand(std::move(request));
-  auto& transfers = cache[&summary];
-  if (auto entry = transfers.find(request); entry != transfers.end()) {
-    return entry->second;
+const StorageFormalTransfer* GetStorageTransfer(const StorageReturnSummary& summary, size_t result);
+
+size_t MapStorageTransfer(const StorageReturnSummary& summary, size_t call,
+                          const StorageFormalTransfer* transfer) {
+  auto& mapped = summary.calls[call].mapped_transfers;
+  auto [it, inserted] = mapped.try_emplace(transfer, summary.nodes.size() + summary.mapped_nodes.size());
+  if (inserted) summary.mapped_nodes.push_back({call, transfer});
+  return it->second;
+}
+
+std::vector<size_t> StorageTransferSuccessors(const StorageReturnSummary& summary, size_t index) {
+  if (index < summary.nodes.size()) {
+    const auto& node = summary.nodes[index];
+    auto successors = node.successors;
+    if (node.projection) {
+      const auto [call, result] = *node.projection;
+      if (const auto* transfer = GetStorageTransfer(*summary.calls[call].callee, result)) {
+        successors.push_back(MapStorageTransfer(summary, call, transfer));
+      }
+    }
+    return successors;
   }
-  std::vector<unsigned char> effects(summary.nodes.size());
-  std::vector<size_t> pending;
-  const auto add = [&](size_t node, unsigned char bits) {
-    if (!(bits & ~effects[node])) return;
-    effects[node] |= bits;
-    pending.push_back(node);
+
+  // Mapping the inputs can grow mapped_nodes, so keep this entry by value.
+  const auto [call, transfer] = summary.mapped_nodes[index - summary.nodes.size()];
+  if (transfer->split == 0) return summary.calls[call].arguments[transfer->first].roots;
+  return {MapStorageTransfer(summary, call, transfer->left),
+          MapStorageTransfer(summary, call, transfer->right)};
+}
+
+const StorageFormalTransfer* GetStorageTransfer(const StorageReturnSummary& summary, size_t result) {
+  auto& transfers = summary.formal_transfers;
+  if (auto it = transfers.find(result); it != transfers.end()) {
+    return it->second;
+  }
+
+  // Iterative Tarjan over newly reached local nodes. Completed components
+  // already have transfers, and every loop component shares a single union.
+  struct SearchNode {
+    size_t order;
+    size_t lowlink;
+    std::vector<size_t> successors;
   };
-  for (const auto& [node, bits] : request) add(node, bits);
-
-  size_t cursor = 0;
-  std::vector<StorageDemand> call_requests(summary.calls.size());
-  std::vector<size_t> pending_calls;
-  while (cursor < pending.size()) {
-    while (cursor < pending.size()) {
-      const size_t index = pending[cursor++];
-      const auto& node = summary.nodes[index];
-      const auto bits = effects[index];
-      for (size_t target : node.successors) add(target, bits);
-      if (node.projection) {
-        const auto [call, result] = *node.projection;
-        auto& demand = call_requests[call];
-        if (demand.empty()) pending_calls.push_back(call);
-        demand.emplace_back(result, bits);
+  std::unordered_map<size_t, SearchNode> search;
+  std::vector<size_t> active;
+  std::vector<std::pair<size_t, size_t>> frames;
+  const auto enter = [&](size_t index) {
+    const auto order = search.size();
+    search.emplace(index, SearchNode{order, order, StorageTransferSuccessors(summary, index)});
+    active.push_back(index);
+    frames.emplace_back(index, 0);
+  };
+  enter(result);
+  while (!frames.empty()) {
+    const size_t index = frames.back().first;
+    auto& current = search.at(index);
+    if (frames.back().second < current.successors.size()) {
+      const size_t next = current.successors[frames.back().second++];
+      if (transfers.count(next)) continue;
+      if (auto it = search.find(next); it != search.end()) {
+        current.lowlink = std::min(current.lowlink, it->second.order);
+      } else {
+        enter(next);
       }
+      continue;
     }
-    for (size_t index : pending_calls) {
-      const auto& call = summary.calls[index];
-      auto demand = std::exchange(call_requests[index], {});
-      for (const auto& [parameter, bits] : TransferStorageEffects(*call.callee, std::move(demand), cache)) {
-        for (size_t root : call.arguments[parameter].roots) add(root, bits);
-      }
-    }
-    pending_calls.clear();
-  }
 
-  StorageDemand parameters;
-  parameters.reserve(summary.formal_bindings.size());
-  for (const auto& [node, parameter] : summary.formal_bindings) {
-    if (effects[node]) parameters.emplace_back(parameter, effects[node]);
+    if (current.order == current.lowlink) {
+      std::vector<size_t> members;
+      const StorageFormalTransfer* transfer = nullptr;
+      std::unordered_set<const StorageFormalTransfer*> seen;
+      while (true) {
+        const size_t member = active.back();
+        active.pop_back();
+        members.push_back(member);
+        if (member < summary.nodes.size()) {
+          if (const auto parameter = summary.nodes[member].parameter; parameter.has_value()) {
+            transfer = UnionStorageTransfers(summary, transfer, summary.FormalLeaf(*parameter));
+          }
+        }
+        for (size_t next : search.at(member).successors) {
+          if (auto it = transfers.find(next);
+              it != transfers.end() && it->second && seen.insert(it->second).second) {
+            transfer = UnionStorageTransfers(summary, transfer, it->second);
+          }
+        }
+        if (member == index) break;
+      }
+      for (size_t member : members) transfers.emplace(member, transfer);
+    }
+
+    frames.pop_back();
+    if (!frames.empty()) {
+      auto& parent = search.at(frames.back().first);
+      parent.lowlink = std::min(parent.lowlink, current.lowlink);
+    }
   }
-  transfers.emplace(std::move(request), parameters);
-  return parameters;
+  return transfers.at(result);
 }
 
 struct StorageReturnContext {
@@ -645,7 +744,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
         const auto& projection = it->second;
         auto [call, inserted] = local_calls.try_emplace(projection.instance.get(), built.calls.size());
         if (inserted) {
-          StorageSummaryCall entry{projection.instance->callee, {}};
+          StorageSummaryCall entry{projection.instance->callee, {}, {}};
           const auto& actuals = projection.instance->arguments;
           entry.arguments.reserve(actuals.size());
           for (const auto& actual : actuals) entry.arguments.push_back(summarize(summarize, actual));
@@ -768,32 +867,39 @@ void BufferRootCollector::PropagateStorageEffects(
     pending.push_back(root);
   };
 
-  StorageTransferCache cache;
-  std::unordered_map<const StorageCallInstance*, StorageDemand> call_requests;
-  std::vector<const StorageCallInstance*> pending_calls;
+  // A call may demand several returns that share a transfer. Apply each
+  // effect bit to that transfer once, keeping distinct actual bindings apart.
+  using AppliedEffects = std::unordered_map<const StorageFormalTransfer*, unsigned char>;
+  std::unordered_map<const StorageCallInstance*, AppliedEffects> applied;
+  std::vector<const StorageFormalTransfer*> pending_transfers;
   size_t cursor = 0;
   while (cursor < pending.size()) {
-    while (cursor < pending.size()) {
-      const Var* root = pending[cursor++];
-      const auto bits = effects[root];
-      if (auto it = storage_successors_.find(root); it != storage_successors_.end()) {
-        for (const Var* target : it->second) add(target, bits);
-      }
-      if (auto it = storage_call_roots_.find(root); it != storage_call_roots_.end()) {
-        const auto& projection = it->second;
-        auto& demand = call_requests[projection.instance.get()];
-        if (demand.empty()) pending_calls.push_back(projection.instance.get());
-        demand.emplace_back(projection.node, bits);
+    const Var* root = pending[cursor++];
+    const auto bits = effects[root];
+    if (auto it = storage_successors_.find(root); it != storage_successors_.end()) {
+      for (const Var* target : it->second) add(target, bits);
+    }
+    if (auto it = storage_call_roots_.find(root); it != storage_call_roots_.end()) {
+      const auto& projection = it->second;
+      const auto& instance = *projection.instance;
+      const auto* transfer = GetStorageTransfer(*instance.callee, projection.node);
+      if (!transfer) continue;
+      auto& visited = applied[&instance];
+      pending_transfers.push_back(transfer);
+      while (!pending_transfers.empty()) {
+        const auto* next = pending_transfers.back();
+        pending_transfers.pop_back();
+        auto& current = visited[next];
+        if (!(bits & ~current)) continue;
+        current |= bits;
+        if (next->split == 0) {
+          for (const Var* target : instance.arguments[next->first].roots) add(target, bits);
+        } else {
+          pending_transfers.push_back(next->left);
+          pending_transfers.push_back(next->right);
+        }
       }
     }
-    for (const auto* instance : pending_calls) {
-      auto demand = std::exchange(call_requests[instance], {});
-      for (const auto& [parameter, bits] :
-           TransferStorageEffects(*instance->callee, std::move(demand), cache)) {
-        for (const Var* root : instance->arguments[parameter].roots) add(root, bits);
-      }
-    }
-    pending_calls.clear();
   }
 }
 
