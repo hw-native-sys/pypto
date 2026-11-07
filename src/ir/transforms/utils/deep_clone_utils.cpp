@@ -83,10 +83,11 @@ class DeepCloneMutator : public IRMutator {
     }
     auto result = IRMutator::VisitStmt_(op);
     for (const auto& [var, prior] : saved) {
-      if (prior)
+      if (prior) {
         expr_map_[var] = prior;
-      else
+      } else {
         expr_map_.erase(var);
+      }
     }
     return result;
   }

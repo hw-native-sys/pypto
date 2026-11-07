@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -52,7 +53,35 @@ class RegionIndex : public IRVisitor {
   std::unordered_set<const Var*> locals;
   bool found = false;
 
+  bool MayRebind(const Var* var, const Stmt* loop) const {
+    if (!loop) return false;
+    const auto it = rebindings_.find(var);
+    if (it == rebindings_.end()) return false;
+    const auto& [begin, end] = loop_ranges_.at(loop);
+    const auto position = std::lower_bound(it->second.begin(), it->second.end(), begin);
+    return position != it->second.end() && *position < end;
+  }
+
  protected:
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    auto call = As<Call>(stmt->value_);
+    // A store returning its own destination updates contents, not the handle.
+    if (!(call && IsOp(call, "tile.store") && call->args_.size() >= 3 &&
+          AsVarLike(call->args_[2]) == stmt->var_)) {
+      rebindings_[stmt->var_.get()].push_back(next_binding_++);
+    }
+    IRVisitor::VisitStmt_(stmt);
+  }
+  void VisitStmt_(const ForStmtPtr& stmt) override {
+    const auto begin = next_binding_;
+    IRVisitor::VisitStmt_(stmt);
+    loop_ranges_[stmt.get()] = {begin, next_binding_};
+  }
+  void VisitStmt_(const WhileStmtPtr& stmt) override {
+    const auto begin = next_binding_;
+    IRVisitor::VisitStmt_(stmt);
+    loop_ranges_[stmt.get()] = {begin, next_binding_};
+  }
   void VisitStmt_(const SimtScopeStmtPtr& scope) override {
     found = true;
     var_collectors::VarDefUseCollector collector;
@@ -64,6 +93,13 @@ class RegionIndex : public IRVisitor {
     for (const auto& var : scope->private_scalars_) collector.var_defs.erase(var.get());
     locals.insert(collector.var_defs.begin(), collector.var_defs.end());
   }
+
+ private:
+  // Assignment positions let nested loops query rebindings without rescanning
+  // their bodies or copying the full dataflow state at each loop boundary.
+  size_t next_binding_ = 0;
+  std::unordered_map<const Var*, std::vector<size_t>> rebindings_;
+  std::unordered_map<const Stmt*, std::pair<size_t, size_t>> loop_ranges_;
 };
 
 class RegionControlChecker : public IRVisitor {
@@ -311,13 +347,17 @@ class ScopeOutliner : public IRMutator {
   }
   StmtPtr VisitStmt_(const ForStmtPtr& stmt) override {
     const auto parent_scope = EnterConditional();
+    loop_stack_.push_back(stmt.get());
     auto result = IRMutator::VisitStmt_(stmt);
+    loop_stack_.pop_back();
     LeaveConditional(parent_scope);
     return result;
   }
   StmtPtr VisitStmt_(const WhileStmtPtr& stmt) override {
     const auto parent_scope = EnterConditional();
+    loop_stack_.push_back(stmt.get());
     auto result = IRMutator::VisitStmt_(stmt);
+    loop_stack_.pop_back();
     LeaveConditional(parent_scope);
     return result;
   }
@@ -412,6 +452,7 @@ class ScopeOutliner : public IRMutator {
     std::shared_ptr<Storage> storage;
     bool whole = false;
     size_t scope = 0;
+    size_t loop_depth = 0;
   };
   static bool IsStorage(const VarPtr& var) {
     return As<TileType>(var->GetType()) || AsTensorTypeLike(var->GetType());
@@ -419,7 +460,11 @@ class ScopeOutliner : public IRMutator {
   Binding ResolveStorage(const ExprPtr& expr) {
     if (auto var = AsVarLike(expr)) {
       auto it = bindings_.find(var.get());
-      if (it != bindings_.end() && active_scopes_[it->second.scope]) return it->second;
+      if (it != bindings_.end() && active_scopes_[it->second.scope] &&
+          (it->second.loop_depth == loop_stack_.size() ||
+           !index_.MayRebind(var.get(), loop_stack_[it->second.loop_depth]))) {
+        return it->second;
+      }
     } else if (auto call = As<Call>(expr)) {
       auto alias = ResultAliasedArgIndex(call);
       if (As<TileType>(call->GetType())) alias = std::nullopt;
@@ -444,6 +489,9 @@ class ScopeOutliner : public IRMutator {
       const auto scope = binding.storage->initialized_scope;
       return scope && active_scopes_[*scope];
     }
+    // An expired or loop-carried binding cannot reuse the first iteration's
+    // proof: a later assignment may replace its storage before the backedge.
+    if (bindings_.count(var.get())) return false;
     // At joins where no reaching value is known, retain only the conservative
     // guarantee that no possible source is Out or an uninitialized allocation.
     return !permissions_.Uninitialized(var.get());
@@ -462,6 +510,7 @@ class ScopeOutliner : public IRMutator {
     auto previous = ResolveStorage(var);
     if (previous.storage == binding.storage && previous.whole == binding.whole) return;
     binding.scope = current_scope_;
+    binding.loop_depth = loop_stack_.size();
     bindings_[var.get()] = std::move(binding);
   }
   void BindFresh(const VarPtr& var, bool initialized) {
@@ -532,6 +581,7 @@ class ScopeOutliner : public IRMutator {
   std::unordered_map<const Var*, Binding> bindings_;
   std::vector<bool> active_scopes_{true};
   size_t current_scope_ = 0;
+  std::vector<const Stmt*> loop_stack_;
   size_t next_name_ = 0;
   size_t reg_depth_ = 0;
 };

@@ -1151,10 +1151,11 @@ StmtPtr IRMutator::VisitStmt_(const SimtScopeStmtPtr& op) {
   }
   result->body_ = VisitStmt(op->body_);
   for (const auto& [var, prior] : saved) {
-    if (prior)
+    if (prior) {
       var_remap_[var] = prior;
-    else
+    } else {
       var_remap_.erase(var);
+    }
   }
   changed |= result->body_ != op->body_;
   return changed ? result : op;
