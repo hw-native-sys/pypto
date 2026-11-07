@@ -1,5 +1,38 @@
 # NormalizeReturnOrder Pass
 
+`Orchestration` 中属于参数回写的张量返回在 `InitMemRef` 前固定为显式参数引用，供 HOST 代码生成直接读取；返回顺序保持不变。内存分配后 SSA 别名的分配元数据可能不同，不能再依赖后期追溯。原有形状、视图与类型检查保持不变。
+
+完整的 `Submit` 结果是 `(results..., TaskId)`，不是张量别名。只有显式的张量
+投影才能被参数化；返回整个容器时保留完成句柄和元组类型。循环回写证明会在循环
+携带假设下，为当前查询中已确定的别名前缀设置暂定来源，因此从展开后的 store
+开始查询不会把合法的归纳证明误判为缓存失败。这不表示新分配或重新绑定的循环
+结果可以成为初始 buffer 的别名。
+
+缓存的循环证明只保留初值或 yield 实际读取的外层假设，独立证明不会随无关的
+外层失败而失效。可合并的左偏堆保留所有依赖：完成证明时选择最深的真实依赖，
+再将剩余要求合并到该外层证明；每条依赖边的额外处理为对数复杂度。词法嵌套
+本身不构成依赖。
+
+存储根查询还可以将尾部的局部定义指定为根，并显式给出前部真实参数的数量。
+真实参数仍接受重绑定检查；局部 tile 定义保留存储身份，使别名返回共享同一个
+输出 buffer 和 store。
+
+严格缓存覆盖一次 `DistributedCodegen::Generate` 调用，因此不同 CHIP 入口可复用
+共享 helper 的映射。正常返回或异常退出都会清空缓存，不在调用之间保留分析状态。
+
+原始 HOST 返回值绑定使用独立的严格追踪缓存策略：返回来源分析实际访问的每个
+Host helper 必须没有 return（保留隐式输出路径），或只有一个末尾 return。末尾的
+AUTO/MANUAL runtime scope 都是无条件容器；条件返回或多条 return 必须先完成
+控制流规范化，再进行 HOST 代码生成。普通 Call 可以逐项绑定 tuple 返回值。
+显式 CHIP 张量返回无法确定存储身份时，不能回退到按可写参数顺序绑定。
+
+设备 kernel 与 Group/SPMD wrapper 保留已有的回写返回契约：混合核拆分后，
+return 可以分布在互斥的核分支中。统一分析这些返回，只有每个位置的存储身份
+一致时才固定为参数；Host/helper 的返回控制流检查仍然保留。
+
+在控制流规范化前，非严格的来源分析也会将条件返回或多条返回的 helper 来源
+保留为未知，避免调用方的返回参数化掩盖它们，绕过后续严格检查。
+
 将每个 InCore 函数的返回 tuple 重新排序，使 `return[i]` 对应声明顺序中的第
 i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 `TupleGetItemExpr` 索引。该 Pass 完成后，编排（orchestration）代码生成可以通
@@ -24,7 +57,7 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 本 Pass 把契约规范化为「按位置 `return[k] ↔ out_indices[k]`」，分两步进行：
 
 1. **Step A0（返回值参数化规范化）** —— 对每个 `InCore`、`Group`、
-   `Spmd`、`Graph` 函数，把每个属于参数回写（param writeback）的 tensor 返回值改写为
+   `Spmd`、`Graph`、`Orchestration` 函数，把每个属于参数回写（param writeback）的 tensor 返回值改写为
    直接引用对应参数（指针同一性），追踪由共享的 `return_lineage` 工具完成。
    kernel 内部分配的输出（无法追踪到任何参数）和标量返回不受影响。
 2. **Step A（InCore 函数重写）** —— 对每个 `InCore` 函数，计算一个使
@@ -38,7 +71,7 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 
 对于 tensor 返回值已经直接指名形参、且返回顺序已经与 `Out`/`InOut` 参数声
 明顺序匹配的函数，本 Pass 是 **no-op**；对于不含 `InCore`、`Group`、`Spmd`、
-`Graph` 函数的程序也是 no-op —— Step A0 覆盖这四类，所以「不含 InCore 函数」
+`Graph`、`Orchestration` 函数的程序也是 no-op —— Step A0 覆盖这五类，所以「不含 InCore 函数」
 本身已不足以说明本 Pass 什么都不做。
 
 **流水线位置**: `Default` 策略中 #20 —— 位于 `SplitVectorKernel`（#19）之
@@ -70,7 +103,7 @@ result = passes.normalize_return_order()(program)
 证函数体使用 tile 操作，从而 Step A 所依赖的
 `tile.store(_, _, out_param)` 信号一定存在。本 Pass 产出
 `ReturnParamsExplicit`（由 `verify_return_params_explicit.cpp` 校验）：每个
-InCore/Group/Spmd/Graph 函数中属于参数回写的 tensor 返回值都以指针同一性引用对应
+InCore/Group/Spmd/Graph/Orchestration 函数中属于参数回写的 tensor 返回值都以指针同一性引用对应
 参数，编排代码生成因此只需查表即可建立返回值到实参的映射。本 Pass 不使任何
 属性失效 —— SSA、规范化语句结构、内存推断等所有上游属性均被保留。
 
@@ -78,7 +111,7 @@ InCore/Group/Spmd/Graph 函数中属于参数回写的 tensor 返回值都以指
 
 ### Step A0 —— 把返回值规范化为参数引用
 
-对每个 `InCore` / `Group` / `Spmd` / `Graph` 函数，`CanonicalizeReturnValues` 调用
+对每个 `InCore` / `Group` / `Spmd` / `Graph` / `Orchestration` 函数，本 pass 使用
 `return_lineage::ReturnedParamIndices`（可追踪 Var 到 Var 别名、循环携带、
 builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数调用），
 把每个可追踪到参数的 tensor 返回值替换为参数 `Var` 本身。无法追踪的值
@@ -120,33 +153,13 @@ SSA 重命名。在 Graph 被排除期间，这张映射全部返回 `nullopt`�
 
 ### Step A —— 计算并应用每个函数的置换
 
-对每个 `InCore` 函数，`BuildReturnToParamMapping` 单次遍历函数体（不含末
-尾的 `ReturnStmt`），通过三条规则维护一个 `Var* → out_param_index` 的映
-射：
+Step A 复用 Step A0 的返回值到参数映射。设备 kernel 存在多个返回点时，只有
+所有路径的同一返回位置都指向同一参数，映射才记录该参数。来源未知的位置保留原索引。
 
-| 规则 | 语句模式 | 行为 |
-| ---- | -------- | ---- |
-| 1. `tile.store` 写入 Out/InOut buffer | `lhs = tile.store(tile, offsets, out_param, ...)` | `lhs → param_index_of(out_param)` |
-| 2. Var 到 Var 别名传播 | `lhs = rhs_var`（且 `rhs_var` 已被映射） | `lhs → lookup(rhs_var)` |
-| 3. `ForStmt` iter-arg yield | `for_stmt.iter_args[i].initValue_` 已被映射 | `for_stmt.return_vars_[i] → lookup(initValue)` |
-
-随后对 `ReturnStmt::value_` 中的每个值，先在该映射里查找其 `Var`，否则回
-退到与 `Function::params_` 的直接身份匹配；若都未命中则对应位置返回
-`kNoParam`，表示该位置「未检测到与 out 参数的关联」，保留其原始下标。
-
-`ComputeReturnPermutation` 把映射变为 `permutation[old_index] = new_index`，
-其中 `new_index` 是匹配参数在 `CollectOutIndices(func)` 中的位置。出现以下
-任一情况都返回空置换（对该函数即为 no-op）：
-
-- 函数体不含 `ReturnStmt`（开放 IR），或不含任何 Out/InOut 参数。
-- `out_indices.size() > ret_to_param.size()` —— 声明的输出参数数量多于返回
-  值数量，分析不完整，不能构造越界置换。
-- 计算出的置换是恒等置换（已规范）。
-
-当置换非空时，`ReorderReturns` 通过 `MutableCopy` 克隆出新的 `Function`，
-将末尾的 `ReturnStmt` 替换为
-`value_[permutation[i]] = old_value_[i]` 的版本，并同步置换
-`Function::return_types_`，使类型列表与值列表始终对齐。
+`ComputeReturnPermutation` 将每个已知位置映射到对应可写参数在
+`CollectOutIndices(func)` 中的索引。返回数量不匹配、置换不满足双射或本身是恒等
+置换时跳过。重排时，`ReorderReturns` 对每个返回点和 `Function::return_types_`
+应用同一置换。属性验证器同样检查每个返回点。
 
 ### Step B —— 重映射调用端的 `TupleGetItemExpr`
 
@@ -176,7 +189,7 @@ SSA 重命名。在 Graph 被排除期间，这张映射全部返回 `nullopt`�
 
 | 约束 | 原因 |
 | ---- | ---- |
-| Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / `Graph` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd`/`Graph` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
+| Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / `Graph` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd`/`Graph`/`Orchestration` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
 | Step A0 在 Graph 函数之外要求类型兼容的分支一致性（branch consensus） | 所有分支必须追踪到同一参数；最终返回张量必须保留参数的类型、视图和有效形状。允许恢复中间的收窄。Graph 合流返回值仍不支持 |
 | Step A0 不改动 kernel 内部分配的输出与标量 | 只有参数回写必须显式化；没有参数血缘的返回值没有可引用的参数 |
 | `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
@@ -227,18 +240,19 @@ class Module:
         b_tile = pl.tile.mul(x_tile, x_tile)
         out_b_store = pl.store(b_tile, [0], out_b)
         out_a_store = pl.store(a_tile, [0], out_a)
-        return (out_a_store, out_b_store)        # ReorderReturns: 置换 [1, 0]
+        return (out_a, out_b)        # ReorderReturns: 置换 [1, 0]
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, out_a, out_b):
         ret = self.kernel(x, out_a, out_b)
         a = ret[1]                                # TupleIndexPermutationMutator: 0 → 1
         b = ret[0]                                # TupleIndexPermutationMutator: 1 → 0
-        return (a, b)
+        return (out_b, out_a)
 ```
 
-同一条 SSA 赋值（`a = ...`）仍然绑定到 `pl.store(a_tile, ..., out_a)` 的输
-出；变化的只是 tuple 访问路径。`InOut` 参数的处理方式相同。
+SSA 变量 `a` 仍引用 `out_b`，`b` 仍引用 `out_a`；变化的只是 tuple 投影索引。
+编排函数直接返回这两个相同缓冲区，保留原有的 `(out_b, out_a)` 结果顺序。
+`InOut` 参数的处理方式相同。
 
 完整用例参见
 `tests/ut/ir/transforms/test_normalize_return_order.py`：
@@ -246,7 +260,7 @@ class Module:
 - `test_swapped_returns_reordered` —— 上文展示的两个 Out 参数案例
 - `test_already_ordered_noop` —— 已规范的 IR 保持不变
 - `test_single_return_noop` —— 单个 Out 参数无需置换
-- `test_non_incore_unchanged` —— 不含 InCore 函数的程序为 no-op
+- `test_non_incore_unchanged` —— opaque 张量计算函数保持不变
 - `test_three_returns_scrambled` —— 三元置换
 - `test_2d_tensor_reorder` —— 2 维 tensor / 多维 offset
 - `test_inout_param_reorder` —— `InOut` 参数同样参与重排

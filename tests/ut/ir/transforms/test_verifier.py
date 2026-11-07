@@ -9,7 +9,10 @@
 
 """Unit tests for PropertyVerifierRegistry-based verification."""
 
+import time
+
 import pypto
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir import builder
@@ -508,7 +511,10 @@ def test_out_param_non_creating_reassignment_ok():
     assert len(diagnostics) == 0
 
 
-def test_return_params_explicit_flags_aliased_param_return():
+@pytest.mark.parametrize(
+    "function_kind", [ir.FunctionType.InCore, ir.FunctionType.Graph, ir.FunctionType.Orchestration]
+)
+def test_return_params_explicit_flags_aliased_param_return(function_kind):
     """ReturnParamsExplicit flags an InCore tensor return that aliases a param
     instead of referencing it directly, and accepts the param-identity form."""
     dim = ir.ConstInt(64, DataType.INT64, ir.Span.unknown())
@@ -531,7 +537,7 @@ def test_return_params_explicit_flags_aliased_param_return():
         [ttype],
         bad_body,
         ir.Span.unknown(),
-        ir.FunctionType.InCore,
+        function_kind,
     )
     program = ir.Program([bad], "test_program", ir.Span.unknown())
 
@@ -550,11 +556,54 @@ def test_return_params_explicit_flags_aliased_param_return():
         [ttype],
         good_body,
         ir.Span.unknown(),
-        ir.FunctionType.InCore,
+        function_kind,
     )
     program_ok = ir.Program([good], "test_program", ir.Span.unknown())
     diags_ok = passes.PropertyVerifierRegistry.verify(props, program_ok)
     assert not [d for d in diags_ok if d.rule_name == "ReturnParamsExplicit"]
+
+
+@pytest.mark.parametrize("normalized", [False, True])
+def test_return_params_explicit_reuses_shared_helper_lineage(normalized):
+    """One verifier traversal must reuse callee maps across orchestration entries."""
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.ReturnParamsExplicit)
+    timings = []
+    for size in (128, 1024):
+        helper_body = "\n".join(
+            f"        value{i} = {'pl.add(x, x)' if i == 0 else f'value{i - 1}'}" for i in range(size)
+        )
+        entries = "\n".join(
+            f"""    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip{i}(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.graph(x)
+        return result
+"""
+            for i in range(size)
+        )
+        program = pl.parse_program(f"""@pl.program
+class SharedHelper:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+{helper_body}
+        return value{size - 1}
+
+{entries}
+""")
+        if normalized:
+            program = passes.normalize_return_order()(program)
+        samples = []
+        for _ in range(3):
+            # Parsing/normalization is excluded. Repeated verification also
+            # exercises cleanup of the invocation-scoped lineage cache.
+            started = time.thread_time()
+            diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+            samples.append(time.thread_time() - started)
+            assert not diagnostics
+        timings.append(min(samples))
+    # 8x more IR permits generous linear/logarithmic growth, while rejecting
+    # the old per-entry retracing of the same linear-sized Graph helper.
+    assert timings[1] < 24 * timings[0] + 0.005, timings
 
 
 if __name__ == "__main__":

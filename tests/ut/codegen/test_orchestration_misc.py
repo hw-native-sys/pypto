@@ -15,6 +15,7 @@ import pypto.language as pl
 import pytest
 from _orchestration_codegen_common import (
     SELF_ALIAS_RE,
+    _ensure_return_params_explicit,
     _finalize_for_codegen,
     _generate_orch_code,
     _orch_func_from_program,
@@ -723,7 +724,7 @@ class TestTupleReturnNameHintCollision:
         kernel_b_first = ir.Var("first_out", tensor_type, span)
         kernel_b_second = ir.Var("second_out", tensor_type, span)
 
-        kernel_a_body = ir.SeqStmts([ir.ReturnStmt([kernel_a_first, kernel_a_second], span)], span)
+        kernel_a_body = ir.ReturnStmt([kernel_a_first, kernel_a_second], span)
         kernel_a = ir.Function(
             "kernel_a",
             [
@@ -737,7 +738,7 @@ class TestTupleReturnNameHintCollision:
             ir.FunctionType.AIV,
         )
 
-        kernel_b_body = ir.SeqStmts([ir.ReturnStmt([kernel_b_first, kernel_b_second], span)], span)
+        kernel_b_body = ir.ReturnStmt([kernel_b_first, kernel_b_second], span)
         kernel_b = ir.Function(
             "kernel_b",
             [
@@ -756,7 +757,7 @@ class TestTupleReturnNameHintCollision:
         consume_c = ir.Var("consume_c", tensor_type, span)
         consume_d = ir.Var("consume_d", tensor_type, span)
         consume_out = ir.Var("consume_out", tensor_type, span)
-        consume_body = ir.SeqStmts([ir.ReturnStmt([consume_out], span)], span)
+        consume_body = ir.ReturnStmt([consume_out], span)
         kernel_consume = ir.Function(
             "kernel_consume",
             [
@@ -859,6 +860,7 @@ class TestTupleReturnNameHintCollision:
             "TupleNameHintCollisionProgram",
             span,
         )
+        program = _ensure_return_params_explicit(program)
         program = _finalize_for_codegen(program)
         orch = _orch_func_from_program(program)
 

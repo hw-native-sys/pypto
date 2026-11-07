@@ -56,8 +56,8 @@ def _program(*, rows=4, dtype="FP16", caller="Orchestration", submit=False, expe
         body = "ret = self.kernel(x, y, out_a, out_b)"
         returned = "(ret[1], ret[0])" if expected else "ret"
     caller_returns = f"{second}, {first}" if use == "whole" else f"{first}, {second}"
-    if expected and caller == "Spmd":
-        returned = "out_a, out_b"
+    if expected and caller in ("Spmd", "Orchestration"):
+        returned = "out_b, out_a" if use == "whole" else "out_a, out_b"
     return pl.parse_program(f"""
 @pl.program
 class {"Expected" if expected else "Before"}:
@@ -161,7 +161,7 @@ class Program:
         first = ret[{first}]
         second = ret[{second}]
         third = ret[{third}]
-        return first, second, third
+        return {"c, a, b" if expected else "first, second, third"}
 """)
 
     before = program(False)
@@ -268,6 +268,127 @@ class Before:
     properties.insert(passes.IRProperty.SSAForm)
     properties.insert(passes.IRProperty.ManualDepsOnSubmitOnly)
     assert not passes.PropertyVerifierRegistry.verify(properties, after)
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+def test_pre_ssa_formal_rebinding_does_not_change_saved_return(conditional):
+    rebind = "if flag > 0:\n            state = other" if conditional else "state = other"
+    before = pl.parse_program(f"""
+@pl.program
+class ReboundFormal:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, flag: pl.Scalar[pl.INDEX], state: pl.Tensor[[4, 16], pl.FP32],
+             other: pl.Tensor[[4, 16], pl.FP32]) -> pl.Tensor[[4, 16], pl.FP32]:
+        saved = state
+        {rebind}
+        return saved
+""")
+    # Body-wide identity analysis cannot substitute a mutable formal for its
+    # earlier captured value. It must stay unknown until SSA separates them.
+    main = before.get_function("main")
+    assert main is not None
+    assert ir.returned_param_indices(main, before) == [None]
+    after = passes.normalize_return_order()(before)
+    _verify_types(after)
+    reference, actual = {}, {}
+    exec(torch_codegen(before), reference)  # noqa: S102
+    exec(torch_codegen(after), actual)  # noqa: S102
+    state = torch.ones((4, 16), dtype=torch.float32)
+    other = torch.full_like(state, 3.0)
+    for flag in (0, 1):
+        torch.testing.assert_close(actual["main"](flag, state, other), reference["main"](flag, state, other))
+
+
+@pytest.mark.parametrize("whole", [False, True])
+def test_pre_ssa_repeated_tuple_definition_has_no_fixed_parameter_map(whole):
+    returned = "result" if whole else "result[0], result[1]"
+    before = pl.parse_program(f"""
+@pl.program
+class ReboundTuple:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, flag: pl.Scalar[pl.INDEX], a: pl.Tensor[[4, 16], pl.FP32],
+             b: pl.Tensor[[4, 16], pl.FP32]) -> tuple[
+                 pl.Tensor[[4, 16], pl.FP32], pl.Tensor[[4, 16], pl.FP32]]:
+        result = (a, b)
+        if flag > 0:
+            result = (b, a)
+        return {returned}
+""")
+    main = before.get_function("main")
+    assert main is not None
+    mapping = ir.returned_param_indices(main, before)
+    assert mapping and all(index is None for index in mapping)
+    after = passes.normalize_return_order()(before)
+    reference, actual = {}, {}
+    exec(torch_codegen(before), reference)  # noqa: S102
+    exec(torch_codegen(after), actual)  # noqa: S102
+    a = torch.ones((4, 16), dtype=torch.float32)
+    b = torch.full_like(a, 3.0)
+    for flag in (0, 1):
+        for got, want in zip(actual["main"](flag, a, b), reference["main"](flag, a, b)):
+            torch.testing.assert_close(got, want)
+
+
+def test_pre_ssa_inplace_formal_writeback_keeps_return_slot_and_value():
+    before = pl.parse_program("""
+@pl.program
+class InplaceFormal:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]]) -> pl.Tensor[[4, 16], pl.FP32]:
+        tile = pl.load(out, [0, 0], [4, 16])
+        out = pl.store(pl.tile.add(tile, tile), [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]]) -> pl.Tensor[[4, 16], pl.FP32]:
+        result = self.kernel(out)
+        return result
+""")
+    after = passes.normalize_return_order()(before)
+    main = after.get_function("main")
+    assert main is not None
+    assert len(main.return_types) == 1
+    assert len(ir.returned_param_indices(main, after)) == 1
+    _verify_types(after)
+    reference, actual = {}, {}
+    exec(torch_codegen(before), reference)  # noqa: S102
+    exec(torch_codegen(after), actual)  # noqa: S102
+    original = torch.ones((4, 16), dtype=torch.float32)
+    expected = reference["main"](original.clone())
+    result = actual["main"](original.clone())
+    torch.testing.assert_close(expected, original * 2.0)
+    torch.testing.assert_close(result, expected)
+
+
+@pytest.mark.parametrize("self_writeback", [False, True])
+@pytest.mark.parametrize("definitions", [1, 2])
+def test_pre_ssa_formal_call_binding_requires_unique_self_writeback(self_writeback, definitions):
+    argument = "out" if self_writeback else "other"
+    statements = "\n        ".join([f"out = self.kernel({argument})"] * definitions)
+    before = pl.parse_program(f"""
+@pl.program
+class FormalCall:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, out: pl.Tensor[[4, 16], pl.FP32]) -> pl.Tensor[[4, 16], pl.FP32]:
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, out: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+             other: pl.Tensor[[4, 16], pl.FP32]) -> pl.Tensor[[4, 16], pl.FP32]:
+        {statements}
+        return out
+""")
+    main = before.get_function("main")
+    assert main is not None
+    expected = [0] if self_writeback and definitions == 1 else [None]
+    assert ir.returned_param_indices(main, before) == expected
+    after = passes.normalize_return_order()(before)
+    reference, actual = {}, {}
+    exec(torch_codegen(before), reference)  # noqa: S102
+    exec(torch_codegen(after), actual)  # noqa: S102
+    out = torch.ones((4, 16), dtype=torch.float32)
+    other = torch.full_like(out, 3.0)
+    torch.testing.assert_close(actual["main"](out, other), reference["main"](out, other))
 
 
 if __name__ == "__main__":

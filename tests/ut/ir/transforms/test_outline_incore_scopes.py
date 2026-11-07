@@ -977,7 +977,7 @@ class Expected:
                 for j, (inner,) in pl.range(2, init_values=(acc,)):
                     updated: pl.Tensor[[64], pl.FP32] = pl.add(inner, y)
                     inner_rv = pl.yield_(updated)
-                return acc
+                return inner_rv
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -992,6 +992,16 @@ class Expected:
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
+
+        import torch  # noqa: PLC0415
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        x = torch.full((64,), 1.0)
+        y = torch.full((64,), 2.0)
+        for program in (Before, After):
+            namespace = {}
+            exec(torch_codegen(program), namespace)  # noqa: S102
+            torch.testing.assert_close(namespace["main"](x, y), x + 6 * y)
 
     def test_outline_scope_does_not_capture_outer_init_value(self):
         """Outer loop's init value must NOT become a parameter of the outlined incore function.

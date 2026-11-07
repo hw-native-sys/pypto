@@ -12,8 +12,10 @@
 #ifndef PYPTO_CODEGEN_DISTRIBUTED_DISTRIBUTED_CODEGEN_H_
 #define PYPTO_CODEGEN_DISTRIBUTED_DISTRIBUTED_CODEGEN_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -314,6 +316,10 @@ class DistributedCodegen : public CodegenBase {
   // EmitCallToWorker when the callee has a TupleType return; consumed by
   // VisitStmt_(AssignStmt) when it encounters TupleGetItemExpr unpacking.
   std::map<std::pair<std::string, int>, std::string> tuple_element_tensors_;
+
+  // Exact return-position -> parameter mapping, local to one Generate call.
+  // Out/InOut parameters not named by ReturnStmt do not occupy result slots.
+  std::unordered_map<const ir::Function*, std::vector<std::optional<size_t>>> returned_param_indices_;
 
   // A distributed ``pl.submit`` returns the runtime TaskHandle as its final
   // tuple element. Keep it separate from tensor aliases so a later

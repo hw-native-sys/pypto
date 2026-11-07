@@ -10,6 +10,7 @@
 """Unit tests for distributed Python code generation."""
 
 import re
+import time
 
 import pypto.language as pl
 import pytest
@@ -25,18 +26,24 @@ class TestDistributedCodegen:
         @pl.program
         class Input:
             @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
-            def chip_worker(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            def chip_worker(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
+                return pl.tensor.assemble(out, y, [0])
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-            def chip_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(x)
+            def chip_orch(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(x, out)
                 return y
 
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-            def host_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x)
+            def host_orch(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x, out)
                 return y
 
         program = passes.convert_to_ssa()(Input)
@@ -70,13 +77,17 @@ class TestDistributedCodegen:
         @pl.program
         class Input:
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-            def chip_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            def chip_orch(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
+                return pl.tensor.assemble(out, y, [0])
 
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-            def moe_ep_l3(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x)
+            def moe_ep_l3(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x, out)
                 return y
 
         program = passes.convert_to_ssa()(Input)
@@ -119,17 +130,19 @@ class TestDistributedCodegen:
                 self,
                 a: pl.Tensor[[64], pl.FP32],
                 b: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
-                return y
+                return pl.tensor.assemble(out, y, [0])
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
             def chip_orch(
                 self,
                 a: pl.Tensor[[64], pl.FP32],
                 b: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(a, b)
+                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(a, b, out)
                 return y
 
             @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
@@ -141,8 +154,9 @@ class TestDistributedCodegen:
                 self,
                 a: pl.Tensor[[64], pl.FP32],
                 b: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                f: pl.Tensor[[64], pl.FP32] = self.chip_orch(a, b)
+                f: pl.Tensor[[64], pl.FP32] = self.chip_orch(a, b, out)
                 self.verify(f)
                 return f
 
@@ -207,8 +221,7 @@ class TestDistributedCodegen:
                 b: pl.Tensor[[64], pl.FP32],
                 f: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
-                return y
+                return f
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
             def chip_orch(
@@ -397,8 +410,7 @@ class TestDistributedCodegen:
                 a: pl.Tensor[[64], pl.FP32],
                 buf: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.add(a, a)
-                return y
+                return buf
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
             def chip_orch(
@@ -440,8 +452,7 @@ class TestDistributedCodegen:
                 b: pl.Tensor[[64], pl.FP32],
                 f: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
-                return y
+                return f
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
             def chip_sub(
@@ -450,8 +461,7 @@ class TestDistributedCodegen:
                 b: pl.Tensor[[64], pl.FP32],
                 f: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.sub(a, b)
-                return y
+                return f
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
             def chip_orch_add(
@@ -526,8 +536,7 @@ class TestDistributedCodegen:
                 a: pl.Tensor[[64], pl.FP32],
                 buf: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.add(a, a)
-                return y
+                return buf
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
             def chip_orch(
@@ -582,18 +591,24 @@ class TestDistributedCodegen:
         @pl.program
         class Input:
             @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
-            def chip_worker(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            def chip_worker(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
+                return pl.tensor.assemble(out, y, [0])
 
             @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-            def chip_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(x)
+            def chip_orch(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(x, out)
                 return y
 
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-            def host_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x)
+            def host_orch(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x, out)
                 return y
 
         program = passes.convert_to_ssa()(Input)
@@ -750,10 +765,6 @@ class TestChipTaskCollection:
         assert "down_seed" in names, names
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     @pl.program
     class Program:
@@ -781,3 +792,628 @@ def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1\)', code)
     assert code.count(".add_scalar(") == 1
     compile(code, "host_orch.py", "exec")
+
+
+@pytest.mark.parametrize("via_graph", [False, True])
+@pytest.mark.parametrize("normalized", [False, True])
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize(
+    "returned", [("second",), ("second", "first"), ("data", "second", "first"), ("second", "second")]
+)
+def test_worker_return_aliases_follow_declared_results_not_mutated_parameters(
+    normalized, submit, returned, via_graph
+):
+    """A KV-like InOut before the outputs must not occupy a return position.
+
+    Reordered/repeated results and a returned input also distinguish ReturnStmt
+    identity from the list of writable parameters. Submit's completion remains
+    separate from these tensor results.
+    """
+    tensor = "pl.Tensor[[64], pl.FP32]"
+    params = f"state: pl.InOut[{tensor}], data: {tensor}, first: pl.Out[{tensor}], second: pl.Out[{tensor}]"
+    ret_type = tensor if len(returned) == 1 else "tuple[" + ", ".join([tensor] * len(returned)) + "]"
+    values = [f"value{i}" for i in range(len(returned))]
+    targets = "(" + ", ".join(values) + "), done" if submit else ", ".join(values)
+    call = (
+        "pl.submit(self.chip, state, data, first, second)"
+        if submit
+        else "self.chip(state, data, first, second)"
+    )
+    graph = ""
+    chip_body = "return " + ", ".join(returned)
+    if via_graph:
+        graph = f"""    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, {params}) -> {ret_type}:
+        return {", ".join(returned)}
+
+"""
+        chip_body = (
+            f"{', '.join(values)} = self.graph(state, data, first, second)\n"
+            f"        return {', '.join(values)}"
+        )
+    text = f"""@pl.program
+class ReturnBinding:
+{graph}    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, {params}) -> {ret_type}:
+        {chip_body}
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, {params}) -> {ret_type}:
+        {targets} = {call}
+        return {", ".join(values)}
+"""
+    program = passes.convert_to_ssa()(pl.parse_program(text))
+    if normalized:
+        program = passes.normalize_return_order()(program)
+    code = codegen.DistributedCodegen().generate(program)
+    aliases = dict(
+        re.findall(r'tensors\["(value\d+)(?:__ssa_v\d+)?"\] = tensors\["(\w+?)(?:__ssa_v\d+)?"\]', code)
+    )
+    assert aliases == dict(zip(values, returned, strict=True)), code
+    assert code.count("TensorArgType.INOUT") == 1, code
+    if submit:
+        assert re.search(r"_handle = _submit_chip", code), code
+    compile(code, "host_orch.py", "exec")
+
+
+@pytest.mark.parametrize("tail", ["none", "scalar", "tensor"])
+def test_known_return_parameter_missing_from_raw_host_call_is_rejected(tail):
+    import pypto  # noqa: PLC0415
+
+    extra_param = {
+        "none": "",
+        "scalar": ", n: pl.Scalar[pl.INT32]",
+        "tensor": ", other: pl.Tensor[[64], pl.FP32]",
+    }[tail]
+    extra_arg = {"none": "", "scalar": ", n", "tensor": ", other"}[tail]
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(
+        self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+        out: pl.Out[pl.Tensor[[64], pl.FP32]]{extra_param},
+    ) -> pl.Tensor[[64], pl.FP32]:
+        return out
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(
+        self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+        out: pl.Out[pl.Tensor[[64], pl.FP32]]{extra_param},
+    ) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(state, out{extra_arg})
+        return result
+""")
+
+    class OmitReturnedArgument(ir.IRMutator):
+        def visit_call(self, op: ir.Call) -> ir.Expr:
+            if op.op.name == "chip":
+                return ir.Call(op.op, [op.args[0], *op.args[2:]], op.type, op.span)
+            return super().visit_call(op)
+
+    malformed = OmitReturnedArgument().visit_program(program)
+    # A middle gap cannot be detected just by checking returned_idx < nargs:
+    # the next scalar or tensor shifts into that index. HOST requires full arity.
+    with pytest.raises(pypto.InternalError, match="requires every callee argument"):
+        codegen.DistributedCodegen().generate(malformed)
+
+
+@pytest.mark.parametrize("fresh_first", [False, True])
+def test_host_mixed_known_and_unresolved_returns_require_explicit_carriers(fresh_first):
+    returned = "fresh, x" if fresh_first else "x, fresh"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        fresh = pl.add(x, x)
+        return {returned}
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> pl.Tensor[[64], pl.FP32]:
+        first, second = self.chip(x, out)
+        return first
+""")
+    with pytest.raises(ValueError, match="mixed known and unresolved tensor returns"):
+        codegen.DistributedCodegen().generate(program)
+
+
+def test_host_returned_readonly_input_does_not_allocate_output_carrier():
+    @pl.program
+    class Program:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = self.chip(x)
+            return result
+
+    source = codegen.DistributedCodegen().generate(Program)
+    assert 'tensors["result"] = tensors["x"]' in source
+    assert "torch.zeros(" not in source
+    compile(source, "<generated>", "exec")
+
+
+@pytest.mark.parametrize("normalized", [False, True])
+def test_raw_typed_callee_does_not_trust_rebound_formal_identity(normalized):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip(
+            self, first: pl.Out[pl.Tensor[[64], pl.FP32]], second: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            second = first
+            return second
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def main(
+            self, first: pl.Out[pl.Tensor[[64], pl.FP32]], second: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            result = self.chip(first, second)
+            return result
+
+    if not normalized:
+        with pytest.raises(ValueError, match="cannot bind unresolved explicit tensor returns"):
+            codegen.DistributedCodegen().generate(Program)
+        return
+    program = passes.normalize_return_order()(passes.convert_to_ssa()(Program))
+    source = codegen.DistributedCodegen().generate(program)
+    assert re.search(r'tensors\["result[^" ]*"\] = tensors\["first[^" ]*"\]', source)
+    assert not re.search(r'tensors\["result[^" ]*"\] = tensors\["second[^" ]*"\]', source)
+    compile(source, "<generated>", "exec")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if False:\n            return second\n        return first",
+        "if flag:\n            return second\n        return first",
+        "if flag:\n            return second",
+    ],
+)
+def test_raw_host_callee_requires_a_single_terminal_return(body):
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        {body}
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(first, second, flag)
+        return result
+""")
+    with pytest.raises(ValueError, match="single terminal return"):
+        codegen.DistributedCodegen().generate(program)
+
+
+@pytest.mark.parametrize("normalized", [False, True])
+@pytest.mark.parametrize("callee_type", ["Opaque", "Orchestration"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if False:\n            return second\n        return first",
+        "if flag:\n            return second\n        return first",
+        "if flag:\n            return second",
+    ],
+)
+def test_raw_host_callee_validates_recursive_graph_return_control_flow(body, callee_type, normalized):
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+              second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        {body}
+
+    @pl.function(type=pl.FunctionType.{callee_type}, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.graph(first, second, flag)
+        return result
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(first, second, flag)
+        return result
+""")
+    if normalized:
+        # Canonicalization must not erase the helper call before HOST validation.
+        program = passes.normalize_return_order()(program)
+    with pytest.raises(ValueError, match="single terminal return"):
+        codegen.DistributedCodegen().generate(program)
+
+
+@pytest.mark.parametrize("scope", ["manual_scope", "scope"])
+@pytest.mark.parametrize("normalized", [False, True])
+def test_host_callee_accepts_unconditional_scoped_terminal_return(scope, normalized):
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator, auto_scope=False)
+    def chip(self, out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.{scope}():
+            return out
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(out)
+        return result
+""")
+    if normalized:
+        program = passes.normalize_return_order()(passes.convert_to_ssa()(program))
+    source = codegen.DistributedCodegen().generate(program)
+    assert re.search(r'tensors\["result[^" ]*"\] = tensors\["out[^" ]*"\]', source)
+    compile(source, "<generated>", "exec")
+
+
+def test_host_lineage_cache_is_released_after_generate_failure():
+    """An exceptional strict query must not affect later non-strict analysis."""
+    program = pl.parse_program("""@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+              second: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        if False:
+            return second
+        return first
+
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.graph(first, second)
+        return result
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(first, second)
+        return result
+""")
+    generator = codegen.DistributedCodegen()
+    for _ in range(2):
+        with pytest.raises(ValueError, match="single terminal return"):
+            generator.generate(program)
+        # Outside HOST codegen the helper's ambiguous map remains unknown;
+        # a leaked strict policy would instead reject this normalization query.
+        normalized = passes.normalize_return_order()(program)
+        assert normalized is not None
+
+
+def test_host_callees_reuse_shared_helper_lineage_within_generate():
+    """A linear-sized shared helper must not be retraced for every CHIP entry."""
+    timings = []
+    for size in (128, 2048):
+        helper_body = "\n".join(
+            f"        value{i} = {'x' if i == 0 else f'value{i - 1}'}" for i in range(size)
+        )
+        entries = "\n".join(
+            f"""    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip{i}(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.graph(x)
+        return result
+"""
+            for i in range(size)
+        )
+        calls = "\n".join(f"        result{i} = self.chip{i}(x)" for i in range(size))
+        program = pl.parse_program(f"""@pl.program
+class SharedHelper:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+{helper_body}
+        return value{size - 1}
+
+{entries}
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+{calls}
+        return result{size - 1}
+""")
+        samples = []
+        generator = codegen.DistributedCodegen()
+        for _ in range(3):
+            # Parsing is outside the measurement. Thread CPU time excludes
+            # scheduling delays; repeating Generate also exercises cache cleanup.
+            started = time.thread_time()
+            source = generator.generate(program)
+            samples.append(time.thread_time() - started)
+            aliases = re.findall(r'tensors\["result\d+"\] = tensors\["x"\]', source)
+            assert len(aliases) == size
+            compile(source, "host_orch.py", "exec")
+        timings.append(min(samples))
+    # 16x more IR allows generous linear/logarithmic growth and fixed overhead,
+    # but rejects the old per-callee retracing of the shared linear alias chain.
+    assert timings[1] < 64 * timings[0] + 0.005, timings
+
+
+def test_host_rejects_unresolved_explicit_tensor_return():
+    source = """
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+             first: pl.Out[pl.Tensor[[64], pl.FP32]], second: pl.Out[pl.Tensor[[64], pl.FP32]],
+             flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        if flag:
+            selected = first
+        else:
+            selected = second
+        return selected
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+             first: pl.Out[pl.Tensor[[64], pl.FP32]], second: pl.Out[pl.Tensor[[64], pl.FP32]],
+             flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(state, first, second, flag)
+        return result
+"""
+    program = pl.parse_program(source)
+    with pytest.raises(ValueError, match="cannot bind unresolved explicit tensor returns"):
+        codegen.DistributedCodegen().generate(passes.convert_to_ssa()(program))
+
+
+@pytest.mark.parametrize("branch_source", [None, "second", "first"])
+def test_host_binds_elements_of_explicit_tuple_value(branch_source):
+    source = """
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+             first: pl.Out[pl.Tensor[[64], pl.FP32]], second: pl.Out[pl.Tensor[[64], pl.FP32]],
+             flag: pl.Scalar[pl.BOOL]
+    ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        pair = (second, first)
+        return pair
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+             first: pl.Out[pl.Tensor[[64], pl.FP32]], second: pl.Out[pl.Tensor[[64], pl.FP32]],
+             flag: pl.Scalar[pl.BOOL]
+    ) -> pl.Tensor[[64], pl.FP32]:
+        left, right = self.chip(state, first, second, flag)
+        return left
+"""
+    if branch_source is not None:
+        source = source.replace(
+            "        pair = (second, first)",
+            f"""        if flag:
+            selected = second
+        else:
+            selected = {branch_source}
+        pair = (selected, first)""",
+        )
+    program = pl.parse_program(source)
+    if branch_source is not None:
+        program = passes.convert_to_ssa()(program)
+    if branch_source == "first":
+        with pytest.raises(ValueError, match="mixed known and unresolved tensor returns"):
+            codegen.DistributedCodegen().generate(program)
+        return
+    emitted = codegen.DistributedCodegen().generate(program)
+    assert re.search(r'tensors\["left(?:__ssa_v\d+)?"\] = tensors\["second(?:__ssa_v\d+)?"\]', emitted)
+    assert re.search(r'tensors\["right(?:__ssa_v\d+)?"\] = tensors\["first(?:__ssa_v\d+)?"\]', emitted)
+
+
+def test_raw_host_binds_directly_returned_call():
+    program = pl.parse_program("""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        return out
+
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+             out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        return self.graph(out)
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+             out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.chip(state, out)
+        return result
+""")
+    source = codegen.DistributedCodegen().generate(program)
+    assert 'tensors["result"] = tensors["out"]' in source
+
+
+def test_host_rejects_unresolved_readonly_return_instead_of_allocating_zeros():
+    program = pl.parse_program("""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def pick(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32],
+             flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        if flag:
+            selected = a
+        else:
+            selected = b
+        return selected
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32],
+             flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+        result = self.pick(a, b, flag)
+        return result
+""")
+    with pytest.raises(ValueError, match="cannot bind unresolved explicit tensor returns"):
+        codegen.DistributedCodegen().generate(passes.convert_to_ssa()(program))
+
+
+@pytest.mark.parametrize("tuple_result", [False, True])
+def test_host_binds_inferred_call_returns(tuple_result):
+    returned = "b, a" if tuple_result else "b"
+    targets = "result, other" if tuple_result else "result"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def pick(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]):
+        return {returned}
+
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        return x
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        {targets} = self.pick(a, b)
+        final = self.consume(result)
+        return final
+""")
+    source = codegen.DistributedCodegen().generate(program)
+    assert 'tensors["result"] = tensors["b"]' in source
+    if tuple_result:
+        assert 'tensors["other"] = tensors["a"]' in source
+    assert "torch.zeros(" not in source
+    compile(source, "host_orch.py", "exec")
+
+
+@pytest.mark.parametrize("annotated", [True, False])
+@pytest.mark.parametrize("tuple_annotation", ["pl.Tuple", "tuple"])
+@pytest.mark.parametrize("direct", [False, True])
+def test_host_binds_tuple_forwarded_from_graph(annotated, tuple_annotation, direct):
+    graph_result = " -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]" if annotated else ""
+    forward = (
+        "return self.graph(first, second)"
+        if direct
+        else "pair = self.graph(first, second)\n        return pair"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+              second: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ){graph_result}:
+        result = (second, first)
+        return result
+
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> {tuple_annotation}[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        {forward}
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        left, right = self.chip(first, second)
+        return left
+""")
+    source = codegen.DistributedCodegen().generate(program)
+    assert 'tensors["left"] = tensors["second"]' in source
+    assert 'tensors["right"] = tensors["first"]' in source
+
+
+@pytest.mark.parametrize("other", ["second", "first"])
+@pytest.mark.parametrize("tuple_annotation", ["pl.Tuple", "tuple"])
+def test_host_binds_elements_of_conditional_tuple(other, tuple_annotation):
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]
+    ) -> {tuple_annotation}[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        if flag:
+            pair = (second, first)
+        else:
+            pair = ({other}, first)
+        return pair
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]], flag: pl.Scalar[pl.BOOL]
+    ) -> pl.Tensor[[64], pl.FP32]:
+        left, right = self.chip(first, second, flag)
+        return left
+""")
+    program = passes.convert_to_ssa()(program)
+    if other == "first":
+        with pytest.raises(ValueError, match="mixed known and unresolved tensor returns"):
+            codegen.DistributedCodegen().generate(program)
+        return
+    emitted = codegen.DistributedCodegen().generate(program)
+    assert re.search(r'tensors\["left(?:__ssa_v\d+)?"\] = tensors\["second(?:__ssa_v\d+)?"\]', emitted)
+    assert re.search(r'tensors\["right(?:__ssa_v\d+)?"\] = tensors\["first(?:__ssa_v\d+)?"\]', emitted)
+
+
+@pytest.mark.parametrize("tensor_position", [0, 1])
+@pytest.mark.parametrize("consume_scalar", [False, True])
+def test_host_preserves_tensor_position_in_mixed_return(tensor_position, consume_scalar):
+    tensor = "pl.Tensor[[64], pl.FP32]"
+    scalar = "pl.Scalar[pl.BOOL]"
+    types = f"{tensor}, {scalar}" if tensor_position == 0 else f"{scalar}, {tensor}"
+    values = "out, flag" if tensor_position == 0 else "flag, out"
+    scalar_use = f"selected_flag = pair[{1 - tensor_position}]" if consume_scalar else "selected_flag = flag"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, state: pl.InOut[{tensor}], out: pl.Out[{tensor}], flag: {scalar}) -> tuple[{types}]:
+        return {values}
+
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def consume(self, x: {tensor}, condition: {scalar}) -> {tensor}:
+        return x
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, state: pl.InOut[{tensor}], out: pl.Out[{tensor}], flag: {scalar}) -> {tensor}:
+        pair = self.chip(state, out, flag)
+        result = pair[{tensor_position}]
+        {scalar_use}
+        final = self.consume(result, selected_flag)
+        return final
+""")
+    if consume_scalar:
+        with pytest.raises(ValueError, match="cannot consume a scalar"):
+            codegen.DistributedCodegen().generate(program)
+        return
+    emitted = codegen.DistributedCodegen().generate(program)
+    assert 'tensors["result"] = tensors["out"]' in emitted
+    assert 'tensors["result"] = tensors["state"]' not in emitted
+
+
+@pytest.mark.parametrize("change", [False, True])
+def test_host_binds_invariant_tuple_carry(change):
+    yielded = "(first, first)" if change else "carry"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        pair = (second, first)
+        for i, (carry,) in pl.range(3, init_values=(pair,)):
+            value = {yielded}
+            result = pl.yield_(value)
+        return result
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, first: pl.Out[pl.Tensor[[64], pl.FP32]],
+             second: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        left, right = self.chip(first, second)
+        return left
+""")
+    program = passes.convert_to_ssa()(program)
+    if change:
+        with pytest.raises(ValueError, match="mixed known and unresolved tensor returns"):
+            codegen.DistributedCodegen().generate(program)
+        return
+    emitted = codegen.DistributedCodegen().generate(program)
+    assert re.search(r'tensors\["left(?:__ssa_v\d+)?"\] = tensors\["second(?:__ssa_v\d+)?"\]', emitted)
+    assert re.search(r'tensors\["right(?:__ssa_v\d+)?"\] = tensors\["first(?:__ssa_v\d+)?"\]', emitted)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
