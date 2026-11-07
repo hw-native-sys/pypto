@@ -26,9 +26,41 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+void ValidateSimtBlockDims(const std::vector<ExprPtr>& block_dims, const Span& span) {
+  CHECK_SPAN(block_dims.size() == 3, span) << "SIMT block_dims must contain exactly three dimensions";
+  int64_t threads = 1;
+  for (const auto& dim : block_dims) {
+    auto value = As<ConstInt>(dim);
+    CHECK_SPAN(value && (value->dtype().IsInt() || value->dtype() == DataType::INDEX) && value->value_ > 0,
+               span)
+        << "SIMT block dimensions must be positive constant integers";
+    CHECK_SPAN(value->value_ <= std::numeric_limits<int32_t>::max() / threads, span)
+        << "SIMT block dimension product exceeds INT32_MAX";
+    threads *= value->value_;
+  }
+}
+}  // namespace
+
+SimtScopeStmt::SimtScopeStmt(std::vector<ExprPtr> block_dims, StmtPtr body, Span span,
+                             std::vector<VarPtr> private_scalars, std::vector<std::string> leading_comments)
+    : Stmt(std::move(span), std::move(leading_comments)),
+      block_dims_(std::move(block_dims)),
+      body_(std::move(body)),
+      private_scalars_(std::move(private_scalars)) {
+  ValidateSimtBlockDims(block_dims_, span_);
+  CHECK_SPAN(body_, span_) << "SIMT scope requires a body";
+  std::unordered_set<const Var*> seen;
+  for (const auto& var : private_scalars_) {
+    CHECK_SPAN(var && As<ScalarType>(var->GetType()) && seen.insert(var.get()).second, span_)
+        << "SIMT private scalar bindings must be distinct scalar variables";
+  }
+}
 
 SimtLaunchStmt::SimtLaunchStmt(GlobalVarPtr callee, std::vector<ExprPtr> block_dims,
                                std::vector<ExprPtr> args, std::vector<VarPtr> results,
@@ -41,17 +73,7 @@ SimtLaunchStmt::SimtLaunchStmt(GlobalVarPtr callee, std::vector<ExprPtr> block_d
       results_(std::move(results)),
       result_param_indices_(std::move(result_param_indices)) {
   CHECK_SPAN(callee_, span_) << "SimtLaunchStmt requires a callee symbol";
-  CHECK_SPAN(block_dims_.size() == 3, span_) << "SIMT block_dims must contain exactly three dimensions";
-  int64_t threads = 1;
-  for (const auto& dim : block_dims_) {
-    auto value = As<ConstInt>(dim);
-    CHECK_SPAN(value && (value->dtype().IsInt() || value->dtype() == DataType::INDEX) && value->value_ > 0,
-               span_)
-        << "SIMT block dimensions must be positive constant integers";
-    CHECK_SPAN(value->value_ <= std::numeric_limits<int32_t>::max() / threads, span_)
-        << "SIMT block dimension product exceeds INT32_MAX";
-    threads *= value->value_;
-  }
+  ValidateSimtBlockDims(block_dims_, span_);
   for (const auto& arg : args_) detail::CheckValueOperand(arg, span_, "SIMT launch argument");
   CHECK_SPAN(results_.size() == result_param_indices_.size(), span_)
       << "SIMT results and result_param_indices must have the same length";

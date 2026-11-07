@@ -55,19 +55,18 @@ LLVM 导出绕过 PTOAS 对象级 SIMT 大小修复。当前子集使用内建�
 
 ## 定向验收
 
-`tests/st/runtime/vpto/test_simt_ir_onboard.py` 直接编译规范 IR，不替换生成源码。
-该面向编译器的测试使用 IR 文本形式，因为 SIMT JIT 编写入口尚未提供。这是已获准的
-P3 专用 ST JIT 编写规范例外，仅限此编译器验收测试。它验证规范 IR 执行，不代表
-公共 JIT 接口已支持 SIMT；实现 SIMT JIT 编写入口和 outlining 后必须迁移。
+`tests/st/runtime/vpto/test_simt_ir_onboard.py` 现通过 `.compile()` 编译包含
+`pl.simt_scope` 的公共 `@pl.jit.aiv` 函数，不替换生成的源码，取代此前 P3 仅使用
+规范 IR 编写测试的例外。
 
 - GM copy 覆盖非零起点 Tensor 子视图、保护区域、非活动元素，以及消费 SIMT
   结果的后续 Tile load。
 - UB gather 覆盖二维线程、INT32 索引、向量生产者、部分写入和原 Tile 后续读取。
 - 两者均检查冷编译、热缓存和目录迁移。每阶段七种长度、三组输入，共 126 个运行用例。
 
-已在 Ascend950DT、PTOAS v0.72、CANN 9.3.0 和固定运行时
-`31f9e72ee6832cd198b77df18c1c305e7fd83676` 上通过。所有产物在当前 checkout
-构建；执行前通过主机设备队列预留设备：
+公共 JIT 版本已在 Ascend950DT_9581、PTOAS v0.72、CANN 9.3.0 和固定运行时
+`391b2fbcd4dd053204a677662c39b6b7636e8043` 上通过全部 126 项数值检查。
+所有产物在当前 checkout 构建；执行前通过主机设备队列预留设备：
 
 ```bash
 PYPTO_RUN_VPTO_ONBOARD=1 PYPTO_VPTO_DEVICE_ID="$DEVICE_ID" \

@@ -2059,6 +2059,13 @@ void BindIR(nb::module_& m) {
       nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<SeqStmts>(seq_stmts_class);
 
+  auto simt_scope_class = nb::class_<SimtScopeStmt, Stmt>(
+      ir, "SimtScopeStmt", "Transient per-thread SIMT region with implicit captures");
+  simt_scope_class.def(nb::init<std::vector<ExprPtr>, StmtPtr, Span, std::vector<VarPtr>>(),
+                       nb::arg("block_dims"), nb::arg("body"), nb::arg("span"),
+                       nb::arg("private_scalars") = std::vector<VarPtr>{});
+  BindFields<SimtScopeStmt>(simt_scope_class);
+
   auto simt_launch_class = nb::class_<SimtLaunchStmt, Stmt>(
       ir, "SimtLaunchStmt", "Launch a void SIMT helper and define updated storage results");
   simt_launch_class.def(nb::init<GlobalVarPtr, std::vector<ExprPtr>, std::vector<ExprPtr>,

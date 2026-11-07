@@ -405,6 +405,8 @@ inline const PassProperties kSplitVectorKernelProperties{
 
 // -- Memory / codegen passes --------------------------------------------------
 
+inline const PassProperties kOutlineSimtScopesProperties{.invalidated = {IRProperty::SSAForm}};
+
 inline const PassProperties kSpecializeSimtHelpersProperties{.required = {IRProperty::SSAForm},
                                                              .produced = {IRProperty::SimtSpecialized}};
 

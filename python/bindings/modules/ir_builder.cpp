@@ -110,6 +110,9 @@ void BindIRBuilder(nb::module_& m) {
           "    RuntimeError: If not inside a function context\n"
           "    ValueError: If a key is already present (attrs are unique-keyed)")
 
+      .def("begin_simt_scope", &IRBuilder::BeginSimtScope, nb::arg("block_dims"), nb::arg("span"))
+      .def("end_simt_scope", &IRBuilder::EndSimtScope, nb::arg("span"),
+           nb::arg("private_scalars") = std::vector<VarPtr>{})
       .def("begin_reg_scope", &IRBuilder::BeginRegScope, nb::arg("span"),
            "Begin an implicit-capture register region")
       .def("end_reg_scope", &IRBuilder::EndRegScope, nb::arg("span"), "End a register region")

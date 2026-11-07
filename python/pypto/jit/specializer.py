@@ -2568,6 +2568,8 @@ class Specializer:
             return "@pl.function(type=pl.FunctionType.Opaque)"
         if ctx.func_type == "graph":
             return "@pl.function(type=pl.FunctionType.Graph)"
+        if ctx.func_type == "aiv":
+            return "@pl.function(type=pl.FunctionType.AIV)"
         # InCore
         if ctx.level is None:
             return "@pl.function(type=pl.FunctionType.InCore)"

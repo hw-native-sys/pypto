@@ -14,7 +14,7 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 
 **Why:** Codegen that embeds analysis becomes fragile — it duplicates logic that passes already handle, and it's harder to test in isolation. Keeping codegen a straightforward translation ensures it stays predictable and maintainable.
 
-**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. [#814](https://github.com/hw-native-sys/pypto/issues/814) was an example: return-to-parameter tracing in orchestration codegen has been refactored into the [`NormalizeReturnOrder`](../passes/29-normalize_return_order.md) pass.
+**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. [#814](https://github.com/hw-native-sys/pypto/issues/814) was an example: return-to-parameter tracing in orchestration codegen has been refactored into the [`NormalizeReturnOrder`](../passes/30-normalize_return_order.md) pass.
 
 ## Overview
 
@@ -334,8 +334,8 @@ or call `set_validshape` on the source tile before taking the view.
 
   `eL` is lane `L`'s **runtime** valid extent on the split axis — the ISA reads it off the popped
   tile (`popVecTileFromGMFiFo`), so the even codes require `e0 == e1` and the odd ones
-  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/24-lower_auto_vector_split.md) materializes those
-  extents and [ExpandMixedKernel](../passes/25-expand_mixed_kernel.md) picks the matching code.
+  `e0 == e1 + 1`. [LowerAutoVectorSplit](../passes/25-lower_auto_vector_split.md) materializes those
+  extents and [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md) picks the matching code.
 - The Cube-to-Vector FIFO carries a compacted rectangle: the producer stores its `valid_row` x
   `valid_col` block at a `valid_col` row pitch, and each consumer lane reads its band back with the
   same pitch (`gmStrideR = valid_col`, doubled for the left-right codes). A partial valid shape on
@@ -516,7 +516,7 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 }
 ```
 
-Signed integer and `INDEX` slots use [corrected floor remainders](../passes/31-lower_pipeline_to_slots.md#generated-pto-ir), preserving Python's `%` semantics. The correction is skipped — as it is above — when the dividend is provably non-negative and the divisor a positive constant, because `arith.remsi` already agrees with floor-modulo there.
+Signed integer and `INDEX` slots use [corrected floor remainders](../passes/32-lower_pipeline_to_slots.md#generated-pto-ir), preserving Python's `%` semantics. The correction is skipped — as it is above — when the dividend is provably non-negative and the divisor a positive constant, because `arith.remsi` already agrees with floor-modulo there.
 
 Two properties matter:
 
@@ -564,7 +564,7 @@ currently receive conservative synchronization in stock PTOAS
 ([#1587](https://github.com/hw-native-sys/PTOAS/issues/1587)). Unsupported user-declared regions keep
 the ordinary fixed-address `alloc_tile` path, which preserves their separation.
 Untransformed programs continue to use that original path.
-See [LowerPipelineToSlots](../passes/31-lower_pipeline_to_slots.md) for the
+See [LowerPipelineToSlots](../passes/32-lower_pipeline_to_slots.md) for the
 preload/main/drain transformation and its whole-loop fallback rules.
 
 ### Load Operation Transformation
@@ -719,7 +719,7 @@ through — the per-variable declaration, the hoisted `extra_alloc_tiles`, and t
 control-flow paths alike — so the check sees exactly what is emitted and cannot
 drift from it. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
 its M axis*, which is boxed for the user in
-[`ConvertTensorToTileOps`](../passes/12-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
+[`ConvertTensorToTileOps`](../passes/13-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
 The axes that remain the user's responsibility are `K` and `N`.
 
 ## Complete Example
