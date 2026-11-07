@@ -926,5 +926,41 @@ class Before:
     assert directions[names[1 - field]] == ir.ParamDirection.Out
 
 
+@pytest.mark.parametrize("field", [0, 1])
+def test_tuple_formal_projection_retains_actual_storage(field):
+    source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def writer(
+        self, pair: pl.Out[pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]]
+    ) -> pl.Tensor[[64], pl.FP32]:
+        output = pair[{field}]
+        pl.tensor.write(output, [0], pl.const(1.0, pl.FP32))
+        return output
+
+    @pl.function
+    def main(self, a: pl.Tensor[[2, 32], pl.FP32], b: pl.Tensor[[2, 32], pl.FP32]):
+        with pl.graph("layer"):
+            pair = (pl.tensor.reshape(a, [64]), pl.tensor.reshape(b, [64]))
+            returned = self.writer(pair)
+            value = pl.tensor.read(returned, [32])
+            pl.tensor.write(a, [0, 0], value)
+            pl.tensor.write(b, [0, 0], value)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    directions = {param.name_hint: kind for param, kind in zip(layer.params, layer.param_directions)}
+    names = ("a", "b")
+    assert directions[names[field]] == ir.ParamDirection.InOut
+    assert directions[names[1 - field]] == ir.ParamDirection.Out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

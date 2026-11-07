@@ -31,6 +31,8 @@ namespace pypto {
 namespace ir {
 namespace buffer_root {
 
+struct StorageFormalPath;
+
 /// Share proven storage-return summaries while an unchanged Program is analyzed.
 /// Nested collectors reuse the scope; the outermost exit releases all cached IR.
 class ScopedStorageRootCache {
@@ -120,7 +122,7 @@ class BufferRootCollector : public IRVisitor {
   std::unordered_map<const Var*, RootCandidates> storage_successors_;
 
   // Propagate content effects through local storage edges and shared callees.
-  void PropagateStorageEffects(std::unordered_map<const Var*, unsigned char>& effects) const;
+  void PropagateStorageEffects(std::unordered_map<const Var*, unsigned char>& effects);
   void RecordSimtLaunchRoots(const SimtLaunchStmtPtr& launch);
   void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
   [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
@@ -153,6 +155,12 @@ class BufferRootCollector : public IRVisitor {
     std::vector<RootInfo> sources;
     std::unordered_map<size_t, RootInfo> projected;
     const Var* aggregate = nullptr;
+    const Var* formal = nullptr;
+  };
+
+  struct FormalReference {
+    const Var* parameter;
+    std::shared_ptr<const StorageFormalPath> path;
   };
 
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
@@ -209,6 +217,7 @@ class BufferRootCollector : public IRVisitor {
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
   std::unordered_map<const Var*, RootInfo> backing_tuple_roots_;
   std::vector<std::unique_ptr<LoopTupleRoots>> loop_tuple_roots_;
+  std::unordered_map<const Var*, FormalReference> formal_projections_;
   size_t backing_value_depth_ = 0;
   std::unordered_map<ExprPtr, RootInfo> backing_value_memo_;
 };

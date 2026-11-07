@@ -43,6 +43,12 @@
 namespace pypto {
 namespace ir {
 namespace buffer_root {
+
+struct StorageFormalPath {
+  std::shared_ptr<const StorageFormalPath> parent;
+  size_t index;
+};
+
 namespace {
 
 using op_predicates::IsBuiltinOp;
@@ -88,13 +94,18 @@ struct StorageReturnSummary;
 
 struct StorageSummaryCall {
   std::shared_ptr<const StorageReturnSummary> callee;
-  std::vector<StorageReturnValue> arguments;
+  std::vector<std::vector<size_t>> argument_roots;
   mutable std::unordered_map<const StorageFormalTransfer*, size_t> mapped_transfers;
+};
+
+struct StorageFormalBinding {
+  size_t parameter;
+  std::shared_ptr<const StorageFormalPath> path;
 };
 
 struct StorageSummaryNode {
   TypePtr type;
-  std::optional<size_t> parameter;
+  std::optional<size_t> binding;
   std::vector<size_t> successors;
   // (local call index, node in the callee graph)
   std::optional<std::pair<size_t, size_t>> projection = std::nullopt;
@@ -110,7 +121,7 @@ struct StorageMappedTransfer {
 // and callee transfer. Caches live as long as the enclosing summary.
 struct StorageReturnSummary {
   std::vector<StorageSummaryNode> nodes;
-  std::vector<std::pair<size_t, size_t>> formal_bindings;
+  std::vector<StorageFormalBinding> formal_bindings;
   std::vector<StorageReturnValue> outputs;
   std::vector<StorageSummaryCall> calls;
   // Shared tuple values retain their source edges, including loop cycles.
@@ -206,7 +217,7 @@ std::vector<size_t> StorageTransferSuccessors(const StorageReturnSummary& summar
 
   // Mapping the inputs can grow mapped_nodes, so keep this entry by value.
   const auto [call, transfer] = summary.mapped_nodes[index - summary.nodes.size()];
-  if (transfer->split == 0) return summary.calls[call].arguments[transfer->first].roots;
+  if (transfer->split == 0) return summary.calls[call].argument_roots[transfer->first];
   return {MapStorageTransfer(summary, call, transfer->left),
           MapStorageTransfer(summary, call, transfer->right)};
 }
@@ -257,8 +268,8 @@ const StorageFormalTransfer* GetStorageTransfer(const StorageReturnSummary& summ
         active.pop_back();
         members.push_back(member);
         if (member < summary.nodes.size()) {
-          if (const auto parameter = summary.nodes[member].parameter; parameter.has_value()) {
-            transfer = UnionStorageTransfers(summary, transfer, summary.FormalLeaf(*parameter));
+          if (const auto binding = summary.nodes[member].binding; binding.has_value()) {
+            transfer = UnionStorageTransfers(summary, transfer, summary.FormalLeaf(*binding));
           }
         }
         for (size_t next : search.at(member).successors) {
@@ -321,6 +332,12 @@ BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy
 void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
     RecordRootCandidates(param, {param.get()});
+    if (view_policy_ == ViewRootPolicy::kBackingStorage && As<TupleType>(param->GetType())) {
+      auto value = MakeLoopStorageValue(param->GetType(), param->span_, param.get());
+      value.loop_tuple->formal = param.get();
+      formal_projections_.emplace(param.get(), FormalReference{param.get(), nullptr});
+      backing_tuple_roots_.emplace(param.get(), std::move(value));
+    }
   }
 }
 
@@ -652,6 +669,21 @@ BufferRootCollector::RootInfo BufferRootCollector::ProjectBackingElement(const R
     // Register the identity before following sources, since a repeated
     // iteration can project the same field through a carry cycle.
     child = MakeLoopStorageValue(tuple.type->types_[index], tuple.span, nullptr);
+    if (tuple.formal) {
+      const auto& parent = formal_projections_.at(tuple.formal);
+      auto path = std::make_shared<StorageFormalPath>(StorageFormalPath{parent.path, index});
+      const Var* root = nullptr;
+      if (child.loop_tuple) {
+        auto proxy = std::make_shared<Var>("storage_formal_tuple", child.loop_tuple->type, tuple.span);
+        root = proxy.get();
+        child.loop_tuple->formal = root;
+        storage_proxy_vars_.push_back(std::move(proxy));
+      } else {
+        root = child.roots.front();
+      }
+      storage_successors_[root] = {parent.parameter};
+      formal_projections_.emplace(root, FormalReference{parent.parameter, std::move(path)});
+    }
     for (const auto& source : tuple.sources) {
       LinkLoopStorageValues(child, ProjectBackingElement(source, index));
     }
@@ -676,6 +708,7 @@ BufferRootCollector::RootCandidates BufferRootCollector::CollectBackingContentRo
 }
 
 const Var* BufferRootCollector::AggregateLoopTupleRoots(LoopTupleRoots& tuple) {
+  if (tuple.formal) return tuple.formal;
   if (tuple.aggregate) return tuple.aggregate;
   auto root = std::make_shared<Var>("storage_tuple_contents", tuple.type, tuple.span);
   tuple.aggregate = root.get();
@@ -818,12 +851,17 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     const auto intern = [&](const Var* root) {
       auto [it, inserted] = node_ids.try_emplace(root, built.nodes.size());
       if (inserted) {
-        auto parameter = positions.find(root);
-        if (parameter != positions.end()) built.formal_bindings.emplace_back(it->second, parameter->second);
-        built.nodes.push_back(
-            {root->GetType(),
-             parameter == positions.end() ? std::nullopt : std::optional<size_t>{parameter->second},
-             {}});
+        const auto projection = nested.formal_projections_.find(root);
+        const auto parameter = positions.find(
+            projection == nested.formal_projections_.end() ? root : projection->second.parameter);
+        std::optional<size_t> binding;
+        if (parameter != positions.end()) {
+          binding = built.formal_bindings.size();
+          built.formal_bindings.push_back({parameter->second, projection == nested.formal_projections_.end()
+                                                                  ? nullptr
+                                                                  : projection->second.path});
+        }
+        built.nodes.push_back({root->GetType(), binding, {}});
         pending.push_back(root);
       }
       return it->second;
@@ -834,7 +872,9 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
         element_summaries;
     const auto summarize = [&](const auto& self, const RootInfo& value) -> StorageReturnValue {
       StorageReturnValue result;
-      if (value.loop_tuple) {
+      if (value.loop_tuple && value.loop_tuple->formal) {
+        result.roots.push_back(intern(value.loop_tuple->formal));
+      } else if (value.loop_tuple) {
         const auto& tuple = *value.loop_tuple;
         auto [entry, inserted] = tuple_ids.try_emplace(&tuple, built.tuples.size());
         const size_t index = entry->second;
@@ -873,14 +913,21 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     std::unordered_map<const StorageCallInstance*, size_t> local_calls;
     for (size_t i = 0; i < pending.size(); ++i) {
       const Var* root = pending[i];
+      // Within the callee a formal field also counts as access to the
+      // containing parameter. The transfer must preserve the field identity.
+      if (built.nodes[i].binding.has_value()) continue;
       if (auto it = nested.storage_call_roots_.find(root); it != nested.storage_call_roots_.end()) {
         const auto& projection = it->second;
         auto [call, inserted] = local_calls.try_emplace(projection.instance.get(), built.calls.size());
         if (inserted) {
           StorageSummaryCall entry{projection.instance->callee, {}, {}};
           const auto& actuals = projection.instance->arguments;
-          entry.arguments.reserve(actuals.size());
-          for (const auto& actual : actuals) entry.arguments.push_back(summarize(summarize, actual));
+          entry.argument_roots.reserve(actuals.size());
+          for (const auto& actual : actuals) {
+            std::vector<size_t> roots;
+            for (const Var* root : nested.CollectBackingContentRoots(actual)) roots.push_back(intern(root));
+            entry.argument_roots.push_back(std::move(roots));
+          }
           built.calls.push_back(std::move(entry));
         }
         built.nodes[i].projection = std::pair{call->second, projection.node};
@@ -924,7 +971,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     recursive.nodes.reserve(callee->params_.size() + 1);
     recursive.formal_bindings.reserve(callee->params_.size());
     for (size_t i = 0; i < callee->params_.size(); ++i) {
-      recursive.formal_bindings.emplace_back(i, i);
+      recursive.formal_bindings.push_back({i, nullptr});
       recursive.nodes.push_back({callee->params_[i]->GetType(), i, {}});
     }
     std::vector<size_t> edges;
@@ -942,19 +989,35 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       callee->params_.size() >= call->args_.size() ? callee->params_.size() - call->args_.size() : 0;
   auto instance = std::make_shared<StorageCallInstance>();
   instance->callee = summary;
-  instance->arguments.resize(callee->params_.size());
-  for (const auto& binding : summary->formal_bindings) {
-    const size_t parameter = binding.second;
+  instance->arguments.resize(summary->formal_bindings.size());
+  std::unordered_map<size_t, RootInfo> actual_parameters;
+  std::unordered_map<const StorageFormalPath*, RootInfo> actual_fields;
+  const auto bind_field = [&](const auto& self, const RootInfo& actual,
+                              const std::shared_ptr<const StorageFormalPath>& path) -> RootInfo {
+    if (!path) return actual;
+    auto [entry, inserted] = actual_fields.try_emplace(path.get());
+    auto& field = entry->second;
+    if (inserted) {
+      field = ProjectBackingElement(self(self, actual, path->parent), path->index);
+    }
+    return field;
+  };
+  for (size_t i = 0; i < summary->formal_bindings.size(); ++i) {
+    const auto& binding = summary->formal_bindings[i];
+    const size_t parameter = binding.parameter;
     if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
     const size_t argument = parameter < prefix ? parameter : parameter - gap;
-    if (argument < call->args_.size()) {
-      instance->arguments[parameter] = ResolveBackingValue(call->args_[argument]);
-    }
+    if (argument >= call->args_.size()) continue;
+    auto [actual, inserted] = actual_parameters.try_emplace(parameter);
+    if (inserted) actual->second = ResolveBackingValue(call->args_[argument]);
+    instance->arguments[i] = bind_field(bind_field, actual->second, binding.path);
   }
   std::unordered_map<size_t, const Var*> projections;
   const auto project = [&](size_t index) -> RootInfo {
     const auto& node = summary->nodes[index];
-    if (node.parameter) return instance->arguments[*node.parameter];
+    if (const auto binding = node.binding; binding.has_value()) {
+      return instance->arguments[*binding];
+    }
     if (node.successors.empty() && !node.projection) return {};
     auto [it, inserted] = projections.try_emplace(index, nullptr);
     if (inserted) {
@@ -1012,8 +1075,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   return roots;
 }
 
-void BufferRootCollector::PropagateStorageEffects(
-    std::unordered_map<const Var*, unsigned char>& effects) const {
+void BufferRootCollector::PropagateStorageEffects(std::unordered_map<const Var*, unsigned char>& effects) {
   std::vector<const Var*> pending;
   pending.reserve(effects.size());
   for (const auto& [root, bits] : effects) {
@@ -1052,7 +1114,12 @@ void BufferRootCollector::PropagateStorageEffects(
         if (!(bits & ~current)) continue;
         current |= bits;
         if (next->split == 0) {
-          for (const Var* target : instance.arguments[next->first].roots) add(target, bits);
+          const auto& actual = instance.arguments[next->first];
+          if (actual.elements || actual.loop_tuple) {
+            for (const Var* target : CollectBackingContentRoots(actual)) add(target, bits);
+          } else {
+            for (const Var* target : actual.roots) add(target, bits);
+          }
         } else {
           pending_transfers.push_back(next->left);
           pending_transfers.push_back(next->right);
