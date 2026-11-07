@@ -175,6 +175,9 @@ class BodyTransformer(ast.NodeTransformer):
         source = self._known_tensor_name(node.value.id) if isinstance(node.value, ast.Name) else None
         value_meta = self._meta.get(source) if source is not None else None
         visited_value = self.visit(node.value)
+        # Evaluate the RHS against the old value, then retire its constant fold.
+        # A deeper-scope private assignment keeps its name instead of renaming.
+        self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
             # Only rename at the same scope where the variable was first defined.
             # Rebindings at a deeper scope (inside for/with) are loop-carried
@@ -213,8 +216,6 @@ class BodyTransformer(ast.NodeTransformer):
         for target in node.targets:
             assignment = ast.copy_location(ast.Assign(targets=[target], value=value), node)
             assignments.append(self._visit_simple_assign(assignment))
-            # Clear an old inlined shape after reading the original RHS.
-            self._shape_inlined.pop(cast(ast.Name, target).id, None)
             value = ast.copy_location(ast.Name(id=first_name, ctx=ast.Load()), node.value)
         return assignments
 
@@ -386,6 +387,7 @@ class BodyTransformer(ast.NodeTransformer):
         # int). Without this the un-inlined name leaks into the generated source
         # and the parser rejects it ("Unknown shape variable: W_PAD").
         node.annotation = self.visit(node.annotation)
+        self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
             if self._scope_depth == self._assign_depth[var_name]:
                 new_name = self._rebind(var_name)
