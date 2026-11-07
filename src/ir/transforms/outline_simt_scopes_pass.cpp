@@ -532,7 +532,9 @@ class ScopeOutliner : public IRMutator {
     }
     auto result = IRMutator::VisitStmt_(stmt);
     auto tail = stmt->body_;
-    if (auto seq = As<SeqStmts>(tail); seq && !seq->stmts_.empty()) tail = seq->stmts_.back();
+    if (auto seq = As<SeqStmts>(tail); seq && !seq->stmts_.empty()) {
+      tail = seq->stmts_.back();
+    }
     auto yield = As<YieldStmt>(tail);
     std::vector<bool> result_initialized;
     for (size_t i = 0; i < carries.size(); ++i) {

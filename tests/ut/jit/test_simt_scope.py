@@ -193,7 +193,7 @@ def conditional_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.
         if n < 32:
             pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
     with pl.simt_scope(dims=(32, 1, 1)):
-        pl.simt.store(dst, (0, 0), pl.cast(n, pl.FP32))
+        pl.simt.store(dst, (0, n - 32), pl.const(1.0, pl.FP32))
     return dst
 
 
@@ -220,13 +220,14 @@ def test_conditional_private_reassignment_materializes_live_in_shape():
 
 
 @pytest.mark.parametrize("local", [False, True])
-def test_conditional_shape_reassignment_keeps_scalar_assignments(local):
+@pytest.mark.parametrize("control", ["if condition:", "for i in pl.range(0):", "while condition:"])
+def test_conditional_shape_reassignment_keeps_scalar_assignments(local, control):
     prefix = "" if local else "n = src.shape[1]\n"
     local_init = "n = src.shape[1]\n    " if local else ""
     tree = ast.parse(f"""
 {prefix}with pl.simt_scope(dims=(32, 1, 1)):
-    {local_init}if condition:
-        n = pl.simt.thread_idx(pl.simt.Axis.X)
+    {local_init}{control}
+        n = pl.cast(pl.simt.thread_idx(pl.simt.Axis.X), pl.INDEX)
     pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
 """)
     transformed = BodyTransformer(
@@ -263,7 +264,7 @@ def test_jit_private_reassignment_uses_thread_index():
 
     class Collector(ir.IRVisitor):
         def visit_call(self, op: ir.Call) -> None:
-            if op.op.name == "simt.store":
+            if op.op.name == ir.get_op("simt.store").name:
                 stores.append(op)
 
     Collector().visit_program(lowered)
@@ -271,6 +272,32 @@ def test_jit_private_reassignment_uses_thread_index():
     offsets = stores[0].args[1]
     assert isinstance(offsets, ir.MakeTuple)
     assert isinstance(offsets.elements[1], ir.Var)
+
+
+@pl.jit.aiv
+def zero_loop_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    # The fixed Tensor annotation supplies shape before JIT visits this body.
+    n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+    with pl.simt_scope(dims=(32, 1, 1)):
+        for i in pl.range(0):
+            n = pl.const(0, pl.INDEX)
+        if n < 32:
+            pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+    return dst
+
+
+def test_zero_iteration_private_loop_keeps_incoming_shape_value():
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    try:
+        outlined = passes.outline_simt_scopes()(zero_loop_shape_rebind.specialize())
+        ssa = passes.convert_to_ssa()(outlined)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.UseAfterDef)
+        properties.insert(passes.IRProperty.SSAForm)
+        assert not passes.PropertyVerifierRegistry.verify(properties, ssa)
+    finally:
+        backend.reset_for_testing()
 
 
 if __name__ == "__main__":

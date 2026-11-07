@@ -583,7 +583,12 @@ class BodyTransformer(ast.NodeTransformer):
         return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ctx_type)}
 
     def _collect_upward_exposed(
-        self, statements: list[ast.stmt], written: set[str], exposed: set[str]
+        self,
+        statements: list[ast.stmt],
+        written: set[str],
+        exposed: set[str],
+        *,
+        may_skip_loops: bool = False,
     ) -> None:
         """Record names *read before being written* within ``statements``.
 
@@ -598,6 +603,9 @@ class BodyTransformer(ast.NodeTransformer):
 
         ``written`` and ``exposed`` are accumulators threaded through nested
         bodies so execution order is respected across compound statements.
+
+        SIMT callers set ``may_skip_loops`` because an assignment in a loop
+        body does not initialize a private scalar when the loop runs zero times.
 
         Names bound only inside a comprehension or lambda are not
         statement-level assignments, so they never enter ``_assign_count`` and
@@ -624,9 +632,14 @@ class BodyTransformer(ast.NodeTransformer):
                 written.update(tgt_names)
             elif isinstance(stmt, ast.For):
                 exposed.update(self._names_by_ctx(stmt.iter, ast.Load) - written)
-                written.update(self._names_by_ctx(stmt.target, ast.Store))
-                self._collect_upward_exposed(stmt.body, written, exposed)
-                self._collect_upward_exposed(stmt.orelse, written, exposed)
+                body_written = set(written) if may_skip_loops else written
+                body_written.update(self._names_by_ctx(stmt.target, ast.Store))
+                self._collect_upward_exposed(stmt.body, body_written, exposed, may_skip_loops=may_skip_loops)
+                self._collect_upward_exposed(stmt.orelse, written, exposed, may_skip_loops=may_skip_loops)
+            elif isinstance(stmt, ast.While) and may_skip_loops:
+                exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
+                self._collect_upward_exposed(stmt.body, set(written), exposed, may_skip_loops=may_skip_loops)
+                self._collect_upward_exposed(stmt.orelse, written, exposed, may_skip_loops=may_skip_loops)
             elif isinstance(stmt, ast.If):
                 exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
                 # then/else are alternative paths: analyze each from the same
@@ -635,17 +648,19 @@ class BodyTransformer(ast.NodeTransformer):
                 # on either path; it is definitely written after the ``if``
                 # only if written on both (no ``else`` → no definite write).
                 then_written = set(written)
-                self._collect_upward_exposed(stmt.body, then_written, exposed)
+                self._collect_upward_exposed(stmt.body, then_written, exposed, may_skip_loops=may_skip_loops)
                 if stmt.orelse:
                     else_written = set(written)
-                    self._collect_upward_exposed(stmt.orelse, else_written, exposed)
+                    self._collect_upward_exposed(
+                        stmt.orelse, else_written, exposed, may_skip_loops=may_skip_loops
+                    )
                     written.update(then_written & else_written)
             elif isinstance(stmt, ast.With):
                 for item in stmt.items:
                     exposed.update(self._names_by_ctx(item.context_expr, ast.Load) - written)
                     if item.optional_vars is not None:
                         written.update(self._names_by_ctx(item.optional_vars, ast.Store))
-                self._collect_upward_exposed(stmt.body, written, exposed)
+                self._collect_upward_exposed(stmt.body, written, exposed, may_skip_loops=may_skip_loops)
             else:
                 # Expr / Return / Assert / ... — pure reads.
                 exposed.update(self._names_by_ctx(stmt, ast.Load) - written)
@@ -834,7 +849,7 @@ class BodyTransformer(ast.NodeTransformer):
             # writes cannot leave either stale constants or undefined names.
             written = self._names_by_ctx(node, ast.Store)
             exposed: set[str] = set()
-            self._collect_upward_exposed(node.body, set(), exposed)
+            self._collect_upward_exposed(node.body, set(), exposed, may_skip_loops=True)
             incoming = [(name, value) for name, value in self._shape_inlined.items() if name in written]
             prefix: list[ast.stmt] = []
             for name, value in incoming:
