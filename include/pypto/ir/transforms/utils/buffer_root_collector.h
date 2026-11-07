@@ -129,7 +129,8 @@ class BufferRootCollector : public IRVisitor {
  private:
   struct RootInfo {
     RootCandidates roots;
-    bool ambiguous;
+    bool ambiguous = false;
+    std::shared_ptr<const std::vector<RootInfo>> elements = nullptr;
   };
 
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
@@ -141,7 +142,9 @@ class BufferRootCollector : public IRVisitor {
   };
 
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
-  [[nodiscard]] RootCandidates ResolveStorageLeaves(const Var* var) const;
+  [[nodiscard]] RootCandidates ResolveStorageLeaves(RootCandidates pending) const;
+  [[nodiscard]] RootInfo ResolveBackingValue(const ExprPtr& expr) const;
+  [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
 
@@ -168,6 +171,7 @@ class BufferRootCollector : public IRVisitor {
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
   std::unordered_map<const Var*, RootCandidates> storage_successors_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
+  std::unordered_map<const Var*, std::shared_ptr<const std::vector<RootInfo>>> backing_tuple_roots_;
 };
 
 }  // namespace buffer_root

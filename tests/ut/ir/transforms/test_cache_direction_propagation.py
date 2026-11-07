@@ -593,5 +593,57 @@ def test_loop_yield_tuple_projection_preserves_input_contents():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_tuple_valued_return_preserves_element_storage():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def update_pair(
+            self, a: pl.Out[pl.Tensor[[64], pl.FP32]], b: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            pl.tensor.write(a, [0], pl.const(1.0, pl.FP32))
+            pl.tensor.write(b, [0], pl.const(2.0, pl.FP32))
+            return a, b
+
+        @pl.function(type=pl.FunctionType.Group)
+        def forward(
+            self, a: pl.Out[pl.Tensor[[64], pl.FP32]], b: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            packed = self.update_pair(a, b)
+            return packed
+
+        @pl.function
+        def main(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]):
+            packed = self.forward(a, b)
+            selected = packed[1]
+            value = pl.tensor.read(selected, [32])
+            pl.tensor.write(a, [0], value)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def update_pair(
+            self, a: pl.Out[pl.Tensor[[64], pl.FP32]], b: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            pl.tensor.write(a, [0], pl.const(1.0, pl.FP32))
+            pl.tensor.write(b, [0], pl.const(2.0, pl.FP32))
+            return a, b
+
+        @pl.function(type=pl.FunctionType.Group)
+        def forward(
+            self, a: pl.Out[pl.Tensor[[64], pl.FP32]], b: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            packed = self.update_pair(a, b)
+            return packed
+
+        @pl.function
+        def main(self, a: pl.Out[pl.Tensor[[64], pl.FP32]], b: pl.InOut[pl.Tensor[[64], pl.FP32]]):
+            packed = self.forward(a, b)
+            selected = packed[1]
+            value = pl.tensor.read(selected, [32])
+            pl.tensor.write(a, [0], value)
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

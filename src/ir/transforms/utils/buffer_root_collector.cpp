@@ -31,6 +31,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -60,9 +61,13 @@ std::optional<size_t> BackingAliasSlot(const CallPtr& call) {
 // Keys retain their IR until the outer analysis exits, avoiding pointer reuse.
 // Program identity matters because the same Function can resolve different callees.
 using StorageKey = std::pair<ProgramPtr, FunctionPtr>;
+struct StorageReturnValue {
+  std::vector<size_t> params;
+  std::vector<StorageReturnValue> elements;
+};
 struct StorageReturnContext {
   size_t depth = 0;
-  std::map<StorageKey, std::vector<std::vector<size_t>>> memo;
+  std::map<StorageKey, std::vector<StorageReturnValue>> memo;
   std::set<StorageKey> active;
 };
 
@@ -217,6 +222,17 @@ void BufferRootCollector::RecordAssignmentRoots(const AssignStmtPtr& assign) {
   // tuple path maps the submit-result projections to the callee's Out roots and
   // leaves the trailing TASK_ID element unmapped
   // (see .claude/rules/pass-submit-awareness.md).
+  if (view_policy_ == ViewRootPolicy::kBackingStorage && As<TupleType>(assign->value_->GetType())) {
+    // Capture the RHS before replacing a pre-SSA tuple binding.
+    auto value = ResolveBackingValue(assign->value_);
+    if (value.elements) {
+      backing_tuple_roots_[assign->var_.get()] = std::move(value.elements);
+    } else {
+      backing_tuple_roots_.erase(assign->var_.get());
+    }
+    RecordRootCandidates(assign->var_, {});
+    return;
+  }
   bool recorded = false;
   if (auto call = transform_utils::AsCallOrSubmitView(assign->value_)) {
     const std::string& op_name = call->op_->name_;
@@ -250,6 +266,10 @@ void BufferRootCollector::RecordAssignmentRoots(const AssignStmtPtr& assign) {
         recorded = true;
       }
     }
+  } else if (view_policy_ == ViewRootPolicy::kBackingStorage && As<TupleGetItemExpr>(assign->value_)) {
+    auto info = ResolveBackingValue(assign->value_);
+    RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
+    recorded = true;
   } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
     if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
       auto it = tuple_output_roots_.find(tuple_var.get());
@@ -294,25 +314,50 @@ BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(c
 
 BufferRootCollector::RootCandidates BufferRootCollector::ResolveBackingDescriptorRoots(
     const ExprPtr& expr) const {
-  auto value = expr;
-  while (auto call = As<Call>(value)) {
-    const auto slot = BackingAliasSlot(call);
-    if (!slot || *slot >= call->args_.size()) return {};
-    value = call->args_[*slot];
-  }
-  if (auto projection = As<TupleGetItemExpr>(value)) {
-    if (auto tuple = AsVarLike(projection->tuple_)) {
-      auto it = tuple_output_roots_.find(tuple.get());
-      const auto index = static_cast<size_t>(projection->index_);
-      if (it != tuple_output_roots_.end() && index < it->second.size()) return it->second[index].roots;
-    }
-    return {};
-  }
-  return ResolveRootCandidates(value);
+  return ResolveBackingValue(expr).roots;
 }
 
-BufferRootCollector::RootCandidates BufferRootCollector::ResolveStorageLeaves(const Var* var) const {
-  RootCandidates pending = RootCandidatesOf(var);
+BufferRootCollector::RootInfo BufferRootCollector::ResolveBackingValue(const ExprPtr& expr) const {
+  if (auto var = AsVarLike(expr)) {
+    auto it = backing_tuple_roots_.find(var.get());
+    if (it != backing_tuple_roots_.end()) return {{}, false, it->second};
+    return {RootCandidatesOf(var.get()), IsAmbiguous(expr), nullptr};
+  }
+  if (auto projection = As<TupleGetItemExpr>(expr)) {
+    auto tuple = ResolveBackingValue(projection->tuple_);
+    const auto index = static_cast<size_t>(projection->index_);
+    if (tuple.elements && index < tuple.elements->size()) return (*tuple.elements)[index];
+  }
+  if (auto tuple = As<MakeTuple>(expr)) {
+    auto elements = std::make_shared<std::vector<RootInfo>>();
+    elements->reserve(tuple->elements_.size());
+    for (const auto& element : tuple->elements_) elements->push_back(ResolveBackingValue(element));
+    return {{}, false, elements};
+  }
+  if (auto call = transform_utils::AsCallOrSubmitView(expr)) {
+    if (auto slot = BackingAliasSlot(call); slot && *slot < call->args_.size()) {
+      return ResolveBackingValue(call->args_[*slot]);
+    }
+    if (!IsBuiltinOp(call->op_->name_)) return BackingCallValue(call);
+  }
+  return {};
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::BackingCallValue(const CallPtr& call) const {
+  auto outputs = CollectCallOutputRoots(call);
+  if (!As<TupleType>(call->GetType())) return SelectReturnRootInfo(outputs, call->GetType());
+  // A plain call returning one tuple preserves that tuple. A Submit wraps it
+  // in the launch result, whose trailing TaskId has no storage roots.
+  if (outputs.size() == 1 && structural_equal(outputs[0].type, call->GetType())) {
+    return std::move(outputs[0].info);
+  }
+  auto elements = std::make_shared<std::vector<RootInfo>>();
+  elements->reserve(outputs.size());
+  for (auto& output : outputs) elements->push_back(std::move(output.info));
+  return {{}, false, elements};
+}
+
+BufferRootCollector::RootCandidates BufferRootCollector::ResolveStorageLeaves(RootCandidates pending) const {
   RootCandidates leaves;
   std::unordered_set<const Var*> seen;
   for (size_t cursor = 0; cursor < pending.size(); ++cursor) {
@@ -395,7 +440,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   const StorageKey key{program_, callee};
   auto cached = ctx.memo.find(key);
   if (cached == ctx.memo.end()) {
-    std::vector<std::vector<size_t>> returned(callee->return_types_.size());
+    std::vector<StorageReturnValue> returned(callee->return_types_.size());
     if (ctx.active.insert(key).second) {
       // Reuse the general return-binding utility, but collect *backing* roots:
       // its complete-parameter writeback test intentionally excludes partial views.
@@ -405,20 +450,24 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       std::unordered_map<const Var*, size_t> positions;
       for (size_t i = 0; i < callee->params_.size(); ++i) positions.emplace(callee->params_[i].get(), i);
       const auto bindings = return_lineage::AnalyzeReturnedValues(callee, program_);
-      for (size_t i = 0; i < bindings.size() && i < returned.size(); ++i) {
-        if (!bindings[i].value) {
-          const auto& parameter = bindings[i].param_index;
-          if (parameter.has_value()) returned[i].push_back(parameter.value());
-          continue;
+      const auto summarize = [&](const auto& self, const RootInfo& value) -> StorageReturnValue {
+        StorageReturnValue result;
+        if (value.elements) {
+          result.elements.reserve(value.elements->size());
+          for (const auto& element : *value.elements) result.elements.push_back(self(self, element));
         }
-        auto value = AsVarLike(bindings[i].value);
-        if (!value) {
-          value = std::make_shared<Var>("storage_return", bindings[i].type, call->span_);
-          nested.RecordAssignmentRoots(std::make_shared<AssignStmt>(value, bindings[i].value, call->span_));
-        }
-        for (const Var* root : nested.ResolveStorageLeaves(value.get())) {
+        for (const Var* root : nested.ResolveStorageLeaves(value.roots)) {
           auto parameter = positions.find(root);
-          if (parameter != positions.end()) returned[i].push_back(parameter->second);
+          if (parameter != positions.end()) result.params.push_back(parameter->second);
+        }
+        return result;
+      };
+      for (size_t i = 0; i < bindings.size() && i < returned.size(); ++i) {
+        const auto& binding = bindings[i];
+        if (binding.value) {
+          returned[i] = summarize(summarize, nested.ResolveBackingValue(binding.value));
+        } else if (binding.param_index) {
+          returned[i].params.push_back(*binding.param_index);
         }
       }
       ctx.active.erase(key);
@@ -426,7 +475,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       // Cyclic user call graphs are diagnosed by the pass. Until then, unknown
       // recursion must not erase a possible captured-storage dependency.
       for (auto& result : returned) {
-        for (size_t i = 0; i < callee->params_.size(); ++i) result.push_back(i);
+        for (size_t i = 0; i < callee->params_.size(); ++i) result.params.push_back(i);
       }
     }
     cached = ctx.memo.emplace(key, std::move(returned)).first;
@@ -437,20 +486,32 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   const size_t prefix = call->args_.size() >= ctx_count ? call->args_.size() - ctx_count : 0;
   const size_t gap =
       callee->params_.size() >= call->args_.size() ? callee->params_.size() - call->args_.size() : 0;
-  for (size_t i = 0; i < cached->second.size(); ++i) {
-    RootInfo info{{}, false};
+  const auto bind = [&](const auto& self, const StorageReturnValue& result) -> RootInfo {
+    RootInfo info;
+    if (!result.elements.empty()) {
+      auto elements = std::make_shared<std::vector<RootInfo>>();
+      elements->reserve(result.elements.size());
+      for (const auto& element : result.elements) elements->push_back(self(self, element));
+      info.elements = elements;
+    }
     std::unordered_set<const Var*> seen;
-    for (const size_t parameter : cached->second[i]) {
+    for (const size_t parameter : result.params) {
       if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
       const size_t argument = parameter < prefix ? parameter : parameter - gap;
       if (argument >= call->args_.size()) continue;
-      for (const Var* root : ResolveRootCandidates(call->args_[argument])) {
+      auto actual = ResolveBackingValue(call->args_[argument]);
+      if (actual.elements) info.elements = std::move(actual.elements);
+      for (const Var* root : actual.roots) {
         if (seen.insert(root).second) info.roots.push_back(root);
       }
-      info.ambiguous = info.ambiguous || IsAmbiguous(call->args_[argument]);
+      info.ambiguous = info.ambiguous || actual.ambiguous;
     }
     info.ambiguous = info.ambiguous || info.roots.size() > 1;
-    roots.push_back(OutputRoot{std::move(info), callee->return_types_[i]});
+    return info;
+  };
+  roots.reserve(cached->second.size());
+  for (size_t i = 0; i < cached->second.size(); ++i) {
+    roots.push_back(OutputRoot{bind(bind, cached->second[i]), callee->return_types_[i]});
   }
   return roots;
 }
