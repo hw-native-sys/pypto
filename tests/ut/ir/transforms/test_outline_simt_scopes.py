@@ -693,5 +693,51 @@ def test_carry_initialization_checks_expression_seeds_and_yields(kind, seed, yie
             passes.outline_simt_scopes()(before)
 
 
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("source", ["src", "pl.tile.create([1, 32], pl.FP32)"])
+def test_tuple_projection_seed_cannot_hide_storage_permissions(kind, source):
+    loop = (
+        "for i, (carried,) in pl.range(3, init_values=(pair[0],)):"
+        if kind == "for"
+        else "for (carried,) in pl.while_(init_values=(pair[0],)):\n    pl.cond(n > 0)"
+    )
+    before = program(f"""
+pair = ({source},)
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(carried, (0, 0), pl.const(1.0, pl.FP32))
+    result = pl.yield_(carried)
+""")
+    # Neither an In Tensor hidden in a tuple nor an uninitialized Tile can
+    # acquire writable, initialized storage just by becoming an IterArg.
+    with pytest.raises((Error, ValueError), match="initialized storage"):
+        passes.outline_simt_scopes()(before)
+
+
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("expression", ["pair[0]", "pl.add(pair[0], 1.0)"])
+def test_tuple_projection_yield_cannot_supply_a_storage_proof(kind, expression):
+    loop = (
+        "for i, (carried,) in pl.range(3, init_values=(seed,)):"
+        if kind == "for"
+        else "for (carried,) in pl.while_(init_values=(seed,)):\n    pl.cond(n > 0)"
+    )
+    before = program(f"""
+seed = pl.tile.load(src, [0, 0], [1, 32])
+empty = pl.tile.create([1, 32], pl.FP32)
+pair = (empty,)
+empty = pl.tile.load(src, [0, 0], [1, 32])
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        value = pl.simt.load(carried, (0, 0))
+        pl.simt.store(dst, (0, 0), value)
+    result = pl.yield_({expression})
+""")
+    # The tuple retains the old uninitialized allocation after its source Var
+    # receives a fresh load; resolving just the source spelling would be unsafe.
+    with pytest.raises((Error, ValueError), match="initialized storage on every iteration"):
+        passes.outline_simt_scopes()(before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
