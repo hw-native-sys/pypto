@@ -23,6 +23,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -116,6 +117,9 @@ Pass OutlineGraphScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     std::vector<FunctionPtr> new_functions;
     std::vector<FunctionPtr> all_outlined_functions;
+    // The outliners share the immutable input program. Keep its callee
+    // summaries alive across functions as well as across regions.
+    buffer_root::ScopedStorageRootCache storage_cache;
 
     // Program-wide set of outlined function names, seeded with the existing
     // function names and shared across every ScopeOutliner so that two regions

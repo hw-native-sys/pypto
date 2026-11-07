@@ -758,6 +758,13 @@ std::vector<ReturnedValueBinding> AnalyzeReturnedValues(const FunctionPtr& func,
   if (ret && !ret->value_.empty()) {
     const auto& values = ret->value_;
     auto tuple_type = values.size() == 1 ? As<TupleType>(values[0]->GetType()) : nullptr;
+    auto declared_tuple = result.size() == 1 ? As<TupleType>(result[0].type) : nullptr;
+    if (declared_tuple && values.size() > 1 && declared_tuple->types_.size() == values.size()) {
+      // A tuple literal is lowered to multiple operands even when the
+      // function declares a single tuple-valued result.
+      result[0].value = std::make_shared<MakeTuple>(values, ret->span_);
+      return result;
+    }
     if (result.size() > 1 && tuple_type && tuple_type->types_.size() == result.size()) {
       // A forwarded tuple describes several flat return positions, but its
       // original expression remains the source of every analysis projection.

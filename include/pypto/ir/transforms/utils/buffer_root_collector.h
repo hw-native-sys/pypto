@@ -12,19 +12,43 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <cstddef>
+#include <functional>
+#include <map>
+#include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace buffer_root {
+
+struct StorageFormalPath;
+struct StorageReturnValue;
+
+/// Share proven storage-return summaries while an unchanged Program is analyzed.
+/// Nested collectors reuse the scope; the outermost exit releases all cached IR.
+class ScopedStorageRootCache {
+ public:
+  ScopedStorageRootCache();
+  ~ScopedStorageRootCache();
+  ScopedStorageRootCache(const ScopedStorageRootCache&) = delete;
+  ScopedStorageRootCache& operator=(const ScopedStorageRootCache&) = delete;
+
+ private:
+  return_lineage::ScopedTraceCache trace_cache_;
+};
 
 /// What SelectReturnRoot does for a single-return call when the owning buffer
 /// cannot be pinned to one Out/InOut arg by shape+dtype (no match, or two+
@@ -39,6 +63,10 @@ enum class AmbiguousRootPolicy {
   /// dropped — a missing root silently degrades to OutputExisting.
   kFirstOutput,
 };
+
+/// Whether a view is a distinct logical footprint or shares its backing storage.
+/// Fusion keeps the default footprint policy; direction inference follows storage.
+enum class ViewRootPolicy { kLogicalFootprint, kBackingStorage };
 
 /**
  * @brief Determine the canonical buffer root for every Var in a function body.
@@ -58,7 +86,8 @@ enum class AmbiguousRootPolicy {
 class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
-                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip);
+                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
+                               ViewRootPolicy view_policy = ViewRootPolicy::kLogicalFootprint);
 
   void Initialize(const std::vector<VarPtr>& params);
 
@@ -85,6 +114,42 @@ class BufferRootCollector : public IRVisitor {
   }
 
  protected:
+  using RootCandidates = std::vector<const Var*>;
+
+  // A single operand evaluation observes a stable set of SSA bindings.
+  // Nested accesses share the memo; the outermost scope clears it.
+  class BackingValueMemoScope {
+   public:
+    explicit BackingValueMemoScope(BufferRootCollector& collector);
+    ~BackingValueMemoScope();
+    BackingValueMemoScope(const BackingValueMemoScope&) = delete;
+    BackingValueMemoScope& operator=(const BackingValueMemoScope&) = delete;
+
+   private:
+    BufferRootCollector& collector_;
+  };
+
+  // Effect analyses visit RHS uses before installing the new binding and skip
+  // descriptor-only yields, while sharing all storage/control-flow propagation.
+  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
+  void RecordAssignmentRoots(const AssignStmtPtr& assign);
+  void VisitBackingStorageOperand(const ExprPtr& expr, const std::function<void(const Var*)>& record_read);
+  [[nodiscard]] RootCandidates ResolveBackingContentRoots(const ExprPtr& expr);
+
+  // Symbolic storage identities share edges until the consumer propagates effects.
+  std::unordered_map<const Var*, RootCandidates> storage_successors_;
+
+  // Propagate content effects through local storage edges and shared callees.
+  void PropagateStorageEffects(std::unordered_map<const Var*, unsigned char>& effects);
+  void RecordSimtLaunchRoots(const SimtLaunchStmtPtr& launch);
+  void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
+  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
+      const std::vector<IterArgPtr>& iter_args);
+  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<IterArgPtr>& iter_args,
+                             const std::vector<VarPtr>& return_vars,
+                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run,
+                             bool may_repeat = true);
+
   void VisitStmt_(const IfStmtPtr& if_stmt) override;
   void VisitStmt_(const ForStmtPtr& for_stmt) override;
   void VisitStmt_(const WhileStmtPtr& while_stmt) override;
@@ -92,11 +157,33 @@ class BufferRootCollector : public IRVisitor {
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override;
 
  private:
-  using RootCandidates = std::vector<const Var*>;
-
+  struct LoopTupleRoots;
+  struct BoundStorageTuple;
+  struct StorageCallInstance;
   struct RootInfo {
     RootCandidates roots;
-    bool ambiguous;
+    bool ambiguous = false;
+    std::shared_ptr<const std::vector<RootInfo>> elements = nullptr;
+    LoopTupleRoots* loop_tuple = nullptr;
+    BoundStorageTuple* bound_tuple = nullptr;
+
+    [[nodiscard]] bool IsTuple() const { return elements || loop_tuple || bound_tuple; }
+  };
+
+  // Own loop tuple nodes in the collector; source edges can be cyclic.
+  // A tuple field receives a distinct identity when it is first projected.
+  struct LoopTupleRoots {
+    std::shared_ptr<const TupleType> type;
+    Span span;
+    std::vector<RootInfo> sources;
+    std::unordered_map<size_t, RootInfo> projected;
+    const Var* aggregate = nullptr;
+    const Var* formal = nullptr;
+  };
+
+  struct FormalReference {
+    const Var* parameter;
+    std::shared_ptr<const StorageFormalPath> path;
   };
 
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
@@ -108,13 +195,29 @@ class BufferRootCollector : public IRVisitor {
   };
 
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
+  [[nodiscard]] RootInfo ResolveBackingValue(const ExprPtr& expr);
+  [[nodiscard]] RootInfo ResolveBackingValueUncached(const ExprPtr& expr);
+  [[nodiscard]] RootInfo MergeBackingValues(const RootInfo& lhs, const RootInfo& rhs, const TypePtr& type,
+                                            const Span& span);
+  [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call);
+  [[nodiscard]] RootInfo MakeLoopStorageValue(const TypePtr& type, const Span& span, const Var* identity);
+  void LinkLoopStorageValues(const RootInfo& target, const RootInfo& source);
+  [[nodiscard]] RootInfo ProjectBackingElement(const RootInfo& tuple, size_t index);
+  [[nodiscard]] RootCandidates CollectBackingContentRoots(const RootInfo& value);
+  [[nodiscard]] const Var* AggregateLoopTupleRoots(LoopTupleRoots& tuple);
+  [[nodiscard]] const Var* AggregateExplicitTupleRoots(
+      const std::shared_ptr<const std::vector<RootInfo>>& elements);
+  [[nodiscard]] RootInfo BindStorageValue(StorageCallInstance& instance, const StorageReturnValue& value);
+  [[nodiscard]] RootInfo BindStorageField(const RootInfo& actual,
+                                          const std::shared_ptr<const StorageFormalPath>& path);
+  [[nodiscard]] RootInfo ProjectStorageRoot(StorageCallInstance& instance, size_t index);
+  [[nodiscard]] const RootInfo& ResolveStorageBinding(StorageCallInstance& instance, size_t binding);
+  [[nodiscard]] const RootInfo& ResolveStorageParameter(StorageCallInstance& instance, size_t parameter);
+  [[nodiscard]] RootInfo ForwardStorageTuple(BoundStorageTuple& tuple);
+  [[nodiscard]] StorageCallInstance& BindNestedStorageCall(StorageCallInstance& parent, size_t index);
+  void RecordBackingValue(const VarPtr& var, const RootInfo& value);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
-  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
-  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
-      const std::vector<IterArgPtr>& iter_args);
-  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
-                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run);
-  [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
+  [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call);
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
   // SubWorker group may take an InOut scratch (e.g. a matmul's kv_final)
@@ -130,10 +233,34 @@ class BufferRootCollector : public IRVisitor {
   // value aliases its source buffer with the same logical shape and dtype.
   [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
 
+  [[nodiscard]] std::vector<OutputRoot> CollectProvenReturnRoots(const CallPtr& call);
+
+  std::unique_ptr<ScopedStorageRootCache> storage_cache_;
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
+  ViewRootPolicy view_policy_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
+  struct StorageCallProjection {
+    StorageCallInstance* instance;
+    size_t node;
+  };
+  std::vector<VarPtr> storage_proxy_vars_;
+  std::vector<std::shared_ptr<StorageCallInstance>> storage_calls_;
+  std::unordered_map<std::shared_ptr<const std::vector<RootInfo>>, const Var*> explicit_tuple_contents_;
+  using TupleElements = std::shared_ptr<const std::vector<RootInfo>>;
+  std::map<std::tuple<TupleElements, TupleElements, TypePtr>, RootInfo> merged_tuple_roots_;
+  using StorageTupleIdentity = std::variant<std::shared_ptr<const std::vector<RootInfo>>,
+                                            const LoopTupleRoots*, const BoundStorageTuple*>;
+  std::unordered_map<StorageTupleIdentity,
+                     std::unordered_map<std::shared_ptr<const StorageFormalPath>, RootInfo>>
+      storage_field_projections_;
+  std::unordered_map<const Var*, StorageCallProjection> storage_call_roots_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
+  std::unordered_map<const Var*, RootInfo> backing_tuple_roots_;
+  std::vector<std::unique_ptr<LoopTupleRoots>> loop_tuple_roots_;
+  std::unordered_map<const Var*, FormalReference> formal_projections_;
+  size_t backing_value_depth_ = 0;
+  std::unordered_map<ExprPtr, RootInfo> backing_value_memo_;
 };
 
 }  // namespace buffer_root

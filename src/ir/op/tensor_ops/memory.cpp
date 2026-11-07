@@ -55,8 +55,8 @@ TypePtr DeduceTensorReadType(const std::vector<ExprPtr>& args,
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.read requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
-             args[0]->span_)
+  const auto& tensor_view = tensor_type->tensor_view_;
+  CHECK_SPAN(!tensor_view.has_value() || !IsMxTensorLayout(tensor_view.value().layout), args[0]->span_)
       << "tensor.read does not support MX-layout tensors";
 
   // Second argument must be TupleType (indices)
@@ -169,8 +169,8 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type) << "tensor.slice requires first argument to be a TensorType or DistributedTensorType, "
                         "but got "
                      << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
-             args[0]->span_)
+  const auto& tensor_view = tensor_type->tensor_view_;
+  CHECK_SPAN(!tensor_view.has_value() || !IsMxTensorLayout(tensor_view.value().layout), args[0]->span_)
       << "tensor.slice does not support MX-layout tensors";
 
   // Second argument must be TupleType (shape)
@@ -853,6 +853,8 @@ REGISTER_OP("tensor.dim")
     .set_description("Extract a shape dimension from a tensor as a scalar value")
     .add_argument("tensor", "Input tensor (TensorType)")
     .add_argument("axis", "Dimension index (ConstInt, supports negative indexing)")
+    // Only the descriptor's extent is queried; no tensor contents are loaded.
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorDimType(args, kwargs);
@@ -872,8 +874,8 @@ TypePtr DeduceTensorWriteType(const std::vector<ExprPtr>& args,
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.write requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
-  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
-             args[0]->span_)
+  const auto& tensor_view = tensor_type->tensor_view_;
+  CHECK_SPAN(!tensor_view.has_value() || !IsMxTensorLayout(tensor_view.value().layout), args[0]->span_)
       << "tensor.write does not support MX-layout tensors";
 
   auto indices_type = As<TupleType>(args[1]->GetType());
