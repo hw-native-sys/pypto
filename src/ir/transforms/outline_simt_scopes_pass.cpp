@@ -145,6 +145,18 @@ class RegionControlChecker : public IRVisitor {
   size_t yield_depth_ = 0;
 };
 
+// Only views and handle copies inherit storage permission. Tile arithmetic
+// returns a fresh value even when a later memory planner reuses an operand.
+std::optional<size_t> StorageAliasedArgIndex(const CallPtr& call) {
+  auto alias = ResultAliasedArgIndex(call);
+  if (As<TileType>(call->GetType())) alias = std::nullopt;
+  if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tensor.slice") ||
+      IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view")) {
+    alias = 0;
+  }
+  return alias;
+}
+
 // A conservative storage-alias partition is built once, before mutation. This
 // handles pre-SSA reassignments and branch/loop joins without choosing a single
 // reaching definition. Union by rank and path compression keep it near-linear.
@@ -180,38 +192,9 @@ class StoragePermissions : public IRVisitor {
       if (!inserted && it->second != tuple) it->second = nullptr;
       return;
     }
-    if (!IsStorage(stmt->var_)) return;
-    if (auto source = AsVarLike(stmt->value_)) {
-      Unite(stmt->var_, source);
-    } else if (auto projection = As<TupleGetItemExpr>(stmt->value_)) {
-      auto tuple = ResolveTuple(projection->tuple_);
-      auto source = tuple && projection->index_ >= 0 &&
-                            static_cast<size_t>(projection->index_) < tuple->elements_.size()
-                        ? AsVarLike(tuple->elements_[projection->index_])
-                        : nullptr;
-      if (source) {
-        Unite(stmt->var_, source);
-      } else {
-        nodes_[Root(stmt->var_.get())].unknown_provenance = true;
-      }
-    } else if (auto call = As<Call>(stmt->value_)) {
-      if (As<GlobalVar>(call->op_)) nodes_[Root(stmt->var_.get())].unknown_provenance = true;
-      if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
-        auto& root = nodes_[Root(stmt->var_.get())];
-        root.uninitialized = true;
-      } else {
-        auto alias = ResultAliasedArgIndex(call);
-        // Tile arithmetic returns a fresh value even if a later memory planner
-        // may reuse an operand. Only views and handle copies inherit permission.
-        if (As<TileType>(stmt->var_->GetType())) alias = std::nullopt;
-        if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tensor.slice") ||
-            IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view")) {
-          alias = 0;
-        }
-        if (alias && *alias < call->args_.size()) Unite(stmt->var_, AsVarLike(call->args_[*alias]));
-      }
-    }
+    UniteSource(stmt->var_, stmt->value_);
   }
+
   void VisitStmt_(const ForStmtPtr& stmt) override {
     Carries(stmt->iter_args_, stmt->return_vars_);
     IRVisitor::VisitStmt_(stmt);
@@ -269,9 +252,40 @@ class StoragePermissions : public IRVisitor {
     parent.unknown_provenance |= child.unknown_provenance;
     parent.uninitialized |= child.uninitialized;
   }
+  void UniteSource(const VarPtr& target, const ExprPtr& value) {
+    if (!IsStorage(target)) return;
+    if (auto source = AsVarLike(value)) {
+      Unite(target, source);
+    } else if (auto projection = As<TupleGetItemExpr>(value)) {
+      auto tuple = ResolveTuple(projection->tuple_);
+      auto source = tuple && projection->index_ >= 0 &&
+                            static_cast<size_t>(projection->index_) < tuple->elements_.size()
+                        ? AsVarLike(tuple->elements_[projection->index_])
+                        : nullptr;
+      if (source) {
+        Unite(target, source);
+      } else {
+        nodes_[Root(target.get())].unknown_provenance = true;
+      }
+    } else if (auto call = As<Call>(value)) {
+      if (As<GlobalVar>(call->op_)) {
+        nodes_[Root(target.get())].unknown_provenance = true;
+      } else if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
+        nodes_[Root(target.get())].uninitialized = true;
+      } else if (auto alias = StorageAliasedArgIndex(call); alias && *alias < call->args_.size()) {
+        // Calls have not been flattened yet. Follow nested views for assignments,
+        // seeds and yields so wrapping an In storage cannot grant write access.
+        UniteSource(target, call->args_[*alias]);
+      } else if (!As<TileType>(call->GetType())) {
+        nodes_[Root(target.get())].unknown_provenance = true;
+      }
+    } else {
+      nodes_[Root(target.get())].unknown_provenance = true;
+    }
+  }
   void Carries(const std::vector<IterArgPtr>& args, const std::vector<VarPtr>& results) {
     for (size_t i = 0; i < args.size(); ++i) {
-      Unite(args[i], AsVarLike(args[i]->initValue_));
+      UniteSource(args[i], args[i]->initValue_);
       if (i < results.size()) Unite(results[i], args[i]);
     }
   }
@@ -283,7 +297,7 @@ class StoragePermissions : public IRVisitor {
     }
     if (auto yield = As<YieldStmt>(tail)) {
       for (size_t i = 0; i < results.size() && i < yield->value_.size(); ++i) {
-        Unite(results[i], AsVarLike(yield->value_[i]));
+        UniteSource(results[i], yield->value_[i]);
       }
     }
   }
@@ -569,12 +583,7 @@ class ScopeOutliner : public IRMutator {
         return *binding;
       }
     } else if (auto call = As<Call>(expr)) {
-      auto alias = ResultAliasedArgIndex(call);
-      if (As<TileType>(call->GetType())) alias = std::nullopt;
-      if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) || IsOp(call, "tensor.slice") ||
-          IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view")) {
-        alias = 0;
-      }
+      auto alias = StorageAliasedArgIndex(call);
       if (alias && *alias < call->args_.size()) {
         auto source = ResolveStorage(call->args_[*alias]);
         // Only unchanged storage geometry can prove an entire allocation
@@ -625,7 +634,7 @@ class ScopeOutliner : public IRMutator {
       void VisitExpr_(const CallPtr& call) override {
         if (As<TileType>(call->GetType()) || AsTensorTypeLike(call->GetType())) {
           if (As<GlobalVar>(call->op_) || IsOp(call, "tile.create") || IsOp(call, "tensor.create") ||
-              (!As<TileType>(call->GetType()) && !ResultAliasedArgIndex(call))) {
+              (!As<TileType>(call->GetType()) && !StorageAliasedArgIndex(call))) {
             initialized = false;
           }
         }

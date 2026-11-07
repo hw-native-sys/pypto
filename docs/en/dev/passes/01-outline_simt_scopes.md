@@ -52,7 +52,9 @@ Storage returned by a function call or projected from a rebound tuple is rejecte
 when its provenance cannot be proved. Storage projections from tuples also do not
 supply initialization proofs in loop seeds or yields, including when nested in
 Tile arithmetic: a tuple may retain an older handle after its source is rebound.
-Capture or carry the original named storage instead.
+Capture or carry the original named storage instead. View expressions in seeds,
+yields and assignments inherit their source permissions, including nested views;
+fresh Tile arithmetic results retain independent storage permissions.
 
 ## Legality and resources
 
