@@ -31,8 +31,9 @@ report statically decidable problems against the source program earlier.
 Materialized `CommCtxType` parameters use input scalar slots containing device
 communication-context pointers. Their `InheritableScalar` origin is preserved
 when forwarded to recorded tasks, so replay refreshes the pointer for each
-invocation. They count toward the scalar boundary limit; unrelated pointer,
-tile, and tuple types remain unsupported.
+invocation. Step A replaces local aliases of a context with the original
+boundary parameter. These contexts count toward the scalar boundary limit;
+unrelated pointer, tile, and tuple types remain unsupported.
 
 ## Step A — derived boundary scalars
 
