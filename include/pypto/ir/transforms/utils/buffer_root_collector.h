@@ -210,6 +210,7 @@ class BufferRootCollector : public IRVisitor {
                                           const std::shared_ptr<const StorageFormalPath>& path);
   [[nodiscard]] RootInfo ProjectStorageRoot(StorageCallInstance& instance, size_t index);
   [[nodiscard]] const RootInfo& ResolveStorageBinding(StorageCallInstance& instance, size_t binding);
+  [[nodiscard]] const RootInfo& ResolveStorageParameter(StorageCallInstance& instance, size_t parameter);
   [[nodiscard]] RootInfo ForwardStorageTuple(BoundStorageTuple& tuple);
   [[nodiscard]] StorageCallInstance& BindNestedStorageCall(StorageCallInstance& parent, size_t index);
   void RecordBackingValue(const VarPtr& var, const RootInfo& value);
