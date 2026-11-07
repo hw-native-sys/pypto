@@ -80,6 +80,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/alloc_batching.h"
 #include "pypto/ir/transforms/utils/graph_replay_invariant.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -125,6 +126,9 @@ struct HoistedValue {
 struct GraphPlan {
   std::string name;
   std::vector<HoistedValue> hoisted;
+  // Identity-only compiler proof, computed from original expressions before
+  // they become scalar parameters. Original runtime formals are never seeded.
+  std::unordered_set<const Var*> proven_fixed_scalar_params;
   /// `alias = <var>` bindings, in definition order, alias -> what it names.
   ///
   /// Not hoisted — a bare reference names something that already has a binding —
@@ -614,8 +618,9 @@ class DerivedScalarCollector : public IRVisitor {
 /// rewrite that did not happen, which this must report rather than wave through.
 class UnhoistableScalarChecker : public IRVisitor {
  public:
-  UnhoistableScalarChecker(const FunctionPtr& func, const std::unordered_set<const Var*>& hoistable)
-      : func_(func), hoistable_(hoistable), invariant_(func) {
+  UnhoistableScalarChecker(const FunctionPtr& func, const std::unordered_set<const Var*>& hoistable,
+                           const std::unordered_set<const Var*>& proven_fixed_scalar_params)
+      : func_(func), hoistable_(hoistable), invariant_(func, proven_fixed_scalar_params) {
     for (const auto& param : func->params_) {
       if (IsScalarType(param->GetType())) scalar_params_.insert(param.get());
     }
@@ -878,8 +883,11 @@ class ExprSubstituter : public IRMutator {
 /// limit stricter, never miss a violation.
 class GraphNodeCounter : public IRVisitor {
  public:
-  GraphNodeCounter(FunctionPtr func, ProgramPtr program)
-      : func_(std::move(func)), program_(std::move(program)) {}
+  GraphNodeCounter(FunctionPtr func, ProgramPtr program, const std::unordered_set<const Var*>& fixed_scalars)
+      : func_(std::move(func)), program_(std::move(program)), invariant_(func_, fixed_scalars) {
+    invariant_.SeedBoundaryDimensionSymbols(func_);
+    invariant_.Collect(func_->body_);
+  }
 
   [[nodiscard]] size_t count() const { return count_; }
 
@@ -963,11 +971,13 @@ class GraphNodeCounter : public IRVisitor {
 
   void VisitStmt_(const IfStmtPtr& op) override {
     const size_t launched = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
-    CHECK_SPAN(launched == 0, op->span_)
+    CHECK_SPAN(launched == 0 || invariant_.IsInvariant(op->condition_), op->span_)
         << "Graph function '" << func_->name_
         << "' launches tasks inside a conditional. Which branch ran on the first call is baked into "
            "the recording and replayed for every later call, so the condition would stop having any "
            "effect. Hoist the branch to the call site and give each arm its own Graph function.";
+    // Sum both arms conservatively; a fixed condition selects at most this many.
+    count_ = SatAdd(count_, launched);
   }
 
  private:
@@ -984,6 +994,7 @@ class GraphNodeCounter : public IRVisitor {
 
   FunctionPtr func_;
   ProgramPtr program_;
+  graph_replay::ReplayInvariantSet invariant_;
   size_t count_ = 0;
   alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   std::unordered_set<const Stmt*> batched_;
@@ -1306,9 +1317,15 @@ class GraphCallSiteChecker : public IRVisitor {
   DerivedScalarCollector collector(func, program);
   collector.VisitStmt(func->body_);
 
-  auto add = [&plan](const VarPtr& var, const ExprPtr& value, ParamDirection dir, bool is_tensor) {
+  graph_replay::ReplayInvariantSet original_invariants(func);
+  original_invariants.Collect(func->body_);
+  auto add = [&plan, &original_invariants](const VarPtr& var, const ExprPtr& value, ParamDirection dir,
+                                           bool is_tensor) {
     auto param = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
     plan.hoisted.push_back(HoistedValue{param, var, value, dir, is_tensor});
+    if (!is_tensor && original_invariants.IsInvariant(var)) {
+      plan.proven_fixed_scalar_params.insert(param.get());
+    }
   };
 
   // Step B: a hoisted view takes the direction of the boundary tensor it views.
@@ -1563,8 +1580,100 @@ class CallSiteExtender : public IRMutator {
   int next_local_ = 0;
 };
 
-[[nodiscard]] ProgramPtr TransformProgram(const ProgramPtr& program) {
-  if (!program) return program;
+// Only return-only If results are admitted here. Giving a merged name general
+// boundary provenance would also admit views of it; DerivedScalarCollector does
+// not yet prove those views' offsets. Non-return uses deliberately keep the old
+// rejection until that separate proof exists.
+class ReturnOnlyPhiCollector : public IRVisitor {
+ public:
+  std::vector<VarPtr> candidates;
+  std::unordered_set<const Var*> non_return_uses;
+
+ protected:
+  void VisitStmt_(const ReturnStmtPtr&) override {}
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    VisitStmt(op->then_body_);
+    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+    for (const auto& var : op->return_vars_) {
+      if (var && AsTensorTypeLike(var->GetType())) candidates.push_back(var);
+    }
+    // return_vars are definitions, not reads of their result.
+  }
+
+  void VisitExpr_(const VarPtr& op) override { non_return_uses.insert(op.get()); }
+};
+
+class ReturnOnlyPhiRewriter : public IRMutator {
+ public:
+  explicit ReturnOnlyPhiRewriter(std::unordered_map<const Var*, VarPtr> aliases)
+      : aliases_(std::move(aliases)) {}
+
+ protected:
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    std::vector<ExprPtr> values = op->value_;
+    bool changed = false;
+    for (auto& value : values) {
+      if (auto var = AsVarLike(value)) {
+        auto it = aliases_.find(var.get());
+        if (it != aliases_.end()) {
+          value = it->second;
+          changed = true;
+        }
+      }
+    }
+    return changed ? std::make_shared<ReturnStmt>(std::move(values), op->span_) : op;
+  }
+
+ private:
+  std::unordered_map<const Var*, VarPtr> aliases_;
+};
+
+[[nodiscard]] ProgramPtr CanonicalizeReturnOnlyGraphPhis(const ProgramPtr& program) {
+  // The input program stays unchanged while every Graph queries return
+  // lineage. Share callee summaries across those queries.
+  return_lineage::ScopedTraceCache trace_cache;
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions;
+  bool changed = false;
+  for (const auto& [gvar, func] : program->functions_) {
+    functions[gvar] = func;
+    if (!func || !func->body_ || func->func_type_ != FunctionType::Graph) continue;
+    ReturnOnlyPhiCollector collector;
+    collector.VisitStmt(func->body_);
+    if (collector.candidates.empty()) continue;
+    // This API requires both branches to resolve to the same complete parameter
+    // descriptor. Views, fresh buffers and conflicting captures remain unknown;
+    // do not substitute the weaker backing-buffer identity analysis here.
+    const auto roots = return_lineage::TraceToParamIndicesForOutlining(
+        collector.candidates, func->body_, func->params_, program, /*trace_if_merges=*/true);
+    std::unordered_map<const Var*, VarPtr> aliases;
+    for (size_t i = 0; i < collector.candidates.size() && i < roots.size(); ++i) {
+      const auto& candidate = collector.candidates[i];
+      if (collector.non_return_uses.count(candidate.get()) != 0 || !roots[i].has_value()) continue;
+      const size_t index = roots[i].value();  // NOLINT(bugprone-unchecked-optional-access)
+      if (index >= func->param_directions_.size() || func->param_directions_[index] == ParamDirection::In)
+        continue;
+      aliases.emplace(candidate.get(), func->params_[index]);
+    }
+    if (aliases.empty()) continue;
+    ReturnOnlyPhiRewriter rewriter(std::move(aliases));
+    auto body = rewriter.VisitStmt(func->body_);
+    if (body == func->body_) continue;
+    auto updated = MutableCopy(func);
+    updated->body_ = std::move(body);
+    functions[gvar] = updated;
+    changed = true;
+  }
+  if (!changed) return program;
+  auto updated_program = MutableCopy(program);
+  updated_program->functions_ = std::move(functions);
+  return updated_program;
+}
+
+[[nodiscard]] ProgramPtr TransformProgram(const ProgramPtr& input_program) {
+  if (!input_program) return input_program;
+  ProgramPtr program = input_program;
 
   bool has_graph = false;
   for (const auto& [gvar, func] : program->functions_) {
@@ -1574,6 +1683,8 @@ class CallSiteExtender : public IRMutator {
     }
   }
   if (!has_graph) return program;
+
+  program = CanonicalizeReturnOnlyGraphPhis(program);
 
   // A Graph only exists under host_build_graph. Codegen emits `GraphTaskArgs`
   // and `rt_submit_graph` unconditionally, and the tensormap_and_ringbuffer
@@ -1641,6 +1752,8 @@ class CallSiteExtender : public IRMutator {
 
   CallSiteExtender extender(with_signatures, plans);
   auto result = extender.VisitProgram(with_signatures);
+  const auto fixed_topology_scalars =
+      graph_replay::ReplayInvariantSet::IndexFixedScalarsFromCallSites(result);
 
   // Step A, part 2 and Step D, part 2: run on the *rewritten* program, so what
   // is checked is what codegen will see.
@@ -1654,7 +1767,10 @@ class CallSiteExtender : public IRMutator {
       // user's own line.
       CheckGraphSignature(func);
       std::unordered_set<const Var*> hoistable;  // all hoistable values are now params
-      UnhoistableScalarChecker checker(func, hoistable);
+      const auto plan = plans.find(func->name_);
+      const std::unordered_set<const Var*> no_fixed_scalars;
+      const auto& fixed = plan == plans.end() ? no_fixed_scalars : plan->second.proven_fixed_scalar_params;
+      UnhoistableScalarChecker checker(func, hoistable, fixed);
       checker.VisitStmt(func->body_);
       // Also after the rewrite: Step A turns a derived scalar into a parameter,
       // which does not make it replay-stable as a *launch spec* — only as an
@@ -1669,7 +1785,9 @@ class CallSiteExtender : public IRMutator {
       // re-derives the same count from this rewritten IR. The message still
       // names the user's own function: `ExtendGraphSignature` carries `name_`
       // and `span_` through unchanged.
-      GraphNodeCounter counter(func, result);
+      const auto& topology_scalars =
+          graph_replay::ReplayInvariantSet::FixedScalarsForGraph(fixed_topology_scalars, func);
+      GraphNodeCounter counter(func, result, topology_scalars);
       counter.VisitStmt(func->body_);
       CHECK_SPAN(counter.count() >= 1, func->span_)
           << "Graph function '" << func->name_
