@@ -1620,8 +1620,12 @@ std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
       {"fp4e2m1x2", "float4_e2m1fn_x2"},
       // Torch has no hifloat8 and no packed E1M2 dtype. Both are byte-sized
       // carriers whose IR shape is already the physical byte extent, so a uint8
-      // host buffer holds exactly the same bytes -- the same substitution
-      // CodegenBase::GetRuntimeDataTypeString makes for the runtime enum.
+      // host buffer holds exactly the same bytes. For FP4E1M2X2 this mirrors
+      // CodegenBase::GetRuntimeDataTypeString, which maps it to the same byte
+      // carrier for the runtime enum. HF8 has no arm there at all -- it falls
+      // through to DataType::UNKNOWN -- so the uint8 substitution for HF8 is
+      // specific to this distributed host allocator and must not be read as
+      // HF8 support in the non-distributed descriptor path.
       {"fp4e1m2x2", "uint8"},
       {"hf8", "uint8"},
   };
@@ -1668,6 +1672,15 @@ std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
   if (dtype == DataType::UINT32) return "UINT32";
   if (dtype == DataType::UINT64) return "UINT64";
   if (dtype == DataType::BOOL) return "BOOL";
+  // The pinned runtime enum has no FP8E5M2 and no FP4E1M2X2. Both are
+  // byte-sized carriers whose IR shape is already the physical byte extent, so
+  // a window of either is described as UINT8 and the identical bytes cross --
+  // the same substitution CodegenBase::GetRuntimeDataTypeString makes for the
+  // runtime descriptor. Without these a `pld.tensor.window(..., dtype=...)` of
+  // either dtype aborts codegen on the CHECK below, even though DeduceWindowType
+  // accepts it.
+  if (dtype == DataType::FP8E5M2) return "UINT8";
+  if (dtype == DataType::FP4E1M2X2) return "UINT8";
   CHECK(false) << "Unsupported DistributedTensor dtype for simpler.DataType mapping: " << dtype.ToString();
   return "FLOAT32";
 }

@@ -2270,17 +2270,23 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
-      # Every test step below runs pytest with --forked. pytest-forked imports
-      # torch in the PARENT and then forks a child per test, so the child
-      # inherits an intraop threadpool whose state did not survive the fork
-      # (pytorch#17199). On this 384-core runner the symptom is a child that
-      # hangs with no verdict until --max-time kills the whole step at 3600 s,
-      # taking every later step in the job with it. Capping the parent's
-      # threadpool to one thread before Python starts is the fix that
+      # Two of this job's test steps run pytest with --forked:
+      # mixed-kernel-tests-a5 and mx-tests-a5. vf-tests-a5 and both
+      # extended-register steps are serial and do not fork. pytest-forked
+      # imports torch in the PARENT and then forks a child per test, so the
+      # child inherits an intraop threadpool whose state did not survive the
+      # fork (pytorch#17199). On this 384-core runner the symptom is a child
+      # that hangs with no verdict until --max-time kills the whole step at
+      # 3600 s, taking every later step in the job with it. Capping the
+      # parent's threadpool to one thread before Python starts is the fix that
       # propagates across the fork; the same cap is set for the same reason on
       # pypto-lib-compile. It belongs here in the job env rather than inline in
       # a --run string, because task-submit starts the child from this
-      # environment.
+      # environment -- which does mean the three non-forked steps also run with
+      # single-threaded OpenMP. That is accepted: their host-side torch work is
+      # setup and comparison rather than throughput, and scoping the variable
+      # per step would leave the fix one omission away from being lost the next
+      # time a forking step is added here.
       OMP_NUM_THREADS: 1
     steps:
       - name: Fetch composite action definitions

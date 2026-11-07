@@ -133,6 +133,14 @@ E5M2 张量会被描述为 UINT8。
 `tensor.matmul_mx` 会在构建 IR 时就拒绝 E5M2 的 lhs 或 rhs，根本到不了字节载体这一步。
 请用该载体搬运 E5M2 数据，并在 MX 矩阵乘消费它之前先转成 `pl.FP8E4M3FN`。
 
+有一种分布式签名会被直接拒绝：**HOST `SubWorker` 不能声明 `FP8E5M2` 的张量参数**。
+生成的接收侧解包只按 wire descriptor 选择 torch dtype，而 E5M2 在 wire 上叫 UINT8，
+于是回调体拿到的会是装着原始字节码的 `torch.uint8` —— 编码后的 `1.0` 会被读成 `60.0`，
+而且不会报错。因此代码生成阶段就会抛出 `NotImplementedError` 并指明是哪个参数。两种受支持
+的写法：把张量交给 chip kernel（它保留声明的元素类型）；或者把参数声明成 `pl.UINT8`，
+在回调体内用 `.view(torch.float8_e5m2)` 重新解释。`pl.FP4E1M2X2` 不受影响 —— torch 根本
+没有对应的 dtype，UINT8 是它忠实的 host 表示，而不是有损的替代。
+
 ### 影响派发的 `RunConfig` 字段
 
 `RunConfig` 同时携带编译侧与运行时侧设置；编译侧那些见[上一页](00-compile.md)。派发时要紧的是：

@@ -12,6 +12,7 @@
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import codegen, ir, passes
@@ -910,4 +911,49 @@ def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INPUT, callables, "chip", 0\)', code)
     assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1\)', code)
     assert code.count(".add_scalar(") == 1
+    compile(code, "host_orch.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expected_enum"),
+    [
+        (pl.FP32, "DataType.FLOAT32"),
+        # Byte carriers: the pinned runtime enum has neither, so the window is
+        # described as UINT8 and the identical bytes cross. Before the mapping
+        # existed these aborted codegen with "Unsupported DistributedTensor
+        # dtype for simpler.DataType mapping".
+        (pl.FP8E5M2, "DataType.UINT8"),
+        (pl.FP4E1M2X2, "DataType.UINT8"),
+    ],
+)
+def test_distributed_window_dtype_reaches_simpler_enum(dtype, expected_enum):
+    """A window of a byte-carrier dtype must emit, not abort codegen.
+
+    ``DeduceWindowType`` accepts these dtypes, so a user can write the program;
+    ``DataTypeToSimplerEnum`` must therefore name them rather than CHECK-fail.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], dtype]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(256)
+            data = pld.window(buf, [256], dtype=dtype)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            return 0
+
+    program = passes.convert_to_ssa()(Program)
+    program = passes.derive_call_directions()(program)
+    program = passes.materialize_comm_domain_scopes()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    code = codegen.DistributedCodegen().generate(program)
+
+    window_lines = [line for line in code.splitlines() if ".tensor(shapes=" in line]
+    assert window_lines, code
+    assert all(expected_enum in line for line in window_lines), window_lines
     compile(code, "host_orch.py", "exec")

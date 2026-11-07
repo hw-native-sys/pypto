@@ -155,6 +155,16 @@ matmul in particular still requires E4M3FN data operands: `tile.matmul_mx`,
 rhs during IR construction, before the carrier is ever reached. Use the carrier to move
 E5M2 data in and out; cast to `pl.FP8E4M3FN` before an MX matmul consumes it.
 
+One distributed signature is rejected outright: **a HOST `SubWorker` may not declare an
+`FP8E5M2` tensor parameter.** The generated receive-side unpacking picks its torch dtype
+from the wire descriptor, which names E5M2 as UINT8, so the callback body would be handed
+a `torch.uint8` tensor of raw byte codes — an encoded `1.0` would read as `60.0`, silently.
+Code generation therefore fails with `NotImplementedError` naming the parameter. Two
+supported alternatives: pass the tensor to a chip kernel, which keeps the declared element
+type; or declare the parameter `pl.UINT8` and reinterpret inside the body with
+`.view(torch.float8_e5m2)`. `pl.FP4E1M2X2` is unaffected — torch has no dtype for it at
+all, so UINT8 is its faithful host representation rather than a lossy stand-in.
+
 ### `RunConfig` fields that affect dispatch
 
 `RunConfig` carries both compile-side and runtime-side settings; the compile-side ones are
