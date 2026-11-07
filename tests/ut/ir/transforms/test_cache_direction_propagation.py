@@ -834,5 +834,57 @@ def test_graph_read_through_tuple_operand_preserves_backing_storage():
     assert layer.param_directions == [ir.ParamDirection.InOut]
 
 
+def test_graph_out_argument_retains_nested_write_effect():
+    @pl.program
+    class Before:
+        @pl.function
+        def writer(self, out: pl.Out[pl.Tensor[[64], pl.FP32]]):
+            pl.tensor.write(out, [1], pl.const(2.0, pl.FP32))
+
+        @pl.function
+        def main(self, cache: pl.Tensor[[64], pl.FP32]):
+            with pl.graph("layer"):
+                self.writer(pl.tensor.write(cache, [0], pl.const(1.0, pl.FP32)))
+
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(Before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    assert layer.param_directions == [ir.ParamDirection.Out]
+
+
+@pytest.mark.parametrize("whole_tuple", [False, True])
+def test_tuple_carry_tracks_diverging_fields(whole_tuple):
+    operand = "self.read_second(carry)" if whole_tuple else "pl.tensor.read(carry[0], [32])"
+    source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def read_second(self, pair: pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]):
+        return pl.tensor.read(pair[1], [32])
+
+    @pl.function
+    def main(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]):
+        with pl.graph("layer"):
+            for i, (carry,) in pl.range(2, init_values=((a, a),)):
+                value = {operand}
+                pl.tensor.write(a, [0], value)
+                result = pl.yield_((carry[0], b))
+            value = pl.tensor.read(result[0], [32])
+            pl.tensor.write(b, [0], value)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    directions = {param.name_hint: kind for param, kind in zip(layer.params, layer.param_directions)}
+    assert directions["a"] == ir.ParamDirection.InOut
+    assert directions["b"] == (ir.ParamDirection.InOut if whole_tuple else ir.ParamDirection.Out)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

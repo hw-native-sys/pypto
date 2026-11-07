@@ -137,10 +137,22 @@ class BufferRootCollector : public IRVisitor {
   void VisitStmt_(const SimtLaunchStmtPtr& launch) override;
 
  private:
+  struct LoopTupleRoots;
   struct RootInfo {
     RootCandidates roots;
     bool ambiguous = false;
     std::shared_ptr<const std::vector<RootInfo>> elements = nullptr;
+    LoopTupleRoots* loop_tuple = nullptr;
+  };
+
+  // Own loop tuple nodes in the collector; source edges can be cyclic.
+  // A tuple field receives a distinct identity when it is first projected.
+  struct LoopTupleRoots {
+    std::shared_ptr<const TupleType> type;
+    Span span;
+    std::vector<RootInfo> sources;
+    std::unordered_map<size_t, RootInfo> projected;
+    const Var* aggregate = nullptr;
   };
 
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
@@ -159,7 +171,10 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call);
   [[nodiscard]] RootInfo MakeLoopStorageValue(const TypePtr& type, const Span& span, const Var* identity);
   void LinkLoopStorageValues(const RootInfo& target, const RootInfo& source);
-  void RecordBackingValue(const VarPtr& var, RootInfo value);
+  [[nodiscard]] RootInfo ProjectBackingElement(const RootInfo& tuple, size_t index);
+  [[nodiscard]] RootCandidates CollectBackingContentRoots(const RootInfo& value);
+  [[nodiscard]] const Var* AggregateLoopTupleRoots(LoopTupleRoots& tuple);
+  void RecordBackingValue(const VarPtr& var, const RootInfo& value);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call);
 
@@ -192,7 +207,8 @@ class BufferRootCollector : public IRVisitor {
   std::vector<VarPtr> storage_proxy_vars_;
   std::unordered_map<const Var*, StorageCallProjection> storage_call_roots_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
-  std::unordered_map<const Var*, std::shared_ptr<const std::vector<RootInfo>>> backing_tuple_roots_;
+  std::unordered_map<const Var*, RootInfo> backing_tuple_roots_;
+  std::vector<std::unique_ptr<LoopTupleRoots>> loop_tuple_roots_;
   size_t backing_value_depth_ = 0;
   std::unordered_map<ExprPtr, RootInfo> backing_value_memo_;
 };

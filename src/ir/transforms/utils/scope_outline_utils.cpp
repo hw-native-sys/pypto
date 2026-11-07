@@ -248,9 +248,18 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
   }
 
   void VisitDescriptorOrValue(const ExprPtr& value) {
-    // Tensor/tile SSA binding and control-flow transfer pass a descriptor;
-    // scalar operands and nested expressions can genuinely read data.
-    if (AsVarLike(value) && (AsTensorTypeLike(value->GetType()) || As<TileType>(value->GetType()))) return;
+    // Packing, projecting, and forwarding tensor descriptors do not read
+    // their contents. Nested calls still execute while building the value.
+    if (auto tuple = As<MakeTuple>(value)) {
+      for (const auto& element : tuple->elements_) VisitDescriptorOrValue(element);
+      return;
+    }
+    if (auto projection = As<TupleGetItemExpr>(value)) {
+      VisitDescriptorOrValue(projection->tuple_);
+      return;
+    }
+    const auto type = value->GetType();
+    if (AsVarLike(value) && (AsTensorTypeLike(type) || As<TileType>(type) || As<TupleType>(type))) return;
     VisitExpr(value);
   }
 
@@ -274,7 +283,11 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     RecordCalleeWrites(op->callee_, op->args_, /*is_submit=*/false);
     const auto slots = CalleeWriteOnlySlots(op->callee_, op->args_.size(), /*is_submit=*/false);
     for (size_t i = 0; i < op->args_.size(); ++i) {
-      if (slots.count(i) == 0) VisitConsumedOperand(op->args_[i]);
+      if (slots.count(i) > 0) {
+        VisitDescriptorOrValue(op->args_[i]);
+      } else {
+        VisitConsumedOperand(op->args_[i]);
+      }
     }
     for (const auto& dim : op->block_dims_) VisitExpr(dim);
     RecordSimtLaunchRoots(op);
@@ -438,15 +451,10 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     const auto dst_slots = DestinationSlots(op);
     const auto callee_out_slots = CalleeWriteOnlySlots(op->op_, op->args_.size(), /*is_submit=*/false);
     for (size_t i = 0; i < op->args_.size(); ++i) {
-      // Skipping the whole operand, not just a bare Var in it, is deliberate:
-      // the destination slot only ever holds the tensor being written, so
-      // anything nested there is address computation, not a content read.
-      if (dst_slots.count(i) > 0 || callee_out_slots.count(i) > 0) continue;
-      // A bare tensor/tile supplies a descriptor to a metadata-only op, not
-      // contents. Still visit scalar expressions and nested calls: an index
-      // or shape may itself read a tensor, and those accesses are real.
+      // Out and metadata-only operands supply a descriptor. Evaluating
+      // that descriptor can still read an index or perform a nested write.
       INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Call has null argument at index " << i;
-      if (metadata_only) {
+      if (metadata_only || dst_slots.count(i) > 0 || callee_out_slots.count(i) > 0) {
         VisitDescriptorOrValue(op->args_[i]);
       } else {
         VisitConsumedOperand(op->args_[i]);
@@ -472,9 +480,12 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     RecordCalleeWrites(op->op_, op->args_, /*is_submit=*/true);
     const auto callee_out_slots = CalleeWriteOnlySlots(op->op_, op->args_.size(), /*is_submit=*/true);
     for (size_t i = 0; i < op->args_.size(); ++i) {
-      if (callee_out_slots.count(i) > 0) continue;
       INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Submit has null argument at index " << i;
-      VisitConsumedOperand(op->args_[i]);
+      if (callee_out_slots.count(i) > 0) {
+        VisitDescriptorOrValue(op->args_[i]);
+      } else {
+        VisitConsumedOperand(op->args_[i]);
+      }
     }
     // ``deps_`` are TaskId values this launch consumes — real SSA uses, never
     // a write destination, so they are always read.
