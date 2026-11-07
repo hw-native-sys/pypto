@@ -962,5 +962,53 @@ class Before:
     assert directions[names[1 - field]] == ir.ParamDirection.Out
 
 
+@pytest.mark.parametrize("field", [0, 1, None])
+def test_nested_tuple_calls_preserve_distinct_actuals(field):
+    tensor = "pl.Tensor[[64], pl.FP32]"
+    pair = f"pl.Tuple[{tensor}, {tensor}]"
+    tree = f"pl.Tuple[{pair}, {pair}]"
+    read = "self.consume(result)" if field is None else f"pl.tensor.read(result[{field}][0], [32])"
+    source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def pair(self, a: pl.Out[{tensor}], b: pl.Out[{tensor}]) -> {pair}:
+        return (a, b)
+
+    @pl.function
+    def tree(self, a: pl.Out[{tensor}], b: pl.Out[{tensor}]) -> {tree}:
+        left = self.pair(a, b)
+        right = self.pair(b, a)
+        return (left, right)
+
+    @pl.function
+    def forward(self, a: pl.Out[{tensor}], b: pl.Out[{tensor}]) -> {tree}:
+        return self.tree(a, b)
+
+    @pl.function
+    def consume(self, value: {tree}) -> pl.Scalar[pl.FP32]:
+        return pl.tensor.read(value[0][0], [32])
+
+    @pl.function
+    def main(self, a: {tensor}, b: {tensor}):
+        with pl.graph("layer"):
+            result = self.forward(a, b)
+            value = {read}
+            pl.tensor.write(a, [0], value)
+            pl.tensor.write(b, [0], value)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    directions = {param.name_hint: kind for param, kind in zip(layer.params, layer.param_directions)}
+    assert directions["a"] == (ir.ParamDirection.Out if field == 1 else ir.ParamDirection.InOut)
+    assert directions["b"] == (ir.ParamDirection.Out if field == 0 else ir.ParamDirection.InOut)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

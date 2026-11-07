@@ -32,6 +32,7 @@ namespace ir {
 namespace buffer_root {
 
 struct StorageFormalPath;
+struct StorageReturnValue;
 
 /// Share proven storage-return summaries while an unchanged Program is analyzed.
 /// Nested collectors reuse the scope; the outermost exit releases all cached IR.
@@ -140,11 +141,16 @@ class BufferRootCollector : public IRVisitor {
 
  private:
   struct LoopTupleRoots;
+  struct BoundStorageTuple;
+  struct StorageCallInstance;
   struct RootInfo {
     RootCandidates roots;
     bool ambiguous = false;
     std::shared_ptr<const std::vector<RootInfo>> elements = nullptr;
     LoopTupleRoots* loop_tuple = nullptr;
+    BoundStorageTuple* bound_tuple = nullptr;
+
+    [[nodiscard]] bool IsTuple() const { return elements || loop_tuple || bound_tuple; }
   };
 
   // Own loop tuple nodes in the collector; source edges can be cyclic.
@@ -182,6 +188,11 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] RootInfo ProjectBackingElement(const RootInfo& tuple, size_t index);
   [[nodiscard]] RootCandidates CollectBackingContentRoots(const RootInfo& value);
   [[nodiscard]] const Var* AggregateLoopTupleRoots(LoopTupleRoots& tuple);
+  [[nodiscard]] const Var* AggregateExplicitTupleRoots(
+      const std::shared_ptr<const std::vector<RootInfo>>& elements);
+  [[nodiscard]] RootInfo BindStorageValue(StorageCallInstance& instance, const StorageReturnValue& value);
+  [[nodiscard]] RootInfo ProjectStorageRoot(StorageCallInstance& instance, size_t index);
+  [[nodiscard]] StorageCallInstance& BindNestedStorageCall(StorageCallInstance& parent, size_t index);
   void RecordBackingValue(const VarPtr& var, const RootInfo& value);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call);
@@ -207,12 +218,13 @@ class BufferRootCollector : public IRVisitor {
   AmbiguousRootPolicy ambiguous_policy_;
   ViewRootPolicy view_policy_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
-  struct StorageCallInstance;
   struct StorageCallProjection {
-    std::shared_ptr<const StorageCallInstance> instance;
+    const StorageCallInstance* instance;
     size_t node;
   };
   std::vector<VarPtr> storage_proxy_vars_;
+  std::vector<std::shared_ptr<StorageCallInstance>> storage_calls_;
+  std::unordered_map<std::shared_ptr<const std::vector<RootInfo>>, const Var*> explicit_tuple_contents_;
   std::unordered_map<const Var*, StorageCallProjection> storage_call_roots_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
   std::unordered_map<const Var*, RootInfo> backing_tuple_roots_;

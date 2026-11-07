@@ -49,30 +49,14 @@ struct StorageFormalPath {
   size_t index;
 };
 
-namespace {
-
-using op_predicates::IsBuiltinOp;
-
-std::optional<size_t> BackingAliasSlot(const CallPtr& call) {
-  if (auto slot = ResultAliasedArgIndex(call)) return slot;
-  if (IsOp(call, "tensor.slice")) return 0;
-  const auto* entry = LookupOpEntry(call->op_);
-  // A view needs explicit registry evidence of descriptor-only access.
-  if (entry && !call->args_.empty() &&
-      entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess &&
-      op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
-    return 0;
-  }
-  return std::nullopt;
-}
-
-// Keys retain their IR until the outer analysis exits, avoiding pointer reuse.
-// Program identity matters because the same Function can resolve different callees.
-using StorageKey = std::pair<ProgramPtr, FunctionPtr>;
 struct StorageReturnValue {
   std::vector<size_t> roots;
   std::shared_ptr<std::vector<StorageReturnValue>> elements;
   std::optional<size_t> tuple_sources;
+  // The call owns the callee summary containing the referenced tuple.
+  std::optional<std::pair<size_t, const StorageReturnValue*>> tuple_call;
+  // Whole-tuple effects travel through these roots without projecting fields.
+  std::vector<size_t> contents;
 };
 
 struct StorageTupleSources {
@@ -95,6 +79,7 @@ struct StorageReturnSummary;
 struct StorageSummaryCall {
   std::shared_ptr<const StorageReturnSummary> callee;
   std::vector<std::vector<size_t>> argument_roots;
+  std::vector<StorageReturnValue> arguments;
   mutable std::unordered_map<const StorageFormalTransfer*, size_t> mapped_transfers;
 };
 
@@ -158,6 +143,26 @@ struct StorageReturnSummary {
   }
 };
 
+namespace {
+
+using op_predicates::IsBuiltinOp;
+
+std::optional<size_t> BackingAliasSlot(const CallPtr& call) {
+  if (auto slot = ResultAliasedArgIndex(call)) return slot;
+  if (IsOp(call, "tensor.slice")) return 0;
+  const auto* entry = LookupOpEntry(call->op_);
+  // A view needs explicit registry evidence of descriptor-only access.
+  if (entry && !call->args_.empty() &&
+      entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess &&
+      op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+    return 0;
+  }
+  return std::nullopt;
+}
+
+// Keys retain their IR until the outer analysis exits, avoiding pointer reuse.
+// Program identity matters because the same Function can resolve different callees.
+using StorageKey = std::pair<ProgramPtr, FunctionPtr>;
 // Canonical persistent sets of formal indices. The split bit is the
 // highest differing bit in a branch. Swapping bindings or regrouping a
 // union produces the same identity, so callers share equivalent transfers.
@@ -305,9 +310,23 @@ StorageReturnContext& StorageCtx() {
 
 }  // namespace
 
+struct BufferRootCollector::BoundStorageTuple {
+  StorageCallInstance* instance;
+  const StorageReturnValue* value;
+  std::optional<RootInfo> forwarded = std::nullopt;
+};
+
 struct BufferRootCollector::StorageCallInstance {
+  StorageCallInstance(std::shared_ptr<const StorageReturnSummary> callee, Span span)
+      : callee(std::move(callee)), span(std::move(span)), arguments(this->callee->formal_bindings.size()) {}
+
   std::shared_ptr<const StorageReturnSummary> callee;
+  Span span;
   std::vector<RootInfo> arguments;
+  std::unordered_map<size_t, const Var*> projections;
+  std::unordered_map<size_t, RootInfo> bound_loops;
+  std::unordered_map<const StorageReturnValue*, BoundStorageTuple> bound_tuples;
+  std::unordered_map<size_t, StorageCallInstance*> nested_calls;
 };
 
 ScopedStorageRootCache::ScopedStorageRootCache() { ++StorageCtx().depth; }
@@ -379,44 +398,60 @@ void BufferRootCollector::RecordIfReturnRoots(const IfStmtPtr& if_stmt) {
 BufferRootCollector::RootInfo BufferRootCollector::MergeBackingValues(const RootInfo& lhs,
                                                                       const RootInfo& rhs,
                                                                       const TypePtr& type, const Span& span) {
-  if (lhs.loop_tuple || rhs.loop_tuple) {
-    if (lhs.loop_tuple && lhs.loop_tuple == rhs.loop_tuple) return lhs;
-    auto joined = MakeLoopStorageValue(type, span, nullptr);
-    LinkLoopStorageValues(joined, lhs);
-    LinkLoopStorageValues(joined, rhs);
-    return joined;
-  }
-  if (lhs.elements || rhs.elements) {
-    if (lhs.elements == rhs.elements) return lhs;
-    const auto tuple = As<TupleType>(type);
-    INTERNAL_CHECK(tuple) << "Storage join with tuple elements must have TupleType";
-    auto elements = std::make_shared<std::vector<RootInfo>>();
-    const RootInfo unknown;
-    elements->reserve(tuple->types_.size());
-    for (size_t i = 0; i < tuple->types_.size(); ++i) {
-      const auto& left = lhs.elements && i < lhs.elements->size() ? (*lhs.elements)[i] : unknown;
-      const auto& right = rhs.elements && i < rhs.elements->size() ? (*rhs.elements)[i] : unknown;
-      elements->push_back(MergeBackingValues(left, right, tuple->types_[i], span));
+  using TupleElements = std::vector<RootInfo>;
+  // Both branches can share a tuple DAG. Merge each pair of subtrees only
+  // once, while retaining the precise root and ambiguity of each field.
+  std::unordered_map<const TupleElements*, std::unordered_map<const TupleElements*, RootInfo>> merged;
+  const auto merge = [&](const auto& self, const RootInfo& lhs, const RootInfo& rhs,
+                         const TypePtr& type) -> RootInfo {
+    if (lhs.loop_tuple || rhs.loop_tuple || lhs.bound_tuple || rhs.bound_tuple) {
+      if ((lhs.loop_tuple && lhs.loop_tuple == rhs.loop_tuple) ||
+          (lhs.bound_tuple && lhs.bound_tuple == rhs.bound_tuple)) {
+        return lhs;
+      }
+      auto joined = MakeLoopStorageValue(type, span, nullptr);
+      LinkLoopStorageValues(joined, lhs);
+      LinkLoopStorageValues(joined, rhs);
+      return joined;
     }
-    return {{}, false, std::move(elements)};
-  }
+    if (lhs.elements || rhs.elements) {
+      if (lhs.elements == rhs.elements) return lhs;
+      auto& matches = merged[lhs.elements.get()];
+      auto [entry, inserted] = matches.try_emplace(rhs.elements.get());
+      auto& result = entry->second;
+      if (!inserted) return result;
+      const auto tuple = As<TupleType>(type);
+      INTERNAL_CHECK(tuple) << "Storage join with tuple elements must have TupleType";
+      auto elements = std::make_shared<std::vector<RootInfo>>();
+      const RootInfo unknown;
+      elements->reserve(tuple->types_.size());
+      for (size_t i = 0; i < tuple->types_.size(); ++i) {
+        const auto& left = lhs.elements && i < lhs.elements->size() ? (*lhs.elements)[i] : unknown;
+        const auto& right = rhs.elements && i < rhs.elements->size() ? (*rhs.elements)[i] : unknown;
+        elements->push_back(self(self, left, right, tuple->types_[i]));
+      }
+      result = {{}, false, std::move(elements)};
+      return result;
+    }
 
-  auto roots = lhs.roots;
-  std::unordered_set<const Var*> seen(roots.begin(), roots.end());
-  for (const Var* root : rhs.roots) {
-    if (seen.insert(root).second) roots.push_back(root);
-  }
-  const bool ambiguous =
-      lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
-  if (roots.size() <= 1) return {std::move(roots), ambiguous};
+    auto roots = lhs.roots;
+    std::unordered_set<const Var*> seen(roots.begin(), roots.end());
+    for (const Var* root : rhs.roots) {
+      if (seen.insert(root).second) roots.push_back(root);
+    }
+    const bool ambiguous =
+        lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
+    if (roots.size() <= 1) return {std::move(roots), ambiguous};
 
-  // One symbolic edge set per join. A later join references this identity
-  // without copying its transitive alternatives.
-  auto join = std::make_shared<Var>("storage_branch_join", type, span);
-  const Var* root = join.get();
-  storage_successors_[root] = std::move(roots);
-  storage_proxy_vars_.push_back(std::move(join));
-  return {{root}, true};
+    // One symbolic edge set per join. A later join references this identity
+    // without copying its transitive alternatives.
+    auto join = std::make_shared<Var>("storage_branch_join", type, span);
+    const Var* root = join.get();
+    storage_successors_[root] = std::move(roots);
+    storage_proxy_vars_.push_back(std::move(join));
+    return {{root}, true};
+  };
+  return merge(merge, lhs, rhs, type);
 }
 
 void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
@@ -454,7 +489,7 @@ BufferRootCollector::RootInfo BufferRootCollector::MakeLoopStorageValue(const Ty
 void BufferRootCollector::LinkLoopStorageValues(const RootInfo& target, const RootInfo& source) {
   if (target.loop_tuple) {
     auto& tuple = *target.loop_tuple;
-    if (source.loop_tuple == &tuple || (!source.elements && !source.loop_tuple)) return;
+    if (source.loop_tuple == &tuple || !source.IsTuple()) return;
     tuple.sources.push_back(source);
     if (tuple.aggregate) {
       const auto roots = CollectBackingContentRoots(source);
@@ -472,7 +507,7 @@ void BufferRootCollector::LinkLoopStorageValues(const RootInfo& target, const Ro
 }
 
 void BufferRootCollector::RecordBackingValue(const VarPtr& var, const RootInfo& value) {
-  if (value.elements || value.loop_tuple) {
+  if (value.IsTuple()) {
     backing_tuple_roots_[var.get()] = value;
   } else {
     backing_tuple_roots_.erase(var.get());
@@ -660,6 +695,20 @@ void BufferRootCollector::VisitBackingStorageOperand(const ExprPtr& expr,
 BufferRootCollector::RootInfo BufferRootCollector::ProjectBackingElement(const RootInfo& value,
                                                                          size_t index) {
   if (value.elements && index < value.elements->size()) return (*value.elements)[index];
+  if (value.bound_tuple) {
+    auto& tuple = *value.bound_tuple;
+    if (tuple.value->elements) {
+      const auto& elements = *tuple.value->elements;
+      return index < elements.size() ? BindStorageValue(*tuple.instance, elements[index]) : RootInfo{};
+    }
+    const auto& reference = tuple.value->tuple_call;
+    if (!reference) return {};
+    if (!tuple.forwarded) {
+      const auto& [call, result] = *reference;
+      tuple.forwarded = BindStorageValue(BindNestedStorageCall(*tuple.instance, call), *result);
+    }
+    return ProjectBackingElement(*tuple.forwarded, index);
+  }
   if (!value.loop_tuple || index >= value.loop_tuple->type->types_.size()) return {};
 
   auto& tuple = *value.loop_tuple;
@@ -692,19 +741,34 @@ BufferRootCollector::RootInfo BufferRootCollector::ProjectBackingElement(const R
 }
 
 BufferRootCollector::RootCandidates BufferRootCollector::CollectBackingContentRoots(const RootInfo& value) {
-  RootCandidates roots;
-  std::vector<const RootInfo*> pending{&value};
-  std::unordered_set<const std::vector<RootInfo>*> seen_elements;
-  while (!pending.empty()) {
-    const auto* current = pending.back();
-    pending.pop_back();
-    roots.insert(roots.end(), current->roots.begin(), current->roots.end());
-    if (current->loop_tuple) roots.push_back(AggregateLoopTupleRoots(*current->loop_tuple));
-    if (current->elements && seen_elements.insert(current->elements.get()).second) {
-      for (const auto& element : *current->elements) pending.push_back(&element);
+  auto roots = value.roots;
+  if (value.loop_tuple) roots.push_back(AggregateLoopTupleRoots(*value.loop_tuple));
+  if (value.elements) roots.push_back(AggregateExplicitTupleRoots(value.elements));
+  if (value.bound_tuple) {
+    auto& tuple = *value.bound_tuple;
+    for (size_t index : tuple.value->contents) {
+      auto actual = ProjectStorageRoot(*tuple.instance, index);
+      auto contents = CollectBackingContentRoots(actual);
+      roots.insert(roots.end(), contents.begin(), contents.end());
     }
   }
   return roots;
+}
+
+const Var* BufferRootCollector::AggregateExplicitTupleRoots(
+    const std::shared_ptr<const std::vector<RootInfo>>& elements) {
+  auto [it, inserted] = explicit_tuple_contents_.try_emplace(elements, nullptr);
+  if (!inserted) return it->second;
+  auto proxy = std::make_shared<Var>("storage_tuple_contents", GetUnknownType(), Span::unknown());
+  const Var* root = proxy.get();
+  it->second = root;
+  storage_proxy_vars_.push_back(std::move(proxy));
+  auto& successors = storage_successors_[root];
+  for (const auto& element : *elements) {
+    auto roots = CollectBackingContentRoots(element);
+    successors.insert(successors.end(), roots.begin(), roots.end());
+  }
+  return root;
 }
 
 const Var* BufferRootCollector::AggregateLoopTupleRoots(LoopTupleRoots& tuple) {
@@ -866,6 +930,16 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       }
       return it->second;
     };
+    std::unordered_map<const StorageCallInstance*, size_t> local_calls;
+    std::vector<const StorageCallInstance*> pending_calls;
+    const auto intern_call = [&](const StorageCallInstance* instance) {
+      auto [it, inserted] = local_calls.try_emplace(instance, built.calls.size());
+      if (inserted) {
+        built.calls.push_back({instance->callee, {}, {}, {}});
+        pending_calls.push_back(instance);
+      }
+      return it->second;
+    };
     std::unordered_map<const LoopTupleRoots*, size_t> tuple_ids;
     std::unordered_map<std::shared_ptr<const std::vector<RootInfo>>,
                        std::shared_ptr<std::vector<StorageReturnValue>>>
@@ -888,6 +962,9 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
           for (const auto& source : tuple.sources) sources.push_back(self(self, source));
           built.tuples[index].sources = std::move(sources);
         }
+      } else if (value.bound_tuple) {
+        const auto& tuple = *value.bound_tuple;
+        result.tuple_call = std::pair{intern_call(tuple.instance), tuple.value};
       } else if (value.elements) {
         auto [entry, inserted] = element_summaries.try_emplace(value.elements);
         if (inserted) entry->second = std::make_shared<std::vector<StorageReturnValue>>();
@@ -895,6 +972,11 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
         if (inserted) {
           result.elements->reserve(value.elements->size());
           for (const auto& element : *value.elements) result.elements->push_back(self(self, element));
+        }
+      }
+      if (result.elements || result.tuple_call) {
+        for (const Var* root : nested.CollectBackingContentRoots(value)) {
+          result.contents.push_back(intern(root));
         }
       }
       result.roots.reserve(value.roots.size());
@@ -910,27 +992,36 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
         built.outputs[i].roots.push_back(intern(callee->params_[*binding.param_index].get()));
       }
     }
-    std::unordered_map<const StorageCallInstance*, size_t> local_calls;
-    for (size_t i = 0; i < pending.size(); ++i) {
-      const Var* root = pending[i];
-      // Within the callee a formal field also counts as access to the
-      // containing parameter. The transfer must preserve the field identity.
-      if (built.nodes[i].binding.has_value()) continue;
+    // Export each local root and call once. Serializing an actual can
+    // discover more roots or references to earlier calls.
+    size_t node_cursor = 0;
+    size_t call_cursor = 0;
+    while (node_cursor < pending.size() || call_cursor < pending_calls.size()) {
+      if (node_cursor == pending.size()) {
+        const size_t index = call_cursor++;
+        const auto& actuals = pending_calls[index]->arguments;
+        std::vector<StorageReturnValue> arguments;
+        std::vector<std::vector<size_t>> argument_roots;
+        arguments.reserve(actuals.size());
+        argument_roots.reserve(actuals.size());
+        for (const auto& actual : actuals) {
+          arguments.push_back(summarize(summarize, actual));
+          std::vector<size_t> roots;
+          for (const Var* root : nested.CollectBackingContentRoots(actual)) roots.push_back(intern(root));
+          argument_roots.push_back(std::move(roots));
+        }
+        built.calls[index].arguments = std::move(arguments);
+        built.calls[index].argument_roots = std::move(argument_roots);
+        continue;
+      }
+      const size_t index = node_cursor++;
+      const Var* root = pending[index];
+      // A formal field is a binding in its own right. Its edge to the
+      // containing parameter only applies inside the function.
+      if (built.nodes[index].binding.has_value()) continue;
       if (auto it = nested.storage_call_roots_.find(root); it != nested.storage_call_roots_.end()) {
         const auto& projection = it->second;
-        auto [call, inserted] = local_calls.try_emplace(projection.instance.get(), built.calls.size());
-        if (inserted) {
-          StorageSummaryCall entry{projection.instance->callee, {}, {}};
-          const auto& actuals = projection.instance->arguments;
-          entry.argument_roots.reserve(actuals.size());
-          for (const auto& actual : actuals) {
-            std::vector<size_t> roots;
-            for (const Var* root : nested.CollectBackingContentRoots(actual)) roots.push_back(intern(root));
-            entry.argument_roots.push_back(std::move(roots));
-          }
-          built.calls.push_back(std::move(entry));
-        }
-        built.nodes[i].projection = std::pair{call->second, projection.node};
+        built.nodes[index].projection = std::pair{intern_call(projection.instance), projection.node};
         continue;
       }
       auto next = nested.storage_successors_.find(root);
@@ -938,7 +1029,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       std::vector<size_t> edges;
       edges.reserve(next->second.size());
       for (const Var* root : next->second) edges.push_back(intern(root));
-      built.nodes[i].successors = std::move(edges);
+      built.nodes[index].successors = std::move(edges);
     }
     // The caller references one node per returned buffer. Keeping the
     // alternatives inside this graph avoids multiplying boundary projections
@@ -987,9 +1078,8 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   const size_t prefix = call->args_.size() >= ctx_count ? call->args_.size() - ctx_count : 0;
   const size_t gap =
       callee->params_.size() >= call->args_.size() ? callee->params_.size() - call->args_.size() : 0;
-  auto instance = std::make_shared<StorageCallInstance>();
-  instance->callee = summary;
-  instance->arguments.resize(summary->formal_bindings.size());
+  auto instance = std::make_shared<StorageCallInstance>(summary, call->span_);
+  storage_calls_.push_back(instance);
   std::unordered_map<size_t, RootInfo> actual_parameters;
   std::unordered_map<const StorageFormalPath*, RootInfo> actual_fields;
   const auto bind_field = [&](const auto& self, const RootInfo& actual,
@@ -1012,67 +1102,80 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     if (inserted) actual->second = ResolveBackingValue(call->args_[argument]);
     instance->arguments[i] = bind_field(bind_field, actual->second, binding.path);
   }
-  std::unordered_map<size_t, const Var*> projections;
-  const auto project = [&](size_t index) -> RootInfo {
-    const auto& node = summary->nodes[index];
-    if (const auto binding = node.binding; binding.has_value()) {
-      return instance->arguments[*binding];
-    }
-    if (node.successors.empty() && !node.projection) return {};
-    auto [it, inserted] = projections.try_emplace(index, nullptr);
-    if (inserted) {
-      auto proxy = std::make_shared<Var>("storage_projection", node.type, call->span_);
-      it->second = proxy.get();
-      storage_call_roots_.emplace(proxy.get(), StorageCallProjection{instance, index});
-      storage_proxy_vars_.push_back(std::move(proxy));
-    }
-    return {{it->second}, false};
-  };
-  std::unordered_map<size_t, RootInfo> bound_tuples;
-  std::unordered_map<const std::vector<StorageReturnValue>*, std::shared_ptr<std::vector<RootInfo>>>
-      bound_elements;
-  const auto bind = [&](const auto& self, const StorageReturnValue& result) -> RootInfo {
-    RootInfo info;
-    if (const auto index = result.tuple_sources; index.has_value()) {
-      auto [entry, inserted] = bound_tuples.try_emplace(*index);
-      auto& tuple = entry->second;
-      if (inserted) {
-        const auto& source_tuple = summary->tuples[*index];
-        tuple = MakeLoopStorageValue(source_tuple.type, call->span_, nullptr);
-        for (const auto& source : source_tuple.sources) LinkLoopStorageValues(tuple, self(self, source));
-      }
-      info = tuple;
-    } else if (result.elements) {
-      auto [entry, inserted] = bound_elements.try_emplace(result.elements.get());
-      if (inserted) entry->second = std::make_shared<std::vector<RootInfo>>();
-      auto elements = entry->second;
-      if (inserted) {
-        elements->reserve(result.elements->size());
-        for (const auto& element : *result.elements) elements->push_back(self(self, element));
-      }
-      info.elements = std::move(elements);
-    }
-    std::unordered_set<const Var*> seen;
-    for (size_t root : result.roots) {
-      const auto actual = project(root);
-      if (actual.elements || actual.loop_tuple) {
-        info.elements = actual.elements;
-        info.loop_tuple = actual.loop_tuple;
-      }
-      for (const Var* candidate : actual.roots) {
-        if (seen.insert(candidate).second) info.roots.push_back(candidate);
-      }
-      info.ambiguous = info.ambiguous || actual.ambiguous;
-    }
-    info.ambiguous = info.ambiguous || info.roots.size() > 1;
-    return info;
-  };
   std::vector<OutputRoot> roots;
   roots.reserve(summary->outputs.size());
   for (size_t i = 0; i < summary->outputs.size(); ++i) {
-    roots.push_back(OutputRoot{bind(bind, summary->outputs[i]), callee->return_types_[i]});
+    roots.push_back(OutputRoot{BindStorageValue(*instance, summary->outputs[i]), callee->return_types_[i]});
   }
   return roots;
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::ProjectStorageRoot(StorageCallInstance& instance,
+                                                                      size_t index) {
+  const auto& node = instance.callee->nodes[index];
+  if (const auto binding = node.binding; binding.has_value()) {
+    return instance.arguments[*binding];
+  }
+  if (node.successors.empty() && !node.projection) return {};
+  auto [it, inserted] = instance.projections.try_emplace(index, nullptr);
+  if (inserted) {
+    auto proxy = std::make_shared<Var>("storage_projection", node.type, instance.span);
+    it->second = proxy.get();
+    storage_call_roots_.emplace(proxy.get(), StorageCallProjection{&instance, index});
+    storage_proxy_vars_.push_back(std::move(proxy));
+  }
+  return {{it->second}, false};
+}
+
+BufferRootCollector::StorageCallInstance& BufferRootCollector::BindNestedStorageCall(
+    StorageCallInstance& parent, size_t index) {
+  auto [it, inserted] = parent.nested_calls.try_emplace(index, nullptr);
+  if (inserted) {
+    const auto& call = parent.callee->calls[index];
+    auto instance = std::make_shared<StorageCallInstance>(call.callee, parent.span);
+    it->second = instance.get();
+    storage_calls_.push_back(instance);
+    for (size_t i = 0; i < call.arguments.size(); ++i) {
+      instance->arguments[i] = BindStorageValue(parent, call.arguments[i]);
+    }
+  }
+  return *it->second;
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::BindStorageValue(StorageCallInstance& instance,
+                                                                    const StorageReturnValue& result) {
+  RootInfo info;
+  if (const auto index = result.tuple_sources; index.has_value()) {
+    auto [entry, inserted] = instance.bound_loops.try_emplace(*index);
+    auto& tuple = entry->second;
+    if (inserted) {
+      const auto& source_tuple = instance.callee->tuples[*index];
+      tuple = MakeLoopStorageValue(source_tuple.type, instance.span, nullptr);
+      for (const auto& source : source_tuple.sources) {
+        LinkLoopStorageValues(tuple, BindStorageValue(instance, source));
+      }
+    }
+    info = tuple;
+  } else if (result.elements || result.tuple_call) {
+    auto [entry, inserted] =
+        instance.bound_tuples.try_emplace(&result, BoundStorageTuple{&instance, &result});
+    info.bound_tuple = &entry->second;
+  }
+  std::unordered_set<const Var*> seen;
+  for (size_t root : result.roots) {
+    const auto actual = ProjectStorageRoot(instance, root);
+    if (actual.IsTuple()) {
+      info.elements = actual.elements;
+      info.loop_tuple = actual.loop_tuple;
+      info.bound_tuple = actual.bound_tuple;
+    }
+    for (const Var* candidate : actual.roots) {
+      if (seen.insert(candidate).second) info.roots.push_back(candidate);
+    }
+    info.ambiguous = info.ambiguous || actual.ambiguous;
+  }
+  info.ambiguous = info.ambiguous || info.roots.size() > 1;
+  return info;
 }
 
 void BufferRootCollector::PropagateStorageEffects(std::unordered_map<const Var*, unsigned char>& effects) {
@@ -1115,7 +1218,7 @@ void BufferRootCollector::PropagateStorageEffects(std::unordered_map<const Var*,
         current |= bits;
         if (next->split == 0) {
           const auto& actual = instance.arguments[next->first];
-          if (actual.elements || actual.loop_tuple) {
+          if (actual.IsTuple()) {
             for (const Var* target : CollectBackingContentRoots(actual)) add(target, bits);
           } else {
             for (const Var* target : actual.roots) add(target, bits);
