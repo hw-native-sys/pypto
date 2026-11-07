@@ -8,11 +8,37 @@
 # -----------------------------------------------------------------------------------------------------------
 
 
-"""Provider boundary. Registration, binding, and implementations follow in task 34.2."""
+"""Provider boundaries for direct preparation and immutable input capture."""
 
+from dataclasses import dataclass
 from typing import Protocol
 
-from .contracts import KernelRequest, PreparedKernel
+from .contracts import KernelRequest, PreparationIdentity, PreparedKernel
+
+
+@dataclass(frozen=True)
+class CapturedInputs:
+    """Provider-encoded snapshot of source and referenced inputs.
+
+    The payload owns its bytes; no AST, live tensor, temporary directory or
+    JIT context crosses this boundary. Its SHA-256 must equal kernel_digest.
+    complete remains the provider's promise that no compiler input was omitted,
+    including dependencies outside the payload. An incomplete capture is valid
+    for preparation, but cannot authorize preparation-cache reuse.
+    """
+
+    payload: bytes
+    identity: PreparationIdentity
+
+
+class CapturingKernelProvider(Protocol):
+    def capture(self, kernel: object, request: KernelRequest) -> CapturedInputs:
+        """Snapshot provider-owned inputs without compiling the kernel."""
+        ...
+
+    def prepare(self, captured: CapturedInputs, request: KernelRequest) -> PreparedKernel:
+        """Compile only the captured inputs and normalized request."""
+        ...
 
 
 class ExternalKernelProvider(Protocol):

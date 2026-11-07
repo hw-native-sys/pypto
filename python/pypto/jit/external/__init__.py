@@ -8,4 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 
 
-"""Internal external-kernel contracts; no provider discovery or optional DSL imports."""
+"""Internal external-kernel contracts and opt-in provider registration.
+
+Import registry/compatibility explicitly when needed. Importing this package
+never discovers providers or imports an optional DSL compiler.
+"""
