@@ -277,6 +277,7 @@ MIGRATION_FAMILIES = (
             "tile.mgather",
             "tile.mscatter",
         ),
+        restricted=frozenset({"tile.gather", "tile.scatter"}),
     ),
     MigrationFamily(
         "G17: Sorting",
