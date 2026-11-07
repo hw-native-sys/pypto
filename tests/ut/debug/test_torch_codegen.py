@@ -1046,7 +1046,8 @@ def test_group_cross_core_left_right_c2v_runs_with_runtime_scheduler():
     assert torch.allclose(out, src)
 
 
-def test_group_cross_core_no_split_bidirect_runs_with_runtime_scheduler():
+@pytest.mark.parametrize("pipe_id", [0, 7])
+def test_group_cross_core_no_split_bidirect_runs_with_runtime_scheduler(pipe_id):
     """No-split bidirectional path should run concurrently without deadlock."""
 
     @pl.program
@@ -1058,10 +1059,10 @@ def test_group_cross_core_no_split_bidirect_runs_with_runtime_scheduler():
             out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
         ):
             recv: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
-                shape=[4, 2], dtype=pl.FP32, split=0
+                shape=[4, 2], dtype=pl.FP32, split=0, id=pipe_id
             )
             twice: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Mat] = pl.add(recv, recv)
-            pl.tpush_to_aiv(twice, split=0)
+            pl.tpush_to_aiv(twice, split=0, id=pipe_id)
 
         @pl.function(type=pl.FunctionType.AIV)
         def cross_aiv(
@@ -1070,9 +1071,9 @@ def test_group_cross_core_no_split_bidirect_runs_with_runtime_scheduler():
             out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
         ) -> pl.Tensor[[4, 2], pl.FP32]:
             tile: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [4, 2])
-            pl.tpush_to_aic(tile, split=0)
+            pl.tpush_to_aic(tile, split=0, id=pipe_id)
             recv: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
-                shape=[4, 2], dtype=pl.FP32, split=0
+                shape=[4, 2], dtype=pl.FP32, split=0, id=pipe_id
             )
             out = pl.store(recv, [0, 0], out)
             return out
@@ -1097,12 +1098,157 @@ def test_group_cross_core_no_split_bidirect_runs_with_runtime_scheduler():
 
     code = torch_codegen(NoSplitBidirectProgram)
     assert "_run_group_call('cross'" in code
+    if pipe_id:
+        assert code.count(f"pipe_id={pipe_id})") == 4
     ns: dict = {}
     exec(code, ns)  # noqa: S102
     src = torch.arange(8, dtype=torch.float32).reshape(4, 2)
     dst = torch.zeros_like(src)
     out = ns["main"](src, dst)
     assert torch.allclose(out, src * 2)
+
+
+@pytest.mark.parametrize("pipe_id", [0, 7])
+@pytest.mark.parametrize("explicit_fp32", [False, True])
+@pytest.mark.parametrize("check_shapes", [False, True])
+def test_ordinary_groups_reset_c2v_epilogue(pipe_id, explicit_fp32, check_shapes):
+    """A default pipe after BF16/ReLU preserves FP32 values across ordinary groups."""
+    plain_options = ", c2v_dtype=pl.FP32" if explicit_fp32 else ""
+    source = f"""@pl.program
+class SequentialGroups:
+    @pl.function(type=pl.FunctionType.AIC)
+    def producer(self, a: pl.Tensor[[64, 128], pl.FP32],
+                 b: pl.Tensor[[128, 128], pl.FP32],
+                 out: pl.Out[pl.Tensor[[64, 128], pl.BF16]],
+                 raw: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        peer = pl.import_peer_buffer(name="rounded", peer_func="consumer")
+        pl.aic_initialize_pipe(c2v_consumer_buf=peer, dir_mask=1,
+            slot_size=16384, slot_num=2, id={pipe_id}, c2v_dtype=pl.BF16, pre_relu=True)
+        a_mat = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+        left = pl.move(a_mat, target_memory=pl.Mem.Left)
+        right = pl.move(b_mat, target_memory=pl.Mem.Right)
+        acc = pl.matmul(left, right)
+        pl.tpush_to_aiv(acc, split=0, id={pipe_id})
+        pl.store(acc, [0, 0], raw)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def consumer(self, a: pl.Tensor[[64, 128], pl.FP32],
+                 b: pl.Tensor[[128, 128], pl.FP32],
+                 out: pl.Out[pl.Tensor[[64, 128], pl.BF16]],
+                 raw: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        buf = pl.reserve_buffer(name="rounded", size=32768)
+        pl.aiv_initialize_pipe(c2v_consumer_buf=buf, dir_mask=1,
+            slot_size=16384, slot_num=2, id={pipe_id}, c2v_dtype=pl.BF16, pre_relu=True)
+        value = pl.tpop_from_aic(shape=[64, 128], dtype=pl.BF16, split=0, id={pipe_id})
+        pl.store(value, [0, 0], out)
+        pl.tfree_to_aic(value, id={pipe_id})
+
+    @pl.function(type=pl.FunctionType.Group)
+    def rounded(self, a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 128], pl.BF16]],
+                raw: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        self.producer(a, b, out, raw)
+        self.consumer(a, b, out, raw)
+
+    @pl.function(type=pl.FunctionType.AIC)
+    def plain_producer(self, a: pl.Tensor[[64, 128], pl.FP32],
+                       b: pl.Tensor[[128, 128], pl.FP32],
+                       out: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        peer = pl.import_peer_buffer(name="plain", peer_func="plain_consumer")
+        pl.aic_initialize_pipe(c2v_consumer_buf=peer, dir_mask=1,
+            slot_size=32768, slot_num=2, id={pipe_id}{plain_options})
+        a_mat = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+        left = pl.move(a_mat, target_memory=pl.Mem.Left)
+        right = pl.move(b_mat, target_memory=pl.Mem.Right)
+        acc = pl.matmul(left, right)
+        pl.tpush_to_aiv(acc, split=0, id={pipe_id})
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def plain_consumer(self, a: pl.Tensor[[64, 128], pl.FP32],
+                       b: pl.Tensor[[128, 128], pl.FP32],
+                       out: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        buf = pl.reserve_buffer(name="plain", size=65536)
+        pl.aiv_initialize_pipe(c2v_consumer_buf=buf, dir_mask=1,
+            slot_size=32768, slot_num=2, id={pipe_id}{plain_options})
+        value = pl.tpop_from_aic(shape=[64, 128], dtype=pl.FP32, split=0, id={pipe_id})
+        pl.store(value, [0, 0], out)
+        pl.tfree_to_aic(value, id={pipe_id})
+
+    @pl.function(type=pl.FunctionType.Group)
+    def plain(self, a: pl.Tensor[[64, 128], pl.FP32],
+              b: pl.Tensor[[128, 128], pl.FP32],
+              out: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        self.plain_producer(a, b, out)
+        self.plain_consumer(a, b, out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[64, 128], pl.FP32],
+             b: pl.Tensor[[128, 128], pl.FP32],
+             rounded_out: pl.Out[pl.Tensor[[64, 128], pl.BF16]],
+             plain_out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+             raw: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+        self.rounded(a, b, rounded_out, raw)
+        self.plain(a, b, plain_out)
+"""
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen(pl.parse(source), check_shapes=check_shapes), namespace)  # noqa: S102
+    assert namespace["_GROUP_META"] == {}
+    a = torch.zeros(64, 128)
+    a[:, :2] = 1
+    b = torch.zeros(128, 128)
+    b[0] = torch.tensor([1.0, 1.0078125, -1.0, -1.0078125] * 32)
+    b[1] = torch.tensor([2**-8, 2**-11, -(2**-8), -(2**-11)] * 32)
+    expected = a @ b
+    rounded = torch.empty_like(expected, dtype=torch.bfloat16)
+    plain = torch.empty_like(expected)
+    raw = torch.empty_like(expected)
+    for _ in range(3):
+        namespace["main"](a, b, rounded, plain, raw)
+        torch.testing.assert_close(rounded, expected.clamp_min(0).to(torch.bfloat16), rtol=0, atol=0)
+        torch.testing.assert_close(plain, expected, rtol=0, atol=0)
+        torch.testing.assert_close(raw, expected, rtol=0, atol=0)
+        assert namespace["_cross_core_rt"].snapshot(pipe_id)["to_aiv"] == 0
+
+
+@pytest.mark.parametrize("pipe_id", [0, 7])
+@pytest.mark.parametrize("dir_mask", [1, 3])
+def test_default_c2v_initializer_keeps_other_pipe_epilogues(pipe_id, dir_mask):
+    """Reset one payload contract without dropping queued data or another pipe's epilogue."""
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, namespace)  # noqa: S102
+    runtime = namespace["_cross_core_rt"]
+    other_id = 7 if pipe_id == 0 else 0
+    runtime.initialize_c2v_pipe(torch.bfloat16, True, pipe_id)
+    runtime.initialize_c2v_pipe(torch.bfloat16, True, other_id)
+    acc = torch.tensor([[-1.00390625, 1.00390625]], dtype=torch.float32)
+    original = acc.clone()
+    runtime.push_to_aiv(acc, 0, pipe_id=other_id)
+    code = torch_codegen_module._handle_aic_initialize_pipe([], {"dir_mask": dir_mask, "id": pipe_id})
+    exec(code, namespace)  # noqa: S102
+    runtime.push_to_aiv(acc, 0, pipe_id=pipe_id)
+    torch.testing.assert_close(runtime.pop_from_aic(0, pipe_id), original, rtol=0, atol=0)
+    torch.testing.assert_close(
+        runtime.pop_from_aic(0, other_id), original.clamp_min(0).to(torch.bfloat16), rtol=0, atol=0
+    )
+    torch.testing.assert_close(acc, original, rtol=0, atol=0)
+
+
+def test_v2c_only_initializer_preserves_c2v_epilogue():
+    """A V2C-only initializer does not replace the C2V contract on the same ID."""
+    namespace: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, namespace)  # noqa: S102
+    runtime = namespace["_cross_core_rt"]
+    runtime.initialize_c2v_pipe(torch.bfloat16, True, 7)
+    code = torch_codegen_module._handle_aic_initialize_pipe([], {"dir_mask": 2, "id": 7})
+    exec(code, namespace)  # noqa: S102
+    acc = torch.tensor([[-1.00390625, 1.00390625]], dtype=torch.float32)
+    runtime.push_to_aiv(acc, 0, pipe_id=7)
+    torch.testing.assert_close(
+        runtime.pop_from_aic(0, 7), acc.clamp_min(0).to(torch.bfloat16), rtol=0, atol=0
+    )
 
 
 def test_split_mode_to_int_invalid_value_raises():
@@ -1240,6 +1386,39 @@ def test_cross_core_no_split_dual_dispatch_runtime_pipe_pairing():
     paired = rt.pop_from_aiv(0)
     assert torch.equal(paired, lane0_tile)
     assert rt.snapshot()["to_aic_dual_nosplit"] == {0: 0, 1: 0}
+
+
+@pytest.mark.parametrize("split,dual", [(0, False), (0, True), (1, False), (2, False)])
+def test_cross_core_pipe_ids_isolate_queues_in_both_directions(split, dual):
+    """Reverse pipe order must not exchange payloads, including per-lane queues."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+    rt = ns["_cross_core_rt"]
+    set_lane = ns["_set_subblock_idx"]
+    rt.reset(no_split_dual_aiv_dispatch=dual)
+    payloads = {0: torch.full((4, 4), 1.0), 7: torch.full((4, 4), -3.0)}
+    for pipe_id, payload in payloads.items():
+        rt.push_to_aiv(payload, split, pipe_id=pipe_id)
+    for pipe_id in (7, 0):
+        for lane in range(2 if split or dual else 1):
+            set_lane(lane)
+            actual = rt.pop_from_aic(split, pipe_id=pipe_id)
+            expected = payloads[pipe_id]
+            if split:
+                expected = rt._split_tile(expected, split)[lane]
+            torch.testing.assert_close(actual, expected)
+
+    for pipe_id, payload in payloads.items():
+        parts = rt._split_tile(payload, split) if split else (payload, payload)
+        for lane in range(2 if split or dual else 1):
+            set_lane(lane)
+            rt.push_to_aic(parts[lane], split, pipe_id=pipe_id)
+    for pipe_id in (7, 0):
+        actual = rt.pop_from_aiv(split, pipe_id=pipe_id)
+        torch.testing.assert_close(actual, payloads[pipe_id])
+    rt.reset()
+    assert rt.snapshot(7)["to_aiv"] == 0
+    assert rt.snapshot(7)["to_aic"] == 0
 
 
 def test_mixed_kernel_timeout_cancels_waiters_and_runtime_recovers():

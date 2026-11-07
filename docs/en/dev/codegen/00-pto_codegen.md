@@ -308,12 +308,28 @@ or call `set_validshape` on the source tile before taking the view.
 | `tile.tpop_from_aiv(split=N[, id=I])` | `%buf = pto.tpop_from_aiv {[id = I, ]split = N} -> type` | Pop from Vector pipe |
 | `system.tfree_to_aic(tile_from_tpop[, id=I])` | `pto.tfree_from_aic {[id = I, ]split = N}` | Release a consumer slot back to Cube |
 | `system.tfree_to_aiv(tile_from_tpop[, id=I])` | `pto.tfree_from_aiv {[id = I, ]split = N}` | Release a consumer slot back to Vector |
-| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init (`slot_num`/`local_slot_num` emitted only when set; otherwise PTOAS uses its defaults) |
-| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init (`slot_num`/`local_slot_num` emitted only when set; otherwise PTOAS uses its defaults) |
+| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L][, nosplit = true, acc_push_epilogue = E]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init (`slot_num`/`local_slot_num` emitted only when set; otherwise PTOAS uses its defaults) |
+| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S[, slot_num = N][, local_slot_num = L][, nosplit = true, acc_push_epilogue = E]} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init (`slot_num`/`local_slot_num` emitted only when set; otherwise PTOAS uses its defaults) |
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer (`auto = true`, `base` omitted under `memory_planner=PTOAS`) |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 | `system.syncall(core_type=C)` | `pto.syncall() mode = #pto.sync_all_mode<hard>, core_type = #pto.sync_core_type<C>` | Cross-core all-participant barrier (hard/FFTS form) |
 | `system.syncall(mode="soft", core_type=C, gm_workspace=ws, used_cores=N)` | `pto.syncall(%gm_ptr[, %used] : !pto.ptr<i32>[, i32]) mode = #pto.sync_all_mode<soft>, core_type = #pto.sync_core_type<C>` | Current PTO-ISA soft/GM-polling barrier (partial occupancy; at least 64-byte GM workspace; explicit `N=0` derives the count from device launch registers and omits `%used`) |
+
+With explicit `c2v_dtype` on an A5 C2V-only initializer, codegen additionally
+emits `nosplit = true` and `acc_push_epilogue`. For `c2v_dtype=pl.BF16,
+pre_relu=True`, the extra attribute is:
+
+```text
+acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = f32_bf16, relu = normal_relu>
+```
+
+PTOAS lowers this to `FixpipeParams<NZ2ND, F322BF16, NormalRelu>` on `TPUSH`;
+`TPOP` receives a BF16 Vec tile. FP16 selects `f32_f16`, FP32 selects
+`no_convert`, and `pre_relu=False` selects `no_relu`. Both initializers carry
+the same contract. Unsupported targets/directions, non-FP32 Acc producers and
+mismatched pop dtypes are rejected; PTOAS checks peer and split compatibility.
+The reserved buffer and FIFO slot sizes must describe the transmitted dtype,
+not the FP32 accumulator. The accumulator itself remains FP32 for other users.
 
 **Notes:**
 

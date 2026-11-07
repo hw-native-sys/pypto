@@ -63,7 +63,7 @@ import json
 import os
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -333,7 +333,7 @@ class _DepGraph(NamedTuple):
     """Dependency graph published as one state and treated as read-only."""
 
     deps: "list[JITFunction]"
-    callers: dict[int, list[tuple[Any, str]]]
+    callers: "dict[int, list[tuple[JITFunction, str]]]"
     callees: dict[int, list[str]]
     call_args: dict[tuple[int, str], list[tuple[str | None, str | _call_binding.SlicedArg | None]] | None]
 
@@ -376,6 +376,20 @@ def _layout_dependency_names(func: Any) -> tuple[str, ...]:
 def _python_source(func: Any) -> str:
     """Cache immutable Python source without caching mutable dependency state."""
     return inspect.getsource(func)
+
+
+def _wrapper_call_wiring(
+    functions: "Sequence[JITFunction]", bindings: Sequence[Sequence[_call_binding.DepBinding]]
+) -> tuple[tuple[int, str, int], ...]:
+    """Fingerprint distinct wrappers of one callable without serializing IDs."""
+    if len({id(function._func) for function in functions}) == len(functions):
+        return ()
+    positions = {id(function): index for index, function in enumerate(functions)}
+    return tuple(
+        (index, call_name, positions[id(dep)])
+        for index, direct in enumerate(bindings)
+        for call_name, dep in direct
+    )
 
 
 class JITFunction:
@@ -499,10 +513,10 @@ class JITFunction:
         # therefore agree with the generated program's for any single-binding
         # call graph, and stay a stable discriminator when a dep is emitted
         # more than once.
-        gen_names = _allocate_generated_names([(id(d._func), d) for d in [self, *state.graph.deps]])
+        gen_names = _allocate_generated_names([(id(d), d) for d in [self, *state.graph.deps]])
         layouts = tuple(
             sorted(
-                (gen_names[id(dep._func)], param, str(layout))
+                (gen_names[id(dep)], param, str(layout))
                 for dep in state.graph.deps
                 # ``dep.__name__`` here is the diagnostic name only — a layout
                 # error should name the user's own function.
@@ -521,10 +535,10 @@ class JITFunction:
         Published graphs are never modified. Returns:
 
         - ``deps_topo``: every reachable dep in leaf-first topological order
-          (deduplicated by underlying Python function identity). The entry
+          (deduplicated by JIT wrapper identity). The entry
           function is NOT included.
         - ``callers_by_dep_id``: for each dep, the list of
-          ``(caller_func, call_name)`` pairs whose bodies contain a call site
+          ``(caller_jit, call_name)`` pairs whose bodies contain a call site
           to it — ``call_name`` being the name that caller's source calls it
           by, which differs from ``dep.__name__`` under an aliased import.
           Recorded in DFS-discovery order; deduplicated within each list. The
@@ -540,7 +554,7 @@ class JITFunction:
           set each context's ``dep_names`` so the body transformer rewrites
           nested dep calls into the ``self.<dep>(...)`` form required by
           multi-function ``@pl.program``.
-        - ``call_args_cache``: ``(id(caller_func), call_name)`` → unified
+        - ``call_args_cache``: ``(id(caller_jit), call_name)`` → unified
           call-site arg list (see ``extract_call_args_for_dep``) or
           ``None`` if the call site isn't found. Cached so metadata
           resolution doesn't re-walk caller ASTs on every JIT call.
@@ -558,41 +572,44 @@ class JITFunction:
             if bindings == cached.bindings:
                 return cached
         deps_topo: list[JITFunction] = []
-        seen: set[int] = set()
-        callers_by_dep_id: dict[int, list[Any]] = {}
+        seen: set[int] = {id(self)}
+        callers_by_dep_id: dict[int, list[tuple[JITFunction, str]]] = {}
+        caller_edges: set[tuple[int, int, str]] = set()
         callees_by_func_id: dict[int, list[str]] = {}
         call_args_cache: dict[
             tuple[int, str], list[tuple[str | None, str | _call_binding.SlicedArg | None]] | None
         ] = {}
 
-        def visit(func: Any, caller_func_type: str) -> None:
-            direct = _discover_dep_bindings(func, caller_func_type)
+        def visit(caller: JITFunction) -> None:
+            direct = _discover_dep_bindings(caller._func, caller._func_type)
             # Call names, not ``__name__``: these become ``ctx.dep_names``,
             # which the body transformer matches against the ``ast.Name``
             # the source actually calls.
-            callees_by_func_id[id(func)] = [b.call_name for b in direct]
+            callees_by_func_id[id(caller)] = [b.call_name for b in direct]
             for call_name, dep in direct:
-                # Key everything off ``id(dep._func)`` (the underlying
-                # Python function) — same key the downstream helpers
-                # use, and stable across multiple wrapper objects for
-                # the same source function.
-                callers = callers_by_dep_id.setdefault(id(dep._func), [])
-                if (func, call_name) not in callers:
-                    callers.append((func, call_name))
+                # Wrappers carry compilation semantics (level, kind, extern
+                # sources); two wrappers of one callable are distinct nodes.
+                callers = callers_by_dep_id.setdefault(id(dep), [])
+                edge = (id(dep), id(caller), call_name)
+                if edge not in caller_edges:
+                    caller_edges.add(edge)
+                    callers.append((caller, call_name))
                 # Memoise per-(caller, call name) call-site args once.
-                cache_key = (id(func), call_name)
+                cache_key = (id(caller), call_name)
                 if cache_key not in call_args_cache:
-                    call_args_cache[cache_key] = _call_binding.extract_call_args_for_dep(func, call_name)
-                if id(dep._func) in seen:
+                    call_args_cache[cache_key] = _call_binding.extract_call_args_for_dep(
+                        caller._func, call_name
+                    )
+                if id(dep) in seen:
                     continue
                 # Mark before recursing — this also serves as a cycle
                 # guard (a self-recursive JIT function is unsupported
                 # but won't loop forever here).
-                seen.add(id(dep._func))
-                visit(dep._func, dep._func_type)
+                seen.add(id(dep))
+                visit(dep)
                 deps_topo.append(dep)
 
-        visit(self._func, self._func_type)
+        visit(self)
         graph = _DepGraph(
             deps_topo,
             callers_by_dep_id,
@@ -603,7 +620,7 @@ class JITFunction:
         source_hash = (
             None
             if any(fn._func_type == "extern" for fn in [self, *deps_topo])
-            else self._compute_static_source_hash(deps_topo)
+            else self._compute_static_source_hash(deps_topo, bindings)
         )
         layout_dependencies = tuple(
             (dep._func, names) for dep in deps_topo if (names := _layout_dependency_names(dep._func))
@@ -712,12 +729,12 @@ class JITFunction:
         and staying silent keeps every existing key — and the artifacts behind
         it — valid.
         """
-        position = {id(jit_func._func): index for index, jit_func in enumerate([self, *self._get_deps()])}
+        position = {id(jit_func): index for index, jit_func in enumerate([self, *self._get_deps()])}
         split = len({key[0] for key in plan.order}) != len(plan.order)
         records: list[tuple[Any, ...]] = []
         for key in plan.order:
             func = plan.jit_func[key]._func
-            index = position.get(id(func), -1)
+            index = position.get(id(plan.jit_func[key]), -1)
             binding = _call_binding.freeze_binding(plan.binding[key])
             for name, text in binding:
                 records.append((index, func.__module__, func.__qualname__, name, text))
@@ -745,9 +762,11 @@ class JITFunction:
         state = self._get_dep_graph_state()
         if state.source_hash is not None:
             return state.source_hash
-        return self._compute_static_source_hash(deps)
+        return self._compute_static_source_hash(deps, state.bindings)
 
-    def _compute_static_source_hash(self, deps: list["JITFunction"]) -> str:
+    def _compute_static_source_hash(
+        self, deps: list["JITFunction"], bindings: Sequence[Sequence[_call_binding.DepBinding]]
+    ) -> str:
         """Compute source structure on graph changes or external-source lookups."""
         sources: list[str] = []
         for jit_func in [self, *deps]:
@@ -775,6 +794,9 @@ class JITFunction:
                 )
             else:
                 sources.append(_python_source(jit_func._func))
+        wiring = _wrapper_call_wiring([self, *deps], bindings)
+        if wiring:
+            sources.append(json.dumps(wiring, separators=(",", ":")))
         return compute_source_hash(sources)
 
     # ------------------------------------------------------------------
@@ -827,9 +849,9 @@ class JITFunction:
 
         deps, callers_by_id, _, call_args_cache = self._get_dep_graph()
         per_func_dyn_maps = _call_binding.compute_per_func_dyndim_maps(
-            self._func, param_names, deps, callers_by_id, call_args_cache
+            self, param_names, deps, callers_by_id, call_args_cache
         )
-        entry_dyn_map = per_func_dyn_maps[id(self._func)]
+        entry_dyn_map = per_func_dyn_maps[id(self)]
         # A layout has no runtime counterpart on a torch tensor, so it comes
         # from the annotation even on this path. Raw UINT8 carriers likewise
         # need the annotation to identify their packed FP4 format.
@@ -942,9 +964,9 @@ class JITFunction:
 
         deps, callers_by_id, _, call_args_cache = self._get_dep_graph()
         per_func_dyn_maps = _call_binding.compute_per_func_dyndim_maps(
-            self._func, param_names, deps, callers_by_id, call_args_cache
+            self, param_names, deps, callers_by_id, call_args_cache
         )
-        entry_dyn_map = per_func_dyn_maps[id(self._func)]
+        entry_dyn_map = per_func_dyn_maps[id(self)]
 
         tensor_meta: dict[str, TensorMeta] = {}
         scalar_dtypes: dict[str, DataType] = {}
@@ -1190,25 +1212,27 @@ class JITFunction:
         state = self._get_dep_graph_state()
         functions = [self, *state.graph.deps]
         if state.persistent_source_hash is None:
-            state.persistent_source_hash = digest_record(
-                [
-                    (
-                        _python_source(fn._func),
-                        fn._func.__module__,
-                        fn._func.__qualname__,
-                        fn._func.__code__.co_filename,
-                        fn._func.__code__.co_firstlineno,
-                        fn._func_type,
-                        str(fn._level),
-                        fn._auto_scope,
-                        fn._external_core_type,
-                        fn._external_dual_aiv_dispatch,
-                        tuple(fn._external_source_paths()),
-                        tuple(fn._external_include_dirs),
-                    )
-                    for fn in functions
-                ]
-            )
+            records: list[Any] = [
+                (
+                    _python_source(fn._func),
+                    fn._func.__module__,
+                    fn._func.__qualname__,
+                    fn._func.__code__.co_filename,
+                    fn._func.__code__.co_firstlineno,
+                    fn._func_type,
+                    str(fn._level),
+                    fn._auto_scope,
+                    fn._external_core_type,
+                    fn._external_dual_aiv_dispatch,
+                    tuple(fn._external_source_paths()),
+                    tuple(fn._external_include_dirs),
+                )
+                for fn in functions
+            ]
+            wiring = _wrapper_call_wiring(functions, state.bindings)
+            if wiring:
+                records.append(("<wrapper-calls>", wiring))
+            state.persistent_source_hash = digest_record(records)
         values: list[tuple[Any, ...]] = []
         for index, fn in enumerate(functions):
             namespace = func_name_lookup(fn._func)
@@ -1658,23 +1682,15 @@ class JITFunction:
         _, callers_by_id, callees_by_id, _ = self._get_dep_graph()
         empty_dyn: dict[str, dict[int, DynDim]] = {}
 
-        # Map each Python function id → its JIT ``_func_type`` so meta
-        # resolution downstream can gate dep discovery on the caller's type
-        # (a host orchestrator additionally admits ``orchestration`` deps).
         # Expand the graph into one generated function per compile-time binding.
         # A dep called with two different ``pl.constexpr`` values is two
         # functions here, not an error. The same walk backs the cache key, so
         # the two cannot disagree.
         plan = self._resolve_constexpr_bindings(constexpr_values)
         entry_key: _call_binding.VariantKey = (
-            id(self._func),
+            id(self),
             _call_binding.freeze_binding(constexpr_values),
         )
-
-        func_type_by_id: dict[int, str] = {id(self._func): self._func_type}
-        for key in plan.order:
-            jit_func = plan.jit_func[key]
-            func_type_by_id[id(jit_func._func)] = jit_func._func_type
 
         # One generated ``@pl.function`` name per variant, unique across the
         # program. Two names can collide for two reasons: two distinct deps
@@ -1714,6 +1730,8 @@ class JITFunction:
         # Walk caller-first (reverse of leaf-first order) so each variant's
         # caller metadata is already resolved when we get to it; collect
         # contexts caller-first, then reverse to restore leaf-first emit order.
+        peer_names_by_variant, ambiguous_peer_scopes = _resolve_peer_func_names(plan, gen_names)
+
         resolved: dict[
             _call_binding.VariantKey,
             tuple[
@@ -1735,9 +1753,11 @@ class JITFunction:
                         tensor_meta=tensor_meta,
                         scalar_dtypes=scalar_dtypes,
                         constexpr_values=constexpr_values,
-                        dep_names=callees_by_id[id(self._func)],
+                        dep_names=callees_by_id[id(self)],
                         dep_func_names=dep_func_names_by_variant.get(key, {}),
                         dep_call_variants=dep_call_variants_by_variant.get(key, {}),
+                        peer_func_names=peer_names_by_variant.get(key, {}),
+                        peer_func_scope_ambiguous=key in ambiguous_peer_scopes,
                         auto_scope=self._auto_scope,
                     )
                 )
@@ -1753,23 +1773,24 @@ class JITFunction:
                 # No call node to pin to (see the fallback in
                 # ``expand_constexpr_variants``); resolve as before variants
                 # existed, from the first recorded caller.
-                caller_obj, dep_call_name = callers_by_id[id(dep._func)][0]
+                caller_obj, dep_call_name = callers_by_id[id(dep)][0]
                 caller_key = next((other for other in resolved if other[0] == id(caller_obj)), entry_key)
                 call_node = None
-            caller_func = plan.jit_func[caller_key]._func
+            caller = plan.jit_func[caller_key]
+            caller_func = caller._func
             c_meta, c_sd = resolved[caller_key]
-            caller_ftype = func_type_by_id.get(id(caller_func), "orchestration")
             dep_meta, dep_sd = _tensor_meta.resolve_dep_call_metadata(
                 dep,
                 caller_func,
                 c_meta,
                 c_sd,
-                per_func_dyn.get(id(dep._func), empty_dyn),
-                caller_func_type=caller_ftype,
+                per_func_dyn.get(id(dep), empty_dyn),
+                caller_func_type=caller._func_type,
                 dep_call_name=dep_call_name,
                 call_node=call_node,
                 caller_constexpr=plan.binding[caller_key],
                 discover_deps=_discover_dep_bindings,
+                caller_identity=id(caller),
             )
             resolved[key] = (dep_meta, dep_sd)
             contexts.append(
@@ -1781,9 +1802,11 @@ class JITFunction:
                     tensor_meta=dep_meta,
                     scalar_dtypes=dep_sd,
                     constexpr_values=plan.binding[key],
-                    dep_names=callees_by_id[id(dep._func)],
+                    dep_names=callees_by_id[id(dep)],
                     dep_func_names=dep_func_names_by_variant.get(key, {}),
                     dep_call_variants=dep_call_variants_by_variant.get(key, {}),
+                    peer_func_names=peer_names_by_variant.get(key, {}),
+                    peer_func_scope_ambiguous=key in ambiguous_peer_scopes,
                     auto_scope=dep._auto_scope,
                     external_core_type=dep._external_core_type,
                     external_aic_source=dep._external_aic_source,
@@ -1913,6 +1936,151 @@ def _allocate_generated_names(items: Sequence[tuple[Any, JITFunction]]) -> dict[
     return names
 
 
+class _PeerFunctionBindings(Mapping[str, str | None]):
+    """Resolve a symbolic name against at most two generated peer members."""
+
+    def __init__(
+        self,
+        local: Mapping[str, str | None],
+        members: tuple[tuple[frozenset[str], str], ...],
+    ) -> None:
+        self._local = local
+        self._members = members
+
+    def __getitem__(self, name: str) -> str | None:
+        matches = {generated for aliases, generated in self._members if name in aliases}
+        if name in self._local:
+            local = self._local[name]
+            if local is None:
+                return None
+            matches.add(local)
+        if not matches:
+            raise KeyError(name)
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    def __iter__(self) -> Iterator[str]:
+        seen = set(self._local)
+        yield from self._local
+        for aliases, _ in self._members:
+            for name in aliases:
+                if name not in seen:
+                    seen.add(name)
+                    yield name
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def __bool__(self) -> bool:
+        # Specialization checks truthiness per helper. Never enumerate aliases
+        # there; iteration and exact length are only needed by Mapping clients.
+        return bool(self._members) or bool(self._local)
+
+
+def _reachable_peer_members(
+    plan: _call_binding.VariantPlan, gen_names: Mapping[_call_binding.VariantKey, str]
+) -> dict[_call_binding.VariantKey, frozenset[str] | None]:
+    """Summarize inline launch wrappers with at most two peers, or invalid None."""
+    summaries: dict[_call_binding.VariantKey, frozenset[str] | None] = {}
+    for key in plan.order:
+        function = plan.jit_func[key]
+        if function._level in (_ir.Level.AIC, _ir.Level.AIV):
+            # Core bodies may call initializers; they remain terminal members.
+            summaries[key] = frozenset((gen_names[key],))
+            continue
+        members: set[str] = set()
+        if function._func_type == "inline" or function._level == _ir.Level.CORE_GROUP:
+            for callee in plan.call_targets.get(key, {}).values():
+                target = plan.jit_func[callee]
+                if target._func_type != "inline" and target._level not in (_ir.Level.AIC, _ir.Level.AIV):
+                    continue
+                child = summaries.get(callee, frozenset())
+                if child is None:
+                    summaries[key] = None
+                    break
+                members.update(child)
+                if len(members) > 2:
+                    summaries[key] = None
+                    break
+        if key not in summaries:
+            summaries[key] = frozenset(members)
+    return summaries
+
+
+def _merge_peer_binding(bindings: dict[str, str | None], name: str, generated: str) -> None:
+    bindings[name] = generated if name not in bindings or bindings[name] == generated else None
+
+
+def _resolve_peer_func_names(
+    plan: _call_binding.VariantPlan,
+    gen_names: Mapping[_call_binding.VariantKey, str],
+) -> tuple[
+    dict[_call_binding.VariantKey, Mapping[str, str | None]],
+    set[_call_binding.VariantKey],
+]:
+    """Resolve Group peers through inline calls in O(nodes + edges) time."""
+    summaries = _reachable_peer_members(plan, gen_names)
+    variants_by_name = {name: key for key, name in gen_names.items()}
+    aliases = {
+        gen_names[key]: {function.__name__}
+        for key, function in plan.jit_func.items()
+        if function._level in (_ir.Level.AIC, _ir.Level.AIV)
+    }
+    for targets in plan.call_targets.values():
+        for (call_name, _), callee in targets.items():
+            if gen_names[callee] in aliases:
+                aliases[gen_names[callee]].add(call_name)
+    member_aliases = {name: frozenset(names) for name, names in aliases.items()}
+    bindings_by_scope: dict[tuple[str, ...], dict[str, str | None]] = {}
+    scopes: dict[_call_binding.VariantKey, tuple[str, ...] | None] = {}
+
+    def merge_scope(key: _call_binding.VariantKey, scope: tuple[str, ...] | None) -> None:
+        if key not in scopes:
+            scopes[key] = scope
+        elif scopes[key] != scope:
+            scopes[key] = None
+
+    for group_key in plan.call_targets:
+        if plan.jit_func[group_key]._level != _ir.Level.CORE_GROUP:
+            continue
+        members = summaries[group_key]
+        if not members:
+            # Invalid multi-peer Groups retain their downstream diagnostics.
+            continue
+        scope = tuple(sorted(members))
+        bindings = bindings_by_scope.setdefault(scope, {})
+        merge_scope(group_key, scope)
+        for name in scope:
+            member = variants_by_name[name]
+            _merge_peer_binding(bindings, plan.jit_func[member].__name__, name)
+            merge_scope(member, scope)
+
+    # The plan is leaf-first. Propagate compact scopes caller-first through
+    # launch wrappers and core initializers, visiting each call edge once.
+    for caller in reversed(plan.order):
+        if caller not in scopes:
+            continue
+        scope = scopes[caller]
+        for (call_name, _), callee in plan.call_targets.get(caller, {}).items():
+            if plan.jit_func[callee]._func_type == "inline":
+                merge_scope(callee, scope)
+            elif scope is not None and gen_names[callee] in scope:
+                _merge_peer_binding(bindings_by_scope[scope], call_name, gen_names[callee])
+
+    # Share alias sets and views instead of copying growing alias maps down
+    # shared wrapper chains. Lookup and truthiness examine at most two peers.
+    names_by_scope = {
+        scope: _PeerFunctionBindings(local, tuple((member_aliases[name], name) for name in scope))
+        for scope, local in bindings_by_scope.items()
+    }
+    peer_names_by_variant: dict[_call_binding.VariantKey, Mapping[str, str | None]] = {
+        key: names_by_scope[scope] for key, scope in scopes.items() if scope is not None
+    }
+    # Shared arithmetic helpers remain valid. An actual peer import
+    # diagnoses ambiguity after ordinary body specialization.
+    ambiguous = {key for key, scope in scopes.items() if scope is None}
+    return peer_names_by_variant, ambiguous
+
+
 # ---------------------------------------------------------------------------
 # _JITDecorator — supports @jit, @jit.incore, @jit.incore(level=...)
 # ---------------------------------------------------------------------------
@@ -1935,7 +2103,8 @@ class _SubFunctionDecorator:
     See `_JITDecorator` for the kind semantics:
       - ``host``    → HOST Orchestrator entry (specialized to
         ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)``).
-      - ``incore``  → ``FunctionType.InCore`` (separate IR function, ``level`` selectable).
+      - ``incore``  → ``FunctionType.InCore`` by default; explicit AIC/AIV
+        levels select those core kinds, and CORE_GROUP selects a co-scheduled Group.
       - ``inline``  → ``FunctionType.Inline`` (spliced at every call site by the
         ``InlineFunctions`` IR pass).
       - ``opaque``  → ``FunctionType.Opaque`` (separate IR function; may wrap
@@ -1968,7 +2137,7 @@ class _SubFunctionDecorator:
                 return JITFunction(f, func_type=self._func_type, level=level, auto_scope=resolved_auto_scope)
 
             return _deferred
-        return JITFunction(func, func_type=self._func_type, level=None, auto_scope=resolved_auto_scope)
+        return JITFunction(func, func_type=self._func_type, level=level, auto_scope=resolved_auto_scope)
 
 
 def _resolve_extern_source(source: str | Any, func: Any) -> str:
@@ -2103,7 +2272,9 @@ class _JITDecorator:
         @pl.jit                               # entry-point (Orchestration)
         @pl.jit.host                          # entry-point (HOST Orchestrator)
         @pl.jit.incore                        # InCore sub-function
-        @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
+        @pl.jit.incore(level=pl.Level.AIC)     # explicit Cube function
+        @pl.jit.incore(level=pl.Level.AIV)     # explicit Vector function
+        @pl.jit.incore(level=pl.Level.CORE_GROUP)  # co-scheduled AIC/AIV group
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
         @pl.jit.opaque                        # Opaque sub-function (separate IR function)
 

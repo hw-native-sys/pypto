@@ -55,10 +55,18 @@ def entry(
 | ------ | ------- | ---- |
 | `@pl.jit` | `Orchestration` | chip 级入口，派发 InCore 工作 |
 | `@pl.jit.host` | `level=HOST, role=Orchestrator` | HOST 级入口 —— 分配 window buffer、按 rank 派发 chip 编排器 |
-| `@pl.jit.incore` | `InCore` | 设备 kernel（可接受 `level=` 指定层级） |
+| `@pl.jit.incore` | `InCore`、`AIC`、`AIV` 或 `Group` | 设备 kernel；显式 `level=AIC` / `AIV` 选择相应核类型，`level=CORE_GROUP` 协同派发显式对端 |
 | `@pl.jit.inline` | `Inline` | 由 `InlineFunctions` 在每个调用点展开的辅助函数 |
 | `@pl.jit.opaque` | `Opaque` | 独立 IR 函数，可包含编排循环与 `pl.at` 作用域 |
 | `@pl.jit.graph` | `Graph` | 可录制的编排片段 —— `host_build_graph` runtime 在首次调用时录制其 task 拓扑、之后回放，因此 N 次调用只付一次建图代价。需要在 `RuntimeKind.HOST_BUILD_GRAPH` 下编译 |
+
+不提供层级（或指定 `level=pl.Level.CHIP_DIE`）时，`@pl.jit.incore` 保持普通 `InCore` 类型。
+手写跨核协议时，可分别用 `@pl.jit.incore(level=pl.Level.AIC)` 和 `level=pl.Level.AIV` 定义
+两端，再由 `@pl.jit.incore(level=pl.Level.CORE_GROUP)` 辅助函数调用它们。在 `@pl.jit` 入口中
+派发一次该组（例如放在 `pl.spmd(...)` 内），两端就作为同一个任务协同执行。显式管道初始化因此
+可以经过正常的 JIT 特化与编译链路。
+工厂函数生成同名对端时，JIT 在各自 Group 内解析 `peer_func`，并将其改写为对应的生成函数名，
+也支持组内通过别名调用对端。
 
 `@pl.jit.graph` 有一种作用域形式：`with pl.graph("name"):` 就地标记一个区域，而不必把它
 拆成独立函数。两者编译结果相同 —— 区域会被外提为一个以 `name` 命名的 Graph 函数 ——

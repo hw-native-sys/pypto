@@ -27,7 +27,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, ScalarType, Span, TensorType
 
-from ..utils import _get_span_or_capture, _to_make_tuple
+from ..utils import _get_span_or_capture, _to_make_tuple, resolve_fixpipe_epilogue
 
 # Redundant aliases: the PEP 484 re-export form pyright accepts (plain
 # names would be reportUnusedImport in the IR contract tier).
@@ -625,20 +625,33 @@ def _build_pipe_init_kwargs(
     slot_num: int | None,
     local_slot_num: int | None,
     id: int | None,
-) -> dict[str, int]:
+    c2v_dtype: object,
+    pre_relu: bool,
+) -> dict[str, Any]:
     """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
 
     Value constraints (slot_num > 0, local_slot_num > 0, local_slot_num <=
     slot_num) are enforced downstream by the IR verifier and PTOAS, matching how
     dir_mask / slot_size are handled, so they are not re-checked here.
     """
-    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    kwargs: dict[str, Any] = {"dir_mask": dir_mask, "slot_size": slot_size}
     if slot_num is not None:
         kwargs["slot_num"] = slot_num
     if local_slot_num is not None:
         kwargs["local_slot_num"] = local_slot_num
     if id is not None:
         kwargs["id"] = id
+    # Match store's compile-time ReLU semantics, without introducing a scale:
+    # the pipe's payload dtype selects an unscaled FP32 conversion instead.
+    _, relu = resolve_fixpipe_epilogue("initialize_pipe", None, pre_relu)
+    if relu and c2v_dtype is None:
+        raise ValueError("initialize_pipe: pre_relu=True requires an explicit c2v_dtype")
+    if c2v_dtype is not None:
+        if not isinstance(c2v_dtype, DataType):
+            raise TypeError(f"initialize_pipe: c2v_dtype must be a DataType, got {type(c2v_dtype).__name__}")
+        kwargs["c2v_dtype"] = c2v_dtype
+    if relu:
+        kwargs["pre_relu"] = True
     return kwargs
 
 
@@ -651,6 +664,8 @@ def aic_initialize_pipe(
     slot_num: int | None = None,
     local_slot_num: int | None = None,
     id: int | None = None,
+    c2v_dtype: DataType | None = None,
+    pre_relu: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
@@ -666,10 +681,17 @@ def aic_initialize_pipe(
             ``<= slot_num``). On a3 the reserved/imported buffer is sized
             ``slot_size * local_slot_num``; on a5 it is ``slot_size * slot_num``.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        c2v_dtype: Explicit A5 non-split C2V payload type: FP32, FP16, or BF16.
+            The producer must push FP32 Acc tiles. Both peer initializers must
+            agree, and the consumer must pop this dtype. Narrowing uses RNE.
+            Slot bytes describe the payload, not the FP32 accumulator.
+        pre_relu: Apply ReLU before conversion on every push in this pipe.
+            Requires c2v_dtype. Like store's pre_relu, this is a compile-time
+            setting. No scalar pre_quant scale is applied.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id)
+    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu)
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
@@ -683,6 +705,8 @@ def aiv_initialize_pipe(
     slot_num: int | None = None,
     local_slot_num: int | None = None,
     id: int | None = None,
+    c2v_dtype: DataType | None = None,
+    pre_relu: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
@@ -698,10 +722,15 @@ def aiv_initialize_pipe(
             ``<= slot_num``). On a3 the reserved/imported buffer is sized
             ``slot_size * local_slot_num``; on a5 it is ``slot_size * slot_num``.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        c2v_dtype: Explicit A5 non-split C2V payload type: FP32, FP16, or BF16.
+            Must match the producer's initializer and every consumer pop.
+            Narrowing uses RNE; slot bytes describe the payload dtype.
+        pre_relu: Apply ReLU before conversion on every push in this pipe.
+            Must match the producer's initializer and requires c2v_dtype.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id)
+    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu)
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
 

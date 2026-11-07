@@ -71,7 +71,101 @@ from pypto.runtime.runner import ExecutionMode, RunConfig
 # ---------------------------------------------------------------------------
 
 
+def _peer_import_names(function: ir.Function) -> list[str]:
+    class PeerImports(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.peers: list[str] = []
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("system.import_peer_buffer").name:
+                self.peers.append(dict(op.kwargs)["peer_func"])
+            super().visit_call(op)
+
+    imports = PeerImports()
+    imports.visit_stmt(function.body)
+    return imports.peers
+
+
 class TestJitDecoration:
+    def test_separate_core_wrappers_of_same_callable_remain_distinct(self):
+        def shared(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            return out
+
+        producer = jit.incore(level=pl.Level.AIC)(shared)
+        consumer = jit.incore(level=pl.Level.AIV)(shared)
+
+        @jit.incore(level=pl.Level.CORE_GROUP)
+        def group(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            producer(out)
+            return consumer(out)
+
+        @jit
+        def entry(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            with pl.spmd(1, sync_start=True):
+                group(out)
+            return out
+
+        program = entry.specialize()
+        cores = [
+            function
+            for function in program.functions.values()
+            if function.func_type in (ir.FunctionType.AIC, ir.FunctionType.AIV)
+        ]
+        assert {function.func_type for function in cores} == {ir.FunctionType.AIC, ir.FunctionType.AIV}
+        assert {function.name for function in cores} == {"shared", "shared__2"}
+
+    def test_aliases_of_same_wrapper_share_one_dependency(self):
+        @jit.inline(auto_scope=False)
+        def helper(out: pl.Tensor[[64, 128], pl.BF16]):
+            return out
+
+        first = helper
+        second = helper
+
+        @jit
+        def entry(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            first(out)
+            return second(out)
+
+        deps, callers, _, _ = entry._get_dep_graph()
+        assert deps == [helper]
+        assert callers[id(helper)] == [(entry, "first"), (entry, "second")]
+        program = entry.specialize()
+        assert {function.name for function in program.functions.values()} == {"entry", "helper"}
+
+    def test_separate_core_wrappers_keep_each_constexpr_binding(self):
+        def shared(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]], BLOCK: pl.constexpr):
+            return out
+
+        producer = jit.incore(level=pl.Level.AIC)(shared)
+        consumer = jit.incore(level=pl.Level.AIV)(shared)
+
+        @jit.incore(level=pl.Level.CORE_GROUP)
+        def group(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]], BLOCK: pl.constexpr):
+            producer(out, BLOCK)
+            return consumer(out, BLOCK)
+
+        @jit
+        def entry(
+            first: pl.Out[pl.Tensor[[64, 128], pl.BF16]], second: pl.Out[pl.Tensor[[64, 128], pl.BF16]]
+        ):
+            with pl.spmd(1, sync_start=True):
+                group(first, 16)
+            with pl.spmd(1, sync_start=True):
+                group(second, 32)
+            return first, second
+
+        plan = entry._resolve_constexpr_bindings({})
+        for wrapper in (producer, consumer):
+            assert {key[1] for key in plan.order if plan.jit_func[key] is wrapper} == {
+                (("BLOCK", "16"),),
+                (("BLOCK", "32"),),
+            }
+        program = entry.specialize()
+        for kind in (ir.FunctionType.AIC, ir.FunctionType.AIV):
+            assert sum(function.func_type == kind for function in program.functions.values()) == 2
+
     def test_plain_jit_creates_jitfunction(self):
         @jit
         def my_kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
@@ -178,12 +272,317 @@ class TestJitDecoration:
         assert aic_fn._func_type == "incore"
         assert aic_fn._level == pl.Level.AIC
 
+    @pytest.mark.parametrize(
+        "level,kind",
+        [
+            (None, ir.FunctionType.InCore),
+            (pl.Level.CHIP_DIE, ir.FunctionType.InCore),
+            (pl.Level.AIC, ir.FunctionType.AIC),
+            (pl.Level.AIV, ir.FunctionType.AIV),
+            (pl.Level.CORE_GROUP, ir.FunctionType.Group),
+        ],
+    )
+    @pytest.mark.parametrize("direct", [False, True])
+    def test_incore_level_selects_matching_ir_kind(self, level, kind, direct):
+        # Core levels select specialized function kinds rather than combining
+        # an InCore function (which derives CHIP_DIE) with an incompatible level.
+        def helper(x: pl.Tensor[[64, 128], pl.FP32]):
+            return x
+
+        decorated = jit.incore(helper, level=level) if direct else jit.incore(level=level)(helper)
+        program = decorated.specialize()
+        function = next(iter(program.functions.values()))
+        assert function.func_type == kind
+
     def test_jit_entry_function_type(self):
         @jit
         def entry(a: pl.Tensor):
             return a
 
         assert entry._func_type == "orchestration"
+
+    def test_factory_groups_remap_symbolic_peer_names(self):
+        def peers(dtype):
+            @jit.incore(level=pl.Level.AIV)
+            def consumer(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                pl.reserve_buffer(name="scores", size=32768)
+                return out
+
+            @jit.incore(level=pl.Level.AIC)
+            def producer(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                pl.import_peer_buffer(name="scores", peer_func="consumer")
+                return out
+
+            reader = consumer  # The peer string names the definition, not this alias.
+
+            @jit.incore(level=pl.Level.CORE_GROUP)
+            def group(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                producer(out)
+                return reader(out)
+
+            return group
+
+        first = peers(pl.BF16)
+        second = peers(pl.FP16)
+
+        @jit
+        def entry(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]], b: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            with pl.spmd(1, sync_start=True):
+                second(b)
+            return a, b
+
+        program = entry.specialize()
+        producers = [f for f in program.functions.values() if f.func_type == ir.FunctionType.AIC]
+        assert len(producers) == 2
+        for function in producers:
+            assert _peer_import_names(function) == [function.name.replace("producer", "consumer", 1)]
+
+    @pytest.mark.parametrize("peer_name", ["consumer", "reader"])
+    def test_factory_groups_remap_peers_in_nested_inline_helpers(self, peer_name):
+        def peers(dtype):
+            @jit.incore(level=pl.Level.AIV)
+            def consumer(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                pl.reserve_buffer(name="scores", size=32768)
+                return out
+
+            @jit.inline(auto_scope=False)
+            def initialize(out: pl.Tensor[[64, 128], dtype]):
+                peer = pl.import_peer_buffer(name="scores", peer_func=peer_name)
+                pl.aic_initialize_pipe(
+                    c2v_consumer_buf=peer, dir_mask=1, slot_size=16384, slot_num=2, c2v_dtype=dtype
+                )
+                return out
+
+            @jit.inline(auto_scope=False)
+            def relay(out: pl.Tensor[[64, 128], dtype]):
+                return initialize(out)
+
+            configure = relay
+
+            @jit.incore(level=pl.Level.AIC)
+            def producer(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                configure(out)
+                return out
+
+            reader = consumer
+
+            @jit.incore(level=pl.Level.CORE_GROUP)
+            def group(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                producer(out)
+                return reader(out)
+
+            return group
+
+        first = peers(pl.BF16)
+        second = peers(pl.FP16)
+
+        @jit
+        def entry(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]], b: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            with pl.spmd(1, sync_start=True):
+                second(b)
+            return a, b
+
+        program = passes.inline_functions()(entry.specialize())
+        producers = [f for f in program.functions.values() if f.func_type == ir.FunctionType.AIC]
+        assert len(producers) == 2
+        for function in producers:
+            assert _peer_import_names(function) == [function.name.replace("producer", "consumer", 1)]
+
+    @pytest.mark.parametrize("imports_peer", [False, True])
+    def test_shared_inline_helper_checks_peer_group_ambiguity(self, imports_peer):
+        @jit.inline(auto_scope=False)
+        def initialize_peer(out: pl.Tensor[[64, 128], pl.BF16]):
+            pl.import_peer_buffer(name="scores", peer_func="consumer")
+            return out
+
+        @jit.inline(auto_scope=False)
+        def identity(out: pl.Tensor[[64, 128], pl.BF16]):
+            return out
+
+        initialize = initialize_peer if imports_peer else identity
+
+        def peers():
+            @jit.incore(level=pl.Level.AIV)
+            def consumer(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+                pl.reserve_buffer(name="scores", size=32768)
+                return out
+
+            @jit.incore(level=pl.Level.AIC)
+            def producer(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+                initialize(out)
+                return out
+
+            @jit.incore(level=pl.Level.CORE_GROUP)
+            def group(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+                producer(out)
+                return consumer(out)
+
+            return group
+
+        first = peers()
+        second = peers()
+
+        @jit
+        def entry(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]], b: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            with pl.spmd(1, sync_start=True):
+                second(b)
+            return a, b
+
+        if imports_peer:
+            with pytest.raises(ValueError, match="peer_func='consumer' is ambiguous across groups"):
+                entry.specialize()
+        else:
+            program = passes.inline_functions()(entry.specialize())
+            producers = [f for f in program.functions.values() if f.func_type == ir.FunctionType.AIC]
+            assert len(producers) == 2
+            assert all(not _peer_import_names(function) for function in producers)
+
+    @pytest.mark.parametrize("group_count", [1, 2])
+    @pytest.mark.parametrize("peer_name", ["consumer", "reader"])
+    def test_groups_resolve_peers_through_nested_launch_wrappers(self, group_count, peer_name):
+        def peers(dtype):
+            @jit.incore(level=pl.Level.AIV)
+            def consumer(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                pl.reserve_buffer(name="scores", size=32768)
+                return out
+
+            @jit.incore(level=pl.Level.AIC)
+            def producer(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                pl.import_peer_buffer(name="scores", peer_func=peer_name)
+                return out
+
+            writer = producer
+            reader = consumer
+
+            @jit.inline(auto_scope=False)
+            def launch(out: pl.Tensor[[64, 128], dtype]):
+                writer(out)
+                return reader(out)
+
+            @jit.inline(auto_scope=False)
+            def relay(out: pl.Tensor[[64, 128], dtype]):
+                return launch(out)
+
+            run_peers = relay
+
+            @jit.incore(level=pl.Level.CORE_GROUP)
+            def group(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
+                return run_peers(out)
+
+            return group
+
+        first = peers(pl.BF16)
+        second = peers(pl.FP16)
+
+        @jit
+        def single(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            return a
+
+        @jit
+        def double(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]], b: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            with pl.spmd(1, sync_start=True):
+                second(b)
+            return a, b
+
+        entry = single if group_count == 1 else double
+        program = passes.inline_functions()(entry.specialize())
+        producers = [f for f in program.functions.values() if f.func_type == ir.FunctionType.AIC]
+        assert len(producers) == group_count
+        for function in producers:
+            assert _peer_import_names(function) == [function.name.replace("producer", "consumer", 1)]
+
+    def test_shared_launch_wrapper_reports_peer_alias_definition_conflict(self):
+        @jit.incore(level=pl.Level.AIV)
+        def consumer(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            pl.reserve_buffer(name="scores", size=32768)
+            return out
+
+        reader = consumer
+
+        @jit.inline(auto_scope=False)
+        def launch(out: pl.Tensor[[64, 128], pl.BF16]):
+            return reader(out)
+
+        def peers():
+            @jit.incore(level=pl.Level.AIC)
+            def reader(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+                pl.import_peer_buffer(name="scores", peer_func="reader")
+                return out
+
+            writer = reader
+
+            @jit.incore(level=pl.Level.CORE_GROUP)
+            def group(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+                writer(out)
+                return launch(out)
+
+            return group
+
+        first = peers()
+        second = peers()
+
+        @jit
+        def entry(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]], b: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            with pl.spmd(1, sync_start=True):
+                second(b)
+            return a, b
+
+        with pytest.raises(ValueError, match="peer_func='reader' is ambiguous across groups"):
+            entry.specialize()
+
+    def test_inline_peer_helper_shared_by_groups_with_same_peers(self):
+        @jit.incore(level=pl.Level.AIV)
+        def consumer(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            pl.reserve_buffer(name="scores", size=32768)
+            return out
+
+        @jit.inline(auto_scope=False)
+        def initialize(out: pl.Tensor[[64, 128], pl.BF16]):
+            pl.import_peer_buffer(name="scores", peer_func="consumer")
+            return out
+
+        @jit.incore(level=pl.Level.AIC)
+        def producer(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            initialize(out)
+            return out
+
+        @jit.incore(level=pl.Level.CORE_GROUP)
+        def first(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            producer(out)
+            return consumer(out)
+
+        write = producer
+        read = consumer
+
+        @jit.incore(level=pl.Level.CORE_GROUP)
+        def second(out: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            write(out)
+            return read(out)
+
+        @jit
+        def entry(a: pl.Out[pl.Tensor[[64, 128], pl.BF16]], b: pl.Out[pl.Tensor[[64, 128], pl.BF16]]):
+            with pl.spmd(1, sync_start=True):
+                first(a)
+            with pl.spmd(1, sync_start=True):
+                second(b)
+            return a, b
+
+        program = passes.inline_functions()(entry.specialize())
+        producers = [f for f in program.functions.values() if f.func_type == ir.FunctionType.AIC]
+        assert len(producers) == 1
+        assert _peer_import_names(producers[0]) == ["consumer"]
 
     def test_jit_pl_access(self):
         """pl.jit should work the same as jit."""
@@ -3940,22 +4339,23 @@ class TestSlicedDispatchMetadata:
         # ``_dyn_sliced_chip(inputs[r], ...)``. The DynDim must NOT cascade onto
         # a ``SlicedArg`` key — doing so would corrupt the caller's dim map with
         # a non-string key (and is semantically wrong: the rank dim is dropped).
+        host = JITFunction(_per_rank_dispatch_body, func_type="host")
         call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | SlicedArg | None]] | None] = {
-            (id(_per_rank_dispatch_body), "_dyn_sliced_chip"): [
+            (id(host), "_dyn_sliced_chip"): [
                 (None, SlicedArg("inputs", 1)),
                 (None, SlicedArg("outputs", 1)),
             ]
         }
         maps = compute_per_func_dyndim_maps(
-            entry_func=_per_rank_dispatch_body,
+            entry=host,
             entry_param_names=["inputs", "outputs"],
             deps=[_dyn_sliced_chip],
-            callers_by_dep_id={id(_dyn_sliced_chip._func): [(_per_rank_dispatch_body, "_dyn_sliced_chip")]},
+            callers_by_dep_id={id(_dyn_sliced_chip): [(host, "_dyn_sliced_chip")]},
             call_args_cache=call_args_cache,
         )
-        host_map = maps[id(_per_rank_dispatch_body)]
+        host_map = maps[id(host)]
         # Sanity: the dep itself carries the dynamic dim.
-        assert maps[id(_dyn_sliced_chip._func)]["data"][0].literal == "M_SLICE"
+        assert maps[id(_dyn_sliced_chip)]["data"][0].literal == "M_SLICE"
         # The host map must only ever be keyed by parameter name strings.
         assert all(isinstance(key, str) for key in host_map)
         assert SlicedArg("inputs", 1) not in host_map
@@ -4087,11 +4487,11 @@ class TestInlineFuncIntegration:
         deps_topo, callers_by_id, callees_by_id, _ = entry._get_dep_graph()
         assert [d.__name__ for d in deps_topo] == ["leaf", "mid"]
         # Callers are recorded with the name their source calls the dep by.
-        assert callers_by_id[id(leaf._func)] == [(mid._func, "leaf")]
-        assert callers_by_id[id(mid._func)] == [(entry._func, "mid")]
-        assert callees_by_id[id(entry._func)] == ["mid"]
-        assert callees_by_id[id(mid._func)] == ["leaf"]
-        assert callees_by_id[id(leaf._func)] == []
+        assert callers_by_id[id(leaf)] == [(mid, "leaf")]
+        assert callers_by_id[id(mid)] == [(entry, "mid")]
+        assert callees_by_id[id(entry)] == ["mid"]
+        assert callees_by_id[id(mid)] == ["leaf"]
+        assert callees_by_id[id(leaf)] == []
 
     def test_nested_inline_compiles(self):
         """End-to-end repro from issue #1302: an entry that calls an inline
@@ -4162,11 +4562,11 @@ class TestInlineFuncIntegration:
         # Both diamond branches must record themselves as callers of the
         # shared leaf, so dyn-dim / dynvar propagation visits every branch
         # rather than just the first DFS path.
-        shared_callers = callers_by_id[id(shared._func)]
+        shared_callers = callers_by_id[id(shared)]
         assert {c.__name__ for c, _ in shared_callers} == {"a_helper", "b_helper"}
         assert {name for _, name in shared_callers} == {"shared"}
-        assert callers_by_id[id(a_helper._func)] == [(entry_diamond._func, "a_helper")]
-        assert callers_by_id[id(b_helper._func)] == [(entry_diamond._func, "b_helper")]
+        assert callers_by_id[id(a_helper)] == [(entry_diamond, "a_helper")]
+        assert callers_by_id[id(b_helper)] == [(entry_diamond, "b_helper")]
 
         a = torch.randn(32, 32)
         out = torch.empty(32, 32)
@@ -5319,7 +5719,7 @@ class TestVariableRebinding:
             },
             scalar_dtypes={},
             constexpr_values={},
-            per_func_dyn={id(kernel._func): {}},
+            per_func_dyn={id(kernel): {}},
             pl=pl,
         )
         assert result is not None
@@ -5588,7 +5988,7 @@ class TestCompileKwargForwarding:
             },
             scalar_dtypes={},
             constexpr_values={},
-            per_func_dyn={id(fwd_kernel._func): {}},
+            per_func_dyn={id(fwd_kernel): {}},
             pl=pl,
             **cfg.compile_kwargs(),
         )
@@ -5632,7 +6032,7 @@ class TestCompileKwargForwarding:
             },
             scalar_dtypes={},
             constexpr_values={},
-            per_func_dyn={id(plain_kernel._func): {}},
+            per_func_dyn={id(plain_kernel): {}},
             pl=pl,
         )
         assert set(captured) == {"skip_ptoas", "output_dir"}
@@ -5695,7 +6095,7 @@ class TestJitSourceProvenance:
             },
             scalar_dtypes={},
             constexpr_values={},
-            per_func_dyn={id(_provenance_kernel._func): {}},
+            per_func_dyn={id(_provenance_kernel): {}},
             pl=pl,
         )
         func = prog.get_function("_provenance_kernel")
@@ -5720,7 +6120,7 @@ class TestJitSourceProvenance:
             },
             scalar_dtypes={},
             constexpr_values={},
-            per_func_dyn={id(_provenance_kernel._func): {}},
+            per_func_dyn={id(_provenance_kernel): {}},
             pl=pl,
         )
         incore = list(prog.get_function("_provenance_kernel").body)[0]

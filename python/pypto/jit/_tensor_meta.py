@@ -141,7 +141,8 @@ class _DepScan(NamedTuple):
 
     ``io`` and ``funcs`` are both keyed by the name the caller's *source*
     calls the dep by (see :class:`DepBinding`). ``seen`` holds the ``id()`` of
-    every Python function already on the extraction stack, so the recursive
+    every JIT wrapper (or raw callable for standalone extraction) already on
+    the extraction stack, so the recursive
     descent :func:`_dep_return_metas` performs cannot loop. ``constexpr`` and
     ``scope`` are the caller's own ``pl.constexpr`` binding and namespace, from
     which that descent resolves the binding each call site gives its callee.
@@ -278,7 +279,7 @@ def _dep_return_metas(
     """
     dep = deps.funcs.get(dep_name)
     names = _target_names(target)
-    if dep is None or not names or id(dep._func) in deps.seen:
+    if dep is None or not names or id(dep) in deps.seen:
         return _DEP_RETURN_DECLINED
     try:
         ret_names = _return_element_names(_ast_analysis.get_func_def(dep._func))
@@ -307,6 +308,7 @@ def _dep_return_metas(
         constexpr_values=_call_site_constexpr(dep, call, deps),
         discover_deps=deps.discover_deps,
         visible_only=True,
+        func_identity=id(dep),
     )
     inherited_dims = {id(dim) for meta in seed_meta.values() for dim in meta.shape if isinstance(dim, DynDim)}
     instance_dims: dict[int, DynDim] = {}
@@ -1430,6 +1432,7 @@ def extract_local_tensor_metas(
     visible_only: bool = False,
     *,
     discover_deps: _call_binding.DiscoverDeps,
+    func_identity: int | None = None,
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
@@ -1470,7 +1473,9 @@ def extract_local_tensor_metas(
        extractor descends into the callee's body, seeded with the params this
        call site binds, and each ``vi`` takes the meta of the i-th returned
        name (see :func:`_dep_return_metas`). ``dep_seen`` carries the ``id()``
-       of every function already on that stack so the descent cannot loop.
+       of every wrapper already on that stack so the descent cannot loop.
+       Standalone raw-callable extraction uses the callable's identity until
+       descending into a JIT wrapper.
 
     ``seed_meta`` pre-populates the table with the caller's parameter metas
     (including any ``DynDim`` entries those carry) so a ``pl.slice`` of a
@@ -1773,7 +1778,7 @@ def extract_local_tensor_metas(
     deps = _DepScan(
         io=scan_dep_io(func, caller_func_type, discover_deps=discover_deps),
         funcs={b.call_name: b.dep for b in discover_deps(func, caller_func_type)},
-        seen=dep_seen | {id(func)},
+        seen=dep_seen | {id(func) if func_identity is None else func_identity},
         constexpr=dict(constexpr_values or {}),
         scope=scope,
         owner=func_def.name,
@@ -1841,7 +1846,7 @@ def extract_local_tensor_metas(
     return local if visible_only or stop_at_dep is not None or stop_at_call is not None else collected
 
 
-def resolve_dep_call_metadata(
+def resolve_dep_call_metadata(  # noqa: PLR0913 — carries the caller's wrapper identity and source context
     dep: "JITFunction",
     caller_func: Any,
     caller_tensor_meta: dict[str, TensorMeta],
@@ -1853,6 +1858,7 @@ def resolve_dep_call_metadata(
     caller_constexpr: Mapping[str, str] | None = None,
     *,
     discover_deps: _call_binding.DiscoverDeps,
+    caller_identity: int | None = None,
 ) -> tuple[
     dict[str, TensorMeta],
     dict[str, DataType],
@@ -1903,6 +1909,7 @@ def resolve_dep_call_metadata(
         constexpr_values=caller_constexpr,
         discover_deps=discover_deps,
         visible_only=True,
+        func_identity=caller_identity,
     )
     # The extractor starts from caller_tensor_meta, then applies source-ordered
     # rebindings. Its result is therefore the authoritative state at the call.
