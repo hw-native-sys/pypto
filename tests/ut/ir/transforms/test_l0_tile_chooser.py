@@ -701,7 +701,7 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     k_tail = K - num_full * k
     k_blocks = num_full + (1 if k_tail > 0 else 0)  # == ceil(K/k)
     k_fractals = num_full * _cdiv(k, kt) + (_cdiv(k_tail, kt) if k_tail > 0 else 0)
-    per_mn = k_blocks * cfg.mad_head + cpr * _cdiv(m, cfg.align_m) * k_fractals * _cdiv(n, cfg.align_n)
+    per_mn = k_blocks * cfg.mad_head + cpr * _cdiv(m, 16) * k_fractals * _cdiv(n, 16)
     mad = _cdiv(M, m) * _cdiv(N, n) * per_mn * repetitions
     # Tile-dependent FIXPIPE drain (mirrors C++ DrainCycles): one drain per (m, n)
     # output block = m-independent fixed issue overhead + a PER-M-ROW cost. FIXPIPE
@@ -764,15 +764,20 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_inner_pair: bool, require
     b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
     best = None
-    m = cfg.min_m
-    min_boxed_n = _cdiv(cfg.min_n, cfg.box_align_n) * cfg.box_align_n
-    while m <= cfg.M:
+    m = _cdiv(cfg.min_m, cfg.align_m) * cfg.align_m
+    min_n = _cdiv(cfg.min_n, cfg.align_n) * cfg.align_n
+    m_hi = _cdiv(max(cfg.M, cfg.min_m), cfg.align_m) * cfg.align_m if cfg.allow_padding else cfg.M
+    n_hi = _cdiv(max(cfg.N, cfg.min_n), cfg.align_n) * cfg.align_n if cfg.allow_padding else cfg.N
+    if cfg.max_n:
+        n_hi = min(n_hi, cfg.max_n)
+    min_boxed_n = _cdiv(min_n, cfg.box_align_n) * cfg.box_align_n
+    while m <= m_hi:
         boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
         physical_m = _cdiv(boxed_m, cfg.l0c_align_m) * cfg.l0c_align_m
         if physical_m * min_boxed_n > c0:
             break
-        n = cfg.min_n
-        while n <= min(cfg.N, c0 // physical_m):
+        n = min_n
+        while n <= min(n_hi, c0 // physical_m):
             boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
             inner_full_tiles = cfg.N // n if _row_outer(m, n, cfg, stat) else cfg.M // m
             if physical_m * boxed_n <= c0 and (not require_inner_pair or inner_full_tiles >= 2):
@@ -1177,6 +1182,72 @@ def test_padded_k_upper_bound_covers_aligned_minimum(min_k):
         dbc,
     )
     assert result.estimated_cost_cycles == cost
+
+
+@pytest.mark.parametrize("axis", ["m", "n"])
+def test_compute_cost_is_independent_of_search_alignment(axis):
+    """One INT8 64-cube requires 32 MAD fractals and one 21-cycle issue."""
+    cfg = _default_config(64, 64, 64)
+    cfg.min_m = cfg.min_n = cfg.min_k = 64
+    cfg.bytes_a = cfg.bytes_b = 1
+    cfg.align_k = 32
+    cfg.l0c_align_m = 32
+    cfg.box_align_n = 32
+    cfg.bw_a = cfg.bw_b = cfg.bw_drain = 1e12
+    cfg.drain_fixed_cycles = cfg.drain_row_cycles = cfg.drain_penalty_cycles = 0
+    for alignment in (16, 32):
+        setattr(cfg, f"align_{axis}", alignment)
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (result.m, result.n, result.k) == (64, 64, 64)
+        assert result.estimated_cost_cycles == 53
+
+
+@pytest.mark.parametrize("axis", ["m", "n"])
+@pytest.mark.parametrize("minimum", [17, 32], ids=["unaligned-minimum", "aligned-control"])
+def test_mn_minimum_respects_alignment(axis, minimum):
+    """A lower bound is not an offset of the legal tile grid."""
+    cfg = _default_config(64, 64, 32)
+    setattr(cfg, f"min_{axis}", minimum)
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert getattr(result, axis) >= minimum
+    assert getattr(result, axis) % getattr(cfg, f"align_{axis}") == 0
+    tile, stat, dbc, cost = _brute_optimum(cfg)
+    assert (result.m, result.n, result.k, result.stationarity, result.double_buffer_c) == (
+        *tile,
+        _STAT_ENUM[stat],
+        dbc,
+    )
+    assert result.estimated_cost_cycles == cost
+
+
+@pytest.mark.parametrize("axis", ["m", "n"])
+@pytest.mark.parametrize(
+    "minimum", [16, 17, 32], ids=["ordinary-control", "unaligned", "larger-than-problem"]
+)
+def test_padding_can_reach_mn_minimum(axis, minimum):
+    """Padding permits the first aligned tile satisfying the lower bound."""
+    cfg = _default_config(16 if axis == "m" else 32, 16 if axis == "n" else 32, 32)
+    cfg.allow_padding = True
+    setattr(cfg, f"min_{axis}", minimum)
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert getattr(result, axis) >= minimum
+    assert _capacities_ok(result.m, result.n, result.k, cfg)
+    tile, stat, dbc, cost = _brute_optimum(cfg)
+    assert (result.m, result.n, result.k, result.stationarity, result.double_buffer_c) == (
+        *tile,
+        _STAT_ENUM[stat],
+        dbc,
+    )
+    assert result.estimated_cost_cycles == cost
+
+
+def test_padding_respects_auxiliary_n_cap():
+    cfg = _default_config(32, 16, 32)
+    cfg.allow_padding = True
+    cfg.min_n = 17
+    cfg.max_n = 24
+    with pytest.raises(ValueError, match="no legal .*tile"):
+        passes.l0_tile_chooser.choose_l0_tile(cfg)
 
 
 if __name__ == "__main__":

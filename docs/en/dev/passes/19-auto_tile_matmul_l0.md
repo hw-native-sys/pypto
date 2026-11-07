@@ -193,6 +193,8 @@ propagation, and definition-site versus consumer-site copy timing in that pass.
 
 ## Cost model & design space (`ChooseL0Tile`)
 
+Search minima are lower bounds, rounded up to the corresponding alignment; they do not offset the tile grid. With padding enabled, the upper bound includes the first aligned tile meeting both the problem extent and the minimum. An auxiliary `max_n` still caps N. Search alignment and physical boxing do not change the cube's 16×16 M/N MAD fractals: increasing either search stride must not discount the compute work of an unchanged tile.
+
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:
 
 - `wall ≈ max(C_load, C_mad) + C_drain` when the FIXPIPE L0C→L1 drain is exposed (single L0C), or
@@ -432,6 +434,11 @@ out     = pl.tile.store(d, [0, 0], out)
 ```
 
 The `tile.cast` is dropped. When the producer needs a K-loop (`k < K`), the K-loop is emitted as usual and its Acc result feeds the *same* single `tile.assemble` — the fold is independent of K tiling.
+
+Both the full-window cast fold and the M/N scratch path restore the producer's
+`valid_shape` after assembling into the scratch. The allocation retains its full
+physical box, while chained consumers see only the original valid rows and
+columns, including symbolic extents. Fully valid results need no extra view.
 
 ## Fractal boundary: why the tail needs no special case
 
