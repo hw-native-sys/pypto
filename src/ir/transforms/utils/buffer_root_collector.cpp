@@ -44,6 +44,19 @@ namespace {
 
 using op_predicates::IsBuiltinOp;
 
+std::optional<size_t> BackingAliasSlot(const CallPtr& call) {
+  if (auto slot = ResultAliasedArgIndex(call)) return slot;
+  if (IsOp(call, "tensor.slice")) return 0;
+  const auto* entry = LookupOpEntry(call->op_);
+  // A view needs explicit registry evidence of descriptor-only access.
+  if (entry && !call->args_.empty() &&
+      entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess &&
+      op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+    return 0;
+  }
+  return std::nullopt;
+}
+
 // Keys retain their IR until the outer analysis exits, avoiding pointer reuse.
 // Program identity matters because the same Function can resolve different callees.
 using StorageKey = std::pair<ProgramPtr, FunctionPtr>;
@@ -209,16 +222,7 @@ void BufferRootCollector::RecordAssignmentRoots(const AssignStmtPtr& assign) {
     const std::string& op_name = call->op_->name_;
     std::optional<size_t> alias_slot;
     if (view_policy_ == ViewRootPolicy::kBackingStorage) {
-      alias_slot = ResultAliasedArgIndex(call);
-      if (IsOp(call, "tensor.slice")) alias_slot = 0;
-      const auto* entry = LookupOpEntry(call->op_);
-      // Physical in-place safety alone cannot prove semantic sharing. Metadata
-      // views also require the registry's explicit NoAccess evidence.
-      if (!alias_slot && entry && !call->args_.empty() &&
-          entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess &&
-          op_predicates::IsBufferAliasingViewOp(op_name)) {
-        alias_slot = 0;
-      }
+      alias_slot = BackingAliasSlot(call);
     }
     if (alias_slot && *alias_slot < call->args_.size()) {
       RecordRootCandidates(assign->var_, ResolveRootCandidates(call->args_[*alias_slot]),
@@ -286,6 +290,25 @@ BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(c
   if (!var) return {};
   auto it = root_candidates_.find(var.get());
   return it != root_candidates_.end() ? it->second : RootCandidates{};
+}
+
+BufferRootCollector::RootCandidates BufferRootCollector::ResolveBackingDescriptorRoots(
+    const ExprPtr& expr) const {
+  auto value = expr;
+  while (auto call = As<Call>(value)) {
+    const auto slot = BackingAliasSlot(call);
+    if (!slot || *slot >= call->args_.size()) return {};
+    value = call->args_[*slot];
+  }
+  if (auto projection = As<TupleGetItemExpr>(value)) {
+    if (auto tuple = AsVarLike(projection->tuple_)) {
+      auto it = tuple_output_roots_.find(tuple.get());
+      const auto index = static_cast<size_t>(projection->index_);
+      if (it != tuple_output_roots_.end() && index < it->second.size()) return it->second[index].roots;
+    }
+    return {};
+  }
+  return ResolveRootCandidates(value);
 }
 
 BufferRootCollector::RootCandidates BufferRootCollector::ResolveStorageLeaves(const Var* var) const {

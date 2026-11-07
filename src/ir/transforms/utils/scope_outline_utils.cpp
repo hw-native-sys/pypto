@@ -398,9 +398,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
 
   void InitializeCarryEffects(const std::vector<IterArgPtr>& iter_args) {
     for (const auto& arg : iter_args) {
-      if (auto seed = AsVarLike(arg->initValue_)) {
-        for (const Var* root : RootCandidatesOf(seed.get())) successors_[arg.get()].push_back(root);
-      }
+      successors_[arg.get()] = ResolveBackingDescriptorRoots(arg->initValue_);
       // Even a fresh or unresolved seed needs an identity: subsequent iterations
       // can replace it with a captured cache whose input contents are required.
       RecordRootCandidates(arg, {arg.get()});
@@ -416,9 +414,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
       const auto& result = return_vars[i];
       RecordRootCandidates(result, {result.get()});
       if (!guaranteed_to_run) successors_[result.get()].push_back(iter_args[i].get());
-      auto value = AsVarLike(yield->value_[i]);
-      if (!value) continue;
-      for (const Var* root : RootCandidatesOf(value.get())) {
+      for (const Var* root : ResolveBackingDescriptorRoots(yield->value_[i])) {
         successors_[result.get()].push_back(root);
         if (may_repeat) successors_[iter_args[i].get()].push_back(root);
       }

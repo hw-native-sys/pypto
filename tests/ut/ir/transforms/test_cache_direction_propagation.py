@@ -525,5 +525,73 @@ def test_callee_loop_return_preserves_repeated_storage_roots(trip_count):
     assert _directions(after)["a" if trip_count == 2 else "b"] == ir.ParamDirection.InOut
 
 
+def test_graph_carry_seed_expression_preserves_input_contents():
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, cache: pl.Tensor[[2, 32], pl.FP32]):
+            with pl.graph("layer"):
+                for i, (carry,) in pl.range(1, init_values=(pl.tensor.reshape(cache, [64]),)):
+                    value = pl.tensor.read(carry, [32])
+                    pl.tensor.write(cache, [0, 0], value)
+                    _result = pl.yield_(carry)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Graph, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def layer(self, cache: pl.InOut[pl.Tensor[[2, 32], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            for i, (carry,) in pl.range(1, init_values=(pl.tensor.reshape(cache, [64]),)):
+                value = pl.tensor.read(carry, [32])
+                pl.tensor.write(cache, [0, 0], value)
+                _result = pl.yield_(carry)
+            return _result
+
+        @pl.function
+        def main(self, cache: pl.Tensor[[2, 32], pl.FP32]):
+            _result = self.layer(cache)
+
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
+def test_loop_yield_tuple_projection_preserves_input_contents():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def update_pair(
+            self, cache: pl.Out[pl.Tensor[[64], pl.FP32]], other: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            pl.tensor.write(cache, [0], pl.const(1.0, pl.FP32))
+            return cache, other
+
+        @pl.function
+        def main(self, cache: pl.Tensor[[64], pl.FP32], other: pl.Tensor[[64], pl.FP32]):
+            for i, (carry,) in pl.range(1, init_values=(cache,)):
+                pair = self.update_pair(cache, other)
+                result = pl.yield_(pair[0])
+            value = pl.tensor.read(result, [32])
+            pl.tensor.write(other, [0], value)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def update_pair(
+            self, cache: pl.Out[pl.Tensor[[64], pl.FP32]], other: pl.Out[pl.Tensor[[64], pl.FP32]]
+        ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            pl.tensor.write(cache, [0], pl.const(1.0, pl.FP32))
+            return cache, other
+
+        @pl.function
+        def main(self, cache: pl.InOut[pl.Tensor[[64], pl.FP32]], other: pl.Out[pl.Tensor[[64], pl.FP32]]):
+            for i, (carry,) in pl.range(1, init_values=(cache,)):
+                pair = self.update_pair(cache, other)
+                result = pl.yield_(pair[0])
+            value = pl.tensor.read(result, [32])
+            pl.tensor.write(other, [0], value)
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

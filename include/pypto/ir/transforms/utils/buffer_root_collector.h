@@ -111,6 +111,7 @@ class BufferRootCollector : public IRVisitor {
   // descriptor-only yields, while sharing all storage/control-flow propagation.
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
   void RecordAssignmentRoots(const AssignStmtPtr& assign);
+  [[nodiscard]] RootCandidates ResolveBackingDescriptorRoots(const ExprPtr& expr) const;
   void RecordSimtLaunchRoots(const SimtLaunchStmtPtr& launch);
   void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
   [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
