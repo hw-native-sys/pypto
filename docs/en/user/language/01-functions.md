@@ -95,7 +95,17 @@ region cannot nest inside another Graph region, nor inside `pl.at` / `pl.cluster
 them. All three are compile errors.
 
 Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
-the entry's body — call them by name. The name you call is resolved in the entry's own
+the entry's body — call them by name. Functions passed to `pl.submit` or
+`pl.spmd_submit` are discovered too; callee constexpr arguments specialize the
+function, while `deps` and other dispatch metadata remain on the submission.
+A first submission can omit runtime-allocated Out parameters when their complete
+tensor annotations determine shape and dtype, including call-owned constexpr
+values. JIT determines result types from a complete return contract or a known store writeback;
+a genuinely void callee contributes no tensor result. Submit appends one TaskId
+after the callee values. Tensor metadata follows single-variable tuple bindings
+and constant projections, including projections used directly as call arguments;
+the TaskId slot is never treated as a tensor.
+The name you call is resolved in the entry's own
 namespace, so an aliased import (`from kernels import matmul as mm`, or a plain
 `mm = matmul` rebinding) is discovered like any other binding; the generated program still
 names the function after its `def`. When two distinct sub-functions share that name — two

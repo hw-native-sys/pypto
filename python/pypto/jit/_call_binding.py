@@ -16,9 +16,10 @@ decorator boundary; type-only references do not introduce a runtime import cycle
 import ast
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 from . import _arguments, _ast_analysis
+from ._call_syntax import dependency_call
 from .specializer import (
     DynDim,
     free_name_source,
@@ -160,12 +161,7 @@ def extract_call_args_for_dep(
     ``None`` if no call site to ``dep_name`` is found. Only the first call
     site is examined.
     """
-    func_def = _ast_analysis.get_func_def(entry_func)
-    calls = [
-        node
-        for node in ast.walk(func_def)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_name
-    ]
+    calls = _dep_call_nodes(entry_func, dep_name)
     if not calls:
         return None
     return call_arg_refs(min(calls, key=lambda call: (call.lineno, call.col_offset)))
@@ -177,7 +173,10 @@ def _dep_call_nodes(caller_func: Any, dep_call_name: str) -> list[ast.Call]:
     calls = [
         node
         for node in ast.walk(func_def)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_call_name
+        if isinstance(node, ast.Call)
+        and (view := dependency_call(node)) is not None
+        and isinstance(view.func, ast.Name)
+        and view.func.id == dep_call_name
     ]
     return sorted(calls, key=lambda call: (call.lineno, call.col_offset))
 
@@ -268,6 +267,7 @@ def resolve_call_site_constexpr(
         TypeError: if a constexpr parameter is unbound at this call site or is
             bound to something with no compile-time value.
     """
+    call = dependency_call(call) or call
     constexpr_names, dep_param_names = signature
     bound: dict[str, ast.expr] = {}
     for index, arg in enumerate(call.args):
@@ -465,23 +465,31 @@ def expand_constexpr_variants(
     return plan
 
 
-def call_arg_refs(node: ast.Call) -> list[tuple[str | None, str | SlicedArg | None]]:
-    """Unify one call node's positional and keyword args into ``(param, ref)`` pairs.
+_ArgT = TypeVar("_ArgT")
 
-    ``param`` is ``None`` for a positional argument (paired with the callee's
-    parameter list by index in :func:`build_param_mapping`) and the keyword
-    name otherwise. ``**kwargs`` splats are skipped — they carry no name to
-    bind against.
-    """
-    result: list[tuple[str | None, str | SlicedArg | None]] = [(None, arg_ref(arg)) for arg in node.args]
-    result.extend((kw.arg, arg_ref(kw.value)) for kw in node.keywords if kw.arg is not None)
-    return result
+
+def _call_arg_pairs(node: ast.Call, transform: Callable[[ast.expr], _ArgT]) -> list[tuple[str | None, _ArgT]]:
+    node = dependency_call(node) or node
+    return [
+        *((None, transform(arg)) for arg in node.args),
+        *((kw.arg, transform(kw.value)) for kw in node.keywords if kw.arg is not None),
+    ]
+
+
+def call_arg_refs(node: ast.Call) -> list[tuple[str | None, str | SlicedArg | None]]:
+    """Bind actual callee arguments, excluding Submit dispatch metadata."""
+    return _call_arg_pairs(node, arg_ref)
+
+
+def call_arg_nodes(node: ast.Call) -> list[tuple[str | None, ast.expr]]:
+    """Keep exact operands for tuple projections that cannot be tensor slices."""
+    return _call_arg_pairs(node, lambda arg: arg)
 
 
 def build_param_mapping(
     dep_param_names: list[str],
-    call_args: list[tuple[str | None, str | SlicedArg | None]],
-) -> dict[str, str | SlicedArg | None]:
+    call_args: list[tuple[str | None, _ArgT]],
+) -> dict[str, _ArgT]:
     """Map dep parameter name → caller argument ref from call-site args.
 
     ``call_args`` is the unified form returned by
@@ -491,7 +499,7 @@ def build_param_mapping(
     ``arg_ref`` may be a name (``str``), a ``SlicedArg``, or ``None``.
     Mixed positional + keyword call sites collapse to the same dict.
     """
-    mapping: dict[str, str | SlicedArg | None] = {}
+    mapping: dict[str, _ArgT] = {}
     pos_idx = 0
     for param_name, arg_name in call_args:
         if param_name is None:

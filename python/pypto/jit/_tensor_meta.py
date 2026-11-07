@@ -16,23 +16,30 @@ decorator at runtime; recursive walks preserve that resolver and request snapsho
 import ast
 import copy
 import functools
+import importlib
+import inspect
 import math
 import types
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast, get_args, get_origin
 
 from pypto.arith import Analyzer
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
 from . import _arguments, _ast_analysis, _call_binding
+from ._call_syntax import call_operand as _call_operand
+from ._call_syntax import dependency_call
+from ._call_syntax import writeback_return_operand as _writeback_return_operand
 from ._specialize_body import BodyTransformer
 from .specializer import (
     DynDim,
     ShapeDim,
     TensorMeta,
     _classify_params,
+    _LangDynVar,
+    _LangTensor,
     func_name_lookup,
 )
 
@@ -136,6 +143,9 @@ def scan_dep_io(
     return out
 
 
+_SubmitTupleMeta = tuple[TensorMeta | None, ...]
+
+
 class _DepScan(NamedTuple):
     """Everything the local-meta walk needs to know about one caller's deps.
 
@@ -155,6 +165,7 @@ class _DepScan(NamedTuple):
     owner: str
     # Keep runtime JIT recognition at the decorator boundary, also for callee returns.
     discover_deps: _call_binding.DiscoverDeps
+    submit_results: dict[str, _SubmitTupleMeta]
 
 
 def _target_names(target: ast.expr) -> list[str]:
@@ -170,11 +181,19 @@ def _target_names(target: ast.expr) -> list[str]:
     return []
 
 
+def _returned_element_name(value: ast.expr) -> str:
+    if isinstance(value, ast.Name):
+        return value.id
+    target = _writeback_return_operand(value) if isinstance(value, ast.Call) else None
+    return target.id if isinstance(target, ast.Name) else ""
+
+
 def _return_element_names(func_def: ast.FunctionDef) -> list[str]:
     """Return the names a function's first value-carrying ``return`` hands back.
 
     ``return a, b`` → ``["a", "b"]``; ``return a`` → ``["a"]``. An element that
-    is not a bare ``Name`` (a call, a subscript, a literal) yields ``""`` so the
+    is a known store expression follows its named destination. Other non-Name
+    expressions (opaque calls, subscripts, literals) yield ``""`` so the
     positional alignment with the caller's targets survives — the empty name
     simply resolves to no meta.
     """
@@ -182,8 +201,68 @@ def _return_element_names(func_def: ast.FunctionDef) -> list[str]:
         if not (isinstance(node, ast.Return) and node.value is not None):
             continue
         elts = node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]
-        return [e.id if isinstance(e, ast.Name) else "" for e in elts]
+        return [_returned_element_name(element) for element in elts]
     return []
+
+
+def _dep_annotation_namespace(dep: "JITFunction", binding: Mapping[str, str]) -> dict[str, Any]:
+    namespace = {**func_name_lookup(dep._func), "pl": importlib.import_module("pypto.language")}
+    for name, text in binding.items():
+        namespace[name] = _arguments.resolve_annotation(text, namespace)
+    return namespace
+
+
+def _omitted_output_metas(
+    dep: "JITFunction", call: ast.Call, binding: Mapping[str, str]
+) -> dict[str, TensorMeta]:
+    """Read only truly omitted Out slots; never repair an unknown supplied operand."""
+    supplied = _call_binding.build_param_mapping(dep._param_names(), _call_binding.call_arg_refs(call))
+    definition = _ast_analysis.get_func_def(dep._func)
+    outputs = _classify_params(definition)[0]
+    outputs = [name for name in outputs if name not in supplied]
+    if not outputs:
+        return {}
+    signature = inspect.signature(dep._func)
+    source_annotations = {arg.arg: arg.annotation for arg in definition.args.args}
+    namespace = _dep_annotation_namespace(dep, binding)
+    dyn_map = _ast_analysis.build_dyndim_map_for_func(dep._func, tuple(dep._param_names()))
+    result: dict[str, TensorMeta] = {}
+    for name in outputs:
+        source = source_annotations.get(name)
+        spelling = ast.unparse(source) if source is not None else ""
+        annotation = _arguments.resolve_annotation(spelling, namespace)
+        if isinstance(annotation, str):
+            # Annotation-only factory locals may survive only in the evaluated
+            # signature. Prefer source resolution so a call-owned constexpr
+            # overrides an ambient value captured when Python defined the function.
+            annotation = _arguments.resolve_annotation(signature.parameters[name].annotation, namespace)
+        if (
+            isinstance(annotation, _LangTensor)
+            and annotation.shape is not None
+            and annotation.dtype is not None
+        ):
+            result[name] = _arguments.signature_tensor_meta(
+                annotation,
+                annotation.dtype,
+                dyn_map.get(name, {}),
+                _LangDynVar,
+                param_name=name,
+                func_name=dep.__name__,
+            )
+    return result
+
+
+def _declared_return_count(dep: "JITFunction", binding: Mapping[str, str]) -> int | None:
+    annotation = _arguments.resolve_annotation(
+        inspect.signature(dep._func).return_annotation, _dep_annotation_namespace(dep, binding)
+    )
+    # A Python tuple annotation declares flat function results. pl.Tuple is a
+    # single tuple-valued result, not a list to flatten into Submit slots.
+    if get_origin(annotation) is tuple:
+        return len(get_args(annotation))
+    if isinstance(annotation, _LangTensor):
+        return 1
+    return None
 
 
 def _dep_out_metas(
@@ -219,6 +298,7 @@ def _dep_out_metas(
             output_metas[out_param] = local[caller_arg]
     dep = deps.funcs.get(dep_name)
     if dep is not None:
+        output_metas.update(_omitted_output_metas(dep, call, _call_site_constexpr(dep, call, deps)))
         # A returned Out buffer must retain the callee's declared packed format.
         _validate_dep_packed_fp4_dtypes(dep, output_metas)
     return {
@@ -298,6 +378,7 @@ def _dep_return_metas(
             continue
         if caller_arg in local:
             seed_meta[dep_param] = local[caller_arg]
+    seed_meta.update(_omitted_output_metas(dep, call, _call_site_constexpr(dep, call, deps)))
     _validate_dep_packed_fp4_dtypes(dep, seed_meta)
     callee_metas = extract_local_tensor_metas(
         dep._func,
@@ -368,17 +449,19 @@ def _dep_out_metas_or_return(
 ) -> _DepReturn:
     """Resolve one ``v1, ..., vk = dep(args)`` target from its return contract.
 
-    Explicit extern returns may reorder, repeat, or select readonly parameters,
-    so their aliases take precedence over the positional Out/InOut convention.
+    Explicit extern and Graph returns may reorder, repeat, or select readonly
+    parameters, so their aliases precede the positional Out/InOut convention.
     Signature-only externs and ordinary kernels retain the existing Out rule,
     which also validates the caller's buffer against the callee's packed format.
     """
     dep = deps.funcs.get(dep_name)
-    if dep is not None and dep._func_type == "extern":
+    if dep is not None and dep._func_type in ("extern", "graph"):
         returned = _dep_return_metas(call, dep_name, target, deps, local)
         # A resolved return can mark targets stale without providing any metas;
         # do not replace that result with an unrelated writable buffer's type.
-        if returned is not _DEP_RETURN_DECLINED:
+        if returned is not _DEP_RETURN_DECLINED and (
+            dep._func_type == "extern" or returned.metas or returned.stale
+        ):
             return returned
     out_metas = _dep_out_metas(call, dep_name, target, deps, local)
     if out_metas:
@@ -560,22 +643,6 @@ def _subscript_slice_meta(
     )
     dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
     return replace(src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes))
-
-
-def _call_operand(call: ast.Call, index: int | None, name: str) -> ast.expr | None:
-    """The argument ``call`` binds to parameter ``name``.
-
-    Args:
-        call: The operator call
-        index: The parameter's positional slot, or None when it is keyword-only
-        name: The parameter's keyword name
-
-    Returns:
-        The argument expression, or None when the call does not supply it
-    """
-    if index is not None and len(call.args) > index:
-        return call.args[index]
-    return next((kw.value for kw in call.keywords if kw.arg == name), None)
 
 
 def _tensor_or_input_operand(call: ast.Call) -> ast.expr | None:
@@ -819,7 +886,8 @@ def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None, stop_at_call: ast.Call
     def matches(node: ast.AST) -> bool:
         if stop_at_call is not None:
             return node is stop_at_call
-        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_name
+        view = dependency_call(node)
+        return view is not None and isinstance(view.func, ast.Name) and view.func.id == dep_name
 
     # Nested bodies are skipped here and walked by the caller one statement at a
     # time, so the metadata a scope defines before the call is still collected.
@@ -836,6 +904,143 @@ def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None, stop_at_call: ast.Call
     return False
 
 
+def _submitted_value_metas(
+    call: ast.Call, dep_name: str, binding: str, deps: _DepScan, local: Mapping[str, TensorMeta]
+) -> _SubmitTupleMeta:
+    """Describe the callee values in the parser's flat Submit tuple."""
+    dep = deps.funcs.get(dep_name)
+    returned: list[str] = []
+    if dep is not None:
+        try:
+            returned = _return_element_names(_ast_analysis.get_func_def(dep._func))
+        except OSError:
+            pass
+    outputs = deps.io[dep_name][1]
+    declared = _declared_return_count(dep, _call_site_constexpr(dep, call, deps)) if dep is not None else None
+    count = (
+        declared
+        if declared is not None
+        else len(returned)
+        or (len(outputs) if dep is not None and dep._func_type == "extern" else int(bool(outputs)))
+    )
+    names = [f"{binding}_value_{index}" for index in range(count)]
+    if not names:
+        return ()
+    target: ast.expr = (
+        ast.Name(id=names[0], ctx=ast.Store())
+        if count == 1
+        else ast.Tuple(elts=[ast.Name(id=name, ctx=ast.Store()) for name in names], ctx=ast.Store())
+    )
+    result = _dep_out_metas_or_return(call, dep_name, target, deps, local)
+    return tuple(result.metas.get(name) for name in names)
+
+
+def _submitted_projection_meta(
+    value: ast.expr | None,
+    submitted: Mapping[str, _SubmitTupleMeta],
+    resolve_int: Callable[[ast.expr], int | None],
+) -> TensorMeta | None:
+    """Resolve a constant projection without treating the TaskId as a tensor."""
+    if not isinstance(value, ast.Subscript) or not isinstance(value.value, ast.Name):
+        return None
+    slots = submitted.get(value.value.id)
+    if slots is None:
+        return None
+    index = resolve_int(value.slice)
+    return slots[index] if index is not None and -len(slots) <= index < len(slots) else None
+
+
+def _update_submit_result_meta(
+    targets: list[ast.expr],
+    value: ast.expr | None,
+    local: dict[str, TensorMeta],
+    deps: _DepScan,
+) -> bool:
+    """Track a submitted callee's tensor result without aliasing its TaskId."""
+    call_view = dependency_call(value) if value is not None else None
+    if (
+        call_view is None
+        or call_view is value
+        or not isinstance(call_view.func, ast.Name)
+        or call_view.func.id not in deps.io
+    ):
+        return False
+    # A submit returns (callee_result, TaskId). Only the first element can
+    # carry Tensor metadata into the next dependent submission.
+    for target in targets:
+        if isinstance(target, ast.Name):
+            values = _submitted_value_metas(call_view, call_view.func.id, target.id, deps, local)
+            deps.submit_results[target.id] = (*values, None)
+            local.pop(target.id, None)
+        elif isinstance(target, ast.Tuple) and len(target.elts) == 2:
+            result_target, task_target = target.elts
+            result = _dep_out_metas_or_return(call_view, call_view.func.id, result_target, deps, local)
+            _apply_dep_return(local, result)
+            for name in _target_names(task_target):
+                local.pop(name, None)
+    return True
+
+
+def _dependency_assignment_returns(
+    call: ast.Call,
+    callee: str,
+    targets: list[ast.expr],
+    deps: _DepScan,
+    local: Mapping[str, TensorMeta],
+) -> list[_DepReturn]:
+    """Infer the RHS once, then relabel a chained assignment's result aliases."""
+    if len(targets) > 1 and all(isinstance(target, ast.Name) for target in targets):
+        names = [target.id for target in targets if isinstance(target, ast.Name)]
+        result = _dep_out_metas_or_return(call, callee, targets[0], deps, local)
+        shared_meta = result.metas.get(names[0])
+        shared_stale = names[0] in result.stale
+        # A chain evaluates one call; preserve its derived dimensions for
+        # every alias rather than inferring fresh symbols for each target.
+        return [
+            _DepReturn(
+                {} if shared_meta is None else {name: shared_meta},
+                frozenset({name}) if shared_stale else frozenset(),
+            )
+            for name in names
+        ]
+    return [_dep_out_metas_or_return(call, callee, target, deps, local) for target in targets]
+
+
+def _forget_submit_bindings(stmt: ast.stmt, deps: _DepScan) -> None:
+    for name in _stmt_binding_names(stmt):
+        deps.submit_results.pop(name, None)
+
+
+def _update_submit_assignment(
+    stmt: ast.stmt,
+    targets: list[ast.expr],
+    value: ast.expr | None,
+    local: dict[str, TensorMeta],
+    deps: _DepScan,
+    resolve_int: Callable[[ast.expr], int | None],
+) -> tuple[bool, TensorMeta | None]:
+    """Apply tuple bindings before their names can hide their RHS metadata."""
+    projection = _submitted_projection_meta(value, deps.submit_results, resolve_int)
+    aliased = deps.submit_results.get(value.id) if isinstance(value, ast.Name) else None
+    if value is not None:
+        _forget_submit_bindings(stmt, deps)
+    if aliased is None:
+        return _update_submit_result_meta(targets, value, local, deps), projection
+    for target in targets:
+        if isinstance(target, ast.Name):
+            deps.submit_results[target.id] = aliased
+            local.pop(target.id, None)
+        elif isinstance(target, ast.Tuple):
+            for index, element in enumerate(target.elts):
+                for name in _target_names(element):
+                    local.pop(name, None)
+                if isinstance(element, ast.Name) and len(target.elts) == len(aliased):
+                    meta = aliased[index]
+                    if meta is not None:
+                        local[element.id] = meta
+    return True, None
+
+
 def _update_local_tensor_meta(
     stmt: ast.stmt,
     local: dict[str, TensorMeta],
@@ -849,9 +1054,15 @@ def _update_local_tensor_meta(
     """Apply one assignment's metadata effects to the source-ordered state."""
     parts = _assignment_parts(stmt)
     if parts is None:
+        _forget_submit_bindings(stmt, deps)
         _forget_rebound_dims(stmt, dim_values)
         return
     targets, value = parts
+    handled, projection = _update_submit_assignment(stmt, targets, value, local, deps, resolve_int)
+    if handled:
+        for target in targets:
+            _forget_names(target, dim_values)
+        return
     named_target = next((t.id for t in targets if isinstance(t, ast.Name)), None)
     has_named_target = named_target is not None
     meta: TensorMeta | None = None
@@ -862,7 +1073,7 @@ def _update_local_tensor_meta(
     # effects from the same pre-assignment state so a self-referential chained
     # assignment cannot affect the metadata applied to later targets.
     if isinstance(value, ast.Subscript) and has_named_target:
-        meta = _subscript_slice_meta(value, local, resolve_int)
+        meta = projection or _subscript_slice_meta(value, local, resolve_int)
     elif isinstance(value, ast.Name) and has_named_target:
         meta = local.get(value.id)
     elif isinstance(value, ast.Call):
@@ -886,24 +1097,7 @@ def _update_local_tensor_meta(
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # The in-place ``Out``-param convention first; a callee that
             # allocates its own results falls through to its return statement.
-            if len(targets) > 1 and all(isinstance(target, ast.Name) for target in targets):
-                names = [target.id for target in targets if isinstance(target, ast.Name)]
-                result = _dep_out_metas_or_return(value, fn.id, targets[0], deps, local)
-                shared_meta = result.metas.get(names[0])
-                shared_stale = names[0] in result.stale
-                # A chain evaluates one call. Relabel its single result rather
-                # than inventing fresh derived dimensions for every alias.
-                dep_returns = [
-                    _DepReturn(
-                        {} if shared_meta is None else {name: shared_meta},
-                        frozenset({name}) if shared_stale else frozenset(),
-                    )
-                    for name in names
-                ]
-            else:
-                dep_returns = [
-                    _dep_out_metas_or_return(value, fn.id, target, deps, local) for target in targets
-                ]
+            dep_returns = _dependency_assignment_returns(value, fn.id, targets, deps, local)
             # Preserve the existing dependency-result behavior when neither
             # rule resolves the callee's results: an already-known target keeps
             # its metadata until a later supported rebinding can refine it.
@@ -1032,6 +1226,7 @@ def _walk_local_tensor_meta_stmts(
     collected: dict[str, TensorMeta],
     update: Callable[[ast.stmt], None],
     stop_at_call: ast.Call | None = None,
+    submit_results: dict[str, _SubmitTupleMeta] | None = None,
 ) -> bool:
     """Walk source order with plain binding tables and branch undo journals.
 
@@ -1044,13 +1239,17 @@ def _walk_local_tensor_meta_stmts(
     """
     dim_undo: list[tuple[str, _DimValue]] = []
     tensor_undo: list[tuple[str, TensorMeta | None]] = []
+    submit_undo: list[tuple[str, _SubmitTupleMeta | None]] = []
+    submitted = submit_results if submit_results is not None else {}
 
     def forget_dims(names: set[str]) -> None:
         for name in names:
             dim_undo.append((name, dim_values.get(name)))
             dim_values[name] = None
 
-    def rewind(dim_mark: int, tensor_mark: int) -> tuple[dict[str, _DimValue], dict[str, TensorMeta | None]]:
+    def rewind(
+        dim_mark: int, tensor_mark: int, submit_mark: int
+    ) -> tuple[dict[str, _DimValue], dict[str, TensorMeta | None], dict[str, _SubmitTupleMeta | None]]:
         dims = {name: dim_values.get(name) for name, _ in dim_undo[dim_mark:]}
         tensors = {name: local.get(name) for name, _ in tensor_undo[tensor_mark:]}
         for name, value in reversed(dim_undo[dim_mark:]):
@@ -1060,18 +1259,25 @@ def _walk_local_tensor_meta_stmts(
                 local.pop(name, None)
             else:
                 local[name] = meta
+        tuples = {name: submitted.get(name) for name, _ in submit_undo[submit_mark:]}
+        for name, value in reversed(submit_undo[submit_mark:]):
+            if value is None:
+                submitted.pop(name, None)
+            else:
+                submitted[name] = value
         del dim_undo[dim_mark:]
         del tensor_undo[tensor_mark:]
-        return dims, tensors
+        del submit_undo[submit_mark:]
+        return dims, tensors, tuples
 
     def walk_if(stmt: ast.If) -> bool:
-        dim_mark, tensor_mark = len(dim_undo), len(tensor_undo)
+        dim_mark, tensor_mark, submit_mark = len(dim_undo), len(tensor_undo), len(submit_undo)
         if walk(stmt.body):
             return True
-        true_dims, true_tensors = rewind(dim_mark, tensor_mark)
+        true_dims, true_tensors, true_tuples = rewind(dim_mark, tensor_mark, submit_mark)
         if walk(stmt.orelse):
             return True
-        false_dims, false_tensors = rewind(dim_mark, tensor_mark)
+        false_dims, false_tensors, false_tuples = rewind(dim_mark, tensor_mark, submit_mark)
         forget_dims(true_dims.keys() | false_dims.keys())
         for name in true_tensors.keys() | false_tensors.keys():
             lhs = true_tensors.get(name, local.get(name))
@@ -1082,6 +1288,14 @@ def _walk_local_tensor_meta_stmts(
                 local[name] = merged
             else:
                 local.pop(name, None)
+        for name in true_tuples.keys() | false_tuples.keys():
+            lhs = true_tuples.get(name, submitted.get(name))
+            rhs = false_tuples.get(name, submitted.get(name))
+            submit_undo.append((name, submitted.get(name)))
+            if lhs is not None and rhs is not None and len(lhs) == len(rhs):
+                submitted[name] = tuple(_merge_tensor_metas(a, b) for a, b in zip(lhs, rhs, strict=True))
+            else:
+                submitted.pop(name, None)
         return False
 
     def walk(body: list[ast.stmt]) -> bool:
@@ -1092,6 +1306,7 @@ def _walk_local_tensor_meta_stmts(
             for name in names:
                 dim_undo.append((name, dim_values.get(name)))
                 tensor_undo.append((name, local.get(name)))
+                submit_undo.append((name, submitted.get(name)))
             update(stmt)
             for name in names:
                 if name in local:
@@ -1430,8 +1645,14 @@ def extract_local_tensor_metas(
     visible_only: bool = False,
     *,
     discover_deps: _call_binding.DiscoverDeps,
+    submit_results: dict[str, _SubmitTupleMeta] | None = None,
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
+
+    An optional submit_results dictionary receives the live flat tuple slots at
+    the stopping call. It shares the same binding/branch undo journal as tensor
+    metadata, so argument resolution can distinguish tuple projections from
+    tensor slices without a second source walk.
 
     Walks the body in source order, tracking the three ways a local tensor can
     be produced inside a JIT function:
@@ -1778,15 +1999,17 @@ def extract_local_tensor_metas(
         scope=scope,
         owner=func_def.name,
         discover_deps=discover_deps,
+        submit_results={} if submit_results is None else submit_results,
     )
 
     # Dispatch table: pl.<attr>(...) → meta extraction function.
     # Replaces sequential if-chains, reducing branch and statement counts.
-    _pl_attr_handlers = {
+    _pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]] = {
         "create_tensor": _create_tensor_meta,
         "slice": _slice_meta,
         "window": _window_meta,
         "reshape": _reshape_meta,
+        "assemble": _same_operand_meta(local, 0, "target"),
     }
 
     # 3-segment spellings this walker also understands, keyed by the FULL
@@ -1807,7 +2030,9 @@ def extract_local_tensor_metas(
     # exactly like today's behavior for any other unrecognized call: a new
     # op starts safe by default and must be added here deliberately, never
     # silently assumed same-shape (#2638).
+    store_meta = _same_operand_meta(local, 2, "output_tensor")
     _qualified_call_handlers: _QualifiedCallHandlers = {
+        ("pl", "tile", "store"): store_meta,
         **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
         ("pld", "tensor", "window"): _pl_attr_handlers["window"],
         ("pld", "tensor", "all_to_all_v"): _same_operand_meta(local, 1, "target"),
@@ -1819,6 +2044,9 @@ def extract_local_tensor_metas(
         ("pld", "tensor", "allgather"): _same_operand_meta(local, 1, "target"),
         ("pld", "tensor", "barrier"): _same_operand_meta(local, 0, "signal"),
     }
+
+    # Unlike the tensor handlers above, pl.store is shorthand for pl.tile.store.
+    _pl_attr_handlers["store"] = store_meta
 
     _walk_local_tensor_meta_stmts(
         func_def.body,
@@ -1837,6 +2065,7 @@ def extract_local_tensor_metas(
             resolve_dim=_resolve_dim_value,
         ),
         stop_at_call,
+        submit_results=deps.submit_results,
     )
     return local if visible_only or stop_at_dep is not None or stop_at_call is not None else collected
 
@@ -1889,11 +2118,17 @@ def resolve_dep_call_metadata(
     """
     dep_param_names = dep._param_names()
     call_name = dep_call_name or dep.__name__
-    call_args = (
-        _call_binding.call_arg_refs(call_node)
+    if call_node is None:
+        calls = _call_binding._dep_call_nodes(caller_func, call_name)
+        call_node = calls[0] if calls else None
+    call_args = _call_binding.call_arg_refs(call_node) if call_node is not None else None
+    actual_nodes = (
+        _call_binding.build_param_mapping(dep_param_names, _call_binding.call_arg_nodes(call_node))
         if call_node is not None
-        else _call_binding.extract_call_args_for_dep(caller_func, call_name)
+        else {}
     )
+    submitted: dict[str, _SubmitTupleMeta] = {}
+    scope = _StaticScope.of(caller_func, caller_constexpr)
     intermediate_metas = extract_local_tensor_metas(
         caller_func,
         seed_meta=caller_tensor_meta,
@@ -1903,6 +2138,7 @@ def resolve_dep_call_metadata(
         constexpr_values=caller_constexpr,
         discover_deps=discover_deps,
         visible_only=True,
+        submit_results=submitted,
     )
     # The extractor starts from caller_tensor_meta, then applies source-ordered
     # rebindings. Its result is therefore the authoritative state at the call.
@@ -1914,6 +2150,14 @@ def resolve_dep_call_metadata(
     if call_args is not None:
         for dep_param, caller_arg in _call_binding.build_param_mapping(dep_param_names, call_args).items():
             if caller_arg is None:
+                continue
+            projection = _submitted_projection_meta(
+                actual_nodes.get(dep_param),
+                submitted,
+                lambda node: _resolve_slice_int(node, scope, {}, all_tensor_meta),
+            )
+            if projection is not None:
+                dep_tensor_meta[dep_param] = projection
                 continue
             if isinstance(caller_arg, _call_binding.SlicedArg):
                 # Per-rank dispatch ``chip_orch(x[r], ...)``: the dep parameter
@@ -1944,6 +2188,21 @@ def resolve_dep_call_metadata(
         # Fallback: name-based matching against the caller's metadata pool.
         dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}
         dep_scalar_dtypes = {n: caller_scalar_dtypes[n] for n in dep_param_names if n in caller_scalar_dtypes}
+
+    if call_node is not None:
+        binding: dict[str, str] = {}
+        constexpr_params = _arguments.constexpr_params(dep._func)
+        if constexpr_params:
+            binding = _call_binding.resolve_call_site_constexpr(
+                dep.__name__,
+                (constexpr_params, dep_param_names),
+                call_node,
+                caller_func.__name__,
+                caller_constexpr or {},
+                scope.namespace,
+                scope.shadowed,
+            )
+        dep_tensor_meta.update(_omitted_output_metas(dep, call_node, binding))
 
     _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta)
     _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)

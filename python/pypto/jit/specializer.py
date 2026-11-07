@@ -62,6 +62,8 @@ from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import TensorLayout
 
 from . import _specialize_values as values
+from ._call_syntax import dependency_call
+from ._call_syntax import writeback_return_operand as _writeback_return_operand
 from ._source import _UNBOUND, cache_in_snapshot, function_namespace
 from ._specialize_body import BodyTransformer
 from ._specialize_types import DynDim, ShapeDim, TensorMeta
@@ -375,8 +377,14 @@ def _resolve_dep_call_targets(
     """
     by_name: dict[str, list[ast.Call]] = {}
     for node in ast.walk(func_def):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in dep_names:
-            by_name.setdefault(node.func.id, []).append(node)
+        view = dependency_call(node)
+        if (
+            isinstance(node, ast.Call)
+            and view is not None
+            and isinstance(view.func, ast.Name)
+            and view.func.id in dep_names
+        ):
+            by_name.setdefault(view.func.id, []).append(node)
     targets: dict[int, str] = {}
     for name, calls in by_name.items():
         for index, call in enumerate(sorted(calls, key=lambda call: (call.lineno, call.col_offset))):
@@ -1615,12 +1623,40 @@ def _validate_extern_return_mapping(
             )
 
 
+def _infer_expression_return_type(
+    annotation: ast.expr | None,
+    tensor_meta: Mapping[str, TensorMeta],
+    py_globals: Mapping[str, Any],
+    constexpr_values: Mapping[str, str] | None,
+    value: ast.Call,
+    distributed_params: set[str],
+) -> str | None:
+    """Emit a resolved contract or a proven writeback result, never guess an Out."""
+    rendered = _render_complete_return_annotation(annotation, py_globals, constexpr_values)
+    known_names = {"pl", "pld", "tuple"} | {
+        dim.name for meta in tensor_meta.values() for dim in meta.shape if isinstance(dim, DynDim)
+    }
+    # Annotation-only factory locals have no closure cells. A spelling that
+    # still contains their names is not a contract the generated module can use.
+    if rendered is not None and _annotation_names(ast.parse(rendered, mode="eval").body) <= known_names:
+        return rendered
+    target = _writeback_return_operand(value)
+    if isinstance(target, ast.Name) and target.id in tensor_meta:
+        return _build_tensor_annotation(
+            tensor_meta[target.id], is_out=False, is_distributed=target.id in distributed_params
+        )
+    # Opaque calls keep ordinary-call inference. Native Submit remains governed
+    # by declared returns; only JIT-generated, proven writebacks get a contract.
+    return None
+
+
 def _infer_return_type(
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
     distributed_params: set[str] | None = None,
     py_globals: Mapping[str, Any] | None = None,
+    constexpr_values: Mapping[str, str] | None = None,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1630,8 +1666,8 @@ def _infer_return_type(
       and bare ``pl.Tensor`` params).
     - ``return name``       -> that name's tensor type (without ``Out[]``) when
       ``name`` is a tensor-typed param.
-    - ``return f(...)``     -> ``None`` (return type depends on f, which we
-      can't resolve here).
+    - ``return f(...)``     -> a fully resolved explicit contract, otherwise
+      ``None`` so the ordinary call can infer its result type.
     - No tensor-typed params -> ``None``.
 
     Falls back to the first ``Out`` param's tensor type as a last resort —
@@ -1736,7 +1772,16 @@ def _infer_return_type(
     # which we don't have here. Emit no annotation rather than wrongly assuming
     # `out_params[0]` — the caller may be a multi-return function.
     if return_node is not None and isinstance(return_node.value, ast.Call):
-        return None
+        # Keep flat tuple contracts and infer exact known writebacks before
+        # emitting the JIT function. Native Submit parsing is unchanged.
+        return _infer_expression_return_type(
+            func_def.returns,
+            tensor_meta,
+            py_globals or {},
+            constexpr_values,
+            return_node.value,
+            dist_set,
+        )
 
     # `return name`: use that name's tensor type if known.
     if (
@@ -2298,7 +2343,12 @@ class Specializer:
             # declaration before the legacy first-Out fallback can erase outputs.
             ret_type = _extern_return_type(func_def, ctx, ann_globals, params, returned_params)
             ret_type = ret_type or _infer_return_type(
-                func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+                func_def,
+                ctx.tensor_meta,
+                out_params,
+                distributed_params,
+                ctx.py_globals,
+                ctx.constexpr_values,
             )
             return self._render_external(
                 ctx,
@@ -2309,7 +2359,7 @@ class Specializer:
             )
 
         ret_type = _infer_return_type(
-            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals, ctx.constexpr_values
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
