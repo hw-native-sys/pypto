@@ -174,9 +174,76 @@ after = n
     assert isinstance(after, ast.Assign)
     assert isinstance(after.value, ast.Constant) and after.value.value == 32
     if assignment == "n = n - 1":
-        assigned = scope.body[0]
+        initial, assigned = scope.body[:2]
+        assert isinstance(initial, ast.Assign) and isinstance(initial.value, ast.Constant)
+        assert initial.value.value == 32
         assert isinstance(assigned, ast.Assign) and isinstance(assigned.value, ast.BinOp)
-        assert isinstance(assigned.value.left, ast.Constant) and assigned.value.left.value == 32
+        assert isinstance(assigned.value.left, ast.Name) and assigned.value.left.id == "n"
+
+
+@pl.jit.aiv
+def conditional_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    # The fixed Tensor annotation supplies shape before JIT visits this body.
+    n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+    with pl.simt_scope(dims=(32, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < 16:
+            n = tid
+        if n < 32:
+            pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(dst, (0, 0), pl.cast(n, pl.FP32))
+    return dst
+
+
+def test_conditional_private_reassignment_materializes_live_in_shape():
+    lowered = conditional_shape_rebind.specialize()
+    conditions: list[ir.Expr] = []
+
+    class Collector(ir.IRVisitor):
+        def visit_if_stmt(self, op: ir.IfStmt) -> None:
+            conditions.append(op.condition)
+            self.visit_stmt(op.then_body)
+
+    Collector().visit_program(lowered)
+    assert len(conditions) == 2
+    assert isinstance(conditions[1], ir.Lt)
+    assert isinstance(conditions[1].left, ir.Var)
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    try:
+        outlined = passes.outline_simt_scopes()(lowered)
+        assert len([fn for fn in outlined.functions.values() if fn.func_type == ir.FunctionType.SIMT]) == 2
+    finally:
+        backend.reset_for_testing()
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_conditional_shape_reassignment_keeps_scalar_assignments(local):
+    prefix = "" if local else "n = src.shape[1]\n"
+    local_init = "n = src.shape[1]\n    " if local else ""
+    tree = ast.parse(f"""
+{prefix}with pl.simt_scope(dims=(32, 1, 1)):
+    {local_init}if condition:
+        n = pl.simt.thread_idx(pl.simt.Axis.X)
+    pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+""")
+    transformed = BodyTransformer(
+        tensor_meta={"src": TensorMeta(shape=(1, 32), dtype=DataType.FP32)},
+        dep_names=set(),
+        param_names=["src", "dst", "condition"],
+    ).visit(tree)
+    assert isinstance(transformed, ast.Module)
+    scope = transformed.body[0]
+    assert isinstance(scope, ast.With)
+    initial = scope.body[0]
+    assert isinstance(initial, ast.Assign) and isinstance(initial.value, ast.Constant)
+    assert initial.value.value == 32
+    store = scope.body[-1]
+    assert isinstance(store, ast.Expr) and isinstance(store.value, ast.Call)
+    offsets = store.value.args[1]
+    assert isinstance(offsets, ast.Tuple)
+    assert isinstance(offsets.elts[1], ast.Name) and offsets.elts[1].id == "n"
 
 
 if __name__ == "__main__":

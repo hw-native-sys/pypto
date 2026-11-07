@@ -101,6 +101,7 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
+        self._simt_depth: int = 0
         # Pre-register function parameters as "already assigned at depth 0" so
         # that body assignments like `x = pl.load(x, ...)` are treated as
         # rebindings and get alpha-renamed to `x_v1`.
@@ -175,9 +176,6 @@ class BodyTransformer(ast.NodeTransformer):
         source = self._known_tensor_name(node.value.id) if isinstance(node.value, ast.Name) else None
         value_meta = self._meta.get(source) if source is not None else None
         visited_value = self.visit(node.value)
-        # Evaluate the RHS against the old value, then retire its constant fold.
-        # A deeper-scope private assignment keeps its name instead of renaming.
-        self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
             # Only rename at the same scope where the variable was first defined.
             # Rebindings at a deeper scope (inside for/with) are loop-carried
@@ -216,6 +214,8 @@ class BodyTransformer(ast.NodeTransformer):
         for target in node.targets:
             assignment = ast.copy_location(ast.Assign(targets=[target], value=value), node)
             assignments.append(self._visit_simple_assign(assignment))
+            # Clear an old inlined shape after reading the original RHS.
+            self._shape_inlined.pop(cast(ast.Name, target).id, None)
             value = ast.copy_location(ast.Name(id=first_name, ctx=ast.Load()), node.value)
         return assignments
 
@@ -308,7 +308,8 @@ class BodyTransformer(ast.NodeTransformer):
 
         # Case 2: M, N = a.shape  →  individual assignments (dynamic) or inline (static)
         if (
-            len(node.targets) == 1
+            not self._simt_depth
+            and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Tuple)
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "shape"
@@ -346,7 +347,8 @@ class BodyTransformer(ast.NodeTransformer):
 
         # Case 3: K = a.shape[1]  →  inline static dim, suppress assignment
         if (
-            len(node.targets) == 1
+            not self._simt_depth
+            and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
             and isinstance(node.value, ast.Subscript)
             and isinstance(node.value.value, ast.Attribute)
@@ -387,7 +389,6 @@ class BodyTransformer(ast.NodeTransformer):
         # int). Without this the un-inlined name leaks into the generated source
         # and the parser rejects it ("Unknown shape variable: W_PAD").
         node.annotation = self.visit(node.annotation)
-        self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
             if self._scope_depth == self._assign_depth[var_name]:
                 new_name = self._rebind(var_name)
@@ -811,11 +812,31 @@ class BodyTransformer(ast.NodeTransformer):
                 self._assign_depth.copy(),
                 self._var_renames.copy(),
             )
+            # A private binding is a runtime scalar even when its incoming
+            # value came from a folded shape. Materialize live-in constants,
+            # and retain scalar assignments inside the region so conditional
+            # writes cannot leave either stale constants or undefined names.
+            written = self._names_by_ctx(node, ast.Store)
+            exposed: set[str] = set()
+            self._collect_upward_exposed(node.body, set(), exposed)
+            incoming = [(name, value) for name, value in self._shape_inlined.items() if name in written]
+            prefix: list[ast.stmt] = []
+            for name, value in incoming:
+                self._shape_inlined.pop(name)
+                if name in exposed:
+                    assignment = ast.Assign(
+                        targets=[ast.Name(id=name, ctx=ast.Store())], value=ast.Constant(value=value)
+                    )
+                    prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
+            node.body = prefix + node.body
+            self._simt_depth += 1
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
+            if simt:
+                self._simt_depth -= 1
             if state is not None:
                 (
                     self._meta,
