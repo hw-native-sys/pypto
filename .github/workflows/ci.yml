@@ -2293,28 +2293,22 @@ jobs:
       # the same reason.
       #
       # Bisected card-free on an a5 host, one variable per leg, 5-20 forks per
-      # leg. The repro does NOT go through pytest -- it forks with
-      # multiprocessing's 'fork' context, which is the mechanism pytest_forked
-      # 1.7.5 itself uses (its frames in the SIGSEGV traceback are
-      # forked_run -> Process.start -> popen_fork._launch). torch 2.14.1,
-      # default intraop thread count 384 on that host:
-      #   parent torch work        child torch work   unset      =1
-      #   none                     MX golden          PASS 15/15 PASS 15/15
-      #   1024-element mul         MX golden          PASS  5/5  PASS  5/5
-      #   98304-element mul        none (10 elements) PASS  5/5  PASS  5/5
-      #   98304-element mul        MX golden          HANG  5/5  PASS  5/5
-      #   1 or 4 x _make_inputs    MX golden          HANG 20/20 PASS 20/20
-      # So it needs a parent-side op that opens a torch parallel region, plus
-      # real torch work in the child -- and `1` removes it from every leg that
-      # showed it. Every leg is deterministic; nothing here was intermittent.
+      # leg, on torch 2.14.1 with a default intraop thread count of 384. The
+      # repro does NOT go through pytest -- it forks with multiprocessing's
+      # 'fork' context, the mechanism pytest_forked 1.7.5 itself uses (its
+      # frames appear in the SIGSEGV traceback as forked_run -> Process.start
+      # -> popen_fork._launch). Result: the fault needs a parent-side op that
+      # opens a torch parallel region PLUS real torch work in the child, and
+      # `1` removes it from every leg that showed it. Every leg was
+      # deterministic; nothing here was intermittent.
       #
-      # Do NOT turn the element counts in that table into a size screen. They
-      # are true of a mul (1024 never triggered it, 98304 always did) and do not
-      # generalise: a later card-free repro armed the fault with an
-      # advanced-indexing gather over 16,384 elements -- BELOW ATen's 32,768
-      # grain size -- while torch.randint over the same 16,384 did not. Which
-      # kernel opens a parallel region in the parent is what decides, not how
-      # big its input is.
+      # Do NOT turn that into a size screen -- "this parent-side work is small
+      # enough to be harmless" is not sound. For a mul the threshold looks like
+      # a size (1024 elements never triggered it, 98304 always did), but a
+      # later card-free repro armed the fault with an advanced-indexing gather
+      # over 16,384 elements -- BELOW ATen's 32,768 grain size -- while
+      # torch.randint over the same 16,384 did not. Which kernel opens a
+      # parallel region in the parent is what decides, not how big its input is.
       #
       # `1` is also the value the runtime already asks for: Worker startup does
       # `setenv("OMP_NUM_THREADS", "1", 0)` (and the OPENBLAS / MKL / BLIS
@@ -2450,24 +2444,18 @@ jobs:
         # signature the same day by appending a *file* to a step.
         #
         # The mechanism IS now understood, and the job-level `OMP_NUM_THREADS: 1`
-        # above is the fix. torch's intraop thread pool does not survive
-        # pytest-forked's fork, so a child of a parent that has already entered
-        # a torch parallel region deadlocks (or faults) on its own first torch
-        # work. THIS module builds all four cases' operands while it is being
-        # imported -- `st.cases(*[st.case(tensors=_tensor_case_tensors(...))])`
-        # evaluates the generator at decoration time, i.e. in the pytest parent
-        # -- which is exactly the parent-side parallel region the fault needs.
+        # above is the fix -- see that env block for it; it is not repeated
+        # here. What is specific to THIS step: this module builds all four
+        # cases' operands while it is being imported --
+        # `st.cases(*[st.case(tensors=_tensor_case_tensors(...))])` evaluates
+        # the generator at decoration time, i.e. in the pytest parent -- which
+        # is exactly the parent-side parallel region the fault needs.
         # test_matmul_mx.py builds its operands inside each test, i.e. in the
         # child, which is why that step stays green on byte-identical data from
         # the same generator in _matmul_mx_data.py. Measured: the two surfaces
         # feed _matmul_mx_golden identical shapes and dtypes ((32,256) / (32,8)
         # / (256,96) / (8,96), k_valid=256), so operand size is NOT the
-        # difference -- only where the operands are built is. Nor is size a safe
-        # screen for "this parent-side work is small enough to be harmless":
-        # torch.randint over 16,384 elements does not arm the fault while an
-        # advanced-indexing gather over the same 16,384 does, and 16,384 is
-        # below ATen's 32,768 grain size. What matters is whether the kernel
-        # opens a parallel region in the parent, not how big its input is.
+        # difference -- only where the operands are built is.
         #
         # Ruled out, so nobody re-derives them:
         #   - *harness style*. `st.case` vs `PTOTestCase` is irrelevant:
@@ -2489,9 +2477,12 @@ jobs:
         # was added, the only occurrence of that variable in this workflow was
         # pypto-lib-compile's own job env. The same cause produced the
         # 2026-11-06 failure of this step, where all four cases died with
-        # `signal 11 (SIGSEGV)` inside _matmul_mx_golden (_matmul_mx_data.py:269,
-        # a float64 elementwise multiply) in 1.24 s -- a fault rather than a
-        # hang, same trigger. See the job env for the bisection legs and counts.
+        # `signal 11 (SIGSEGV)` inside _matmul_mx_golden, at the float64
+        # elementwise multiply `a_scaled = a_values[...] * a_scale[...]`
+        # (_matmul_mx_data.py:282 as of this commit -- cite the expression, not
+        # the number, which has already drifted once), in 1.24 s -- a fault
+        # rather than a hang, same trigger. See the job env for the bisection
+        # legs and counts.
         #
         # The file is the whole target rather than node IDs on purpose: a stale
         # or mistyped node ID in --deselect/-k is SILENTLY ignored by pytest, so
