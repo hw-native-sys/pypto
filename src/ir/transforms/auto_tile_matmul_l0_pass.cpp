@@ -1456,9 +1456,17 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
   // Declared accumulator/operand storage and explicit buffering loops are
   // manual decisions. Rebuilding even an unchanged Mat load from its deduced
   // type would discard its declared allocation identity and slot selection.
-  // Leave these loads to ordinary K tiling, which retains their original Vars.
-  if ((init_ty && init_ty->memref_.has_value()) || lhs_ty->memref_.has_value() ||
-      rhs_ty->memref_.has_value() || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
+  // The same contract applies to branch results and carried/merged values,
+  // not only the seed. Ordinary K tiling retains full-output bindings and
+  // diagnoses a declared result that cannot fit without M/N subdivision.
+  const auto has_declared_storage = [](const VarPtr& var) {
+    const auto tile = var ? As<TileType>(var->GetType()) : nullptr;
+    return tile && tile->memref_.has_value();
+  };
+  if (has_declared_storage(init->var_) || lhs_ty->memref_.has_value() || rhs_ty->memref_.has_value() ||
+      (matmul && has_declared_storage(matmul->var_)) || has_declared_storage(matmul_acc->var_) ||
+      has_declared_storage(phi) || has_declared_storage(loop->iter_args_[0]) ||
+      has_declared_storage(loop->return_vars_[0]) || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
     return std::nullopt;
   }
   auto init_m = init_ty && init_ty->shape_.size() == 2 ? As<ConstInt>(init_ty->shape_[0]) : nullptr;

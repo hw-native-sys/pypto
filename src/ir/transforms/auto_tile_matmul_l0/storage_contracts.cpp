@@ -101,6 +101,7 @@ class SnapshotIndex : public IRVisitor {
     // takes precedence; an ordinary fresh result owns its own SSA storage.
     if (auto alias = AsVarLike(op->value_)) {
       storage_[op->var_.get()] = Resolve(alias).value_or(UnknownStorage(op->var_));
+      plain_alias_roots_[op->var_.get()] = PlainAliasRoot(alias.get());
     } else if (!entry) {
       storage_[op->var_.get()] = UnknownStorage(op->var_);
     } else {
@@ -122,7 +123,9 @@ class SnapshotIndex : public IRVisitor {
       if (auto result = Resolve(op->var_)) RecordWrite(*result, point);
     }
     if (IsOp(call, "tile.store") && !call->args_.empty()) {
-      if (auto source = AsVarLike(call->args_[0])) stores_.emplace(source.get(), execution_point);
+      if (auto source = AsVarLike(call->args_[0])) {
+        stores_.emplace(PlainAliasRoot(source.get()), execution_point);
+      }
     }
     if (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")) {
       Query query{op->var_.get(), point, {}};
@@ -184,6 +187,11 @@ class SnapshotIndex : public IRVisitor {
     size_t point;
     std::vector<std::pair<VarPtr, Storage>> inputs;
   };
+
+  const Var* PlainAliasRoot(const Var* var) const {
+    const auto found = plain_alias_roots_.find(var);
+    return found != plain_alias_roots_.end() ? found->second : var;
+  }
 
   std::optional<Storage> Resolve(const VarPtr& var) const {
     auto tile = var ? As<TileType>(var->GetType()) : nullptr;
@@ -266,6 +274,9 @@ class SnapshotIndex : public IRVisitor {
 
   size_t point_ = 0;
   std::unordered_map<const Var*, Storage> storage_;
+  // Match BuildSiblingIndex's plain result aliases, not arbitrary storage
+  // views. Roots are flattened on definition, so long chains remain linear.
+  std::unordered_map<const Var*, const Var*> plain_alias_roots_;
   std::unordered_map<const Var*, Writes> writes_;
   std::vector<size_t> all_writes_;
   std::map<std::optional<MemorySpace>, std::vector<size_t>> space_writes_;

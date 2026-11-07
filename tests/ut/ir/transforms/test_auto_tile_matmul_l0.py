@@ -5019,6 +5019,10 @@ def test_storage_k_tiling_preserves_declared_result_slots(
         ("nested-view-delayed", 256, 64),
         ("plain-alias-delayed", 256, 64),
         ("dynamic-slot-delayed", 256, 64),
+        ("output-alias-delayed", 256, 64),
+        ("output-alias-dynamic-delayed", 256, 64),
+        ("output-alias-safe-control", 256, 64),
+        ("output-alias-delayed", 32, 512),
         ("nested-write-delayed", 256, 64),
         ("argument-write-delayed", 256, 64),
         ("no-access-control", 256, 64),
@@ -5031,11 +5035,19 @@ def test_storage_mn_fold_preserves_input_snapshot(planner, variant, M, K, tmp_pa
     _backend.set_backend_type(BackendType.Ascend910)
     slot = (
         "slot_index"
-        if variant == "dynamic-slot-delayed"
-        else ("1" if variant in ("different-slot-control", "atomic-store-control") else "0")
+        if variant in ("dynamic-slot-delayed", "output-alias-dynamic-delayed")
+        else (
+            "1"
+            if variant in ("different-slot-control", "atomic-store-control", "output-alias-safe-control")
+            else "0"
+        )
     )
     early = "        oc = pl.store(c, [0, 0], outc)\n" if variant == "early-store-control" else ""
-    late = "" if early else "        oc = pl.store(c, [0, 0], outc)\n"
+    output_alias = (
+        "        c_alias = c\n        c_final = c_alias\n" if variant.startswith("output-alias") else ""
+    )
+    output_value = "c_final" if output_alias else "c"
+    late = "" if early else f"        oc = pl.store({output_value}, [0, 0], outc)\n"
     input_view = f"        av = pl.tile.reshape(at0, [{M}, {K}])\n"
     if variant == "nested-view-delayed":
         input_view = f"        av = pl.tile.reshape(pl.tile.set_validshape(at0, {M}, {K}), [{M}, {K}])\n"
@@ -5093,7 +5105,7 @@ class Before:
         ] = pl.load(a0, [0, 0], [{M}, {K}], target_memory=pl.Mem.Mat)
         bt = pl.load(b, [0, 0], [{K}, 256], target_memory=pl.Mem.Mat)
 {alias}        c = pl.tile.matmul({lhs}, bt)
-{early}{writer}{late}        return oc, od_final
+{output_alias}{early}{writer}{late}        return oc, od_final
 """
     before = passes.convert_to_ssa()(pl.parse_program(source))
     _storage_verify_source(before)
@@ -5102,6 +5114,7 @@ class Before:
         "early-store-control",
         "no-access-control",
         "atomic-store-control",
+        "output-alias-safe-control",
     )
     if unsafe:
         with (
@@ -5128,7 +5141,7 @@ class Before:
         # tile.create sharing the live slot; that contract is outside this fix.
         return
     _storage_native(before, planner, BackendType.Ascend910, tmp_path)
-    if variant in ("same-slot-delayed", "early-store-control"):
+    if variant in ("same-slot-delayed", "output-alias-delayed", "early-store-control"):
         assert first_read < overwrite, "AutoTile reads the old slot only after it was overwritten"
 
 
@@ -5324,6 +5337,59 @@ def test_storage_k_tiling_does_not_legalize_declared_inplace_result(planner, K):
         pytest.raises(ValueError, match="(Bind the source tile instead|bind its input accumulator instead)"),
     ):
         PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("M,K", [(256, 64), (32, 512)])
+def test_storage_canonical_branch_keeps_declared_accumulator(planner, M, K):
+    """A branch result's explicit allocation is as binding as the loop seed's."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910)
+    source = f"""@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[{M}, {2 * K}], pl.BF16],
+               b: pl.Tensor[[{2 * K}, 256], pl.BF16],
+               out: pl.Out[pl.Tensor[[{M}, 256], pl.FP32]]) -> pl.Tensor[[{M}, 256], pl.FP32]:
+        seed = pl.tile.create([{M}, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+        for k0, (acc_iter,) in pl.pipeline(0, {2 * K}, {K}, init_values=(seed,), stage=2):
+            at = pl.load(a, [0, k0], [{M}, {K}], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [k0, 0], [{K}, 256], target_memory=pl.Mem.Mat)
+            if k0 == 0:
+                acc_first: pl.Tile[
+                    [{M}, 256], pl.FP32, pl.MemRef("first_acc"), pl.Mem.Acc
+                ] = pl.tile.matmul(at, bt)
+                acc_phi = pl.yield_(acc_first)
+            else:
+                acc_next = pl.tile.matmul_acc(acc_iter, at, bt)
+                acc_phi = pl.yield_(acc_next)
+            acc = pl.yield_(acc_phi)
+        result = pl.store(acc, [0, 0], out)
+        return result
+"""
+    before = passes.convert_to_ssa()(pl.parse_program(source))
+    _storage_verify_source(before)
+    if M == 256:
+        with (
+            passes.PassContext([], memory_planner=planner),
+            pytest.raises(ValueError, match="declared accumulator storage.*no full-output K-only plan fits"),
+        ):
+            passes.auto_tile_matmul_l0()(before)
+        return
+    with passes.PassContext([], memory_planner=planner):
+        after = passes.auto_tile_matmul_l0()(before)
+    _storage_verify_source(after)
+    owners = [
+        stmt.var
+        for stmt in _storage_assignments(after)
+        if isinstance(stmt.var.type, ir.TileType)
+        and stmt.var.type.memref is not None
+        and "first_acc" in stmt.var.type.memref.base_.name_hint
+    ]
+    assert owners, "Canonical retiling discarded the branch's declared accumulator"
+    assert all([dim.value for dim in var.type.shape] == [M, 256] for var in owners)
 
 
 if __name__ == "__main__":
