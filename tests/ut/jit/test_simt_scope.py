@@ -16,7 +16,9 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 from pypto import CacheConfig, DataType, backend, ir, passes
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.compiled_program import CompiledProgram
+from pypto.jit import decorator
 from pypto.jit._specialize_body import BodyTransformer
 from pypto.jit._specialize_types import TensorMeta
 from pypto.runtime import ExecutionMode, RunConfig
@@ -45,7 +47,13 @@ def scope_entry(
     return scope_copy(src, dst, n)
 
 
-def test_public_jit_scope_full_compile(tmp_path: Path):
+@pytest.mark.parametrize("use_ptoas", [False, True], ids=["diagnostic", "executable"])
+def test_public_jit_scope_full_compile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_ptoas: bool):
+    if use_ptoas:
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    else:
+        monkeypatch.setattr(decorator, "_ptoas_available", lambda: False)
     backend.reset_for_testing()
     try:
         compiled = scope_entry.compile(
@@ -58,14 +66,18 @@ def test_public_jit_scope_full_compile(tmp_path: Path):
             ),
         )
         assert isinstance(compiled, CompiledProgram)
-        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        artifact_dir = "vpto" if use_ptoas else "kernels"
+        helpers = list((tmp_path / artifact_dir).rglob("*.pto"))
         assert len(helpers) == 1
         text = helpers[0].read_text()
         assert "pto.simt_entry" in text
         assert "pto.simt_launch" in text
         assert "pto.ldg" in text and "pto.stg" in text
-        manifest = json.loads(helpers[0].with_name("manifest.json").read_text())
-        assert manifest["helpers"][0]["kind"] == "simt"
+        if use_ptoas:
+            manifest = json.loads(helpers[0].with_name("manifest.json").read_text())
+            assert manifest["helpers"][0]["kind"] == "simt"
+        else:
+            assert not (tmp_path / "vpto").exists()
     finally:
         backend.reset_for_testing()
 
