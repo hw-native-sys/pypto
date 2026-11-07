@@ -89,6 +89,7 @@ class DataType(Enum):
     FP32 = "fp32"
     FP16 = "fp16"
     FP8E4M3FN = "fp8e4m3fn"
+    FP8E5M2 = "fp8e5m2"
     FP8E8M0 = "fp8e8m0"
     FP4E2M1X2 = "fp4e2m1x2"
     INT32 = "int32"
@@ -121,6 +122,7 @@ class DataType(Enum):
 
         optional_name = {
             DataType.FP8E4M3FN: "float8_e4m3fn",
+            DataType.FP8E5M2: "float8_e5m2",
             DataType.FP8E8M0: "float8_e8m0fnu",
             DataType.FP4E2M1X2: "float4_e2m1fn_x2",
         }[self]

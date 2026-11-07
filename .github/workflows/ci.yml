@@ -2229,8 +2229,13 @@ jobs:
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
-    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # MX_A_ZZ / MX_B_NN), test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul), test_fp8e5m2_transfer.py (the runtime's UINT8 byte
+    # carrier for FP8E5M2), and test_matmul_fp8_mixed.py (ordinary tmatmul /
+    # .acc / .bias over the A5 FP8 operand pairs, both mixed orders, plus the
+    # A @ I decode case and a valid-K tail). All are
+    # `@pytest.mark.platforms("a5")` — this job is the only one giving them
+    # device coverage, so a file absent from the list below is never re-run.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2266,6 +2271,18 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # Every test step below runs pytest with --forked. pytest-forked imports
+      # torch in the PARENT and then forks a child per test, so the child
+      # inherits an intraop threadpool whose state did not survive the fork
+      # (pytorch#17199). On this 384-core runner the symptom is a child that
+      # hangs with no verdict until --max-time kills the whole step at 3600 s,
+      # taking every later step in the job with it. Capping the parent's
+      # threadpool to one thread before Python starts is the fix that
+      # propagates across the fork; the same cap is set for the same reason on
+      # pypto-lib-compile. It belongs here in the job env rather than inline in
+      # a --run string, because task-submit starts the child from this
+      # environment.
+      OMP_NUM_THREADS: 1
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -2323,6 +2340,31 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # fp8e5m2_transfer is the wire-level sibling of those: one harness case
+        # asserting that a host-prequantized FP8E5M2 tensor survives the
+        # runtime's UINT8 byte carrier bit-for-bit. matmul_fp8_mixed covers the
+        # ordinary (non-MX) FP8 operand pairs: 10 harness cases over both mixed
+        # orders. Both are here rather than in a directory-glob step because
+        # every such step runs at the default --platform=a2a3, which deselects
+        # their platforms("a5") marker; this is the only job that gives them a5
+        # device coverage.
+        #
+        # Device budget: --max-time 3600 caps device execution for the whole
+        # step. No total is recorded here on purpose -- every sibling branch
+        # that gates another file restales it. Measure instead:
+        # `pytest <the files below> --collect-only -q --platform=a5`.
+        # All of these are harness-based (`PTOTestCase` + `test_runner`), which
+        # shares one Worker rather than initialising the device per case: the
+        # MX/quant files measured ~38 s for 16 cases together, and the 10
+        # matmul_fp8_mixed cases ~190 s on an idle card (65 s in CI, warm).
+        # A case that drives a `compiled()` program directly instead pays device
+        # init in its own `--forked` child at ~150-175 s *each*, and one fully
+        # parametrised direct-pattern addition has already overrun this cap
+        # (3602 s, killed, no assertions reported). So: whole-file targets are
+        # safe for harness suites; add a direct-pattern case as one or two
+        # explicit node IDs and record its cost here. Never narrow an existing
+        # whole-file line into node IDs -- that silently drops every case in the
+        # file it does not enumerate while looking like a fix.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
@@ -2332,6 +2374,8 @@ jobs:
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp8e5m2_transfer.py \
+              tests/st/runtime/ops/test_matmul_fp8_mixed.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5
