@@ -497,10 +497,12 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     // Recursive call graphs are diagnosed separately. Conservatively connect
     // the results to a shared union of the arguments until then.
     recursive.outputs.resize(callee->return_types_.size());
+    recursive.nodes.reserve(callee->params_.size() + 1);
     for (size_t i = 0; i < callee->params_.size(); ++i) {
       recursive.nodes.push_back({callee->params_[i]->GetType(), i, {}});
     }
     std::vector<size_t> edges;
+    edges.reserve(recursive.nodes.size());
     for (size_t i = 0; i < recursive.nodes.size(); ++i) edges.push_back(i);
     const size_t union_id = recursive.nodes.size();
     recursive.nodes.push_back({callee->return_types_[0], std::nullopt, std::move(edges)});
