@@ -1006,7 +1006,7 @@ StmtPtr ScopeOutliner::VisitStmt_(const SeqStmtsPtr& op) {
       // propagated required_outputs_, or when the scope sits directly
       // inside another scope (e.g. an InCoreScopeStmt at the top of a
       // SpmdScopeStmt body produced by the ``for i in pl.spmd(...)`` form).
-      if (used_after.empty()) {
+      if (used_after.empty() && target_scope_kind_ != ScopeKind::Graph) {
         used_after = ComputeFallbackUsedAfter(scope);
       }
 
@@ -1061,6 +1061,13 @@ StmtPtr ScopeOutliner::VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
   // child of another scope (SpmdScopeStmt{InCoreScopeStmt{...}}) — the
   // enclosing SeqStmts visitor populates required_outputs_ with variables
   // the post-scope statements still reference.
+  // Graph regions expose real tail uses and external mutations, not every
+  // temporary defined in a terminal region. OutlineScope already exports
+  // caller-owned store destinations after its live-in classification. Adding
+  // all store targets here would also export scope-local allocations.
+  if (target_scope_kind_ == ScopeKind::Graph) {
+    return OutlineScope(op, required_outputs_);
+  }
   if (required_outputs_.empty()) {
     return OutlineScope(op, ComputeFallbackUsedAfter(op));
   }

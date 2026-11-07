@@ -108,11 +108,28 @@ value:
 | ---- | ------------------------ |
 | a literal | trivially |
 | the induction variable of a **constant-trip** loop | recording walks the loop once and bakes each iteration's literal into that iteration's own node; constant bounds mean every later call walks the identical sequence |
-| `tensor.dim` of a boundary tensor parameter, with a literal axis | `graph_boundary_matches` compares each boundary tensor's `ndims`, `shapes` and `strides` against the recorded `GraphBoundarySignature` and rejects a submission on any mismatch, so a boundary shape cannot change within one recording |
+| `tensor.dim` of a boundary tensor parameter, with a literal axis | `GraphBoundaryMatchInfo` records each boundary tensor's `ndims`, `shapes` and `strides` and a submission must match the recorded layout, so a boundary shape cannot change within one recording |
 
-**Scalar parameters are deliberately excluded from the invariant set.** The
-runtime patches a boundary scalar's slot on every call — which is exactly what
-makes one a legal *task argument* and an illegal *frozen view offset*.
+A literal-axis `tensor.dim` may also read a `tensor.slice`, `tensor.reshape` or
+`tensor.view` chain rooted in a boundary tensor. This requires every metadata
+operand (including offsets and optional valid-shape operands) and every physical
+result extent to be replay-invariant. It proves a shape fact only; address
+hoisting, effects and allocation lifetime still have independent checks.
+
+A literal-axis read of a local tensor allocation is invariant when that
+physical extent is invariant. A frontend shape tuple must match the result
+tensor type. Normalized zero-argument allocations use the result type directly.
+Bare aliases preserve facts for matching extents. Backend-injected pipe
+allocations are excluded.
+
+**Scalar parameters are mutable by default.** A topology argument qualifies
+only when every call or submit derives it from literals and the exact tensor
+descriptors passed at that site. The boundary matcher fixes descriptor
+layouts. Generated orchestration also puts any boundary scalar read by the
+Graph body into its Config. Different scalar values at different sites
+therefore select different recordings. Caller loop indices, tensor data and
+runtime scalar parameters do not supply the provenance proof. Legalization
+and verification derive the facts independently from their current program.
 
 This is what admits a tiled kernel at all. A slab offset `i * TILE` cannot be
 hoisted: the value does not exist at the call site. Every projection, MLP and

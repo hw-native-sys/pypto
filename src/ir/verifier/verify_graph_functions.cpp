@@ -318,8 +318,13 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
 /// disagreed with the pass would reject IR the pass just produced.
 class GraphBodyChecker : public IRVisitor {
  public:
-  GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics)
-      : program_(std::move(program)), func_(std::move(func)), diagnostics_(diagnostics), invariant_(func_) {
+  GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics,
+                   const std::unordered_set<const Var*>& fixed_scalars)
+      : program_(std::move(program)),
+        func_(std::move(func)),
+        diagnostics_(diagnostics),
+        invariant_(func_),
+        topology_invariant_(func_, fixed_scalars) {
     for (const auto& param : func_->params_) {
       if (As<ScalarType>(param->GetType()) != nullptr) {
         scalar_params_.insert(param.get());
@@ -329,6 +334,8 @@ class GraphBodyChecker : public IRVisitor {
       }
     }
     invariant_.Collect(func_->body_);
+    topology_invariant_.SeedBoundaryDimensionSymbols(func_);
+    topology_invariant_.Collect(func_->body_);
   }
 
   [[nodiscard]] size_t count() const { return count_; }
@@ -477,12 +484,16 @@ class GraphBodyChecker : public IRVisitor {
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    if (CountSubtree([&] { IRVisitor::VisitStmt_(op); }) != 0) {
+    const size_t launched = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
+    if (launched != 0 && !topology_invariant_.IsInvariant(op->condition_)) {
       Report(
           "launches tasks inside a conditional, so the recorded topology depends on the branch "
           "the first call happened to take.",
           op->span_);
+      return;
     }
+    // Independently re-count both arms, not a count recorded by the pass.
+    count_ = SatAdd(count_, launched);
   }
 
  private:
@@ -653,6 +664,7 @@ class GraphBodyChecker : public IRVisitor {
   FunctionPtr func_;
   std::vector<Diagnostic>& diagnostics_;
   graph_replay::ReplayInvariantSet invariant_;
+  graph_replay::ReplayInvariantSet topology_invariant_;
   std::unordered_set<const Var*> scalar_params_;
   std::unordered_set<const Var*> tensor_params_;
   /// Tensor vars that derive from a boundary parameter, directly or by alias.
@@ -686,13 +698,16 @@ class GraphBoundaryLegalizedPropertyVerifierImpl : public PropertyVerifier {
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    const auto fixed_scalars = graph_replay::ReplayInvariantSet::IndexFixedScalarsFromCallSites(program);
     for (const auto& [gv, func] : program->functions_) {
       if (!func) continue;
       if (func->func_type_ == FunctionType::Graph) {
         VerifySignature(func, diagnostics);
         if (func->body_) {
           VerifyReturns(func, program, diagnostics);
-          GraphBodyChecker body_checker(program, func, diagnostics);
+          const auto& topology_scalars =
+              graph_replay::ReplayInvariantSet::FixedScalarsForGraph(fixed_scalars, func);
+          GraphBodyChecker body_checker(program, func, diagnostics, topology_scalars);
           body_checker.VisitStmt(func->body_);
           if (body_checker.count() == 0) {
             diagnostics.emplace_back(DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,

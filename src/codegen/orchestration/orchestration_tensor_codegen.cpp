@@ -211,6 +211,9 @@ void OrchestrationStmtCodegen::EmitBatchedAllocTensors(const std::vector<StmtPtr
     }
     creates.push_back({emit_var, call});
     batched_create_stmts_.insert(stmt.get());
+    // Even a queued producer is body-local: a later allocation reading its
+    // descriptor must wait until this batch has allocated and bound it.
+    locally_defined.insert(assign->var_.get());
   }
   if (creates.empty()) {
     return;
