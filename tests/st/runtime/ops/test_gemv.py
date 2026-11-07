@@ -39,6 +39,7 @@ import pytest
 import torch
 from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto import passes
 from pypto.runtime.runner import RunConfig
 
 K = 64
@@ -744,6 +745,68 @@ class TestGemvAcc:
         """Split-K where ``init_cond=(k0 == 0)`` replaces the peeled first step."""
         result = test_runner.run(GemvAccInitCondTestCase(n=n, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
+
+
+@pl.jit.incore
+def _acc_column_pool(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    lhs = pl.load(a, [0, 0], [1, 256], valid_shape=[1, 64], target_memory=pl.Mem.Mat)
+    rhs = pl.load(b, [0, 0], [256, 64], valid_shape=[64, 64], target_memory=pl.Mem.Mat)
+    left = pl.move(lhs, target_memory=pl.Mem.Left)
+    right = pl.move(rhs, target_memory=pl.Mem.Right)
+    pool = pl.tile.create([16, 128], pl.FP32, target_memory=pl.Mem.Acc)
+    for i in pl.unroll(2):
+        slot = pl.tile.slice(pool, [16, 64], [0, i * 64], valid_shape=[1, 64])
+        result = pl.tile.gemv_acc(slot, left, right, init_cond=True)
+        pool = pl.tile.assemble(pool, result, [0, i * 64])
+    return pl.store(pl.set_validshape(pool, 1, 128), [1, 16], out)
+
+
+@pl.jit
+def _acc_column_pool_entry(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    with pl.spmd(1):
+        out = _acc_column_pool(a, b, out)
+    return out
+
+
+_POOL_SENTINEL = -701.0
+
+
+def _acc_column_pool_golden(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    product = tensors["a"].float() @ tensors["b"].float()
+    out = tensors["out"].clone()
+    out[1:2, 16:80] = product
+    out[1:2, 80:144] = product
+    return {"out": out}
+
+
+def _compare_acc_column_pool(actual: dict[str, torch.Tensor], expected: dict[str, torch.Tensor]) -> None:
+    result, reference = actual["out"], expected["out"]
+    # Check the entire untouched area exactly; tolerance must never conceal a
+    # misplaced FIX write, including writes into the other physical rows.
+    guard = reference == _POOL_SENTINEL
+    assert torch.equal(result[guard], reference[guard]), "Acc pool overwrote a sentinel guard"
+    torch.testing.assert_close(result[1:2, 16:80], reference[1:2, 16:80], rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(result[1:2, 80:144], reference[1:2, 80:144], rtol=1e-5, atol=1e-5)
+
+
+@st.cases(
+    *(
+        st.case(
+            _acc_column_pool_entry,
+            ((torch.arange(64).reshape(1, 64).remainder(29) - 14) / 16).to(torch.float16),
+            ((torch.arange(4096).reshape(64, 64).remainder(modulus) - modulus // 2) / 16).to(torch.float16),
+            torch.full((3, 160), _POOL_SENTINEL),
+            name=f"issue3132_acc_column_pool_mod{modulus}",
+            golden=_acc_column_pool_golden,
+            compare=_compare_acc_column_pool,
+            memory_planner=passes.MemoryPlanner.PYPTO,
+        )
+        for modulus in (17, 23)
+    )
+)
+@pytest.mark.platforms("a2a3", reason="Issue #3132 targets A2/A3 GEMV and Acc subviews.")
+def test_acc_column_pool_with_sentinel_guards(case_run):
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

@@ -160,6 +160,21 @@ rejects FP4 `treshape`. InCore tensor reinterpret operations lower to tile
 aliases and require the same planners; orchestration tensors remain unsupported.
 See [FP4](../fp4.md) for the carrier-unit contract and supported alias paths.
 
+### Slice views and accumulator writebacks
+
+`tile.slice` inherits the parent's effective layout and memory space, including
+when its `TileView` is omitted. It does not infer a new layout from the child
+shape. Its valid region belongs to the child; `stride` and `start_offset` are
+left for window lowering rather than copied from the parent's coordinates.
+Layout, boxing, padding and compact mode remain inherited; an explicit
+`pad_value` keeps its existing override and codegen validation contract.
+
+`tile.matmul_acc` and `tile.gemv_acc` write the specified accumulator window.
+Their result keeps its physical shape, valid region and complete effective
+view, including window metadata. Before placement is resolved, deduction uses
+the required Acc layout instead of an implicit layout from another space.
+Matrix geometry, dtype and valid-region validation still apply.
+
 ### Result view of `tile.move`
 
 The deduced result `TileView` splits by field:

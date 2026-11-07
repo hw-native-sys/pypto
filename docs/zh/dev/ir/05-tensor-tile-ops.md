@@ -147,6 +147,19 @@ Packed `FP4E2M1X2` 的 tile 字节别名需要 PYPTO 或 DSA_RP；PTOAS 0.65
 planner 要求；Orchestration Tensor 仍不支持。
 Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
 
+### 切片视图与累加器写回
+
+`tile.slice` 继承父 Tile 的有效布局（effective layout）和内存空间，包括父类型
+省略 `TileView` 的情况；不会按子窗口形状重新推断布局。有效范围属于子窗口；
+`stride` 和 `start_offset` 留给窗口降低阶段推导，不直接复制父窗口坐标。
+布局、分块、填充和 compact 模式均继承；显式 `pad_value` 保留原有覆盖及
+代码生成校验契约。
+
+`tile.matmul_acc` 和 `tile.gemv_acc` 写入指定的累加器窗口，结果保留其物理形状、
+有效范围及完整有效视图，包括窗口元数据。内存空间尚未确定时，类型推导使用
+算子要求的 Acc 布局，避免继承其他空间的隐式布局。矩阵维度、dtype 和有效区域
+校验继续生效。
+
 ### tile.move 的结果 view
 
 推导出的结果 `TileView` 按字段分别取值：

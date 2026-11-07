@@ -27,6 +27,8 @@ so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned alloca
 
 Both Vec materializations place the `tile.extract` **at the slice's definition** whenever that is provably equivalent, so the copy stays where the author wrote the slice — in particular inside the same `pl.split_aiv` region — and a slice with several consumers is copied once. A slice is a view that reads its source when consumed, so a copy taken at the definition is equivalent only when nothing writes that storage in between; when a write may reach it, the extract is placed before each consumer instead (see [Where a Vec extract goes](#where-a-vec-extract-goes)).
 
+Type consistency does not establish backend instruction support. For example, extracting an implicit col-major `[16, 1]` Vec tile from a row-major `[16, 8]` parent can pass IR verification and PTOAS lowering, but A2/A3 PTO-ISA rejects this Vec-to-Vec `TEXTRACT` because source and destination layouts must match. This pass does not add that layout-conversion capability.
+
 **Pipeline position**: After [`AutoTileMatmulL0`](19-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](21-infer_tile_memory_space.md).
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.
@@ -51,7 +53,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 ## Algorithm
 
-For each InCore-typed function, in four steps:
+For each InCore-typed function, in five steps:
 
 1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 32-element multiple. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
 
@@ -71,6 +73,10 @@ For each InCore-typed function, in four steps:
    The Vec consumer rules apply only to a slice step 2 did not plan — one whose storage may be written between the definition and the consumer. There, only a copy placed at the consumer reads what the view would have read.
 
 4. **Drop dead slices** — a `tile.slice` whose result no longer has any use is removed. A chained slice only becomes dead once the slice consuming it is dropped, so this iterates to a fixpoint (bounded by the slice count). A slice still used at the end had a consumer this pass does not canonicalize; it is left intact — no regression versus the pre-pass IR.
+
+5. **Refresh affected types** — before the pass returns for verification, re-deduce changed registered calls with `RebuildRegisteredCall`, preserving attributes. Propagate authoritative RHS descriptors through plain aliases, downstream consumers, `ForStmt`/`WhileStmt` initializers and `IterArg`s, and loop/if tile results. Preserve declared non-tile carry types for validation. A fresh extract can be col-major even when its slice inherited a row-major parent. Keep unrelated specialized descriptors and carry existing allocation metadata with `WithCarriedMemRef`; this step does not require a MemRef or defer repairs to a later pass. Indexing original nodes and forwarding types each take one traversal.
+
+   Before propagation, a union-find analysis connects same-geometry flat Vec values through aliases, operand/result dependencies and region merges. When materialization mixes inherited and dense layouts, normalize the affected branch yields and loop initializers/backedges to the implicit Vec layout. Plan this before visiting loop bodies, including zero-trip loops, so nested carries need no repeated traversal. Copies read the physical parent window (retaining its pitch), restore any further valid-region narrowing on the fresh allocation, and retire only the bypassed pure view chains with a use-count worklist. Boxed/unplaced Acc or MX values are excluded. Normalize the newly spliced statement sequences before this pass is verified.
 
 The pass is a `FunctionPass`; functions are returned unchanged when no canonical `tile.slice` is present.
 

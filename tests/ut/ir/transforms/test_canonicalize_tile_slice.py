@@ -1151,6 +1151,211 @@ class TestUnalignedVecSlice:
         ir.assert_structural_equal(_run_pass(Before), Expected)
 
 
+class TestMaterializedSliceTypes:
+    def test_mixed_branch_layouts_are_reconciled_before_partial_result_is_typed(self):
+        """Only the unaligned branch initially gets a dense column extract.
+
+        The aligned branch must be copied at its yield, preserving the narrowed
+        valid region, before it can merge with that col-major result.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                if flag:
+                    window = pl.tile.slice(local, [16, 1], [0, 1])
+                    partial = pl.tile.set_validshape(window, 8, 1)
+                    chosen = pl.yield_(partial)
+                else:
+                    window = pl.tile.slice(local, [16, 1], [0, 0])
+                    partial = pl.tile.set_validshape(window, 8, 1)
+                    chosen = pl.yield_(partial)
+                return pl.store(chosen, [0, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                if flag:
+                    window = pl.tile.extract(local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec)
+                    partial = pl.tile.set_validshape(window, 8, 1)
+                    chosen = pl.yield_(partial)
+                else:
+                    window = pl.tile.extract(local, 0, 0, shape=[16, 1], target_memory=pl.Mem.Vec)
+                    partial = pl.tile.set_validshape(window, 8, 1)
+                    chosen = pl.yield_(partial)
+                return pl.store(chosen, [0, 0], out)
+
+        after = _run_pass(Before)
+        ir.assert_structural_equal(after, Expected)
+        passes.run_verifier()(after)
+
+    @pytest.mark.parametrize("trips", [0, 2])
+    def test_mixed_loop_initializer_and_backedge_layouts(self, trips):
+        """The initializer needs normalization before any IterArg consumer is
+        rebuilt; the zero-trip result must use the same descriptor as the yield.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                window = pl.tile.slice(local, [16, 1], [0, 0])
+                initial = pl.tile.set_validshape(window, 8, 1)
+                for i, (carried,) in pl.range(trips, init_values=(initial,)):
+                    observed = pl.tile.muls(carried, 1.0)
+                    next_window = pl.tile.slice(local, [16, 1], [0, 1])
+                    partial = pl.tile.set_validshape(next_window, 8, 1)
+                    result = pl.yield_(partial)
+                return pl.store(result, [0, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                window = pl.tile.extract(local, 0, 0, shape=[16, 1], target_memory=pl.Mem.Vec)
+                initial = pl.tile.set_validshape(window, 8, 1)
+                for i, (carried,) in pl.range(trips, init_values=(initial,)):
+                    observed = pl.tile.muls(carried, 1.0)
+                    next_window = pl.tile.extract(local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec)
+                    partial = pl.tile.set_validshape(next_window, 8, 1)
+                    result = pl.yield_(partial)
+                return pl.store(result, [0, 0], out)
+
+        after = _run_pass(Before)
+        ir.assert_structural_equal(after, Expected)
+        passes.run_verifier()(after)
+
+    def test_while_backedge_layout_is_known_before_initializer_and_condition(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                trips: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                window = pl.tile.slice(local, [16, 1], [0, 0])
+                initial = pl.tile.set_validshape(window, 8, 1)
+                for carried, count in pl.while_(init_values=(initial, 0)):
+                    pl.cond(count < trips)
+                    observed = pl.tile.muls(carried, 1.0)
+                    next_window = pl.tile.slice(local, [16, 1], [0, 1])
+                    partial = pl.tile.set_validshape(next_window, 8, 1)
+                    result, next_count = pl.yield_(partial, count + 1)
+                return pl.store(result, [0, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                trips: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                window = pl.tile.extract(local, 0, 0, shape=[16, 1], target_memory=pl.Mem.Vec)
+                initial = pl.tile.set_validshape(window, 8, 1)
+                for carried, count in pl.while_(init_values=(initial, 0)):
+                    pl.cond(count < trips)
+                    observed = pl.tile.muls(carried, 1.0)
+                    next_window = pl.tile.extract(local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec)
+                    partial = pl.tile.set_validshape(next_window, 8, 1)
+                    result, next_count = pl.yield_(partial, count + 1)
+                return pl.store(result, [0, 0], out)
+
+        after = _run_pass(Before)
+        ir.assert_structural_equal(after, Expected)
+        passes.run_verifier()(after)
+
+    def test_while_alias_consumers_and_if_results_follow_fresh_extract_layout(self):
+        """Refresh types inside the pass, before validation or memory allocation.
+
+        The source is row-major but its fresh single-column extract is col-major.
+        Every alias, IterArg, consumer and region result must follow that change.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                head = pl.tile.slice(local, [16, 1], [0, 1])
+                alias = head
+                for carried, count in pl.while_(init_values=(alias, 0)):
+                    pl.cond(count < 2)
+                    if count == 0:
+                        scaled = pl.tile.muls(carried, 0.5)
+                        chosen = pl.yield_(scaled)
+                    else:
+                        shifted = pl.tile.adds(carried, 1.0)
+                        chosen = pl.yield_(shifted)
+                    result, next_count = pl.yield_(chosen, count + 1)
+                final = pl.tile.muls(result, 2.0)
+                out = pl.store(final, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local = pl.tile.load(x, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+                head = pl.tile.extract(local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec)
+                alias = head
+                for carried, count in pl.while_(init_values=(alias, 0)):
+                    pl.cond(count < 2)
+                    if count == 0:
+                        scaled = pl.tile.muls(carried, 0.5)
+                        chosen = pl.yield_(scaled)
+                    else:
+                        shifted = pl.tile.adds(carried, 1.0)
+                        chosen = pl.yield_(shifted)
+                    result, next_count = pl.yield_(chosen, count + 1)
+                final = pl.tile.muls(result, 2.0)
+                out = pl.store(final, [0, 0], out)
+                return out
+
+        after = _run_pass(Before)
+        ir.assert_structural_equal(after, Expected)
+        # A standalone pass invocation must already satisfy type verification;
+        # no InferTileMemorySpace / InitMemRef repair may be needed afterwards.
+        passes.run_verifier()(after)
+
+
 class TestSliceIntoColExpand:
     """A Vec tile.slice consumed by tile.col_expand_mul / tile.col_expand_add is
     materialized through a fresh tile.extract (issue #1640) so the lazy
