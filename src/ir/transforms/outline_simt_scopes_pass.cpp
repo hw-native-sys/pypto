@@ -335,7 +335,7 @@ class ScopeOutliner : public IRMutator {
         auto call = As<Call>(stmt->value_);
         const bool fresh_tile = call && As<TileType>(stmt->var_->GetType()) && !IsOp(call, "tile.create") &&
                                 !As<GlobalVar>(call->op_);
-        BindFresh(stmt->var_, fresh_tile && InitializedOperands(call));
+        BindFresh(stmt->var_, fresh_tile && InitializedExpression(call));
       }
     }
     return result;
@@ -511,8 +511,7 @@ class ScopeOutliner : public IRMutator {
   StmtPtr VisitLoop(const LoopPtr& stmt) {
     std::vector<bool> seed_initialized;
     for (const auto& arg : stmt->iter_args_) {
-      auto seed = AsVarLike(arg->initValue_);
-      seed_initialized.push_back(seed && IsInitialized(seed));
+      seed_initialized.push_back(InitializedExpression(arg->initValue_));
     }
     const auto parent_scope = EnterConditional();
     loop_stack_.push_back(stmt.get());
@@ -536,13 +535,20 @@ class ScopeOutliner : public IRMutator {
       tail = seq->stmts_.back();
     }
     auto yield = As<YieldStmt>(tail);
+    // Evaluate every backedge before checking requirements: a later yield may
+    // consume an earlier carry's proof (including through a Tile expression).
+    // Two linear passes prevent parameter order from hiding that dependency.
+    std::vector<bool> backedge_initialized;
+    for (size_t i = 0; i < carries.size(); ++i) {
+      const ExprPtr value = yield && i < yield->value_.size() ? yield->value_[i] : stmt->iter_args_[i];
+      backedge_initialized.push_back(InitializedExpression(value));
+    }
     std::vector<bool> result_initialized;
     for (size_t i = 0; i < carries.size(); ++i) {
-      auto value = yield && i < yield->value_.size() ? AsVarLike(yield->value_[i]) : stmt->iter_args_[i];
-      const bool initialized = value && IsInitialized(value);
-      CHECK_SPAN(!carries[i] || !carries[i]->requires_initialized_backedge || initialized, stmt->span_)
+      CHECK_SPAN(!carries[i] || !carries[i]->requires_initialized_backedge || backedge_initialized[i],
+                 stmt->span_)
           << "SIMT loop carry requires initialized storage on every iteration";
-      result_initialized.push_back(seed_initialized[i] && initialized);
+      result_initialized.push_back(seed_initialized[i] && backedge_initialized[i]);
     }
     loop_stack_.pop_back();
     LeaveConditional(parent_scope);
@@ -595,15 +601,33 @@ class ScopeOutliner : public IRMutator {
     // guarantee that no possible source is Out or an uninitialized allocation.
     return !permissions_.Uninitialized(var.get());
   }
-  bool InitializedOperands(const CallPtr& call) {
-    var_collectors::VarDefUseCollector uses;
-    uses.VisitExpr(call);
-    outline_utils::VarCollector objects;
-    objects.VisitExpr(call);
-    for (const auto* var : uses.var_uses) {
-      if (!IsInitialized(objects.var_objects.at(var))) return false;
-    }
-    return true;
+  bool InitializedExpression(const ExprPtr& expr) {
+    // Seeds/yields precede FlattenCallExpr. Walk each expression once, checking
+    // nested allocations as well as named operands; tile.full and arithmetic
+    // produce initialized values only when their storage inputs are initialized.
+    class Checker : public IRVisitor {
+     public:
+      explicit Checker(ScopeOutliner& owner) : owner_(owner) {}
+      bool initialized = true;
+
+     protected:
+      void VisitExpr_(const VarPtr& var) override { initialized &= owner_.IsInitialized(var); }
+      void VisitExpr_(const IterArgPtr& var) override { initialized &= owner_.IsInitialized(var); }
+      void VisitExpr_(const CallPtr& call) override {
+        if (As<TileType>(call->GetType()) || AsTensorTypeLike(call->GetType())) {
+          if (As<GlobalVar>(call->op_) || IsOp(call, "tile.create") || IsOp(call, "tensor.create") ||
+              (!As<TileType>(call->GetType()) && !ResultAliasedArgIndex(call))) {
+            initialized = false;
+          }
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+
+     private:
+      ScopeOutliner& owner_;
+    } checker(*this);
+    checker.VisitExpr(expr);
+    return checker.initialized;
   }
   void Bind(const VarPtr& var, Binding binding) {
     auto previous = ResolveStorage(var);

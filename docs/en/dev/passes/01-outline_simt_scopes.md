@@ -42,6 +42,11 @@ start from the incoming bindings; their changed bindings remain invalid at the
 join. Explicit loop carries retain initialized seeds, and captures that depend
 on them require initialized yielded values on every iteration. Loop outputs are
 initialized only when both the seed and the backedge values are initialized.
+Seed and yield expressions are checked before call flattening, including nested
+Tile arithmetic. All backedges are evaluated before requirements are validated,
+so dependencies between carries cannot evade checks through parameter order.
+Shape unpacking inside SIMT expands into scalars even when conditional writes
+require runtime bindings.
 
 Storage returned by a function call or projected from a rebound tuple is rejected
 when its provenance cannot be proved. Capture the original named storage instead.
