@@ -2004,7 +2004,7 @@ def extract_local_tensor_metas(
 
     # Dispatch table: pl.<attr>(...) → meta extraction function.
     # Replaces sequential if-chains, reducing branch and statement counts.
-    _pl_attr_handlers = {
+    _pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]] = {
         "create_tensor": _create_tensor_meta,
         "slice": _slice_meta,
         "window": _window_meta,
