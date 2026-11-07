@@ -49,7 +49,10 @@ Shape unpacking inside SIMT expands into scalars even when conditional writes
 require runtime bindings.
 
 Storage returned by a function call or projected from a rebound tuple is rejected
-when its provenance cannot be proved. Capture the original named storage instead.
+when its provenance cannot be proved. Storage projections from tuples also do not
+supply initialization proofs in loop seeds or yields, including when nested in
+Tile arithmetic: a tuple may retain an older handle after its source is rebound.
+Capture or carry the original named storage instead.
 
 ## Legality and resources
 

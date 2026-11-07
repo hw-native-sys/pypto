@@ -613,6 +613,15 @@ class ScopeOutliner : public IRMutator {
      protected:
       void VisitExpr_(const VarPtr& var) override { initialized &= owner_.IsInitialized(var); }
       void VisitExpr_(const IterArgPtr& var) override { initialized &= owner_.IsInitialized(var); }
+      void VisitExpr_(const TupleGetItemExprPtr& projection) override {
+        // A tuple may retain an older storage handle than its source Var's
+        // current binding. Until tuple values have reaching-storage identities,
+        // neither a nonstorage tuple Var nor its original spelling is proof.
+        if (As<TileType>(projection->GetType()) || AsTensorTypeLike(projection->GetType())) {
+          initialized = false;
+        }
+        IRVisitor::VisitExpr_(projection);
+      }
       void VisitExpr_(const CallPtr& call) override {
         if (As<TileType>(call->GetType()) || AsTensorTypeLike(call->GetType())) {
           if (As<GlobalVar>(call->op_) || IsOp(call, "tile.create") || IsOp(call, "tensor.create") ||
