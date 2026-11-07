@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <cstddef>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -115,6 +116,9 @@ class BufferRootCollector : public IRVisitor {
 
   // Symbolic storage identities share edges until the consumer propagates effects.
   std::unordered_map<const Var*, RootCandidates> storage_successors_;
+
+  // Propagate content effects through local storage edges and shared callees.
+  void PropagateStorageEffects(std::unordered_map<const Var*, unsigned char>& effects) const;
   void RecordSimtLaunchRoots(const SimtLaunchStmtPtr& launch);
   void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
   [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
@@ -171,7 +175,13 @@ class BufferRootCollector : public IRVisitor {
   AmbiguousRootPolicy ambiguous_policy_;
   ViewRootPolicy view_policy_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
+  struct StorageCallInstance;
+  struct StorageCallProjection {
+    std::shared_ptr<const StorageCallInstance> instance;
+    size_t node;
+  };
   std::vector<VarPtr> storage_proxy_vars_;
+  std::unordered_map<const Var*, StorageCallProjection> storage_call_roots_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
   std::unordered_map<const Var*, std::shared_ptr<const std::vector<RootInfo>>> backing_tuple_roots_;
 };

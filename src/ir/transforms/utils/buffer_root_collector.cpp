@@ -66,22 +66,109 @@ struct StorageReturnValue {
   std::vector<StorageReturnValue> elements;
 };
 
+struct StorageReturnSummary;
+
+struct StorageSummaryCall {
+  std::shared_ptr<const StorageReturnSummary> callee;
+  std::vector<StorageReturnValue> arguments;
+};
+
 struct StorageSummaryNode {
   TypePtr type;
   std::optional<size_t> parameter;
   std::vector<size_t> successors;
+  // (local call index, node in the callee graph)
+  std::optional<std::pair<size_t, size_t>> projection = std::nullopt;
 };
 
-// Each return refers to nodes in the same graph. A loop that rotates N
-// descriptors stores N transitions, rather than N sets of N parameters.
+// Each summary owns only local transitions. Call sites refer to another
+// summary and bind its formal roots to local nodes.
 struct StorageReturnSummary {
   std::vector<StorageSummaryNode> nodes;
   std::vector<StorageReturnValue> outputs;
+  std::vector<StorageSummaryCall> calls;
 };
+
+using StorageDemand = std::vector<std::pair<size_t, unsigned char>>;
+
+struct StorageTransfer {
+  StorageDemand requested;
+  StorageDemand parameters;
+};
+
+// Keep one recent request per callee in this propagation. This bounds cache
+// storage and lets sibling calls reuse the same query with different bindings.
+using StorageTransferCache = std::unordered_map<const StorageReturnSummary*, StorageTransfer>;
+
+StorageDemand CanonicalDemand(StorageDemand demand) {
+  std::sort(demand.begin(), demand.end());
+  size_t count = 0;
+  for (const auto& [node, bits] : demand) {
+    if (count > 0 && demand[count - 1].first == node) {
+      demand[count - 1].second |= bits;
+    } else {
+      demand[count++] = {node, bits};
+    }
+  }
+  demand.resize(count);
+  return demand;
+}
+
+StorageDemand TransferStorageEffects(const StorageReturnSummary& summary, StorageDemand request,
+                                     StorageTransferCache& cache) {
+  request = CanonicalDemand(std::move(request));
+  if (auto entry = cache.find(&summary); entry != cache.end() && entry->second.requested == request) {
+    return entry->second.parameters;
+  }
+  std::vector<unsigned char> effects(summary.nodes.size());
+  std::vector<size_t> pending;
+  const auto add = [&](size_t node, unsigned char bits) {
+    if (!(bits & ~effects[node])) return;
+    effects[node] |= bits;
+    pending.push_back(node);
+  };
+  for (const auto& [node, bits] : request) add(node, bits);
+
+  size_t cursor = 0;
+  std::vector<StorageDemand> call_requests(summary.calls.size());
+  std::vector<size_t> pending_calls;
+  while (cursor < pending.size()) {
+    while (cursor < pending.size()) {
+      const size_t index = pending[cursor++];
+      const auto& node = summary.nodes[index];
+      const auto bits = effects[index];
+      for (size_t target : node.successors) add(target, bits);
+      if (node.projection) {
+        const auto [call, result] = *node.projection;
+        auto& demand = call_requests[call];
+        if (demand.empty()) pending_calls.push_back(call);
+        demand.emplace_back(result, bits);
+      }
+    }
+    for (size_t index : pending_calls) {
+      const auto& call = summary.calls[index];
+      auto demand = std::exchange(call_requests[index], {});
+      for (const auto& [parameter, bits] : TransferStorageEffects(*call.callee, std::move(demand), cache)) {
+        for (size_t root : call.arguments[parameter].roots) add(root, bits);
+      }
+    }
+    pending_calls.clear();
+  }
+
+  StorageDemand parameters;
+  parameters.reserve(summary.nodes.size());
+  for (size_t i = 0; i < summary.nodes.size(); ++i) {
+    if (const auto parameter = summary.nodes[i].parameter; parameter.has_value() && effects[i]) {
+      parameters.emplace_back(*parameter, effects[i]);
+    }
+  }
+  cache.insert_or_assign(&summary, StorageTransfer{std::move(request), parameters});
+  return parameters;
+}
 
 struct StorageReturnContext {
   size_t depth = 0;
-  std::map<StorageKey, StorageReturnSummary> memo;
+  std::map<StorageKey, std::shared_ptr<const StorageReturnSummary>> memo;
   std::set<StorageKey> active;
 };
 
@@ -91,6 +178,11 @@ StorageReturnContext& StorageCtx() {
 }
 
 }  // namespace
+
+struct BufferRootCollector::StorageCallInstance {
+  std::shared_ptr<const StorageReturnSummary> callee;
+  std::vector<RootInfo> arguments;
+};
 
 ScopedStorageRootCache::ScopedStorageRootCache() { ++StorageCtx().depth; }
 
@@ -130,18 +222,19 @@ void BufferRootCollector::RecordIfReturnRoots(const IfStmtPtr& if_stmt) {
   auto else_yield = transform_utils::GetLastYieldStmt(else_body.value());
   if (!then_yield || !else_yield) return;
 
+  const auto resolve = [&](const ExprPtr& value) -> RootInfo {
+    if (view_policy_ == ViewRootPolicy::kBackingStorage) return ResolveBackingValue(value);
+    return {ResolveRootCandidates(value), IsAmbiguous(value)};
+  };
   for (size_t i = 0;
        i < if_stmt->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
        ++i) {
-    auto roots = ResolveRootCandidates(then_yield->value_[i]);
-    auto else_roots = ResolveRootCandidates(else_yield->value_[i]);
-    for (const Var* root : else_roots) {
-      if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
-    }
-    const bool unresolved = roots.empty() || IsAmbiguous(then_yield->value_[i]) ||
-                            IsAmbiguous(else_yield->value_[i]) ||
-                            ResolveRootCandidates(then_yield->value_[i]).empty() || else_roots.empty();
-    RecordRootCandidates(if_stmt->return_vars_[i], roots, unresolved);
+    auto then_root = resolve(then_yield->value_[i]);
+    auto else_root = resolve(else_yield->value_[i]);
+    const bool unresolved =
+        then_root.roots.empty() || else_root.roots.empty() || then_root.ambiguous || else_root.ambiguous;
+    then_root.roots.insert(then_root.roots.end(), else_root.roots.begin(), else_root.roots.end());
+    RecordRootCandidates(if_stmt->return_vars_[i], then_root.roots, unresolved);
   }
 }
 
@@ -438,10 +531,9 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   auto& ctx = StorageCtx();
   const StorageKey key{program_, callee};
   auto cached = ctx.memo.find(key);
-  StorageReturnSummary recursive;
-  const StorageReturnSummary* summary = nullptr;
+  std::shared_ptr<const StorageReturnSummary> summary;
   if (cached != ctx.memo.end()) {
-    summary = &cached->second;
+    summary = cached->second;
   } else if (ctx.active.insert(key).second) {
     StorageReturnSummary built;
     built.outputs.resize(callee->return_types_.size());
@@ -483,19 +575,49 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
         built.outputs[i].roots.push_back(intern(callee->params_[*binding.param_index].get()));
       }
     }
+    std::unordered_map<const StorageCallInstance*, size_t> local_calls;
     for (size_t i = 0; i < pending.size(); ++i) {
-      auto next = nested.storage_successors_.find(pending[i]);
+      const Var* root = pending[i];
+      if (auto it = nested.storage_call_roots_.find(root); it != nested.storage_call_roots_.end()) {
+        const auto& projection = it->second;
+        auto [call, inserted] = local_calls.try_emplace(projection.instance.get(), built.calls.size());
+        if (inserted) {
+          StorageSummaryCall entry{projection.instance->callee, {}};
+          const auto& actuals = projection.instance->arguments;
+          entry.arguments.reserve(actuals.size());
+          for (const auto& actual : actuals) entry.arguments.push_back(summarize(summarize, actual));
+          built.calls.push_back(std::move(entry));
+        }
+        built.nodes[i].projection = std::pair{call->second, projection.node};
+        continue;
+      }
+      auto next = nested.storage_successors_.find(root);
       if (next == nested.storage_successors_.end()) continue;
       std::vector<size_t> edges;
       edges.reserve(next->second.size());
       for (const Var* root : next->second) edges.push_back(intern(root));
       built.nodes[i].successors = std::move(edges);
     }
+    // The caller references one node per returned buffer. Keeping the
+    // alternatives inside this graph avoids multiplying boundary projections
+    // when successive callers merge the results of different call sites.
+    const auto join_returns = [&](const auto& self, StorageReturnValue& value) -> void {
+      if (value.roots.size() > 1) {
+        const auto root = built.nodes.size();
+        auto type = built.nodes[value.roots.front()].type;
+        built.nodes.push_back({std::move(type), std::nullopt, std::move(value.roots)});
+        value.roots = {root};
+      }
+      for (auto& element : value.elements) self(self, element);
+    };
+    for (auto& output : built.outputs) join_returns(join_returns, output);
     ctx.active.erase(key);
-    summary = &ctx.memo.emplace(key, std::move(built)).first->second;
+    summary = std::make_shared<StorageReturnSummary>(std::move(built));
+    ctx.memo.emplace(key, summary);
   } else {
     // Recursive call graphs are diagnosed separately. Conservatively connect
     // the results to a shared union of the arguments until then.
+    StorageReturnSummary recursive;
     recursive.outputs.resize(callee->return_types_.size());
     recursive.nodes.reserve(callee->params_.size() + 1);
     for (size_t i = 0; i < callee->params_.size(); ++i) {
@@ -507,36 +629,39 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     const size_t union_id = recursive.nodes.size();
     recursive.nodes.push_back({callee->return_types_[0], std::nullopt, std::move(edges)});
     for (auto& output : recursive.outputs) output.roots.push_back(union_id);
-    summary = &recursive;
+    summary = std::make_shared<StorageReturnSummary>(std::move(recursive));
   }
 
   const size_t ctx_count = transform_utils::TrailingCommCtxParamCount(callee);
   const size_t prefix = call->args_.size() >= ctx_count ? call->args_.size() - ctx_count : 0;
   const size_t gap =
       callee->params_.size() >= call->args_.size() ? callee->params_.size() - call->args_.size() : 0;
-  std::vector<RootInfo> bound(summary->nodes.size());
-  for (size_t i = 0; i < summary->nodes.size(); ++i) {
-    const auto& node = summary->nodes[i];
-    if (node.parameter) {
-      const size_t parameter = *node.parameter;
-      if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
-      const size_t argument = parameter < prefix ? parameter : parameter - gap;
-      if (argument < call->args_.size()) bound[i] = ResolveBackingValue(call->args_[argument]);
-    } else if (!node.successors.empty()) {
-      auto proxy = std::make_shared<Var>("storage_transition", node.type, call->span_);
-      bound[i].roots.push_back(proxy.get());
+  auto instance = std::make_shared<StorageCallInstance>();
+  instance->callee = summary;
+  instance->arguments.resize(callee->params_.size());
+  for (const auto& node : summary->nodes) {
+    if (!node.parameter) continue;
+    const size_t parameter = *node.parameter;
+    if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
+    const size_t argument = parameter < prefix ? parameter : parameter - gap;
+    if (argument < call->args_.size()) {
+      instance->arguments[parameter] = ResolveBackingValue(call->args_[argument]);
+    }
+  }
+  std::unordered_map<size_t, const Var*> projections;
+  const auto project = [&](size_t index) -> RootInfo {
+    const auto& node = summary->nodes[index];
+    if (node.parameter) return instance->arguments[*node.parameter];
+    if (node.successors.empty() && !node.projection) return {};
+    auto [it, inserted] = projections.try_emplace(index, nullptr);
+    if (inserted) {
+      auto proxy = std::make_shared<Var>("storage_projection", node.type, call->span_);
+      it->second = proxy.get();
+      storage_call_roots_.emplace(proxy.get(), StorageCallProjection{instance, index});
       storage_proxy_vars_.push_back(std::move(proxy));
     }
-  }
-  for (size_t i = 0; i < summary->nodes.size(); ++i) {
-    const auto& node = summary->nodes[i];
-    if (node.parameter || node.successors.empty()) continue;
-    auto& edges = storage_successors_[bound[i].roots.front()];
-    for (size_t next : node.successors) {
-      const auto& roots = bound[next].roots;
-      edges.insert(edges.end(), roots.begin(), roots.end());
-    }
-  }
+    return {{it->second}, false};
+  };
   const auto bind = [&](const auto& self, const StorageReturnValue& result) -> RootInfo {
     RootInfo info;
     if (!result.elements.empty()) {
@@ -547,7 +672,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     }
     std::unordered_set<const Var*> seen;
     for (size_t root : result.roots) {
-      const auto& actual = bound[root];
+      const auto actual = project(root);
       if (actual.elements) info.elements = actual.elements;
       for (const Var* candidate : actual.roots) {
         if (seen.insert(candidate).second) info.roots.push_back(candidate);
@@ -563,6 +688,49 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     roots.push_back(OutputRoot{bind(bind, summary->outputs[i]), callee->return_types_[i]});
   }
   return roots;
+}
+
+void BufferRootCollector::PropagateStorageEffects(
+    std::unordered_map<const Var*, unsigned char>& effects) const {
+  std::vector<const Var*> pending;
+  pending.reserve(effects.size());
+  for (const auto& [root, bits] : effects) {
+    if (bits) pending.push_back(root);
+  }
+  const auto add = [&](const Var* root, unsigned char bits) {
+    auto& current = effects[root];
+    if (!(bits & ~current)) return;
+    current |= bits;
+    pending.push_back(root);
+  };
+
+  StorageTransferCache cache;
+  std::unordered_map<const StorageCallInstance*, StorageDemand> call_requests;
+  std::vector<const StorageCallInstance*> pending_calls;
+  size_t cursor = 0;
+  while (cursor < pending.size()) {
+    while (cursor < pending.size()) {
+      const Var* root = pending[cursor++];
+      const auto bits = effects[root];
+      if (auto it = storage_successors_.find(root); it != storage_successors_.end()) {
+        for (const Var* target : it->second) add(target, bits);
+      }
+      if (auto it = storage_call_roots_.find(root); it != storage_call_roots_.end()) {
+        const auto& projection = it->second;
+        auto& demand = call_requests[projection.instance.get()];
+        if (demand.empty()) pending_calls.push_back(projection.instance.get());
+        demand.emplace_back(projection.node, bits);
+      }
+    }
+    for (const auto* instance : pending_calls) {
+      auto demand = std::exchange(call_requests[instance], {});
+      for (const auto& [parameter, bits] :
+           TransferStorageEffects(*instance->callee, std::move(demand), cache)) {
+        for (const Var* root : instance->arguments[parameter].roots) add(root, bits);
+      }
+    }
+    pending_calls.clear();
+  }
 }
 
 BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(

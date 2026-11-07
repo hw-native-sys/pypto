@@ -423,26 +423,8 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
 
  public:
   void FinalizeEffects() {
-    // One graph for the whole body replaces per-enclosing-loop effect copies.
-    // Carry/result identities retain possible storage transitions (including
-    // descriptor-only swaps). Each root gains each of the three bits at most
-    // once, so the worklist is O(V + E), independent of loop nesting depth.
-    std::vector<const Var*> pending;
-    for (const auto& [root, bits] : effects_) {
-      if (bits) pending.push_back(root);
-    }
-    for (size_t cursor = 0; cursor < pending.size(); ++cursor) {
-      const Var* source = pending[cursor];
-      auto next = storage_successors_.find(source);
-      if (next == storage_successors_.end()) continue;
-      const auto bits = effects_[source];
-      for (const Var* target : next->second) {
-        const auto added = static_cast<unsigned char>(bits & ~effects_[target]);
-        if (!added) continue;
-        RecordRootAccess(target, added);
-        pending.push_back(target);
-      }
-    }
+    PropagateStorageEffects(effects_);
+    for (const auto& [root, bits] : effects_) RecordRootAccess(root, bits);
   }
 
  protected:

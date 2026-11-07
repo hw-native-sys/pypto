@@ -645,5 +645,81 @@ def test_tuple_valued_return_preserves_element_storage():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_shared_callee_transition_uses_each_branch_argument_binding():
+    tensor = "pl.Tensor[[64], pl.FP32]"
+    params = (
+        f"condition: pl.Scalar[pl.BOOL], a: pl.Out[{tensor}], b: pl.Out[{tensor}], scratch: pl.Out[{tensor}]"
+    )
+    source = f"""import pypto.language as pl
+
+@pl.program
+class BranchCalls:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer0(self, {params}) -> {tensor}:
+        for i, (left, right) in pl.range(1, init_values=(a, b)):
+            first, second = pl.yield_(right, left)
+        return first
+"""
+    for level in range(1, 7):
+        source += f"""
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer{level}(self, {params}) -> {tensor}:
+        if condition:
+            left = self.layer{level - 1}(condition, a, b, scratch)
+            selected = pl.yield_(left)
+        else:
+            right = self.layer{level - 1}(condition, b, a, scratch)
+            selected = pl.yield_(right)
+        return selected
+"""
+    source += f"""
+    @pl.function
+    def main(self, condition: pl.Scalar[pl.BOOL], a: {tensor}, b: {tensor}, scratch: {tensor}):
+        result = self.layer6(condition, a, b, scratch)
+        value = pl.tensor.read(result, [32])
+        pl.tensor.write(a, [0], value)
+"""
+    directions = _directions(_lower(pl.parse(source)))
+    assert directions["a"] == ir.ParamDirection.InOut
+    assert directions["b"] == ir.ParamDirection.InOut
+    assert directions["scratch"] == ir.ParamDirection.Out
+
+
+def test_graph_branch_view_yields_preserve_backing_storage():
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, condition: pl.Scalar[pl.BOOL], cache: pl.Tensor[[2, 32], pl.FP32]):
+            with pl.graph("layer"):
+                if condition:
+                    selected = pl.yield_(pl.tensor.reshape(cache, [64]))
+                else:
+                    selected = pl.yield_(pl.tensor.reshape(cache, [64]))
+                value = pl.tensor.read(selected, [32])
+                pl.tensor.write(cache, [0, 0], value)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Graph, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def layer(
+            self, condition: pl.Scalar[pl.BOOL], cache: pl.InOut[pl.Tensor[[2, 32], pl.FP32]]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            if condition:
+                selected = pl.yield_(pl.tensor.reshape(cache, [64]))
+            else:
+                selected = pl.yield_(pl.tensor.reshape(cache, [64]))
+            value = pl.tensor.read(selected, [32])
+            pl.tensor.write(cache, [0, 0], value)
+            return selected
+
+        @pl.function
+        def main(self, condition: pl.Scalar[pl.BOOL], cache: pl.Tensor[[2, 32], pl.FP32]):
+            _selected = self.layer(condition, cache)
+
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
