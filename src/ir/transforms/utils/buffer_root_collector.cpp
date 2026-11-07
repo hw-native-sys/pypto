@@ -823,7 +823,8 @@ BufferRootCollector::RootInfo BufferRootCollector::BackingCallValue(const CallPt
   if (!As<TupleType>(call->GetType())) return SelectReturnRootInfo(outputs, call->GetType());
   // A plain call returning one tuple preserves that tuple. A Submit wraps it
   // in the launch result, whose trailing TaskId has no storage roots.
-  if (outputs.size() == 1 && structural_equal(outputs[0].type, call->GetType())) {
+  if (outputs.size() == 1 &&
+      (outputs[0].type == call->GetType() || structural_equal(outputs[0].type, call->GetType()))) {
     return std::move(outputs[0].info);
   }
   auto elements = std::make_shared<std::vector<RootInfo>>();
