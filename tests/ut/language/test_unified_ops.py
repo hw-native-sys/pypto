@@ -2173,6 +2173,15 @@ class TestCastSaturationMode:
         """The rule itself: integer destinations saturate, float ones are left alone."""
         assert pypto_ir_utils.default_saturation_mode_for(dtype) == expected
 
+    def test_integer_dtype_codes_select_the_same_default(self):
+        """IR dtype codes must behave like their corresponding DataType values."""
+        for dtype in (DataType.INT8, DataType.UINT8, DataType.FP16, DataType.FP32):
+            assert pypto_ir_utils.default_saturation_mode_for(dtype.code()) == (
+                pypto_ir_utils.default_saturation_mode_for(dtype)
+            )
+        with pytest.raises(ValueError, match="Unknown DataType code"):
+            pypto_ir_utils.default_saturation_mode_for(256)
+
     @pytest.mark.parametrize("kind", ["tensor", "tile"])
     def test_unified_matches_the_explicit_surface(self, kind):
         """``pl.cast`` forwards the kwarg to the same op the explicit surface builds."""

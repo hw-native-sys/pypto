@@ -32,8 +32,10 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/const_fold.h"
+#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -281,6 +283,70 @@ std::optional<int64_t> GetConstantDimension(const ExprPtr& dim) {
 
   // Not a constant
   return std::nullopt;
+}
+
+DataType ValidateCastAttributes(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                DataType source_dtype, const std::string& op_name, const Span& span) {
+  DataType target;
+  bool found_target = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key != "target_type") continue;
+    if (const auto dtype = std::any_cast<DataType>(&value)) {
+      target = *dtype;
+    } else if (const auto code = std::any_cast<int>(&value)) {
+      CHECK_SPAN(*code >= 0 && *code <= std::numeric_limits<uint8_t>::max(), span)
+          << op_name << " target_type code must be in [0, 255], got " << *code;
+      target = DataType(static_cast<uint8_t>(*code));
+    } else {
+      throw TypeError(op_name + " target_type must be a DataType or int");
+    }
+    found_target = true;
+    break;
+  }
+  CHECK_SPAN(found_target, span) << op_name << " requires 'target_type' kwarg";
+  const bool has_mode =
+      std::any_of(kwargs.begin(), kwargs.end(), [](const auto& entry) { return entry.first == "mode"; });
+  CHECK_SPAN(has_mode, span) << op_name << " requires a 'mode' kwarg";
+  const int mode = GetRequiredKwarg<int>(kwargs, "mode", op_name);
+  CHECK_SPAN(mode >= 0 && mode <= 6, span) << op_name << " mode must be in [0, 6], got " << mode;
+  ValidatePackedFp4CastMode(target, mode, span);
+  ValidateCastSaturationModeKwarg(kwargs, op_name);
+  CHECK_SPAN(source_dtype != target, span)
+      << op_name << ": target_type equals input dtype; same-dtype cast is not a valid operation";
+  return target;
+}
+
+bool CastExtentsEqual(const ShapedTypePtr& source, const ShapedTypePtr& result,
+                      const std::vector<ExprPtr>& source_extents,
+                      const std::vector<ExprPtr>& result_extents) {
+  if (source_extents.size() != result_extents.size()) return false;
+  auto source_values = source_extents;
+  auto result_values = result_extents;
+  if (source->dtype_.IsPackedFp4() != result->dtype_.IsPackedFp4()) {
+    auto& expanded = source->dtype_.IsPackedFp4() ? source_values : result_values;
+    const auto packed = source->dtype_.IsPackedFp4() ? source : result;
+    if (expanded.empty()) return false;
+    bool dn = false;
+    if (const auto tile = As<TileType>(packed)) {
+      dn = tile_view_semantics::GetEffectiveTileView(*tile).blayout == TileLayout::col_major;
+    } else if (const auto tensor = AsTensorTypeLike(packed)) {
+      dn = tensor->tensor_view_ && tensor->tensor_view_->layout == TensorLayout::DN;
+    }
+    if (dn && expanded.size() != 2) return false;
+    const size_t axis = dn ? 0 : expanded.size() - 1;
+    const auto& extent = expanded[axis];
+    if (const auto value = As<ConstInt>(extent)) {
+      if (value->value_ < 0 || value->value_ > std::numeric_limits<int64_t>::max() / 2) return false;
+      expanded[axis] = std::make_shared<ConstInt>(value->value_ * 2, DataType::INDEX, extent->span_);
+    } else {
+      expanded[axis] =
+          MakeMul(extent, std::make_shared<ConstInt>(2, DataType::INDEX, extent->span_), extent->span_);
+    }
+  }
+  for (size_t i = 0; i < source_values.size(); ++i) {
+    if (!DimensionsEqual(source_values[i], result_values[i])) return false;
+  }
+  return true;
 }
 
 bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {

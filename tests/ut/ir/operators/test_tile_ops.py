@@ -9826,5 +9826,30 @@ def test_omitted_cache_policy_stays_absent():
     assert "cache" not in dict(store_call.kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"target_type": DataType.FP16, "mode": -1}, "mode must be in"),
+        ({"target_type": DataType.FP16, "mode": 7}, "mode must be in"),
+        ({"target_type": -1, "mode": 2}, "target_type code"),
+        ({"target_type": DataType.FP16.code() + 256, "mode": 2}, "target_type code"),
+    ],
+)
+def test_tile_cast_rejects_invalid_raw_attributes(kwargs, message):
+    """Invalid raw IR must fail at construction, before native-rule lookup."""
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TileType([16, 32], DataType.FP32), span)
+    with pytest.raises(ValueError, match=message):
+        ir.create_op_call("tile.cast", [source], kwargs, span)
+
+
+def test_tile_cast_accepts_integer_destination_code():
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TileType([16, 32], DataType.FP32), span)
+    call = ir.create_op_call("tile.cast", [source], {"target_type": DataType.FP16.code(), "mode": 2}, span)
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.dtype == DataType.FP16
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

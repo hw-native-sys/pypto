@@ -23,7 +23,8 @@ namespace ir {
 namespace op_predicates {
 
 /// Whether tile.cast must keep its result disjoint from its source. Widening
-/// casts are unsafe in place on every target. A2/A3 narrowing casts process all
+/// casts (including packed FP4 -> FP8 decoding) are unsafe in place on every
+/// target. A2/A3 narrowing casts process all
 /// row heads before the tails, so later output rows can overwrite unread input.
 /// Callers without a resolved target must conservatively pass is_a2a3=true.
 bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3);

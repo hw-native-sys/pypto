@@ -57,7 +57,8 @@ below. Native MXFP4 quantization supports E2M1 only.
 | Packed GM views and load/store | Both formats, ND/DN carrier dimensions, strides, and offsets; a one-carrier width stays ND; PTOAS v0.67 handles DMA descriptor conversion |
 | Either packed format ↔ UINT8/INT8 alias | Same-shape, dense addressed 2D row-major Vec storage; PYPTO or DSA_RP planning |
 | Either packed format ↔ BF16 cast | Native TCVT on unboxed Vec; ND columns or full static dense DN rows expand/contract 2:1 |
-| Either packed format → FP8E4M3FN/FP8E5M2 cast | Legalized through BF16 and FP32, with a warning; a host reference or lookup table remains an alternative |
+| E2M1x2 → FP8E4M3FN cast | Direct ND Vec TCVT for compatible geometry; `[16,32]` carriers become `[16,64]` values without BF16/FP32 intermediates |
+| Other packed FP4 → FP8 casts | Legalized through BF16 and FP32, with a warning; incompatible direct-cast geometry also uses this fallback |
 | E2M1↔E1M2 conversion | Numerical cast through BF16; carrier shape is unchanged |
 | Other wider-type casts | Existing legalization with lossless intermediates; see the encoding constraint below |
 | Packed Vec layout conversion | ND→NZ; carrier geometry changes with the packing axis while preserving the value geometry |
@@ -84,6 +85,27 @@ rejected. Packing requires complete pairs: a positive even source extent or a
 provably even dynamic `valid_shape`, such as `2 * n`. Decoding expands the
 carrier extent without requiring it to be even.
 
+`pl.cast`, `pl.tile.cast`, and InCore `pl.tensor.cast` use a direct
+E2M1x2→FP8E4M3FN `pto.tcvt` on A5 when both tiles are two-dimensional unboxed
+row-major ND Vec. Physical dimensions must
+be static and positive, the packed source row pitch must be a multiple of 32
+bytes, and valid rows and columns must be static positive extents. Tiles must have dense canonical strides and zero UB
+`start_offset`. The destination doubles physical and valid columns; no rounding is
+needed because every E2M1 value is exactly representable in E4M3FN, including
+signed zero. PTOAS v0.72 also requires signed 32-bit byte spans and logical
+columns, at most 65,535 rows, and a source register count (`packed_cols / 256`)
+that fits 16 bits. Unsupported ND geometry retains the BF16/FP32 legalization
+path. This does not enable direct E1M2→FP8 or E2M1→E5M2 casts, NZ output, or
+any DN packed→FP8 cast — see the DN paragraph below, which rejects rather than
+falls back.
+Static-valid descriptors alias the actual source handle, preserving runtime
+addresses from tile parameters, cross-core pipes, and rotating allocations.
+All three memory planners use this direct ND route. After vector splitting,
+legalization rechecks the final lane geometry and restores the fallback if a
+packed row is no longer aligned or validity becomes dynamic. Empty replay
+lanes retain their storage and issue no conversion.
+GM offsets remain in carrier units; the output uses FP8 element offsets.
+
 All packed casts require `none_box` storage. Wider cast chains require ND.
 Decoding through BF16 preserves every FP4 value exactly. Implicit encoding chains must also preserve
 the original source through BF16: FP16/FP32 and larger integer sources are
@@ -98,6 +120,22 @@ prepare a column-major BF16 source. Tensor casts preserve the same contract.
 PYPTO or DSA_RP must supply static tile addresses; codegen binds full static
 valid descriptors to select the safe native conversion path. Dynamic-valid
 DN descriptors can fault even for a full rectangle and remain unsupported.
+
+**ND and DN fail differently, and only ND degrades.** An ND packed cast whose
+geometry misses the direct conditions is legalized through BF16/FP32 and still
+compiles. A DN packed cast to any FP8 target is instead rejected by
+`tile.cast` type deduction, before any backend rule is consulted:
+
+```python
+# DN packed source: pl.TileView(blayout=pl.TileLayout.col_major, stride=[1, 32])
+pl.cast(dn_packed_tile, pl.FP8E4M3FN)
+# ValueError: packed FP4 DN cast supports only BF16 and packed FP4 endpoints;
+#             use ND storage for wider cast chains
+```
+
+The check is target-independent — it raises identically with no backend
+configured, on Ascend910, and on Ascend950 — so prepare an ND source when the
+destination is FP8.
 
 ## Decode a UINT8 carrier through a UB alias (Ascend950)
 

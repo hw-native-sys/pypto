@@ -33,8 +33,11 @@ bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3) {
   const auto source = As<TileType>(call->args_[0]->GetType());
   const auto result = As<TileType>(call->GetType());
   if (!source || !result) return false;
-  const auto source_bits = source->dtype_.GetBit();
-  const auto result_bits = result->dtype_.GetBit();
+  // Packed FP4's public width describes its byte carrier. A numerical decode
+  // doubles the packed extent, so FP4 -> FP8 widens despite both carriers being
+  // 8-bit. Compare logical value widths to protect unread source bytes.
+  const auto source_bits = source->dtype_.GetBit() / (source->dtype_.IsPackedFp4() ? 2 : 1);
+  const auto result_bits = result->dtype_.GetBit() / (result->dtype_.IsPackedFp4() ? 2 : 1);
   return result_bits > source_bits || (is_a2a3 && result_bits < source_bits);
 }
 

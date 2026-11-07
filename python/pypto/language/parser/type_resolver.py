@@ -2299,6 +2299,12 @@ class TypeResolver:
         if isinstance(node, ast.Attribute):
             if node.attr in _TILELAYOUT_MAP:
                 return _TILELAYOUT_MAP[node.attr]
+        if isinstance(node, ast.Name):
+            # Like tensor layouts, tile layout constants may be bound in the
+            # enclosing Python scope and reused in several annotations.
+            success, value = self.expr_evaluator.try_eval_expr(node)
+            if success and isinstance(value, ir.TileLayout):
+                return value
         raise ParserTypeError(
             f"Unknown TileLayout value: {ast.unparse(node)}",
             span=self._get_span(node),

@@ -17,6 +17,7 @@ backends so adding a third backend cannot silently inherit the wrong defaults.
 
 import pickle
 
+import pypto.language as pl
 import pytest
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
@@ -169,6 +170,200 @@ class TestGlobalHandlerAccessor:
         assert _backend_core.is_backend_configured() == (configured_backend is not None)
         if configured_backend is not None:
             assert _backend_core.get_backend_type() == configured_backend
+
+
+def _direct_tile_view(**kwargs):
+    """Build a view with Expr extents, including mixed static/dynamic inputs."""
+    span = _ir_core.Span.unknown()
+    for key in ("valid_shape", "stride"):
+        if key in kwargs:
+            kwargs[key] = [
+                _ir_core.ConstInt(value, pl.INDEX, span) if isinstance(value, int) else value
+                for value in kwargs[key]
+            ]
+    if isinstance(kwargs.get("start_offset"), int):
+        kwargs["start_offset"] = _ir_core.ConstInt(kwargs["start_offset"], pl.INDEX, span)
+    return _ir_core.TileView(**kwargs)
+
+
+def _direct_cast_query(
+    source_dtype,
+    target_dtype,
+    source_shape,
+    result_shape,
+    *,
+    source_view=None,
+    result_view=None,
+    source_memory=None,
+    result_memory=None,
+):
+    """Build typed calls to test native descriptor constraints independently of frontend inference."""
+    span = _ir_core.Span.unknown()
+    source_type = _ir_core.TileType(source_shape, source_dtype, None, source_view, source_memory)
+    result_type = _ir_core.TileType(result_shape, target_dtype, None, result_view, result_memory)
+    source = _ir_core.Var("source", source_type, span)
+    return _ir_core.Call(
+        _ir_core.get_op("tile.cast"), [source], {"target_type": target_dtype, "mode": 2}, result_type, span
+    )
+
+
+@pytest.mark.parametrize(
+    "target,source_dtype,result_dtype,expected",
+    [
+        (_backend_core.BackendType.Ascend950, pl.FP32, pl.FP16, True),
+        (_backend_core.BackendType.Ascend950, pl.INT32, pl.FP16, False),
+        (_backend_core.BackendType.Ascend910, pl.INT32, pl.FP16, True),
+        (_backend_core.BackendType.Ascend910, pl.FP8E4M3FN, pl.FP32, False),
+    ],
+)
+def test_direct_cast_queries_own_backend_without_global_configuration(
+    target, source_dtype, result_dtype, expected
+):
+    """Native rules are owned by the queried target, independent of ambient configuration."""
+    handler = _backend_core.get_backend_instance(target).get_handler()
+    call = _direct_cast_query(source_dtype, result_dtype, [16, 32], [16, 32])
+    assert _backend_core.is_direct_cast(call, handler) == expected
+
+
+def test_direct_cast_accepts_integer_target_dtype_code():
+    """Integer codes are normalized by the IR contract, not by native matching."""
+    span = _ir_core.Span.unknown()
+    source = _ir_core.Var("source", _ir_core.TileType([16, 32], pl.FP32), span)
+    call = _ir_core.create_op_call("tile.cast", [source], {"target_type": pl.FP16.code(), "mode": 2}, span)
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    assert _backend_core.is_direct_cast(call, handler)
+
+
+@pytest.mark.parametrize("target", [_backend_core.BackendType.Ascend950, _backend_core.BackendType.Ascend910])
+def test_direct_cast_requeries_changed_packed_geometry(target):
+    handler = _backend_core.get_backend_instance(target).get_handler()
+    aligned = _direct_cast_query(pl.FP4E2M1X2, pl.FP8E4M3FN, [16, 32], [16, 64])
+    split = _direct_cast_query(pl.FP4E2M1X2, pl.FP8E4M3FN, [16, 16], [16, 32])
+    assert _backend_core.is_direct_cast(aligned, handler) == (target == _backend_core.BackendType.Ascend950)
+    assert not _backend_core.is_direct_cast(split, handler)
+
+
+@pytest.mark.parametrize("packed_dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+@pytest.mark.parametrize("decode", [False, True])
+@pytest.mark.parametrize("matching", [False, True])
+def test_direct_packed_cast_normalizes_both_dynamic_valid_extents(packed_dtype, decode, matching):
+    """Affine packed extents must compare by value in either conversion direction."""
+    span = _ir_core.Span.unknown()
+    n = _ir_core.Var("n", _ir_core.ScalarType(pl.INDEX), span)
+    packed_cols = _ir_core.Add(n, _ir_core.ConstInt(1, pl.INDEX, span), pl.INDEX, span)
+    unpacked_cols = _ir_core.Mul(
+        _ir_core.Add(n, _ir_core.ConstInt(1 if matching else 2, pl.INDEX, span), pl.INDEX, span),
+        _ir_core.ConstInt(2, pl.INDEX, span),
+        pl.INDEX,
+        span,
+    )
+    packed_view = _direct_tile_view(valid_shape=[16, packed_cols])
+    unpacked_view = _direct_tile_view(valid_shape=[16, unpacked_cols])
+    call = _direct_cast_query(
+        packed_dtype if decode else pl.BF16,
+        pl.BF16 if decode else packed_dtype,
+        [16, 32 if decode else 64],
+        [16, 64 if decode else 32],
+        source_view=packed_view if decode else unpacked_view,
+        result_view=unpacked_view if decode else packed_view,
+    )
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    assert _backend_core.is_direct_cast(call, handler) == matching
+
+
+@pytest.mark.parametrize(
+    "case", ["valid_shape", "dynamic_valid", "stride", "offset", "memory", "rows", "compact"]
+)
+def test_direct_cast_rule_rejects_invalid_packed_descriptors(case):
+    """Every descriptor constraint is queried through the same public boolean API."""
+    rows = 65536 if case == "rows" else 16
+    source_shape = [rows, 32]
+    result_shape = [rows, 64]
+    source_valid: list[int | _ir_core.Expr] = [8, 24]
+    result_valid: list[int | _ir_core.Expr] = [8, 47 if case == "valid_shape" else 48]
+    if case == "dynamic_valid":
+        n = _ir_core.Var("n", _ir_core.ScalarType(pl.INDEX), _ir_core.Span.unknown())
+        source_valid = [8, n]
+        result_valid = [
+            8,
+            _ir_core.Mul(
+                n, _ir_core.ConstInt(2, pl.INDEX, _ir_core.Span.unknown()), pl.INDEX, _ir_core.Span.unknown()
+            ),
+        ]
+    source_view = _direct_tile_view(
+        valid_shape=source_valid,
+        stride=[64, 1] if case == "stride" else [32, 1],
+        start_offset=1 if case == "offset" else 0,
+        compact=_ir_core.CompactMode.normal if case == "compact" else _ir_core.CompactMode.null,
+    )
+    result_view = _direct_tile_view(valid_shape=result_valid, stride=[64, 1])
+    call = _direct_cast_query(
+        pl.FP4E2M1X2,
+        pl.FP8E4M3FN,
+        source_shape,
+        result_shape,
+        source_view=source_view,
+        result_view=result_view,
+        source_memory=_ir_core.MemorySpace.Mat if case == "memory" else _ir_core.MemorySpace.Vec,
+    )
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    assert not _backend_core.is_direct_cast(call, handler)
+
+
+@pytest.mark.parametrize(
+    "source_dtype,result_dtype,source_rows,result_rows",
+    [
+        (pl.FP4E2M1X2, pl.BF16, 32, 64),
+        (pl.FP4E1M2X2, pl.BF16, 32, 64),
+        (pl.BF16, pl.FP4E2M1X2, 64, 32),
+    ],
+)
+def test_direct_cast_dense_dn_rule_and_full_validity(source_dtype, result_dtype, source_rows, result_rows):
+    """DN uses the same lookup as ND and rejects partial rectangles without a special predicate."""
+    handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
+    source_view = _direct_tile_view(blayout=_ir_core.TileLayout.col_major, stride=[1, source_rows])
+    result_view = _direct_tile_view(blayout=_ir_core.TileLayout.col_major, stride=[1, result_rows])
+    call = _direct_cast_query(
+        source_dtype,
+        result_dtype,
+        [source_rows, 16],
+        [result_rows, 16],
+        source_view=source_view,
+        result_view=result_view,
+    )
+    assert _backend_core.is_direct_cast(call, handler)
+    partial_source = _direct_tile_view(
+        blayout=_ir_core.TileLayout.col_major, valid_shape=[source_rows, 8], stride=[1, source_rows]
+    )
+    partial_result = _direct_tile_view(
+        blayout=_ir_core.TileLayout.col_major, valid_shape=[result_rows, 8], stride=[1, result_rows]
+    )
+    partial = _direct_cast_query(
+        source_dtype,
+        result_dtype,
+        [source_rows, 16],
+        [result_rows, 16],
+        source_view=partial_source,
+        result_view=partial_result,
+    )
+    assert not _backend_core.is_direct_cast(partial, handler)
+
+
+@pytest.mark.parametrize("target", [_backend_core.BackendType.Ascend910, _backend_core.BackendType.Ascend950])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_direct_cast_accepts_transport_box_with_narrowed_consumer(target, dynamic):
+    """Ordinary TCVT uses destination validity after a full-box cross-core pop."""
+    span = _ir_core.Span.unknown()
+    rows = _ir_core.Var("lane_rows", _ir_core.ScalarType(pl.INDEX), span) if dynamic else 20
+    call = _direct_cast_query(
+        pl.INT32,
+        pl.FP32,
+        [32, 128],
+        [32, 128],
+        result_view=_direct_tile_view(valid_shape=[rows, 128]),
+    )
+    handler = _backend_core.get_backend_instance(target).get_handler()
+    assert _backend_core.is_direct_cast(call, handler)
 
 
 if __name__ == "__main__":

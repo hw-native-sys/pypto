@@ -239,9 +239,17 @@ def default_saturation_mode_for(target_dtype: DataType | int | None) -> int | No
     """
     if target_dtype is None:
         return None
-    # NOTE: the int spelling has no runtime path — DataType has no constructor
-    # from a type code (mirrors pl.cast in unified_ops); kept verbatim under ignore.
-    dtype = DataType(target_dtype) if isinstance(target_dtype, int) else target_dtype  # type: ignore[reportCallIssue]
+    if isinstance(target_dtype, int):
+        # DataType exposes its code but has no Python constructor from a code.
+        # Resolve only registered dtype constants so invalid codes fail clearly.
+        types = (getattr(DataType, name) for name in dir(DataType))
+        dtype = next(
+            (value for value in types if isinstance(value, DataType) and value.code() == target_dtype), None
+        )
+        if dtype is None:
+            raise ValueError(f"Unknown DataType code: {target_dtype}")
+    else:
+        dtype = target_dtype
     if not dtype.is_int():
         return None
     return SATURATION_MODE_NAMES[DEFAULT_SATURATION_MODE]

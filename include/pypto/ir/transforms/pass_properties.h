@@ -277,7 +277,8 @@ inline const PassProperties kFlattenTileNdTo2DProperties{
 // native tile.cast hops. Empty props (same rationale as LowerCompositeOps):
 // the rewrite stays inside the existing tile.cast vocabulary and does not
 // establish or destroy IRProperties. Pipeline position is FlattenTileNdTo2D
-// → LegalizeTileCast → AutoTileMatmulL0.
+// → LegalizeTileCast → AutoTileMatmulL0, with a second run after SplitVectorKernel
+// to revalidate shape-dependent native edges while preserving resolved placement.
 inline const PassProperties kLegalizeTileCastProperties{};
 
 // -- Auto L0 matmul tiling pass -----------------------------------------------

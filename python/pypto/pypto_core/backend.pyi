@@ -281,6 +281,19 @@ def get_backend_type() -> BackendType:
     """
     ...
 
+def is_direct_cast(call: ir.Call, handler: BackendHandler) -> bool:
+    """Query native conditions for a well-typed cast using the supplied target.
+
+    Requery after changing shape or layout. IR construction and TypeCheck
+    validate the operator contract; this query only selects a native rule.
+
+    This is a capability query for tests and tooling, not part of the DSL
+    compile path: LegalizeTileCast, the layout passes and codegen call the C++
+    ``backend::IsDirectCast`` directly, so compiling a kernel never routes
+    through this binding.
+    """
+    ...
+
 def get_backend_instance(backend_type: BackendType) -> Backend:
     """
     Get the singleton :class:`Backend` instance for a specific
