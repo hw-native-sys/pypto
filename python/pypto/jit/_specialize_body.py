@@ -784,6 +784,19 @@ class BodyTransformer(ast.NodeTransformer):
             return bridges + [node]
         return node
 
+    def visit_While(self, node: ast.While) -> ast.stmt:
+        """Keep SIMT while-body updates on the incoming private binding."""
+        if not self._simt_depth:
+            return cast("ast.stmt", self.generic_visit(node))
+        node.test = self.visit(node.test)
+        self._scope_depth += 1
+        try:
+            node.body = self._visit_scoped_body(node.body)
+        finally:
+            self._scope_depth -= 1
+        node.orelse = self._visit_scoped_body(node.orelse)
+        return node
+
     def visit_If(self, node: ast.If) -> ast.stmt:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
