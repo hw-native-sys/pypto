@@ -1804,6 +1804,25 @@ class JITFunction:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_jit_hook(value: object) -> JITFunction | None:
+    """Keep legacy hook discovery separate from provider compilation.
+
+    Hooks return a stable JIT object. Its ordinary extern path (or a deferred
+    builder) owns compilation; discovery does not receive a target or signature.
+    """
+    if isinstance(value, JITFunction):
+        return value
+    hook = getattr(value, "__pypto_jit__", None)
+    if hook is None:
+        return None
+    if not callable(hook):
+        raise TypeError("__pypto_jit__: expected a callable hook")
+    result = hook()
+    if not isinstance(result, JITFunction):
+        raise TypeError(f"__pypto_jit__: expected JITFunction, got {type(result).__name__}")
+    return result
+
+
 def _discover_dep_bindings(
     func: Any, caller_func_type: str = "orchestration"
 ) -> list[_call_binding.DepBinding]:
@@ -1840,7 +1859,7 @@ def _discover_dep_bindings(
     deps: list[_call_binding.DepBinding] = []
     seen: set[str] = set()
     for name in called_names:
-        obj = all_vars.get(name)
+        obj = _resolve_jit_hook(all_vars.get(name))
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_call_binding.DepBinding(call_name=name, dep=obj))
             seen.add(name)
