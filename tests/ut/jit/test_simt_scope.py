@@ -286,11 +286,24 @@ def zero_loop_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Te
     return dst
 
 
-def test_zero_iteration_private_loop_keeps_incoming_shape_value():
+@pl.jit.aiv
+def zero_while_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    # The fixed Tensor annotation supplies shape before JIT visits this body.
+    n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+    with pl.simt_scope(dims=(32, 1, 1)):
+        while n < 0:
+            n = pl.const(0, pl.INDEX)
+        if n < 32:
+            pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+    return dst
+
+
+@pytest.mark.parametrize("kernel", [zero_loop_shape_rebind, zero_while_shape_rebind])
+def test_zero_iteration_private_loop_keeps_incoming_shape_value(kernel):
     backend.reset_for_testing()
     backend.set_backend_type(backend.BackendType.Ascend950)
     try:
-        outlined = passes.outline_simt_scopes()(zero_loop_shape_rebind.specialize())
+        outlined = passes.outline_simt_scopes()(kernel.specialize())
         ssa = passes.convert_to_ssa()(outlined)
         properties = passes.IRPropertySet()
         properties.insert(passes.IRProperty.UseAfterDef)
