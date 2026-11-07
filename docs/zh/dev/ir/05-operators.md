@@ -242,6 +242,92 @@ REGISTER_OP("tensor.matmul")
 M/N/K 装箱严格兼容，同时允许累加器的有效 M/N 矩形以及 rhs 的有效 K 包含 PTO 根据
 lhs M/K 与 rhs N 实际计算的较小矩形。
 
+#### Cube 操作数类型配对（operand dtype pairs）
+
+Cube 能相乘的元素类型是一张硬件表，而不是“两边必须相同”的对称规则：
+`backend::kCubeOperandPairs`（`include/pypto/backend/common/cube_operand_types.h`）
+即 PyPTO 对 PTOAS `verifyMatmulTypeTriple` 与 pto-isa `npu/a5/TMatmul.hpp` 的复刻。
+
+| lhs x rhs | 累加器 | A2/A3 | A5 | 算子族 |
+| --------- | ------ | ----- | -- | ------ |
+| INT8 x INT8 | INT32 | 支持 | 支持 | matmul、gemv |
+| FP16 x FP16 | FP32 | 支持 | 支持 | matmul、gemv |
+| BF16 x BF16 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP32 x FP32 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv |
+| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv |
+| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv |
+| HF8 x HF8 | FP32 | 不支持 | 支持 | matmul、gemv |
+
+因此在 Ascend950 上，`tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、
+`tile.batch_matmul*`、`tensor.matmul` 与 `tensor.matmul_acc` 接受**两种顺序的
+FP8 混合操作数**；累加器、`matmul_acc` 的输入以及 `matmul_bias` 的 bias 仍为 FP32。
+`tf32_mode` 仍只支持 FP32，因此 FP8 操作数对会拒绝该参数。
+
+普通 GEMV 族——`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`——是该矩阵乘的
+`M == 1` 特化，并共用同一张表：`pto.tgemv`、`pto.tgemv.acc` 与 `pto.tgemv.bias`
+的元素类型都经由同一个 `verifyMatmulTypeTriple` 校验，其 a5 TileLib 模板也使用
+矩阵乘的 `MATMUL_*_DTYPES` 签名列表。因此 FP8 与 HF8 配对在这里同样可用，结果仍为
+FP32，`gemv_acc` 的累加器与 `gemv_bias` 的 bias 也仍为 FP32。**MX** GEMV 算子是另一条
+指令、另一张表，不在这些行的覆盖范围内。
+
+与矩阵乘不同，GEMV 的 dtype 校验（`ValidateGemvInputDtypes`，
+`src/ir/op/tile_ops/matmul.cpp`）是**封闭**白名单：GEMV 从未有过
+“两边 dtype 相同”这一历史兜底分支，因此表外配对在类型推导阶段就被拒绝，不会下达到 PTOAS。
+该校验把配对**逐条手写**，而不是去查 `FindCubeOperandPair`；同一文件中的
+`static_assert`（`HandWrittenGemvListMatchesCubeTable`）会在编译期双向校验手写列表与
+`kGemv` 行一致，并一并比对累加器 dtype。
+
+这条断言并非锦上添花。五行 FP8 / HF8 上的 `gemv` 族位还剩一个读者——codegen 的
+`CheckMatmulOperandArch`：它在 `kGemv` 行里查找操作数配对，**查不到就直接返回、不做校验**。
+于是“手写列表接受、但表里没有”的配对会悄悄失去“FP8 需要 a5 后端”这一拒绝，
+被下发到无法完成该乘法的硬件上。因此这个漂移方向在编译期就被钉死，而不是依赖评审发现。
+
+##### A5 GEMV：静态 valid 累加器桥接
+
+Ascend950 上的普通 GEMV 还需要在指令处**重新标注累加器类型**，这与操作数 dtype 无关。
+PTOAS v0.72 的 `verifyGemvTileOperandsA5` 会转调*矩阵乘*的操作数校验以复用 A5 布局规则，
+从而继承了它的形状规则——“static matmul tile shapes lhs[M,K], rhs[K,N], and dst[M,N]”。
+该规则比较 `getMatmulLogicalShapeVec`，而后者在类型的 valid 为动态时回退到*物理*尺寸。
+PyPTO 通用的 `pto.alloc_tile` 发出的是 `v_row=?, v_col=?`，真实尺寸由单独的
+`valid_row` / `valid_col` 操作数承载；而 GEMV 的结果必然是只有一个逻辑行的 16 行 FP32
+Acc 箱——于是该规则用 lhs 的 1 行去比 dst 的 16 行，在任何 dtype 下都拒绝 a5 的
+`pto.tgemv*`。A2/A3 不会走到这条规则：`verifyGemvTileOperandsA2A3` 使用
+`verifyGemvValidShapes`，只比较 *valid* 行。
+
+因此 `EmitStaticValidGemvAccView`（`src/backend/common/pto_ops_elementwise.cpp`）
+仅在 a5 上发出一个零拷贝的 `pto.treshape`，其*结果类型*携带累加器的静态 valid 尺寸——
+与 `pto.tquant.mx` 所用的桥接相同——并让 GEMV 的 `outs()`（以及 `.acc` 的 `ins()`
+累加器）指向该视图。累加器自身的分配与下游的 `pto.tstore` 保持不变，A2/A3 发出的指令
+逐字节不变。
+
+有两种情况刻意不做桥接：
+
+| 情况 | 原因 |
+| ---- | ---- |
+| 累加器的 valid 尺寸不是编译期常量 | 没有可用的静态类型；该由 PTOAS 报告，而不是由代码生成臆造常量 |
+| 累加器的 valid N 小于其物理 N | 静态的 dst N 会触发该规则的 `rhs logical N == dst logical N` 子句，而 rhs 类型的 valid 仍是动态的，该子句会读取 rhs 的*物理* N，从而引入新的不匹配。部分有效的 N 需要重新标注 GEMV 的每个操作数，而不只是累加器 |
+
+GEMV lhs 的物理 K 取决于操作数 dtype：Mat 到 Left 的提取（`TExtractToAVector`，
+pto-isa `npu/a5/TExtractCommon.hpp`）要求 `Cols % (512 / sizeof(dtype)) == 0`，
+即一个完整的 512 字节 K 块——1 字节操作数为 K = 512，2 字节为 256，4 字节为 128。
+
+该契约分两层实现，因为合法集合取决于编译目标，而类型推导看不到目标：类型推导
+（`ValidateMatmulOperandDataTypes`，`src/ir/op/type_inference.cpp`）接受表中的配对
+**或**两边 dtype 相同的配对——后者保留历史上“lhs 与 rhs 相同”的契约，使那些
+PTOAS 本来就会拒绝的类型仍像以前一样下达到后端；随后矩阵乘代码生成
+（`CheckMatmulOperandArch`，`src/backend/common/pto_ops_elementwise.cpp`）在 PTOAS
+之前拒绝当前目标不具备的表内配对（`a2a3` 上的 FP8 或 HF8 操作数），表外配对保持原样
+交给 PTOAS。
+
+当任一操作数为 FP8 或 HF8 时，`tensor.matmul` 省略 `out_dtype` 的默认值取累加器类型：
+类型提升会给出 FP8，而无缩放的 FIXPIPE 写回无法产生该类型，且混合配对的提升结果还会
+依赖操作数顺序。更宽的操作数配对保持原有的提升默认值。
+
+1 字节操作数的物理 K 必须是 32 的倍数（Left/Right fractal 沿 K 打包 32 字节）；
+有效 K 没有该限制。
+
 对于 Ascend950 上的二维 FP32 操作数，`matmul`、`matmul_acc` 和
 `tile.matmul_bias` 支持仅限关键字参数 `tf32_mode="round_even"` 或
 `tf32_mode="round_away"`。两者将输入舍入为 HF32（e8m10），仍使用 FP32 累加；

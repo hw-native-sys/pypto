@@ -139,11 +139,11 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
-| [`matmul`][pypto.language.matmul] | `pl.` | Matrix multiply; `a_trans=` / `b_trans=` transpose an operand in place of a DN annotation |
-| [`matmul_acc`][pypto.language.matmul_acc] | `pl.` | Multiply-accumulate into an existing `Acc` tile |
-| [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | Multiply with a bias operand |
+| [`matmul`][pypto.language.matmul] | `pl.` | Matrix multiply; `a_trans=` / `b_trans=` transpose an operand in place of a DN annotation. Operand dtypes must pair: INT8, FP16, BF16 or FP32 with itself, plus any FP8 (E4M3FN / E5M2, **either order**) or HF8 pair on Ascend950, which always produces FP32 |
+| [`matmul_acc`][pypto.language.matmul_acc] | `pl.` | Multiply-accumulate into an existing `Acc` tile. Same operand pairs as `matmul`; the accumulator carries the FP32 / INT32 result dtype |
+| [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | Multiply with a bias operand. Same operand pairs as `matmul`; the bias matches the accumulator dtype |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | Batched multiply, **tile operands only**. For tensors call `pl.matmul` — rank > 2 dispatches to `tile.batch_matmul` during lowering |
-| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | Matrix-vector forms |
+| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | Matrix-vector forms, `M == 1`. Same operand pairs as `matmul` (including the FP8 / HF8 pairs on Ascend950); the result, accumulator and bias are FP32 / INT32 |
 | [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX block-scale multiply. Tensor `matmul_mx` consumes oriented 2D data/scale tensors and returns FP32; `_acc` / `_bias` remain tile-only. Data reaching the op must be FP8E4M3FN; native FP4×FP4 is unsupported |
 
 `pl.tile.matmul`, `pl.tile.matmul_acc`, and the GEMV family accept producer
