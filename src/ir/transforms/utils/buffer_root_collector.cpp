@@ -85,20 +85,18 @@ struct StorageSummaryNode {
 // summary and bind its formal roots to local nodes.
 struct StorageReturnSummary {
   std::vector<StorageSummaryNode> nodes;
+  // Index only reachable formal roots for call binding and effect extraction.
+  std::vector<std::pair<size_t, size_t>> formal_bindings;
   std::vector<StorageReturnValue> outputs;
   std::vector<StorageSummaryCall> calls;
 };
 
 using StorageDemand = std::vector<std::pair<size_t, unsigned char>>;
 
-struct StorageTransfer {
-  StorageDemand requested;
-  StorageDemand parameters;
-};
-
-// Keep one recent request per callee in this propagation. This bounds cache
-// storage and lets sibling calls reuse the same query with different bindings.
-using StorageTransferCache = std::unordered_map<const StorageReturnSummary*, StorageTransfer>;
+// Sibling calls can alternate among different demands on a shared summary.
+// Memoize each observed demand for the duration of effect propagation.
+using StorageTransferCache =
+    std::unordered_map<const StorageReturnSummary*, std::map<StorageDemand, StorageDemand>>;
 
 StorageDemand CanonicalDemand(StorageDemand demand) {
   std::sort(demand.begin(), demand.end());
@@ -117,8 +115,9 @@ StorageDemand CanonicalDemand(StorageDemand demand) {
 StorageDemand TransferStorageEffects(const StorageReturnSummary& summary, StorageDemand request,
                                      StorageTransferCache& cache) {
   request = CanonicalDemand(std::move(request));
-  if (auto entry = cache.find(&summary); entry != cache.end() && entry->second.requested == request) {
-    return entry->second.parameters;
+  auto& transfers = cache[&summary];
+  if (auto entry = transfers.find(request); entry != transfers.end()) {
+    return entry->second;
   }
   std::vector<unsigned char> effects(summary.nodes.size());
   std::vector<size_t> pending;
@@ -156,13 +155,11 @@ StorageDemand TransferStorageEffects(const StorageReturnSummary& summary, Storag
   }
 
   StorageDemand parameters;
-  parameters.reserve(summary.nodes.size());
-  for (size_t i = 0; i < summary.nodes.size(); ++i) {
-    if (const auto parameter = summary.nodes[i].parameter; parameter.has_value() && effects[i]) {
-      parameters.emplace_back(*parameter, effects[i]);
-    }
+  parameters.reserve(summary.formal_bindings.size());
+  for (const auto& [node, parameter] : summary.formal_bindings) {
+    if (effects[node]) parameters.emplace_back(parameter, effects[node]);
   }
-  cache.insert_or_assign(&summary, StorageTransfer{std::move(request), parameters});
+  transfers.emplace(std::move(request), parameters);
   return parameters;
 }
 
@@ -226,15 +223,45 @@ void BufferRootCollector::RecordIfReturnRoots(const IfStmtPtr& if_stmt) {
     if (view_policy_ == ViewRootPolicy::kBackingStorage) return ResolveBackingValue(value);
     return {ResolveRootCandidates(value), IsAmbiguous(value)};
   };
+  const auto merge_elements = [](const auto& self, const RootInfo& lhs, const RootInfo& rhs) -> RootInfo {
+    if (lhs.elements || rhs.elements) {
+      const size_t left_size = lhs.elements ? lhs.elements->size() : 0;
+      const size_t right_size = rhs.elements ? rhs.elements->size() : 0;
+      auto elements = std::make_shared<std::vector<RootInfo>>();
+      const RootInfo unknown;
+      const size_t size = std::max(left_size, right_size);
+      elements->reserve(size);
+      for (size_t index = 0; index < size; ++index) {
+        const auto& left = index < left_size ? (*lhs.elements)[index] : unknown;
+        const auto& right = index < right_size ? (*rhs.elements)[index] : unknown;
+        elements->push_back(self(self, left, right));
+      }
+      return {{}, false, std::move(elements)};
+    }
+    auto roots = lhs.roots;
+    std::unordered_set<const Var*> seen(roots.begin(), roots.end());
+    for (const Var* root : rhs.roots) {
+      if (seen.insert(root).second) roots.push_back(root);
+    }
+    const bool ambiguous =
+        lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
+    return {std::move(roots), ambiguous};
+  };
   for (size_t i = 0;
        i < if_stmt->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size();
        ++i) {
     auto then_root = resolve(then_yield->value_[i]);
     auto else_root = resolve(else_yield->value_[i]);
+    const auto& result = if_stmt->return_vars_[i];
+    if (then_root.elements || else_root.elements) {
+      backing_tuple_roots_[result.get()] = merge_elements(merge_elements, then_root, else_root).elements;
+      RecordRootCandidates(result, {});
+      continue;
+    }
     const bool unresolved =
         then_root.roots.empty() || else_root.roots.empty() || then_root.ambiguous || else_root.ambiguous;
     then_root.roots.insert(then_root.roots.end(), else_root.roots.begin(), else_root.roots.end());
-    RecordRootCandidates(if_stmt->return_vars_[i], then_root.roots, unresolved);
+    RecordRootCandidates(result, then_root.roots, unresolved);
   }
 }
 
@@ -549,6 +576,7 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       auto [it, inserted] = node_ids.try_emplace(root, built.nodes.size());
       if (inserted) {
         auto parameter = positions.find(root);
+        if (parameter != positions.end()) built.formal_bindings.emplace_back(it->second, parameter->second);
         built.nodes.push_back(
             {root->GetType(),
              parameter == positions.end() ? std::nullopt : std::optional<size_t>{parameter->second},
@@ -620,7 +648,9 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
     StorageReturnSummary recursive;
     recursive.outputs.resize(callee->return_types_.size());
     recursive.nodes.reserve(callee->params_.size() + 1);
+    recursive.formal_bindings.reserve(callee->params_.size());
     for (size_t i = 0; i < callee->params_.size(); ++i) {
+      recursive.formal_bindings.emplace_back(i, i);
       recursive.nodes.push_back({callee->params_[i]->GetType(), i, {}});
     }
     std::vector<size_t> edges;
@@ -639,9 +669,8 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
   auto instance = std::make_shared<StorageCallInstance>();
   instance->callee = summary;
   instance->arguments.resize(callee->params_.size());
-  for (const auto& node : summary->nodes) {
-    if (!node.parameter) continue;
-    const size_t parameter = *node.parameter;
+  for (const auto& binding : summary->formal_bindings) {
+    const size_t parameter = binding.second;
     if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
     const size_t argument = parameter < prefix ? parameter : parameter - gap;
     if (argument < call->args_.size()) {

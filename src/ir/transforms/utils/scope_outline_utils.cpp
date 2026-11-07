@@ -254,6 +254,15 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     VisitExpr(value);
   }
 
+  void VisitConsumedOperand(const ExprPtr& value) {
+    // A consuming op reads the backing storage of an inline view as well as
+    // evaluating the expression that produces the view descriptor.
+    if (!AsVarLike(value) && (AsTensorTypeLike(value->GetType()) || As<TileType>(value->GetType()))) {
+      for (const Var* root : ResolveBackingDescriptorRoots(value)) RecordRootAccess(root, kRead);
+    }
+    VisitExpr(value);
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     VisitDescriptorOrValue(op->value_);
     RecordAssignmentRoots(op);
@@ -263,7 +272,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     RecordCalleeWrites(op->callee_, op->args_, /*is_submit=*/false);
     const auto slots = CalleeWriteOnlySlots(op->callee_, op->args_.size(), /*is_submit=*/false);
     for (size_t i = 0; i < op->args_.size(); ++i) {
-      if (slots.count(i) == 0) VisitExpr(op->args_[i]);
+      if (slots.count(i) == 0) VisitConsumedOperand(op->args_[i]);
     }
     for (const auto& dim : op->block_dims_) VisitExpr(dim);
     RecordSimtLaunchRoots(op);
@@ -457,12 +466,12 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
       // A bare tensor/tile supplies a descriptor to a metadata-only op, not
       // contents. Still visit scalar expressions and nested calls: an index
       // or shape may itself read a tensor, and those accesses are real.
-      if (metadata_only && AsVarLike(op->args_[i]) &&
-          (AsTensorTypeLike(op->args_[i]->GetType()) || As<TileType>(op->args_[i]->GetType()))) {
-        continue;
-      }
       INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Call has null argument at index " << i;
-      VisitExpr(op->args_[i]);
+      if (metadata_only) {
+        VisitDescriptorOrValue(op->args_[i]);
+      } else {
+        VisitConsumedOperand(op->args_[i]);
+      }
     }
     // Reference-typed attrs name Vars used elsewhere; mirror the base visitor so
     // a var reachable only through an attr is still counted as read — except
@@ -486,7 +495,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     for (size_t i = 0; i < op->args_.size(); ++i) {
       if (callee_out_slots.count(i) > 0) continue;
       INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Submit has null argument at index " << i;
-      VisitExpr(op->args_[i]);
+      VisitConsumedOperand(op->args_[i]);
     }
     // ``deps_`` are TaskId values this launch consumes — real SSA uses, never
     // a write destination, so they are always read.

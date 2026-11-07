@@ -721,5 +721,50 @@ def test_graph_branch_view_yields_preserve_backing_storage():
     ir.assert_structural_equal(after, Expected)
 
 
+def test_graph_inline_view_read_preserves_input_contents():
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, cache: pl.Tensor[[2, 32], pl.FP32]):
+            with pl.graph("layer"):
+                value = pl.tensor.read(pl.tensor.reshape(cache, [64]), [32])
+                pl.tensor.write(cache, [0, 0], value)
+
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(Before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    assert layer.param_directions == [ir.ParamDirection.InOut]
+
+
+def test_graph_branch_tuple_yields_preserve_element_storage():
+    source = """
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def main(self, condition: pl.Scalar[pl.BOOL], cache: pl.Tensor[[2, 32], pl.FP32]):
+        with pl.graph("layer"):
+            if condition:
+                packed = pl.yield_((pl.tensor.reshape(cache, [64]), pl.tensor.reshape(cache, [64])))
+            else:
+                packed = pl.yield_((pl.tensor.reshape(cache, [64]), pl.tensor.reshape(cache, [64])))
+            selected = packed[0]
+            value = pl.tensor.read(selected, [32])
+            pl.tensor.write(cache, [0, 0], value)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    directions = {
+        param.name_hint: direction for param, direction in zip(layer.params, layer.param_directions)
+    }
+    assert directions["cache"] == ir.ParamDirection.InOut
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
