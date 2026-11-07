@@ -196,6 +196,31 @@ def test_graph_local_store_alias_preserves_return_metadata(keyword_store):
     assert ir.structural_equal(consumer.params[0].type, ir.TensorType([32, 64], pl.FP32))
 
 
+@pytest.mark.parametrize("qualified", [False, True])
+def test_graph_assemble_alias_preserves_target_metadata(qualified):
+    @pl.jit.graph
+    def stage(x: pl.Tensor, scratch: pl.InOut[pl.Tensor], out: pl.InOut[pl.Tensor], tensor_op: pl.constexpr):
+        if tensor_op:
+            assembled = pl.tensor.assemble(target=out, source=x, offset=[0, 0])
+        else:
+            assembled = pl.assemble(out, x, [0, 0])
+        return assembled
+
+    @pl.jit.graph
+    def consume(value: pl.Tensor):
+        return value
+
+    @pl.jit
+    def entry(x: pl.Tensor, scratch: pl.InOut[pl.Tensor], out: pl.InOut[pl.Tensor]):
+        result = stage(x, scratch, out, tensor_op=qualified)
+        return consume(result)
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(8, 16), torch.empty(32, 64))
+    consumer = program.get_function("consume")
+    assert consumer is not None
+    assert ir.structural_equal(consumer.params[0].type, ir.TensorType([32, 64], pl.FP32))
+
+
 def test_single_lhs_submit_projection_keeps_tensor_metadata():
     @pl.jit.graph
     def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):

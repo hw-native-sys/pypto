@@ -2009,6 +2009,7 @@ def extract_local_tensor_metas(
         "slice": _slice_meta,
         "window": _window_meta,
         "reshape": _reshape_meta,
+        "assemble": _same_operand_meta(local, 0, "target"),
     }
 
     # 3-segment spellings this walker also understands, keyed by the FULL
