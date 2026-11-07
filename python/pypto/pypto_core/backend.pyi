@@ -281,6 +281,46 @@ def get_backend_type() -> BackendType:
     """
     ...
 
+def is_direct_cast(call: ir.Call, handler: BackendHandler) -> bool:
+    """Query native conditions for a well-typed cast using the supplied target.
+
+    Requery after changing shape or layout. IR construction and TypeCheck
+    validate the operator contract; this query only selects a native rule.
+    """
+    ...
+
+class DirectCastInfo:
+    """Diagnostics and layout exemptions reported by :func:`query_direct_cast`."""
+
+    @property
+    def reason(self) -> str:
+        """Why no native rule matched; empty when one did."""
+        ...
+
+    @property
+    def preserve_input_layout(self) -> bool:
+        """The selected rule's operand layouts need no backend repair."""
+        ...
+
+    @property
+    def preserve_output_layout(self) -> bool:
+        """The selected rule writes its destination layout natively, so the
+        backend must not wrap the cast in a relayout ``tile.move``."""
+        ...
+
+    @property
+    def empty_replay(self) -> bool:
+        """The call is a zero-valid replay lane and emits no instruction."""
+        ...
+
+def query_direct_cast(call: ir.Call, handler: BackendHandler) -> tuple[bool, DirectCastInfo]:
+    """Query a cast's native rule, returning ``(is_direct, info)``.
+
+    Same selection as :func:`is_direct_cast`, additionally reporting which
+    layout repairs the chosen rule already satisfies.
+    """
+    ...
+
 def get_backend_instance(backend_type: BackendType) -> Backend:
     """
     Get the singleton :class:`Backend` instance for a specific

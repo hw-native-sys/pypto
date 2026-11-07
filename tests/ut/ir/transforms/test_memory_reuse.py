@@ -7591,6 +7591,42 @@ class TestForbidOutputAlias:
         )
 
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_packed_fp4_to_fp8_cast_source_is_disjoint(self, planner):
+        """Carrier widths match, but decoding doubles the byte footprint."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                previous: pl.Tensor[[16, 64], pl.FP32],
+                packed: pl.Tensor[[16, 32], pl.fp4e2m1x2],
+                output: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+            ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+                # Dead large buffers make cross-dtype reuse possible: comparing
+                # carrier GetBit alone would permit an in-place expanding cast.
+                previous_tile = pl.load(previous, [0, 0], [16, 64])
+                _dead = pl.add(previous_tile, previous_tile)
+                source = pl.load(packed, [0, 0], [16, 32])
+                result = pl.cast(source, pl.FP8E4M3FN)
+                return pl.store(result, [0, 0], output)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = passes.infer_tile_memory_space()(Before)
+            after = passes.init_mem_ref()(after)
+            after = passes.materialize_semantic_aliases()(after)
+            if planner == passes.MemoryPlanner.PYPTO:
+                after = passes.memory_reuse()(after)
+            after = passes.allocate_memory_addr()(after)
+        ranges = _collect_allocated_tile_ranges(after)
+        source_offset, source_size = ranges["source"]
+        result_offset, result_size = ranges["result"]
+        assert source_size >= 16 * 32 and result_size >= 16 * 64
+        assert source_offset + source_size <= result_offset or result_offset + result_size <= source_offset
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
     @pytest.mark.parametrize("width", [128, 528])
     def test_narrowing_cast_source_is_disjoint(self, planner, width):
         """A2/A3 TCVT must not overwrite an unread source tail, including views."""

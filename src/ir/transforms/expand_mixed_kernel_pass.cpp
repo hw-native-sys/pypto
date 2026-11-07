@@ -1705,15 +1705,28 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 
             auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
                                                         fractal_view, MemorySpace::Vec);
-            std::string src_name = "tile";
-            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-              src_name = sv->name_hint_;
+            // Already in the boundary layout, so there is nothing to adapt --
+            // same early-out the hand-written tpush adapter above performs.
+            // A producer can land its result directly in the fractal layout
+            // (an A5 packed FP4 cast asked for an NZ destination writes one
+            // natively), and relaying an NZ tile out to the identical NZ tile
+            // would cost a Vec buffer and a TMOV for no change in bytes.
+            const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+            const bool already_adapted = fractal_view.blayout == src_view.blayout &&
+                                         fractal_view.slayout == src_view.slayout &&
+                                         fractal_view.fractal == src_view.fractal;
+            if (!already_adapted) {
+              std::string src_name = "tile";
+              if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+                src_name = sv->name_hint_;
+              }
+              bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+              auto tmov_var =
+                  std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
+              auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
+              result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
+              push_source = tmov_var;
             }
-            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
-            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
-            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
-            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
-            push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
               CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));

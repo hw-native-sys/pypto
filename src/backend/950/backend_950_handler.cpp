@@ -11,13 +11,18 @@
 
 #include "pypto/backend/950/backend_950_handler.h"
 
+#include <cstdint>
 #include <initializer_list>
+#include <limits>
+#include <utility>
 
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/sync/resource_catalog.h"
 #include "src/backend/common/sync_resources.h"
@@ -82,7 +87,71 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     TcvtAdjacency t;
     auto add = [&t](DataType from, std::initializer_list<DataType> tos) {
       for (DataType to : tos) {
-        t.edges.emplace_back(from, to);
+        TcvtRule rule{from, to, {}};
+        if (from.IsPackedFp4() || to.IsPackedFp4()) {
+          TcvtConditions nd;
+          nd.source.blayout = ir::TileLayout::row_major;
+          nd.source.slayout = ir::TileLayout::none_box;
+          nd.result = nd.source;
+          nd.matching_valid_shape = true;
+          TcvtConditions dn = nd;
+          dn.source.blayout = ir::TileLayout::col_major;
+          dn.source.static_shape = true;
+          dn.source.full_valid = true;
+          dn.source.dense_stride = true;
+          dn.source.zero_start_offset = true;
+          dn.result = dn.source;
+          dn.preserve_input_layout = true;
+          dn.preserve_output_layout = true;
+          dn.descriptor = CastDescriptor::StaticPlannedAddress;
+          rule.alternatives = {nd, dn};
+        }
+        if (from == DataType::FP4E2M1X2 && to == DataType::FP8E4M3FN) {
+          // PTOAS v0.72 direct packed decode (PTO_IR_manual.md "f4E2M1x2 ->
+          // f8E4M3FN"). All values/strides count byte carriers on the packed
+          // side. The source is always ND; the destination is either ND or the
+          // standard 512-byte NZ box grid, and PTOAS accepts no other boxing.
+          TcvtConditions direct;
+          direct.source.blayout = ir::TileLayout::row_major;
+          direct.source.slayout = ir::TileLayout::none_box;
+          direct.source.null_compact = true;
+          direct.source.static_shape = true;
+          direct.source.static_valid = true;
+          direct.source.dense_stride = true;
+          direct.source.zero_start_offset = true;
+          direct.source.vec_only = true;
+          direct.source.max_rows = std::numeric_limits<uint16_t>::max();
+          direct.source.max_columns = std::numeric_limits<int32_t>::max();
+          direct.source.max_byte_span = std::numeric_limits<int32_t>::max();
+          direct.result = direct.source;
+          direct.matching_valid_shape = true;
+          direct.allow_empty_replay = true;
+          direct.source_col_alignment = 32;
+          direct.source_register_bytes = 256;
+          direct.max_source_registers = std::numeric_limits<uint16_t>::max();
+          direct.descriptor = CastDescriptor::StaticValidShape;
+
+          // NZ destination: same decode, boxed result. `dense_stride` and
+          // `zero_start_offset` do not apply -- HasCanonicalDenseStrides is
+          // defined for none_box views only, and a boxed tile's addressing is
+          // the fractal grid rather than a 2D pitch. The 16-row granularity is
+          // the ISA's own requirement on the *physical* rows, which also keeps
+          // the tile a whole number of boxes so its byte footprint stays the
+          // plain row*col product the allocator already computes.
+          TcvtConditions direct_nz = direct;
+          direct_nz.result.blayout = ir::TileLayout::col_major;
+          direct_nz.result.slayout = ir::TileLayout::row_major;
+          direct_nz.result.fractal = ir::tile_view_semantics::kStandardNzFractalBytes;
+          direct_nz.result.dense_stride = false;
+          direct_nz.result.zero_start_offset = false;
+          direct_nz.result.row_alignment = ir::tile_view_semantics::kNzFractalRows;
+          // The native write already lands in NZ, so the backend's row-major
+          // result repair must not wrap it in a relayout tile.move. The ND
+          // *source* requirement stands, so input repair is left enabled.
+          direct_nz.preserve_output_layout = true;
+          rule.alternatives = {direct, direct_nz};
+        }
+        t.edges.push_back(std::move(rule));
       }
     };
     add(DataType::FP32, {DataType::FP16, DataType::BF16, DataType::INT16, DataType::INT32, DataType::INT64});
@@ -102,7 +171,7 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     add(DataType::FP8E4M3FN, {DataType::FP32});
     add(DataType::FP8E5M2, {DataType::FP32});
     add(DataType::HF8, {DataType::FP32});
-    add(DataType::FP4E2M1X2, {DataType::BF16});
+    add(DataType::FP4E2M1X2, {DataType::BF16, DataType::FP8E4M3FN});
     add(DataType::FP4E1M2X2, {DataType::BF16});
     return t;
   }();

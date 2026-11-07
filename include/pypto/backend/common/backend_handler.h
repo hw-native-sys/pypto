@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/transforms/utils/hardware_loop_analysis.h"
@@ -33,17 +34,6 @@ class ResourceCatalog;
 namespace backend {
 
 class Backend;
-
-/**
- * @brief The (src, dst) dtype pairs an architecture converts in one `pto.tcvt`.
- *
- * Transcribed from the ISA Supported Conversions table in the pto-isa tcvt
- * documentation. Order is irrelevant; duplicates and self-edges are ignored by
- * consumers.
- */
-struct TcvtAdjacency {
-  std::vector<std::pair<DataType, DataType>> edges;
-};
 
 /**
  * @brief Closed-form GEMM cost-model parameters consumed by ChooseL0Tile.
@@ -601,8 +591,9 @@ class BackendHandler {
    * `tcvt`; the set differs per architecture (a5 has FP8/HF8/FP4 sources and
    * no INT32 -> FP16 deq, a2a3 is the reverse). LegalizeTileCast treats this as
    * a directed graph and expands any cast whose pair is absent into the
-   * shortest chain of native hops, so the table is the single source of truth
-   * for what a backend can convert directly.
+   * shortest chain of native hops. Each edge also owns alternative shape and
+   * layout conditions; the free IsDirectCast query matches concrete IR against those rules.
+   * The table is the single source of truth for direct-conversion eligibility.
    *
    * Returned by reference from a handler-owned static — callers may hold the
    * reference for the duration of a pass.

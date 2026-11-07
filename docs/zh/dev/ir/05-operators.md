@@ -386,7 +386,11 @@ FP8E8M0 shaped alias（用于 GM 分核暂存）。在完整的 scale layout con
 Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中保留这些维度，
 不进行单位换算。
 
-两种打包 FP4 格式到 FP8 的显式转换均在 A5 上经 BF16 和 FP32 合法化。
+在 A5 上，E2M1x2→FP8E4M3FN 转换在满足[直接转换约束](../fp4.md#数值转换限制)时
+使用直接 ND Vec TCVT；其他打包 FP4→FP8 转换仍经 BF16 和 FP32 合法化。
+上述直接 E2M1x2→FP8E4M3FN 转换——且仅有它——还接受可选的 `blayout` / `slayout`
+属性（拼写与 `tile.move` 一致），用于从 ND 源请求标准 NZ 目标；省略它们即继承源布局。
+
 它仅对数据操作数进行数值转换，因此缩放因子不变。原生打包 FP4 矩阵乘仍不支持。
 `pl.quant_mx` 支持 MXFP8，以及以 FP16/BF16 为源的 E2M1 MXFP4 量化；
 只有 FP8 结果可直接供 `matmul_mx` 使用。量化对齐与内存规划器要求见 [FP4](../fp4.md)。

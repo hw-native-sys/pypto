@@ -51,6 +51,7 @@
 #include "pypto/ir/simt.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/python_printer.h"
 
@@ -458,7 +459,21 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // recorded Call. Type expressions use a separate printer and keep their DSL
   // spelling, as do Inline/InCore functions whose parser does not fold reads.
   const bool dimension_call = orchestration_function_ && IsOp(op, "tensor.dim");
-  if (!storage_call && !folded_flag && !dimension_call &&
+  // Legalization retains a cast's recorded result type, which may deliberately
+  // omit a view or memory space that deduction from its new input would add.
+  // The ordinary spelling re-runs deduction and silently loses that distinction.
+  bool cast_needs_recorded_type = false;
+  if (IsOp(op, "tile.cast")) {
+    try {
+      const auto inferred = OpRegistry::GetInstance().Create("tile.cast", op->args_, op->kwargs_, op->span_);
+      cast_needs_recorded_type = !structural_equal(op->GetType(), inferred->GetType());
+    } catch (const pypto::Error&) {
+      // A verifier may deliberately inspect malformed or intermediate IR. Its
+      // printer must preserve the recorded call rather than fail deduction.
+      cast_needs_recorded_type = true;
+    }
+  }
+  if (!storage_call && !folded_flag && !dimension_call && !cast_needs_recorded_type &&
       (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value()))) {
     PrintCall(op);
     return;

@@ -191,3 +191,31 @@ scratch；`Unknown` 表示缺少查询所需信息；`Unsupported` 表示候选�
 合成规格与显式操作数保持区分：调用者提供的 scratch 原样传递，包括 A5 接受的其他
 dtype 占位空间。本次迁移保留既有编译器检查，不增加 scratch 精确几何校验，不改变
 PTOAS 校验。生命周期和复用决策仍由现有内存分配与 IR workspace/alias 元数据处理。
+
+## 直接转换规则
+
+`GetTcvtAdjacency()` 提供各目标的 `TcvtRule`。规则类型与独立匹配器放在
+`backend/common/cast_rules.h/.cpp`。`IsDirectCast(call, rules, info)` 只查询合法 IR 的
+原生实现条件，不再是 `BackendHandler` 成员。Python 使用显式目标接口
+`pypto_core.backend.is_direct_cast(call, handler)`。几何变化后须重新查询。
+
+构造阶段复用 `type_inference.h/.cpp` 中的属性检查和 `cast_saturation.h` 中的饱和语义。
+TypeCheck 检查变换后 cast 的结果 dtype 与逻辑物理形状，并沿用既有的有效范围边界检查。
+普通转换允许目标保留较小的有效范围。
+
+每个备选实现**按端点**（`source` 与 `result` 各自的 `TcvtEndpointConditions`）声明约束，
+而不是对两端共用一份，因为这些实现是不对称的：A5 的打包 FP4 解码读取 ND 源，而目标可以是 ND 或
+标准 NZ，单一共享的布局字段无法描述这一点。保持默认值的端点不施加任何约束。
+
+命中的规则还指定描述符准备方式，以及它已经满足哪些布局修复。这是两个独立标志，而非一个：
+`preserve_input_layout` 豁免操作数，`preserve_output_layout` 豁免结果。NZ 目标只需要后者——
+它原生写出分块结果，因此后端不得用重排 `tile.move` 包裹它；而该规则自身要求源为 ND，
+意味着操作数修复必须继续启用。LegalizeTileCast 也正是依据 `preserve_output_layout` 判断
+显式请求的分块目标是否真的原生受支持；无约束的 dtype 边不表达任何布局意见，因此永不设置它。
+Python 可通过 `pypto_core.backend.query_direct_cast(call, handler)` 读取两者。
+连续 DN 与直接 FP4→FP8
+均由规则表表达，各 pass 不再维护单独 predicate。普通无额外条件的边沿用既有后端布局修正。
+普通 TCVT 由目标有效范围控制，允许跨核源描述符携带完整传输框，而消费端保留较小的
+运行时有效范围。Packed 边设置 `matching_valid_shape`，要求解包后的逻辑有效范围一致。
+Scratch 合成和分配后的地址重叠检查仍由原流程负责，它们依赖纯规则查询时尚不存在的
+内存规划信息。BFS 为每个候选 hop 推导 IR 类型，并调用同一个查询。

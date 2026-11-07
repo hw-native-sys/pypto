@@ -16,6 +16,10 @@ halving driver was deleted, and the halving machinery now lives solely in
 This pass lowers each first-class `SplitAivScopeStmt` region in place and
 retains its wrapper. `ExpandMixedKernel` consumes that structure before codegen.
 
+When halving a 2D tile with an explicit contiguous, unboxed ND or DN stride,
+the pass recomputes that stride from the new physical shape. Non-contiguous
+strides and boxed layouts retain their storage metadata.
+
 ## Why this pass exists
 
 A mixed `InCore` function written with `pl.split` describes cube and vector work

@@ -9826,5 +9826,206 @@ def test_omitted_cache_policy_stays_absent():
     assert "cache" not in dict(store_call.kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"target_type": DataType.FP16, "mode": -1}, "mode must be in"),
+        ({"target_type": DataType.FP16, "mode": 7}, "mode must be in"),
+        ({"target_type": -1, "mode": 2}, "target_type code"),
+        ({"target_type": DataType.FP16.code() + 256, "mode": 2}, "target_type code"),
+    ],
+)
+def test_tile_cast_rejects_invalid_raw_attributes(kwargs, message):
+    """Invalid raw IR must fail at construction, before native-rule lookup."""
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TileType([16, 32], DataType.FP32), span)
+    with pytest.raises(ValueError, match=message):
+        ir.create_op_call("tile.cast", [source], kwargs, span)
+
+
+def test_tile_cast_accepts_integer_destination_code():
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TileType([16, 32], DataType.FP32), span)
+    call = ir.create_op_call("tile.cast", [source], {"target_type": DataType.FP16.code(), "mode": 2}, span)
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.dtype == DataType.FP16
+
+
+# ---------------------------------------------------------------------------
+# tile.cast destination layout (blayout / slayout)
+#
+# NZ on a tile is blayout=col_major + slayout=row_major + fractal=512 -- the
+# same triple `tile_view_semantics::GetImplicitTileLayout` gives a Mat/Left
+# tile, and the only boxed `pto.tcvt` destination PTOAS v0.72 accepts
+# (PTO_IR_manual.md, the `f4E2M1x2 -> f8E4M3FN` paragraph).
+# ---------------------------------------------------------------------------
+
+_NZ_BLAYOUT = ir.TileLayout.col_major
+_NZ_SLAYOUT = ir.TileLayout.row_major
+
+
+def _packed_fp4_source(rows=16, packed_cols=32):
+    """An explicitly ND-viewed packed FP4 tile.
+
+    The view is spelled out rather than left implicit because a TileType with no
+    view stores ``tile_view=None`` (the canonical sparse form), and these tests
+    compare concrete layout fields.
+    """
+    span = ir.Span.unknown()
+    nd_view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box)
+    tile_type = ir.TileType([rows, packed_cols], DataType.FP4E2M1X2, tile_view=nd_view)
+    return ir.Var("source", tile_type, span), span
+
+
+def test_tile_cast_omitted_layout_stays_absent_and_inherits_source():
+    """The no-op guarantee: nothing about layout is recorded when nothing is asked.
+
+    Both halves matter. The kwargs stay absent (not default-valued), which is
+    what keeps a plain cast's IR, printed form and serialization identical to
+    what they were before these attributes existed, and what makes the backend's
+    native-rule query see exactly the same call as before. And the result type
+    records no TileView at all: inheriting the source's ND layout reproduces the
+    implicit layout for this shape, so the canonical sparse form collapses it
+    away -- the same type a cast produced before. Contrast
+    ``test_tile_cast_nz_request_boxes_the_result``, where the view IS recorded.
+    """
+    source, span = _packed_fp4_source()
+    call = tile.cast(source, DataType.FP8E4M3FN, span=span)
+
+    assert "blayout" not in dict(call.kwargs)
+    assert "slayout" not in dict(call.kwargs)
+    assert sorted(dict(call.kwargs)) == ["mode", "target_type"]
+
+    # The result's layout fields are the source's ND layout, untouched. The
+    # source records no view at all -- an explicit layout equal to the implicit
+    # one for this shape collapses to the canonical sparse form -- while the
+    # result's view is non-None only because a packed FP4 cast records the
+    # doubled-column stride, which is pre-existing and unrelated to layout.
+    assert isinstance(source.type, ir.TileType)
+    assert isinstance(call.type, ir.TileType)
+    assert source.type.tile_view is None
+    result_view = call.type.tile_view
+    assert result_view is not None
+    assert result_view.blayout == ir.TileLayout.row_major
+    assert result_view.slayout == ir.TileLayout.none_box
+    assert result_view.fractal == 512
+
+
+def test_tile_cast_nz_request_boxes_the_result():
+    """An NZ request lands on the result view, and the packed columns still double."""
+    source, span = _packed_fp4_source(rows=16, packed_cols=32)
+    call = tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
+
+    assert sorted(dict(call.kwargs)) == ["blayout", "mode", "slayout", "target_type"]
+    assert isinstance(call.type, ir.TileType)
+    view = call.type.tile_view
+    assert view is not None
+    assert view.blayout == ir.TileLayout.col_major
+    assert view.slayout == ir.TileLayout.row_major
+    # fractal is inherited, not a kwarg: an ND source carries the TileView
+    # default, which is the one value the native NZ destination accepts.
+    assert view.fractal == 512
+    assert [cast(ir.ConstInt, dim).value for dim in call.type.shape] == [16, 64]
+
+
+def test_tile_cast_layout_request_equal_to_the_source_is_a_no_op():
+    """Spelling out the layout the cast would have produced anyway is accepted."""
+    source, span = _packed_fp4_source()
+    call = tile.cast(
+        source,
+        DataType.FP8E4M3FN,
+        span=span,
+        blayout=ir.TileLayout.row_major,
+        slayout=ir.TileLayout.none_box,
+    )
+    assert isinstance(call.type, ir.TileType)
+    view = call.type.tile_view
+    assert view is not None
+    assert view.blayout == ir.TileLayout.row_major
+    assert view.slayout == ir.TileLayout.none_box
+
+
+@pytest.mark.parametrize(
+    "layout,message",
+    [
+        # ZN / "zZ" is the other boxed flavour; PTOAS rejects it for this pair.
+        (
+            {"blayout": ir.TileLayout.row_major, "slayout": ir.TileLayout.col_major},
+            "the only destination layout a cast converts to is standard NZ",
+        ),
+        # Plain DN is a layout change too, and tile.move owns it.
+        (
+            {"blayout": ir.TileLayout.col_major},
+            "the only destination layout a cast converts to is standard NZ",
+        ),
+    ],
+)
+def test_tile_cast_rejects_non_nz_layout_changes(layout, message):
+    source, span = _packed_fp4_source()
+    with pytest.raises(ValueError, match=message):
+        tile.cast(source, DataType.FP8E4M3FN, span=span, **layout)
+
+
+def test_tile_cast_nz_rejects_rows_that_are_not_whole_boxes():
+    """8 rows is half an NZ box, so no address arithmetic reaches the tile.
+
+    Checked on the PHYSICAL rows: PTOAS pads a boxed destination up to the box
+    grid and tracks the narrower extent as the valid region.
+    """
+    source, span = _packed_fp4_source(rows=8)
+    with pytest.raises(ValueError, match=r"physical rows \(8\) must be a multiple of 16"):
+        tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
+
+
+def test_tile_cast_nz_rejects_columns_that_are_not_whole_boxes():
+    """One FP8 NZ box is 16x32, so the 32-column granularity is on columns too."""
+    source, span = _packed_fp4_source(rows=16, packed_cols=8)
+    with pytest.raises(ValueError, match=r"physical columns \(16\) must be a multiple of 32"):
+        tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
+
+
+def test_tile_cast_nz_rejects_a_non_nd_source():
+    """A DN source cannot feed the native NZ write.
+
+    Requiring ND here collapses the state space: with an NZ result the backend's
+    row-major output repair would otherwise fire, re-deduce the cast (NZ again
+    from the kwargs) and emit a degenerate NZ-to-NZ relayout move.
+    """
+    span = ir.Span.unknown()
+    dn_view = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.none_box)
+    # FP32, not packed FP4: a DN *packed* source is rejected earlier still, by
+    # the narrower packed-FP4 DN endpoint check, which would mask this rule.
+    source = ir.Var("source", ir.TileType([16, 32], DataType.FP32, tile_view=dn_view), span)
+    with pytest.raises(ValueError, match="requires an ND source"):
+        tile.cast(source, DataType.FP16, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
+
+
+def test_tile_cast_nz_rejects_a_dynamic_shape():
+    span = ir.Span.unknown()
+    rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+    cols = ir.ConstInt(32, DataType.INDEX, span)
+    nd_view = ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box)
+    source = ir.Var("source", ir.TileType([rows, cols], DataType.FP4E2M1X2, tile_view=nd_view), span)
+    with pytest.raises(ValueError, match="static positive 2D shape"):
+        tile.cast(source, DataType.FP8E4M3FN, span=span, blayout=_NZ_BLAYOUT, slayout=_NZ_SLAYOUT)
+
+
+def test_tensor_cast_rejects_the_tile_layout_kwargs():
+    """The Tile-only guarantee.
+
+    tensor.cast never declares these attributes, so the op registry's own
+    unknown-kwarg check is what keeps a Tensor-level destination-layout path
+    from existing at all. Pinned here so declaring them on tensor.cast later
+    cannot happen silently.
+    """
+    span = ir.Span.unknown()
+    source = ir.Var("source", ir.TensorType([16, 32], DataType.FP4E2M1X2), span)
+    for key in ("blayout", "slayout"):
+        kwargs: dict[str, Any] = {"target_type": DataType.FP8E4M3FN, "mode": 2}
+        kwargs[key] = ir.TileLayout.col_major
+        with pytest.raises(ValueError, match=f"Unknown kwarg '{key}' for operator 'tensor.cast'"):
+            ir.create_op_call("tensor.cast", [source], kwargs, span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

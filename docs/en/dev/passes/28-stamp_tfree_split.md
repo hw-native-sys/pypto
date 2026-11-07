@@ -13,11 +13,11 @@ call. This pass makes that data explicit on the IR node.
 ## Position in the pipeline
 
 ```text
-... -> SplitVectorKernel -> StampTfreeSplit -> NormalizeReturnOrder -> SkewCrossCorePipeline -> ...
+... -> SplitVectorKernel -> LegalizeTileCast -> StampTfreeSplit -> NormalizeReturnOrder -> SkewCrossCorePipeline -> ...
 ```
 
-It runs immediately after `SplitVectorKernel` finalizes the `split` value on
-tpops, and before `SkewCrossCorePipeline` clones tpop/tfree pairs into the
+It runs after `SplitVectorKernel` finalizes the `split` value on tpops and
+`LegalizeTileCast` revalidates per-lane casts, and before `SkewCrossCorePipeline` clones tpop/tfree pairs into the
 software-pipeline prologue/epilogue — so each clone carries the already-stamped
 `split`, and the lookup still sees every `tfree` arg as its direct tpop result
 var (not a pipelined loop carry).

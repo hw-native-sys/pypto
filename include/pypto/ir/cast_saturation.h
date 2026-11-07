@@ -23,6 +23,8 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -77,7 +79,10 @@ inline std::optional<int> GetSaturationMode(const CallPtr& call) {
   constexpr int kAbsent = -1;
   const int explicit_mode = call->GetKwarg<int>("saturation_mode", kAbsent);
   if (explicit_mode != kAbsent) return explicit_mode;
-  const auto fallback = DefaultSaturationModeFor(call->GetKwarg<DataType>("target_type"));
+  const auto result = As<ShapedType>(call->GetType());
+  INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: cast result must have a shaped type";
+  // The inferred result also covers the supported integer target_type spelling.
+  const auto fallback = DefaultSaturationModeFor(result->dtype_);
   if (!fallback.has_value()) return std::nullopt;
   return static_cast<int>(*fallback);
 }
@@ -103,7 +108,8 @@ inline SaturationMode EmittedSaturationModeFor(DataType dst) {
 
 inline int GetEmittedSaturationMode(const CallPtr& call) {
   if (const auto mode = GetSaturationMode(call)) return *mode;
-  return static_cast<int>(EmittedSaturationModeFor(call->GetKwarg<DataType>("target_type")));
+  // No effective mode means the floating destination keeps target behavior.
+  return static_cast<int>(SaturationMode::kOff);
 }
 
 inline bool IsValidSaturationMode(int value) {

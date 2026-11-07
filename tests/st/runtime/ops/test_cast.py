@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Runtime tests for tile.cast (pto.tcvt) narrowing conversions.
+Runtime tests for tile.cast (pto.tcvt) conversions.
 
 Regression for #1549: pto.tcvt mis-orders elements when its source tile is
 col_major. A [1, N] -> [N, 1] reshape yields a col_major [N, 1] tile; narrowing
@@ -16,12 +16,16 @@ that view i32 -> i16 used to reverse the elements (silent wrong output). The
 tile.cast row_major layout spec lets ResolveBackendOpLayouts repair col_major
 sources by reshaping [N, 1] -> [1, N] row_major around the cast.
 
+The A5 direct FP4 E2M1 -> E4M3FN cases additionally check exact encodings,
+nonzero GM offsets, reused buffers, and the emitted conversion chain.
+
   TileCastColMajorNarrowTestCase : narrow a col_major [N, 1] view i32 -> i16
                                    (the regression — must preserve element order).
   TileCastRowMajorNarrowTestCase : narrow a row_major [1, N] tile i32 -> i16
                                    (always-correct control / baseline).
 """
 
+from dataclasses import replace
 from typing import Any
 
 import pypto.language as pl
@@ -311,6 +315,295 @@ def test_issue_2973_isolate_alias(case_run):
 )
 def test_issue_2973_planners(case_run):
     case_run.assert_passed()
+
+
+def _make_fp4_e2m1_direct_fp8(surface: str, row_start: int, column_start: int):
+    """Convert two packed tiles with offsets, reusing the loop's UB buffers.
+
+    One kernel per authoring surface: a kernel body cannot branch on the surface
+    itself, because the parser walks the body as IR rather than evaluating it.
+    """
+    if surface == "tensor":
+
+        @pl.jit(auto_scope=False)
+        def convert(
+            packed: pl.Tensor[[48, 96], pl.fp4e2m1x2],
+            output: pl.InOut[pl.Tensor[[48, 192], pl.INT8]],
+        ):
+            with pl.spmd(1, sync_start=False):
+                worker = pl.tile.get_block_idx()
+                for row in pl.range(row_start + worker * 32, row_start + 32, 16):
+                    source = pl.tensor.slice(packed, [16, 32], [row, column_start])
+                    converted = pl.cast(source, pl.FP8E4M3FN)
+                    result = pl.reinterpret_view(converted, pl.INT8)
+                    output = pl.tensor.assemble(output, result, [row, column_start * 2])
+            return output
+
+        return convert
+
+    if surface == "tile":
+
+        @pl.jit(auto_scope=False)
+        def convert(
+            packed: pl.Tensor[[48, 96], pl.fp4e2m1x2],
+            output: pl.InOut[pl.Tensor[[48, 192], pl.INT8]],
+        ):
+            with pl.spmd(1, sync_start=False):
+                worker = pl.tile.get_block_idx()
+                for row in pl.range(row_start + worker * 32, row_start + 32, 16):
+                    source = pl.tile.load(packed, [row, column_start], [16, 32])
+                    converted = pl.tile.cast(source, pl.FP8E4M3FN)
+                    result = pl.reinterpret_view(converted, pl.INT8)
+                    pl.tile.store(result, [row, column_start * 2], output)
+            return output
+
+        return convert
+
+    @pl.jit(auto_scope=False)
+    def convert(
+        packed: pl.Tensor[[48, 96], pl.fp4e2m1x2],
+        output: pl.InOut[pl.Tensor[[48, 192], pl.INT8]],
+    ):
+        with pl.spmd(1, sync_start=False):
+            worker = pl.tile.get_block_idx()
+            for row in pl.range(row_start + worker * 32, row_start + 32, 16):
+                source = pl.tile.load(packed, [row, column_start], [16, 32])
+                converted = pl.cast(source, pl.FP8E4M3FN)
+                result = pl.reinterpret_view(converted, pl.INT8)
+                pl.tile.store(result, [row, column_start * 2], output)
+        return output
+
+    return convert
+
+
+def _fp4_e2m1_to_fp8_bits(packed: torch.Tensor) -> torch.Tensor:
+    """Decode low nibble first into independent E4M3FN encodings.
+
+    All sixteen E2M1 values are exact in E4M3FN. Comparing encodings also
+    checks negative zero, which a floating-point equality check would miss.
+    """
+    encodings = torch.tensor(
+        [
+            0x00,  # +0
+            0x30,  # +0.5
+            0x38,  # +1
+            0x3C,  # +1.5
+            0x40,  # +2
+            0x44,  # +3
+            0x48,  # +4
+            0x4C,  # +6
+            0x80,  # -0
+            0xB0,  # -0.5
+            0xB8,  # -1
+            0xBC,  # -1.5
+            0xC0,  # -2
+            0xC4,  # -3
+            0xC8,  # -4
+            0xCC,  # -6
+        ],
+        dtype=torch.uint8,
+    )
+    codes = torch.stack((packed & 15, packed >> 4), dim=-1).long()
+    return encodings[codes].reshape(packed.shape[0], packed.shape[1] * 2)
+
+
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize(
+    "planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS], ids=lambda p: p.name
+)
+@pytest.mark.parametrize("surface", ["tensor", "tile", "unified_tile"])
+@pytest.mark.parametrize(("row_start", "column_start"), [(0, 0), (16, 32)])
+def test_fp4_e2m1_direct_fp8(test_config, planner, surface, row_start, column_start):
+    """A5 uses one direct TCVT and preserves every nibble, sign, and GM offset."""
+    convert = _make_fp4_e2m1_direct_fp8(surface, row_start, column_start)
+    packed = torch.empty((48, 96), dtype=torch.uint8)
+    output = torch.empty((48, 192), dtype=torch.int8)
+    config = replace(test_config, memory_planner=planner)
+    compiled = convert.compile(packed, output, config=config)
+
+    sources = list((compiled.output_dir / "ptoas").glob("*.pto"))
+    assert sources, "compilation did not produce the executed PTO kernel"
+    pto = "\n".join(source.read_text() for source in sources)
+    conversions = [line for line in pto.splitlines() if "pto.tcvt " in line]
+    assert len(conversions) == 1, f"expected one direct cast, got {conversions}"
+    assert "f4E2M1x2" in conversions[0] and "f8E4M3FN" in conversions[0], conversions[0]
+    assert "bf16" not in pto and "f32" not in pto, "direct cast allocated an intermediate type"
+    if config.codegen_only:
+        return
+
+    for repeat in range(3):
+        # Every 8x32 carrier window contains all 256 bytes. Row shifts and
+        # repeats expose wrong pitches, offsets, nibble order, and stale UB.
+        packed[:] = (torch.arange(48)[:, None] * 32 + torch.arange(96)[None, :] + 37 * repeat).to(torch.uint8)
+        expected = torch.full(output.shape, 0xA7, dtype=torch.uint8)
+        output.view(torch.uint8).copy_(expected)
+        expected[row_start : row_start + 32, column_start * 2 : column_start * 2 + 64] = (
+            _fp4_e2m1_to_fp8_bits(packed[row_start : row_start + 32, column_start : column_start + 32])
+        )
+        compiled(packed, output, config=config)
+        assert torch.equal(output.view(torch.uint8), expected), (
+            f"{planner.name}/{surface}: FP8 encoding mismatch at row={row_start}, "
+            f"column={column_start}, repeat={repeat}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# NZ destination layout on the A5 packed FP4 cast
+# ---------------------------------------------------------------------------
+
+_NZ_M, _NZ_PACKED_K, _NZ_N = 32, 128, 64
+_NZ_K = 2 * _NZ_PACKED_K  # logical FP8 columns after the packed decode
+
+
+def _make_fp4_nz_matmul(nz: bool):
+    """Decode packed FP4 to FP8 and feed an FP8 matmul, with and without NZ.
+
+    One kernel per spelling: a kernel body cannot branch on the flag, because
+    the parser walks the body as IR rather than evaluating it.
+
+    ``blayout=col_major`` + ``slayout=row_major`` is standard NZ -- the layout
+    the matrix unit consumes -- so the native A5 ``pto.tcvt`` writes the FP8
+    result straight into it and the Vec-to-Vec ND-to-NZ relayout the ND form
+    needs disappears. Values must be identical either way; only the instruction
+    sequence changes.
+    """
+    if nz:
+
+        @pl.jit.incore
+        def kernel(
+            a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+            b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+            out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+        ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+            packed = pl.load(a, [0, 0], [_NZ_M, _NZ_PACKED_K])
+            lhs = pl.cast(
+                packed,
+                pl.FP8E4M3FN,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            rhs = pl.load(b, [0, 0], [_NZ_K, _NZ_N])
+            return pl.store(pl.matmul(lhs, rhs), [0, 0], out)
+
+        @pl.jit
+        def nz_matmul(
+            a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+            b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+            out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+        ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+            return kernel(a, b, out)
+
+        return nz_matmul
+
+    @pl.jit.incore
+    def nd_kernel(
+        a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+        b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+        out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+    ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+        packed = pl.load(a, [0, 0], [_NZ_M, _NZ_PACKED_K])
+        lhs = pl.cast(packed, pl.FP8E4M3FN)
+        rhs = pl.load(b, [0, 0], [_NZ_K, _NZ_N])
+        return pl.store(pl.matmul(lhs, rhs), [0, 0], out)
+
+    @pl.jit
+    def nd_matmul(
+        a: pl.Tensor[[_NZ_M, _NZ_PACKED_K], pl.fp4e2m1x2],
+        b: pl.Tensor[[_NZ_K, _NZ_N], pl.FP8E4M3FN],
+        out: pl.Out[pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]],
+    ) -> pl.Tensor[[_NZ_M, _NZ_N], pl.FP32]:
+        return nd_kernel(a, b, out)
+
+    return nd_matmul
+
+
+def _vec_relayout_moves(pto: str) -> list[str]:
+    """Vec-to-Vec `pto.tmov`s: the pure layout repairs the NZ request removes.
+
+    Operand staging moves (into Mat/Left/Right) change memory space and are
+    unaffected, so they must not be counted.
+    """
+    moves = []
+    for line in pto.splitlines():
+        if "pto.tmov " not in line:
+            continue
+        ins, _, outs = line.partition(") outs(")
+        if "loc=vec" in ins and "loc=vec" in outs:
+            moves.append(line.strip())
+    return moves
+
+
+def _read_kernels(compiled) -> str:
+    sources = list((compiled.output_dir / "ptoas").glob("*.pto"))
+    assert sources, "compilation did not produce the executed PTO kernel"
+    return "\n".join(source.read_text() for source in sources)
+
+
+@pytest.mark.platforms("a5")
+def test_fp4_nz_cast_fuses_the_relayout_and_matches_the_nd_result_bit_for_bit(test_config):
+    """One `pto.tcvt` writing NZ, one fewer relayout, and identical bytes.
+
+    The numeric claim is made as a DIFFERENTIAL against the same kernel without
+    the keyword rather than against a hand-written NZ golden. That is the claim
+    worth making -- the NZ cast must write exactly the bytes the ND cast plus
+    its relayout `tile.move` would have -- and it needs no NZ-aware store, which
+    PyPTO does not offer for an FP8 Vec tile: `tile.store` into a `pl.NZ` tensor
+    accepts only an FP32 Acc source, and `reinterpret_view` rejects a boxed
+    tile, so the bytes cannot be read back directly from the host.
+
+    Comparison is on the raw `uint8` view at `torch.equal`, not `isclose`: the
+    two paths must agree exactly, and a mis-addressed fractal reads entirely
+    different elements rather than slightly wrong ones.
+    """
+    nz_matmul = _make_fp4_nz_matmul(nz=True)
+    nd_matmul = _make_fp4_nz_matmul(nz=False)
+
+    packed = torch.empty((_NZ_M, _NZ_PACKED_K), dtype=torch.uint8)
+    rhs = torch.empty((_NZ_K, _NZ_N), dtype=torch.uint8)
+    nz_out = torch.zeros((_NZ_M, _NZ_N), dtype=torch.float32)
+    nd_out = torch.zeros((_NZ_M, _NZ_N), dtype=torch.float32)
+
+    packed_arg = packed.view(torch.float4_e2m1fn_x2)
+    rhs_arg = rhs.view(torch.float8_e4m3fn)
+
+    nz_compiled = nz_matmul.compile(packed_arg, rhs_arg, nz_out, config=test_config)
+    nd_compiled = nd_matmul.compile(packed_arg, rhs_arg, nd_out, config=test_config)
+
+    nz_pto = _read_kernels(nz_compiled)
+    nd_pto = _read_kernels(nd_compiled)
+
+    # Exactly one conversion either way, and only the NZ form writes a boxed
+    # destination.
+    nz_casts = [line for line in nz_pto.splitlines() if "pto.tcvt " in line]
+    nd_casts = [line for line in nd_pto.splitlines() if "pto.tcvt " in line]
+    assert len(nz_casts) == len(nd_casts) == 1, (nz_casts, nd_casts)
+    nz_destination = nz_casts[0].partition(") outs(")[2]
+    nd_destination = nd_casts[0].partition(") outs(")[2]
+    assert "blayout=col_major" in nz_destination and "slayout=row_major" in nz_destination, nz_casts[0]
+    assert "blayout=row_major" in nd_destination and "slayout=none_box" in nd_destination, nd_casts[0]
+    # The fused relayout: present without the keyword, gone with it.
+    assert len(_vec_relayout_moves(nd_pto)) == 1, nd_pto
+    assert _vec_relayout_moves(nz_pto) == [], nz_pto
+
+    if test_config.codegen_only:
+        return
+
+    for repeat in range(3):
+        # Small signed integers keep the FP32 accumulation exact, so the two
+        # paths must agree to the bit rather than to a tolerance.
+        packed[:] = (torch.arange(_NZ_M)[:, None] + torch.arange(_NZ_PACKED_K)[None, :] + 11 * repeat).to(
+            torch.uint8
+        )
+        rhs[:] = ((torch.arange(_NZ_K)[:, None] + torch.arange(_NZ_N)[None, :]) % 8 + 0x38).to(torch.uint8)
+        nz_out.zero_()
+        nd_out.zero_()
+        nz_compiled(packed_arg, rhs_arg, nz_out, config=test_config)
+        nd_compiled(packed_arg, rhs_arg, nd_out, config=test_config)
+        assert torch.equal(nz_out.view(torch.uint8), nd_out.view(torch.uint8)), (
+            f"NZ and ND cast paths disagree at repeat={repeat}"
+        )
+        # A kernel that wrote nothing would also compare equal.
+        assert torch.any(nz_out != 0), f"matmul produced no output at repeat={repeat}"
 
 
 if __name__ == "__main__":

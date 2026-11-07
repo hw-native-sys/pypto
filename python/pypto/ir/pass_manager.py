@@ -224,9 +224,13 @@ class PassManager:
             passes.expand_mixed_kernel,
             passes.inject_gm_pipe_buffer,
             passes.split_vector_kernel,
+            # Splitting can shrink packed FP4 rows or make validity dynamic.
+            # Revalidate conditional native casts against the final geometry;
+            # generated bridges keep the already inferred Vec placement.
+            passes.legalize_tile_cast,
             # Copy each cross-core tpop's split/pipe-id onto its matching tfree op so
             # codegen reads them from the op (no codegen-side tpop lookup table). Runs
-            # right after SplitVectorKernel finalizes split on tpops and before
+            # after SplitVectorKernel finalizes split and cast revalidation, before
             # SkewCrossCorePipeline clones tpop/tfree pairs (so clones carry split).
             passes.stamp_tfree_split,
             passes.normalize_return_order,

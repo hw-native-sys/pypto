@@ -13,6 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import InvalidOperationError
 
 _TILE_CAST = ir.get_op("tile.cast").name
@@ -48,6 +49,12 @@ def _run(program, backend_type: BackendType):
         return passes.legalize_tile_cast()(program)
     finally:
         backend.reset_for_testing()
+
+
+def _assert_recorded_cast_roundtrip(program):
+    printed = python_print(program, format=False)
+    assert 'pl._dump.call("tile.cast"' in printed
+    ir.assert_structural_equal(program, pl.parse_program(printed), enable_auto_mapping=True)
 
 
 def test_legalize_tile_cast_pass_factory_exists():
@@ -201,8 +208,11 @@ def test_a5_packed_fp4_encoding_keeps_lossless_bf16_bridges(source, target):
     assert pairs[-1] == ("bfloat16", str(target))
 
 
-@pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
-def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
+@pytest.mark.parametrize(
+    "dtype,target",
+    [(pl.fp4e1m2x2, pl.FP8E4M3FN), (pl.fp4e2m1x2, pl.FP8E5M2), (pl.fp4e1m2x2, pl.FP8E5M2)],
+)
+def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype, target):
     """Packed FP4→FP8 is legalized with a warning about the three-hop bridge."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
@@ -212,10 +222,10 @@ def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
         def kernel(
             self,
             x: pl.Tensor[[16, 32], dtype],
-            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
-        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            out: pl.Out[pl.Tensor[[16, 64], target]],
+        ) -> pl.Tensor[[16, 64], target]:
             t = pl.load(x, [0, 0], [16, 32])
-            c = pl.cast(t, pl.FP8E4M3FN)
+            c = pl.cast(t, target)
             return pl.store(c, [0, 0], out)
 
     prev = get_log_level()
@@ -228,7 +238,7 @@ def test_a5_packed_fp4_to_fp8_cast_emits_warning(capfd, dtype):
     assert _cast_pairs(after) == [
         (str(dtype), "bfloat16"),
         ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
+        ("fp32", str(target)),
     ]
     err = capfd.readouterr().err
     assert "LegalizeTileCast" in err
@@ -254,11 +264,14 @@ def test_a5_packed_fp4_cast_expands_last_dim_valid_shape(dtype):
 
     after = _run(Before, BackendType.Ascend950)
 
-    assert _cast_pairs(after) == [
-        (str(dtype), "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
+    # E2M1 now decodes directly, including partial static validity. E1M2
+    # retains the existing BF16/FP32 bridge; both must expand carrier columns.
+    expected = (
+        [(str(dtype), "fp8e4m3fn")]
+        if dtype == pl.fp4e2m1x2
+        else [(str(dtype), "bfloat16"), ("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+    )
+    assert _cast_pairs(after) == expected
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -861,6 +874,354 @@ def test_legalize_packed_dn_cast_preserves_loop_backedge(dtype, loop_kind):
     binding = packed_loop.body.stmts[0]
     assert isinstance(binding, ir.AssignStmt)
     assert binding.value is binder
+
+
+@pytest.mark.parametrize("tile_surface", [False, True])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_a5_e2m1_to_e4m3_is_one_silent_native_cast(capfd, tile_surface, planner):
+    """Aligned ND E2M1 carriers decode without intermediate floating tiles."""
+    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tensor[[16, 32], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            packed = pl.load(source, [0, 0], [16, 32])
+            if tile_surface:
+                decoded = pl.tile.cast(packed, pl.FP8E4M3FN)
+            else:
+                decoded = pl.cast(packed, pl.FP8E4M3FN)
+            return pl.store(decoded, [0, 0], output)
+
+    previous = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        with passes.PassContext([], memory_planner=planner):
+            # Resolve the compile-time surface choice before counting casts: the
+            # parser otherwise retains both branches of the authored conditional.
+            before = passes.simplify()(Before)
+            after = _run(before, BackendType.Ascend950)
+    finally:
+        set_log_level(previous)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    ir.assert_structural_equal(after, before)
+    assert "FP4→BF16→FP32→FP8" not in capfd.readouterr().err
+    with pytest.raises(ValueError, match="no native cast path"):
+        _run(before, BackendType.Ascend910)
+
+
+@pytest.mark.parametrize(
+    "case", ["unaligned", "dynamic_valid", "dynamic_affine_valid", "narrowed_result", "row_limit", "strided"]
+)
+def test_e2m1_to_e4m3_unsuitable_descriptors_keep_float_bridge(case):
+    """The dtype edge must not bypass direct TCVT's packed-axis restrictions."""
+    span = ir.Span.unknown()
+    rows, cols = (65536, 32) if case == "row_limit" else (16, 16 if case == "unaligned" else 32)
+    valid_cols = ir.Var("valid_cols", ir.ScalarType(pl.INDEX), span)
+    valid = [rows, valid_cols] if case == "dynamic_valid" else []
+    if case == "dynamic_affine_valid":
+        valid = [
+            ir.ConstInt(rows, pl.INDEX, span),
+            ir.Add(valid_cols, ir.ConstInt(1, pl.INDEX, span), pl.INDEX, span),
+        ]
+    stride = [cols + 32, 1] if case == "strided" else []
+    source_type = ir.TileType([rows, cols], pl.fp4e2m1x2, None, ir.TileView(valid_shape=valid, stride=stride))
+    source = ir.Var("source", source_type, span)
+    cast = ir.op.tile.cast(source, pl.FP8E4M3FN)
+    if case == "narrowed_result":
+        result_type = ir.TileType(
+            [rows, cols * 2], pl.FP8E4M3FN, None, ir.TileView(valid_shape=[8, cols * 2])
+        )
+        cast = ir.Call(cast.op, cast.args, cast.kwargs, result_type, span)
+    decoded = ir.Var("decoded", cast.type, span)
+    parameters = [valid_cols, source] if case in ("dynamic_valid", "dynamic_affine_valid") else [source]
+    before = ir.Program(
+        [
+            ir.Function(
+                "kernel",
+                parameters,
+                [cast.type],
+                ir.SeqStmts([ir.AssignStmt(decoded, cast, span), ir.ReturnStmt([decoded], span)], span),
+                span,
+                ir.FunctionType.Opaque,
+            )
+        ],
+        "fallback",
+        span,
+    )
+    after = _run(before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+    if case == "narrowed_result":
+        _assert_recorded_cast_roundtrip(after)
+
+
+@pytest.mark.parametrize("tile_surface", [False, True])
+def test_e2m1_to_e4m3_type_inference_preserves_carrier_geometry(tile_surface):
+    span = ir.Span.unknown()
+    if tile_surface:
+        source_type = ir.TileType(
+            [16, 32], pl.fp4e2m1x2, None, ir.TileView(valid_shape=[8, 24], stride=[32, 1])
+        )
+        source = ir.Var("source", source_type, span)
+        result = ir.op.tile.cast(source, pl.FP8E4M3FN).type
+        assert isinstance(result, ir.TileType)
+        view = result.get_effective_tile_view()
+    else:
+        source_type = ir.TensorType(
+            [16, 32], pl.fp4e2m1x2, None, ir.TensorView([32, 1], ir.TensorLayout.ND, valid_shape=[8, 24])
+        )
+        source = ir.Var("source", source_type, span)
+        result = ir.op.tensor.cast(source, pl.FP8E4M3FN).type
+        assert isinstance(result, ir.TensorType)
+        view = result.tensor_view
+        assert view is not None
+    assert [value.value for value in result.shape if isinstance(value, ir.ConstInt)] == [16, 64]
+    assert [value.value for value in view.valid_shape if isinstance(value, ir.ConstInt)] == [8, 48]
+    assert [value.value for value in view.stride if isinstance(value, ir.ConstInt)] == [64, 1]
+
+
+@pytest.mark.parametrize("placed", [False, True])
+def test_late_cast_bridge_preserves_placement_final_type_and_attrs(placed):
+    """A split carrier row needs fresh Vec bridge storage after memory inference."""
+    span = ir.Span.unknown()
+    memory = ir.MemorySpace.Vec if placed else None
+    source = ir.Var("source", ir.TileType([16, 16], pl.fp4e2m1x2, None, None, memory), span)
+    tmp = ir.Var("tmp", ir.TileType([1, 64], pl.INT8, None, None, memory), span)
+    # An absent view is the canonical implicit layout; legalization must
+    # preserve it even when the final hop's inferred input has explicit stride.
+    result_type = ir.TileType([16, 32], pl.FP8E4M3FN, None, None, memory)
+    attrs = {"arg_directions": [ir.ArgDirection.Input, ir.ArgDirection.InOut], "test_metadata": "retained"}
+    kwargs = {"target_type": pl.FP8E4M3FN, "mode": 1, "saturation_mode": 0}
+    call = ir.Call(ir.get_op("tile.cast"), [source, tmp], kwargs, attrs, result_type, span)
+    result = ir.Var("result", result_type, span)
+    before = ir.Program(
+        [
+            ir.Function(
+                "kernel",
+                [source, tmp],
+                [result_type],
+                ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([result], span)], span),
+                span,
+                ir.FunctionType.AIV,
+            )
+        ],
+        "late_bridge",
+        span,
+    )
+    after = _run(before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [
+        ("fp4e2m1x2", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+    class Collector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.assignments = []
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name == _TILE_CAST:
+                self.assignments.append(op)
+            super().visit_assign_stmt(op)
+
+    collector = Collector()
+    collector.visit_program(after)
+    assert len(collector.assignments) == 3
+    # A bridge hop lands in Vec either way: the pass copies a resolved placement
+    # onto it, and ``tile.cast``'s registered output memory supplies Vec when the
+    # final result is still unplaced (early legalization).
+    bridge_memory = memory or ir.MemorySpace.Vec
+    for assignment in collector.assignments[:-1]:
+        assert isinstance(assignment.var.type, ir.TileType)
+        assert isinstance(assignment.value.type, ir.TileType)
+        assert assignment.var.type.memory_space == bridge_memory
+        assert assignment.value.type.memory_space == bridge_memory
+        assert assignment.var.type.memref is None and assignment.value.type.memref is None
+        assert "test_metadata" not in assignment.value.attrs
+        assert "arg_directions" not in assignment.value.attrs
+    final = collector.assignments[-1]
+    assert final.var is result
+    assert final.value.type is result_type
+    assert final.value.attrs == attrs
+    assert final.value.kwargs == kwargs
+    assert final.value.args[1] is tmp
+    _assert_recorded_cast_roundtrip(after)
+
+
+def test_native_direct_cast_empty_replay_is_not_expanded():
+    """The late legality check leaves the all-zero replay for no-data emission."""
+    span = ir.Span.unknown()
+    view = ir.TileView(valid_shape=[0, 0])
+    source = ir.Var("source", ir.TileType([16, 32], pl.fp4e2m1x2, None, view, ir.MemorySpace.Vec), span)
+    result_type = ir.TileType([16, 64], pl.FP8E4M3FN, None, view, ir.MemorySpace.Vec)
+    call = ir.Call(
+        ir.get_op("tile.cast"), [source], {"target_type": pl.FP8E4M3FN, "mode": 2}, result_type, span
+    )
+    result = ir.Var("result", result_type, span)
+    before = ir.Program(
+        [
+            ir.Function(
+                "kernel",
+                [source],
+                [result_type],
+                ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([result], span)], span),
+                span,
+                ir.FunctionType.AIV,
+            )
+        ],
+        "empty_replay",
+        span,
+    )
+    after = _run(before, BackendType.Ascend950)
+    ir.assert_structural_equal(after, before)
+    with pytest.raises(ValueError, match="no native cast path"):
+        _run(before, BackendType.Ascend910)
+
+
+def test_native_conditional_edge_is_not_a_lossy_bf16_to_fp8_shortcut():
+    """Both BF16->FP4 and FP4->FP8 can be native, but their composition loses values."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, source: pl.Tensor[[16, 64], pl.BF16], output: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]]
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            value = pl.load(source, [0, 0], [16, 64])
+            result = pl.cast(value, pl.FP8E4M3FN)
+            return pl.store(result, [0, 0], output)
+
+    after = _run(Before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [("bfloat16", "fp32"), ("fp32", "fp8e4m3fn")]
+
+
+# ---------------------------------------------------------------------------
+# NZ destination layout (blayout=col_major / slayout=row_major, fractal=512)
+# ---------------------------------------------------------------------------
+
+
+def _nz_cast_program(rows=16, packed_cols=32, dtype=pl.fp4e2m1x2, target=pl.FP8E4M3FN):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tensor[[rows, packed_cols], dtype],
+            output: pl.Out[pl.Tensor[[rows, 2 * packed_cols], target]],
+        ) -> pl.Tensor[[rows, 2 * packed_cols], target]:
+            packed = pl.load(source, [0, 0], [rows, packed_cols])
+            decoded = pl.tile.cast(
+                packed,
+                target,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            return pl.store(decoded, [0, 0], output)
+
+    return Before
+
+
+def test_a5_nz_destination_cast_stays_one_native_cast():
+    """An NZ destination is a native A5 tcvt, so legalization leaves it alone.
+
+    This is the whole point of the attribute: PTOAS v0.72 converts packed FP4
+    straight into a standard 512-byte NZ FP8 tile, so the cast must survive as
+    one hop with its boxed result type intact rather than being expanded.
+    """
+    before = _nz_cast_program()
+    after = _run(before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "fp8e4m3fn")]
+    ir.assert_structural_equal(after, before)
+
+
+def test_nz_destination_cast_survives_print_parse():
+    """The boxed result and both layout kwargs round-trip through the printer.
+
+    `TileLayout` kwargs already had printer, parser and serializer support --
+    they are how `tile.move` spells the same thing -- so the cast needs no new
+    round-trip machinery. What is asserted here is stronger than survival: the
+    printer emits the ORDINARY DSL spelling (not the `pl._dump.call` escape
+    hatch that a cast needs when its recorded type cannot be re-derived), which
+    means re-deducing from the two kwargs reproduces the boxed result type
+    exactly. If that ever stops holding, this fails rather than silently
+    degrading to the dump form.
+    """
+    before = _nz_cast_program()
+    after = _run(before, BackendType.Ascend950)
+    printed = python_print(after, format=False)
+    assert "blayout=pl.TileLayout.col_major" in printed
+    assert "slayout=pl.TileLayout.row_major" in printed
+    assert 'pl._dump.call("tile.cast"' not in printed
+    ir.assert_structural_equal(after, pl.parse_program(printed), enable_auto_mapping=True)
+
+
+def test_nz_destination_is_rejected_for_a_dtype_pair_without_a_native_edge():
+    """An unsupported boxing must fail loudly, not assemble and misaddress.
+
+    PTOAS's `tcvt` verifier inspects the destination layout ONLY for the packed
+    FP4-to-FP8 pair; for every other pair it accepts a boxed destination without
+    complaint. An unconstrained dtype edge in the backend table likewise states
+    no layout opinion, so without this gate an FP32-to-FP16 NZ request would
+    lower to a `pto.tcvt` whose destination the ISA never promised to write.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            source: pl.Tensor[[16, 32], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+        ) -> pl.Tensor[[16, 32], pl.FP16]:
+            loaded = pl.load(source, [0, 0], [16, 32])
+            boxed = pl.tile.cast(
+                loaded,
+                pl.FP16,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            return pl.store(boxed, [0, 0], output)
+
+    with pytest.raises(ValueError, match="no native pto.tcvt that writes it"):
+        _run(Before, BackendType.Ascend950)
+
+
+def test_nz_destination_is_rejected_on_a2a3():
+    """A2/A3 has no packed FP4 tcvt at all, so the NZ request fails there too."""
+    before = _nz_cast_program()
+    with pytest.raises(ValueError, match="no native pto.tcvt that writes it"):
+        _run(before, BackendType.Ascend910)
+
+
+def test_an_incidentally_boxed_cast_is_not_caught_by_the_nz_gate():
+    """The gate keys on the REQUEST, not on the result being boxed.
+
+    A cast that merely happens to carry a boxed tile (no layout kwargs) keeps
+    the ordinary backend layout-repair path, so narrowing the gate to explicit
+    requests is what keeps this working.
+    """
+    span = ir.Span.unknown()
+    boxed_view = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major)
+    source = ir.Var("source", ir.TileType([16, 32], pl.FP32, tile_view=boxed_view), span)
+    call = ir.create_op_call("tile.cast", [source], {"target_type": pl.FP16, "mode": 2}, span)
+    assert "blayout" not in dict(call.kwargs)
+    result = call.type
+    assert isinstance(result, ir.TileType)
+    # Inherited, not requested: the gate must ignore it.
+    assert result.tile_view is not None
+    assert result.tile_view.slayout == ir.TileLayout.row_major
 
 
 if __name__ == "__main__":

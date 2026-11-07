@@ -18,6 +18,7 @@ from pypto.pypto_core.ir import (
     Expr,
     ScalarType,
     Span,
+    TileLayout,
 )
 
 from ..utils import (
@@ -974,8 +975,15 @@ def cast(
     *,
     tmp: Expr | None = None,
     saturation_mode: str | int | None = None,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
+
+    On A5, unboxed row-major E2M1x2 tiles with compatible static geometry
+    convert directly to FP8E4M3FN. Packed physical and valid columns double
+    (e.g. [16,32] carriers become [16,64] values). Other packed FP4-to-FP8
+    cases retain BF16/FP32 legalization.
 
     Args:
         tile: Input tile (TileType)
@@ -992,6 +1000,15 @@ def cast(
              default — ``DEFAULT_SATURATION_MODE`` ("on") for an integer
              destination, the target's own behavior for a float one. Only a
              deviation from that default is recorded on the call.
+        blayout: Optional block layout for the destination tile, spelled as on
+             ``tile.move``. ``None`` inherits the source tile's layout, which is
+             what a cast has always done.
+        slayout: Optional scatter layout for the destination tile. Together with
+             ``blayout`` this is how a boxed destination is requested:
+             ``col_major`` / ``row_major`` is standard NZ. The only layout
+             *change* a cast performs is ND source to NZ destination (A5
+             E2M1x2-to-FP8E4M3FN); any other requested change is rejected and
+             belongs to ``tile.move``.
 
     Returns:
         Call expression for element-wise cast to target dtype
@@ -1007,6 +1024,13 @@ def cast(
     kwargs: dict[str, Any] = {"target_type": target_type, "mode": mode_val}
     if deviation is not None:
         kwargs["saturation_mode"] = deviation
+    # Only a requested layout is recorded, so an ordinary cast keeps exactly the
+    # kwargs it had before these options existed and still round-trips to
+    # structurally equal IR.
+    if blayout is not None:
+        kwargs["blayout"] = blayout
+    if slayout is not None:
+        kwargs["slayout"] = slayout
     args: list[Expr] = [tile] if tmp is None else [tile, tmp]
     return _ir_core.create_op_call("tile.cast", args, kwargs, actual_span)
 

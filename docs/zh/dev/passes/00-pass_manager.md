@@ -499,36 +499,37 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 12. `ExpandMixedKernel`
 13. [`InjectGMPipeBuffer`](26-inject_gm_pipe_buffer.md)
 14. [`SplitVectorKernel`](27-split_vector_kernel.md)（仅为 split_aiv 函数打属性 + 处理无拆分双 AIV 路径）
-15. [`StampTfreeSplit`](28-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
-16. `NormalizeReturnOrder`
-17. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
-18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md)（PyPTO 下 opt-in 固定地址单层 Vec 软流水，或 PTOAS 下同轮 slot 轮转；不支持的循环保留 unroll）
-19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
-20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
-21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
-22. [`MaterializeSimtOutputs`](35-materialize_simt_outputs.md)
-23. [`SpecializeSimtHelpers`](36-specialize_simt_helpers.md)
-24. `InitMemRef`
-25. [`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
-26. `MemoryReuse`
-27. `AllocateMemoryAddr`
-28. [`FoldNoOpReshape`](41-fold_no_op_reshape.md)
-29. [`FuseCreateAssembleToSlice`](42-fuse_create_assemble_to_slice.md)
-30. [`LowerL2TensorCollectives`](43-lower_l2_tensor_collectives.md)（分布式：写在 CHIP orchestration 函数体里的托管集合通信 -> 一个本地 builtin AIV task；放在此处是为了让改写后的调用像任何 kernel 调用一样推导出实参方向与 TensorMap 任务依赖边）
-31. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md)
-32. [`DeriveCallDirections`](45-derive_call_directions.md)
-33. [`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
-34. [`ExpandManualPhaseFence`](47-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
-35. [`SynthesizeAllReduceSignals`](48-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
-36. [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
-37. [`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-38. [`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
-39. `Simplify`
-40. [`LegalizeGraphBoundary`](52-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
-41. [`MaterializeRuntimeScopes`](53-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
-42. [`ClassifyIterArgCarry`](54-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
-43. [`InsertCommFence`](55-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
-44. [`MaterializeValidShapeSymbols`](56-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
+15. [`LegalizeTileCast`](18-legalize_tile_cast.md)（向量切分后重新检查有条件的原生转换）
+16. [`StampTfreeSplit`](28-stamp_tfree_split.md)（把每个跨核 tpop 的 split/pipe-id 复制到与之配对的 tfree 算子上）
+17. `NormalizeReturnOrder`
+18. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md)（cube/vector 跨核软流水 skew；紧接在 LowerPipelineLoops 之前运行）
+19. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md)（PyPTO 下 opt-in 固定地址单层 Vec 软流水，或 PTOAS 下同轮 slot 轮转；不支持的循环保留 unroll）
+20. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
+21. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
+22. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
+23. [`MaterializeSimtOutputs`](35-materialize_simt_outputs.md)
+24. [`SpecializeSimtHelpers`](36-specialize_simt_helpers.md)
+25. `InitMemRef`
+26. [`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
+27. `MemoryReuse`
+28. `AllocateMemoryAddr`
+29. [`FoldNoOpReshape`](41-fold_no_op_reshape.md)
+30. [`FuseCreateAssembleToSlice`](42-fuse_create_assemble_to_slice.md)
+31. [`LowerL2TensorCollectives`](43-lower_l2_tensor_collectives.md)（分布式：写在 CHIP orchestration 函数体里的托管集合通信 -> 一个本地 builtin AIV task；放在此处是为了让改写后的调用像任何 kernel 调用一样推导出实参方向与 TensorMap 任务依赖边）
+32. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md)
+33. [`DeriveCallDirections`](45-derive_call_directions.md)
+34. [`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
+35. [`ExpandManualPhaseFence`](47-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
+36. [`SynthesizeAllReduceSignals`](48-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
+37. [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
+38. [`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
+39. [`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
+40. `Simplify`
+41. [`LegalizeGraphBoundary`](52-legalize_graph_boundary.md)（把 Graph 体从边界标量派生出来的值上提到调用点，并拒绝 host_build_graph runtime 无法录制的边界；无 Graph 函数的程序为 no-op）
+42. [`MaterializeRuntimeScopes`](53-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit SIMPLER_SCOPE）
+43. [`ClassifyIterArgCarry`](54-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+44. [`InsertCommFence`](55-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在所有语句重排 pass 之后，使插入的 op 一路到 codegen 都紧邻其 notify）
+45. [`MaterializeValidShapeSymbols`](56-materialize_valid_shape_symbols.md)（跑在最后；把设备侧 kernel 无法绑定的 valid_shape 符号转成前置的 Scalar[INDEX] 形参，由调用点传入实际有效范围）
 
 [`ResolveBackendOpLayouts`](23-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO
