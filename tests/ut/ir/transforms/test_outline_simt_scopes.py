@@ -710,7 +710,8 @@ pair = ({source},)
 """)
     # Neither an In Tensor hidden in a tuple nor an uninitialized Tile can
     # acquire writable, initialized storage just by becoming an IterArg.
-    with pytest.raises((Error, ValueError), match="initialized storage|enclosing In"):
+    message = "enclosing In" if source == "src" else "Cannot prove SIMT capture permissions"
+    with pytest.raises((Error, ValueError), match=message):
         passes.outline_simt_scopes()(before)
 
 
