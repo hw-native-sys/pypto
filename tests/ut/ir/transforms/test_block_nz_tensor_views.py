@@ -1984,8 +1984,11 @@ def test_rejects_acc_nz_store_with_unknown_column_offset():
 @pytest.mark.usefixtures("ascend_backend")
 def test_rejects_acc_nz_store_with_dynamic_source_shape():
     rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    # Keep both dimensions Expr-valued so native construction reaches the NZ
+    # verifier instead of relying on mixed int/Expr convenience conversion.
+    columns = ir.ConstInt(16, DataType.INDEX, ir.Span.unknown())
     with pytest.raises(ValueError, match="NZ"):
-        passes.block_nz_tensor_views()(_nz_store_program(tile_shape=(rows, 16)))
+        passes.block_nz_tensor_views()(_nz_store_program(tile_shape=(rows, columns)))
 
 
 @pytest.mark.parametrize("negative", [False, True], ids=["unknown", "negative"])

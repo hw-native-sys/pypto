@@ -176,6 +176,8 @@ auto rebuilt = transform_utils::RebuildRegisteredCall(
 
 ## Cost model & design space (`ChooseL0Tile`)
 
+搜索下限（search minimum）是向上取整到对应对齐粒度的下界，而不是 tile 网格的偏移。启用 padding 时，上界包含第一个同时满足问题尺寸和下限的对齐 tile；辅助约束 `max_n` 仍限制 N。搜索对齐和物理 boxing 不改变 cube 的 16×16 M/N MAD fractal：增大搜索步长不能减少同一个 tile 的计算代价。
+
 `ChooseL0Tile` 通过**穷举式 roofline 搜索**挑选 L0 GEMM tile，而非闭式公式。对每个合法且对齐的 `(m, n, k)`（每维都是 `GetL0FractalAlignment()` 的倍数，L0C 预算按 `AlignUp(m, l0c_align_m) × n` 计算），它以核心 cycle 估算 wall-clock 并返回最小者：
 
 - 当 FIXPIPE 的 L0C→L1 drain 暴露在外（单 L0C）时，`wall ≈ max(C_load, C_mad) + C_drain`；
@@ -398,6 +400,10 @@ out     = pl.tile.store(d, [0, 0], out)
 ```
 
 `tile.cast` 被删除。当 producer 需要 K-loop（`k < K`）时，照常发出 K-loop，其 Acc 结果喂给*同一个*单次 `tile.assemble` —— 折叠与 K 切分无关。
+
+整窗 cast-fold 和 M/N scratch 路径都会在组装后恢复 producer 的 `valid_shape`。
+分配保留完整物理形状，链式消费者只读取原来的有效行列范围，包括符号化的有效维度。
+完全有效的结果不需要额外视图。
 
 ## 分形边界：尾块为何不需要特判
 
