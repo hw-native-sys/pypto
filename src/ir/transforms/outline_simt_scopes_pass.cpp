@@ -256,7 +256,9 @@ class StoragePermissions : public IRVisitor {
     if (!IsStorage(target)) return;
     if (auto source = AsVarLike(value)) {
       Unite(target, source);
-    } else if (auto projection = As<TupleGetItemExpr>(value)) {
+      return;
+    }
+    if (auto projection = As<TupleGetItemExpr>(value)) {
       auto tuple = ResolveTuple(projection->tuple_);
       auto source = tuple && projection->index_ >= 0 &&
                             static_cast<size_t>(projection->index_) < tuple->elements_.size()
@@ -264,24 +266,22 @@ class StoragePermissions : public IRVisitor {
                         : nullptr;
       if (source) {
         Unite(target, source);
-      } else {
-        nodes_[Root(target.get())].unknown_provenance = true;
+        return;
       }
-    } else if (auto call = As<Call>(value)) {
-      if (As<GlobalVar>(call->op_)) {
-        nodes_[Root(target.get())].unknown_provenance = true;
-      } else if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
+    } else if (auto call = As<Call>(value); call && !As<GlobalVar>(call->op_)) {
+      if (IsOp(call, "tile.create") || IsOp(call, "tensor.create")) {
         nodes_[Root(target.get())].uninitialized = true;
-      } else if (auto alias = StorageAliasedArgIndex(call); alias && *alias < call->args_.size()) {
+        return;
+      }
+      if (auto alias = StorageAliasedArgIndex(call); alias && *alias < call->args_.size()) {
         // Calls have not been flattened yet. Follow nested views for assignments,
         // seeds and yields so wrapping an In storage cannot grant write access.
         UniteSource(target, call->args_[*alias]);
-      } else if (!As<TileType>(call->GetType())) {
-        nodes_[Root(target.get())].unknown_provenance = true;
+        return;
       }
-    } else {
-      nodes_[Root(target.get())].unknown_provenance = true;
+      if (As<TileType>(call->GetType())) return;
     }
+    nodes_[Root(target.get())].unknown_provenance = true;
   }
   void Carries(const std::vector<IterArgPtr>& args, const std::vector<VarPtr>& results) {
     for (size_t i = 0; i < args.size(); ++i) {
