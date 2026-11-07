@@ -329,12 +329,8 @@ def test_extended_ops_survive_default_pipeline(name, dtype, statement, tmp_path)
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize(
-    "name,dtype,statement",
-    [case for case in CASES if (case[0], case[1]) not in (("expdif", "FP16"), ("gather", "INT8"))],
-)
+@pytest.mark.parametrize("name,dtype,statement", CASES)
 def test_extended_vf_helpers_compile_to_llvm(name, dtype, statement, tmp_path):
-    # Widening variants above are covered through the direct VMI/VPTO path.
     compiler = find_ptoas_binary()
     if compiler is None:
         pytest.skip("PTOAS is unavailable")
