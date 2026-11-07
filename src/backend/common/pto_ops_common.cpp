@@ -14,7 +14,7 @@
  * @brief Shared PTO op registration for all PTO-based backends.
  *
  * Provides RegisterPTOOps() which registers shared PTO operators except the
- * separately registered select family to any backend instance by delegating to the
+ * separately registered select, cast and load ops by delegating to the
  * per-category RegisterXxxOps entry points (declared in pto_ops_internal.h).
  * Backends that need to override specific ops can pass those op names in the
  * exclude_ops set and register their own implementations before calling this
