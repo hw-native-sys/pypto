@@ -102,6 +102,7 @@ class BodyTransformer(ast.NodeTransformer):
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
         self._simt_depth: int = 0
+        self._simt_runtime_names: set[str] = set()
         # Pre-register function parameters as "already assigned at depth 0" so
         # that body assignments like `x = pl.load(x, ...)` are treated as
         # rebindings and get alpha-renamed to `x_v1`.
@@ -176,6 +177,8 @@ class BodyTransformer(ast.NodeTransformer):
         source = self._known_tensor_name(node.value.id) if isinstance(node.value, ast.Name) else None
         value_meta = self._meta.get(source) if source is not None else None
         visited_value = self.visit(node.value)
+        if self._simt_depth:
+            self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
             # Only rename at the same scope where the variable was first defined.
             # Rebindings at a deeper scope (inside for/with) are loop-carried
@@ -308,9 +311,11 @@ class BodyTransformer(ast.NodeTransformer):
 
         # Case 2: M, N = a.shape  →  individual assignments (dynamic) or inline (static)
         if (
-            not self._simt_depth
-            and len(node.targets) == 1
+            len(node.targets) == 1
             and isinstance(node.targets[0], ast.Tuple)
+            and not (
+                self._simt_depth and self._names_by_ctx(node.targets[0], ast.Store) & self._simt_runtime_names
+            )
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "shape"
             and isinstance(node.value.value, ast.Name)
@@ -347,9 +352,9 @@ class BodyTransformer(ast.NodeTransformer):
 
         # Case 3: K = a.shape[1]  →  inline static dim, suppress assignment
         if (
-            not self._simt_depth
-            and len(node.targets) == 1
+            len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
+            and not (self._simt_depth and node.targets[0].id in self._simt_runtime_names)
             and isinstance(node.value, ast.Subscript)
             and isinstance(node.value.value, ast.Attribute)
             and node.value.value.attr == "shape"
@@ -389,6 +394,8 @@ class BodyTransformer(ast.NodeTransformer):
         # int). Without this the un-inlined name leaks into the generated source
         # and the parser rejects it ("Unknown shape variable: W_PAD").
         node.annotation = self.visit(node.annotation)
+        if self._simt_depth:
+            self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
             if self._scope_depth == self._assign_depth[var_name]:
                 new_name = self._rebind(var_name)
@@ -811,10 +818,19 @@ class BodyTransformer(ast.NodeTransformer):
                 self._assign_count.copy(),
                 self._assign_depth.copy(),
                 self._var_renames.copy(),
+                self._simt_runtime_names,
             )
+            self._simt_runtime_names = set()
+            pending: list[tuple[ast.AST, bool]] = [(stmt, False) for stmt in node.body]
+            while pending:
+                current, conditional = pending.pop()
+                conditional = conditional or isinstance(current, (ast.If, ast.For, ast.While))
+                if conditional and isinstance(current, ast.Name) and isinstance(current.ctx, ast.Store):
+                    self._simt_runtime_names.add(current.id)
+                pending.extend((child, conditional) for child in ast.iter_child_nodes(current))
             # A private binding is a runtime scalar even when its incoming
             # value came from a folded shape. Materialize live-in constants,
-            # and retain scalar assignments inside the region so conditional
+            # and retain conditionally rebound scalar assignments so conditional
             # writes cannot leave either stale constants or undefined names.
             written = self._names_by_ctx(node, ast.Store)
             exposed: set[str] = set()
@@ -844,5 +860,6 @@ class BodyTransformer(ast.NodeTransformer):
                     self._assign_count,
                     self._assign_depth,
                     self._var_renames,
+                    self._simt_runtime_names,
                 ) = state
         return node

@@ -33,8 +33,9 @@ initialized; a fresh Tile load replaces an earlier uninitialized value without
 initializing old aliases. Branch-local proofs and changed storage identities are
 not assumed after a join. A loop capture must also be initialized on later
 iterations; a fresh load before the capture supplies a new proof. JIT shape folding and scalar renaming inside a SIMT
-scope do not affect subsequent caller code. Private scalar assignments are
-retained inside the region, including shape-derived assignments. An incoming
+scope do not affect subsequent caller code. Conditionally rebound private scalar
+assignments are retained inside the region, including shape-derived assignments.
+A straight-line reassignment retires the old fold after evaluating its right-hand side. An incoming
 shape constant read before a private write is materialized as a scalar, so
 conditional writes preserve both the original value and subsequent rebindings. Both sides of an `if`
 start from the incoming bindings; their changed bindings remain invalid at the
