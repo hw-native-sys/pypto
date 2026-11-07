@@ -89,7 +89,7 @@ program_tiled = l0_tile_pass(program)
 
 8. **保留已有 L0 流水线**——分析前即禁用自动累加器缓冲识别。显式 `pipeline_double_buffer_c` 属性保持不变。
 
-Direct-store M/N 网格在消费者 store 处执行，因此操作数快照（operand snapshot）必须保留到该位置。选择前，函数级索引跟踪存储别名，按 allocation 和 slot 记录写入。不同的常量 slot 互不重叠；无法解析的别名、可能改变来源的 carry，以及未知物理 effect（含跨核 ring 复用）均保守处理。普通和 atomic GM store 不会覆写输入 tile 的片上存储。如果延后的读取会跨越可能的覆写，chooser 只考虑保留完整输出的 K-only 方案。若无合法方案，则给出可操作的错误：先 store 结果再复用输入存储，或使用不同输入 slot。本 pass 不提前执行 GM store，因为不同 tensor 参数在运行时可能互为别名。
+Direct-store M/N 网格在消费者 store 处执行，因此操作数快照（operand snapshot）必须保留到该位置。选择前，函数级索引跟踪存储别名，按 allocation 和 slot 记录写入。索引还沿普通结果别名追踪消费者 store，避免结果改名掩盖中间发生的输入覆写。不同的常量 slot 互不重叠；无法解析的别名、可能改变来源的 carry，以及未知物理 effect（含跨核 ring 复用）均保守处理。普通和 atomic GM store 不会覆写输入 tile 的片上存储。如果延后的读取会跨越可能的覆写，chooser 只考虑保留完整输出的 K-only 方案。若无合法方案，则给出可操作的错误：先 store 结果再复用输入存储，或使用不同输入 slot。本 pass 不提前执行 GM store，因为不同 tensor 参数在运行时可能互为别名。
 
 显式绑定 MemRef 的 matmul 结果同样要求完整输出方案。K 切分把绑定附到第一个分配所有者（累加器占位声明或 fresh/head-peel matmul），并保留生成的 layout 与 valid-shape 元数据；累加和尾块继承同一存储。M/N 切分不得悄悄用独立子块替换声明的完整结果存储。现有 PTOAS 限制仍以明确错误报告，包括单 slot 声明和经过不受支持循环 phi 的多 slot 值；这些组合可使用 PYPTO 或 DSA_RP。
 
@@ -385,7 +385,8 @@ split-K 内部流水线深度与源深度相乘，full-K block 取常规深度�
 操作数，即使 `k == source_K` 也不例外；它排除该 emitter 未实现的
 held-panel 与 dbC 调度。普通 matmul 保持一个源归约、一个源 stage 的默认
 设置。硬件成本常数不变。
-已声明的累加器或 Mat 操作数 MemRef 与显式缓冲循环仍属于手工存储决策；
+已声明的累加器或 Mat 操作数 MemRef 与显式缓冲循环仍属于手工存储决策，
+包括分支结果、合并值和循环 carry 上的绑定；
 此规范折叠不会重建其分配或槽位选择。普通 K 切分仍可保留并消费这些 load。
 
 ### Fits-L0c 链式 matmul（cast-fold）

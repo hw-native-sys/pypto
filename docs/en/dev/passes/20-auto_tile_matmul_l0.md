@@ -90,7 +90,7 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
 8. **Preserve existing L0 pipelines** — automatic accumulator-buffer recognition is disabled before analysis. An explicit `pipeline_double_buffer_c` attribute remains unchanged.
 
-Direct-store M/N grids execute at the consumer store, so their operand snapshots must survive until that point. Before selection, a function-wide index follows storage aliases and records writes by allocation and slot. Different constant slots are disjoint; unresolved aliases, changing carries, and unknown physical effects (including cross-core ring recycling) are conservative. Ordinary and atomic GM stores do not overwrite the input tiles' on-chip storage. If delaying a read would cross a possible overwrite, the chooser is restricted to a full-output K-only plan. If no such plan fits, compilation reports an actionable error: store the result before reusing its input storage, or use separate input slots. The pass does not move GM stores earlier, because distinct tensor parameters may alias.
+Direct-store M/N grids execute at the consumer store, so their operand snapshots must survive until that point. Before selection, a function-wide index follows storage aliases and records writes by allocation and slot. It also follows plain result aliases to their consumer store, so renaming the result cannot hide an intervening input overwrite. Different constant slots are disjoint; unresolved aliases, changing carries, and unknown physical effects (including cross-core ring recycling) are conservative. Ordinary and atomic GM stores do not overwrite the input tiles' on-chip storage. If delaying a read would cross a possible overwrite, the chooser is restricted to a full-output K-only plan. If no such plan fits, compilation reports an actionable error: store the result before reusing its input storage, or use separate input slots. The pass does not move GM stores earlier, because distinct tensor parameters may alias.
 
 A matmul result with an explicit MemRef likewise requires a full-output plan. K tiling attaches that binding to the first allocation owner (the accumulator placeholder or fresh/head-peeled matmul), preserving generated layout and valid-shape metadata; accumulation and tail blocks inherit the same storage. M/N tiling must not silently replace the declared whole-result storage with unrelated sub-tiles. Existing PTOAS restrictions remain explicit errors, including single-slot declarations and multi-slot values carried through unsupported loop phis; use PYPTO or DSA_RP for those compositions.
 
@@ -419,8 +419,9 @@ reduction even when `k == source_K`; it excludes held-panel and dbC schedules
 that this emitter does not implement. Ordinary matmuls retain the default
 one-reduction, one-source-stage schedule. Hardware cost constants are unchanged.
 Declared accumulator or Mat-operand MemRefs and explicitly buffered loops remain
-manual storage decisions; this canonical fold does not rebuild their allocations
-or slot selections. Ordinary K tiling can still retain and consume those loads.
+manual storage decisions, including bindings on branch results, merged values,
+and loop carries; this canonical fold does not rebuild their allocations or slot
+selections. Ordinary K tiling can still retain and consume those loads.
 
 ### Fits-L0c chained matmul (cast-fold)
 
