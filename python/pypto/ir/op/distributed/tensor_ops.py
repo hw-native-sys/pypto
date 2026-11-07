@@ -23,7 +23,7 @@ from typing import overload
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, Call, Expr, ReduceOp, Span
+from pypto.pypto_core.ir import AtomicType, Call, CommEngine, Expr, ReduceOp, Span
 
 from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
@@ -250,6 +250,98 @@ def get(
     if pipeline:
         attrs["pipeline"] = True
     return _ir_core.create_op_call("pld.tensor.get", args, attrs, actual_span)
+
+
+def put_async(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    *,
+    engine: CommEngine = CommEngine.URMA,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.put_async(dst, peer, src)`` Call.
+
+    Asynchronous cross-rank write: issue a URMA transfer of the local ``src``
+    into the ``peer`` rank's slice of ``dst``. The call returns ``dst`` (the
+    result aliases argument 0); returning does **not** mean the transfer has
+    completed. Completion is owned by the enclosing task and carried by the
+    producer ``InOut`` -> consumer ``In`` dependency.
+
+    ``engine`` is a compile-time kwarg; V1 accepts :attr:`CommEngine.URMA` only
+    and rejects any other engine. With no offsets/shape this transfers the full
+    local ``src`` into the full peer ``dst`` slice. Supplying ``dst_offsets``,
+    ``src_offsets`` and ``shape`` narrows the transfer to matching subregions;
+    all three must be provided together, and the subregion must span the full
+    innermost dimension (a contiguous flattened GM range).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    args: list[Expr] = [dst, peer_expr, src]
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.put_async dst_offsets, src_offsets, and shape must be provided together")
+    if has_region:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        args.extend(
+            [
+                _to_make_tuple(dst_offsets, actual_span),
+                _to_make_tuple(src_offsets, actual_span),
+                _to_make_tuple(shape, actual_span),
+            ]
+        )
+    return _ir_core.create_op_call("pld.tensor.put_async", args, {"engine": int(engine)}, actual_span)
+
+
+def get_async(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    *,
+    engine: CommEngine = CommEngine.URMA,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.get_async(dst, peer, src)`` Call.
+
+    Asynchronous cross-rank read: issue a URMA transfer of the ``peer`` rank's
+    slice of ``src`` into the local ``dst``. The call returns ``dst`` (the
+    result aliases argument 0); returning does **not** mean the data has
+    arrived. Completion is owned by the enclosing task and carried by the
+    producer ``InOut`` -> consumer ``In`` dependency.
+
+    ``engine`` is a compile-time kwarg; V1 accepts :attr:`CommEngine.URMA` only
+    and rejects any other engine. With no offsets/shape this reads the full
+    peer ``src`` slice into the full local ``dst``. Supplying ``dst_offsets``,
+    ``src_offsets`` and ``shape`` narrows the transfer to matching subregions;
+    all three must be provided together, and the subregion must span the full
+    innermost dimension (a contiguous flattened GM range).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    args: list[Expr] = [dst, peer_expr, src]
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.get_async dst_offsets, src_offsets, and shape must be provided together")
+    if has_region:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        args.extend(
+            [
+                _to_make_tuple(dst_offsets, actual_span),
+                _to_make_tuple(src_offsets, actual_span),
+                _to_make_tuple(shape, actual_span),
+            ]
+        )
+    return _ir_core.create_op_call("pld.tensor.get_async", args, {"engine": int(engine)}, actual_span)
 
 
 @overload
@@ -560,7 +652,9 @@ __all__ = [
     "barrier",
     "broadcast",
     "get",
+    "get_async",
     "put",
+    "put_async",
     "remote_store",
     "reduce_scatter",
     "window",

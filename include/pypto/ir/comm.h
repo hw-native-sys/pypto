@@ -34,6 +34,10 @@ namespace ir {
 // - kNone : plain remote store — overwrite the peer's destination slice.
 // - kAdd  : atomically add the source data into the peer's destination slice.
 //
+// CommEngine selects the asynchronous engine of pld.tensor.put_async /
+// get_async. V1 accepts URMA only; the underlying value matches PTOAS's
+// DmaEngine::URMA so codegen can pass it through without translation.
+//
 // ReduceOp selects the reduction operator of pld.tensor.allreduce (and
 // future collective reductions):
 // - kSum  : element-wise sum across ranks.
@@ -59,6 +63,13 @@ enum class WaitCmp : int {
 enum class AtomicType : int {
   kNone = 0,
   kAdd = 1,
+};
+
+// Async communication engine carried by pld.tensor.put_async / get_async.
+// The underlying value is stored in the op's integer `engine` kwarg and must
+// stay in sync with PTOAS's DmaEngine enum. Add new variants only at the end.
+enum class CommEngine : int {
+  kURMA = 1,
 };
 
 // Underlying values are stored in tile.mgather's integer `coalesce` kwarg.
@@ -102,6 +113,18 @@ inline std::string AtomicTypeToString(AtomicType atomic) {
       return "Add";
     default:
       throw pypto::TypeError("Unknown AtomicType: " + std::to_string(static_cast<int>(atomic)));
+  }
+}
+
+// Convert CommEngine to the matching Python enum member name. Keep this in
+// sync with the `nb::enum_<CommEngine>` binding in
+// `python/bindings/modules/ir.cpp`.
+inline std::string CommEngineToString(CommEngine engine) {
+  switch (engine) {
+    case CommEngine::kURMA:
+      return "URMA";
+    default:
+      throw pypto::TypeError("Unknown CommEngine: " + std::to_string(static_cast<int>(engine)));
   }
 }
 
