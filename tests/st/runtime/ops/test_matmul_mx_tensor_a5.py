@@ -16,9 +16,18 @@ and all four A5 FP8 pairs run here.
 Each case runs **both** surfaces in one kernel over byte-identical operands: the
 Tensor dispatch and a ``@pl.jit.incore`` Tile reference, so a disagreement can
 only mean the surfaces differ, not that the inputs did. Both outputs are
-compared to the exact FP64-derived golden *and* to each other on raw FP32 words
-rather than with ``torch.isclose``, which holds for ``(-0.0, +0.0)`` even at
-``rtol = atol = 0`` and so cannot see a sign-of-zero error.
+compared to the same exact FP64-derived golden on raw FP32 words rather than
+with ``torch.isclose``, which holds for ``(-0.0, +0.0)`` even at
+``rtol = atol = 0`` and so cannot see a sign-of-zero error. Comparing both
+against one golden also compares them against each other, so no separate
+cross-check is needed.
+
+The in-kernel Tile reference is kept deliberately even though the golden alone
+would catch a wrong Tensor result: on a red run it says *which* layer broke.
+Tensor wrong while Tile is right points at the Tensor dispatch; both wrong
+points at the shared MX stack underneath. Deleting it would save ~30 lines and
+cost that distinction on exactly the runs where it is most expensive to
+re-derive.
 
 Operands come from ``_matmul_mx_data._make_inputs`` -- the same generator the
 Tile-surface cases in ``test_matmul_mx.py`` use -- windowed to the exact extents
@@ -163,11 +172,19 @@ def _tensor_case_golden(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Ten
 
 
 def _assert_bitwise_equal(actual, expected) -> None:
-    """Compare FP32 bytes, then compare the two surfaces to each other.
+    """Compare both surfaces' FP32 bytes against the one shared exact golden.
 
     The default elementwise check is ``torch.isclose``, and ``isclose(-0.0, +0.0)``
     holds even at ``rtol = atol = 0`` -- so a sign-of-zero difference would pass a
     tolerance-based claim of exactness. Comparing the raw bytes does not.
+
+    Both outputs are checked against the *same* golden values (``base`` and
+    ``base.clone()``), so "the two surfaces agree with each other" is implied by
+    this loop rather than needing its own assert: anything that makes them
+    disagree makes at least one of them disagree with the golden first. An
+    explicit cross-check used to follow, and was removed because it could not
+    fail -- an exhaustive single-word perturbation of both outputs fired this
+    loop every time and the cross-check never.
     """
     assert actual.keys() == expected.keys(), f"{sorted(actual)} != {sorted(expected)}"
     for name in sorted(actual):
@@ -175,11 +192,6 @@ def _assert_bitwise_equal(actual, expected) -> None:
         ref = expected[name].contiguous().view(torch.int32)
         differing = int((got != ref).sum())
         assert differing == 0, f"{name} differs from the golden in {differing} of {got.numel()} FP32 words"
-    tensor_words = actual["out_tensor"].contiguous().view(torch.int32)
-    tile_words = actual["out_tile"].contiguous().view(torch.int32)
-    assert torch.equal(tensor_words, tile_words), (
-        "the Tensor and Tile matmul_mx surfaces disagree on the same inputs"
-    )
 
 
 @pytest.mark.platforms("a5")

@@ -25,38 +25,6 @@ _MX_FP8_PAIRS = [
 ]
 
 
-def _shaped(op_type: ir.Type) -> ir.ShapedType:
-    """Narrow a deduced result type to its shaped form.
-
-    ``Call.type`` / ``Var.type`` are statically ``Type``, which carries no
-    ``shape`` / ``dtype`` / ``memory_space``; every operand and result asserted
-    on below deduces a Tensor or Tile type, and the assert says so.
-    """
-    assert isinstance(op_type, ir.ShapedType), f"expected a ShapedType, got {type(op_type).__name__}"
-    return op_type
-
-
-def _extents(op_type: ir.Type) -> list[int]:
-    """The static extents of a deduced shaped type."""
-    dims: list[int] = []
-    for dim in _shaped(op_type).shape:
-        assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
-        dims.append(dim.value)
-    return dims
-
-
-def _as_tile_type(op_type: ir.Type) -> ir.TileType:
-    """Narrow an operand / result type to ``TileType``.
-
-    ``Call.type`` is statically ``Type``; every tile op asserted on below deduces
-    a tile, and the assert is itself part of what the caller checks -- narrowing
-    only to ``ShapedType`` would silence the type checker while dropping the
-    check that a *tile* op did not hand back a Tensor type.
-    """
-    assert isinstance(op_type, ir.TileType), f"expected a TileType, got {type(op_type).__name__}"
-    return op_type
-
-
 class TestMxLoad:
     def test_mx_layout_sets_fractal(self):
         span = ir.Span.unknown()
@@ -259,6 +227,38 @@ def _tile(name, shape, dtype, *, valid_shape=None, memory=None):
     if valid_shape is not None:
         view = ir.TileView(valid_shape=valid_shape, stride=[])
     return ir.Var(name, ir.TileType(shape, dtype, tile_view=view, memory_space=memory), span)
+
+
+def _shaped(op_type: ir.Type) -> ir.ShapedType:
+    """Narrow a deduced result type to its shaped form.
+
+    ``Call.type`` / ``Var.type`` are statically ``Type``, which carries no
+    ``shape`` / ``dtype`` / ``memory_space``; every operand and result asserted
+    on below deduces a Tensor or Tile type, and the assert says so.
+    """
+    assert isinstance(op_type, ir.ShapedType), f"expected a ShapedType, got {type(op_type).__name__}"
+    return op_type
+
+
+def _extents(op_type: ir.Type) -> list[int]:
+    """The static extents of a deduced shaped type."""
+    dims: list[int] = []
+    for dim in _shaped(op_type).shape:
+        assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
+        dims.append(dim.value)
+    return dims
+
+
+def _as_tile_type(op_type: ir.Type) -> ir.TileType:
+    """Narrow an operand / result type to ``TileType``.
+
+    ``Call.type`` is statically ``Type``; every tile op asserted on below deduces
+    a tile, and the assert is itself part of what the caller checks -- narrowing
+    only to ``ShapedType`` would silence the type checker while dropping the
+    check that a *tile* op did not hand back a Tensor type.
+    """
+    assert isinstance(op_type, ir.TileType), f"expected a TileType, got {type(op_type).__name__}"
+    return op_type
 
 
 class TestMatmulMxRegistry:
