@@ -7,11 +7,11 @@ scope form and `@pl.jit.graph` converge into one representation.
 
 This pass transforms `GraphScopeStmt` nodes — produced by
 `with pl.graph("name"):` — into `Function(Graph)` definitions and replaces each
-scope with a Call to the outlined function.
+scope with a Call or Submit to the outlined function.
 
 Its entire purpose is convergence. After this pass, a region the user marked in
 place has the same shape as a function the user decorated with `@pl.jit.graph` —
-a `Function(Graph)` with orchestration metadata plus a `Call` — so
+a `Function(Graph)` with orchestration metadata plus a Call/Submit — so
 `LegalizeGraphBoundary`, the Graph verifier and orchestration codegen need no
 knowledge of which surface was written. The two surfaces exist because the choice
 is ergonomic, not semantic: the decorator suits a layer that is already its own
@@ -23,6 +23,13 @@ appends parameters in capture order, whereas the decorator form uses the
 signature the user declared. The two boundaries are permutations of each other,
 which nothing downstream depends on — every consumer reads the parameters through
 `param_directions_`, not by position.
+
+`with pl.graph("layer", deps=[ready]) as done:` uses the generic scope
+`manual_dep_edges` and `task_id_var` attributes. The outliner consumes these as
+outer `Submit.deps_` and its trailing completion result; neither is a parameter
+or computed return of the recorded function. The completion covers the entire
+Graph, including its cold invocation. Internal TaskId arrays stay local;
+`LegalizeGraphBoundary` still rejects recorded-local ids that escape.
 
 **Requirements**:
 
@@ -96,7 +103,7 @@ program_outlined = outline_pass(program)
 4. **Outline**: run the shared `outline_utils::ScopeOutliner` with
    `ScopeKind::Graph` / `FunctionType::Graph` / suffix `_graph_`. Captured values
    become parameters, values used after the region become returns, and the scope
-   is replaced by a Call.
+   is replaced by a Call or a Submit when dispatch metadata is present.
 
 The outlined function needs no level/role fixup: `Function`'s constructor
 derives `Level::CHIP` + `Role::Orchestrator` for any orchestration-like type, so

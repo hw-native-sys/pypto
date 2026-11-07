@@ -846,11 +846,12 @@ def legalize_graph_boundary() -> Pass:
     A value computed inside the region loses that origin and would be frozen at
     its first-call value on every later replay.
 
-    Also rejects, at compile time, the boundary shapes the runtime would decline
-    to cache — an oversized or empty tensor boundary, runtime-allocated outputs,
-    return values, nested graphs, and call sites carrying explicit dependencies
-    or a dispatch predicate. Almost all of those degrade to a silent non-graph
-    fallback at runtime, which no numerical test can detect.
+    Rejects oversized or empty tensor boundaries, runtime-allocated outputs,
+    computed returns, nested graphs, and Graph dispatch predicates or SPMD launch
+    specifications. Caller-supplied Out/InOut storage and parameter-alias returns
+    are allowed. Explicit predecessors order the outer Graph invocation without
+    entering its cached Definition. Its completion TaskId is valid for recording
+    and replay and covers the whole invocation; recorded-local TaskIds cannot escape.
     """
 
 def materialize_valid_shape_symbols() -> Pass:

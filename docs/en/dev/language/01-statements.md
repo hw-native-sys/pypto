@@ -169,7 +169,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.cross_core_slot(slot_num=N)])` | `InCore` | InCore + cross-core pipe slot count |
 | `pl.at(level=pl.Level.HOST)` *(or any non-`CORE_GROUP` level)* | `Hierarchy` | Distributed hierarchy scope |
 | `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
-| `pl.graph("name")` | `Graph` | Recordable orchestration region; the name is required and becomes the outlined function's — see [OutlineGraphScopes](../passes/08-outline_graph_scopes.md) |
+| `pl.graph("name", deps=[...]) as done` | `Graph` | Recordable orchestration region; deps/capture are optional outer-task metadata, and the required name identifies the outlined function — see [OutlineGraphScopes](../passes/08-outline_graph_scopes.md) |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd` (for-form wraps inner `InCore`) | SPMD multi-block dispatch — see [pl.spmd](#plspmd-multi-block-dispatch) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |

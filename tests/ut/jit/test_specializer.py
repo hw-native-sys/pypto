@@ -23,6 +23,8 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import PartialCodegenError
+from pypto.ir import python_print
 from pypto.jit._specialize_body import BodyTransformer
 from pypto.jit._specialize_values import layout_str, render_free_value
 from pypto.jit.specializer import (
@@ -41,7 +43,8 @@ from pypto.jit.specializer import (
     specialize,
     tile_annotation_fingerprints,
 )
-from pypto.pypto_core import DataType, ir
+from pypto.language.parser.diagnostics import UndefinedVariableError
+from pypto.pypto_core import DataType, ir, passes
 from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1512,40 @@ class TestVariableRebinding:
         # x_v1 is taken by user, so rebinding of x should skip to x_v2
         assert "x_v2 =" in out
         assert "x_v1 = b" in out
+
+    @pytest.mark.parametrize(
+        "context",
+        [
+            'pl.graph("layer", deps=[ready])',
+            "pl.at(level=pl.Level.CORE_GROUP, deps=[ready])",
+            "pl.spmd(1, deps=[ready])",
+        ],
+    )
+    def test_scope_capture_uses_the_existing_emitted_binding(self, context):
+        out = self._transform(f"""
+            def f(seed, latest):
+                ready = seed
+                ready = latest
+                with {context} as ready:
+                    work()
+                consume(deps=[ready])
+        """)
+        function = ast.parse(out).body[0]
+        assert isinstance(function, ast.FunctionDef)
+        assigned, scope, consumer = function.body[1:]
+        assert isinstance(assigned, ast.Assign) and isinstance(assigned.targets[0], ast.Name)
+        assert isinstance(scope, ast.With) and isinstance(scope.items[0].optional_vars, ast.Name)
+        expected = assigned.targets[0].id
+        assert scope.items[0].optional_vars.id == expected, out
+        call = scope.items[0].context_expr
+        assert isinstance(call, ast.Call)
+        deps = next(kw.value for kw in call.keywords if kw.arg == "deps")
+        assert isinstance(deps, ast.List) and isinstance(deps.elts[0], ast.Name)
+        assert deps.elts[0].id == expected, out
+        assert isinstance(consumer, ast.Expr) and isinstance(consumer.value, ast.Call)
+        deps = next(kw.value for kw in consumer.value.keywords if kw.arg == "deps")
+        assert isinstance(deps, ast.List) and isinstance(deps.elts[0], ast.Name)
+        assert deps.elts[0].id == expected, out
 
     def test_if_branch_rebind_not_renamed(self):
         """Assignments inside if branches are not alpha-renamed.
@@ -3506,6 +3543,281 @@ class TestInlineTupleTileAnnotations:
         func = _specialized_function(ctx)
         assert func.func_type == ir.FunctionType.InCore
         ir.assert_structural_equal(func.params[0].type, ir.TupleType([ir.TileType([8, 64], DataType.FP32)]))
+
+
+@pytest.mark.parametrize("iterations", [0, 4])
+def test_jit_while_graph_capture_becomes_taskid_carry(iterations):
+    """Native SSA carries completion; full codegen rejects orchestration while."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                tile = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(tile, 1.0), [0, 0], c)
+            i = 0
+            while i < iterations:
+                with pl.graph("layer", deps=[ready]) as ready:
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        tile = pl.load(c, [0, 0], [128, 128])
+                        pl.store(pl.add(tile, 1.0), [0, 0], c)
+                i = i + 1
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                tile = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(tile, 1.0), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.outline_incore_scopes()(
+            passes.outline_graph_scopes()(passes.convert_to_ssa()(chain.specialize()))
+        )
+    loops = []
+    submits = []
+
+    class Collect(ir.IRVisitor):
+        def visit_while_stmt(self, op):
+            loops.append(op)
+            super().visit_while_stmt(op)
+
+        def visit_submit(self, op):
+            submits.append(op)
+            super().visit_submit(op)
+
+    main = program.get_function("chain")
+    assert main is not None
+    Collect().visit_function(main)
+    assert len(loops) == 1
+    loop = loops[0]
+    task_carries = [
+        (i, arg)
+        for i, arg in enumerate(loop.iter_args)
+        if isinstance(arg.type, ir.ScalarType) and arg.type.dtype == DataType.TASK_ID
+    ]
+    assert len(task_carries) == 1
+    index, carry = task_carries[0]
+    graph = next(f for f in program.functions.values() if f.func_type == ir.FunctionType.Graph)
+    launch = next(s for s in submits if isinstance(s.op, ir.GlobalVar) and s.op.name == graph.name)
+    assert launch.deps[0].unique_id == carry.unique_id
+    assert submits[-1].deps[0].unique_id == loop.return_vars[index].unique_id
+    # Native SSA supports the carry, but the orchestration backend has no
+    # while emitter. Full compilation must reject it instead of dropping it.
+    with (
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+        pytest.raises(PartialCodegenError, match="While loops are not supported in orchestration"),
+    ):
+        chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+
+
+@pytest.mark.parametrize("setup_iterations,graph_iterations", [(0, 4), (1, 0), (1, 4)])
+def test_jit_independent_capture_compiles_across_empty_sibling_loops(setup_iterations, graph_iterations):
+    """A fresh nonempty capture must not require a previous loop to execute."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[seed]) as latest:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            for setup in pl.range(setup_iterations):
+                ready = seed
+                ready = latest
+            for invocation in pl.range(graph_iterations):
+                # Intentional: an empty loop must preserve the preceding TaskId binding.
+                with pl.graph("layer") as ready:  # noqa: F811
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_jit_conditional_capture_preserves_sibling_loop_carry(enabled):
+    """Conditionally captured completions carry across the surrounding loop."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            for setup in pl.range(1):
+                if enabled:
+                    ready = seed
+                else:
+                    ready = seed
+            for invocation in pl.range(4):
+                if enabled:
+                    with pl.graph("layer", deps=[ready]) as ready:
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.outline_incore_scopes()(
+            passes.outline_graph_scopes()(passes.convert_to_ssa()(chain.specialize()))
+        )
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+    if enabled:
+        loops = []
+        launches = []
+
+        class Collect(ir.IRVisitor):
+            def visit_for_stmt(self, op):
+                loops.append(op)
+                super().visit_for_stmt(op)
+
+            def visit_submit(self, op):
+                if isinstance(op.op, ir.GlobalVar) and op.op.name == "layer":
+                    launches.append(op)
+                super().visit_submit(op)
+
+        main = program.get_function("chain")
+        assert main is not None
+        Collect().visit_function(main)
+        assert len(loops) == 2 and len(launches) == 1
+        carries = [
+            arg
+            for arg in loops[1].iter_args
+            if isinstance(arg.type, ir.ScalarType) and arg.type.dtype == DataType.TASK_ID
+        ]
+        assert len(carries) == 1
+        assert launches[0].deps[0].unique_id == carries[0].unique_id
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_jit_branch_merge_preserves_last_capture_binding(enabled):
+    """A branch-local rebind must export latest, rather than its first capture."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            if enabled:
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[seed]) as ready:
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]) as latest:
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+                ready = latest
+            else:
+                ready = seed
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.convert_to_ssa()(chain.specialize())
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+    branches = []
+    scopes = []
+    aliases = {}
+    yields = []
+
+    class Collect(ir.IRVisitor):
+        def visit_if_stmt(self, op):
+            branches.append(op)
+            super().visit_if_stmt(op)
+
+        def visit_in_core_scope_stmt(self, op):
+            if "task_id_var" in op.attrs or "manual_dep_edges" in op.attrs:
+                scopes.append(op)
+            super().visit_in_core_scope_stmt(op)
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Var):
+                aliases[op.var.unique_id] = op.value
+            super().visit_assign_stmt(op)
+
+        def visit_yield_stmt(self, op):
+            yields.append(op)
+            super().visit_yield_stmt(op)
+
+    main = program.get_function("chain")
+    assert main is not None
+    Collect().visit_function(main)
+    assert len(branches) == 1
+    branch = branches[0]
+    assert scopes, python_print(program)
+    consumer_dep = scopes[-1].attrs["manual_dep_edges"][0]
+    index = next(i for i, value in enumerate(branch.return_vars) if value.unique_id == consumer_dep.unique_id)
+    assert len(scopes) == 4
+    expected_origins = (
+        (branch.then_body, scopes[2].attrs["task_id_var"]),
+        (branch.else_body, scopes[0].attrs["task_id_var"]),
+    )
+    # Resolve scalar copies at both exits: true exports latest, false exports seed.
+    for body, origin in expected_origins:
+        assert body is not None
+        yields.clear()
+        Collect().visit_stmt(body)
+        value = yields[-1].value[index]
+        while value.unique_id in aliases:
+            value = aliases[value.unique_id]
+        assert value.unique_id == origin.unique_id
+
+
+def test_jit_recorded_local_capture_name_can_be_reused():
+    """An independent capture must not read a previous Definition's local ID.
+
+    Its completion orders a consumer within each iteration; it needs no entry
+    TaskId from the previous Definition or a value exported from an empty loop.
+    """
+
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ):
+        with pl.manual_scope():
+            with pl.graph("first"):
+                with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                    pl.store(pl.load(first, [0, 0], [128, 128]), [0, 0], first)
+            for invocation in pl.range(4):
+                with pl.graph("second") as ready:
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+def test_jit_explicit_recorded_local_dependency_remains_rejected():
+    """Fresh capture names must not erase an actual cross-recording TaskId read."""
+
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ):
+        with pl.manual_scope():
+            with pl.graph("first"):
+                with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                    pl.store(pl.load(first, [0, 0], [128, 128]), [0, 0], first)
+            with pl.graph("second", deps=[ready]) as done:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[done]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with (
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+        pytest.raises(UndefinedVariableError, match="Undefined variable 'ready'"),
+    ):
+        chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
 
 
 if __name__ == "__main__":

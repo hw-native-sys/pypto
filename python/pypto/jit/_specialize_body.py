@@ -788,9 +788,28 @@ class BodyTransformer(ast.NodeTransformer):
         return node
 
     def visit_With(self, node: ast.With) -> ast.stmt:
-        """Visit With block, incrementing scope depth for its body."""
-        node.items = [self.visit(item) for item in node.items]
+        """Align captures with existing aliases; let the parser/SSA bind them."""
+        captures: dict[str, str] = {}
+        for item in node.items:
+            item.context_expr = self.visit(item.context_expr)
+            if isinstance(item.optional_vars, ast.Name):
+                original = item.optional_vars
+                captured = self._var_renames.get(original.id, original.id)
+                item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
+                captures[original.id] = captured
+                self._var_renames[original.id] = captured
+                self._shape_inlined.pop(original.id, None)
+                self._record_tensor_meta(captured, None)
+            elif item.optional_vars is not None:
+                item.optional_vars = self.visit(item.optional_vars)
         self._scope_depth += 1
         node.body = self._visit_scoped_body(node.body)
         self._scope_depth -= 1
+        # A capture binds the dispatch result, not a body-local reassignment
+        # of the same spelling. Do not create another alpha version here:
+        # the parser reuses the source Var and native SSA builds carries/phis.
+        for original, captured in captures.items():
+            self._var_renames[original] = captured
+            self._shape_inlined.pop(original, None)
+            self._record_tensor_meta(captured, None)
         return node
