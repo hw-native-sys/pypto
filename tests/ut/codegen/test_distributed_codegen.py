@@ -12,7 +12,9 @@
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
+import torch
 from pypto import codegen, ir, passes
 
 
@@ -366,6 +368,59 @@ class TestDistributedCodegen:
         # Generated stub must be syntactically valid Python.
         compile(module, "<sample>", "exec")
 
+    def test_sub_worker_rejects_fp8e5m2_parameter(self):
+        """A HOST SubWorker cannot receive a byte-carried FP8E5M2 tensor.
+
+        The generated unpacking reads its torch dtype from the wire descriptor,
+        which names FP8E5M2 as UINT8, so the body would silently be handed byte
+        codes instead of float values. Emission must refuse rather than produce
+        a module that computes wrong numbers without erroring.
+        """
+        from pypto.backend.pto_backend import _emit_sub_worker_module  # noqa: PLC0415
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+            def observe(x: pl.Tensor[[64], pl.FP8E5M2]):
+                pass
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, x: pl.Tensor[[64], pl.FP8E5M2]) -> pl.Tensor[[64], pl.FP8E5M2]:
+                self.observe(x)
+                return x
+
+        observe_fn = Input.get_function("observe")
+        assert observe_fn is not None
+        with pytest.raises(NotImplementedError, match="FP8E5M2"):
+            _emit_sub_worker_module(observe_fn)
+
+    def test_sub_worker_accepts_packed_fp4_parameter(self):
+        """The FP8E5M2 refusal must not catch FP4E1M2X2, which crosses correctly.
+
+        Control for the guard above. FP4E1M2X2 is also named UINT8 on the wire,
+        but torch has no dtype for it at all, so UINT8 is its faithful host
+        representation rather than a lossy stand-in -- rejecting it would break
+        a path that works.
+        """
+        from pypto.backend.pto_backend import _emit_sub_worker_module  # noqa: PLC0415
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+            def observe(x: pl.Tensor[[64], pl.FP4E1M2X2]):
+                pass
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, x: pl.Tensor[[64], pl.FP4E1M2X2]) -> pl.Tensor[[64], pl.FP4E1M2X2]:
+                self.observe(x)
+                return x
+
+        observe_fn = Input.get_function("observe")
+        assert observe_fn is not None
+        module = _emit_sub_worker_module(observe_fn)
+        assert "_tensor_from_continuous" in module
+        compile(module, "<observe>", "exec")
+
     def test_abstract_sub_worker_survives_pto_serialization(self):
         """requires_runtime_binding round-trips through binary .pto serialization."""
 
@@ -427,6 +482,82 @@ class TestDistributedCodegen:
         assert "torch.float32" in code
         assert ".share_memory_()" in code
         assert "import torch" in code
+
+    @pytest.mark.parametrize(
+        ("dtype", "torch_name"),
+        [
+            (pl.FP8E4M3FN, "float8_e4m3fn"),
+            (pl.FP8E5M2, "float8_e5m2"),
+            (pl.FP8E8M0, "float8_e8m0fnu"),
+            (pl.FP4E2M1X2, "float4_e2m1fn_x2"),
+            # Torch has no hifloat8 / packed-E1M2 dtype, so both cross as the
+            # byte carrier holding the same bytes.
+            (pl.FP4E1M2X2, "uint8"),
+            (pl.HF8, "uint8"),
+        ],
+    )
+    # 32768 is ``at::internal::GRAIN_SIZE``. ``Tensor::zero_`` serves a buffer
+    # BELOW the grain with a serial memset and dispatches at or above it to the
+    # parallel ``fill_`` kernel, which torch does not implement on CPU for every
+    # low-precision dtype. Both sides of that boundary must be allocatable, so
+    # both are exercised -- 64 alone passed while FP4 at 32768 raised
+    # NotImplementedError: "fill_cpu" not implemented for 'Float4_e2m1fn_x2'.
+    @pytest.mark.parametrize("size", [64, 32768])
+    def test_create_tensor_low_precision_dtype_allocates_on_the_host(self, dtype, torch_name, size):
+        """A host tensor.create must emit an allocation that actually runs.
+
+        The emitted line is executed verbatim in the generated ``host_orch.py``,
+        so this evaluates it rather than pattern-matching it: an IR abbreviation
+        left untranslated (``torch.fp8e5m2``) raises AttributeError, and a dtype
+        with no CPU fill kernel raises NotImplementedError -- neither of which a
+        string assertion over the emitted text can observe.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
+            def chip_worker(
+                self,
+                a: pl.Tensor[[size], dtype],
+                buf: pl.Out[pl.Tensor[[size], dtype]],
+            ) -> pl.Tensor[[size], dtype]:
+                return a
+
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(
+                self,
+                a: pl.Tensor[[size], dtype],
+                buf: pl.Out[pl.Tensor[[size], dtype]],
+            ) -> pl.Tensor[[size], dtype]:
+                result: pl.Tensor[[size], dtype] = self.chip_worker(a, buf)
+                return result
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, a: pl.Tensor[[size], dtype]) -> pl.Tensor[[size], dtype]:
+                buf: pl.Tensor[[size], dtype] = pl.create_tensor([size], dtype=dtype)
+                result: pl.Tensor[[size], dtype] = self.chip_orch(a, buf)
+                return result
+
+        code = codegen.DistributedCodegen().generate(passes.convert_to_ssa()(Input))
+        create_lines = [line for line in code.splitlines() if "torch.zeros(" in line]
+        assert len(create_lines) == 1, create_lines
+        # The declared dtype must be named somewhere in the allocation -- either
+        # as the ``zeros`` dtype or as the dtype a byte allocation is viewed as.
+        assert f"torch.{torch_name}" in create_lines[0], create_lines[0]
+        # The IR abbreviation must not survive as a torch attribute name.
+        assert f"torch.{dtype.to_string()}" not in code or torch_name == dtype.to_string()
+
+        expected_dtype = getattr(torch, torch_name, None)
+        if expected_dtype is None:
+            pytest.skip(f"torch {torch.__version__} does not provide torch.{torch_name}")
+
+        # Run the emitted right-hand side exactly as ``host_orch.py`` would.
+        expr = create_lines[0].split("=", 1)[1].strip()
+        allocated = eval(expr, {"torch": torch})
+        assert allocated.dtype is expected_dtype, f"{expr} produced {allocated.dtype}"
+        assert tuple(allocated.shape) == (size,), f"{expr} produced shape {tuple(allocated.shape)}"
+        assert allocated.is_shared(), "host allocations must live in shared memory for the forked runtime"
+        assert not allocated.view(torch.uint8).any(), "host allocation must be zeroed"
 
     def test_create_tensor_shared_zeros_for_multiple_tensors(self):
         """Multiple tensor.create calls each emit torch.zeros(...).share_memory_()."""
@@ -780,4 +911,49 @@ def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INPUT, callables, "chip", 0\)', code)
     assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1\)', code)
     assert code.count(".add_scalar(") == 1
+    compile(code, "host_orch.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expected_enum"),
+    [
+        (pl.FP32, "DataType.FLOAT32"),
+        # Byte carriers: the pinned runtime enum has neither, so the window is
+        # described as UINT8 and the identical bytes cross. Before the mapping
+        # existed these aborted codegen with "Unsupported DistributedTensor
+        # dtype for simpler.DataType mapping".
+        (pl.FP8E5M2, "DataType.UINT8"),
+        (pl.FP4E1M2X2, "DataType.UINT8"),
+    ],
+)
+def test_distributed_window_dtype_reaches_simpler_enum(dtype, expected_enum):
+    """A window of a byte-carrier dtype must emit, not abort codegen.
+
+    ``DeduceWindowType`` accepts these dtypes, so a user can write the program;
+    ``DataTypeToSimplerEnum`` must therefore name them rather than CHECK-fail.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], dtype]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(256)
+            data = pld.window(buf, [256], dtype=dtype)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            return 0
+
+    program = passes.convert_to_ssa()(Program)
+    program = passes.derive_call_directions()(program)
+    program = passes.materialize_comm_domain_scopes()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    code = codegen.DistributedCodegen().generate(program)
+
+    window_lines = [line for line in code.splitlines() if ".tensor(shapes=" in line]
+    assert window_lines, code
+    assert all(expected_enum in line for line in window_lines), window_lines
     compile(code, "host_orch.py", "exec")

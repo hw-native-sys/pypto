@@ -2229,8 +2229,12 @@ jobs:
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
-    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # MX_A_ZZ / MX_B_NN), test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul), and test_fp8e5m2_transfer.py (the wire-level sibling:
+    # a host-prequantized FP8E5M2 tensor crossing the runtime's UINT8 byte
+    # carrier and compared bit-for-bit). All are `@pytest.mark.platforms("a5")`.
+    # Keep this enumeration in step with the `run:` target list below — they are
+    # two statements of the same fact and nothing checks that they agree.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2266,6 +2270,24 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # Two of this job's test steps run pytest with --forked:
+      # mixed-kernel-tests-a5 and mx-tests-a5. vf-tests-a5 and both
+      # extended-register steps are serial and do not fork. pytest-forked
+      # imports torch in the PARENT and then forks a child per test, so the
+      # child inherits an intraop threadpool whose state did not survive the
+      # fork (pytorch#17199). On this 384-core runner the symptom is a child
+      # that hangs with no verdict until --max-time kills the whole step at
+      # 3600 s, taking every later step in the job with it. Capping the
+      # parent's threadpool to one thread before Python starts is the fix that
+      # propagates across the fork; the same cap is set for the same reason on
+      # pypto-lib-compile. It belongs here in the job env rather than inline in
+      # a --run string, because task-submit starts the child from this
+      # environment -- which does mean the three non-forked steps also run with
+      # single-threaded OpenMP. That is accepted: their host-side torch work is
+      # setup and comparison rather than throughput, and scoping the variable
+      # per step would leave the fix one omission away from being lost the next
+      # time a forking step is added here.
+      OMP_NUM_THREADS: 1
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -2323,6 +2345,12 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # fp8e5m2_transfer is the wire-level sibling of those: a single harness
+        # case asserting that a host-prequantized FP8E5M2 tensor survives the
+        # runtime's UINT8 byte carrier bit-for-bit. It is
+        # here rather than in a directory-glob step because every such step runs
+        # at the default --platform=a2a3, which deselects its platforms("a5")
+        # marker; this is the only job that gives it a5 device coverage.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
@@ -2332,6 +2360,7 @@ jobs:
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp8e5m2_transfer.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5
