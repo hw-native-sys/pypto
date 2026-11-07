@@ -10,13 +10,15 @@
 
 """Pure validation of the internal v1 contract, independent of provider imports."""
 
+import hashlib
 import math
 import re
 from dataclasses import fields, is_dataclass
-from enum import Enum
 from pathlib import PurePosixPath
-from typing import cast
+from types import UnionType
+from typing import cast, get_args, get_origin
 
+from pypto.jit._artifact_manifest import MANIFEST_NAME
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
 
@@ -50,24 +52,32 @@ def _require(condition: bool, message: str) -> None:
         raise ContractError(message)
 
 
-def _immutable(value: object, path: str) -> None:
-    """Reject mutable nested values; frozen dataclasses alone are insufficient."""
-    if value is None or isinstance(value, (str, bool, int, Enum, DataType, TensorLayout)):
-        return
-    if isinstance(value, float):
-        _require(math.isfinite(value), f"{path}: non-finite values are unsupported")
-        return
-    if isinstance(value, (tuple, frozenset)):
-        for i, item in enumerate(cast(tuple[object, ...] | frozenset[object], value)):
-            _immutable(item, f"{path}[{i}]")
-        return
+def _immutable(value: object, path: str, expected: object) -> None:
+    """Validate the declared schema before semantic checks consume provider data.
+
+    Exact container and leaf types preserve ordering and keep non-JSON payload
+    bytes confined to SourceFile.content. Frozen records alone guarantee neither.
+    """
     if is_dataclass(value) and not isinstance(value, type):
         frozen = getattr(getattr(type(value), "__dataclass_params__"), "frozen")
         _require(frozen is True, f"{path}: expected immutable frozen record")
-        for field in fields(value):
-            _immutable(getattr(value, field.name), f"{path}.{field.name}")
+    origin = get_origin(expected)
+    arguments = get_args(expected)
+    if origin in (tuple, frozenset):
+        _require(type(value) is origin, f"{path}: expected immutable {origin.__name__}")
+        items = cast(tuple[object, ...] | frozenset[object], value)
+        repeated = origin is frozenset or arguments[-1] is Ellipsis
+        _require(repeated or len(items) == len(arguments), f"{path}: invalid tuple length")
+        for i, item in enumerate(items):
+            _immutable(item, f"{path}[{i}]", arguments[0] if repeated else arguments[i])
         return
-    raise ContractError(f"{path}: expected immutable contract data, got {type(value).__name__}")
+    allowed = arguments if origin is UnionType else (expected,)
+    _require(type(value) in allowed, f"{path}: expected immutable {expected!r}, got {type(value).__name__}")
+    if isinstance(value, float):
+        _require(math.isfinite(value), f"{path}: non-finite values are unsupported")
+    if is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            _immutable(getattr(value, field.name), f"{path}.{field.name}", field.type)
 
 
 def _version(value: int, context: str) -> None:
@@ -120,7 +130,7 @@ def _parameters(parameters: tuple[ParameterSpec, ...]) -> set[int]:
 
 def validate_request(request: KernelRequest) -> None:
     """Validate normalized signature and compile inputs before provider preparation."""
-    _immutable(request, "request")
+    _immutable(request, "request", KernelRequest)
     _version(request.schema_version, "request")
     _parameters(request.parameters)
     _require(
@@ -137,7 +147,7 @@ def validate_request(request: KernelRequest) -> None:
 
 def validate_contract(contract: KernelContract) -> None:
     """Reject missing effects, ambiguous writebacks and unsupported result kinds."""
-    _immutable(contract, "contract")
+    _immutable(contract, "contract", KernelContract)
     _version(contract.schema_version, "contract")
     tensors = _parameters(contract.parameters)
     unknown = contract.required_capabilities - SUPPORTED_CAPABILITIES
@@ -242,6 +252,32 @@ def _validate_abi(prepared: PreparedKernel) -> None:
         "ABI: every logical parameter needs one scalar, data-pointer or descriptor representation",
     )
 
+    # Allocation-base pointers cannot encode runtime view metadata themselves.
+    # Static constraints are already available to provider compilation; dynamic
+    # fields need physical slots unless a descriptor carries the complete view.
+    effects = {effect.parameter: effect.access for effect in prepared.contract.effects}
+    for i, parameter in enumerate(prepared.contract.parameters):
+        spec = parameter.type
+        if (
+            not isinstance(spec, TensorSpec)
+            or (i, ABIValue.DATA_POINTER, None) not in fields_seen
+            or effects[i] == Access.NONE
+        ):
+            continue
+        required: list[tuple[ABIValue, int | None]] = []
+        if spec.offset is None or isinstance(spec.offset, str):
+            required.append((ABIValue.OFFSET, None))
+        for axis, extent in enumerate(spec.shape):
+            if isinstance(extent, str):
+                required.append((ABIValue.DIMENSION, axis))
+            if not spec.strides or isinstance(spec.strides[axis], str):
+                required.append((ABIValue.STRIDE, axis))
+        for kind, axis in required:
+            _require(
+                (i, kind, axis) in fields_seen,
+                f"ABI parameter {i}: runtime-bound {kind.name} axis {axis} requires a physical field",
+            )
+
 
 def _bundle_path(path: str, *, directory: bool = False) -> None:
     value = PurePosixPath(path)
@@ -255,15 +291,30 @@ def _bundle_path(path: str, *, directory: bool = False) -> None:
         and (directory or path != "."),
         f"artifact: expected bundle-relative path, got {path!r}",
     )
+    # The store writes its completion marker at the bundle root. Neither a
+    # payload nor a directory may occupy that name when the bundle is published.
+    _require(
+        not value.parts or value.parts[0] != MANIFEST_NAME,
+        f"artifact: reserved manifest path {path!r}",
+    )
 
 
 def _digest(value: str, context: str) -> None:
     _require(re.fullmatch(r"[0-9a-f]{64}", value) is not None, f"{context}: expected lowercase SHA-256")
 
 
+def _require_bundle_directory(directory: PurePosixPath, files: set[str], context: str) -> None:
+    """Every component of a directory must be distinct from bundled file paths."""
+    for component in (directory, *directory.parents):
+        _require(
+            str(component) not in files,
+            f"artifact: {context} conflicts with bundled file {str(component)!r}",
+        )
+
+
 def validate_prepared(prepared: PreparedKernel) -> None:
     """Validate a provider result; bridge-specific ABI support is checked separately."""
-    _immutable(prepared, "prepared")
+    _immutable(prepared, "prepared", PreparedKernel)
     validate_request(prepared.request)
     validate_contract(prepared.contract)
     _require(
@@ -298,16 +349,26 @@ def validate_prepared(prepared: PreparedKernel) -> None:
         _require(file.path not in paths, f"artifact: duplicate file {file.path!r}")
         paths.add(file.path)
         _digest(file.sha256, f"artifact {file.path}")
+        _require(type(file.content) is bytes, f"artifact {file.path}: expected immutable bytes")
+        _require(
+            hashlib.sha256(file.content).hexdigest() == file.sha256,
+            f"artifact {file.path}: content does not match SHA-256",
+        )
+    # Check the complete set so file/directory conflicts are rejected in either
+    # enumeration order. A materializer cannot create a directory over a file.
+    for path in paths:
+        _require_bundle_directory(PurePosixPath(path).parent, paths, f"parent of {path!r}")
     _require(artifact.entry in paths, "artifact: entry must name a bundled file")
     _require(bool(artifact.symbol), "artifact: missing entry symbol")
     for directory in artifact.include_dirs:
         _bundle_path(directory, directory=True)
+        _require_bundle_directory(PurePosixPath(directory), paths, f"include directory {directory!r}")
     validate_identity(prepared.identity)
 
 
 def validate_identity(identity: PreparationIdentity) -> None:
     """Validate identity metadata without promising that dependencies are complete."""
-    _immutable(identity, "identity")
+    _immutable(identity, "identity", PreparationIdentity)
     _require(
         all((identity.provider, identity.provider_version, identity.adapter_version)),
         "identity: provider and adapter versions are required",

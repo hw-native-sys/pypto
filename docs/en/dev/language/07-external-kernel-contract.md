@@ -29,6 +29,13 @@ A scalar has an explicit `DataType`. Task IDs are not device scalar arguments.
 
 Records are frozen dataclasses containing immutable tuples/frozensets. The
 validators reject mutable nested inputs, duplicate names and non-finite constants.
+Tuple-declared fields require actual tuples, including ABI parameters, tensor
+dimensions, result bindings and include paths. An immutable set cannot substitute
+for an ordered tuple. Constant/option entries also require `(name, value)` tuples;
+capability sets remain unordered frozensets.
+Container members and scalar metadata must match their declared types too.
+Bytes are accepted only in `SourceFile.content`; malformed metadata fails with
+`ContractError` before semantic validation or digest serialization.
 Do not pass `SpecializeContext`, AST nodes, Python source expressions or actual
 data pointers to a provider as normalized signature data.
 
@@ -39,14 +46,26 @@ reference and returns `PreparedKernel`:
 | ----- | -------- |
 | `request` | Exact normalized input, including target/toolchain/options |
 | `contract` | Logical parameters, effects, public returns, writebacks, alias permissions |
-| `artifact` | Bundle-relative source/header paths and SHA-256 digests, entry, symbol, ordered include paths |
+| `artifact` | Owned source/header bytes, bundle-relative paths and SHA-256 digests, entry, symbol, ordered include paths |
 | `native_abi` | Independently versioned physical argument representation |
 | `execution` | Core members, lanes, launch requirements and completion guarantee |
 | `identity` | Provider/adapter versions, source/dependency digest and completeness promise |
 
-The source bundle describes content identity, not storage ownership. Existing
-artifact-store handles own materialized paths and lifetimes. Restore must verify
-actual bytes and path/symlink containment; metadata validation alone does not.
+Each `SourceFile.content` owns immutable `bytes`, retained for the lifetime of the
+bundle. Providers snapshot every source/header before returning, so
+`RuntimeBridge.lower()` can consume a `PreparedKernel` after provider temporary
+directories or cache leases are released. `ExternalTask.source` uses the same
+self-contained representation for bridge-generated output.
+
+`validate_prepared` checks each payload against its SHA-256 digest. The top-level
+`artifact_manifest.json` name is reserved for the existing artifact store and
+cannot be a payload or directory. Bridges materialize validated bytes into private
+directories and enforce path/symlink containment on disk. Persistent publication,
+restore and leases still use `ArtifactStore`; the bundle is not another cache.
+File paths cannot be ancestors of other files: a bundle containing both `include`
+and `include/header.h` is rejected regardless of enumeration order.
+An include directory and all its ancestors must also be distinct from bundled
+files; include directories may contain ordinary bundled headers.
 
 ## Public results and writebacks
 
@@ -126,6 +145,12 @@ byte size, byte alignment, optional tensor axis, and element/byte unit. Scalar b
 are copied without numeric conversion. Descriptor internals belong to the named
 ABI/version; validating a name is not proof that a bridge supports that layout.
 Data pointers denote allocation bases; apply view offsets exactly once.
+For an accessed tensor using `DATA_POINTER`, runtime-bound or symbolic offsets
+require an `OFFSET` field. Symbolic extents require `DIMENSION` fields, and
+unconstrained or symbolic strides require `STRIDE` fields for the corresponding
+axes. Fixed integer constraints are available during provider compilation.
+A supported descriptor ABI carries these values in its descriptor; unused
+(`Access.NONE`) pointers do not require view metadata slots.
 
 `ExecutionRequirements` declares AIC/AIV membership and AIV lane count. Standalone
 AIV uses one lane; mixed tasks may use one or two. Full residency requires a
@@ -141,6 +166,10 @@ must fail, never silently degrade to a plain call.
 semantic/execution capabilities. Requirements derived from actual effects and
 launch fields cannot be hidden by omitting a capability label. It does not prove
 per-invocation aliasing, dimensions, alignment or occupancy; the bridge must do so.
+Runtime-target fields follow the same exact schema checks as provider records.
+Supported ABI entries must be `(str, int)` tuples in a frozenset, with nonempty
+names and positive integer versions; booleans and floats cannot authorize an ABI
+through Python's numeric equality. Runtime name and version must be nonempty.
 
 ## Versions and cache identity
 
@@ -160,7 +189,8 @@ effective build options. Reuse `ArtifactStore` for locking, publication and leas
 
 `test_external_contract.py` covers two independent fake providers, result/writeback
 planning, immutable requests, diagnostics, ABI order/units, target capability gates
-and identity invalidation. `test_external_ir_semantics.py` checks normalized forms
+and identity invalidation, source handoff after provider directory cleanup, payload
+integrity and reserved manifest paths. `test_external_ir_semantics.py` checks normalized forms
 through round-trip serialization, the default pass pipeline and orchestration
 code generation: explicit public return plus hidden state writeback, inline,
 zero/multi-trip loops, branches, AIC/AIV/MIX and a view-to-root dependency.

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from pypto.jit.external.contracts import Access, CompileTarget, Coverage, PreparedKernel, SourceArtifact
-from pypto.jit.external.validation import ContractError, validate_prepared
+from pypto.jit.external.validation import ContractError, _immutable, validate_prepared
 
 
 @dataclass(frozen=True)
@@ -47,13 +47,28 @@ class ExternalTask:
 
 class RuntimeBridge(Protocol):
     def lower(self, prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
-        """Validate target/ABI capabilities and produce runtime-compatible source."""
+        """Validate target/ABI capabilities and produce runtime-compatible source.
+
+        Input and output bundles own their bytes; no provider working directory
+        or live cache lease is required. Materialize only validated content into
+        a private directory, enforcing path/symlink containment on disk.
+        """
         ...
 
 
 def validate_target(prepared: PreparedKernel, target: RuntimeTarget) -> None:
     """Reject incompatible ABI/launch requirements before generating a wrapper."""
     validate_prepared(prepared)
+    # Runtime metadata crosses the same untrusted boundary as provider records.
+    # In particular, Python equality must not let True or 1.0 authorize ABI 1.
+    _immutable(target, "target", RuntimeTarget)
+    if not target.runtime or not target.version:
+        raise ContractError("bridge: runtime name and version must be specified")
+    for name, version in target.supported_abis:
+        if not name or version <= 0:
+            raise ContractError(
+                f"bridge: runtime ABI needs a name and positive version, got {(name, version)!r}"
+            )
     if target.compile_target != prepared.request.target:
         raise ContractError("bridge: compile target differs from the prepared target")
     abi = prepared.native_abi

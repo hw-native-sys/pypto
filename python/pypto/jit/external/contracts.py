@@ -203,13 +203,21 @@ class ExecutionRequirements:
 
 @dataclass(frozen=True)
 class SourceFile:
+    """Owned immutable payload, independent of provider directories or cache leases."""
+
     path: str  # Bundle-relative path, including required headers.
     sha256: str
+    content: bytes
 
 
 @dataclass(frozen=True)
 class SourceArtifact:
-    """Content identity only; artifact-store handles own concrete paths/lifetimes."""
+    """Self-contained source bundle retained for the lifetime of this record.
+
+    Providers snapshot all source/header bytes before returning. Bridges can
+    materialize these bytes without a provider directory or artifact-store
+    lookup. Persistent publication still belongs to the existing artifact store.
+    """
 
     files: tuple[SourceFile, ...]
     entry: str

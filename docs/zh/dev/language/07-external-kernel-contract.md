@@ -24,6 +24,11 @@ stride 和 offset 以元素为单位；空 stride 元组表示未约束，不代
 scalar 必须声明 `DataType`；TaskId 不是设备 scalar 参数。
 
 记录使用冻结 dataclass 和不可变 tuple/frozenset。校验器拒绝嵌套可变值、重复名称和非有限常量。
+声明为 tuple 的字段必须使用实际 tuple，包括 ABI 参数、tensor 维度、结果绑定和 include 路径；
+不可变集合不能替代有序 tuple。常量和选项条目也必须使用 `(name, value)` tuple；
+capability 集合仍使用无序 frozenset。
+容器成员和标量元数据也必须符合声明类型。仅 `SourceFile.content` 接受 bytes；
+格式错误的元数据会在语义校验或摘要序列化前触发 `ContractError`。
 规范化签名不能携带 `SpecializeContext`、AST、Python 源码表达式或本次调用的数据地址。
 
 `ExternalKernelProvider.prepare(kernel, request)` 接受 provider 持有的不透明引用，返回 `PreparedKernel`：
@@ -32,13 +37,22 @@ scalar 必须声明 `DataType`；TaskId 不是设备 scalar 参数。
 | ---- | ---- |
 | `request` | 原始规范化输入，包含目标、工具链和选项 |
 | `contract` | 逻辑参数、效果、公开返回、写回和别名许可 |
-| `artifact` | bundle 相对路径、源码/头文件 SHA-256、入口、符号及有序 include 路径 |
+| `artifact` | 持有的源码/头文件字节、bundle 相对路径、SHA-256、入口、符号及有序 include 路径 |
 | `native_abi` | 独立版本化的物理参数表示 |
 | `execution` | 核成员、lane、启动要求及完成保证 |
 | `identity` | provider/adapter 版本、源码依赖摘要及完整性承诺 |
 
-源码 bundle 描述内容身份，不负责存储所有权。现有 artifact-store handle 持有实际路径和生命周期。
-恢复产物时仍须验证实际字节与路径/符号链接边界；元数据校验不能代替这些检查。
+每个 `SourceFile.content` 持有不可变 `bytes`，生命周期与 bundle 一致。Provider 在返回前对所有
+源码/头文件生成字节快照，因此即使 provider 临时目录已删除或缓存租约已释放，
+`RuntimeBridge.lower()` 仍可使用 `PreparedKernel`。`ExternalTask.source` 同样使用这一自包含表示
+保存 bridge 生成的源码。
+
+`validate_prepared` 检查每份内容是否与其 SHA-256 一致。顶层 `artifact_manifest.json` 名称由现有
+artifact store 保留，不得用于 payload 或目录。Bridge 将已校验字节写入私有目录，并在磁盘上检查
+路径/符号链接边界。持久化发布、恢复和租约仍复用 `ArtifactStore`；bundle 不是另一套缓存。
+文件路径不能是其他文件的祖先路径：同时包含 `include` 和 `include/header.h` 的 bundle 会被拒绝，
+与文件枚举顺序无关。
+include 目录及其所有祖先路径也不能与 bundle 中的文件重合；include 目录可以包含普通 bundle 头文件。
 
 ## 公开返回与写回
 
@@ -108,6 +122,10 @@ IR 原型复用 `external_return_params` 中对本函数参数的引用，以及
 每个 `ABIParameter` 包含逻辑参数索引、值种类、字节大小、字节对齐、可选 tensor 轴和元素/字节单位。
 scalar 按位复制，不做数值转换。descriptor 内部布局由 ABI 名称/版本定义；名称有效不代表 bridge 支持它。
 数据指针指向分配基址；view offset 只能应用一次。
+使用 `DATA_POINTER` 的被访问 tensor，其运行期绑定或符号 offset 必须有 `OFFSET` 字段；
+符号维度必须有对应轴的 `DIMENSION` 字段，未约束或符号 stride 必须有对应轴的 `STRIDE` 字段。
+固定整数约束可在 provider 编译时使用。受支持的 descriptor ABI 在 descriptor 中携带这些信息；
+未使用的指针（`Access.NONE`）不需要 view 元数据槽位。
 
 `ExecutionRequirements` 声明 AIC/AIV 成员和 AIV lane 数。独立 AIV 使用一个 lane，MIX 可以使用一个或两个。
 全核驻留要求同步启动；全核 MIX 要求两个 AIV lane。逻辑启动上下文必须显式声明，不能用物理核号替代。
@@ -117,6 +135,9 @@ bridge 必须在 runtime 标记任务完成前插入所需等待和 cache 操作
 
 `validate_target` 检查编译目标、ABI 名称/版本以及语义和执行能力。从实际效果和启动字段推导的要求，
 不能通过省略 capability 标签隐藏。它不证明每次调用的别名、维度、对齐和驻留情况；bridge 仍须检查。
+runtime target 字段与 provider 记录采用相同的严格类型校验。支持的 ABI 条目必须是 frozenset 中的
+`(str, int)` tuple，名称非空且版本为正整数；不能利用 Python 数值相等规则将 bool 或 float 当作
+有效 ABI 版本。runtime 名称和版本也必须非空。
 
 ## 版本与缓存身份
 
@@ -131,7 +152,8 @@ bridge 必须在 runtime 标记任务完成前插入所需等待和 cache 操作
 ## 验证证据与限制
 
 `test_external_contract.py` 覆盖两个独立 fake provider、返回/写回计划、不可变请求、诊断、ABI 顺序/单位、
-目标能力检查及身份失效。`test_external_ir_semantics.py` 对规范化形式执行往返序列化、默认 pass pipeline 和编排代码生成：
+目标能力检查、身份失效、provider 目录清理后的源码交接、内容完整性及保留 manifest 路径。
+`test_external_ir_semantics.py` 对规范化形式执行往返序列化、默认 pass pipeline 和编排代码生成：
 显式公开返回与隐藏状态写回、inline、零次/多次循环、分支、AIC/AIV/MIX，以及 view 写入到根读取的依赖。
 
 这些是 CPU 编译器检查，不能证明设备数值正确性、自动源码写回传播、重叠执行安全或完整 runtime 完成行为。

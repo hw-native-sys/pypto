@@ -18,11 +18,15 @@ from typing import cast
 
 from pypto.pypto_core import DataType
 
-from .contracts import KernelRequest, PreparationIdentity, PreparedKernel
+from .contracts import KernelRequest, PreparationIdentity, PreparedKernel, SourceFile
 from .validation import validate_identity, validate_prepared, validate_request
 
 
 def _encode(value: object) -> object:
+    if isinstance(value, SourceFile):
+        # validate_prepared verifies the owned bytes before hashing. Their
+        # digest captures content identity without serializing the payload again.
+        return {"path": value.path, "sha256": value.sha256}
     if isinstance(value, DataType):
         return {"dtype": value.to_string()}
     if isinstance(value, Enum):
