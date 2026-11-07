@@ -188,7 +188,8 @@ def conditional_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.
     with pl.simt_scope(dims=(32, 1, 1)):
         tid = pl.simt.thread_idx(pl.simt.Axis.X)
         if tid < 16:
-            n = tid
+            # Shape extents use INDEX; preserve the private binding's type.
+            n = pl.cast(tid, pl.INDEX)
         if n < 32:
             pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
     with pl.simt_scope(dims=(32, 1, 1)):
@@ -244,6 +245,32 @@ def test_conditional_shape_reassignment_keeps_scalar_assignments(local):
     offsets = store.value.args[1]
     assert isinstance(offsets, ast.Tuple)
     assert isinstance(offsets.elts[1], ast.Name) and offsets.elts[1].id == "n"
+
+
+@pl.jit.aiv
+def linear_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    # The fixed Tensor annotation supplies shape before JIT visits this body.
+    n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
+    with pl.simt_scope(dims=(32, 1, 1)):
+        n = pl.simt.thread_idx(pl.simt.Axis.X)
+        pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+    return dst
+
+
+def test_jit_private_reassignment_uses_thread_index():
+    lowered = linear_shape_rebind.specialize()
+    stores: list[ir.Call] = []
+
+    class Collector(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == "simt.store":
+                stores.append(op)
+
+    Collector().visit_program(lowered)
+    assert len(stores) == 1
+    offsets = stores[0].args[1]
+    assert isinstance(offsets, ir.MakeTuple)
+    assert isinstance(offsets.elements[1], ir.Var)
 
 
 if __name__ == "__main__":
