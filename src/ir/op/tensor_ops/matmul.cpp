@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -129,6 +130,11 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   CHECK(lhs_shape.size() >= 1) << "tensor.matmul requires lhs to have at least 1 dimension";
   CHECK(rhs_shape.size() >= 1) << "tensor.matmul requires rhs to have at least 1 dimension";
 
+  // Operand dtypes need not be identical: A5 multiplies the mixed FP8 orders.
+  // This also yields the accumulator the Cube produces for the pair.
+  const DataType accumulator =
+      ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, "tensor.matmul");
+
   // Read kwargs (with defaults)
   DataType out_dtype;
   bool out_dtype_requested = false;
@@ -136,9 +142,19 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     out_dtype = GetKwarg<DataType>(kwargs, "out_dtype");
     out_dtype_requested = true;
   } catch (const ValueError& e) {
-    auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-    CHECK(promoted) << "Cannot promote data types for tensor.matmul";
-    out_dtype = *promoted;
+    // A 1-byte float operand pair defaults to the accumulator, not to a promoted
+    // operand dtype: the unscaled FIXPIPE writeback cannot reproduce FP8 / HF8
+    // (CheckTensorMatmulOutDataType below rejects it when asked explicitly), and
+    // promotion of a mixed pair would additionally depend on operand order --
+    // E4M3FN for E4M3FN x E5M2 but E5M2 for the reverse. Wider operand pairs keep
+    // their historical promoted default.
+    if (backend::IsCubeFloat8Operand(lhs_type->dtype_) || backend::IsCubeFloat8Operand(rhs_type->dtype_)) {
+      out_dtype = accumulator;
+    } else {
+      auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
+      CHECK(promoted) << "Cannot promote data types for tensor.matmul";
+      out_dtype = *promoted;
+    }
   } catch (const TypeError& e) {
     throw TypeError("Invalid kwarg type for out_dtype: " + std::string(e.what()));
   }
@@ -344,10 +360,20 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires oriented 2D data and scale tensors";
   CHECK_SPAN(!lhs->dtype_.IsPackedFp4() && !rhs->dtype_.IsPackedFp4(), span)
       << kOpName
-      << " native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-         "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions";
-  CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
-      << kOpName << " requires FP8E4M3FN data tensors";
+      << " native packed FP4 matmul_mx is not supported; cast the packed FP4E2M1X2/FP4E1M2X2 operand "
+         "to FP8E4M3FN or FP8E5M2 with pl.cast first";
+  // The accepted data pairs come from the shared Cube operand table's kMx rows, the
+  // same source `tile.matmul_mx` reads (PTOAS v0.72 `isA5MxFp8InputType`, pto-isa
+  // `isSupportedFp8Combo`): FP8E4M3FN or FP8E5M2 per side, chosen independently. One
+  // table for both layers is what makes the Tensor surface accept exactly the pairs
+  // the Tile op it lowers to accepts -- each operand keeps its own dtype through the
+  // conversion, so a mixed pair is never coerced to a single format. HF8 is a Cube
+  // FP8 operand but not an MX one (kMatmul without kMx).
+  CHECK_SPAN(backend::FindCubeOperandPair(backend::CubeOpFamily::kMx, lhs->dtype_, rhs->dtype_) != nullptr,
+             span)
+      << kOpName << " requires one of the MX data pairs ("
+      << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kMx, "a5") << "), but got "
+      << lhs->dtype_.ToString() << " x " << rhs->dtype_.ToString();
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)
       << kOpName << " requires FP8E8M0 scale tensors";
   const auto lhs_layout =
@@ -418,9 +444,9 @@ REGISTER_OP("tensor.quant_mx")
 REGISTER_OP("tensor.matmul_mx")
     .set_op_category("TensorOp")
     .set_description("MXFP8 matrix multiplication of oriented data and scale tensors")
-    .add_argument("lhs", "Left FP8E4M3FN tensor [M, K]")
+    .add_argument("lhs", "Left FP8E4M3FN or FP8E5M2 tensor [M, K]")
     .add_argument("lhs_scale", "Left FP8E8M0 MX_A_ZZ scale tensor [M, K/32]")
-    .add_argument("rhs", "Right FP8E4M3FN tensor [K, N]")
+    .add_argument("rhs", "Right FP8E4M3FN or FP8E5M2 tensor [K, N]")
     .add_argument("rhs_scale", "Right FP8E8M0 MX_B_NN scale tensor [K/32, N]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -477,12 +503,9 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   CHECK(rhs_shape.size() >= 2) << "tensor.matmul_acc requires rhs to be at least 2D, but got "
                                << rhs_shape.size() << "D";
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "tensor.matmul_acc requires identical lhs and rhs dtypes, but got " << lhs_type->dtype_.ToString()
-      << " and " << rhs_type->dtype_.ToString();
-
-  auto result_dtype =
-      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
+  // Operand dtypes need not be identical: A5 multiplies the mixed FP8 orders.
+  // The shared check also answers which dtype the Cube accumulates them in.
+  auto result_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, "tensor.matmul_acc");
   CHECK(acc_type->dtype_ == result_dtype)
       << "tensor.matmul_acc requires accumulator dtype " << result_dtype.ToString() << ", but got "
       << acc_type->dtype_.ToString();

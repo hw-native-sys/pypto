@@ -14,6 +14,16 @@ import pytest
 from pypto import ir
 from pypto.pypto_core import DataType
 
+# A5 MX picks its operand format per side, so the Tile and the Tensor op both
+# accept these four pairs (PTOAS v0.72 isA5MxFp8InputType, pto-isa
+# isSupportedFp8Combo).
+_MX_FP8_PAIRS = [
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
 
 class TestMxLoad:
     def test_mx_layout_sets_fractal(self):
@@ -111,29 +121,87 @@ class TestDtypeAndMemorySpace:
 
 
 class TestTensorMatmulMx:
-    def test_tensor_matmul_mx_requires_oriented_scale_layouts(self):
+    @staticmethod
+    def _mx_tensors(*, m=16, k=64, n=32, lhs_dtype=pl.FP8E4M3FN, rhs_dtype=pl.FP8E4M3FN):
+        """Build a valid oriented Tensor MX operand set for ``[m, k] x [k, n]``."""
         span = ir.Span.unknown()
-        lhs = ir.Var("lhs", ir.TensorType([16, 64], pl.FP8E4M3FN), span)
+        groups = k // 32
+        lhs = ir.Var("lhs", ir.TensorType([m, k], lhs_dtype), span)
         lhs_scale = ir.Var(
             "lhs_scale",
-            ir.TensorType([16, 2], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_A_ZZ)),
+            ir.TensorType([m, groups], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_A_ZZ)),
             span,
         )
-        rhs = ir.Var("rhs", ir.TensorType([64, 32], pl.FP8E4M3FN), span)
+        rhs = ir.Var("rhs", ir.TensorType([k, n], rhs_dtype), span)
         rhs_scale = ir.Var(
             "rhs_scale",
-            ir.TensorType([2, 32], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_B_NN)),
+            ir.TensorType([groups, n], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_B_NN)),
             span,
         )
+        return lhs, lhs_scale, rhs, rhs_scale
+
+    def test_tensor_matmul_mx_requires_oriented_scale_layouts(self):
+        lhs, lhs_scale, rhs, rhs_scale = self._mx_tensors()
 
         call = ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
         assert isinstance(call.type, ir.TensorType)
         assert call.type.dtype == pl.FP32
         assert tuple(dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)) == (16, 32)
 
+        span = ir.Span.unknown()
         bad_scale = ir.Var("bad_scale", ir.TensorType([16, 2], pl.FP8E8M0), span)
         with pytest.raises(ValueError, match="lhs_scale layout MX_A_ZZ"):
             ir.op.tensor.matmul_mx(lhs, bad_scale, rhs, rhs_scale)
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_every_fp8_pair_deduces_an_fp32_result(self, lhs_dtype, rhs_dtype):
+        """The Tensor op accepts the same four pairs as the Tile op it lowers to.
+
+        Multi-block on every axis: M spans two 16-row Cube blocks, N three 32-column
+        ones, and K four 64-element blocks (eight MX scale groups), so a per-pair
+        regression cannot hide behind a single-block shape.
+        """
+        operands = self._mx_tensors(m=32, k=256, n=96, lhs_dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        call = ir.op.tensor.matmul_mx(*operands)
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == pl.FP32
+        assert _extents(call.type) == [32, 96]
+        # The operands keep their declared dtypes -- nothing coerces one side.
+        assert _shaped(operands[0].type).dtype == lhs_dtype
+        assert _shaped(operands[2].type).dtype == rhs_dtype
+
+    @pytest.mark.parametrize(
+        ("lhs_dtype", "rhs_dtype"),
+        [
+            # HF8 is an A5 Cube FP8 operand, but PTOAS gates MX through
+            # isA5MxFp8InputType, which excludes HiF8 -- so it stays rejected here.
+            pytest.param(DataType.HF8, DataType.HF8, id="hf8-x-hf8"),
+            pytest.param(DataType.HF8, DataType.FP8E5M2, id="hf8-x-e5m2"),
+            pytest.param(DataType.FP8E5M2, DataType.HF8, id="e5m2-x-hf8"),
+            pytest.param(DataType.BF16, DataType.BF16, id="bf16-x-bf16"),
+            pytest.param(DataType.FP16, DataType.FP16, id="fp16-x-fp16"),
+            pytest.param(DataType.INT8, DataType.INT8, id="int8-x-int8"),
+            pytest.param(DataType.FP8E5M2, DataType.BF16, id="e5m2-x-bf16"),
+        ],
+    )
+    def test_rejects_pairs_outside_the_mx_table(self, lhs_dtype, rhs_dtype):
+        operands = self._mx_tensors(lhs_dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        with pytest.raises(ValueError, match=r"requires one of the MX data pairs") as exc_info:
+            ir.op.tensor.matmul_mx(*operands)
+        # The diagnostic names the four accepted pairs and the rejected one.
+        message = str(exc_info.value)
+        assert "fp8e4m3fn x fp8e5m2" in message
+        assert f"but got {lhs_dtype.to_string()} x {rhs_dtype.to_string()}" in message
+
+    @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
+    @pytest.mark.parametrize("side", ["lhs", "rhs"])
+    def test_rejects_native_packed_fp4_with_a_cast_hint(self, side, dtype):
+        """Native packed FP4 x FP4 is unsupported; the lhs must be cast to FP8 first."""
+        lhs_dtype = dtype if side == "lhs" else pl.FP8E5M2
+        rhs_dtype = dtype if side == "rhs" else pl.FP8E5M2
+        operands = self._mx_tensors(lhs_dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        with pytest.raises(ValueError, match=r"native packed FP4 matmul_mx is not supported.*pl\.cast"):
+            ir.op.tensor.matmul_mx(*operands)
 
 
 class TestPackedFp4Shape:
@@ -159,6 +227,38 @@ def _tile(name, shape, dtype, *, valid_shape=None, memory=None):
     if valid_shape is not None:
         view = ir.TileView(valid_shape=valid_shape, stride=[])
     return ir.Var(name, ir.TileType(shape, dtype, tile_view=view, memory_space=memory), span)
+
+
+def _shaped(op_type: ir.Type) -> ir.ShapedType:
+    """Narrow a deduced result type to its shaped form.
+
+    ``Call.type`` / ``Var.type`` are statically ``Type``, which carries no
+    ``shape`` / ``dtype`` / ``memory_space``; every operand and result asserted
+    on below deduces a Tensor or Tile type, and the assert says so.
+    """
+    assert isinstance(op_type, ir.ShapedType), f"expected a ShapedType, got {type(op_type).__name__}"
+    return op_type
+
+
+def _extents(op_type: ir.Type) -> list[int]:
+    """The static extents of a deduced shaped type."""
+    dims: list[int] = []
+    for dim in _shaped(op_type).shape:
+        assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
+        dims.append(dim.value)
+    return dims
+
+
+def _as_tile_type(op_type: ir.Type) -> ir.TileType:
+    """Narrow an operand / result type to ``TileType``.
+
+    ``Call.type`` is statically ``Type``; every tile op asserted on below deduces
+    a tile, and the assert is itself part of what the caller checks -- narrowing
+    only to ``ShapedType`` would silence the type checker while dropping the
+    check that a *tile* op did not hand back a Tensor type.
+    """
+    assert isinstance(op_type, ir.TileType), f"expected a TileType, got {type(op_type).__name__}"
+    return op_type
 
 
 class TestMatmulMxRegistry:
@@ -187,12 +287,16 @@ class TestMatmulMxRegistry:
 
 class TestMatmulMxTypes:
     @staticmethod
-    def _mx_operands(span, *, m=16, k=64, n=32, valid=None, dtype=DataType.FP8E4M3FN):
-        """Build a valid MX operand set; optional valid=(m_v, k_v, n_v)."""
+    def _mx_operands(span, *, m=16, k=64, n=32, valid=None, dtype=DataType.FP8E4M3FN, rhs_dtype=None):
+        """Build a valid MX operand set; optional valid=(m_v, k_v, n_v).
+
+        ``dtype`` is the lhs data dtype and, unless ``rhs_dtype`` is given, the rhs one too.
+        """
+        rhs_dtype = dtype if rhs_dtype is None else rhs_dtype
         if valid is None:
             lhs = ir.Var("lhs", ir.TileType([m, k], dtype), span)
             lhs_scale = ir.Var("lhs_scale", ir.TileType([m, k // 32], DataType.FP8E8M0), span)
-            rhs = ir.Var("rhs", ir.TileType([k, n], dtype), span)
+            rhs = ir.Var("rhs", ir.TileType([k, n], rhs_dtype), span)
             rhs_scale = ir.Var("rhs_scale", ir.TileType([k // 32, n], DataType.FP8E8M0), span)
             return lhs, lhs_scale, rhs, rhs_scale
         m_v, k_v, n_v = valid
@@ -200,7 +304,7 @@ class TestMatmulMxTypes:
         sk_v = (k_v + 31) // 32
         lhs = _tile("lhs", [m, k], dtype, valid_shape=[m_v, k_v])
         lhs_scale = _tile("lhs_scale", [m, sk], DataType.FP8E8M0, valid_shape=[m_v, sk_v])
-        rhs = _tile("rhs", [k, n], dtype, valid_shape=[k_v, n_v])
+        rhs = _tile("rhs", [k, n], rhs_dtype, valid_shape=[k_v, n_v])
         rhs_scale = _tile("rhs_scale", [sk, n], DataType.FP8E8M0, valid_shape=[sk_v, n_v])
         return lhs, lhs_scale, rhs, rhs_scale
 
@@ -223,6 +327,51 @@ class TestMatmulMxTypes:
         bias_call = ir.op.tile.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, span)
         assert bias_call.op.name == ir.get_op("tile.matmul_mx_bias").name
 
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_accepts_every_fp8_pair_for_all_variants(self, lhs_dtype, rhs_dtype):
+        """E4M3/E5M2 data is accepted independently per side; output, acc and bias stay FP32."""
+        span = ir.Span.unknown()
+        operands = self._mx_operands(span, m=32, k=128, n=96, dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        base_type = _as_tile_type(ir.op.tile.matmul_mx(*operands, span).type)
+        assert base_type.dtype == DataType.FP32
+        assert _extents(base_type) == [32, 96]
+
+        acc = ir.Var("acc", ir.TileType([32, 96], DataType.FP32), span)
+        acc_type = _as_tile_type(ir.op.tile.matmul_mx_acc(acc, *operands, span).type)
+        assert acc_type.dtype == DataType.FP32
+
+        bias = ir.Var("bias", ir.TileType([1, 96], DataType.FP32), span)
+        bias_type = _as_tile_type(ir.op.tile.matmul_mx_bias(*operands, bias, span).type)
+        assert bias_type.dtype == DataType.FP32
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_fp8_pairs_keep_valid_k_and_scale_group_contract(self, lhs_dtype, rhs_dtype):
+        """Mixed pairs use the same physical/valid K and ceil(K/32) group checks."""
+        span = ir.Span.unknown()
+        operands = self._mx_operands(
+            span, m=32, k=128, n=64, valid=(32, 112, 64), dtype=lhs_dtype, rhs_dtype=rhs_dtype
+        )
+        call = ir.op.tile.matmul_mx(*operands, span)
+        assert isinstance(call.type, ir.TileType)
+        with pytest.raises(ValueError, match="same scale-group count as physical K"):
+            ir.op.tile.matmul_mx(
+                *self._mx_operands(
+                    span, m=32, k=128, n=64, valid=(32, 96, 64), dtype=lhs_dtype, rhs_dtype=rhs_dtype
+                ),
+                span,
+            )
+
+    @pytest.mark.parametrize("bad", [DataType.HF8, DataType.BF16, DataType.FP16, DataType.INT8])
+    @pytest.mark.parametrize("side", ["lhs", "rhs"])
+    def test_rejects_non_mx_fp8_data(self, bad, side):
+        span = ir.Span.unknown()
+        lhs_dtype = bad if side == "lhs" else DataType.FP8E5M2
+        rhs_dtype = bad if side == "rhs" else DataType.FP8E5M2
+        operands = self._mx_operands(span, n=64, dtype=lhs_dtype, rhs_dtype=rhs_dtype)
+        with pytest.raises(ValueError, match=rf"requires {side} dtype FP8E4M3FN or FP8E5M2") as exc_info:
+            ir.op.tile.matmul_mx(*operands, span)
+        assert "native packed FP4" not in str(exc_info.value)
+
     def test_rejects_reused_scale_between_operands(self):
         """A/B scales require distinct operand tiles and layouts."""
         span = ir.Span.unknown()
@@ -235,32 +384,27 @@ class TestMatmulMxTypes:
     def test_rejects_native_mxfp4_and_requires_cast(self, dtype):
         span = ir.Span.unknown()
         fp4_operands = self._mx_operands(span, n=64, dtype=dtype)
-        with pytest.raises(ValueError, match=r"requires lhs dtype FP8E4M3FN.*PTOAS v0.67.*pl.cast"):
+        expected = r"requires lhs dtype FP8E4M3FN or FP8E5M2.*native packed FP4.*pl.cast"
+        with pytest.raises(ValueError, match=expected):
             ir.op.tile.matmul_mx(*fp4_operands, span)
 
         lhs, lhs_scale, _, _ = self._mx_operands(span, n=64)
         _, _, rhs_fp4, rhs_scale = self._mx_operands(span, n=64, dtype=dtype)
-        with pytest.raises(ValueError, match=r"requires rhs dtype FP8E4M3FN.*PTOAS v0.67.*pl.cast"):
+        expected = r"requires rhs dtype FP8E4M3FN or FP8E5M2.*native packed FP4.*pl.cast"
+        with pytest.raises(ValueError, match=expected):
             ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp4, rhs_scale, span)
 
     def test_rejects_wrong_dtypes_and_alignment(self):
         span = ir.Span.unknown()
-        # data must be FP8E4M3FN
-        with pytest.raises(ValueError, match="requires lhs dtype FP8E4M3FN") as exc_info:
+        # data must be an MX FP8 dtype (HF8 is an FP8 format PTOAS excludes from MX)
+        with pytest.raises(ValueError, match="requires lhs dtype FP8E4M3FN or FP8E5M2"):
             ir.op.tile.matmul_mx(
-                ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E5M2), span),
+                ir.Var("lhs", ir.TileType([16, 64], DataType.HF8), span),
                 ir.Var("ls", ir.TileType([16, 2], DataType.FP8E8M0), span),
                 ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span),
                 ir.Var("rs", ir.TileType([2, 32], DataType.FP8E8M0), span),
                 span,
             )
-        assert "native FP4" not in str(exc_info.value)
-
-        lhs, lhs_scale, _, rhs_scale = self._mx_operands(span)
-        rhs_fp8e5m2 = ir.Var("rhs", ir.TileType([64, 32], DataType.FP8E5M2), span)
-        with pytest.raises(ValueError, match="requires rhs dtype FP8E4M3FN") as exc_info:
-            ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp8e5m2, rhs_scale, span)
-        assert "native FP4" not in str(exc_info.value)
 
         # scale must be FP8E8M0
         lhs, _, rhs, rhs_scale = self._mx_operands(span)
@@ -275,6 +419,8 @@ class TestMatmulMxTypes:
             ir.op.tile.matmul_mx(*self._mx_operands(span, k=96), span)
         with pytest.raises(ValueError, match=r"physical N divisible by 32 for fp8e4m3fn"):
             ir.op.tile.matmul_mx(*self._mx_operands(span, n=16), span)
+        with pytest.raises(ValueError, match=r"physical N divisible by 32 for fp8e5m2"):
+            ir.op.tile.matmul_mx(*self._mx_operands(span, n=16, rhs_dtype=DataType.FP8E5M2), span)
 
     @pytest.mark.parametrize(
         ("rhs_k", "rhs_scale_groups", "error"),
@@ -420,7 +566,7 @@ class TestTGetScaleAddr:
         assert call_type.memory_space == ir.MemorySpace.RightScale
 
         fp4_src = _tile("fp4_rb", [64, 32], DataType.FP4E2M1X2, memory=ir.MemorySpace.Right)
-        with pytest.raises(ValueError, match="requires src dtype FP8E4M3FN"):
+        with pytest.raises(ValueError, match="requires src dtype FP8E4M3FN or FP8E5M2"):
             ir.op.tile.tget_scale_addr(dst, fp4_src, span)
 
         with pytest.raises(ValueError, match="LeftScale↔Left|RightScale↔Right"):
@@ -435,7 +581,7 @@ class TestTGetScaleAddr:
                 _tile("la", [16, 64], DataType.FP8E4M3FN, memory=ir.MemorySpace.Left),
                 span,
             )
-        with pytest.raises(ValueError, match="requires src dtype FP8E4M3FN"):
+        with pytest.raises(ValueError, match="requires src dtype FP8E4M3FN or FP8E5M2"):
             ir.op.tile.tget_scale_addr(
                 _tile("las", [16, 2], DataType.FP8E8M0, memory=ir.MemorySpace.LeftScale),
                 _tile("la", [16, 64], DataType.FP16, memory=ir.MemorySpace.Left),
@@ -447,6 +593,22 @@ class TestTGetScaleAddr:
                 _tile("la", [16, 64], DataType.FP8E4M3FN, memory=ir.MemorySpace.Left),
                 span,
             )
+
+    @pytest.mark.parametrize("dtype", [DataType.FP8E4M3FN, DataType.FP8E5M2])
+    def test_accepts_fp8_sources_on_both_sides(self, dtype):
+        span = ir.Span.unknown()
+        left = ir.op.tile.tget_scale_addr(
+            _tile("las", [16, 2], DataType.FP8E8M0, memory=ir.MemorySpace.LeftScale),
+            _tile("la", [16, 64], dtype, memory=ir.MemorySpace.Left),
+            span,
+        )
+        assert _as_tile_type(left.type).memory_space == ir.MemorySpace.LeftScale
+        right = ir.op.tile.tget_scale_addr(
+            _tile("rbs", [2, 32], DataType.FP8E8M0, memory=ir.MemorySpace.RightScale),
+            _tile("rb", [64, 32], dtype, memory=ir.MemorySpace.Right),
+            span,
+        )
+        assert _as_tile_type(right.type).memory_space == ir.MemorySpace.RightScale
 
     def test_requires_resolved_memory_spaces(self):
         span = ir.Span.unknown()

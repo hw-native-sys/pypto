@@ -121,6 +121,42 @@ launch. `close()` releases the registrations and any `DeviceTensor` the caller f
 | **Freed explicitly** | `w.free_tensor(t)`; `close()` auto-frees as a backstop, not as the plan |
 | **Bound to its worker** | It is not portable to another `ChipWorker` |
 
+### Host tensor dtypes and the FP8E5M2 byte carrier
+
+A host `torch.Tensor` argument is named on the wire by its dtype, so the pinned runtime
+must have a `DataType` for it. It has one for every ordinary dtype and for the MX formats
+`float8_e4m3fn`, `float8_e8m0fnu` and `float4_e2m1fn_x2` — but **not** for
+`float8_e5m2`, which the runtime omits on purpose because its MX paths were specified
+around E4M3FN plus the E8M0 scale.
+
+PyPTO carries such a tensor across as raw bytes rather than refusing it, so E5M2 data a
+framework already holds can be transferred, stored and copied without a host-side
+conversion:
+
+| What you pass | What crosses the wire | What the kernel sees |
+| ------------- | --------------------- | -------------------- |
+| `torch.float8_e5m2` host tensor | a zero-copy `view(torch.uint8)`, named `DataType::UINT8` | `pl.FP8E5M2` |
+| `float8_e5m2` `DeviceTensor` | wire descriptor names `DataType::UINT8` | `pl.FP8E5M2` |
+| A runtime-allocated E5M2 output | `TensorCreateInfo` names `DataType::UINT8` | `pl.FP8E5M2` |
+
+The carrier is a naming substitution only: it is the same byte count and the same bytes,
+so nothing reinterprets the data and the kernel signature keeps `pl.FP8E5M2`. Quantize on
+the host (torch) and pass the result straight in; outputs come back as the dtype your
+kernel declared. `pl.FP4E1M2X2` crosses the same way, since torch cannot name it either.
+(`pl.HF8` does not: it has no runtime `DataType` arm at all, so a runtime-allocated
+HF8 tensor is named `DataType::UNKNOWN` rather than carried as bytes.)
+
+You do not opt in, and there is nothing to configure. The one visible consequence is that
+an E5M2 tensor is described as UINT8 in runtime-level logs and descriptors.
+
+The carrier is about **transfer and storage only — it does not widen any operator**. What
+an operator accepts is decided separately, during IR construction, and is unaffected by
+how the bytes crossed. On A5 the MX matmul family — `tile.matmul_mx`,
+`tile.matmul_mx_acc`, `tile.matmul_mx_bias` and `tensor.matmul_mx` — accepts `pl.FP8E4M3FN`
+or `pl.FP8E5M2` for each data operand, chosen independently, so a mixed pair is legal and
+each operand keeps its own dtype; native packed FP4 operands are still rejected, and must
+be cast to one of the two FP8 formats first.
+
 ### `RunConfig` fields that affect dispatch
 
 `RunConfig` carries both compile-side and runtime-side settings; the compile-side ones are

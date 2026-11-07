@@ -2166,10 +2166,12 @@ jobs:
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Three steps share one checkout / install:
+    # npu-a5 card. Four steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
     #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
-    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
+    #   3. tensor-mx-tests-a5    — the Tensor surface of matmul_mx, in its own
+    #                              session (see that step for why)
+    #   4. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2229,8 +2231,22 @@ jobs:
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
-    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # MX_A_ZZ / MX_B_NN), test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul), test_fp8e5m2_transfer.py (the runtime's UINT8 byte
+    # carrier for FP8E5M2), and test_matmul_fp8_mixed.py (ordinary tmatmul /
+    # .acc / .bias over the A5 FP8 operand pairs, both mixed orders, plus the
+    # A @ I decode case and a valid-K tail). All are
+    # `@pytest.mark.platforms("a5")` — this job is the only one giving them
+    # device coverage, so a file absent from the list below is never re-run.
+    # The Tensor surface of matmul_mx is NOT here — it is tensor-mx-tests-a5.
+    #
+    # --- tensor-mx-tests-a5 ---
+    # Scope — tests/st/runtime/ops/test_matmul_mx_tensor_a5.py: `pl.matmul_mx` on
+    # GM tensors over the four FP8 pairs, each case running the Tensor and Tile
+    # surfaces in one kernel over byte-identical operands and comparing both on
+    # raw FP32 words. It shares its operand generator with test_matmul_mx.py via
+    # the non-collected `_matmul_mx_data.py`, so the split into two sessions
+    # cannot turn into two drifting copies of the data.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2266,6 +2282,55 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # Three of this job's steps run pytest with --forked, which forks one
+      # child per test while module import has already happened in the pytest
+      # PARENT. torch's intraop thread pool does not survive that fork: a child
+      # inheriting a pool whose threads do not exist deadlocks, or faults, on
+      # its own first torch work (pytorch#17199). Pinning the pool to one
+      # thread removes the pool, and costs nothing here -- a post-fork child
+      # gets no parallelism either way, and every host-side golden in this job
+      # is small. pypto-lib-compile carries the same cap in its own job env for
+      # the same reason.
+      #
+      # Bisected card-free on an a5 host, one variable per leg, 5-20 forks per
+      # leg, on torch 2.14.1 with a default intraop thread count of 384. The
+      # repro does NOT go through pytest -- it forks with multiprocessing's
+      # 'fork' context, the mechanism pytest_forked 1.7.5 itself uses (its
+      # frames appear in the SIGSEGV traceback as forked_run -> Process.start
+      # -> popen_fork._launch). Result: the fault needs a parent-side op that
+      # opens a torch parallel region PLUS real torch work in the child, and
+      # `1` removes it from every leg that showed it. Every leg was
+      # deterministic; nothing here was intermittent.
+      #
+      # Do NOT turn that into a size screen -- "this parent-side work is small
+      # enough to be harmless" is not sound. For a mul the threshold looks like
+      # a size (1024 elements never triggered it, 98304 always did), but a
+      # later card-free repro armed the fault with an advanced-indexing gather
+      # over 16,384 elements -- BELOW ATen's 32,768 grain size -- while
+      # torch.randint over the same 16,384 did not. Which kernel opens a
+      # parallel region in the parent is what decides, not how big its input is.
+      #
+      # `1` is also the value the runtime already asks for: Worker startup does
+      # `setenv("OMP_NUM_THREADS", "1", 0)` (and the OPENBLAS / MKL / BLIS
+      # equivalents) in runtime/src/common/hierarchical/worker.cpp, with
+      # overwrite=0, so this job env agrees with it rather than overriding it.
+      #
+      # Job-wide rather than per-step because every unexplained failure this job
+      # has had -- the two mx/tensor-mx hangs described below and the four-case
+      # SIGSEGV in _matmul_mx_golden on 2026-11-06 -- landed on a --forked step
+      # with this variable unset, and the three --forked steps share the cause.
+      # Those steps also export it inside their `task-submit --run` strings so
+      # the requirement is visible at the point of use; this job env is what
+      # carries it (task-submit snapshots the submitter's environment with
+      # `env -0` under a blacklist that does not include OMP_NUM_THREADS, and
+      # task-daemon loads that snapshot into the payload env).
+      #
+      # What the bisection does NOT cover: it ran without a card, without
+      # pytest, and on a different torch build from the runner's, so it
+      # establishes the trigger and that `1` removes it -- not that the runner
+      # reproduces the HANG flavour rather than the SIGSEGV one. The first green
+      # run of the three --forked steps is what confirms the fix end to end.
+      OMP_NUM_THREADS: 1
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -2305,12 +2370,15 @@ jobs:
         # matmul cases verify entry initialization after deliberately enabling HF32.
         # The rsqrt cases check both API entries against a FP64 ULP reference.
         # --forked isolates each case's device init, as the daily a5 job does.
+        # OMP_NUM_THREADS is re-exported here only so the --forked requirement
+        # is readable at the point of use; the job env above is what carries it.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              export OMP_NUM_THREADS=1 && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               tests/st/runtime/ops/test_rsqrt.py::test_a5_rsqrt_precision_ulp \
@@ -2323,15 +2391,128 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # fp8e5m2_transfer is the wire-level sibling of those: one harness case
+        # asserting that a host-prequantized FP8E5M2 tensor survives the
+        # runtime's UINT8 byte carrier bit-for-bit. matmul_fp8_mixed covers the
+        # ordinary (non-MX) FP8 operand pairs: 10 harness cases over both mixed
+        # orders. Both are here rather than in a directory-glob step because
+        # every such step runs at the default --platform=a2a3, which deselects
+        # their platforms("a5") marker; this is the only job that gives them a5
+        # device coverage.
+        #
+        # Device budget: --max-time 3600 caps device execution for the whole
+        # step. No total is recorded here on purpose -- every sibling branch
+        # that gates another file restales it. Measure instead:
+        # `pytest <the files below> --collect-only -q --platform=a5`.
+        # All of these are harness-based (`PTOTestCase` + `test_runner`), which
+        # shares one Worker rather than initialising the device per case: the
+        # MX/quant files measured ~38 s for 16 cases together, and the 10
+        # matmul_fp8_mixed cases ~190 s on an idle card (65 s in CI, warm).
+        # A case that drives a `compiled()` program directly instead pays device
+        # init in its own `--forked` child at ~150-175 s *each*, and one fully
+        # parametrised direct-pattern addition has already overrun this cap
+        # (3602 s, killed, no assertions reported). So: whole-file targets are
+        # safe for harness suites; add a direct-pattern case as one or two
+        # explicit node IDs and record its cost here. Never narrow an existing
+        # whole-file line into node IDs -- that silently drops every case in the
+        # file it does not enumerate while looking like a fix.
+        # OMP_NUM_THREADS as in mixed-kernel-tests-a5: this step is --forked too.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
           task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
-            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              export OMP_NUM_THREADS=1 && python -m pytest \
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp8e5m2_transfer.py \
+              tests/st/runtime/ops/test_matmul_fp8_mixed.py \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: tensor-mx-tests-a5
+        # The Tensor-surface matmul_mx ST runs in its OWN task-submit session,
+        # deliberately NOT appended to mx-tests-a5 above, and its cases live in
+        # their own module for the same reason.
+        #
+        # Adding cases to mx-tests-a5's session made its *first* test hang:
+        # pytest collected the items and then printed nothing for the full
+        # --max-time cap, never reaching the `[DEVICE] ... -> device 0`
+        # assignment line, so the task queue killed the step and every later
+        # step in this job was skipped with it. Two other changes hit the same
+        # signature the same day by appending a *file* to a step.
+        #
+        # The mechanism IS now understood, and the job-level `OMP_NUM_THREADS: 1`
+        # above is the fix -- see that env block for it; it is not repeated
+        # here. What is specific to THIS step: this module builds all four
+        # cases' operands while it is being imported --
+        # `st.cases(*[st.case(tensors=_tensor_case_tensors(...))])` evaluates
+        # the generator at decoration time, i.e. in the pytest parent -- which
+        # is exactly the parent-side parallel region the fault needs.
+        # test_matmul_mx.py builds its operands inside each test, i.e. in the
+        # child, which is why that step stays green on byte-identical data from
+        # the same generator in _matmul_mx_data.py. Measured: the two surfaces
+        # feed _matmul_mx_golden identical shapes and dtypes ((32,256) / (32,8)
+        # / (256,96) / (8,96), k_valid=256), so operand size is NOT the
+        # difference -- only where the operands are built is.
+        #
+        # Ruled out, so nobody re-derives them:
+        #   - *harness style*. `st.case` vs `PTOTestCase` is irrelevant:
+        #     test_quant_mx.py mixes both inside mx-tests-a5 itself, and
+        #     test_cross_core.py mixes them in mixed-kernel-tests-a5. Both pass.
+        #   - *case count*. mixed-kernel-tests-a5 passes with 167 collected
+        #     while mx-tests-a5 hung with 20 -- that 20 was the merged session
+        #     (this step's 16 at the time, plus these 4 appended), not any
+        #     composition the file list produces today.
+        #   - *adding cases to an already-selected file*. The tile MX change
+        #     added three cases to test_matmul_mx.py, which mx-tests-a5 already
+        #     selected wholesale, and that step is green at 19 collected.
+        #     Scoreboard: 16 green, 19 green, 21 hang, 23 hang.
+        #   - *collection cost*. All four files collect together in 0.21 s.
+        #
+        # NOT ruled out -- *eager import-time torch compute* is the cause. The
+        # earlier "refuted" note here rested on the claim that CI set
+        # OMP_NUM_THREADS: 1 for this job. It did not: until the job env above
+        # was added, the only occurrence of that variable in this workflow was
+        # pypto-lib-compile's own job env. The same cause produced the
+        # 2026-11-06 failure of this step, where all four cases died with
+        # `signal 11 (SIGSEGV)` inside _matmul_mx_golden, at the float64
+        # elementwise multiply `a_scaled = a_values[...] * a_scale[...]`
+        # (_matmul_mx_data.py:282 as of this commit -- cite the expression, not
+        # the number, which has already drifted once), in 1.24 s -- a fault
+        # rather than a hang, same trigger. See the job env for the bisection
+        # legs and counts.
+        #
+        # The file is the whole target rather than node IDs on purpose: a stale
+        # or mistyped node ID in --deselect/-k is SILENTLY ignored by pytest, so
+        # node-ID containment would quietly un-contain itself on any rename and
+        # bring the hang back with nothing in the log to say why.
+        #
+        # Do NOT merge this back into mx-tests-a5 on the strength of the fix
+        # alone: no run has yet verified the merged step, and the split is also
+        # what keeps this file's --max-time at 600 instead of mx-tests-a5's 3600.
+        #
+        # --max-time 600 rather than 3600: these four cases need ~53 s of device
+        # time, so a hang here is reported in 10 minutes instead of consuming
+        # the hour and starving vf-tests-a5 of the card.
+        #
+        # timeout-minutes covers task-submit's *queue wait* (--timeout 1800, i.e.
+        # 30 min) plus five for reporting and cleanup, the same wait+5 shape the
+        # three sibling steps use for their 120 min wait. At the previous 20 it
+        # sat BELOW the wait budget: a card busy for more than 20 minutes would
+        # have GitHub kill the step while task-submit was still legitimately
+        # queued, losing the verdict and skipping every step below it -- the
+        # failure mode that is indistinguishable from a real hang in the log.
+        timeout-minutes: 35
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && \
+              export OMP_NUM_THREADS=1 && python -m pytest \
+              tests/st/runtime/ops/test_matmul_mx_tensor_a5.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5

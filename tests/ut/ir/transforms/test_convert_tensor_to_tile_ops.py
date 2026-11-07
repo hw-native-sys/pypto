@@ -311,6 +311,35 @@ def _tuple_int_values(expr: ir.Expr) -> list[int]:
     return values
 
 
+def _as_tile_type(op_type: ir.Type) -> ir.TileType:
+    """Narrow an operand / result type to ``TileType``.
+
+    ``Call.type`` is statically ``Type``; after the conversion pass every tile-op
+    operand is a tile, and the assert is itself part of what the caller checks.
+    """
+    assert isinstance(op_type, ir.TileType), f"expected a TileType, got {type(op_type).__name__}"
+    return op_type
+
+
+def _static_extents(shaped: ir.ShapedType) -> list[int]:
+    """Return a shaped type's static extents."""
+    values: list[int] = []
+    for dim in shaped.shape:
+        assert isinstance(dim, ir.ConstInt), f"expected a static extent, got {dim}"
+        values.append(dim.value)
+    return values
+
+
+# A5 MX takes FP8E4M3FN or FP8E5M2 on each side independently, so the bridge must
+# carry four distinct pairs through without making the two sides agree.
+_MX_FP8_PAIRS = [
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E4M3FN, id="e4m3-x-e4m3"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E5M2, id="e5m2-x-e5m2"),
+    pytest.param(DataType.FP8E4M3FN, DataType.FP8E5M2, id="e4m3-x-e5m2"),
+    pytest.param(DataType.FP8E5M2, DataType.FP8E4M3FN, id="e5m2-x-e4m3"),
+]
+
+
 class _CallCounter(ir.IRVisitor):
     """Count Calls whose callee ``Op`` name appears in ``op_names``."""
 
@@ -2455,6 +2484,75 @@ class TestConvertTensorToTileOps:
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         _assert_convert_output_equal(After, Expected)
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype"), _MX_FP8_PAIRS)
+    def test_tensor_matmul_mx_carries_each_operand_dtype(self, lhs_dtype, rhs_dtype):
+        """tensor.matmul_mx -> tile.matmul_mx keeps each operand's own FP8 format.
+
+        A5 MX picks its format per side, so a mixed pair must stay mixed across the
+        bridge: nothing on the path may coerce an E5M2 operand to E4M3 (or the
+        reverse) to make the two sides agree. The shape is multi-block on every axis
+        (M = 2x16, N = 3x32, K = 4x64 = 8 MX groups) so a pair-dependent regression
+        cannot hide behind a single-block case.
+
+        The entry loads materialize the full operand window, so valid == physical on
+        every tile -- the narrowed-valid-K form `tile.matmul_mx` admits is simply not
+        expressible from the Tensor surface.
+        """
+        m, k, n = 32, 256, 96
+        groups = k // 32
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[m, k], lhs_dtype],
+                a_s: pl.Tensor[[m, groups], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[k, n], rhs_dtype],
+                b_s: pl.Tensor[[groups, n], pl.FP8E8M0, pl.MX_B_NN],
+            ) -> pl.Tensor[[m, n], pl.FP32]:
+                out: pl.Tensor[[m, n], pl.FP32] = pl.matmul_mx(a, a_s, b, b_s)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[m, k], lhs_dtype],
+                a_s: pl.Tensor[[m, groups], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[k, n], rhs_dtype],
+                b_s: pl.Tensor[[groups, n], pl.FP8E8M0, pl.MX_B_NN],
+            ) -> pl.Tensor[[m, n], pl.FP32]:
+                out: pl.Tensor[[m, n], pl.FP32] = self.main_incore_0(a, a_s, b, b_s)
+                return out
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        incore = _require_function(after, "main_incore_0")
+        assert _find_calls_to(incore, "tensor.matmul_mx") == []
+        (matmul,) = _find_calls_to(incore, "tile.matmul_mx")
+
+        # Every operand reaches the tile op as a tile (_as_tile_type asserts it).
+        operands = [_as_tile_type(arg.type) for arg in matmul.args]
+        lhs_t, lhs_scale_t, rhs_t, rhs_scale_t = operands
+        # The two emitted data tiles each spell the dtype their Tensor operand declared.
+        assert lhs_t.dtype == lhs_dtype
+        assert rhs_t.dtype == rhs_dtype
+        assert lhs_scale_t.dtype == DataType.FP8E8M0
+        assert rhs_scale_t.dtype == DataType.FP8E8M0
+        result = _as_tile_type(matmul.type)
+        assert result.dtype == DataType.FP32
+        assert _static_extents(result) == [m, n]
+        # Shapes are carried through, and valid == physical on every operand.
+        assert _static_extents(lhs_t) == [m, k]
+        assert _static_extents(rhs_t) == [k, n]
+        assert _static_extents(lhs_scale_t) == [m, groups]
+        assert _static_extents(rhs_scale_t) == [groups, n]
+        for operand in operands:
+            valid: list[int] = []
+            for dim in operand.get_effective_tile_view().valid_shape:
+                assert isinstance(dim, ir.ConstInt), f"expected a static valid extent, got {dim}"
+                valid.append(dim.value)
+            assert valid == _static_extents(operand)
 
     def test_dump_vars_attr_preserved_through_call_site_update(self):
         """Regression: ``pl.dump_tag`` on an orchestration call must survive the

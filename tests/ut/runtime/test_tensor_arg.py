@@ -305,6 +305,57 @@ def test_host_tensor_delegates_to_simpler():
     assert result is sentinel
 
 
+# ``torch.float8_e5m2`` needs torch >= 2.1; the production helper probes it with
+# getattr, so the tests must skip rather than fail on an older torch.
+_HAS_E5M2 = isinstance(getattr(torch, "float8_e5m2", None), torch.dtype)
+_requires_e5m2 = pytest.mark.skipif(not _HAS_E5M2, reason="torch.float8_e5m2 is unavailable")
+
+
+@_requires_e5m2
+def test_fp8e5m2_host_tensor_crosses_as_uint8_byte_view():
+    """The runtime has no E5M2 DataType; the host tensor is passed as a zero-copy byte view."""
+    host = torch.tensor([[1.0, -2.0], [0.5, 57344.0]], dtype=torch.float8_e5m2)
+    sentinel = MagicMock(name="Tensor(host)")
+    worker = _worker(3)
+
+    with patch("simpler_setup.torch_interop.make_tensor_arg", return_value=sentinel) as impl:
+        from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+        result = make_tensor_arg(worker, host)
+
+    assert result is sentinel
+    passed_worker, passed = impl.call_args.args
+    assert passed_worker is worker
+    assert passed.dtype == torch.uint8
+    assert passed.shape == host.shape
+    assert passed.data_ptr() == host.data_ptr()
+    assert torch.equal(passed, host.view(torch.uint8))
+
+
+@_requires_e5m2
+def test_fp8e5m2_device_tensor_uses_uint8_runtime_dtype():
+    buffer = _RecordingBuffer()
+    dt = DeviceTensor(buffer.base, (8, 16), torch.float8_e5m2, buffer=buffer)
+
+    from pypto.runtime import task_interface  # noqa: PLC0415
+    from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+    make_tensor_arg(_worker(3), dt)
+
+    assert buffer.tensor_calls == [((8, 16), task_interface.DataType.UINT8)]
+
+
+@_requires_e5m2
+def test_byte_carrier_policy_covers_only_e5m2():
+    from pypto.runtime.tensor_arg import is_byte_carrier_dtype, runtime_host_tensor  # noqa: PLC0415
+
+    assert is_byte_carrier_dtype(torch.float8_e5m2)
+    assert not is_byte_carrier_dtype(torch.float8_e4m3fn)
+    assert not is_byte_carrier_dtype(torch.float32)
+    host = torch.zeros(2, 2, dtype=torch.float32)
+    assert runtime_host_tensor(host) is host
+
+
 @pytest.mark.parametrize("backend", ["fork", "posix"])
 def test_host_control_accepts_existing_host_wire_tensor(backend):
     from pypto.runtime.distributed_runner import _ChipCallables, add_chip_tensor_arg  # noqa: PLC0415

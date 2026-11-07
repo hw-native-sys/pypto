@@ -819,11 +819,19 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
     ``[M, K]`` / ``MX_A_ZZ[M, K/32]`` and B data/scale as
     ``[K, N]`` / ``MX_B_NN[K/32, N]``.
 
+    Each data tensor is ``FP8E4M3FN`` or ``FP8E5M2``, chosen independently per
+    side, so ``E4M3 x E4M3``, ``E5M2 x E5M2``, ``E4M3 x E5M2`` and
+    ``E5M2 x E4M3`` are all accepted -- the same four pairs as the tile-level
+    :func:`pypto.language.tile.matmul_mx` this lowers to. Each operand keeps its
+    own dtype through tiling; the scales stay ``FP8E8M0`` and the result FP32.
+
     Args:
-        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs: A-side quantized data tensor with shape ``[M, K]``
+            (``FP8E4M3FN`` or ``FP8E5M2``).
         lhs_scale: A-side ``MX_A_ZZ`` FP8E8M0 scale tensor with shape
             ``[M, K/32]``.
-        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs: B-side quantized data tensor with shape ``[K, N]``
+            (``FP8E4M3FN`` or ``FP8E5M2``).
         rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
             ``[K/32, N]``.
 
@@ -832,9 +840,10 @@ def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) ->
 
     Raises:
         ValueError: If the operands are not supported static 2D MX tensors, the
-            M/N/K dimensions are inconsistent, M is not divisible by 16, N is
-            not divisible by 32, K is not divisible by 64, or the scale tensors
-            have the wrong dtype, shape, or MX layout.
+            data dtypes are not one of the four FP8 pairs, the M/N/K dimensions
+            are inconsistent, M is not divisible by 16, N is not divisible by
+            32, K is not divisible by 64, or the scale tensors have the wrong
+            dtype, shape, or MX layout.
     """
     return Tensor(expr=_ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()))
 
