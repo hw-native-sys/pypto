@@ -2029,7 +2029,9 @@ def extract_local_tensor_metas(
     # exactly like today's behavior for any other unrecognized call: a new
     # op starts safe by default and must be added here deliberately, never
     # silently assumed same-shape (#2638).
+    store_meta = _same_operand_meta(local, 2, "output_tensor")
     _qualified_call_handlers: _QualifiedCallHandlers = {
+        ("pl", "tile", "store"): store_meta,
         **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
         ("pld", "tensor", "window"): _pl_attr_handlers["window"],
         ("pld", "tensor", "all_to_all_v"): _same_operand_meta(local, 1, "target"),
@@ -2041,6 +2043,9 @@ def extract_local_tensor_metas(
         ("pld", "tensor", "allgather"): _same_operand_meta(local, 1, "target"),
         ("pld", "tensor", "barrier"): _same_operand_meta(local, 0, "signal"),
     }
+
+    # Unlike the tensor handlers above, pl.store is shorthand for pl.tile.store.
+    _pl_attr_handlers["store"] = store_meta
 
     _walk_local_tensor_meta_stmts(
         func_def.body,

@@ -169,6 +169,33 @@ def test_submitted_graph_metadata_follows_return_order():
     assert ir.structural_equal(consumer.params[0].type, ir.TensorType([32, 64], pl.FP32))
 
 
+@pytest.mark.parametrize("keyword_store", [False, True])
+def test_graph_local_store_alias_preserves_return_metadata(keyword_store):
+    @pl.jit.graph
+    def stage(x: pl.Tensor, scratch: pl.InOut[pl.Tensor], out: pl.InOut[pl.Tensor], keyword: pl.constexpr):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            value = pl.load(x, [0, 0], [32, 64])
+            if keyword:
+                stored = pl.tile.store(value, [0, 0], output_tensor=out)
+            else:
+                stored = pl.store(value, [0, 0], out)
+        return stored
+
+    @pl.jit.graph
+    def consume(value: pl.Tensor):
+        return value
+
+    @pl.jit
+    def entry(x: pl.Tensor, scratch: pl.InOut[pl.Tensor], out: pl.InOut[pl.Tensor]):
+        result = stage(x, scratch, out, keyword=keyword_store)
+        return consume(result)
+
+    program = entry.specialize(torch.empty(32, 64), torch.empty(16, 32), torch.empty(32, 64))
+    consumer = program.get_function("consume")
+    assert consumer is not None
+    assert ir.structural_equal(consumer.params[0].type, ir.TensorType([32, 64], pl.FP32))
+
+
 def test_single_lhs_submit_projection_keeps_tensor_metadata():
     @pl.jit.graph
     def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
