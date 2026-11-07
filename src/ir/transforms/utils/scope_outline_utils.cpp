@@ -293,19 +293,21 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
-    InitializeCarryEffects(op->iter_args_);
+    auto init_roots = InitializeLoopCarryRoots(op->iter_args_);
+    for (const auto& arg : op->iter_args_) VisitDescriptorOrValue(arg->initValue_);
     VisitStmt(op->body_);
     const auto trip_count = transform_utils::EvalConstTripCount(op);
-    BindCarryEffects(op->iter_args_, op->body_, op->return_vars_, trip_count.value_or(0) > 0,
-                     !trip_count || *trip_count > 1);
+    RecordLoopReturnRoots(op->body_, op->iter_args_, op->return_vars_, init_roots, trip_count.value_or(0) > 0,
+                          !trip_count || *trip_count > 1);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    InitializeCarryEffects(op->iter_args_);
+    auto init_roots = InitializeLoopCarryRoots(op->iter_args_);
+    for (const auto& arg : op->iter_args_) VisitDescriptorOrValue(arg->initValue_);
     VisitExpr(op->condition_);
     VisitStmt(op->body_);
-    BindCarryEffects(op->iter_args_, op->body_, op->return_vars_,
-                     /*guaranteed_to_run=*/false, /*may_repeat=*/true);
+    RecordLoopReturnRoots(op->body_, op->iter_args_, op->return_vars_, init_roots,
+                          /*guaranteed_to_run=*/false);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -403,31 +405,6 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
 
   void RecordWrite(const ExprPtr& value) {
     if (auto var = AsVarLike(value)) RecordAccess(var.get(), kWrite);
-  }
-
-  void InitializeCarryEffects(const std::vector<IterArgPtr>& iter_args) {
-    for (const auto& arg : iter_args) {
-      storage_successors_[arg.get()] = ResolveBackingDescriptorRoots(arg->initValue_);
-      // Even a fresh or unresolved seed needs an identity: subsequent iterations
-      // can replace it with a captured cache whose input contents are required.
-      RecordRootCandidates(arg, {arg.get()});
-      VisitDescriptorOrValue(arg->initValue_);
-    }
-  }
-
-  void BindCarryEffects(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
-                        const std::vector<VarPtr>& return_vars, bool guaranteed_to_run, bool may_repeat) {
-    auto yield = transform_utils::GetLastYieldStmt(body);
-    if (!yield) return;
-    for (size_t i = 0; i < iter_args.size() && i < return_vars.size() && i < yield->value_.size(); ++i) {
-      const auto& result = return_vars[i];
-      RecordRootCandidates(result, {result.get()});
-      if (!guaranteed_to_run) storage_successors_[result.get()].push_back(iter_args[i].get());
-      for (const Var* root : ResolveBackingDescriptorRoots(yield->value_[i])) {
-        storage_successors_[result.get()].push_back(root);
-        if (may_repeat) storage_successors_[iter_args[i].get()].push_back(root);
-      }
-    }
   }
 
  public:

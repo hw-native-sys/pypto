@@ -766,5 +766,50 @@ class Before:
     assert directions["cache"] == ir.ParamDirection.InOut
 
 
+def test_graph_nested_inline_views_preserve_assigned_storage():
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, cache: pl.Tensor[[2, 32], pl.FP32]):
+            with pl.graph("layer"):
+                flat = pl.tensor.reshape(pl.tensor.reshape(cache, [64]), [64])
+                value = pl.tensor.read(flat, [32])
+                pl.tensor.write(cache, [0, 0], value)
+
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(Before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    assert layer.param_directions == [ir.ParamDirection.InOut]
+
+
+def test_graph_tuple_loop_carry_and_result_preserve_element_storage():
+    source = """
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def main(self, a: pl.Tensor[[2, 32], pl.FP32], b: pl.Tensor[[2, 32], pl.FP32]):
+        with pl.graph("layer"):
+            pair = (pl.tensor.reshape(a, [64]), pl.tensor.reshape(b, [64]))
+            for i, (carry,) in pl.range(1, init_values=(pair,)):
+                v = pl.tensor.read(carry[0], [32])
+                pl.tensor.write(a, [0, 0], v)
+                result = pl.yield_((carry[1], carry[0]))
+            v = pl.tensor.read(result[0], [32])
+            pl.tensor.write(b, [0, 0], v)
+"""
+    before = pl.parse(source)
+    assert isinstance(before, ir.Program)
+    with passes.PassContext([]):
+        after = passes.outline_graph_scopes()(before)
+    layer = after.get_function("layer")
+    assert layer is not None
+    directions = {param.name_hint: kind for param, kind in zip(layer.params, layer.param_directions)}
+    assert directions["a"] == ir.ParamDirection.InOut
+    assert directions["b"] == ir.ParamDirection.InOut
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -29,6 +29,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -269,8 +270,8 @@ void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
   auto init_roots = InitializeLoopCarryRoots(for_stmt->iter_args_);
   IRVisitor::VisitStmt_(for_stmt);
   const auto trip_count = transform_utils::EvalConstTripCount(for_stmt);
-  RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, init_roots, trip_count.value_or(0) > 0,
-                        !trip_count || *trip_count > 1);
+  RecordLoopReturnRoots(for_stmt->body_, for_stmt->iter_args_, for_stmt->return_vars_, init_roots,
+                        trip_count.value_or(0) > 0, !trip_count || *trip_count > 1);
 }
 
 void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
@@ -278,33 +279,71 @@ void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
   IRVisitor::VisitStmt_(while_stmt);
   // A while condition may be false before the first iteration, so both the
   // initial and yielded roots remain possible.
-  RecordLoopReturnRoots(while_stmt->body_, while_stmt->return_vars_, init_roots,
+  RecordLoopReturnRoots(while_stmt->body_, while_stmt->iter_args_, while_stmt->return_vars_, init_roots,
                         /*guaranteed_to_run=*/false);
+}
+
+BufferRootCollector::RootInfo BufferRootCollector::MakeLoopStorageValue(const TypePtr& type, const Span& span,
+                                                                        const Var* identity) {
+  if (const auto tuple = As<TupleType>(type)) {
+    auto elements = std::make_shared<std::vector<RootInfo>>();
+    elements->reserve(tuple->types_.size());
+    for (const auto& element : tuple->types_) {
+      elements->push_back(MakeLoopStorageValue(element, span, nullptr));
+    }
+    return {{}, false, std::move(elements)};
+  }
+  if (identity) return {{identity}, false};
+  auto element = std::make_shared<Var>("storage_carry_element", type, span);
+  const Var* root = element.get();
+  storage_proxy_vars_.push_back(std::move(element));
+  return {{root}, false};
+}
+
+void BufferRootCollector::LinkLoopStorageValues(const RootInfo& target, const RootInfo& source) {
+  if (target.elements) {
+    if (!source.elements) return;
+    const size_t count = std::min(target.elements->size(), source.elements->size());
+    for (size_t i = 0; i < count; ++i) {
+      LinkLoopStorageValues((*target.elements)[i], (*source.elements)[i]);
+    }
+    return;
+  }
+  if (target.roots.empty() || source.roots.empty()) return;
+  auto& successors = storage_successors_[target.roots.front()];
+  successors.insert(successors.end(), source.roots.begin(), source.roots.end());
+}
+
+void BufferRootCollector::RecordLoopStorageValue(const VarPtr& var, RootInfo value) {
+  if (value.elements) backing_tuple_roots_[var.get()] = std::move(value.elements);
+  RecordRootCandidates(var, value.roots);
 }
 
 std::vector<BufferRootCollector::RootCandidates> BufferRootCollector::InitializeLoopCarryRoots(
     const std::vector<IterArgPtr>& iter_args) {
   std::vector<RootCandidates> init_roots;
+  if (view_policy_ == ViewRootPolicy::kBackingStorage) {
+    for (const auto& iter_arg : iter_args) {
+      // Give each leaf an identity before visiting the body. Yielded edges
+      // may later connect it to a different buffer in subsequent iterations.
+      auto carry = MakeLoopStorageValue(iter_arg->GetType(), iter_arg->span_, iter_arg.get());
+      LinkLoopStorageValues(carry, ResolveBackingValue(iter_arg->initValue_));
+      RecordLoopStorageValue(iter_arg, std::move(carry));
+    }
+    return init_roots;
+  }
+
   init_roots.reserve(iter_args.size());
   for (const auto& iter_arg : iter_args) {
-    auto roots = view_policy_ == ViewRootPolicy::kBackingStorage
-                     ? ResolveBackingDescriptorRoots(iter_arg->initValue_)
-                     : ResolveRootCandidates(iter_arg->initValue_);
-    if (view_policy_ == ViewRootPolicy::kBackingStorage) {
-      // Keep a symbolic identity until all repeated-iteration edges are known.
-      // Eager expansion would freeze a descriptor swap to its first iteration.
-      storage_successors_[iter_arg.get()] = std::move(roots);
-      init_roots.push_back({iter_arg.get()});
-      RecordRootCandidates(iter_arg, {iter_arg.get()});
-    } else {
-      init_roots.push_back(roots);
-      RecordRootCandidates(iter_arg, roots, IsAmbiguous(iter_arg->initValue_));
-    }
+    auto roots = ResolveRootCandidates(iter_arg->initValue_);
+    RecordRootCandidates(iter_arg, roots, IsAmbiguous(iter_arg->initValue_));
+    init_roots.push_back(std::move(roots));
   }
   return init_roots;
 }
 
-void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
+void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::vector<IterArgPtr>& iter_args,
+                                                const std::vector<VarPtr>& return_vars,
                                                 const std::vector<RootCandidates>& init_roots,
                                                 bool guaranteed_to_run, bool may_repeat) {
   // Resolve after visiting the body so fresh-rebind assignments already have
@@ -314,20 +353,16 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
 
   if (view_policy_ == ViewRootPolicy::kBackingStorage) {
     for (size_t i = 0; i < return_vars.size() && i < yield->value_.size(); ++i) {
-      auto roots = ResolveBackingDescriptorRoots(yield->value_[i]);
-      auto& result_roots = storage_successors_[return_vars[i].get()];
-      result_roots = roots;
-      RecordRootCandidates(return_vars[i], {return_vars[i].get()});
-      if (i >= init_roots.size()) continue;
-      if (!guaranteed_to_run) {
-        result_roots.insert(result_roots.end(), init_roots[i].begin(), init_roots[i].end());
+      const auto& var = return_vars[i];
+      auto yielded = ResolveBackingValue(yield->value_[i]);
+      auto result = MakeLoopStorageValue(var->GetType(), var->span_, var.get());
+      LinkLoopStorageValues(result, yielded);
+      if (i < iter_args.size()) {
+        auto carry = ResolveBackingValue(iter_args[i]);
+        if (!guaranteed_to_run) LinkLoopStorageValues(result, carry);
+        if (may_repeat) LinkLoopStorageValues(carry, yielded);
       }
-      if (may_repeat) {
-        for (const Var* carry : init_roots[i]) {
-          auto& next = storage_successors_[carry];
-          next.insert(next.end(), roots.begin(), roots.end());
-        }
-      }
+      RecordLoopStorageValue(var, std::move(result));
     }
     return;
   }
@@ -377,8 +412,8 @@ void BufferRootCollector::RecordAssignmentRoots(const AssignStmtPtr& assign) {
       alias_slot = BackingAliasSlot(call);
     }
     if (alias_slot && *alias_slot < call->args_.size()) {
-      RecordRootCandidates(assign->var_, ResolveRootCandidates(call->args_[*alias_slot]),
-                           IsAmbiguous(call->args_[*alias_slot]));
+      auto info = ResolveBackingValue(call->args_[*alias_slot]);
+      RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
       recorded = true;
     } else if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
       RecordRootCandidates(assign->var_, {assign->var_.get()});

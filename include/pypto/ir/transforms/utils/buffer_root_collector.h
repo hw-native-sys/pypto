@@ -20,6 +20,7 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -123,7 +124,8 @@ class BufferRootCollector : public IRVisitor {
   void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
   [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
       const std::vector<IterArgPtr>& iter_args);
-  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
+  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<IterArgPtr>& iter_args,
+                             const std::vector<VarPtr>& return_vars,
                              const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run,
                              bool may_repeat = true);
 
@@ -151,6 +153,9 @@ class BufferRootCollector : public IRVisitor {
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] RootInfo ResolveBackingValue(const ExprPtr& expr);
   [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call);
+  [[nodiscard]] RootInfo MakeLoopStorageValue(const TypePtr& type, const Span& span, const Var* identity);
+  void LinkLoopStorageValues(const RootInfo& target, const RootInfo& source);
+  void RecordLoopStorageValue(const VarPtr& var, RootInfo value);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call);
 
