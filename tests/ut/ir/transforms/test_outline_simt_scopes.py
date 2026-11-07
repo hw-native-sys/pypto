@@ -485,5 +485,51 @@ with pl.simt_scope(dims=(32, 1, 1)):
         passes.outline_simt_scopes()(before)
 
 
+@pytest.mark.parametrize("loop", ["for i in pl.range(2):", "while n > 0:"])
+@pytest.mark.parametrize("capture,accepted", [("local", False), ("old", True)])
+def test_loop_backedge_does_not_reuse_initial_storage_proof(loop, capture, accepted):
+    before = program(f"""
+local = pl.tile.load(src, [0, 0], [1, 32])
+old = local
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store({capture}, (0, 0), pl.const(1.0, pl.FP32))
+    local = pl.tile.create([1, 32], pl.FP32)
+""")
+    if accepted:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
+    else:
+        with pytest.raises((Error, ValueError), match="initialized storage"):
+            passes.outline_simt_scopes()(before)
+
+
+def test_nested_loop_does_not_hide_outer_backedge_rebinding():
+    before = program("""
+local = pl.tile.load(src, [0, 0], [1, 32])
+for i in pl.range(2):
+    for j in pl.range(2):
+        with pl.simt_scope(dims=(32, 1, 1)):
+            pl.simt.store(local, (0, 0), pl.const(1.0, pl.FP32))
+    local = pl.tile.create([1, 32], pl.FP32)
+""")
+    with pytest.raises((Error, ValueError), match="initialized storage"):
+        passes.outline_simt_scopes()(before)
+
+
+def test_initialized_output_survives_loop_content_updates():
+    before = program(
+        """
+value = pl.tile.load(src, [0, 0], [1, 32])
+dst = pl.tile.store(value, [0, 0], dst)
+for i in pl.range(2):
+    dst = pl.tile.store(value, [0, 0], dst)
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(dst, (0, 0), pl.const(1.0, pl.FP32))
+""",
+        direction="Out",
+    )
+    assert len(launches(passes.outline_simt_scopes()(before))) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
