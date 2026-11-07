@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import CacheConfig, backend, ir
+from pypto import CacheConfig, backend, ir, passes
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.runtime import ExecutionMode, RunConfig
 
@@ -88,7 +88,8 @@ def shape_shadow_scope(
     n: pl.Scalar[pl.INT32],
 ):
     with pl.simt_scope(dims=(32, 1, 1)):
-        n = src.shape[1]
+        # JIT resolves this fixed Tensor annotation before visiting the body.
+        n = src.shape[1]  # pyright: ignore[reportOptionalSubscript]
         pl.simt.store(dst, (0, 0), pl.cast(n, pl.FP32))
     with pl.simt_scope(dims=(32, 1, 1)):
         tid = pl.simt.thread_idx(pl.simt.Axis.X)
@@ -126,8 +127,6 @@ def test_jit_shape_shadow_keeps_runtime_guard():
 
 
 def test_jit_loaded_tile_reassignment_can_be_captured():
-    from pypto import passes
-
     backend.reset_for_testing()
     backend.set_backend_type(backend.BackendType.Ascend950)
     try:
