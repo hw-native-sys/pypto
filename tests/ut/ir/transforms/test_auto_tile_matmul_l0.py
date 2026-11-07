@@ -4960,7 +4960,8 @@ def test_function_use_index_does_not_rewrite_scalar_carry_chains(depth):
 )
 @pytest.mark.parametrize("capture_kind", ["var", "tuple"])
 @pytest.mark.parametrize("capture_surface", ["kwargs", "attrs"])
-def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, capture_surface):
+@pytest.mark.parametrize("M, N, K", [(256, 256, 64), (64, 512, 256)])
+def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, capture_surface, M, N, K):
     """A retained keyword edge forbids deleting a matmul's whole result."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
@@ -4970,14 +4971,14 @@ def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, ca
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            a: pl.Tensor[[256, 64], pl.BF16],
-            b: pl.Tensor[[64, 256], pl.BF16],
+            a: pl.Tensor[[M, K], pl.BF16],
+            b: pl.Tensor[[K, N], pl.BF16],
             other: pl.Tensor[[16, 16], pl.FP32],
-            out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             out_other: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-        ) -> tuple[pl.Tensor[[256, 256], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
-            at = pl.load(a, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
-            bt = pl.load(b, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+        ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            at = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
             c = pl.tile.matmul(at, bt)
             kept = pl.load(other, [0, 0], [16, 16])
             retained = pl.store(kept, [0, 0], out_other)
@@ -5015,7 +5016,22 @@ def test_function_use_index_counts_keyword_value_edges(planner, capture_kind, ca
         after = passes.auto_tile_matmul_l0()(before)
     # With two consumers there is no supported whole-result M/N placement.
     # Leaving the definition intact also preserves the keyword's SSA edge.
-    ir.assert_structural_equal(after, before)
+    if M == 256:
+        ir.assert_structural_equal(after, before)
+    else:
+        assignments = _cast_fold_assignments(after)
+        kept = next(stmt.value for stmt in assignments if stmt.var.name_hint.startswith("kept__"))
+        store = next(
+            stmt.value
+            for stmt in assignments
+            if isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.store").name
+            and stmt.var.name_hint.startswith("result__")
+        )
+        reference = dict(kept.kwargs if capture_surface == "kwargs" else kept.attrs)["retained_value"]
+        if capture_kind == "tuple":
+            reference = reference.elements[0]
+        assert reference.same_as(store.args[0])
     passes.verify_properties(properties, after, "keyword edge after AutoTile")
 
 

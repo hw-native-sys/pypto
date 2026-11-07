@@ -420,10 +420,13 @@ VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int
 /// passes a bias operand here.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
                         const AssignStmtPtr& sb, const std::string& base, const Span& sp,
-                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                        const std::vector<std::pair<std::string, std::any>>& kwargs,
+                        const CallPtr& original_call) {
   auto& reg = OpRegistry::GetInstance();
   auto init_cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
-  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, kwargs, sp);
+  auto c_call = PreserveCallAttrs(
+      original_call,
+      reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, kwargs, sp));
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto body_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -439,8 +442,8 @@ StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const As
 /// operand and the emitted call ANDs it with the generated ``ko == 0``.
 StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, const AssignStmtPtr& sb,
                            const std::string& base, const Span& sp, const ExprPtr& user_init_cond,
-                           const VarPtr& ko_var,
-                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                           const VarPtr& ko_var, const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const CallPtr& original_call) {
   auto& reg = OpRegistry::GetInstance();
   std::vector<ExprPtr> args{ExprPtr(c_iter), sa->var_, sb->var_};
   if (user_init_cond) {
@@ -453,7 +456,7 @@ StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, co
     // introduced here.
     args.push_back(MakeAnd(user_init_cond, MakeEq(ko_var, MakeIndex(0, sp), sp), sp));
   }
-  auto c_call = reg.Create("tile.matmul_acc", args, kwargs, sp);
+  auto c_call = PreserveCallAttrs(original_call, reg.Create("tile.matmul_acc", args, kwargs, sp));
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -563,7 +566,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
                            base + "_l0_a" + tag, sp);
     auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
                            base + "_l0_b" + tag, sp);
-    ExprPtr call;
+    CallPtr call;
     INTERNAL_CHECK_SPAN(acc_in || !init_cond, sp)
         << "Internal error: init_cond on a straight-line block with no accumulator";
     if (acc_in) {
@@ -575,6 +578,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     } else {
       call = reg.Create("tile.matmul", {sa->var_, sb->var_}, block_kwargs, sp);
     }
+    call = PreserveCallAttrs(original_call, call);
     auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
     out.push_back(sa);
     out.push_back(sb);
@@ -598,9 +602,10 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // predicated it.  The bias path passes neither: its seed already holds the
     // first block's product, so every block here accumulates.
     const auto main_kwargs = MatmulPhaseKwargs(kwargs, main_phase);
-    StmtPtr body = (k_lo == 0 && r.kind == MatmulKind::kFresh)
-                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, main_kwargs)
-                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, main_kwargs);
+    StmtPtr body =
+        (k_lo == 0 && r.kind == MatmulKind::kFresh)
+            ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, main_kwargs, original_call)
+            : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, main_kwargs, original_call);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
     // Loop return var: an intermediate when a final block follows (named
     // distinctly so round-trip names stay unique), else the final result.
