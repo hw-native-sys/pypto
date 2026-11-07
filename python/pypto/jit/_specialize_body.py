@@ -313,9 +313,6 @@ class BodyTransformer(ast.NodeTransformer):
         if (
             len(node.targets) == 1
             and isinstance(node.targets[0], ast.Tuple)
-            and not (
-                self._simt_depth and self._names_by_ctx(node.targets[0], ast.Store) & self._simt_runtime_names
-            )
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "shape"
             and isinstance(node.value.value, ast.Name)
@@ -328,7 +325,20 @@ class BodyTransformer(ast.NodeTransformer):
                 for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
                     if not isinstance(tgt, ast.Name):
                         continue
-                    if isinstance(dim, DynDim) or param_name in self._alias_to_original:
+                    if self._simt_depth and tgt.id in self._simt_runtime_names:
+                        # Keep scalar expansion even when a conditional write
+                        # prevents folding. A generic tuple temporary is illegal
+                        # inside SIMT before simplification removes it.
+                        value = (
+                            self._dyn_dim_expr(param_name, i)
+                            if isinstance(dim, DynDim) or param_name in self._alias_to_original
+                            else ast.Constant(value=dim)
+                        )
+                        assignment = ast.Assign(
+                            targets=[tgt], value=value, lineno=node.lineno, col_offset=node.col_offset
+                        )
+                        stmts.append(self._visit_simple_assign(assignment))
+                    elif isinstance(dim, DynDim) or param_name in self._alias_to_original:
                         # Dynamic dim: emit M = pl.tensor.dim(<param>, i) so the
                         # DynVar name never appears as a runtime expression.
                         lhs_name = tgt.id

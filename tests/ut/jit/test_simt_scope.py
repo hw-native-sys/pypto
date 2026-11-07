@@ -325,5 +325,43 @@ def test_zero_iteration_private_loop_keeps_incoming_shape_value(kernel):
         backend.reset_for_testing()
 
 
+@pl.jit.aiv
+def unpacked_shape_rebind(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        # JIT resolves the fixed Tensor annotation before unpacking its shape.
+        rows, n = src.shape  # pyright: ignore[reportOptionalIterable]
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < 16:
+            n = pl.cast(tid, pl.INDEX)
+        if n < 32:
+            pl.simt.store(dst, (rows - 1, n), pl.const(1.0, pl.FP32))
+    return dst
+
+
+@pl.jit
+def unpacked_shape_entry(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    return unpacked_shape_rebind(src, dst)
+
+
+def test_conditional_shape_unpacking_compiles_as_scalars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(decorator, "_ptoas_available", lambda: False)
+    backend.reset_for_testing()
+    try:
+        compiled = unpacked_shape_entry.compile(
+            config=RunConfig(
+                backend_type=backend.BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                cache_config=CacheConfig(enabled=False),
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+        kernels = list((tmp_path / "kernels").rglob("*.pto"))
+        assert len(kernels) == 1
+        assert "pto.simt_entry" in kernels[0].read_text()
+    finally:
+        backend.reset_for_testing()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

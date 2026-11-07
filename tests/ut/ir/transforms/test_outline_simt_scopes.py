@@ -624,5 +624,74 @@ for i, (carried,) in pl.range(2, init_values=(other,)):
     assert len(launches(passes.outline_simt_scopes()(before))) == 1
 
 
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("order", [("a", "b"), ("b", "a"), ("a", "b", "c")])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_carry_dependency_backedges_are_independent_of_parameter_order(kind, order, initialized):
+    names = ", ".join(order)
+    seeds = ", ".join("seed" for _ in order)
+    results = ", ".join(f"result_{name}" for name in order)
+    replacements = {"a": "seed" if initialized else "empty", "b": "a", "c": "b"}
+    yielded = ", ".join(replacements[name] for name in order)
+    captured = "c" if "c" in order else "b"
+    loop = (
+        f"for i, ({names}) in pl.range(4, init_values=({seeds})):"
+        if kind == "for"
+        else f"for ({names}) in pl.while_(init_values=({seeds})):\n    pl.cond(n > 0)"
+    )
+    before = program(f"""
+seed = pl.tile.load(src, [0, 0], [1, 32])
+empty = pl.tile.create([1, 32], pl.FP32)
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        value = pl.simt.load({captured}, (0, 0))
+        pl.simt.store(dst, (0, 0), value)
+    {results} = pl.yield_({yielded})
+""")
+    # An uninitialized value reaches the captured carry after two/three
+    # backedges, regardless of which carry is checked first.
+    if initialized:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
+    else:
+        with pytest.raises((Error, ValueError), match="initialized storage on every iteration"):
+            passes.outline_simt_scopes()(before)
+
+
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize(
+    "seed,yielded,valid",
+    [
+        ("pl.tile.full([1, 32], pl.FP32, 0.0)", "pl.add(carried, 1.0)", True),
+        ("pl.add(pl.tile.full([1, 32], pl.FP32, 0.0), 1.0)", "carried", True),
+        ("pl.tile.create([1, 32], pl.FP32)", "carried", False),
+        ("pl.add(pl.tile.create([1, 32], pl.FP32), 1.0)", "carried", False),
+        ("pl.tile.full([1, 32], pl.FP32, 0.0)", "pl.tile.create([1, 32], pl.FP32)", False),
+        (
+            "pl.tile.full([1, 32], pl.FP32, 0.0)",
+            "pl.add(pl.tile.create([1, 32], pl.FP32), 1.0)",
+            False,
+        ),
+    ],
+)
+def test_carry_initialization_checks_expression_seeds_and_yields(kind, seed, yielded, valid):
+    loop = (
+        f"for i, (carried,) in pl.range(3, init_values=({seed},)):"
+        if kind == "for"
+        else f"for (carried,) in pl.while_(init_values=({seed},)):\n    pl.cond(n > 0)"
+    )
+    before = program(f"""
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        value = pl.simt.load(carried, (0, 0))
+        pl.simt.store(dst, (0, 0), value)
+    result = pl.yield_({yielded})
+""")
+    if valid:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
+    else:
+        with pytest.raises((Error, ValueError), match="initialized storage"):
+            passes.outline_simt_scopes()(before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
