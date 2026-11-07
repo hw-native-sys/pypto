@@ -531,5 +531,98 @@ for i in pl.range(2):
     assert len(launches(passes.outline_simt_scopes()(before))) == 1
 
 
+@pytest.mark.parametrize(
+    "then_value", ["pl.tile.load(src, [0, 0], [1, 32])", "pl.tile.create([1, 32], pl.FP32)"]
+)
+def test_else_scope_uses_incoming_initialized_binding(then_value):
+    before = program(f"""
+local = pl.tile.load(src, [0, 0], [1, 32])
+if n > 0:
+    local = {then_value}
+else:
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(local, (0, 0), pl.const(1.0, pl.FP32))
+""")
+    assert len(launches(passes.outline_simt_scopes()(before))) == 1
+
+
+def test_sibling_restoration_does_not_restore_binding_after_join():
+    before = program("""
+local = pl.tile.load(src, [0, 0], [1, 32])
+if n > 0:
+    local = pl.tile.create([1, 32], pl.FP32)
+else:
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(local, (0, 0), pl.const(1.0, pl.FP32))
+with pl.simt_scope(dims=(32, 1, 1)):
+    pl.simt.store(local, (0, 0), pl.const(1.0, pl.FP32))
+""")
+    with pytest.raises((Error, ValueError), match="initialized storage"):
+        passes.outline_simt_scopes()(before)
+
+
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("replacement", ["same", "initialized", "uninitialized"])
+def test_explicit_carry_preserves_seed_and_checks_backedge(kind, replacement):
+    loop = (
+        "for i, (carried,) in pl.range(2, init_values=(dst,)):"
+        if kind == "for"
+        else "for (carried,) in pl.while_(init_values=(dst,)):\n    pl.cond(n > 0)"
+    )
+    other = "" if replacement == "same" else "other = pl.create_tensor([1, 32], dtype=pl.FP32)\n"
+    if replacement == "initialized":
+        other += "other = pl.tile.store(value, [0, 0], other)\n"
+    yielded = "carried" if replacement == "same" else "other"
+    before = program(
+        f"""
+value = pl.tile.load(src, [0, 0], [1, 32])
+dst = pl.tile.store(value, [0, 0], dst)
+{other}{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(carried, (0, 0), pl.const(1.0, pl.FP32))
+    result = pl.yield_({yielded})
+with pl.simt_scope(dims=(32, 1, 1)):
+    pl.simt.store(result, (0, 0), pl.const(2.0, pl.FP32))
+""",
+        direction="Out",
+    )
+    if replacement == "uninitialized":
+        with pytest.raises((Error, ValueError), match="initialized storage on every iteration"):
+            passes.outline_simt_scopes()(before)
+    else:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 2
+
+
+@pytest.mark.parametrize("kind", ["for", "while"])
+def test_explicit_carry_rejects_uninitialized_seed(kind):
+    loop = (
+        "for i, (carried,) in pl.range(2, init_values=(dst,)):"
+        if kind == "for"
+        else "for (carried,) in pl.while_(init_values=(dst,)):\n    pl.cond(n > 0)"
+    )
+    before = program(
+        f"""
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(carried, (0, 0), pl.const(1.0, pl.FP32))
+    result = pl.yield_(carried)
+""",
+        direction="Out",
+    )
+    with pytest.raises((Error, ValueError), match="initialized storage"):
+        passes.outline_simt_scopes()(before)
+
+
+def test_unrelated_uninitialized_carry_does_not_block_scope():
+    before = program("""
+other = pl.create_tensor([1, 32], dtype=pl.FP32)
+for i, (carried,) in pl.range(2, init_values=(other,)):
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(dst, (0, 0), pl.const(1.0, pl.FP32))
+    result = pl.yield_(carried)
+""")
+    assert len(launches(passes.outline_simt_scopes()(before))) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

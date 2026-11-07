@@ -300,6 +300,13 @@ class ScopeOutliner : public IRMutator {
         names_(names),
         helpers_(helpers),
         permissions_(function_) {
+    outline_utils::VarCollector variables;
+    variables.VisitStmt(function_->body_);
+    for (const auto& param : function_->params_) variables.CollectParameter(param);
+    for (const auto& [var, _] : variables.var_objects) {
+      binding_indices_.emplace(var, binding_indices_.size());
+    }
+    binding_capacity_ = std::max(size_t{1}, binding_indices_.size());
     for (size_t i = 0; i < function_->params_.size(); ++i) {
       const auto& param = function_->params_[i];
       if (IsStorage(param)) {
@@ -341,26 +348,16 @@ class ScopeOutliner : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& stmt) override {
     auto result = MutableCopy(stmt);
     result->condition_ = VisitExpr(stmt->condition_);
+    auto incoming = bindings_;
     result->then_body_ = VisitConditionalBody(stmt->then_body_);
+    auto then_bindings = bindings_;
+    bindings_ = incoming;
     if (stmt->else_body_) result->else_body_ = VisitConditionalBody(*stmt->else_body_);
+    bindings_ = JoinBindings(incoming, then_bindings, bindings_);
     return result;
   }
-  StmtPtr VisitStmt_(const ForStmtPtr& stmt) override {
-    const auto parent_scope = EnterConditional();
-    loop_stack_.push_back(stmt.get());
-    auto result = IRMutator::VisitStmt_(stmt);
-    loop_stack_.pop_back();
-    LeaveConditional(parent_scope);
-    return result;
-  }
-  StmtPtr VisitStmt_(const WhileStmtPtr& stmt) override {
-    const auto parent_scope = EnterConditional();
-    loop_stack_.push_back(stmt.get());
-    auto result = IRMutator::VisitStmt_(stmt);
-    loop_stack_.pop_back();
-    LeaveConditional(parent_scope);
-    return result;
-  }
+  StmtPtr VisitStmt_(const ForStmtPtr& stmt) override { return VisitLoop(stmt); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& stmt) override { return VisitLoop(stmt); }
   StmtPtr VisitStmt_(const RegScopeStmtPtr& scope) override {
     ++reg_depth_;
     auto result = IRMutator::VisitStmt_(scope);
@@ -442,11 +439,15 @@ class ScopeOutliner : public IRMutator {
   // value. Each fresh Tile/allocation gets a separate identity, while copies
   // and views share their actual source. A branch-local identity/proof expires
   // at its join. We deliberately do not infer a reaching alias across joins.
-  // Scope stamps avoid rescanning or copying state at nested branches: each
-  // binding/write is processed once, and lookups are constant-time on average.
+  // A persistent segment tree snapshots sibling environments in O(1), with
+  // O(log N) binding updates/lookups. Joins share unchanged subtrees and visit
+  // only overlapping changed paths; they do not rescan an incoming environment.
+  // Scope stamps expire branch-local values and initialization proofs at joins.
   struct Storage {
     TypePtr type;
     std::optional<size_t> initialized_scope;
+    bool loop_carry = false;
+    bool requires_initialized_backedge = false;
   };
   struct Binding {
     std::shared_ptr<Storage> storage;
@@ -454,16 +455,110 @@ class ScopeOutliner : public IRMutator {
     size_t scope = 0;
     size_t loop_depth = 0;
   };
+  struct BindingNode;
+  using BindingRoot = std::shared_ptr<const BindingNode>;
+  struct BindingNode {
+    BindingRoot left;
+    BindingRoot right;
+    std::optional<Binding> value;
+  };
+  std::optional<Binding> LookupBinding(const Var* var) const {
+    auto index = binding_indices_.find(var);
+    if (index == binding_indices_.end()) return std::nullopt;
+    auto node = bindings_;
+    size_t begin = 0;
+    size_t end = binding_capacity_;
+    while (node && end - begin > 1) {
+      const auto middle = begin + (end - begin) / 2;
+      if (index->second < middle) {
+        node = node->left;
+        end = middle;
+      } else {
+        node = node->right;
+        begin = middle;
+      }
+    }
+    return node ? node->value : std::nullopt;
+  }
+  static BindingRoot UpdateBinding(const BindingRoot& root, size_t begin, size_t end, size_t index,
+                                   const Binding& binding) {
+    auto node = root ? std::make_shared<BindingNode>(*root) : std::make_shared<BindingNode>();
+    if (end - begin == 1) {
+      node->value = binding;
+    } else {
+      const auto middle = begin + (end - begin) / 2;
+      if (index < middle) {
+        node->left = UpdateBinding(node->left, begin, middle, index, binding);
+      } else {
+        node->right = UpdateBinding(node->right, middle, end, index, binding);
+      }
+    }
+    return node;
+  }
+  static BindingRoot JoinBindings(const BindingRoot& incoming, const BindingRoot& left,
+                                  const BindingRoot& right) {
+    if (left == incoming) return right;
+    if (right == incoming || left == right) return left;
+    // Both sides replaced this leaf. Either expired branch binding records
+    // that the reaching value is unknown; neither supplies a post-join proof.
+    if (left->value) return left;
+    auto node = std::make_shared<BindingNode>();
+    node->left = JoinBindings(incoming ? incoming->left : nullptr, left->left, right->left);
+    node->right = JoinBindings(incoming ? incoming->right : nullptr, left->right, right->right);
+    return node;
+  }
+  template <typename LoopPtr>
+  StmtPtr VisitLoop(const LoopPtr& stmt) {
+    std::vector<bool> seed_initialized;
+    for (const auto& arg : stmt->iter_args_) {
+      auto seed = AsVarLike(arg->initValue_);
+      seed_initialized.push_back(seed && IsInitialized(seed));
+    }
+    const auto parent_scope = EnterConditional();
+    loop_stack_.push_back(stmt.get());
+    std::vector<std::shared_ptr<Storage>> carries;
+    for (size_t i = 0; i < stmt->iter_args_.size(); ++i) {
+      const auto& arg = stmt->iter_args_[i];
+      if (!IsStorage(arg)) {
+        carries.push_back(nullptr);
+        continue;
+      }
+      // A carry has an initialized-value invariant, not a definite alias to
+      // its seed: subsequent iterations may yield a different allocation.
+      BindFresh(arg, seed_initialized[i]);
+      auto storage = ResolveStorage(arg).storage;
+      storage->loop_carry = true;
+      carries.push_back(std::move(storage));
+    }
+    auto result = IRMutator::VisitStmt_(stmt);
+    auto tail = stmt->body_;
+    if (auto seq = As<SeqStmts>(tail); seq && !seq->stmts_.empty()) tail = seq->stmts_.back();
+    auto yield = As<YieldStmt>(tail);
+    std::vector<bool> result_initialized;
+    for (size_t i = 0; i < carries.size(); ++i) {
+      auto value = yield && i < yield->value_.size() ? AsVarLike(yield->value_[i]) : stmt->iter_args_[i];
+      const bool initialized = value && IsInitialized(value);
+      CHECK_SPAN(!carries[i] || !carries[i]->requires_initialized_backedge || initialized, stmt->span_)
+          << "SIMT loop carry requires initialized storage on every iteration";
+      result_initialized.push_back(seed_initialized[i] && initialized);
+    }
+    loop_stack_.pop_back();
+    LeaveConditional(parent_scope);
+    for (size_t i = 0; i < stmt->return_vars_.size() && i < result_initialized.size(); ++i) {
+      if (IsStorage(stmt->return_vars_[i])) BindFresh(stmt->return_vars_[i], result_initialized[i]);
+    }
+    return result;
+  }
   static bool IsStorage(const VarPtr& var) {
     return As<TileType>(var->GetType()) || AsTensorTypeLike(var->GetType());
   }
   Binding ResolveStorage(const ExprPtr& expr) {
     if (auto var = AsVarLike(expr)) {
-      auto it = bindings_.find(var.get());
-      if (it != bindings_.end() && active_scopes_[it->second.scope] &&
-          (it->second.loop_depth == loop_stack_.size() ||
-           !index_.MayRebind(var.get(), loop_stack_[it->second.loop_depth]))) {
-        return it->second;
+      auto binding = LookupBinding(var.get());
+      if (binding && active_scopes_[binding->scope] &&
+          (binding->loop_depth == loop_stack_.size() ||
+           !index_.MayRebind(var.get(), loop_stack_[binding->loop_depth]))) {
+        return *binding;
       }
     } else if (auto call = As<Call>(expr)) {
       auto alias = ResultAliasedArgIndex(call);
@@ -487,11 +582,13 @@ class ScopeOutliner : public IRMutator {
     auto binding = ResolveStorage(var);
     if (binding.storage) {
       const auto scope = binding.storage->initialized_scope;
-      return scope && active_scopes_[*scope];
+      const bool initialized = scope && active_scopes_[*scope];
+      if (initialized && binding.storage->loop_carry) binding.storage->requires_initialized_backedge = true;
+      return initialized;
     }
     // An expired or loop-carried binding cannot reuse the first iteration's
     // proof: a later assignment may replace its storage before the backedge.
-    if (bindings_.count(var.get())) return false;
+    if (LookupBinding(var.get())) return false;
     // At joins where no reaching value is known, retain only the conservative
     // guarantee that no possible source is Out or an uninitialized allocation.
     return !permissions_.Uninitialized(var.get());
@@ -511,7 +608,7 @@ class ScopeOutliner : public IRMutator {
     if (previous.storage == binding.storage && previous.whole == binding.whole) return;
     binding.scope = current_scope_;
     binding.loop_depth = loop_stack_.size();
-    bindings_[var.get()] = std::move(binding);
+    bindings_ = UpdateBinding(bindings_, 0, binding_capacity_, binding_indices_.at(var.get()), binding);
   }
   void BindFresh(const VarPtr& var, bool initialized) {
     auto storage = std::make_shared<Storage>();
@@ -578,7 +675,9 @@ class ScopeOutliner : public IRMutator {
   std::set<std::string>& names_;
   std::vector<FunctionPtr>& helpers_;
   StoragePermissions permissions_;
-  std::unordered_map<const Var*, Binding> bindings_;
+  std::unordered_map<const Var*, size_t> binding_indices_;
+  size_t binding_capacity_ = 1;
+  BindingRoot bindings_;
   std::vector<bool> active_scopes_{true};
   size_t current_scope_ = 0;
   std::vector<const Stmt*> loop_stack_;

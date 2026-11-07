@@ -33,7 +33,12 @@ initialized; a fresh Tile load replaces an earlier uninitialized value without
 initializing old aliases. Branch-local proofs and changed storage identities are
 not assumed after a join. A loop capture must also be initialized on later
 iterations; a fresh load before the capture supplies a new proof. JIT shape folding and scalar renaming inside a SIMT
-scope do not affect subsequent caller code.
+scope do not affect subsequent caller code. Private reassignment invalidates a
+previous shape fold after evaluating its right-hand side. Both sides of an `if`
+start from the incoming bindings; their changed bindings remain invalid at the
+join. Explicit loop carries retain initialized seeds, and captures that depend
+on them require initialized yielded values on every iteration. Loop outputs are
+initialized only when both the seed and the backedge values are initialized.
 
 Storage returned by a function call or projected from a rebound tuple is rejected
 when its provenance cannot be proved. Capture the original named storage instead.

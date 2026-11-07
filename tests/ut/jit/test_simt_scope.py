@@ -9,13 +9,16 @@
 
 """Compile public SIMT authoring through the complete JIT pipeline."""
 
+import ast
 import json
 from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import CacheConfig, backend, ir, passes
+from pypto import CacheConfig, DataType, backend, ir, passes
 from pypto.ir.compiled_program import CompiledProgram
+from pypto.jit._specialize_body import BodyTransformer
+from pypto.jit._specialize_types import TensorMeta
 from pypto.runtime import ExecutionMode, RunConfig
 
 
@@ -134,6 +137,46 @@ def test_jit_loaded_tile_reassignment_can_be_captured():
         assert any(fn.func_type == ir.FunctionType.SIMT for fn in outlined.functions.values())
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "n = pl.simt.thread_idx(pl.simt.Axis.X)",
+        "n: pl.Scalar[pl.INDEX] = pl.simt.thread_idx(pl.simt.Axis.X)",
+        "m = n = pl.simt.thread_idx(pl.simt.Axis.X)",
+        "n = n - 1",
+    ],
+)
+def test_private_reassignment_invalidates_shape_fold(assignment):
+    tree = ast.parse(f"""
+n = src.shape[1]
+with pl.simt_scope(dims=(32, 1, 1)):
+    {assignment}
+    pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+after = n
+""")
+    transformer = BodyTransformer(
+        tensor_meta={"src": TensorMeta(shape=(1, 32), dtype=DataType.FP32)},
+        dep_names=set(),
+        param_names=["src", "dst"],
+    )
+    transformed = transformer.visit(tree)
+    assert isinstance(transformed, ast.Module)
+    scope = transformed.body[0]
+    assert isinstance(scope, ast.With)
+    store = scope.body[-1]
+    assert isinstance(store, ast.Expr) and isinstance(store.value, ast.Call)
+    offsets = store.value.args[1]
+    assert isinstance(offsets, ast.Tuple)
+    assert isinstance(offsets.elts[1], ast.Name) and offsets.elts[1].id == "n"
+    after = transformed.body[1]
+    assert isinstance(after, ast.Assign)
+    assert isinstance(after.value, ast.Constant) and after.value.value == 32
+    if assignment == "n = n - 1":
+        assigned = scope.body[0]
+        assert isinstance(assigned, ast.Assign) and isinstance(assigned.value, ast.BinOp)
+        assert isinstance(assigned.value.left, ast.Constant) and assigned.value.left.value == 32
 
 
 if __name__ == "__main__":
