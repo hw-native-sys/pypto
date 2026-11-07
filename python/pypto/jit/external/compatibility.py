@@ -40,7 +40,7 @@ def make_request(
 ) -> KernelRequest:
     """Own the input containers and reject any mutable nested signature data."""
     # tuple(set(...)) would freeze an arbitrary physical parameter order.
-    if not issubclass(type(parameters), Sequence):
+    if not isinstance(cast(object, parameters), Sequence):
         raise ContractError("request: expected an ordered parameter sequence")
     request = KernelRequest(
         tuple(parameters), target, tuple((constants or {}).items()), tuple((options or {}).items())
