@@ -88,9 +88,18 @@ struct FinalProducer {
   MemRefPtr storage;
 };
 
+/// The operators that can set a producer-side unit flag.
+///
+/// `tile.gemv_mx` / `_acc` carry `acc_phase` because `pto.tgemv.mx` and
+/// `.mx.acc` declare the attribute; `tile.gemv_mx_bias` does *not* appear here
+/// because `pto.tgemv.mx.bias` has no such attribute (an emitted one would be
+/// kept as a discardable MLIR attribute and silently ignored), exactly as
+/// `tile.matmul_bias` is absent for the same reason. The MX *matmul* family does
+/// not expose `acc_phase` through PyPTO yet, so it is likewise absent.
 bool IsPhasedAccumulatorProducer(const CallPtr& call) {
   return IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.gemv") ||
-         IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias");
+         IsOp(call, "tile.gemv_acc") || IsOp(call, "tile.gemv_bias") || IsOp(call, "tile.gemv_mx") ||
+         IsOp(call, "tile.gemv_mx_acc");
 }
 
 bool IsFinalAccumulatorProducer(const CallPtr& call) {
@@ -380,7 +389,8 @@ class AccStorePhaseVisitor : public IRVisitor {
             DiagnosticSeverity::Error, "AccStorePhaseValid", /*error_code=*/1,
             "tile.store(..., st_phase=pl.STPhase.Final) in function '" + func_name_ +
                 "' must consume the exact SSA value produced by tile.matmul, tile.matmul_acc, "
-                "tile.gemv, tile.gemv_acc, or tile.gemv_bias with acc_phase=pl.AccPhase.Final in the "
+                "tile.gemv, tile.gemv_acc, tile.gemv_bias, tile.gemv_mx, or tile.gemv_mx_acc with "
+                "acc_phase=pl.AccPhase.Final in the "
                 "same straight-line region. A final "
                 "store "
                 "without a matching producer waits on a unit flag that was never set and can stall device "

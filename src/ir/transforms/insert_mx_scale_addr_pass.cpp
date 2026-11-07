@@ -158,9 +158,20 @@ class MxScaleAddrInserter : public IRMutator {
   std::optional<Binding> left_binding_;
   std::optional<Binding> right_binding_;
 
+  // "An MX instruction has already consumed a binding on this side, in this
+  // straight-line region." Deliberately NOT part of `Binding`: `InvalidateBinding`
+  // drops the binding as soon as any other statement touches a Left/Right tile --
+  // which a second K chunk's own operands do -- so a flag living inside `Binding`
+  // would be gone exactly when the hazard appears. Only a control-flow boundary
+  // (`ClearBindings`) ends the region these describe.
+  bool left_mx_consumed_ = false;
+  bool right_mx_consumed_ = false;
+
   void ClearBindings() {
     left_binding_.reset();
     right_binding_.reset();
+    left_mx_consumed_ = false;
+    right_mx_consumed_ = false;
   }
 
   void InvalidateBinding(const TypePtr& type) {
@@ -171,11 +182,51 @@ class MxScaleAddrInserter : public IRMutator {
     if (space == MemorySpace::Right || space == MemorySpace::RightScale) right_binding_.reset();
   }
 
+  static bool IsMxGemv(const CallPtr& call) {
+    return IsOp(call, "tile.gemv_mx") || IsOp(call, "tile.gemv_mx_acc") || IsOp(call, "tile.gemv_mx_bias");
+  }
+
+  /// Reject a second scale binding emitted after an MX GEMV consumer (PTOAS #1691).
+  ///
+  /// A segmented-K MX reduction carries its own scale tiles per chunk, so the
+  /// binding cannot be reused and a fresh `tile.tget_scale_addr` lands *after* the
+  /// previous chunk's MX instruction. The emitted order is then
+  /// `bind, bind, consumer, bind, bind, consumer`, and PTOAS #1691 hoists the
+  /// second pair back to the first scale fill, so the later chunk silently reads
+  /// the earlier chunk's scales for part of its output. Measured on A5: a two-chunk
+  /// K=1024 GEMV produced the correct answer in only 3 of 6 runs, and failed
+  /// identically with the `acc_phase` bits removed.
+  ///
+  /// A wrong number is worse than a compile error, so refuse to emit the shape.
+  ///
+  /// Scope, deliberately: only when the op needing the rebind is an MX *GEMV*.
+  /// `tile.matmul_mx*` is structurally exposed the same way, but it predates this
+  /// family and pypto-lib's `deepseek_v4_1_flash` MX models are built on exactly
+  /// that chunked `matmul_mx` + `matmul_mx_acc` shape, so rejecting it is a
+  /// contract change for existing callers rather than a fix, and is not made here.
+  ///
+  /// Not covered: the loop-carried form, where the bind and the consumer both sit
+  /// inside one loop body and the hazard only appears across iterations. Bindings
+  /// are tracked per straight-line region, so that shape still compiles. It is the
+  /// matmul models' form, and no device measurement of it exists.
+  static void RejectRebindAfterConsumerForGemv(bool side_already_consumed, const CallPtr& call) {
+    if (!side_already_consumed || !IsMxGemv(call)) return;
+    CHECK_SPAN(false, call->span_)
+        << "The operator " << call->op_->name_
+        << " needs a second MX scale binding after an earlier MX instruction has already consumed one, "
+           "which is a segmented-K MX reduction. PTOAS #1691 hoists that re-binding back to the first "
+           "scale fill, so the later K chunk reads the earlier chunk's scales and the result is silently "
+           "wrong. Accumulate over a single K window (one scale binding per side) until #1691 is fixed.";
+  }
+
   static std::vector<std::pair<size_t, size_t>> GetDataScalePairs(const CallPtr& call) {
-    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias")) {
+    // Both MX families place their scale immediately after the data operand it
+    // belongs to, so the pairs differ only by the leading accumulator operand.
+    if (IsOp(call, "tile.matmul_mx") || IsOp(call, "tile.matmul_mx_bias") || IsOp(call, "tile.gemv_mx") ||
+        IsOp(call, "tile.gemv_mx_bias")) {
       return {{0, 1}, {2, 3}};
     }
-    if (IsOp(call, "tile.matmul_mx_acc")) {
+    if (IsOp(call, "tile.matmul_mx_acc") || IsOp(call, "tile.gemv_mx_acc")) {
       return {{1, 2}, {3, 4}};
     }
     return {};
@@ -222,10 +273,11 @@ class MxScaleAddrInserter : public IRMutator {
              "RightScale↔Right pairing before inserting tile.tget_scale_addr (run "
              "InferTileMemorySpace first)";
 
-      auto& binding = As<TileType>(scale->GetType())->GetMemorySpace() == MemorySpace::LeftScale
-                          ? left_binding_
-                          : right_binding_;
+      const bool is_left = As<TileType>(scale->GetType())->GetMemorySpace() == MemorySpace::LeftScale;
+      auto& binding = is_left ? left_binding_ : right_binding_;
+      bool& side_consumed = is_left ? left_mx_consumed_ : right_mx_consumed_;
       if (!binding || binding->scale.get() != scale.get() || binding->data.get() != data.get()) {
+        RejectRebindAfterConsumerForGemv(side_consumed, call);
         auto binding_call = registry.Create("tile.tget_scale_addr", {scale, data}, {}, call->span_);
         auto bound_scale =
             std::make_shared<Var>(scale->name_hint_ + "_bound", binding_call->GetType(), call->span_);
@@ -233,6 +285,9 @@ class MxScaleAddrInserter : public IRMutator {
         binding = Binding{scale, data, bound_scale};
       }
       new_args[scale_index] = binding->bound;
+      // This call consumes whatever is bound on this side, so any later binding
+      // here would be emitted *after* a consumer.
+      side_consumed = true;
       call_changed = true;
       changed = true;
     }

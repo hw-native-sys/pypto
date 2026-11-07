@@ -14,6 +14,7 @@
  * @brief MX block-scale matmul tile ops and the inferred scale-address binding op
  */
 
+#include <algorithm>
 #include <any>
 #include <cstdint>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -36,7 +38,42 @@
 namespace pypto {
 namespace ir {
 
-static bool IsSupportedMxDataType(const DataType& dtype) { return dtype == DataType::FP8E4M3FN; }
+// A5 MX data operands come from the shared Cube operand table's kMx rows
+// (PTOAS v0.72 isA5MxFp8InputType, pto-isa isSupportedFp8Combo): each side is
+// FP8E4M3FN or FP8E5M2, independently. HF8 is a Cube FP8 operand but not an MX
+// one, so it carries kMatmul/kGemv without kMx; packed FP4 is absent entirely.
+static bool IsSupportedMxDataPair(const DataType& lhs, const DataType& rhs) {
+  return backend::FindCubeOperandPair(backend::CubeOpFamily::kMx, lhs, rhs) != nullptr;
+}
+
+/// Can @p dtype appear on *either* side of some supported MX pair?
+///
+/// Used where only one operand is in hand -- the per-side diagnostics below and
+/// `tile.tget_scale_addr`, whose src may be the Left or the Right data tile.
+static bool IsSupportedMxDataType(const DataType& dtype) {
+  for (const auto& pair : backend::kCubeOperandPairs) {
+    if (!pair.InFamily(backend::CubeOpFamily::kMx)) continue;
+    if (pair.lhs == dtype || pair.rhs == dtype) return true;
+  }
+  return false;
+}
+
+static std::string PackedFp4MxHint(const DataType& dtype, const char* side) {
+  if (!dtype.IsPackedFp4()) return "";
+  return std::string("; native packed FP4 MX multiplication is not supported, cast the ") + side +
+         " to FP8E4M3FN or FP8E5M2 with pl.cast first";
+}
+
+/// Which MX product the shared deducer is shaping.
+///
+/// The two differ only in the lhs row rule and the result shape: a matmul takes
+/// a physical M that is a multiple of 16 and keeps it, while a GEMV takes
+/// exactly one physical row and lands in the mandatory 16-row Acc box via
+/// `BuildGemvResultType`. Every other contract -- operand pair, physical K / N
+/// alignment, valid-K positivity, the ceil(K/32) scale-group agreement, and both
+/// scale tiles' geometry -- is identical, which is why they share one body
+/// rather than two deducers that can drift.
+enum class MxProductKind : uint8_t { kMatmul, kGemv };
 
 // Static-dim checks only: when either side is symbolic (non-ConstInt), the match
 // is skipped. Full PTOAS alignment (M%16 / K%64 / N%32 / ceil(K/32) groups) is
@@ -81,9 +118,9 @@ static ExprPtr MxScaleKCeil(const ExprPtr& k_dim) {
   return std::make_shared<ConstInt>(groups, DataType::INDEX, Span::unknown());
 }
 
-TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
-                               const std::vector<std::pair<std::string, std::any>>& kwargs,
-                               const std::string& op_name) {
+TypePtr DeduceTileMxProductType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name, MxProductKind kind) {
   CHECK(args.size() == 4) << "The operator " << op_name
                           << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
@@ -102,21 +139,15 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK(lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D lhs/rhs tiles";
   CHECK(IsSupportedMxDataType(lhs_type->dtype_))
-      << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
-      << lhs_type->dtype_.ToString()
-      << (lhs_type->dtype_.IsPackedFp4()
-              ? "; native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-                "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions; cast the lhs to FP8E4M3FN "
-                "with pl.cast first"
-              : "");
+      << "The operator " << op_name << " requires lhs dtype FP8E4M3FN or FP8E5M2, but got "
+      << lhs_type->dtype_.ToString() << PackedFp4MxHint(lhs_type->dtype_, "lhs");
   CHECK(IsSupportedMxDataType(rhs_type->dtype_))
-      << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
-      << rhs_type->dtype_.ToString()
-      << (rhs_type->dtype_.IsPackedFp4()
-              ? "; native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-                "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions; cast the rhs to FP8E4M3FN "
-                "with pl.cast first"
-              : "");
+      << "The operator " << op_name << " requires rhs dtype FP8E4M3FN or FP8E5M2, but got "
+      << rhs_type->dtype_.ToString() << PackedFp4MxHint(rhs_type->dtype_, "rhs");
+  CHECK(IsSupportedMxDataPair(lhs_type->dtype_, rhs_type->dtype_))
+      << "The operator " << op_name << " requires one of the MX data pairs ("
+      << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kMx, "a5") << "), but got "
+      << lhs_type->dtype_.ToString() << " x " << rhs_type->dtype_.ToString();
 
   ExprPtr m_phys = lhs_type->shape_[0];
   ExprPtr k_phys_lhs = lhs_type->shape_[1];
@@ -135,9 +166,21 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   auto k_phys_lhs_c = As<ConstInt>(k_phys_lhs);
   auto k_phys_rhs_c = As<ConstInt>(k_phys_rhs);
   if (m_phys_c) {
-    CHECK(m_phys_c->value_ > 0 && m_phys_c->value_ % 16 == 0)
-        << "The operator " << op_name
-        << " requires physical M divisible by 16 (ISA/PTOAS tmatmul_mx), but got M=" << m_phys_c->value_;
+    // A GEMV engages the Cube's GEMV mode through the Left tile's *physical*
+    // row count (pto-isa a5/TMatmulCommon.hpp:30-33, `GetGemvCtrl` is
+    // `TileLeft::Rows != 1`), so a single row is required rather than merely
+    // permitted; a matmul instead needs a whole 16-row L0A box.
+    if (kind == MxProductKind::kGemv) {
+      CHECK(m_phys_c->value_ == 1)
+          << "The operator " << op_name
+          << " requires physical M to be exactly 1 (the Cube selects GEMV mode from the Left tile's"
+             " physical row count), but got M="
+          << m_phys_c->value_;
+    } else {
+      CHECK(m_phys_c->value_ > 0 && m_phys_c->value_ % 16 == 0)
+          << "The operator " << op_name
+          << " requires physical M divisible by 16 (ISA/PTOAS tmatmul_mx), but got M=" << m_phys_c->value_;
+    }
   }
   if (n_phys_c) {
     constexpr int64_t n_align = 32;
@@ -202,6 +245,32 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   check_scale_group_agreement(k_phys_lhs_c, k_valid_lhs_c, "lhs");
   check_scale_group_agreement(k_phys_rhs_c, k_valid_rhs_c, "rhs");
 
+  // Agreeing scale-group counts are necessary but NOT sufficient: physical K=512
+  // with valid K=481 rounds to the same 16 groups and still faults the card, for
+  // every FP8 pair (docs/en/dev/ir/05-operators.md, "On device, valid K must equal
+  // physical K"). Documenting that was not enough -- the program compiled and
+  // reached the device -- so the GEMV family rejects it here instead.
+  //
+  // Deliberately scoped to `kind == kGemv`. `tile.matmul_mx*` has carried the
+  // looser contract since before this family existed and pypto-lib's MX models
+  // narrow valid *M*, not valid K; widening the rejection to matmul is a contract
+  // change for existing callers and is not made here.
+  if (kind == MxProductKind::kGemv) {
+    auto check_valid_k_is_full = [&](const ConstIntPtr& phys_c, const ConstIntPtr& valid_c,
+                                     const char* side) {
+      if (!phys_c || !valid_c) return;
+      CHECK(valid_c->value_ == phys_c->value_)
+          << "The operator " << op_name << " requires " << side
+          << " valid K to equal physical K: a narrowed valid K assembles but faults the A5 card for "
+             "every FP8 pair, and matching scale-group counts (ceil(validK/32) == ceil(physicalK/32)) "
+             "do not make it safe. Got physical K="
+          << phys_c->value_ << ", valid K=" << valid_c->value_
+          << ". Shrink the operand tiles' physical K instead of narrowing their valid shape.";
+    };
+    check_valid_k_is_full(k_phys_lhs_c, k_valid_lhs_c, "lhs");
+    check_valid_k_is_full(k_phys_rhs_c, k_valid_rhs_c, "rhs");
+  }
+
   ExprPtr lhs_scale_k_phys = MxScaleKCeil(k_phys_lhs);
   ExprPtr lhs_scale_k_valid = MxScaleKCeil(k_valid_lhs);
   if (!lhs_scale_k_phys) {
@@ -244,12 +313,38 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   tile_view.fractal = 1024;
   tile_view.valid_shape = {m_valid, n_valid};
   StampCompactForNarrowedAccRows(tile_view, output_shape);
-  return std::make_shared<TileType>(output_shape, DataType::FP32, std::nullopt, tile_view);
+  auto product = std::make_shared<TileType>(output_shape, DataType::FP32, std::nullopt, tile_view);
+  if (kind == MxProductKind::kMatmul) {
+    return product;
+  }
+  // A GEMV's one logical row has to live in a 16-row Acc box, and the
+  // physical/logical split that creates is what the codegen bridge depends on.
+  // `BuildGemvResultType` owns that shape for the ordinary GEMV family too, so
+  // the two cannot drift. It re-checks the single-row lhs contract on the valid
+  // extents, which the physical-M check above does not cover.
+  //
+  // Note it does *not* stamp CompactMode::normal: a GEMV accumulator is one
+  // valid row in a 16-row box by construction, which is the non-compact form
+  // the ordinary GEMV family already emits and PTOAS accepts.
+  return BuildGemvResultType(product, lhs_type, rhs_type);
 }
 
-TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name) {
+TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  return DeduceTileMxProductType(args, kwargs, op_name, MxProductKind::kMatmul);
+}
+
+TypePtr DeduceTileGemvMxType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  ValidateAccPhase(kwargs, op_name);
+  return DeduceTileMxProductType(args, kwargs, op_name, MxProductKind::kGemv);
+}
+
+TypePtr DeduceTileMxProductAccType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name, MxProductKind kind) {
   CHECK(args.size() == 5) << "The operator " << op_name
                           << " requires exactly 5 arguments (acc, lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
@@ -263,7 +358,7 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
   const auto acc_valid = GetValidShape(acc_type);
 
   std::vector<ExprPtr> mx_args = {args[1], args[2], args[3], args[4]};
-  auto out_type = DeduceTileMatMulMxType(mx_args, kwargs, op_name);
+  auto out_type = DeduceTileMxProductType(mx_args, kwargs, op_name, kind);
   auto out_tile = As<TileType>(out_type);
   auto m_acc = As<ConstInt>(acc_type->shape_[0]);
   auto n_acc = As<ConstInt>(acc_type->shape_[1]);
@@ -284,9 +379,9 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
   return out_type;
 }
 
-TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
-                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                   const std::string& op_name) {
+TypePtr DeduceTileMxProductBiasType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name, MxProductKind kind) {
   CHECK(args.size() == 5) << "The operator " << op_name
                           << " requires exactly 5 arguments (lhs, lhs_scale, rhs, rhs_scale, bias), but got "
                           << args.size();
@@ -300,7 +395,7 @@ TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
   const auto bias_valid = GetValidShape(bias_type);
 
   std::vector<ExprPtr> mx_args = {args[0], args[1], args[2], args[3]};
-  auto out_type = DeduceTileMatMulMxType(mx_args, kwargs, op_name);
+  auto out_type = DeduceTileMxProductType(mx_args, kwargs, op_name, kind);
   auto out_tile = As<TileType>(out_type);
   auto n_out = As<ConstInt>(out_tile->shape_[1]);
   auto bias_rows = As<ConstInt>(bias_type->shape_[0]);
@@ -322,6 +417,47 @@ TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
   }
   CheckDimMatch(out_valid[1], bias_valid[1], op_name, "bias", "valid", "cols");
   return out_type;
+}
+
+TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
+  return DeduceTileMxProductAccType(args, kwargs, op_name, MxProductKind::kMatmul);
+}
+
+TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name) {
+  return DeduceTileMxProductBiasType(args, kwargs, op_name, MxProductKind::kMatmul);
+}
+
+TypePtr DeduceTileGemvMxAccType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
+  ValidateAccPhase(kwargs, op_name);
+  return DeduceTileMxProductAccType(args, kwargs, op_name, MxProductKind::kGemv);
+}
+
+TypePtr DeduceTileGemvMxBiasType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  // `pto.tgemv.mx.bias` has no accPhase attribute (PTOAS v0.72 PTOOps.td:1356-1367),
+  // unlike `pto.tgemv.mx` and `.mx.acc`. MLIR would keep an emitted one as a
+  // *discardable* attribute and the TGEMV_MX intrinsic would silently ignore it.
+  //
+  // Leaving `ValidateAccPhase` out is not enough to make that unreachable: the op
+  // registration declares no attribute schema, so kwargs stay open and a raw
+  // `ir.create_op_call("tile.gemv_mx_bias", ..., {"acc_phase": ...})` bypasses the
+  // Python wrapper's signature and would be accepted here and then dropped. Reject
+  // the keyword outright so the phase cannot be silently lost.
+  const bool has_acc_phase =
+      std::any_of(kwargs.begin(), kwargs.end(), [](const auto& kv) { return kv.first == "acc_phase"; });
+  CHECK(!has_acc_phase)
+      << "The operator " << op_name
+      << " does not accept acc_phase: PTOAS has no accPhase attribute on pto.tgemv.mx.bias, so a phase "
+         "given here would be dropped rather than honoured. Use tile.gemv_mx or tile.gemv_mx_acc for a "
+         "phased producer and add the bias separately.";
+  return DeduceTileMxProductBiasType(args, kwargs, op_name, MxProductKind::kGemv);
 }
 
 REGISTER_OP("tile.matmul_mx")
@@ -380,6 +516,95 @@ REGISTER_OP("tile.matmul_mx_bias")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulMxBiasType(args, kwargs, "tile.matmul_mx_bias");
+    });
+
+// ============================================================================
+// A5 MX GEMV family: C[1, N] = A[1, K] * A_scale @ B[K, N] * B_scale
+// ============================================================================
+//
+// Same operand and scale contract as the MX matmul family above -- PTOAS gates
+// both through one dtype predicate -- with three GEMV-specific differences:
+//
+//  * physical M is exactly 1, because the Cube reads GEMV mode off the Left
+//    tile's physical row count rather than from the opcode;
+//  * the result is the 16-row Acc box with `valid_shape = [1, N]`
+//    (`BuildGemvResultType`), which `EmitStaticValidGemvAccView` then re-types
+//    so PTOAS compares logical extents;
+//  * `lhs_scale` is physically `[1, ceil(K/32)]`, so it is an ordinary ND
+//    FP8E8M0 tensor rather than an `MX_A_ZZ` one -- a single row has no 16x2
+//    SFractal packing to undo (see the load-deducer note in
+//    src/ir/op/tile_ops/memory.cpp). `rhs_scale` keeps `MX_B_NN`.
+//
+// Physical K is dtype-dependent and larger than a matmul's: the Mat-to-Left
+// extract of a single-row lhs is a vector load whose pto-isa static_assert
+// requires `Cols % (512 / sizeof(DType)) == 0` (npu/a5/TExtractCommon.hpp:182),
+// so a 1-byte MX operand needs physical K = 512.
+
+REGISTER_OP("tile.gemv_mx")
+    .set_op_category("TileOp")
+    .set_description(
+        "MX block-scale matrix-vector multiplication (A5): C[1, N] = gemv_mx(A, A_scale, B, B_scale)")
+    .add_argument("lhs",
+                  "Left-hand side tile (TileType, [1, K], FP8E4M3FN or FP8E5M2); physical K % 64 == 0, "
+                  "and K = 512 for the Mat-to-Left vector extract")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0); physical/valid [1, ceil(K/32)]")
+    .add_argument("rhs",
+                  "Right-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2); physical K % 64 == 0, "
+                  "N % 32 == 0")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0); physical/valid [ceil(K/32), N]")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::LeftScale)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_input_memory(3, MemorySpace::RightScale)
+    .set_output_memory(MemorySpace::Acc)
+    .functional_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGemvMxType(args, kwargs, "tile.gemv_mx");
+    });
+
+REGISTER_OP("tile.gemv_mx_acc")
+    .set_op_category("TileOp")
+    .set_description("MX block-scale GEMV with accumulation (A5): acc += gemv_mx(...)")
+    .add_argument("acc", "Accumulator tile (TileType, 2D, FP32); physical/valid shape of the gemv_mx result")
+    .add_argument("lhs", "Left-hand side tile (TileType, [1, K], FP8E4M3FN or FP8E5M2)")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2)")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(1, MemorySpace::Left)
+    .set_input_memory(2, MemorySpace::LeftScale)
+    .set_input_memory(3, MemorySpace::Right)
+    .set_input_memory(4, MemorySpace::RightScale)
+    .set_output_memory(MemorySpace::Acc)
+    .set_output_reuses_input(0)
+    // Accumulates into `acc` in place, same as tile.matmul_mx_acc: PTOAS wants
+    // the ins() accumulator and the outs() destination to be one SSA value.
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .functional_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGemvMxAccType(args, kwargs, "tile.gemv_mx_acc");
+    });
+
+REGISTER_OP("tile.gemv_mx_bias")
+    .set_op_category("TileOp")
+    .set_description("MX block-scale GEMV with bias (A5): C[1, N] = gemv_mx(...) + bias")
+    .add_argument("lhs", "Left-hand side tile (TileType, [1, K], FP8E4M3FN or FP8E5M2)")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, FP8E4M3FN or FP8E5M2)")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("bias", "Bias tile (TileType, [1, N], FP32)")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::LeftScale)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_input_memory(3, MemorySpace::RightScale)
+    .set_input_memory(4, MemorySpace::Bias)
+    .set_output_memory(MemorySpace::Acc)
+    .functional_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGemvMxBiasType(args, kwargs, "tile.gemv_mx_bias");
     });
 
 TypePtr DeduceTileTGetScaleAddrType(const std::vector<ExprPtr>& args,

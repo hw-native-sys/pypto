@@ -1,6 +1,6 @@
 # InsertMxScaleAddr Pass
 
-Inserts compiler-generated `tile.tget_scale_addr` bindings before MX matmul consumers once every operand memory space is concrete.
+Inserts compiler-generated `tile.tget_scale_addr` bindings before MX matmul and MX GEMV consumers once every operand memory space is concrete.
 
 ## Overview
 
@@ -11,7 +11,7 @@ bound_scale = tile.tget_scale_addr(scale, data)
 matmul_mx(..., bound_scale, ...)
 ```
 
-`tile.tget_scale_addr` is intentionally absent from the public `pypto.language` API. Users write only the high-level `matmul_mx` family; the compiler derives the Left/Right side from the matmul operand slots. The low-level `ir.op.tile.tget_scale_addr` remains available for compiler construction and IR parsing. It accepts only the resolved pairs `(LeftScale, Left)` and `(RightScale, Right)`, with an `FP8E4M3FN` data tile. An FP4 lhs is cast to FP8 before reaching this pass.
+`tile.tget_scale_addr` is intentionally absent from the public `pypto.language` API. Users write only the high-level `matmul_mx` / `gemv_mx` families; the compiler derives the Left/Right side from the operand slots. The low-level `ir.op.tile.tget_scale_addr` remains available for compiler construction and IR parsing. It accepts only the resolved pairs `(LeftScale, Left)` and `(RightScale, Right)`, with an `FP8E4M3FN` or `FP8E5M2` data tile. An FP4 lhs is cast to FP8 before reaching this pass.
 
 **Pipeline position**: Immediately after [`InferTileMemorySpace`](21-infer_tile_memory_space.md), before [`ResolveBackendOpLayouts`](23-resolve_backend_op_layouts.md).
 
@@ -35,9 +35,9 @@ Rewrites all InCore-variant functions (`FunctionType::InCore` / `AIC` / `AIV`). 
 
 ## Algorithm
 
-Walk each InCore-variant body. For every `tile.matmul_mx` / `tile.matmul_mx_acc` / `tile.matmul_mx_bias` assignment:
+Walk each InCore-variant body. For every `tile.matmul_mx` / `_acc` / `_bias` and `tile.gemv_mx` / `_acc` / `_bias` assignment:
 
-1. Pair data/scale operand indices (`(0,1)/(2,3)` for `matmul_mx` / `_bias`; `(1,2)/(3,4)` for `_acc`).
+1. Pair data/scale operand indices. Both families place each scale immediately after the data operand it belongs to, so the pairs differ only by the leading accumulator operand: `(0,1)/(2,3)` for the base and `_bias` forms, `(1,2)/(3,4)` for `_acc`.
 2. Require Var-like operands (`Var` or `IterArg`) whose memory spaces already form a legal LeftScale↔Left or RightScale↔Right pair.
 3. Reuse the latest binding on that side only if both SSA operands are unchanged and no invalidating operation intervened. Otherwise insert `tile.tget_scale_addr(scale, data)` immediately before the matmul. Rewrite the matmul to consume the bound scale SSA.
 

@@ -307,10 +307,39 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // A transposed matmul operand is realised by a zero-copy ``tile.transpose_view``
   // at the matmul site, not by the load.
   bool source_is_dn = tensor_type->tensor_view_.value_or(TensorView{}).layout == TensorLayout::DN;
+
+  // A *single-row* FP8E8M0 scale loaded for the cube is an MX A-scale with no
+  // SFractal packing to undo, so it arrives from an ordinary ND tensor rather
+  // than an `MX_A_ZZ` one -- and it still has to reach LeftScale, which accepts
+  // only the row/row/32 scale box (see the `tile.move` check in
+  // DeduceTileMoveType below).
+  //
+  // Why the A-scale of a GEMV is unpacked at all: `MX_A_ZZ` interleaves 16 rows
+  // x 2 groups into each 32-byte SFractal, which is meaningless for one row, and
+  // the hardware reads a `rows=1, cols=G, fractal=32` ScaleLeft tile as G
+  // *contiguous* bytes (PTOAS's own a5 device test moves exactly ceil(K/32)
+  // bytes GM->L1 for it). Padding an `MX_A_ZZ` buffer to 16 rows is therefore
+  // not an alternative: row 0's groups would sit at stride 32 inside the
+  // fractals, not contiguously, so no reinterpretation of a packed buffer is
+  // byte-correct.
+  //
+  // Restricted to `rows == 1` on purpose: that is exactly the extent for which
+  // no packed form exists, so an unpacked multi-row scale cannot be smuggled
+  // past `BlockMxScaleTensorViews` through this arm. An FP8E8M0 tile is never a
+  // cube *data* vector, so this does not overlap the GEMV lhs case below.
+  const bool is_single_row_window = shapes_tuple->elements_.size() == 2 && [&] {
+    const ExprPtr& row_dim = source_is_dn ? shapes_tuple->elements_[1] : shapes_tuple->elements_[0];
+    auto rows = As<ConstInt>(row_dim);
+    return rows && rows->value_ == 1;
+  }();
+  const bool is_unpacked_mx_a_scale = !is_mx_load && tensor_type->dtype_ == DataType::FP8E8M0 &&
+                                      target_memory_opt.has_value() &&
+                                      *target_memory_opt == MemorySpace::Mat && is_single_row_window;
+
   TileView tile_view;
-  if (is_mx_load) {
+  if (is_mx_load || is_unpacked_mx_a_scale) {
     // A5 TLoadMxCubeCheck: MX_A_* → row-major ZZ (SFractal=32); MX_B_* → col-major NN.
-    const bool is_mx_b = tensor_type->tensor_view_->layout == TensorLayout::MX_B_NN;
+    const bool is_mx_b = is_mx_load && tensor_type->tensor_view_->layout == TensorLayout::MX_B_NN;
     if (is_mx_b) {
       tile_view.blayout = TileLayout::col_major;
       tile_view.slayout = TileLayout::col_major;
@@ -331,14 +360,11 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     // SLayout::NoneBox>; that pair routes the Mat->Left move through the
     // rows==1 vector path instead of the regular extraction path, whose row
     // alignment excludes M=1. In a rank-3+ Mat load, shape[0] is a batch
-    // dimension, so keep the canonical NZ view.
-    const auto& shape = shapes_tuple->elements_;
-    if (shape.size() == 2) {
-      const ExprPtr& row_dim = source_is_dn ? shape[1] : shape[0];
-      if (auto rows = As<ConstInt>(row_dim); rows && rows->value_ == 1) {
-        tile_view.blayout = TileLayout::row_major;
-        tile_view.slayout = TileLayout::none_box;
-      }
+    // dimension, so keep the canonical NZ view. A single-row FP8E8M0 scale is
+    // not a data vector and never reaches here -- the MX arm above claims it.
+    if (is_single_row_window) {
+      tile_view.blayout = TileLayout::row_major;
+      tile_view.slayout = TileLayout::none_box;
     }
     // Column vector: independent of the destination, and in particular still
     // true when `target_memory` is absent. This arm used to sit inside the

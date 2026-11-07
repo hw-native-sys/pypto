@@ -2165,11 +2165,14 @@ jobs:
 
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
-    # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
-    # npu-a5 card. Three steps share one checkout / install:
+    # because the job now also runs MX ST (matmul_mx / gemv_mx / quant_mx) on the
+    # same npu-a5 card. Three steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
-    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
-    #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
+    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board
+    #                              quant/quant-to-matmul
+    #   3. gemv-mx-tests-a5      — the M == 1 forms of the MX family, in their own
+    #                              session (see that step for why)
+    #   4. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
     # a2a3 (910B) only: `system-tests*` run --platform=a2a3, and
@@ -2231,6 +2234,18 @@ jobs:
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
     # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
     # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    #
+    # --- gemv-mx-tests-a5 ---
+    # Scope — tests/st/runtime/ops/test_gemv_mx_a5.py: gemv_mx / _acc / _bias over
+    # the four FP8 pairs, each case exercising all three forms. There is NO
+    # segmented-K case: that shape is rejected at compile time pending PTOAS
+    # #1691, so this job gives segmented K no device coverage at all (see the
+    # file's own docstring). The whole file is the target rather than node IDs,
+    # because all four cases are harness-based (`st.case` / `case_run`, no direct
+    # `compiled()`), so enumerating node IDs would only create a way to silently
+    # drop a case added later. It is the ONLY CI coverage of `pto.tgemv.mx` / `.mx.acc` / `.mx.bias`
+    # on silicon — `system-tests*` run --platform=a2a3, where those ops do not
+    # exist. It gets its own session; the step comment says why.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2323,6 +2338,13 @@ jobs:
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
+        # fp8e5m2_transfer is the wire-level sibling of those: one harness case
+        # (+1 to this step's 16) asserting that a host-prequantized FP8E5M2
+        # tensor survives the runtime's UINT8 byte carrier bit-for-bit. It is
+        # here rather than in a directory-glob step because every such step runs
+        # at the default --platform=a2a3, which deselects its platforms("a5")
+        # marker; this is the only job that gives it a5 device coverage.
+        # The M == 1 forms live in gemv-mx-tests-a5, not here.
         run: |
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
@@ -2332,6 +2354,72 @@ jobs:
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp8e5m2_transfer.py \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: gemv-mx-tests-a5
+        # The MX GEMV ST runs in its OWN task-submit session, deliberately not
+        # appended to mx-tests-a5 above. Adding it to that step's target list made
+        # the *first* test of test_matmul_mx.py hang: pytest collected 21 items and
+        # then printed nothing for the full 3600 s cap, never reaching the
+        # `[DEVICE] ... -> device 0` assignment line, and the task queue killed the
+        # step (exit 130 = SIGINT). The same step with the original three files
+        # passes 16 cases in 36 s, and the source tree was byte-identical across
+        # those two runs -- only this target list differed -- so the trigger is
+        # sharing one pytest session, not the kernels or the device budget.
+        # The mechanism is not yet understood; isolating the session restores the
+        # pre-existing 16 cases and confines any residual risk to this step.
+        # Ruled out, so nobody re-derives them:
+        #   - *mixed harness styles in one session*. This file is pure `st.case`
+        #     while `test_matmul_mx.py` is `PTOTestCase`, which looks like the
+        #     culprit and is not: `test_quant_mx.py` mixes both styles inside one
+        #     file in this very step, and `test_cross_core.py` mixes them
+        #     (6 `st.case` / 13 `PTOTestCase`) in `mixed-kernel-tests-a5`. Both
+        #     pass.
+        #   - *device budget*. Nothing executed at all, and the three-file step
+        #     passes 16 cases in 36 s against a 3600 s cap.
+        #   - *the kernels, and anything else in the source tree*. The two runs
+        #     were byte-identical outside this file's one target line.
+        #   - *collection cost*. Collecting all four files together locally takes
+        #     0.16 s.
+        # Still untested here: this file under `--forked` with a session-held card
+        # (`--device=$TASK_DEVICE`); local runs used `--execute-via-task-submit`
+        # unforked. If this step hangs on its own, drop `--forked` next.
+        # Do NOT merge this back into mx-tests-a5 without reproducing that hang.
+        #
+        # --max-time 900 rather than 3600: this file needs ~2 min of device time,
+        # so a hang here is reported in 15 minutes instead of consuming the whole
+        # hour and starving vf-tests-a5 / reg-extended-tests-a5 of the card.
+        timeout-minutes: 30
+        env:
+          # `--forked` means pytest-forked imports torch in the PARENT (~384 intraop
+          # threads on this runner) and then forks a child per test. The child
+          # inherits a threadpool whose state is invalid across fork
+          # (pytorch#17199), and any real torch work in it can deadlock with no
+          # verdict -- which would kill this step at --max-time and take every later
+          # step in the job with it.
+          #
+          # The discriminator is WHICH SIDE OF THE FORK builds the operands, not how
+          # big a case is: `st.cases(*[st.case(..., tensors=_f(...)) ...])` evaluates
+          # at decoration time, i.e. in the parent, even though it reads like test
+          # setup. So the parent-side pool is already primed before any case runs,
+          # and this step is exposed regardless of the sizes currently listed.
+          #
+          # Scoped to this step on purpose: #3313 adds the same variable at job
+          # level, and a step-level entry lands on different lines, so both merge
+          # cleanly in either order and this step stays protected whichever lands
+          # first. This `env:` entry is the load-bearing half -- task-submit does
+          # not filter OMP_NUM_THREADS out of the forwarded environment, so it
+          # reaches the device-side pytest parent. The assignment inside `--run`
+          # below is documentation at the point of use.
+          OMP_NUM_THREADS: 1
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && OMP_NUM_THREADS=1 python -m pytest \
+              tests/st/runtime/ops/test_gemv_mx_a5.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5

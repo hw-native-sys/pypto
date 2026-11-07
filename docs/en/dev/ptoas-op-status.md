@@ -162,18 +162,18 @@ output elements outside the valid rectangle.
 | pto.tmov | TMOV / TMOV_FP | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.ttrans | TTRANS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | **Matrix Computation (12)** |  |  |  |  |  |  |  |  |
-| pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
+| pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A5 also accepts mixed FP8 operand pairs (E4M3FN x E5M2 in either order), E5M2 x E5M2 and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs) |
+| pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | Same A5 operand pairs as `pto.tmatmul`; acc_in stays FP32 |
+| pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | Same A5 operand pairs as `pto.tmatmul`; bias stays FP32 |
 | pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST; FP4 input is limited to FP4×FP8 with an explicit lhs FP4→FP8 cast; native FP4×FP4 is deferred; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
 | pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.matmul_mx_acc`) |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_bias`); ST pending |
-| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
-| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Shares `pto.tmatmul`'s operand-pair table, so A5 also accepts the four FP8 pairs (E4M3FN / E5M2, either order) and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs). A5 ST covers every dtype (the static-valid Acc bridge is what makes a5 GEMV assemble at all) |
+| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; acc_in stays FP32. A5 ST covers every dtype, split-K and `init_cond` |
+| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; bias stays FP32. A5 ST covers every dtype |
+| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.gemv_mx`). MX operand table only (the four FP8 pairs, no HF8); the A scale is a plain ND `[1, ceil(K/32)]` tensor, the B scale `MX_B_NN`. Needs physical K = 512 (the pto-isa vector extract wants `K % 512 == 0` for a 1-byte operand) and valid N == physical N. Valid K must EQUAL physical K: a narrowed valid K assembles and then faults the card, so all three GEMV forms reject it; see [MX GEMV](ir/05-operators.md#mx-gemv-ascend950) |
+| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.gemv_mx_acc`). Same operand table as `pto.tgemv.mx`; c_in stays FP32 and must be the same SSA value as dst. **Segmented K has NO device coverage** and does not compile: a second scale binding after an MX consumer is rejected (PTOAS #1691 hoists it back to the first scale fill, giving a nondeterministically wrong result). The emitted-shape contract is pinned by `tests/ut/codegen/test_mx_ops_codegen.py::TestGemvMxCodegen::test_segmented_k_mx_gemv_is_rejected_rather_than_silently_wrong`. A5 ST covers the single-window Partial/Final pair only. No `init_cond` equivalent is exposed |
+| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.gemv_mx_bias`); bias stays FP32. Declares no `accPhase` attribute, so PyPTO neither exposes `acc_phase` on the Python wrapper nor accepts it through a raw `create_op_call` -- the deducer rejects the keyword rather than letting PTOAS drop it |
 | **Vector Arithmetic and Math (42)** |  |  |  |  |  |  |  |  |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

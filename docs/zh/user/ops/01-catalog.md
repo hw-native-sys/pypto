@@ -130,14 +130,16 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
-| [`matmul`][pypto.language.matmul] | `pl.` | 矩阵乘；`a_trans=` / `b_trans=` 用来替代 DN 注解转置操作数 |
-| [`matmul_acc`][pypto.language.matmul_acc] | `pl.` | 乘累加进已有的 `Acc` tile |
-| [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | 带 bias 操作数的乘法 |
+| [`matmul`][pypto.language.matmul] | `pl.` | 矩阵乘；`a_trans=` / `b_trans=` 用来替代 DN 注解转置操作数。操作数类型必须成对：INT8、FP16、BF16、FP32 与自身配对，Ascend950 上还支持任意 FP8（E4M3FN / E5M2，**两种顺序**）或 HF8 配对，结果恒为 FP32 |
+| [`matmul_acc`][pypto.language.matmul_acc] | `pl.` | 乘累加进已有的 `Acc` tile。操作数配对同 `matmul`；累加器使用 FP32 / INT32 结果类型 |
+| [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | 带 bias 操作数的乘法。操作数配对同 `matmul`；bias 与累加器类型一致 |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
-| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式 |
-| [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor 并返回 FP32；`_acc` / `_bias` 仍只支持 tile。进入算子的 data 必须为 FP8E4M3FN；不支持原生 FP4×FP4 |
+| [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式，`M == 1`。操作数配对与 `matmul` 相同（含 Ascend950 上的 FP8 / HF8 配对）；结果、累加器与 bias 为 FP32 / INT32 |
+| [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor 并返回 FP32；`_acc` / `_bias` 仍只支持 tile。**tile** 操作数两侧可各自独立地为 FP8E4M3FN 或 FP8E5M2；而 **Tensor** 形式仍要求两侧均为 FP8E4M3FN（`DeduceTensorMatMulMxType`）。不支持原生 FP4×FP4 |
+| [`gemv_mx`][pypto.language.tile.gemv_mx] [`gemv_mx_acc`][pypto.language.tile.gemv_mx_acc] [`gemv_mx_bias`][pypto.language.tile.gemv_mx_bias] | `pl.` (t) | A5 MX 块缩放矩阵-向量形式，`M == 1`。操作数配对与 FP8E8M0 scale 同 `matmul_mx`，结果为 FP32。A 侧 scale 是普通 ND `[1, ceil(K/32)]` tensor（**不是** `pl.MX_A_ZZ`——其 16 行分块对单行没有意义）；B 侧仍为 `pl.MX_B_NN`。物理 K 必须为 512，有效 N 必须等于物理 N，且有效 K 必须**等于**物理 K（收窄的有效 K 会导致真机 fault，因此被拒绝）。请在单个 K 窗口内累加：需要第二次 scale 绑定的分段 K 归约在 PTOAS #1691 修复前会被拒绝 |
 
-`pl.tile.matmul`、`pl.tile.matmul_acc` 和 GEMV 家族通过
+`pl.tile.matmul`、`pl.tile.matmul_acc`、GEMV 家族以及 `pl.tile.gemv_mx` /
+`pl.tile.gemv_mx_acc` 通过
 `acc_phase=pl.AccPhase` 选择生产者阶段。默认 `Unspecified` 保持现有行为；
 中间 K 分块使用 `Partial`，最后一个生产者的 `Final` 必须与使用
 `pl.STPhase.Final` 的 store 配对：
