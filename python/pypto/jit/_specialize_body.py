@@ -790,7 +790,36 @@ class BodyTransformer(ast.NodeTransformer):
     def visit_With(self, node: ast.With) -> ast.stmt:
         """Visit With block, incrementing scope depth for its body."""
         node.items = [self.visit(item) for item in node.items]
+        simt = any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and item.context_expr.func.attr == "simt_scope"
+            for item in node.items
+        )
+        # SIMT assignments are per-thread. Folding a local shape or renaming a
+        # shadowed scalar must not change the caller's later specialization.
+        # Generated-name reservations and diagnostic aliases remain global to
+        # this function so distinct regions never reuse a generated name.
+        state = None
+        if simt:
+            state = (
+                self._meta.copy(),
+                self._shape_inlined.copy(),
+                self._assign_count.copy(),
+                self._assign_depth.copy(),
+                self._var_renames.copy(),
+            )
         self._scope_depth += 1
-        node.body = self._visit_scoped_body(node.body)
-        self._scope_depth -= 1
+        try:
+            node.body = self._visit_scoped_body(node.body)
+        finally:
+            self._scope_depth -= 1
+            if state is not None:
+                (
+                    self._meta,
+                    self._shape_inlined,
+                    self._assign_count,
+                    self._assign_depth,
+                    self._var_renames,
+                ) = state
         return node
