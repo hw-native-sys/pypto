@@ -31,7 +31,7 @@ Because bounds, step and `iter_args` are untouched, there is no remainder to dis
 
 ## The two passes are complementary, not alternatives
 
-Both run, in this order. This pass takes the loops it can prove safe and demotes them; every loop it declines keeps `ForKind::Pipeline` and is replicated by `LowerPipelineLoops` exactly as before. Nothing loses its ping-pong because this pass exists — matmul L0 stage loops, nested pipelines and unusual loop shapes all keep the replication path.
+Both run, in this order. This pass takes the loops it can prove safe and demotes them; every loop it declines keeps `ForKind::Pipeline` and is replicated by `LowerPipelineLoops` exactly as before. Matmul L0 stage loops, unsupported nests and unusual loop shapes keep the replication path. The software-pipeline option also admits the bounded local nests described below.
 
 This mirrors [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md), which handles cross-core pipeline loops the same way and leaves the rest intact.
 
@@ -135,10 +135,71 @@ region. Dynamic or partial valid shapes are never silently replaced by full shap
 The local path supports full-valid flat 2D Vec tiles, stages 2–4,
 nonnegative static starts and positive constant steps. Runtime bounds use
 guarded preloads and a normalized loop; overflow-risk paths retain the original
-schedule. Nested pipelines, cross-core FIFO operations, unsupported effects,
+schedule. Unsupported nests, cross-core FIFO operations, unsupported effects,
 true data recurrences and unproved aliases decline the
 whole loop to the established lowering. Static single-level loops shorter than
 the preload distance also retain that fallback.
+
+### Bounded local nested pipelines
+
+With `enable_software_pipeline=True`, Ascend 910B also supports nested local
+Vec pipelines. The pass specializes static child iterations and retains one
+outer loop. Only producer loads and their scalar address computations move
+across parent iterations; compute and stores keep their original order.
+
+```python
+import pypto.language as pl
+from pypto.runtime import RunConfig
+
+@pl.jit
+def nested_add(x: pl.Tensor[[8, 64], pl.FP32],
+               y: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for group in pl.pipeline(4, stage=3):
+            for page in pl.pipeline(2, stage=2):
+                row = group * 2 + page
+                value = pl.load(x, [row, 0], [1, 64])
+                pl.store(pl.add(value, 1.0), [row, 0], y)
+    return y
+
+nested_add.compile(config=RunConfig(enable_software_pipeline=True, codegen_only=True))
+```
+
+The local nested path requires:
+
+- Stages 2 through 4 at every level, with at most four child levels and 64
+  expanded phases across the nest. Every child has constant bounds in the
+  original IR, before ancestor specialization, a nonnegative start and a positive
+  step. All loop coordinates have INDEX type.
+- No escaping child result or live tensor, tile or task-state carry. Child state
+  referenced by shape or view metadata retains fallback before state cleanup.
+  Original child initializers and yields must contain no calls, even when their
+  results are unused. After dead-state cleanup, scalar carries must yield a
+  variable or constant; assign compound updates to an SSA variable before yielding
+  to keep specialization linear. Unknown effects, communication and task launches
+  retain the original loop for fallback. Moved producers must preserve scalar predicates.
+- A static outer loop with a nonnegative start and positive constant step,
+  normalized to logical ordinals `t`, where the source index is `start + t * step`.
+  A runtime outer bound still requires `start=0`, `step=1` and a provable upper
+  bound that keeps ordinal arithmetic in range.
+
+Storage depth is the product of stage counts, independent of child trip
+counts. For a root with `S` stages, child iteration residues form a mixed-radix
+`bank`; its physical slot is `bank * S + (parent_ordinal % S)`. The example has
+six slots: page 0 uses `group % 3`, and page 1 uses `3 + group % 3`.
+Codegen represents each fixed bank with the existing parent/subview form. If
+a static one-trip root is simplified away, a software region with only constant
+slot selections keeps its complete fixed-address parent instead. The PTOAS
+multi-tile slot-count limit does not apply to this ordinary parent tile.
+Short children can leave banks unused, so lookahead is limited by the actual
+distance before a physical slot is reused. For example, a one-iteration child
+with four stages inside a two-stage parent may prefetch only one parent ahead.
+
+Existing `MemoryReuse` and `AllocateMemoryAddr` own the final capacity check,
+including intermediate tiles and workspace. This path does not reduce stage
+counts or promote scratch to GM when storage exceeds capacity. It adds no FIFO
+lowering or synchronization algorithm. Disabling the option preserves the
+existing behavior, and enabling it does not guarantee a speedup.
 
 **Performance limitation:** stock PTOAS can conservatively serialize dynamic
 subviews even when their slots are disjoint. This does not remove required

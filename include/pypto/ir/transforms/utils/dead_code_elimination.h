@@ -14,8 +14,10 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/stmt.h"
 
 namespace pypto {
@@ -39,6 +41,11 @@ void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
 /// Dead statements are those whose defined variable is not transitively
 /// used by any return, yield, or side-effect statement.
 std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts);
+
+/// Preserve externally observed definitions, including loads read through another
+/// SSA handle of the same compiler-owned slot storage.
+std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts,
+                                       const std::unordered_set<const Var*>& live_outputs);
 
 /// Conservative scalar-only DCE.
 ///

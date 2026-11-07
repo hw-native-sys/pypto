@@ -22,7 +22,9 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -44,11 +46,13 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/io_category.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/nested_pipeline.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
@@ -61,6 +65,8 @@ namespace {
 using pipeline_loop::MakeConstIndex;
 using pipeline_loop::OffsetIndex;
 using pipeline_loop::SplitBodyYield;
+
+constexpr int kMaxPipelineStages = 4;
 
 /// A fixed number of linear walks plus indexed lookups: O(N log N). Stage count
 /// is bounded to 2..4, so cloning the short prologue / epilogue is constant-factor.
@@ -110,6 +116,18 @@ bool IsDenseVecTile(const TileTypePtr& type) {
 }
 
 struct LoopPlan {
+  NestedPipelinePlan nesting;
+  std::map<const Var*, const Var*> nested_owners;
+  std::map<const Var*, NestedPipelineSlot> slot_axes;
+  std::map<const Var*, CallPtr> scope_definitions;
+  std::set<const Var*> local_workspace;
+  std::set<const Var*> prefetched_loads;
+  std::set<const Var*> head_loads;
+  // Anchor -> parent-iteration distance -> producer slice. Distances are at
+  // most S-1, including when a child has fewer iterations than its depth.
+  std::map<const Var*, std::map<int64_t, std::set<const Var*>>> prefetch_issues;
+  std::map<int64_t, std::set<const Var*>> prologue_loads;
+  bool nested_storage_valid = true;
   int64_t slots = 0;
   int64_t trips = 0;
   bool dynamic_trips = false;
@@ -117,9 +135,13 @@ struct LoopPlan {
   int64_t start = 0;
   int64_t step = 0;
   std::set<const Var*> loads;
+  std::set<const Var*> partial_aliases;
+  std::map<const Var*, int64_t> region_slots;
   std::set<const Var*> scalars;
   std::set<const Var*> store_sources;
   std::map<const Var*, const Var*> aliases;
+  /// Slotted tile -> the input load owning its region.
+  std::map<const Var*, const Var*> slot_roots;
   std::map<const Var*, VarPtr> bases;
   std::vector<ExprPtr> yields;
 };
@@ -173,7 +195,13 @@ class SoftwarePipelineMutator : public IRMutator {
     if (inside_pipeline_) return op;
     LoopPlan plan;
     std::string reason;
-    if (!Analyze(op, plan, reason)) {
+    bool prepared = PrepareNestedPipeline(op, plan.nesting, reason);
+    if (prepared && plan.nesting.nested) {
+      TileDefinitions scoped;
+      scoped.VisitStmt(plan.nesting.loop->body_);
+      plan.scope_definitions = std::move(scoped.calls);
+    }
+    if (!prepared || !Analyze(plan.nesting.loop, plan, reason)) {
       LOG_DEBUG << "LowerPipelineToSlots: software pipeline declined for '" << op->loop_var_->name_hint_
                 << "' at " << op->span_.to_string() << ": " << reason;
       inside_pipeline_ = true;
@@ -182,6 +210,7 @@ class SoftwarePipelineMutator : public IRMutator {
       return result;
     }
     changed = true;
+    if (plan.nesting.nested) return BuildScoped(plan.nesting.loop, plan);
     return Build(op, plan);
   }
 
@@ -191,11 +220,11 @@ class SoftwarePipelineMutator : public IRMutator {
     return false;
   }
 
-  static bool CollectAssignments(const StmtPtr& stmt, std::vector<AssignStmtPtr>& assigns,
+  static bool CollectAssignments(const StmtPtr& stmt, bool allow_guards, std::vector<AssignStmtPtr>& assigns,
                                  std::string& reason) {
     if (auto seq = As<SeqStmts>(stmt)) {
       for (const auto& child : seq->stmts_) {
-        if (!CollectAssignments(child, assigns, reason)) return false;
+        if (!CollectAssignments(child, allow_guards, assigns, reason)) return false;
       }
       return true;
     }
@@ -203,15 +232,49 @@ class SoftwarePipelineMutator : public IRMutator {
       assigns.push_back(assign);
       return true;
     }
-    return Decline(reason, "nested loops, control flow, task launches or side effects are unsupported");
+    if (allow_guards) {
+      if (auto branch = As<IfStmt>(stmt)) {
+        ExprReads reads;
+        reads.VisitExpr(branch->condition_);
+        if (reads.has_call || !branch->return_vars_.empty() || branch->else_body_) {
+          return Decline(reason, "nested guards require scalar conditions and no branch results/else");
+        }
+        for (const auto* var : reads.vars) {
+          if (!As<ScalarType>(var->GetType())) return Decline(reason, "guard depends on tile data");
+        }
+        return CollectAssignments(branch->then_body_, allow_guards, assigns, reason);
+      }
+    }
+    return Decline(reason, "control flow, task launches or side-effect statements are unsupported");
   }
 
-  static bool AnalyzeScalar(const AssignStmtPtr& assign, LoopPlan& plan, std::string& reason) {
+  bool AnalyzeScalar(const AssignStmtPtr& assign, LoopPlan& plan, std::set<const Var*>& tensors,
+                     std::string& reason) const {
     ExprReads reads;
     reads.VisitExpr(assign->value_);
-    if (reads.has_call) return Decline(reason, "scalar calls cannot be duplicated into prefetch");
+    if (reads.has_call) {
+      auto call = As<Call>(assign->value_);
+      if (!plan.nesting.nested || !call || !OpRegistry::GetInstance().IsRegistered(call->op_->name_)) {
+        return Decline(reason, "scalar calls cannot be duplicated into prefetch");
+      }
+      const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+      if (entry.IsNoDuplicate() || entry.GetCrossCoreRole() ||
+          (!entry.HasDeclaredArgEffects() &&
+           entry.GetExecutionMemoryAccessEvidence() != ExecutionMemoryAccessEvidence::NoAccess)) {
+        return Decline(reason, "scalar call lacks a readonly effect contract");
+      }
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        ExprReads nested;
+        nested.VisitExpr(call->args_[i]);
+        if (nested.has_call || entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read) {
+          return Decline(reason, "scalar call has nested calls or writes");
+        }
+      }
+    }
     for (const auto* var : reads.vars) {
-      if (!As<ScalarType>(var->GetType()) || var->GetKind() == ObjectKind::IterArg) {
+      if (plan.nesting.nested && tensor_params_.count(var)) {
+        tensors.insert(var);
+      } else if (!As<ScalarType>(var->GetType()) || var->GetKind() == ObjectKind::IterArg) {
         return Decline(reason, "scalar address computation depends on carried or tile data");
       }
     }
@@ -224,12 +287,16 @@ class SoftwarePipelineMutator : public IRMutator {
     auto start = transform_utils::EvalConstInt(op->start_);
     auto stop = transform_utils::EvalConstInt(op->stop_);
     auto step = transform_utils::EvalConstInt(op->step_);
-    if (plan.slots < 2 || plan.slots > 4 || !start || !step || *start < 0 || *step <= 0) {
+    if (plan.slots < 2 || plan.slots > kMaxPipelineStages || !start || !step || *start < 0 || *step <= 0) {
       return Decline(reason, "requires stage 2..4, static nonnegative start and positive step");
     }
     plan.start = *start;
     plan.step = *step;
     plan.dynamic_trips = !stop.has_value();
+    if (plan.nesting.nested &&
+        !PassContext::Current()->GetBackendHandler()->SupportsNestedLocalSoftwarePipeline()) {
+      return Decline(reason, "backend does not support nested slot event boundaries");
+    }
     if (plan.dynamic_trips &&
         !PassContext::Current()->GetBackendHandler()->SupportsRuntimeBoundLocalSoftwarePipeline()) {
       return Decline(reason, "backend has not enabled runtime-bound local software pipelines");
@@ -237,13 +304,20 @@ class SoftwarePipelineMutator : public IRMutator {
     const auto max_stop = std::max(plan.start, scalar_bounds_.const_int_bound(op->stop_).max_value);
     const auto max_extent = max_stop - plan.start;
     const auto max_trips = max_extent / plan.step + (max_extent % plan.step != 0);
+    // Fixed banks never multiply the parent ordinal by a child stride. Each
+    // issue advances it by at most three (stage - 1); reserve bounded headroom
+    // for slot coordinates and future-iteration guards, including the loop end.
+    if (plan.nesting.nested && ((plan.dynamic_trips && (plan.start != 0 || plan.step != 1)) ||
+                                max_trips > std::numeric_limits<int64_t>::max() - kMaxPipelineStages)) {
+      return Decline(reason, "nested pipeline requires bounded normalized outer ordinals");
+    }
     plan.needs_overflow_fallback =
         plan.dynamic_trips && max_trips > std::numeric_limits<int64_t>::max() - plan.slots;
     if (stop) plan.trips = transform_utils::ComputeStaticTripCount(*start, *stop, *step);
     ExprReads bound_reads;
     bound_reads.VisitExpr(op->stop_);
     if (bound_reads.has_call) return Decline(reason, "loop bound contains a call or task launch");
-    if (!plan.dynamic_trips && plan.trips < plan.slots - 1) {
+    if (!plan.nesting.nested && !plan.dynamic_trips && plan.trips < plan.slots - 1) {
       return Decline(reason, "trip count is smaller than prefetch distance");
     }
     auto [body, yields] = SplitBodyYield(op->body_);
@@ -253,7 +327,7 @@ class SoftwarePipelineMutator : public IRMutator {
       return Decline(reason, "requires a straight-line body with matching yields");
     }
     std::vector<AssignStmtPtr> statements;
-    if (!CollectAssignments(body, statements, reason)) {
+    if (!CollectAssignments(body, plan.nesting.nested, statements, reason)) {
       return false;
     }
     std::map<const Var*, const Var*> tensor_roots;
@@ -285,7 +359,10 @@ class SoftwarePipelineMutator : public IRMutator {
         auto source = AsVarLike(consumer->args_[0]);
         if (!source) return Decline(reason, "view has no source variable");
         if (!CompatibleSlotTypes(assign->var_->GetType(), source->GetType())) {
-          return Decline(reason, "view does not preserve a complete slot's physical storage");
+          if (!plan.nesting.nested) {
+            return Decline(reason, "view does not preserve a complete slot's physical storage");
+          }
+          plan.partial_aliases.insert(assign->var_.get());
         }
         plan.aliases[assign->var_.get()] = AliasRoot(plan, source.get());
       }
@@ -299,7 +376,7 @@ class SoftwarePipelineMutator : public IRMutator {
         }
       }
       if (As<ScalarType>(assign->var_->GetType())) {
-        if (!AnalyzeScalar(assign, plan, reason)) return false;
+        if (!AnalyzeScalar(assign, plan, read_tensors, reason)) return false;
       } else {
         auto call = As<Call>(assign->value_);
         if (!call || !call->op_ || !OpRegistry::GetInstance().IsRegistered(call->op_->name_)) {
@@ -343,6 +420,11 @@ class SoftwarePipelineMutator : public IRMutator {
     for (const auto* scratch : scratch_tiles) {
       if (read_tiles.count(scratch)) return Decline(reason, "workspace is also read as loop data");
     }
+    for (const auto* scratch : plan.local_workspace) {
+      if (!scratch_tiles.count(scratch) || plan.store_sources.count(scratch)) {
+        return Decline(reason, "nested tile.create must be used exclusively as workspace");
+      }
+    }
     for (const auto* root : read_tensors) {
       if (written_tensors.count(root)) {
         return Decline(reason, "a prefetched input may alias a written tensor");
@@ -356,7 +438,7 @@ class SoftwarePipelineMutator : public IRMutator {
       }
     }
     for (const auto* load : plan.loads) {
-      if (consumer_counts[load] > 1) {
+      if (consumer_counts[load] > 1 && !plan.nesting.nested) {
         return Decline(reason, "a prefetched tile has multiple consumer statements");
       }
     }
@@ -365,6 +447,18 @@ class SoftwarePipelineMutator : public IRMutator {
         return Decline(reason, "a stored tile is also consumed by compute");
       }
     }
+    // Only live iteration versions need slots here. Output allocation, in-place
+    // reuse and the final capacity check belong to the memory-planning passes.
+    if (!plan.nested_storage_valid) {
+      return Decline(reason, "nested storage changes shape, stride or depth across specializations");
+    }
+    for (auto* alias : plan.partial_aliases) {
+      auto* root = AliasRoot(plan, alias);
+      if (plan.slot_roots.count(root)) {
+        return Decline(reason, "partial views of rotating or borrowed input storage are unsupported");
+      }
+    }
+    if (plan.nesting.nested && !PlanProducerIssues(plan, reason)) return false;
     // Fixed-address multi_tile buffers require their physical slot stride to
     // satisfy target alignment. This is an encoding check, not a UB budget.
     const auto* handler = PassContext::Current()->GetBackendHandler();
@@ -378,6 +472,113 @@ class SoftwarePipelineMutator : public IRMutator {
           return Decline(reason, "slot stride is not aligned for a multi-buffer region");
         }
       }
+    }
+    return true;
+  }
+
+  static bool PlanProducerIssues(LoopPlan& plan, std::string& reason) {
+    using Guards = std::vector<const IfStmt*>;
+    std::map<const Var*, Guards> guards;
+    Guards path;
+    std::function<void(const StmtPtr&)> collect = [&](const StmtPtr& stmt) {
+      if (auto seq = As<SeqStmts>(stmt)) {
+        for (const auto& child : seq->stmts_) collect(child);
+      } else if (auto branch = As<IfStmt>(stmt)) {
+        path.push_back(branch.get());
+        collect(branch->then_body_);
+        path.pop_back();
+      } else if (auto assign = As<AssignStmt>(stmt);
+                 assign && plan.nesting.anchors.count(assign->var_.get())) {
+        guards.emplace(assign->var_.get(), path);
+      }
+    };
+    collect(plan.nesting.loop->body_);
+    std::map<std::pair<const Var*, int64_t>, const Var*> members;
+    std::map<const Var*, bool> continuous;
+    std::map<const Var*, size_t> family_size;
+    for (const auto* load : plan.loads) {
+      auto found = plan.nesting.storage.find(load);
+      if (found == plan.nesting.storage.end()) {
+        plan.prefetched_loads.insert(load);
+        const auto distance = plan.region_slots.at(plan.slot_roots.at(load)) - 1;
+        plan.prefetch_issues[nullptr][distance].insert(load);
+        for (int64_t initial = 0; initial < distance; ++initial) plan.prologue_loads[initial].insert(load);
+        continue;
+      }
+      const auto& axis = found->second;
+      if (!members.emplace(std::make_pair(axis.family, axis.phase), load).second) {
+        return Decline(reason, "nested stream has ambiguous phase ownership");
+      }
+      continuous.try_emplace(axis.family, true);
+      continuous[axis.family] &= guards.at(axis.anchor).empty();
+      ++family_size[axis.family];
+    }
+    // A short child can leave most of its stage slots unused. Limit continuous
+    // lookahead by the actual distance between uses of each hierarchical slot:
+    // parent=2, child stage=4, child trips=1 must not preload three parents into
+    // two parent contexts. This changes issue distance, never allocation depth.
+    // Phase specialization is bounded; indexed family/residue walks are O(N log N).
+    std::map<const Var*, int64_t> reuse_distance;
+    std::map<const Var*, int64_t> family_period;
+    std::map<const Var*, std::map<int64_t, std::pair<int64_t, int64_t>>> phase_spans;
+    for (const auto& [member, load] : members) {
+      const auto& axis = plan.nesting.storage.at(load);
+      const auto period = plan.slots * axis.stride;
+      family_period.emplace(axis.family, period);
+      auto gap = reuse_distance.try_emplace(axis.family, period).first;
+      auto& spans = phase_spans[axis.family];
+      auto previous = spans.find(axis.storage_phase);
+      if (previous == spans.end()) {
+        spans.emplace(axis.storage_phase, std::make_pair(axis.phase, axis.phase));
+      } else {
+        gap->second = std::min(gap->second, axis.phase - previous->second.second);
+        previous->second.second = axis.phase;
+      }
+    }
+    for (const auto& [family, spans] : phase_spans) {
+      for (const auto& [residue, span] : spans) {
+        reuse_distance[family] =
+            std::min(reuse_distance.at(family), family_period.at(family) + span.first - span.second);
+      }
+    }
+    for (const auto* load : plan.loads) {
+      auto found = plan.nesting.storage.find(load);
+      if (found == plan.nesting.storage.end()) continue;
+      const auto& axis = found->second;
+      if (continuous.at(axis.family) && family_size.at(axis.family) == static_cast<size_t>(axis.stride)) {
+        const auto distance = std::min(axis.slots - 1, reuse_distance.at(axis.family) - 1);
+        const auto issue_phase = ((axis.phase - distance) % axis.stride + axis.stride) % axis.stride;
+        const auto parent_distance = (issue_phase + distance - axis.phase) / axis.stride;
+        auto earlier = members.find({axis.family, issue_phase});
+        INTERNAL_CHECK(earlier != members.end()) << "Missing phase in a complete nested stream";
+        // The first phase has no earlier consumer in this parent iteration.
+        // Its producer slice can overlap parent compute at the loop head.
+        auto anchor = issue_phase ? plan.nesting.storage.at(earlier->second).anchor : nullptr;
+        plan.prefetch_issues[anchor][parent_distance].insert(load);
+        plan.prefetched_loads.insert(load);
+        for (int64_t ordinal = axis.phase; ordinal < distance; ordinal += axis.stride) {
+          plan.prologue_loads[ordinal / axis.stride].insert(load);
+        }
+        continue;
+      }
+      // Predicated ancestor scopes retain their local staging window. Moving
+      // a producer into a different dynamic invocation would require proving
+      // that the destination anchor executes whenever that producer is needed.
+      const auto window = std::min(axis.slots, reuse_distance.at(axis.family));
+      if (axis.phase < window) {
+        plan.prefetched_loads.insert(load);
+        plan.head_loads.insert(load);
+      }
+      if (axis.phase < window) continue;
+      auto earlier = members.find({axis.family, axis.phase - window + 1});
+      if (earlier == members.end()) continue;
+      auto anchor = plan.nesting.storage.at(earlier->second).anchor;
+      // Do not issue under an earlier enclosing predicate that can be false
+      // while the future consumer's enclosing predicate is true. Such loads
+      // remain at their original phase; the enclosing plan stays valid.
+      if (guards.at(anchor) != guards.at(axis.anchor)) continue;
+      plan.prefetch_issues[anchor][0].insert(load);
+      plan.prefetched_loads.insert(load);
     }
     return true;
   }
@@ -413,6 +614,25 @@ class SoftwarePipelineMutator : public IRMutator {
   }
 
   void DeclareRegion(LoopPlan& plan, const VarPtr& owner) {
+    int64_t slots = plan.slots;
+    auto nested = plan.nesting.storage.find(owner.get());
+    if (nested != plan.nesting.storage.end()) {
+      plan.slot_axes[owner.get()] = nested->second;
+      slots = plan.slots * nested->second.storage_stride;
+      auto shared = plan.nested_owners.find(nested->second.family);
+      if (shared != plan.nested_owners.end()) {
+        const auto& first = plan.slot_axes.at(shared->second);
+        if (first.storage_stride != nested->second.storage_stride || first.slots != nested->second.slots ||
+            !CompatibleSlotTypes(owner->GetType(), shared->second->GetType())) {
+          plan.nested_storage_valid = false;
+        }
+        plan.slot_roots[owner.get()] = shared->second;
+        return;
+      }
+      plan.nested_owners[nested->second.family] = owner.get();
+    }
+    plan.slot_roots[owner.get()] = owner.get();
+    plan.region_slots[owner.get()] = slots;
     plan.bases[owner.get()] = std::make_shared<Var>(
         "pipe_" + owner->name_hint_ + "_" + std::to_string(next_region_++), GetPtrType(), owner->span_);
   }
@@ -445,14 +665,21 @@ class SoftwarePipelineMutator : public IRMutator {
                       std::set<const Var*>& scratch_tiles, std::set<const Var*>& read_tiles,
                       std::string& reason) const {
     auto definition = [&](const Var* root) -> CallPtr {
+      auto scoped = plan.scope_definitions.find(root);
+      if (scoped != plan.scope_definitions.end()) return scoped->second;
       auto original = definitions_.calls.find(root);
       return original == definitions_.calls.end() ? nullptr : original->second;
     };
     const bool view = plan.aliases.count(assign->var_.get()) != 0;
-    if (!IsDenseVecTile(As<TileType>(assign->var_->GetType()))) {
+    if (!(plan.nesting.nested && view) && !IsDenseVecTile(As<TileType>(assign->var_->GetType()))) {
       return Decline(reason, "compute result requires an unbound full static Vec tile");
     }
     const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+    if (plan.nesting.nested && IsOp(call, "tile.create") &&
+        entry.GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess) {
+      plan.local_workspace.insert(assign->var_.get());
+      return true;
+    }
     if ((!view && entry.GetExecutionMemoryAccessEvidence() != ExecutionMemoryAccessEvidence::Functional &&
          !entry.HasDeclaredArgEffects()) ||
         entry.IsNoDuplicate() || entry.GetCrossCoreRole() ||
@@ -525,11 +752,20 @@ class SoftwarePipelineMutator : public IRMutator {
   struct Iteration {
     std::vector<StmtPtr> stmts;
     std::vector<ExprPtr> yields;
+    std::unordered_set<const Var*> live_outputs;
   };
+
+  using AxisKey = std::tuple<int64_t, int64_t, int64_t>;
 
   static Iteration CloneIteration(const ForStmtPtr& op, const LoopPlan& plan, const ExprPtr& logical,
                                   const std::vector<ExprPtr>& carries, bool producer,
-                                  const ExprPtr& explicit_slot = nullptr) {
+                                  const ExprPtr& explicit_slot = nullptr,
+                                  const std::map<AxisKey, ExprPtr>& scoped_slots = {},
+                                  const std::set<const Var*>* selected_loads = nullptr,
+                                  const std::map<const Var*, std::vector<StmtPtr>>& issues = {}) {
+    // Continuous streams have no head loads. Avoid cloning an entire body for
+    // a producer slice whose requested output set is already known to be empty.
+    if (producer && selected_loads && selected_loads->empty()) return {};
     std::unordered_map<const Var*, ExprPtr> seeds{
         {op->loop_var_.get(), SourceIndex(plan, logical, op->span_)}};
     for (size_t i = 0; i < op->iter_args_.size(); ++i) seeds[op->iter_args_[i].get()] = carries[i];
@@ -538,11 +774,21 @@ class SoftwarePipelineMutator : public IRMutator {
     std::map<const Var*, const Var*> originals;
     for (const auto& [original, fresh] : clone.var_map) {
       originals[fresh.get()] = original;
-      // Only input loads own slots. InitMemRef derives mandatory views from
-      // their source instead of giving each view a new allocation.
-      if (plan.loads.count(original)) {
-        auto type = SlotType(fresh->GetType(), plan.bases.at(original), logical, plan.slots, fresh->span_,
-                             explicit_slot);
+      auto root = plan.slot_roots.find(original);
+      // InitMemRef derives mandatory views from their source. Binding the view
+      // itself would incorrectly turn it into an independent allocation.
+      if (root != plan.slot_roots.end() && !plan.aliases.count(original)) {
+        const auto count = plan.region_slots.at(root->second);
+        auto slot = explicit_slot;
+        if (!scoped_slots.empty()) {
+          auto axis = plan.slot_axes.find(original);
+          AxisKey key = axis == plan.slot_axes.end()
+                            ? AxisKey{1, 0, count}
+                            : AxisKey{axis->second.storage_stride, axis->second.storage_phase, count};
+          slot = scoped_slots.at(key);
+        }
+        auto type =
+            SlotType(fresh->GetType(), plan.bases.at(root->second), logical, count, fresh->span_, slot);
         auto replacement = std::make_shared<Var>(fresh->name_hint_, type, fresh->span_);
         replacements[fresh.get()] = replacement;
         originals[replacement.get()] = original;
@@ -563,13 +809,26 @@ class SoftwarePipelineMutator : public IRMutator {
         }
         return SeqStmts::Flatten(std::move(kept), sequence->span_);
       }
+      if (auto branch = As<IfStmt>(stmt)) {
+        return std::make_shared<IfStmt>(branch->condition_, filter(branch->then_body_), std::nullopt,
+                                        std::vector<VarPtr>{}, branch->span_);
+      }
+      if (auto yield = As<YieldStmt>(stmt); yield && yield->value_.empty()) {
+        return nullptr;
+      }
       auto assign = As<AssignStmt>(stmt);
       INTERNAL_CHECK_SPAN(assign, op->span_)
           << "Internal error: eligible pipeline statement must be an assignment";
       const auto* original = originals.at(assign->var_.get());
+      if (plan.nesting.anchors.count(original)) {
+        auto issue = issues.find(original);
+        return !producer && issue != issues.end() ? SeqStmts::Flatten(issue->second, assign->span_) : nullptr;
+      }
       const bool load = plan.loads.count(original) != 0;
       if (producer && !load && !plan.scalars.count(original)) return nullptr;
-      if (!producer && load) {
+      if (producer && load && selected_loads && !selected_loads->count(original)) return nullptr;
+      if (producer && load) result.live_outputs.insert(assign->var_.get());
+      if (!producer && load && (!plan.nesting.nested || plan.prefetched_loads.count(original))) {
         auto type = As<TileType>(assign->var_->GetType());
         const auto& span = assign->span_;
         auto shape = std::make_shared<MakeTuple>(type->shape_, span);
@@ -601,6 +860,136 @@ class SoftwarePipelineMutator : public IRMutator {
     }
     if (!producer) result.yields = std::move(yields);
     return result;
+  }
+
+  /// Child residues select contiguous banks; each bank rotates root stages.
+  /// This is the same mixed-radix hierarchy with the root coordinate stored
+  /// fastest: bank * root_stage + (root_iteration % root_stage). No trip count
+  /// enters storage indexing, and every bank index dominates backend waits.
+  static std::map<AxisKey, ExprPtr> ScopedSlots(const LoopPlan& plan, const ExprPtr& iv,
+                                                int64_t parent_distance, std::vector<StmtPtr>& body,
+                                                std::map<int64_t, ExprPtr>& ordinals) {
+    const auto& span = plan.nesting.loop->span_;
+    std::map<AxisKey, ExprPtr> slots;
+    std::set<AxisKey> axes;
+    for (const auto& [var, owner] : plan.slot_roots) {
+      auto count = plan.region_slots.at(owner);
+      auto axis = plan.slot_axes.find(var);
+      AxisKey key = axis == plan.slot_axes.end()
+                        ? AxisKey{1, 0, count}
+                        : AxisKey{axis->second.storage_stride, axis->second.storage_phase, count};
+      axes.insert(key);
+    }
+    for (const auto& key : axes) {
+      auto [stride, phase, depth] = key;
+      const auto root_depth = depth / stride;
+      if (auto constant = As<ConstInt>(iv)) {
+        slots.emplace(key, MakeConstIndex(
+                               phase * root_depth + (constant->value_ + parent_distance) % root_depth, span));
+        continue;
+      }
+      // Within a plan every bank has the same root depth. Cache by issue distance.
+      if (!ordinals.count(parent_distance)) {
+        ExprPtr logical = iv;
+        if (parent_distance) logical = MakeAdd(iv, MakeConstIndex(parent_distance, span), span);
+        auto ordinal = std::make_shared<Var>("parent_slot", iv->GetType(), span);
+        body.push_back(std::make_shared<AssignStmt>(
+            ordinal, MakeFloorMod(logical, MakeConstIndex(root_depth, span), span), span));
+        ordinals.emplace(parent_distance, ordinal);
+      }
+      ExprPtr index = ordinals.at(parent_distance);
+      if (phase) {
+        auto slot = std::make_shared<Var>("nested_slot", iv->GetType(), span);
+        body.push_back(std::make_shared<AssignStmt>(
+            slot, MakeAdd(index, MakeConstIndex(phase * root_depth, span), span), span));
+        index = slot;
+      }
+      slots.emplace(key, index);
+    }
+    return slots;
+  }
+
+  /// Preserve one outer loop and issue each stream's planned producer slices,
+  /// across parent boundaries. Only producer slices cross those boundaries;
+  /// parent compute and side effects keep their original execution order.
+  static StmtPtr BuildScoped(const ForStmtPtr& op, const LoopPlan& plan) {
+    const auto& span = op->span_;
+    const auto zero = MakeConstIndex(0, span);
+    const auto limit = plan.dynamic_trips ? op->stop_ : MakeConstIndex(plan.trips, span);
+    auto iv = std::make_shared<Var>(op->loop_var_->name_hint_ + "_pipe", op->loop_var_->GetType(), span);
+    std::vector<StmtPtr> result;
+    auto initial_carries = pipeline_loop::InitValueExprs(op->iter_args_);
+    for (const auto& [distance, selected] : plan.prologue_loads) {
+      // Do not even clone statically absent iterations: reconstructing their
+      // source index could overflow before a constant-false guard is emitted.
+      if (!plan.dynamic_trips && distance >= plan.trips) continue;
+      std::vector<StmtPtr> prelude;
+      std::map<int64_t, ExprPtr> ordinals;
+      auto slots = ScopedSlots(plan, zero, distance, prelude, ordinals);
+      auto logical = MakeConstIndex(distance, span);
+      auto preload = CloneIteration(op, plan, logical, initial_carries, true, nullptr, slots, &selected);
+      prelude.insert(prelude.end(), preload.stmts.begin(), preload.stmts.end());
+      prelude = dce::EliminateDeadCode(prelude, preload.live_outputs);
+      result.push_back(std::make_shared<IfStmt>(MakeLt(logical, limit, span),
+                                                SeqStmts::Flatten(std::move(prelude), span), std::nullopt,
+                                                std::vector<VarPtr>{}, span));
+    }
+    std::vector<StmtPtr> body;
+    std::map<int64_t, ExprPtr> ordinals;
+    std::map<int64_t, std::map<AxisKey, ExprPtr>> slots_by_distance;
+    slots_by_distance.emplace(0, ScopedSlots(plan, iv, 0, body, ordinals));
+    std::vector<IterArgPtr> args;
+    std::vector<ExprPtr> carries;
+    for (const auto& original : op->iter_args_) {
+      auto arg = pipeline_loop::MakeFreshIterArg(original, original->initValue_);
+      args.push_back(arg);
+      carries.push_back(arg);
+    }
+    auto inputs =
+        CloneIteration(op, plan, iv, carries, true, nullptr, slots_by_distance.at(0), &plan.head_loads);
+    inputs.stmts = dce::EliminateDeadCode(inputs.stmts, inputs.live_outputs);
+    std::map<const Var*, std::vector<StmtPtr>> issues;
+    std::unordered_set<const Var*> future_live;
+    // There are at most 64 phase anchors. Slice each issue group with the
+    // existing clone/effect/DCE machinery: bounded O(N log N), not one unbounded
+    // whole-body scan per operation or per runtime iteration.
+    for (const auto& [anchor, groups] : plan.prefetch_issues) {
+      auto& at_anchor = issues[anchor];
+      for (const auto& [distance, selected] : groups) {
+        if (!slots_by_distance.count(distance)) {
+          slots_by_distance.emplace(distance, ScopedSlots(plan, iv, distance, body, ordinals));
+        }
+        auto logical = distance ? MakeAdd(iv, MakeConstIndex(distance, span), span) : ExprPtr(iv);
+        auto future = CloneIteration(op, plan, logical, carries, true, nullptr,
+                                     slots_by_distance.at(distance), &selected);
+        future.stmts = dce::EliminateDeadCode(future.stmts, future.live_outputs);
+        future_live.insert(future.live_outputs.begin(), future.live_outputs.end());
+        if (distance) {
+          at_anchor.push_back(std::make_shared<IfStmt>(MakeLt(logical, limit, span),
+                                                       SeqStmts::Flatten(std::move(future.stmts), span),
+                                                       std::nullopt, std::vector<VarPtr>{}, span));
+        } else {
+          at_anchor.insert(at_anchor.end(), future.stmts.begin(), future.stmts.end());
+        }
+      }
+    }
+    auto current =
+        CloneIteration(op, plan, iv, carries, false, nullptr, slots_by_distance.at(0), nullptr, issues);
+    current.stmts = dce::EliminateDeadCode(current.stmts, future_live);
+    body.insert(body.end(), inputs.stmts.begin(), inputs.stmts.end());
+    if (auto head = issues.find(nullptr); head != issues.end()) {
+      body.insert(body.end(), head->second.begin(), head->second.end());
+    }
+    body.insert(body.end(), current.stmts.begin(), current.stmts.end());
+    if (!args.empty()) body.push_back(std::make_shared<YieldStmt>(current.yields, span));
+    future_live.insert(inputs.live_outputs.begin(), inputs.live_outputs.end());
+    body = dce::EliminateDeadCode(body, future_live);
+    std::vector<std::pair<std::string, std::any>> attrs{
+        {kSoftwarePipelineSlotsAttr, static_cast<int>(plan.slots)}};
+    result.push_back(std::make_shared<ForStmt>(iv, zero, limit, MakeConstIndex(1, span), args,
+                                               SeqStmts::Flatten(std::move(body), span), op->return_vars_,
+                                               span, ForKind::Sequential, attrs));
+    return SeqStmts::Flatten(std::move(result), span);
   }
 
   /// One guarded body for runtime trip counts: no independently allocated tail.
