@@ -1045,5 +1045,40 @@ class Before:
     assert wrapper.param_directions == [expected]
 
 
+def test_loop_feedback_projection_preserves_all_incoming_fields():
+    count = 26
+    half = count // 2
+    tensor = "pl.Tensor[[64], pl.FP32]"
+    pair = "pl.Tuple[" + ", ".join([tensor] * count) + "]"
+    params = ", ".join(f"x{i}: pl.Tensor[[2, 32], pl.FP32]" for i in range(count))
+    initial = ", ".join(f"pl.tensor.reshape(x{i}, [64])" for i in range(count))
+    swap = ", ".join(f"pair[{(i + half) % count}]" for i in range(count))
+    reads = "\n".join(f"                value{i} = pl.tensor.read(carry[{i}], [32])" for i in range(half))
+    source = f"""import pypto.language as pl
+@pl.program
+class Feedback:
+    @pl.function
+    def permute(self, pair: pl.Out[{pair}]) -> {pair}:
+        swapped = ({swap})
+        return swapped
+    @pl.function
+    def main(self, {params}):
+        with pl.graph("layer"):
+            initial = ({initial})
+            for i, (carry,) in pl.range(2, init_values=(initial,)):
+{reads}
+                updated = self.permute(carry)
+                result = pl.yield_(updated)
+"""
+    program = pl.parse(source)
+    assert isinstance(program, ir.Program)
+    with passes.PassContext([]):
+        outlined = passes.outline_graph_scopes()(program)
+    layer = outlined.get_function("layer")
+    assert layer
+    directions = {p.name_hint: d for p, d in zip(layer.params, layer.param_directions)}
+    assert all(directions[f"x{i}"] == ir.ParamDirection.InOut for i in range(count))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

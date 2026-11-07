@@ -21,6 +21,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -549,60 +550,53 @@ void BufferRootCollector::RecordIfReturnRoots(const IfStmtPtr& if_stmt) {
 BufferRootCollector::RootInfo BufferRootCollector::MergeBackingValues(const RootInfo& lhs,
                                                                       const RootInfo& rhs,
                                                                       const TypePtr& type, const Span& span) {
-  using TupleElements = std::vector<RootInfo>;
-  // Both branches can share a tuple DAG. Merge each pair of subtrees only
-  // once, while retaining the precise root and ambiguity of each field.
-  std::unordered_map<const TupleElements*, std::unordered_map<const TupleElements*, RootInfo>> merged;
-  const auto merge = [&](const auto& self, const RootInfo& lhs, const RootInfo& rhs,
-                         const TypePtr& type) -> RootInfo {
-    if (lhs.loop_tuple || rhs.loop_tuple || lhs.bound_tuple || rhs.bound_tuple) {
-      if ((lhs.loop_tuple && lhs.loop_tuple == rhs.loop_tuple) ||
-          (lhs.bound_tuple && lhs.bound_tuple == rhs.bound_tuple)) {
-        return lhs;
-      }
-      auto joined = MakeLoopStorageValue(type, span, nullptr);
-      LinkLoopStorageValues(joined, lhs);
-      LinkLoopStorageValues(joined, rhs);
-      return joined;
+  if (lhs.loop_tuple || rhs.loop_tuple || lhs.bound_tuple || rhs.bound_tuple) {
+    if ((lhs.loop_tuple && lhs.loop_tuple == rhs.loop_tuple) ||
+        (lhs.bound_tuple && lhs.bound_tuple == rhs.bound_tuple)) {
+      return lhs;
     }
-    if (lhs.elements || rhs.elements) {
-      if (lhs.elements == rhs.elements) return lhs;
-      auto& matches = merged[lhs.elements.get()];
-      auto [entry, inserted] = matches.try_emplace(rhs.elements.get());
-      auto& result = entry->second;
-      if (!inserted) return result;
-      const auto tuple = As<TupleType>(type);
-      INTERNAL_CHECK(tuple) << "Storage join with tuple elements must have TupleType";
-      auto elements = std::make_shared<std::vector<RootInfo>>();
-      const RootInfo unknown;
-      elements->reserve(tuple->types_.size());
-      for (size_t i = 0; i < tuple->types_.size(); ++i) {
-        const auto& left = lhs.elements && i < lhs.elements->size() ? (*lhs.elements)[i] : unknown;
-        const auto& right = rhs.elements && i < rhs.elements->size() ? (*rhs.elements)[i] : unknown;
-        elements->push_back(self(self, left, right, tuple->types_[i]));
-      }
-      result = {{}, false, std::move(elements)};
-      return result;
+    auto joined = MakeLoopStorageValue(type, span, nullptr);
+    LinkLoopStorageValues(joined, lhs);
+    LinkLoopStorageValues(joined, rhs);
+    return joined;
+  }
+  if (lhs.elements || rhs.elements) {
+    if (lhs.elements == rhs.elements) return lhs;
+    // Tuple element vectors are immutable. Hold them in the key so a
+    // later branch can reuse a join without risking pointer reuse.
+    auto [entry, inserted] = merged_tuple_roots_.try_emplace(std::tuple{lhs.elements, rhs.elements, type});
+    auto& result = entry->second;
+    if (!inserted) return result;
+    const auto tuple = As<TupleType>(type);
+    INTERNAL_CHECK(tuple) << "Storage join with tuple elements must have TupleType";
+    auto elements = std::make_shared<std::vector<RootInfo>>();
+    const RootInfo unknown;
+    elements->reserve(tuple->types_.size());
+    for (size_t i = 0; i < tuple->types_.size(); ++i) {
+      const auto& left = lhs.elements && i < lhs.elements->size() ? (*lhs.elements)[i] : unknown;
+      const auto& right = rhs.elements && i < rhs.elements->size() ? (*rhs.elements)[i] : unknown;
+      elements->push_back(MergeBackingValues(left, right, tuple->types_[i], span));
     }
+    result = {{}, false, std::move(elements)};
+    return result;
+  }
 
-    auto roots = lhs.roots;
-    std::unordered_set<const Var*> seen(roots.begin(), roots.end());
-    for (const Var* root : rhs.roots) {
-      if (seen.insert(root).second) roots.push_back(root);
-    }
-    const bool ambiguous =
-        lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
-    if (roots.size() <= 1) return {std::move(roots), ambiguous};
+  auto roots = lhs.roots;
+  std::unordered_set<const Var*> seen(roots.begin(), roots.end());
+  for (const Var* root : rhs.roots) {
+    if (seen.insert(root).second) roots.push_back(root);
+  }
+  const bool ambiguous =
+      lhs.roots.empty() || rhs.roots.empty() || lhs.ambiguous || rhs.ambiguous || roots.size() > 1;
+  if (roots.size() <= 1) return {std::move(roots), ambiguous};
 
-    // One symbolic edge set per join. A later join references this identity
-    // without copying its transitive alternatives.
-    auto join = std::make_shared<Var>("storage_branch_join", type, span);
-    const Var* root = join.get();
-    storage_successors_[root] = std::move(roots);
-    storage_proxy_vars_.push_back(std::move(join));
-    return {{root}, true};
-  };
-  return merge(merge, lhs, rhs, type);
+  // One symbolic edge set per join. A later join references this identity
+  // without copying its transitive alternatives.
+  auto join = std::make_shared<Var>("storage_branch_join", type, span);
+  const Var* root = join.get();
+  storage_successors_[root] = std::move(roots);
+  storage_proxy_vars_.push_back(std::move(join));
+  return {{root}, true};
 }
 
 void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
@@ -641,14 +635,19 @@ void BufferRootCollector::LinkLoopStorageValues(const RootInfo& target, const Ro
   if (target.loop_tuple) {
     auto& tuple = *target.loop_tuple;
     if (source.loop_tuple == &tuple || !source.IsTuple()) return;
+    // Projecting a permuted feedback value can insert new fields into
+    // this carry. Those fields see the new source when they are created.
+    std::vector<size_t> projected_fields;
+    projected_fields.reserve(tuple.projected.size());
+    for (const auto& entry : tuple.projected) projected_fields.push_back(entry.first);
     tuple.sources.push_back(source);
     if (tuple.aggregate) {
       const auto roots = CollectBackingContentRoots(source);
       auto& successors = storage_successors_[tuple.aggregate];
       successors.insert(successors.end(), roots.begin(), roots.end());
     }
-    for (const auto& [index, child] : tuple.projected) {
-      LinkLoopStorageValues(child, ProjectBackingElement(source, index));
+    for (size_t index : projected_fields) {
+      LinkLoopStorageValues(tuple.projected.at(index), ProjectBackingElement(source, index));
     }
     return;
   }

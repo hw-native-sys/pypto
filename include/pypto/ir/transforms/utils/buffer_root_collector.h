@@ -14,7 +14,9 @@
 
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -245,6 +247,8 @@ class BufferRootCollector : public IRVisitor {
   std::vector<VarPtr> storage_proxy_vars_;
   std::vector<std::shared_ptr<StorageCallInstance>> storage_calls_;
   std::unordered_map<std::shared_ptr<const std::vector<RootInfo>>, const Var*> explicit_tuple_contents_;
+  using TupleElements = std::shared_ptr<const std::vector<RootInfo>>;
+  std::map<std::tuple<TupleElements, TupleElements, TypePtr>, RootInfo> merged_tuple_roots_;
   using StorageTupleIdentity = std::variant<std::shared_ptr<const std::vector<RootInfo>>,
                                             const LoopTupleRoots*, const BoundStorageTuple*>;
   std::unordered_map<StorageTupleIdentity,
