@@ -398,7 +398,7 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
 
   void InitializeCarryEffects(const std::vector<IterArgPtr>& iter_args) {
     for (const auto& arg : iter_args) {
-      successors_[arg.get()] = ResolveBackingDescriptorRoots(arg->initValue_);
+      storage_successors_[arg.get()] = ResolveBackingDescriptorRoots(arg->initValue_);
       // Even a fresh or unresolved seed needs an identity: subsequent iterations
       // can replace it with a captured cache whose input contents are required.
       RecordRootCandidates(arg, {arg.get()});
@@ -413,10 +413,10 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     for (size_t i = 0; i < iter_args.size() && i < return_vars.size() && i < yield->value_.size(); ++i) {
       const auto& result = return_vars[i];
       RecordRootCandidates(result, {result.get()});
-      if (!guaranteed_to_run) successors_[result.get()].push_back(iter_args[i].get());
+      if (!guaranteed_to_run) storage_successors_[result.get()].push_back(iter_args[i].get());
       for (const Var* root : ResolveBackingDescriptorRoots(yield->value_[i])) {
-        successors_[result.get()].push_back(root);
-        if (may_repeat) successors_[iter_args[i].get()].push_back(root);
+        storage_successors_[result.get()].push_back(root);
+        if (may_repeat) storage_successors_[iter_args[i].get()].push_back(root);
       }
     }
   }
@@ -433,8 +433,8 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
     }
     for (size_t cursor = 0; cursor < pending.size(); ++cursor) {
       const Var* source = pending[cursor];
-      auto next = successors_.find(source);
-      if (next == successors_.end()) continue;
+      auto next = storage_successors_.find(source);
+      if (next == storage_successors_.end()) continue;
       const auto bits = effects_[source];
       for (const Var* target : next->second) {
         const auto added = static_cast<unsigned char>(bits & ~effects_[target]);
@@ -553,7 +553,6 @@ class ParamAccessCollector : public buffer_root::BufferRootCollector {
 
  private:
   EffectMap effects_;
-  std::unordered_map<const Var*, std::vector<const Var*>> successors_;
   const std::unordered_map<const Var*, size_t>& var_to_idx_;
   std::vector<bool>& has_read_;
   std::vector<bool>& has_write_;

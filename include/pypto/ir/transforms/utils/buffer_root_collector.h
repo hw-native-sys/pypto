@@ -111,7 +111,10 @@ class BufferRootCollector : public IRVisitor {
   // descriptor-only yields, while sharing all storage/control-flow propagation.
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
   void RecordAssignmentRoots(const AssignStmtPtr& assign);
-  [[nodiscard]] RootCandidates ResolveBackingDescriptorRoots(const ExprPtr& expr) const;
+  [[nodiscard]] RootCandidates ResolveBackingDescriptorRoots(const ExprPtr& expr);
+
+  // Symbolic storage identities share edges until the consumer propagates effects.
+  std::unordered_map<const Var*, RootCandidates> storage_successors_;
   void RecordSimtLaunchRoots(const SimtLaunchStmtPtr& launch);
   void RecordIfReturnRoots(const IfStmtPtr& if_stmt);
   [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
@@ -142,11 +145,10 @@ class BufferRootCollector : public IRVisitor {
   };
 
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
-  [[nodiscard]] RootCandidates ResolveStorageLeaves(RootCandidates pending) const;
-  [[nodiscard]] RootInfo ResolveBackingValue(const ExprPtr& expr) const;
-  [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call) const;
+  [[nodiscard]] RootInfo ResolveBackingValue(const ExprPtr& expr);
+  [[nodiscard]] RootInfo BackingCallValue(const CallPtr& call);
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
-  [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
+  [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call);
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
   // SubWorker group may take an InOut scratch (e.g. a matmul's kv_final)
@@ -162,14 +164,14 @@ class BufferRootCollector : public IRVisitor {
   // value aliases its source buffer with the same logical shape and dtype.
   [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b);
 
-  [[nodiscard]] std::vector<OutputRoot> CollectProvenReturnRoots(const CallPtr& call) const;
+  [[nodiscard]] std::vector<OutputRoot> CollectProvenReturnRoots(const CallPtr& call);
 
   std::unique_ptr<ScopedStorageRootCache> storage_cache_;
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
   ViewRootPolicy view_policy_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
-  std::unordered_map<const Var*, RootCandidates> storage_successors_;
+  std::vector<VarPtr> storage_proxy_vars_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
   std::unordered_map<const Var*, std::shared_ptr<const std::vector<RootInfo>>> backing_tuple_roots_;
 };

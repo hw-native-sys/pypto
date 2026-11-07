@@ -62,12 +62,26 @@ std::optional<size_t> BackingAliasSlot(const CallPtr& call) {
 // Program identity matters because the same Function can resolve different callees.
 using StorageKey = std::pair<ProgramPtr, FunctionPtr>;
 struct StorageReturnValue {
-  std::vector<size_t> params;
+  std::vector<size_t> roots;
   std::vector<StorageReturnValue> elements;
 };
+
+struct StorageSummaryNode {
+  TypePtr type;
+  std::optional<size_t> parameter;
+  std::vector<size_t> successors;
+};
+
+// Each return refers to nodes in the same graph. A loop that rotates N
+// descriptors stores N transitions, rather than N sets of N parameters.
+struct StorageReturnSummary {
+  std::vector<StorageSummaryNode> nodes;
+  std::vector<StorageReturnValue> outputs;
+};
+
 struct StorageReturnContext {
   size_t depth = 0;
-  std::map<StorageKey, std::vector<StorageReturnValue>> memo;
+  std::map<StorageKey, StorageReturnSummary> memo;
   std::set<StorageKey> active;
 };
 
@@ -153,7 +167,9 @@ std::vector<BufferRootCollector::RootCandidates> BufferRootCollector::Initialize
   std::vector<RootCandidates> init_roots;
   init_roots.reserve(iter_args.size());
   for (const auto& iter_arg : iter_args) {
-    auto roots = ResolveRootCandidates(iter_arg->initValue_);
+    auto roots = view_policy_ == ViewRootPolicy::kBackingStorage
+                     ? ResolveBackingDescriptorRoots(iter_arg->initValue_)
+                     : ResolveRootCandidates(iter_arg->initValue_);
     if (view_policy_ == ViewRootPolicy::kBackingStorage) {
       // Keep a symbolic identity until all repeated-iteration edges are known.
       // Eager expansion would freeze a descriptor swap to its first iteration.
@@ -178,7 +194,7 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
 
   if (view_policy_ == ViewRootPolicy::kBackingStorage) {
     for (size_t i = 0; i < return_vars.size() && i < yield->value_.size(); ++i) {
-      auto roots = ResolveRootCandidates(yield->value_[i]);
+      auto roots = ResolveBackingDescriptorRoots(yield->value_[i]);
       auto& result_roots = storage_successors_[return_vars[i].get()];
       result_roots = roots;
       RecordRootCandidates(return_vars[i], {return_vars[i].get()});
@@ -312,12 +328,11 @@ BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(c
   return it != root_candidates_.end() ? it->second : RootCandidates{};
 }
 
-BufferRootCollector::RootCandidates BufferRootCollector::ResolveBackingDescriptorRoots(
-    const ExprPtr& expr) const {
+BufferRootCollector::RootCandidates BufferRootCollector::ResolveBackingDescriptorRoots(const ExprPtr& expr) {
   return ResolveBackingValue(expr).roots;
 }
 
-BufferRootCollector::RootInfo BufferRootCollector::ResolveBackingValue(const ExprPtr& expr) const {
+BufferRootCollector::RootInfo BufferRootCollector::ResolveBackingValue(const ExprPtr& expr) {
   if (auto var = AsVarLike(expr)) {
     auto it = backing_tuple_roots_.find(var.get());
     if (it != backing_tuple_roots_.end()) return {{}, false, it->second};
@@ -343,7 +358,7 @@ BufferRootCollector::RootInfo BufferRootCollector::ResolveBackingValue(const Exp
   return {};
 }
 
-BufferRootCollector::RootInfo BufferRootCollector::BackingCallValue(const CallPtr& call) const {
+BufferRootCollector::RootInfo BufferRootCollector::BackingCallValue(const CallPtr& call) {
   auto outputs = CollectCallOutputRoots(call);
   if (!As<TupleType>(call->GetType())) return SelectReturnRootInfo(outputs, call->GetType());
   // A plain call returning one tuple preserves that tuple. A Submit wraps it
@@ -355,22 +370,6 @@ BufferRootCollector::RootInfo BufferRootCollector::BackingCallValue(const CallPt
   elements->reserve(outputs.size());
   for (auto& output : outputs) elements->push_back(std::move(output.info));
   return {{}, false, elements};
-}
-
-BufferRootCollector::RootCandidates BufferRootCollector::ResolveStorageLeaves(RootCandidates pending) const {
-  RootCandidates leaves;
-  std::unordered_set<const Var*> seen;
-  for (size_t cursor = 0; cursor < pending.size(); ++cursor) {
-    const Var* root = pending[cursor];
-    if (!seen.insert(root).second) continue;
-    auto next = storage_successors_.find(root);
-    if (next == storage_successors_.end() || next->second.empty()) {
-      leaves.push_back(root);
-    } else {
-      pending.insert(pending.end(), next->second.begin(), next->second.end());
-    }
-  }
-  return leaves;
 }
 
 bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
@@ -412,7 +411,7 @@ void BufferRootCollector::RecordRootCandidates(const VarPtr& var, const RootCand
 }
 
 std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOutputRoots(
-    const CallPtr& call) const {
+    const CallPtr& call) {
   if (!program_) return {};
   auto callee = program_->GetFunction(call->op_->name_);
   if (!callee) return {};
@@ -432,60 +431,110 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
 }
 
 std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenReturnRoots(
-    const CallPtr& call) const {
+    const CallPtr& call) {
   const auto callee = program_->GetFunction(call->op_->name_);
   INTERNAL_CHECK(callee) << "Storage return analysis requires a resolved callee";
   if (callee->return_types_.empty()) return {};
   auto& ctx = StorageCtx();
   const StorageKey key{program_, callee};
   auto cached = ctx.memo.find(key);
-  if (cached == ctx.memo.end()) {
-    std::vector<StorageReturnValue> returned(callee->return_types_.size());
-    if (ctx.active.insert(key).second) {
-      // Reuse the general return-binding utility, but collect *backing* roots:
-      // its complete-parameter writeback test intentionally excludes partial views.
-      BufferRootCollector nested(program_, AmbiguousRootPolicy::kSkip, ViewRootPolicy::kBackingStorage);
-      nested.Initialize(callee->params_);
-      if (callee->body_) nested.VisitStmt(callee->body_);
-      std::unordered_map<const Var*, size_t> positions;
-      for (size_t i = 0; i < callee->params_.size(); ++i) positions.emplace(callee->params_[i].get(), i);
-      const auto bindings = return_lineage::AnalyzeReturnedValues(callee, program_);
-      const auto summarize = [&](const auto& self, const RootInfo& value) -> StorageReturnValue {
-        StorageReturnValue result;
-        if (value.elements) {
-          result.elements.reserve(value.elements->size());
-          for (const auto& element : *value.elements) result.elements.push_back(self(self, element));
-        }
-        for (const Var* root : nested.ResolveStorageLeaves(value.roots)) {
-          auto parameter = positions.find(root);
-          if (parameter != positions.end()) result.params.push_back(parameter->second);
-        }
-        return result;
-      };
-      for (size_t i = 0; i < bindings.size() && i < returned.size(); ++i) {
-        const auto& binding = bindings[i];
-        if (binding.value) {
-          returned[i] = summarize(summarize, nested.ResolveBackingValue(binding.value));
-        } else if (binding.param_index) {
-          returned[i].params.push_back(*binding.param_index);
-        }
+  StorageReturnSummary recursive;
+  const StorageReturnSummary* summary = nullptr;
+  if (cached != ctx.memo.end()) {
+    summary = &cached->second;
+  } else if (ctx.active.insert(key).second) {
+    StorageReturnSummary built;
+    built.outputs.resize(callee->return_types_.size());
+    BufferRootCollector nested(program_, AmbiguousRootPolicy::kSkip, ViewRootPolicy::kBackingStorage);
+    nested.Initialize(callee->params_);
+    if (callee->body_) nested.VisitStmt(callee->body_);
+
+    std::unordered_map<const Var*, size_t> positions;
+    for (size_t i = 0; i < callee->params_.size(); ++i) positions.emplace(callee->params_[i].get(), i);
+    std::unordered_map<const Var*, size_t> node_ids;
+    RootCandidates pending;
+    const auto intern = [&](const Var* root) {
+      auto [it, inserted] = node_ids.try_emplace(root, built.nodes.size());
+      if (inserted) {
+        auto parameter = positions.find(root);
+        built.nodes.push_back(
+            {root->GetType(),
+             parameter == positions.end() ? std::nullopt : std::optional<size_t>{parameter->second},
+             {}});
+        pending.push_back(root);
       }
-      ctx.active.erase(key);
-    } else {
-      // Cyclic user call graphs are diagnosed by the pass. Until then, unknown
-      // recursion must not erase a possible captured-storage dependency.
-      for (auto& result : returned) {
-        for (size_t i = 0; i < callee->params_.size(); ++i) result.params.push_back(i);
+      return it->second;
+    };
+    const auto summarize = [&](const auto& self, const RootInfo& value) -> StorageReturnValue {
+      StorageReturnValue result;
+      if (value.elements) {
+        result.elements.reserve(value.elements->size());
+        for (const auto& element : *value.elements) result.elements.push_back(self(self, element));
+      }
+      for (const Var* root : value.roots) result.roots.push_back(intern(root));
+      return result;
+    };
+    const auto bindings = return_lineage::AnalyzeReturnedValues(callee, program_);
+    for (size_t i = 0; i < bindings.size() && i < built.outputs.size(); ++i) {
+      const auto& binding = bindings[i];
+      if (binding.value) {
+        built.outputs[i] = summarize(summarize, nested.ResolveBackingValue(binding.value));
+      } else if (binding.param_index) {
+        built.outputs[i].roots.push_back(intern(callee->params_[*binding.param_index].get()));
       }
     }
-    cached = ctx.memo.emplace(key, std::move(returned)).first;
+    for (size_t i = 0; i < pending.size(); ++i) {
+      auto next = nested.storage_successors_.find(pending[i]);
+      if (next == nested.storage_successors_.end()) continue;
+      std::vector<size_t> edges;
+      edges.reserve(next->second.size());
+      for (const Var* root : next->second) edges.push_back(intern(root));
+      built.nodes[i].successors = std::move(edges);
+    }
+    ctx.active.erase(key);
+    summary = &ctx.memo.emplace(key, std::move(built)).first->second;
+  } else {
+    // Recursive call graphs are diagnosed separately. Conservatively connect
+    // the results to a shared union of the arguments until then.
+    recursive.outputs.resize(callee->return_types_.size());
+    for (size_t i = 0; i < callee->params_.size(); ++i) {
+      recursive.nodes.push_back({callee->params_[i]->GetType(), i, {}});
+    }
+    std::vector<size_t> edges;
+    for (size_t i = 0; i < recursive.nodes.size(); ++i) edges.push_back(i);
+    const size_t union_id = recursive.nodes.size();
+    recursive.nodes.push_back({callee->return_types_[0], std::nullopt, std::move(edges)});
+    for (auto& output : recursive.outputs) output.roots.push_back(union_id);
+    summary = &recursive;
   }
 
-  std::vector<OutputRoot> roots;
   const size_t ctx_count = transform_utils::TrailingCommCtxParamCount(callee);
   const size_t prefix = call->args_.size() >= ctx_count ? call->args_.size() - ctx_count : 0;
   const size_t gap =
       callee->params_.size() >= call->args_.size() ? callee->params_.size() - call->args_.size() : 0;
+  std::vector<RootInfo> bound(summary->nodes.size());
+  for (size_t i = 0; i < summary->nodes.size(); ++i) {
+    const auto& node = summary->nodes[i];
+    if (node.parameter) {
+      const size_t parameter = *node.parameter;
+      if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
+      const size_t argument = parameter < prefix ? parameter : parameter - gap;
+      if (argument < call->args_.size()) bound[i] = ResolveBackingValue(call->args_[argument]);
+    } else if (!node.successors.empty()) {
+      auto proxy = std::make_shared<Var>("storage_transition", node.type, call->span_);
+      bound[i].roots.push_back(proxy.get());
+      storage_proxy_vars_.push_back(std::move(proxy));
+    }
+  }
+  for (size_t i = 0; i < summary->nodes.size(); ++i) {
+    const auto& node = summary->nodes[i];
+    if (node.parameter || node.successors.empty()) continue;
+    auto& edges = storage_successors_[bound[i].roots.front()];
+    for (size_t next : node.successors) {
+      const auto& roots = bound[next].roots;
+      edges.insert(edges.end(), roots.begin(), roots.end());
+    }
+  }
   const auto bind = [&](const auto& self, const StorageReturnValue& result) -> RootInfo {
     RootInfo info;
     if (!result.elements.empty()) {
@@ -495,23 +544,21 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectProvenR
       info.elements = elements;
     }
     std::unordered_set<const Var*> seen;
-    for (const size_t parameter : result.params) {
-      if (parameter >= prefix && parameter < callee->params_.size() - ctx_count) continue;
-      const size_t argument = parameter < prefix ? parameter : parameter - gap;
-      if (argument >= call->args_.size()) continue;
-      auto actual = ResolveBackingValue(call->args_[argument]);
-      if (actual.elements) info.elements = std::move(actual.elements);
-      for (const Var* root : actual.roots) {
-        if (seen.insert(root).second) info.roots.push_back(root);
+    for (size_t root : result.roots) {
+      const auto& actual = bound[root];
+      if (actual.elements) info.elements = actual.elements;
+      for (const Var* candidate : actual.roots) {
+        if (seen.insert(candidate).second) info.roots.push_back(candidate);
       }
       info.ambiguous = info.ambiguous || actual.ambiguous;
     }
     info.ambiguous = info.ambiguous || info.roots.size() > 1;
     return info;
   };
-  roots.reserve(cached->second.size());
-  for (size_t i = 0; i < cached->second.size(); ++i) {
-    roots.push_back(OutputRoot{bind(bind, cached->second[i]), callee->return_types_[i]});
+  std::vector<OutputRoot> roots;
+  roots.reserve(summary->outputs.size());
+  for (size_t i = 0; i < summary->outputs.size(); ++i) {
+    roots.push_back(OutputRoot{bind(bind, summary->outputs[i]), callee->return_types_[i]});
   }
   return roots;
 }
