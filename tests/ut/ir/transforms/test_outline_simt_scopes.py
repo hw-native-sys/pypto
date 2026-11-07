@@ -710,7 +710,7 @@ pair = ({source},)
 """)
     # Neither an In Tensor hidden in a tuple nor an uninitialized Tile can
     # acquire writable, initialized storage just by becoming an IterArg.
-    with pytest.raises((Error, ValueError), match="initialized storage"):
+    with pytest.raises((Error, ValueError), match="initialized storage|enclosing In"):
         passes.outline_simt_scopes()(before)
 
 
@@ -737,6 +737,36 @@ empty = pl.tile.load(src, [0, 0], [1, 32])
     # receives a fresh load; resolving just the source spelling would be unsafe.
     with pytest.raises((Error, ValueError), match="initialized storage on every iteration"):
         passes.outline_simt_scopes()(before)
+
+
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("position", ["seed", "yield"])
+@pytest.mark.parametrize("source", ["src", "dst"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_view_expression_carries_preserve_storage_permissions(kind, position, source, nested):
+    view = f"pl.tensor.reshape({source}, [1, 32])"
+    if nested:
+        view = f"pl.tensor.reshape({view}, [1, 32])"
+    seed = view if position == "seed" else "dst"
+    yielded = view if position == "yield" else "carried"
+    loop = (
+        f"for i, (carried,) in pl.range(3, init_values=({seed},)):"
+        if kind == "for"
+        else f"for (carried,) in pl.while_(init_values=({seed},)):\n    pl.cond(n > 0)"
+    )
+    before = program(f"""
+{loop}
+    with pl.simt_scope(dims=(32, 1, 1)):
+        pl.simt.store(carried, (0, 0), pl.const(1.0, pl.FP32))
+    result = pl.yield_({yielded})
+""")
+    # The same view expression is legal for InOut storage, but never turns
+    # an enclosing In parameter into a writable carry on a later iteration.
+    if source == "src":
+        with pytest.raises((Error, ValueError), match="enclosing In"):
+            passes.outline_simt_scopes()(before)
+    else:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
 
 
 if __name__ == "__main__":
