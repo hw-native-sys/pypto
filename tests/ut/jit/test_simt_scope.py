@@ -449,7 +449,9 @@ def test_rebound_shape_store_index_full_compile(entry, tmp_path: Path, monkeypat
         assert isinstance(compiled, CompiledProgram) and compiled.program is not None
         kernels = list((tmp_path / "kernels").rglob("*.pto"))
         assert len(kernels) == 1 and "pto.stg" in kernels[0].read_text()
-        simplified = passes.simplify()(passes.convert_to_ssa()(passes.outline_simt_scopes()(compiled.program)))
+        simplified = passes.simplify()(
+            passes.convert_to_ssa()(passes.outline_simt_scopes()(compiled.program))
+        )
         stores: list[ir.Call] = []
 
         class Collector(ir.IRVisitor):
