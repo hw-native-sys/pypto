@@ -65,9 +65,17 @@ direct callers; registration uses the capture-aware protocol.
 immutable contents. `request_from_context` is the compatibility boundary: it copies
 only signature metadata and literal constants from `SpecializeContext`, canonicalizes
 shared dynamic dimension names, and keeps inexact extents dynamic. Declared dimensions
-share by name; synthesized dimensions share only when they are the same instance,
-so reusing a local name does not impose equality on independent extents. Unresolved layouts
-and unsupported constants fail explicitly. Strides remain unconstrained and offsets
+share by their DSL symbol literal, even through different Python aliases;
+synthesized dimensions share only when they are the same instance,
+so reusing a local name does not impose equality on independent extents. A slice whose
+length is unproven receives an independent symbol even if metadata retains its parent's
+dynamic dimension as a fallback; full slices preserve proven equality. Repeated aliases
+of the same inexact tensor metadata share their axis symbols; independent views do not.
+Shortened views retain separate runtime extent identities alongside their fallback
+bounds. Full slices, whole-shape reads, and descriptor-based reshapes preserve these
+identities, including when the derived view crosses an ordinary JIT dependency.
+Omitted layouts normalize to ND, while unsupported constants fail explicitly.
+Strides remain unconstrained and offsets
 runtime-bound because the legacy context cannot prove those values.
 
 Existing `__pypto_jit__()` hooks may return a stable `JITFunction`; discovery checks

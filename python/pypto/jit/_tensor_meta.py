@@ -145,7 +145,11 @@ def scan_dep_io(
 
 _TupleMeta = tuple[TensorMeta | None, ...]
 _TensorSeedKey = tuple[
-    tuple[int | tuple[int, DynDim], ...], DataType, _ir.TensorLayout | None, frozenset[int]
+    tuple[int | tuple[int, DynDim], ...],
+    DataType,
+    _ir.TensorLayout | None,
+    frozenset[int],
+    tuple[tuple[int, int, DynDim], ...],
 ]
 
 
@@ -176,7 +180,8 @@ def _tensor_seed_key(meta: TensorMeta) -> _TensorSeedKey:
     # Retain the dimension object so its identity cannot be reused during
     # this metadata walk. An equal-valued but unrelated DynDim is distinct.
     shape = tuple((id(dim), dim) if isinstance(dim, DynDim) else dim for dim in meta.shape)
-    return shape, meta.dtype, meta.layout, meta.inexact_axes
+    runtime = tuple((axis, id(dim), dim) for axis, dim in sorted(meta.runtime_dims.items()))
+    return shape, meta.dtype, meta.layout, meta.inexact_axes, runtime
 
 
 class _DepScan(NamedTuple):
@@ -469,23 +474,34 @@ def _instantiate_dep_results(
     summary: _DepResults, call: ast.Call, owner: str, seed_meta: Mapping[str, TensorMeta]
 ) -> _DepResults:
     """Give each call site its own synthesized dimensions while retaining aliases."""
-    inherited_dims = {id(dim) for meta in seed_meta.values() for dim in meta.shape if isinstance(dim, DynDim)}
+    inherited_dims = {
+        id(dim)
+        for meta in seed_meta.values()
+        for dim in (*meta.shape, *meta.runtime_dims.values())
+        if isinstance(dim, DynDim)
+    }
     instance_dims: dict[int, DynDim] = {}
 
+    def instantiate_dim(dim: ShapeDim, result_index: int, axis: int) -> ShapeDim:
+        if isinstance(dim, DynDim) and dim.synthesized and id(dim) not in inherited_dims:
+            # A helper's independent call sites need distinct extent identities,
+            # including hidden runtime extents retained alongside fallback bounds.
+            key = id(dim)
+            if key not in instance_dims:
+                result = f"return_l{call.lineno}_c{call.col_offset}_r{result_index}"
+                instance_dims[key] = synthesized_dyn_dim(owner, result, axis)
+            return instance_dims[key]
+        return dim
+
     def instantiate(meta: TensorMeta, result_index: int) -> TensorMeta:
-        shape: list[ShapeDim] = []
-        for axis, dim in enumerate(meta.shape):
-            if isinstance(dim, DynDim) and dim.synthesized and id(dim) not in inherited_dims:
-                # One helper source can produce independently sized results at
-                # different caller sites. Preserve actual within-call aliases
-                # and inherited dimensions; object IDs never enter IR names.
-                key = id(dim)
-                if key not in instance_dims:
-                    result = f"return_l{call.lineno}_c{call.col_offset}_r{result_index}"
-                    instance_dims[key] = synthesized_dyn_dim(owner, result, axis)
-                dim = instance_dims[key]
-            shape.append(dim)
-        return replace(meta, shape=tuple(shape))
+        return replace(
+            meta,
+            shape=tuple(instantiate_dim(dim, result_index, axis) for axis, dim in enumerate(meta.shape)),
+            runtime_dims={
+                axis: cast(DynDim, instantiate_dim(dim, result_index, axis))
+                for axis, dim in meta.runtime_dims.items()
+            },
+        )
 
     return _DepResults(
         tuple(
@@ -680,6 +696,7 @@ def _subscript_slice_meta(
     sub: ast.Subscript,
     local: Mapping[str, TensorMeta],
     resolve_int: Callable[[ast.expr], int | None],
+    resolve_dim: "Callable[[ast.expr], _DimValue] | None" = None,
 ) -> TensorMeta | None:
     """Infer the ``TensorMeta`` of ``var = src[a:b, i, ...]`` subscript-slice sugar.
 
@@ -689,10 +706,10 @@ def _subscript_slice_meta(
     resolves to ``parent_dim - start`` — mirroring the parser's
     ``_build_subscript_slice_args``. Constant differences of runtime bounds
     (``base:base + width``) retain their static width. A dim falls back to the
-    parent extent when the width cannot be proved — a ``DynDim`` parent flows
-    through transparently that way; a scalar index drops its dim (numpy-style
-    rank reduction); dims past the supplied indices are implicit ``:`` and keep
-    the parent extent.
+    parent extent when the width cannot be proved, marking the axis inexact
+    unless the slice preserves the full extent; a scalar index drops its dim
+    (numpy-style rank reduction); dims past the supplied indices are implicit
+    ``:`` and keep the parent extent.
     Returns ``None`` (skipped, leaving the clear ``_build_params`` error) when
     ``src`` is unknown, a step slice is used, or the index count exceeds
     ``src``'s rank.
@@ -707,30 +724,69 @@ def _subscript_slice_meta(
         return None
     dims: list[ShapeDim] = []
     inexact_axes: set[int] = set()
+    runtime_dims: dict[int, DynDim] = {}
     for dim_idx, idx in enumerate(indices):
         if not isinstance(idx, ast.Slice):
             continue  # scalar index → rank-reducing, dim dropped
         if idx.step is not None:
             return None
         parent = src_meta.shape[dim_idx]
+        start = 0 if idx.lower is None else resolve_int(idx.lower)
         if idx.upper is None:
             # Open upper bound ``a:`` — the parser bounds it at ``parent - start``
             # (see ``_build_subscript_slice_args``), so mirror that here instead
             # of falling back to the full parent extent for a nonzero ``start``.
-            start = 0 if idx.lower is None else resolve_int(idx.lower)
             extent = parent - start if isinstance(parent, int) and isinstance(start, int) else None
         else:
             extent = _constant_slice_extent(idx.lower, idx.upper, resolve_int)
-        if (
-            extent is None and isinstance(parent, int) and (idx.lower is not None or idx.upper is not None)
-        ) or (idx.upper is None and dim_idx in src_meta.inexact_axes):
+        # A fallback DynDim is only a placeholder for a shortened/runtime slice,
+        # not proof that the view and parent have equal extents. Full slices
+        # (including 0:) preserve equality unless the parent is already inexact.
+        upper_dim = (
+            resolve_dim(idx.upper)
+            if resolve_dim is not None and idx.upper is not None
+            else _alias_dim(_extract_dim_alias(idx.upper, resolve_int), local)
+        )
+        actual_parent = src_meta.actual_dim(dim_idx)
+        shared_dynamic_bound = (
+            isinstance(actual_parent, DynDim)
+            and isinstance(upper_dim, DynDim)
+            and (
+                upper_dim is actual_parent
+                or (
+                    not actual_parent.synthesized
+                    and not upper_dim.synthesized
+                    and upper_dim.literal == actual_parent.literal
+                )
+            )
+        )
+        # Descriptor reads and their live aliases also prove a full slice.
+        # Use the source-ordered resolver so rebinding cannot leave stale proofs.
+        # Synthesized dimensions require the same instance, just
+        # as they do at the provider boundary; names alone are insufficient.
+        full_extent = start == 0 and (idx.upper is None or shared_dynamic_bound)
+        if (extent is None and not full_extent) or (
+            (idx.upper is None or full_extent) and dim_idx in src_meta.inexact_axes
+        ):
             inexact_axes.add(len(dims))
+            runtime_dims[len(dims)] = (
+                actual_parent
+                if full_extent and isinstance(actual_parent, DynDim)
+                else synthesized_dyn_dim("slice", f"{src.id}_l{sub.lineno}_c{sub.col_offset}", dim_idx)
+            )
         dims.append(extent if extent is not None else parent)
     inexact_axes.update(
         len(dims) + axis - len(indices) for axis in src_meta.inexact_axes if axis >= len(indices)
     )
+    runtime_dims.update(
+        (len(dims) + axis - len(indices), dim)
+        for axis, dim in src_meta.runtime_dims.items()
+        if axis >= len(indices)
+    )
     dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
-    return replace(src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes))
+    return replace(
+        src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes), runtime_dims=runtime_dims
+    )
 
 
 def _call_operand(call: ast.Call, index: int | None, name: str) -> ast.expr | None:
@@ -880,6 +936,7 @@ def _tensor_expr_meta(
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: Mapping[str, Callable[[ast.Call, str | None], TensorMeta | None]],
     qualified_call_handlers: _QualifiedCallHandlers,
+    resolve_dim: "Callable[[ast.expr], _DimValue]",
 ) -> TensorMeta | None:
     """Resolve one tensor expression in a return or a tuple construction."""
     if isinstance(expr, ast.Name):
@@ -897,8 +954,9 @@ def _tensor_expr_meta(
                 resolve_int,
                 pl_attr_handlers,
                 qualified_call_handlers,
+                resolve_dim,
             )
-        return _subscript_meta(expr, local, resolve_int, return_meta, deps)
+        return _subscript_meta(expr, local, resolve_int, return_meta, deps, resolve_dim)
     if isinstance(expr, ast.Call):
         target_name = f"return_l{expr.lineno}_c{expr.col_offset}"
         if isinstance(expr.func, ast.Name) and expr.func.id in deps.io:
@@ -963,7 +1021,7 @@ def _alias_dim(alias: tuple[str, int] | None, local: Mapping[str, TensorMeta]) -
     rank = len(src_meta.shape)
     if axis < 0:
         axis += rank
-    return src_meta.shape[axis] if 0 <= axis < rank and axis not in src_meta.inexact_axes else None
+    return src_meta.actual_dim(axis) if 0 <= axis < rank else None
 
 
 def _assignment_parts(stmt: ast.stmt) -> tuple[list[ast.expr], ast.expr | None] | None:
@@ -1025,7 +1083,9 @@ def _merge_tensor_metas(lhs: TensorMeta | None, rhs: TensorMeta | None) -> Tenso
         return None
     # Keep explicit ND so a later helper annotation cannot overwrite it as unspecified.
     result = rhs if lhs.layout is None and rhs.layout is not None else lhs
-    return replace(result, inexact_axes=lhs.inexact_axes | rhs.inexact_axes)
+    # A branch join retains only extent identities proved by both arms.
+    runtime_dims = {axis: dim for axis, dim in lhs.runtime_dims.items() if rhs.runtime_dims.get(axis) is dim}
+    return replace(result, inexact_axes=lhs.inexact_axes | rhs.inexact_axes, runtime_dims=runtime_dims)
 
 
 def _resolve_dim_binop(elt: ast.BinOp, resolve: Callable[[ast.expr], _DimValue]) -> _DimValue:
@@ -1083,6 +1143,7 @@ def _subscript_meta(
     resolve_int: Callable[[ast.expr], int | None],
     return_meta: _ReturnMeta | None,
     deps: _DepScan,
+    resolve_dim: Callable[[ast.expr], _DimValue],
 ) -> TensorMeta | None:
     items = None
     if return_meta is not None:
@@ -1093,7 +1154,7 @@ def _subscript_meta(
     if items is not None:
         index = resolve_int(value.slice)
         return items[index] if index is not None and -len(items) <= index < len(items) else None
-    return _subscript_slice_meta(value, local, resolve_int)
+    return _subscript_slice_meta(value, local, resolve_int, resolve_dim)
 
 
 def _update_local_tensor_meta(
@@ -1121,6 +1182,7 @@ def _update_local_tensor_meta(
             resolve_int=resolve_int,
             pl_attr_handlers=pl_attr_handlers,
             qualified_call_handlers=qualified_call_handlers,
+            resolve_dim=resolve_dim,
         )
         if isinstance(stmt, ast.Return) and stmt is return_meta.site:
             _resolve_returned_exprs(stmt, return_meta, resolve_expr, deps, local)
@@ -1146,7 +1208,7 @@ def _update_local_tensor_meta(
         meta = (
             resolve_expr(value)
             if resolve_expr is not None
-            else _subscript_meta(value, local, resolve_int, return_meta, deps)
+            else _subscript_meta(value, local, resolve_int, return_meta, deps, resolve_dim)
         )
     elif isinstance(value, ast.Name) and has_named_target:
         meta = local.get(value.id)
@@ -1238,7 +1300,7 @@ def _update_dim_values(
                 and isinstance(elt, ast.Name)
                 and axis < len(unpack_meta.shape)
             ):
-                dim_values[elt.id] = None if axis in unpack_meta.inexact_axes else unpack_meta.shape[axis]
+                dim_values[elt.id] = unpack_meta.actual_dim(axis)
                 continue
             _forget_names(elt, dim_values)
 
@@ -1733,7 +1795,10 @@ def _resolve_whole_shape(
     src = _shape_attr_source(node)
     if src is not None:
         meta = local.get(src)
-        return meta.shape if meta is not None and not meta.inexact_axes else None
+        if meta is None:
+            return None
+        shape = tuple(meta.actual_dim(axis) for axis in range(len(meta.shape)))
+        return cast(tuple[ShapeDim, ...], shape) if all(dim is not None for dim in shape) else None
     return scope.int_shape(node)
 
 
@@ -1918,11 +1983,6 @@ def extract_local_tensor_metas(
     ) -> ShapeDim | None:
         return _bind_scalar_shape_dim(_resolve_dim_value(elt), bound_dim, bound_dims)
 
-    def _resolve_int(elt: ast.expr) -> int | None:
-        """Integer-only wrapper retained for _slice_meta's existing call site."""
-        v = _resolve_shape_elt(elt)
-        return v if isinstance(v, int) else None
-
     def _resolve_shape(
         node: ast.expr | None, dyn_base: str | None = None, *, dimension_arithmetic: bool = False
     ) -> tuple[ShapeDim, ...] | None:
@@ -2093,17 +2153,25 @@ def extract_local_tensor_metas(
             return None
         dims: list[ShapeDim] = []
         inexact_axes: set[int] = set()
+        runtime_dims: dict[int, DynDim] = {}
         for elt, parent_dim in zip(shape_node.elts, src_meta.shape, strict=True):
-            v = _resolve_int(elt)
+            v = _resolve_shape_elt(elt)
             # A non-static slice dim (e.g. a runtime ``valid_len = pl.min(...)``)
             # is bounded above by the parent dim — advertise that static bound,
             # the way hand-written @pl.program code annotates a kernel that
             # consumes a narrowed view (see examples/models/04_paged_attention.py).
-            # If the parent dim is itself a DynDim, it propagates through.
-            if isinstance(v if v is not None else parent_dim, int) and resolve_slice_int(elt) is None:
+            # A fallback DynDim is also inexact: a runtime length need not equal
+            # the parent's dimension. Only a directly resolved DynDim proves
+            # symbolic equality; numeric values still need a literal proof.
+            if v is None or (isinstance(v, int) and resolve_slice_int(elt) is None):
                 inexact_axes.add(len(dims))
+                runtime_dims[len(dims)] = synthesized_dyn_dim(
+                    func_def.name, f"{target}_l{call.lineno}_c{call.col_offset}", len(dims)
+                )
             dims.append(v if v is not None else parent_dim)
-        return replace(src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes))
+        return replace(
+            src_meta, shape=tuple(dims), inexact_axes=frozenset(inexact_axes), runtime_dims=runtime_dims
+        )
 
     deps = _DepScan(
         io=scan_dep_io(func, caller_func_type, discover_deps=discover_deps),
@@ -2278,6 +2346,11 @@ def resolve_dep_call_metadata(
                             for axis in base_meta.inexact_axes
                             if axis >= caller_arg.drop
                         ),
+                        runtime_dims={
+                            axis - caller_arg.drop: dim
+                            for axis, dim in base_meta.runtime_dims.items()
+                            if axis >= caller_arg.drop
+                        },
                     )
                 continue
             if caller_arg in all_tensor_meta:

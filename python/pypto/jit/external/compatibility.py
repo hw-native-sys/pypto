@@ -15,6 +15,7 @@ from typing import TypeVar, cast
 
 from pypto.jit._specialize_types import DynDim
 from pypto.jit.specializer import SpecializeContext
+from pypto.pypto_core.ir import TensorLayout
 
 from .contracts import (
     CompileTarget,
@@ -58,13 +59,13 @@ def request_from_context(
     """Copy only normalized metadata; never expose the context or its namespace.
 
     Dynamic dimensions are renamed in first-use order while retaining equality
-    relationships. Inexact numeric bounds become independent dynamic symbols,
-    rather than falsely promising a fixed extent. Missing layout, strides and
-    offsets are rejected or left unconstrained; they are not inferred from shape.
+    relationships. Inexact bounds become independent dynamic symbols,
+    rather than falsely promising a fixed extent. Omitted layouts mean ND;
+    strides and offsets remain unconstrained, never inferred from shape.
     """
     parameters: list[ParameterSpec] = []
     constants: dict[str, Constant] = {}
-    symbols: dict[str | int, str] = {}
+    symbols: dict[str | int | tuple[int, int], str] = {}
     declared = set(context.param_names)
     categorized = [set(context.tensor_meta), set(context.scalar_dtypes), set(context.constexpr_values)]
     if set[str]().union(*categorized) != declared or sum(map(len, categorized)) != len(declared):
@@ -76,23 +77,28 @@ def request_from_context(
     for name in context.param_names:
         if name in context.tensor_meta:
             meta = context.tensor_meta[name]
-            if meta.layout is None:
-                raise ContractError(f"request: tensor {name!r} needs a resolved layout")
+            layout = TensorLayout.ND if meta.layout is None else meta.layout
             shape: list[int | str] = []
             for axis, dimension in enumerate(meta.shape):
-                if isinstance(dimension, DynDim):
+                if axis in meta.inexact_axes:
+                    # A fallback DynDim can describe a shortened view, so this
+                    # marker overrides both symbolic and numeric parent bounds.
+                    # Extent provenance survives full-view metadata copies and
+                    # descriptor reads. Legacy metadata without it can prove
+                    # sharing only through repeated references to the same axis.
+                    runtime_dim = meta.runtime_dims.get(axis)
+                    key = id(runtime_dim) if runtime_dim is not None else (id(meta), axis)
+                    shape.append(symbols.setdefault(key, f"extent_{len(parameters)}_{axis}"))
+                elif isinstance(dimension, DynDim):
                     # Rebinding a runtime-sized local can synthesize independent
                     # dimensions with the same name. Only shared instances imply
-                    # equality; declared dimensions retain name-based sharing.
-                    key = id(dimension) if dimension.synthesized else dimension.name
-                    shape.append(symbols.setdefault(key, f"d{len(symbols)}"))
-                elif axis in meta.inexact_axes:
-                    # Prefix differs from shared symbols, so independent runtime
-                    # extents cannot accidentally acquire equality constraints.
-                    shape.append(f"extent_{len(parameters)}_{axis}")
+                    # equality. Declared aliases share their DSL symbol literal,
+                    # which may differ from the Python variable's name.
+                    symbol_key = id(dimension) if dimension.synthesized else dimension.literal
+                    shape.append(symbols.setdefault(symbol_key, f"d{len(symbols)}"))
                 else:
                     shape.append(dimension)
-            parameters.append(ParameterSpec(name, TensorSpec(tuple(shape), meta.dtype, layout=meta.layout)))
+            parameters.append(ParameterSpec(name, TensorSpec(tuple(shape), meta.dtype, layout=layout)))
         elif name in context.scalar_dtypes:
             parameters.append(ParameterSpec(name, ScalarSpec(context.scalar_dtypes[name])))
         else:
