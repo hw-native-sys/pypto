@@ -44,6 +44,7 @@ class Ascend910BHandler : public BackendHandler {
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool SupportsRuntimeBoundLocalSoftwarePipeline() const override { return true; }
+  [[nodiscard]] bool SupportsNestedLocalSoftwarePipeline() const override { return true; }
   [[nodiscard]] bool SupportsLocalPipeDepth() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
 

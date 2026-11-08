@@ -270,6 +270,14 @@ std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
   return key.str();
 }
 
+// CloneIteration marks the slot producers, including preload-only schedules
+// whose steady loop may disappear during simplification. The marker applies to
+// these producers only; it does not prove a dynamic slot expression canonical.
+bool IsSoftwarePipelineSlotProducer(const ir::CallPtr& call) {
+  return call && call->GetAttr<bool>(ir::kSoftwarePipelineSlotsAttr, false) &&
+         (ir::IsOp(call, "tile.load") || ir::IsOp(call, "tile.create"));
+}
+
 // Base Ptrs of tile phis — an `IfStmt` / `ForStmt` / `WhileStmt` return var, or a
 // loop-carried iter_arg. Under the PTOAS planner those take a handle declared in
 // the function head (see pto_control_flow_codegen.cpp), which a per-use
@@ -377,6 +385,9 @@ class CanonicalSlotCollector : public ir::IRVisitor {
   std::set<const ir::Expr*> remainders;
   std::set<const ir::Var*> unsupported_bases;
   std::set<const ir::Var*> verified_bases;
+  std::set<const ir::Var*> software_slot_bases;
+  std::map<const ir::Var*, uint64_t> bank_depths;
+  std::map<const ir::Expr*, std::pair<uint64_t, ExprPtr>> bank_indices;
 
   void VisitStmt_(const ir::ForStmtPtr& op) override {
     loops_.emplace(op->loop_var_.get(), op);
@@ -397,10 +408,15 @@ class CanonicalSlotCollector : public ir::IRVisitor {
       const auto memref = ir::GetDefinedMemRef(tile);
       if (memref->slot_count_ > 1 && memref->slot_index_.has_value()) {
         if (verified_depth_) verified_bases.insert(memref->base_.get());
+        if (IsSoftwarePipelineSlotProducer(As<ir::Call>(op->value_))) {
+          software_slot_bases.insert(memref->base_.get());
+        }
         ExprPtr index = *memref->slot_index_;
         if (ir::AsVarLike(index)) index = ResolveScalarAlias(index);
         if (!IsCanonical(index, memref->slot_count_)) {
-          unsupported_bases.insert(memref->base_.get());
+          if (!verified_depth_ || !RecognizeBank(*memref->slot_index_, memref)) {
+            unsupported_bases.insert(memref->base_.get());
+          }
         } else if (As<ir::FloorMod>(index)) {
           remainders.insert(index.get());
         }
@@ -427,6 +443,43 @@ class CanonicalSlotCollector : public ir::IRVisitor {
       expr = it->second;
     }
     return IsIndex(expr) ? expr : nullptr;
+  }
+
+  // Bounded nested schedules specialize each child coordinate to a fixed bank;
+  // only the root loop rotates within it. Recognize local_slot + bank * depth,
+  // reusing the ordinary canonical proof for local_slot rather than accepting
+  // a general mixed-radix or strided induction expression.
+  bool RecognizeBank(ExprPtr index, const ir::MemRefPtr& memref) {
+    const auto* original_index = index.get();
+    ExprPtr local_index = index;
+    index = ResolveScalarAlias(index);
+    uint64_t offset = 0;
+    if (auto add = As<ir::Add>(index)) {
+      auto constant = As<ir::ConstInt>(add->right_);
+      if (!constant || !IsIndex(constant) || constant->value_ < 0) return false;
+      offset = static_cast<uint64_t>(constant->value_);
+      local_index = add->left_;
+      index = ResolveScalarAlias(local_index);
+    }
+    auto mod = As<ir::FloorMod>(index);
+    auto divisor = mod ? As<ir::ConstInt>(mod->right_) : nullptr;
+    if (!divisor || divisor->value_ < static_cast<int64_t>(kMinMultiTileBufSlots) ||
+        divisor->value_ > static_cast<int64_t>(kMaxMultiTileBufSlots)) {
+      return false;
+    }
+    const auto depth = static_cast<uint64_t>(divisor->value_);
+    if (memref->slot_count_ % depth || offset % depth || offset >= memref->slot_count_ ||
+        offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - (depth - 1) ||
+        !IsCanonical(index, depth)) {
+      return false;
+    }
+    auto [bank, inserted] = bank_depths.emplace(memref->base_.get(), depth);
+    if (!inserted && bank->second != depth) return false;
+    // Keep a dominating scalar alias when one exists; resolving it is needed
+    // only for the proof, and emission must respect the original SSA scope.
+    bank_indices.emplace(original_index, std::make_pair(offset / depth, local_index));
+    remainders.insert(index.get());
+    return true;
   }
 
   bool IsCanonical(const ExprPtr& index, uint64_t count) {
@@ -1669,9 +1722,7 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
         const auto memref = ir::GetDefinedMemRef(tile_type);
         // CloneIteration marks the slot producers, including preload-only schedules
         // with no steady loop. Collect that IR fact before rendering any tile types.
-        const auto call = As<ir::Call>(op->value_);
-        if (memref->slot_count_ > 1 && call && call->GetAttr<bool>(ir::kSoftwarePipelineSlotsAttr, false) &&
-            (ir::IsOp(call, "tile.load") || ir::IsOp(call, "tile.create"))) {
+        if (memref->slot_count_ > 1 && IsSoftwarePipelineSlotProducer(As<ir::Call>(op->value_))) {
           has_software_pipeline_slots = true;
         }
         const ir::Var* base_ptr = memref->base_.get();
@@ -1997,6 +2048,7 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
 
 void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   fs_.multi_buffer_regions.clear();
+  fs_.banked_slot_indices.clear();
   fs_.multi_buffer_region_order.clear();
 
   if (emit_tile_addr_ && !fs_.has_software_pipeline_slots) return;
@@ -2037,6 +2089,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   // on the affected multi-tile startup/drain event calculation.
   if (emit_tile_addr_ && !colive_collector.bases.empty()) use_addressed_slots = true;
   fs_.unsigned_slot_remainders = std::move(canonical_collector.remainders);
+  fs_.banked_slot_indices = std::move(canonical_collector.bank_indices);
 
   /// One allocation's slots, accumulated over every tile bound to it. `blocker`
   /// is empty while the allocation can still become a region, and otherwise says
@@ -2044,6 +2097,9 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   /// slotted declaration has no fallback that keeps its slots apart.
   struct Candidate {
     uint64_t count = 1;
+    uint64_t bank_depth = 0;  ///< Root rotation depth; zero for an ordinary region
+    bool all_constant_indices = true;
+    bool constant_addressed_slots = false;  ///< Large literal-only software region
     std::string slot_type_str;
     /// The valid extent every slot must share, taken from the reference tile.
     /// Held as plain values plus a flag rather than an optional: `blocker` is what
@@ -2079,7 +2135,14 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       // InitMemRef has already rejected a disagreement — so the diagnostic below
       // states the declared count even when no tile selects a slot.
       candidate.count = memref->slot_count_;
+      auto bank = canonical_collector.bank_depths.find(base);
+      if (bank != canonical_collector.bank_depths.end()) candidate.bank_depth = bank->second;
     }
+    const auto index = memref->slot_index_ ? As<ir::ConstInt>(*memref->slot_index_) : nullptr;
+    const auto scalar = index ? As<ScalarType>(index->GetType()) : nullptr;
+    candidate.all_constant_indices = candidate.all_constant_indices && index && scalar &&
+                                     scalar->dtype_ == DataType::INDEX && index->value_ >= 0 &&
+                                     static_cast<uint64_t>(index->value_) < candidate.count;
     if (candidate.reference_tile || !memref->slot_index_.has_value() || !*memref->slot_index_) continue;
     // A multi-buffer region's slots never pass through ComputeAllocTileFields:
     // the whole region is emitted as one `pto.alloc_multi_tile` by
@@ -2099,6 +2162,17 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     candidate.reference_tile = tile_var;
   }
   if (candidates.empty()) return;
+
+  // A single-iteration root may simplify away every rotating coordinate. Its
+  // producer markers still identify the allocation, and checking every binding
+  // above proves literal subviews preserve all slots without guessing a depth.
+  // Limit this exception to fixed-address software regions: author declarations
+  // under the PTOAS planner retain the backend multi-tile count restriction.
+  for (auto& [base, candidate] : candidates) {
+    candidate.constant_addressed_slots = emit_tile_addr_ && candidate.count > kMaxMultiTileBufSlots &&
+                                         candidate.all_constant_indices &&
+                                         canonical_collector.software_slot_bases.count(base) != 0;
+  }
 
   // Pass 2: every tile on a slotted allocation has to select a slot of the same
   // type — ptoas requires `multi_tile_get`'s result to equal the region's slot
@@ -2125,7 +2199,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "tile '" + tile_var->name_hint_ + "' binds it without selecting a slot";
     } else if (memref->slot_count_ != candidate.count) {
       candidate.blocker = "its tiles disagree on how many slots it has";
-    } else if (candidate.count > kMaxMultiTileBufSlots) {
+    } else if (candidate.bank_depth && !As<ir::ConstInt>(*memref->slot_index_) &&
+               !fs_.banked_slot_indices.count(memref->slot_index_->get())) {
+      candidate.blocker = "its slots mix banked and unbanked dynamic coordinates";
+    } else if (candidate.count > kMaxMultiTileBufSlots && !candidate.bank_depth &&
+               !candidate.constant_addressed_slots) {
       candidate.blocker = "ptoas supports " + std::to_string(kMinMultiTileBufSlots) + " to " +
                           std::to_string(kMaxMultiTileBufSlots) + " slots, and it declares " +
                           std::to_string(candidate.count);
@@ -2179,6 +2257,14 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
         candidate.blocker = "its addressed slot stride or region base cannot be represented exactly";
       } else if (candidate.base_address && *candidate.base_address != *base) {
         candidate.blocker = "its slots do not share one fixed region base";
+      } else if ((candidate.bank_depth || candidate.constant_addressed_slots) &&
+                 candidate.count > (static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) -
+                                    static_cast<uint64_t>(*base)) /
+                                       memref->size_) {
+        // Banks and a large literal-only parent preserve the full contiguous
+        // allocation. Prove its extent fits before emitting i64 addresses or
+        // converting the parent row count to an i64 dimension.
+        candidate.blocker = "its slot allocation exceeds the fixed address range";
       } else {
         candidate.base_address = base;
       }
@@ -2215,11 +2301,10 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     }
     region.valid_row_ssa = GetOrEmitConstant(candidate.valid_row, DataType::INDEX);
     region.valid_col_ssa = GetOrEmitConstant(candidate.valid_col, DataType::INDEX);
-    region.count = candidate.count;
+    region.count = candidate.bank_depth ? candidate.bank_depth : candidate.count;
     region.slot_type_str = candidate.slot_type_str;
-    region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
     region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
-    if (use_addressed_slots) {
+    if (use_addressed_slots || candidate.constant_addressed_slots) {
       const auto type = As<TileType>(candidate.reference_tile->GetType());
       const auto c = ExtractTileTypeInfo(*type, GetTypeString(type->dtype_));
       region.slot_elements = static_cast<int64_t>(ir::GetDefinedMemRef(type)->size_) /
@@ -2232,6 +2317,24 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       // parent's pitch in PTOAS and prevent reshaping back to the tile.
       region.flat_slot_type_str = flat_type(1, region.slot_elements);
       region.parent_type_str = flat_type(static_cast<int64_t>(region.count), region.slot_elements);
+    } else {
+      // The [2, 16] limit belongs to multi_tile_buf, not an alloc_tile parent.
+      region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
+    }
+
+    if (candidate.bank_depth) {
+      INTERNAL_CHECK_SPAN(candidate.base_address, candidate.first_tile->span_)
+          << "Internal error: banked software slots require a fixed region address";
+      const auto type = As<TileType>(candidate.reference_tile->GetType());
+      const auto bytes = ir::GetDefinedMemRef(type)->size_;
+      // Each specialized child bank owns a disjoint contiguous root rotation.
+      // Splitting storage here changes no scheduling or synchronization policy.
+      for (uint64_t bank = 0; bank < candidate.count / candidate.bank_depth; ++bank) {
+        const auto address =
+            static_cast<uint64_t>(*candidate.base_address) + bank * candidate.bank_depth * bytes;
+        region.banks.emplace_back(NewNamedTemp(base->name_hint_ + "_bank" + std::to_string(bank)),
+                                  GetOrEmitConstant(static_cast<int64_t>(address), DataType::INT64));
+      }
     }
 
     fs_.multi_buffer_regions.emplace(base, std::move(region));
@@ -2258,6 +2361,23 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::TileTypePtr& type, const std::str
       << "' carries no slot index";
   ExprPtr slot_index = *memref->slot_index_;
   std::string region_ssa = region->region_ssa;
+  if (!region->banks.empty()) {
+    uint64_t bank;
+    if (auto constant = As<ir::ConstInt>(slot_index)) {
+      INTERNAL_CHECK_SPAN(constant->value_ >= 0, span) << "Internal error: negative banked slot coordinate";
+      bank = static_cast<uint64_t>(constant->value_) / region->count;
+      slot_index = std::make_shared<ir::ConstInt>(constant->value_ % region->count, DataType::INDEX, span);
+    } else {
+      const auto found = fs_.banked_slot_indices.find(slot_index.get());
+      INTERNAL_CHECK_SPAN(found != fs_.banked_slot_indices.end(), span)
+          << "Internal error: missing proven bank coordinate";
+      bank = found->second.first;
+      slot_index = found->second.second;
+    }
+    INTERNAL_CHECK_SPAN(bank < region->banks.size(), span)
+        << "Internal error: bank coordinate exceeds the declared allocation";
+    region_ssa = region->banks[bank].first;
+  }
   // ptoas reads the slot as an `index` SSA and matches its affine form (`iv % N`,
   // `(iv ± c) % N`, a constant) to decide whether two accesses can touch the same
   // slot. Passing the index itself — not the byte offset InitMemRef derived from
@@ -2329,8 +2449,14 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
     // one statement, so the base variable's span is the closest true source.
     SpanScope base_loc(this, &base->span_);
     if (!region.parent_type_str.empty()) {
-      Emit(region.region_ssa + " = pto.alloc_tile addr = " + region.addr_ssa + " : " +
-           region.parent_type_str);
+      if (region.banks.empty()) {
+        Emit(region.region_ssa + " = pto.alloc_tile addr = " + region.addr_ssa + " : " +
+             region.parent_type_str);
+      } else {
+        for (const auto& [bank_ssa, bank_addr] : region.banks) {
+          Emit(bank_ssa + " = pto.alloc_tile addr = " + bank_addr + " : " + region.parent_type_str);
+        }
+      }
       continue;
     }
     const std::string address = region.addr_ssa.empty() ? "" : " addr = " + region.addr_ssa;
@@ -2340,8 +2466,15 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
     const auto valid_col = region.slot_type_str.find("v_col=?") != std::string::npos
                                ? " valid_col = " + region.valid_col_ssa
                                : "";
-    Emit(region.region_ssa + " = pto.alloc_multi_tile" + address + valid_row + valid_col + " : " +
-         region.mtb_type_str);
+    if (region.banks.empty()) {
+      Emit(region.region_ssa + " = pto.alloc_multi_tile" + address + valid_row + valid_col + " : " +
+           region.mtb_type_str);
+    } else {
+      for (const auto& [bank_ssa, bank_addr] : region.banks) {
+        Emit(bank_ssa + " = pto.alloc_multi_tile addr = " + bank_addr + valid_row + valid_col + " : " +
+             region.mtb_type_str);
+      }
+    }
   }
 }
 

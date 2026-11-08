@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Numerical coverage for single-level static and runtime-bound local pipelines."""
+"""Numerical coverage for static, runtime-bound and bounded nested local pipelines."""
 
 from dataclasses import replace
 
@@ -16,7 +16,7 @@ import pytest
 import torch
 from pypto import passes
 
-from tests.software_pipeline_cases import make_epilogue
+from tests.software_pipeline_cases import make_epilogue, make_nested, make_single_parent_nested
 
 
 def _run_pipeline(kernel, args, test_config, software):
@@ -98,6 +98,55 @@ def test_score_epilogue_keeps_reduction_workspace_values(test_config, software, 
     expected[:rows] = (acc[:rows].float().clamp_min(0) * coef).sum(dim=1, keepdim=True) * scale[:rows]
     _run_pipeline(make_epilogue(capacity, dynamic), (acc, scale, coef, active, out), test_config, software)
     torch.testing.assert_close(out, expected, rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.parametrize(
+    ("groups", "children", "outer_stage", "inner_stage", "leaves", "leaf_stage", "guarded", "software"),
+    [
+        (0, 5, 3, 3, 0, 3, False, True),
+        (1, 5, 3, 3, 0, 3, False, True),
+        (65, 5, 3, 3, 0, 3, False, True),
+        (0, 2, 3, 2, 2, 2, False, True),
+        (1, 2, 3, 2, 2, 2, False, True),
+        (65, 2, 3, 2, 2, 2, False, True),
+        (0, 2, 3, 2, 2, 2, True, True),
+        (1, 2, 3, 2, 2, 2, True, True),
+        (65, 2, 3, 2, 2, 2, True, True),
+        (65, 1, 2, 4, 0, 4, False, True),
+        (65, 2, 3, 2, 2, 4, True, True),
+        (65, 2, 3, 2, 2, 2, True, False),
+    ],
+)
+def test_nested_pipeline_preserves_values_and_inactive_groups(
+    test_config, groups, children, outer_stage, inner_stage, leaves, leaf_stage, guarded, software
+):
+    """Check parent wraparound, short children, guarded leaves and untouched canaries."""
+    rows_per_group = children * max(leaves, 1)
+    generator = torch.Generator().manual_seed(2026)
+    x = torch.randn((65 * rows_per_group, 64), generator=generator)
+    y = torch.full_like(x, -777.0)
+    expected = y.clone()
+    active = groups * rows_per_group
+    expected[:active] = x[:active] + 1.0
+    if guarded:
+        # Preserve canaries for inactive child batches as well as inactive
+        # outer groups; both can otherwise hide speculative slot overwrites.
+        for g in range(groups):
+            for p in range(children):
+                if (g + p) % 2:
+                    row = (g * children + p) * leaves
+                    expected[row : row + leaves] = -777.0
+    kernel = make_nested(children, outer_stage, inner_stage, leaves, leaf_stage, guarded)
+    _run_pipeline(kernel, (x, groups, y), test_config, software)
+    torch.testing.assert_close(y, expected, rtol=0, atol=0)
+
+
+def test_static_single_parent_preserves_all_child_values(test_config):
+    """Check constant slot indices after eliminating a one-trip parent loop."""
+    x = torch.randn((6, 64), generator=torch.Generator().manual_seed(2026))
+    y = torch.full_like(x, -777.0)
+    _run_pipeline(make_single_parent_nested(), (x, y), test_config, True)
+    torch.testing.assert_close(y, x + 1.0, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
