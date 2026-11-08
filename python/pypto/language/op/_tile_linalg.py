@@ -89,11 +89,18 @@ def quant_mx_raw(
     FP4 output halves physical and valid columns; native FP4 additionally
     requires physical columns divisible by 64 (32 carrier bytes). Partial valid rows are allowed.
 
-    Both workspaces use the source dtype. Axis0 workspaces have valid shape
-    ``[valid_rows/32, valid_cols]`` and the same physical column stride as src.
-    Axis1 may use flat valid shape ``[1, valid_rows*valid_cols/32]``; FP16/BF16
-    OCP scaling capacity must round this group count up to 128 elements.
-    Workspaces are write-only. FP4E2M1X2 returns native carriers; MXFP8 returns
+    Both workspaces use the source dtype and are write-only, and their physical
+    capacity is checked, not just their valid extent. Axis0 workspaces must have
+    valid shape ``[valid_rows/32, valid_cols]`` and the source's physical column
+    stride. Axis1 takes either the flat valid shape
+    ``[1, valid_rows*valid_cols/32]`` or the grouped ``[valid_rows, valid_cols/32]``
+    one, and a multi-row axis1 workspace must be compact. Axis1 ``scaling``
+    capacity rounds the group count up to a whole vector length: 128 elements for
+    FP16/BF16, 64 for FP32, doubled when an FP32 source takes the unrolled path
+    -- over 1024 physical elements, with *both* the physical element count and
+    ``valid_rows * physical_cols`` a multiple of 256, so a partial valid region
+    can keep the single-buffer size.
+    FP4E2M1X2 returns native carriers; MXFP8 returns
     INT8 carrier bytes. Exponents are flat on axis1 and grouped on axis0.
     ``interleave=True`` interleaves adjacent axis0 exponent groups along columns;
     FP16/BF16 physical and valid source rows must then be divisible by 64.
@@ -126,7 +133,15 @@ def tmov_x2zz(
 
     ``tmp`` is a write-only workspace. Axis1 requires capacity
     ``64 + ceil(rows/16) * cols`` bytes (typically 32-byte-aligned by the
-    caller) and ``dst_rows``/``dst_cols`` for the ZZ ``[M, G]`` shape. Axis0
+    caller) and ``dst_rows``/``dst_cols`` for the ZZ ``[M, G]`` shape. Its
+    source is either the legacy-flat ``[1, dst_rows*dst_cols]`` exponent run or
+    an already-shaped ``[dst_rows, dst_cols]`` tile; a shaped multi-row source
+    must be compact, with its physical column stride equal to its valid column
+    count, because the exponents are read as one contiguous run. Either form
+    needs physical capacity for ``align16(dst_rows) * dst_cols`` bytes, since
+    the conversion zeroes the row padding in place: a shaped source for
+    ``dst_rows=17`` is physically ``[32, dst_cols]`` with valid
+    ``[17, dst_cols]``. Axis0
     (TMovDnTo2Zz) still requires a Vec tmp operand; use a minimal 32-byte-aligned
     pad.
     """

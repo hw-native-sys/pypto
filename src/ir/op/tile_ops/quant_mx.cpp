@@ -232,6 +232,146 @@ TypePtr DeducePublicTQuantMxType(const std::vector<ExprPtr>& args,
   return std::make_shared<TupleType>(std::vector<TypePtr>{dst_type, scale_type});
 }
 
+// Physical geometry PTOAS reads off the raw TQUANT workspaces, gathered so the
+// checks below do not need a dozen parameters.
+struct MxRawWorkspaceGeometry {
+  DataType src_dtype;
+  int64_t src_physical_rows;
+  int64_t src_physical_cols;
+  int64_t valid_rows;
+  int64_t grouped_rows;
+  int64_t grouped_cols;
+  int64_t groups;
+  int group_axis;
+};
+
+int64_t AlignUp(int64_t value, int64_t alignment) { return (value + alignment - 1) / alignment * alignment; }
+
+// Bytes pto.tquant.mx needs in the axis1 `scaling` workspace. PTOAS sizes it
+// from the group count rounded up to a vector length, not from the group count
+// itself (verifyTQuantMxAxis1Flat): FP32 rounds to 64 elements and doubles the
+// buffer on the unrolled large-source path, B16 rounds to 128. LowerCompositeOps
+// already allocates exactly this for the public op; the raw op has to check it
+// because its caller supplies the buffer.
+int64_t Axis1FlatScalingBytes(const MxRawWorkspaceGeometry& g, const std::string& op_name, const Span& span) {
+  constexpr int64_t kFp32ScaleAlignment = 64;
+  constexpr int64_t kB16ScaleAlignment = 128;
+  constexpr int64_t kFp32UnrollMinElements = 1024;
+  constexpr int64_t kFp32UnrollMultiple = 256;
+  const bool is_fp32 = g.src_dtype == DataType::FP32;
+  int64_t scale_elements = g.groups;
+  if (is_fp32) {
+    CHECK_SPAN(g.src_physical_rows <= std::numeric_limits<int64_t>::max() / g.src_physical_cols, span)
+        << "The operator " << op_name << " source element count overflows int64";
+    const int64_t physical_elements = g.src_physical_rows * g.src_physical_cols;
+    const int64_t valid_elements = g.valid_rows * g.src_physical_cols;
+    const bool unroll = physical_elements > kFp32UnrollMinElements &&
+                        physical_elements % kFp32UnrollMultiple == 0 &&
+                        valid_elements % kFp32UnrollMultiple == 0;
+    if (unroll) {
+      CHECK_SPAN(scale_elements <= std::numeric_limits<int64_t>::max() / 2, span)
+          << "The operator " << op_name << " unrolled scale scratch size overflows int64";
+      scale_elements *= 2;
+    }
+  }
+  const int64_t alignment = is_fp32 ? kFp32ScaleAlignment : kB16ScaleAlignment;
+  // CheckSrcBasics has already restricted the source to FP16 / BF16 / FP32, so
+  // the element size is 2 or 4; bind it to a checked local because the overflow
+  // guard below divides by it.
+  const int64_t element_bytes = static_cast<int64_t>(g.src_dtype.GetByte());
+  INTERNAL_CHECK_SPAN(element_bytes > 0, span)
+      << "Internal error: an MX quantization source dtype must have a positive byte size";
+  // Round up first, then guard the byte multiply: the alignment is measured in
+  // elements, so reserving it in bytes leaves too little element headroom and
+  // AlignUp itself could overflow.
+  CHECK_SPAN(scale_elements <= std::numeric_limits<int64_t>::max() - (alignment - 1), span)
+      << "The operator " << op_name << " aligned scale scratch size overflows int64";
+  const int64_t aligned_elements = AlignUp(scale_elements, alignment);
+  CHECK_SPAN(aligned_elements <= std::numeric_limits<int64_t>::max() / element_bytes, span)
+      << "The operator " << op_name << " aligned scale scratch byte size overflows int64";
+  return aligned_elements * element_bytes;
+}
+
+// PTOAS treats max/scaling as physical buffers, so a matching *valid* element
+// count is not sufficient: axis0 fixes their valid shape and row stride
+// (verifyTQuantMxAxis0Aux), and axis1 sizes `scaling` by an aligned group count
+// (verifyTQuantMxAxis1Flat). Reject an unusable workspace here rather than
+// leaving it for the assembler.
+void CheckRawWorkspaceGeometry(const TileTypePtr& max_type, const TileTypePtr& scaling_type,
+                               const MxRawWorkspaceGeometry& g, const std::string& op_name,
+                               const Span& span) {
+  const std::vector<std::pair<TileTypePtr, const char*>> workspaces = {{max_type, "max scratch"},
+                                                                       {scaling_type, "scaling scratch"}};
+  for (const auto& [type, name] : workspaces) {
+    CHECK_SPAN(type->shape_.size() == 2, span) << "The operator " << op_name << " requires a 2D " << name;
+    auto physical_cols = As<ConstInt>(type->shape_[1]);
+    CHECK_SPAN(physical_cols && physical_cols->value_ > 0, span)
+        << "The operator " << op_name << " requires a static positive " << name << " column count";
+    const TileView view = tile_view_semantics::GetEffectiveTileView(*type);
+    // An explicit TileView may carry a rank that disagrees with the tile's
+    // physical shape, and nothing has rejected that yet at this point, so check
+    // before indexing.
+    CHECK_SPAN(view.valid_shape.size() == 2, span)
+        << "The operator " << op_name << " requires a 2D " << name << " valid_shape, but got rank "
+        << view.valid_shape.size();
+    auto valid_rows = As<ConstInt>(view.valid_shape[0]);
+    auto valid_cols = As<ConstInt>(view.valid_shape[1]);
+    CHECK_SPAN(valid_rows && valid_cols, span)
+        << "The operator " << op_name << " requires a static " << name << " valid_shape";
+    const int64_t physical_elements = GetStaticPhysicalElementCount(type, name, op_name, span);
+    if (g.group_axis == 0) {
+      // Axis0 has no legacy-flat workspace form.
+      CHECK_SPAN(valid_rows->value_ == g.grouped_rows && valid_cols->value_ == g.grouped_cols, span)
+          << "The operator " << op_name << " requires group_axis=0 " << name << " valid_shape ["
+          << g.grouped_rows << ", " << g.grouped_cols << "], but got [" << valid_rows->value_ << ", "
+          << valid_cols->value_ << "]";
+      CHECK_SPAN(physical_cols->value_ == g.src_physical_cols, span)
+          << "The operator " << op_name << " requires group_axis=0 " << name
+          << " to keep the source's physical column stride (" << g.src_physical_cols << "), but got "
+          << physical_cols->value_;
+      CHECK_SPAN(g.grouped_rows <= std::numeric_limits<int64_t>::max() / g.src_physical_cols, span)
+          << "The operator " << op_name << " workspace capacity overflows int64";
+      const int64_t required = g.grouped_rows * g.src_physical_cols;
+      CHECK_SPAN(physical_elements >= required, span)
+          << "The operator " << op_name << " requires group_axis=0 " << name << " capacity for " << required
+          << " elements, but got " << physical_elements;
+    } else {
+      // Axis1 takes either the legacy-flat `[1, groups]` workspace or a
+      // canonical `[M, K/32]` one; a multi-row workspace must form a compact
+      // physical prefix (mxRequireCompact).
+      const bool flat = valid_rows->value_ == 1 && valid_cols->value_ == g.groups;
+      const bool canonical = valid_rows->value_ == g.grouped_rows && valid_cols->value_ == g.grouped_cols;
+      CHECK_SPAN(flat || canonical, span)
+          << "The operator " << op_name << " requires group_axis=1 " << name << " valid_shape [1, "
+          << g.groups << "] or [" << g.grouped_rows << ", " << g.grouped_cols << "], but got ["
+          << valid_rows->value_ << ", " << valid_cols->value_ << "]";
+      CHECK_SPAN(valid_rows->value_ == 1 || physical_cols->value_ == valid_cols->value_, span)
+          << "The operator " << op_name << " requires a multi-row group_axis=1 " << name
+          << " to be compact: its physical column stride (" << physical_cols->value_
+          << ") must equal its valid column count (" << valid_cols->value_ << ")";
+      CHECK_SPAN(physical_elements >= g.groups, span)
+          << "The operator " << op_name << " requires group_axis=1 " << name << " capacity for " << g.groups
+          << " elements, but got " << physical_elements;
+    }
+  }
+  if (g.group_axis != 1) return;
+  const int64_t required_bytes = Axis1FlatScalingBytes(g, op_name, span);
+  const int64_t scaling_elements =
+      GetStaticPhysicalElementCount(scaling_type, "scaling scratch", op_name, span);
+  const int64_t scaling_element_bytes = static_cast<int64_t>(scaling_type->dtype_.GetByte());
+  INTERNAL_CHECK_SPAN(scaling_element_bytes > 0, span)
+      << "Internal error: a scaling workspace dtype must have a positive byte size";
+  // The element count is the caller's metadata, bounded only by int64, so check
+  // it before converting a capacity that large into bytes.
+  CHECK_SPAN(scaling_elements <= std::numeric_limits<int64_t>::max() / scaling_element_bytes, span)
+      << "The operator " << op_name << " scaling scratch physical capacity overflows int64 in bytes";
+  const int64_t scaling_bytes = scaling_elements * scaling_element_bytes;
+  CHECK_SPAN(scaling_bytes >= required_bytes, span)
+      << "The operator " << op_name << " requires group_axis=1 scaling scratch capacity of " << required_bytes
+      << " bytes (the " << g.groups << " groups rounded up to a whole vector length), "
+      << "but got " << scaling_bytes;
+}
+
 // Raw tile.tquant_mx_raw: (src, max_ws, scaling_ws) -> TupleType{INT8 or packed FP4, UINT8 exp}.
 // max/scaling are write-only workspace inputs (gather_compare tmp style).
 TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
@@ -314,6 +454,11 @@ TypePtr DeduceRawTQuantMxType(const std::vector<ExprPtr>& args,
       << "The operator " << kOpName << " requires max scratch valid element count " << groups;
   CHECK_SPAN(GetStaticElementCount(scaling_type, "scaling scratch", kOpName, span) == groups, span)
       << "The operator " << kOpName << " requires scaling scratch valid element count " << groups;
+  CheckRawWorkspaceGeometry(
+      max_type, scaling_type,
+      MxRawWorkspaceGeometry{src_type->dtype_, dim0_const->value_, dim1_const->value_, valid_rows->value_,
+                             grouped_rows, grouped_cols, groups, group_axis},
+      kOpName, span);
 
   TileView dst_view;
   std::vector<ExprPtr> dst_shape = src_type->shape_;
@@ -421,6 +566,16 @@ TypePtr DeduceTileTMovX2ZzType(const std::vector<ExprPtr>& args,
         << "The operator " << kOpName << " axis1 src valid shape must be [1, " << groups << "] or ["
         << zz_rows << ", " << zz_cols << "], but got [" << src_rows->value_ << ", " << src_cols->value_
         << "]";
+    // A multi-row source must be a compact physical prefix: PTOAS reads the
+    // exponents as one contiguous run (verifyTMovXToZzAxis1), so a wider
+    // physical stride would feed it the row padding as data.
+    auto src_physical_cols = As<ConstInt>(src->shape_[1]);
+    CHECK_SPAN(src_rows->value_ == 1 || (src_physical_cols && src_physical_cols->value_ == src_cols->value_),
+               span)
+        << "The operator " << kOpName
+        << " requires a multi-row axis1 src to be compact: its physical column stride ("
+        << (src_physical_cols ? std::to_string(src_physical_cols->value_) : std::string("?"))
+        << ") must equal its valid column count (" << src_cols->value_ << ")";
     CHECK_SPAN(zz_rows <= std::numeric_limits<int64_t>::max() - 15, span)
         << "The operator " << kOpName << " padded row count overflows int64";
     const int64_t row_blocks = (zz_rows + 15) / 16;

@@ -158,8 +158,16 @@ cannot reshape its custom FP4 type into the required static-valid descriptor.
 
 `pl.tile.quant_mx_raw` keeps source orientation and returns native packed data
 plus UINT8 exponent codes without composite scale boxing. Workspaces use the
-source dtype. Axis0 workspaces retain the source physical column stride; axis1
-FP16/BF16 OCP scaling capacity rounds the group count up to 128 elements.
+source dtype, and their physical capacity is checked rather than only their
+valid extent. Axis0 workspaces must use the canonical `[valid_rows/32,
+valid_cols]` valid shape and retain the source physical column stride. Axis1
+takes either its own grouped shape `[valid_rows, valid_cols/32]` or the flat
+`[1, groups]` one, must be compact
+when it has more than one row, and sizes its `scaling` buffer from the group
+count rounded up to a whole vector length: 128 elements for FP16/BF16, 64 for
+FP32, doubled when an FP32 source takes the unrolled path — over 1024 physical
+elements, with both the physical element count and `valid_rows * physical_cols`
+a multiple of 256, so a partial valid region can keep the single-buffer size.
 Static partial valid regions are supported; axis1 requires tight physical/valid
 columns and FP4 physical columns divisible by 64. Axis0 groups 32 valid rows;
 `interleave=True` requires FP16/BF16 physical and valid rows divisible by 64.

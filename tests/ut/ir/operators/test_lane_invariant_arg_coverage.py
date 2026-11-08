@@ -89,6 +89,11 @@ UNSEEDED_OPS = {
     # Raw UINT8 src/tmp plus a `dst_rows`/`dst_cols` pair that must agree with the source's static
     # valid shape.
     ir.get_op("tile.tmov_x2zz").name,
+    # Its two workspaces are sized from the source's own group count, and `scaling` additionally
+    # needs that count rounded up to a whole vector length (128 B16 elements / 64 FP32 ones). No
+    # assignment of independent probe shapes satisfies both at once — a workspace large enough for
+    # the byte capacity has the wrong valid extent, and one with the right extent is too small.
+    ir.get_op("tile.tquant_mx_raw").name,
     # `cond` must be the packed predicate mask for the result the other two operands imply:
     # UINT8, columns `roundup(ceil(N/8), 32)`, valid columns `ceil(valid_N/8)`. That is a
     # derived relation between operands, not an independent shape the uniform search can guess.
