@@ -45,7 +45,19 @@ stride 就得到物理 GlobalTensor stride，因此本 pass 之后
   `TensorType` 槽位；
 - `tile.load` 的 offset 和 shape，使其使用 rank-5 坐标；
 - `tile.store` 的 MX-scale 目标和可选 partition shape，使其使用对应的 rank-5
-  坐标；store 必须写完整的 FP8E8M0 16x2 box；
+  坐标；store 必须写完整的 FP8E8M0 16x2 box。codegen 通过同一指针上 store 专用的
+  ND view 写入：固定版本的 pto-isa TSTORE 只接受 ND、DN 和 NZ 的 GlobalTensor
+  layout，而张量自身的 view 带有 Cube 侧 load 所需的 MX layout。该路径需要
+  PYPTO 或 DSA_RP 内存规划器，以提供 ND 源别名所需的静态地址。把 store 描述为
+  单段连续搬运还带来两条限制：它必须覆盖所写每一行的**全部** group box（把
+  `[16, 2]` tile 写入 `[16, 4]` 的 MX_A_ZZ 张量会被拒绝，因为其打包后的 box 0
+  和 box 2 并不相邻）；并且源必须是完整的 scale tile，而不是它的 `tile.slice`
+  （boxed scale 的 view 记录的是逻辑 row-major 地址，而非打包后的 box 地址）。
+  与本 pass 无关但同属一条规则：对 MX scale tile 做 `tile.slice` 只能选取**整个**
+  tile。scale 的字节按打包 box 顺序存放，而 slice 记录的是逻辑 row-major 地址，
+  两者只有在整块 tile 上才一致；任何子窗口要么是一组带 stride 的 32 字节片段，
+  要么位于后续阶段无法纠正的地址上——那时窗口只是共享缓冲池里的一个偏移。
+  如需切片，请先把 scale 落到普通 `FP8E8M0` 张量再切；
 - 物理 `valid_shape` 参数，使其保持完整对齐 load box，同时把缩窄的逻辑
   `TileType.valid_shape` 保留为 tile 元数据；
 - 两个方向的 FP8E8M0 有 shape `tensor.view` 别名：ND-to-MX 与 MX-to-ND；
@@ -89,7 +101,10 @@ callee 参数必须在每一个 caller 中都可证明。调用映射缺失或�
 | load 级缩窄 `valid_shape` | 保留为 tile 元数据；物理 box 仍完整 |
 | 原始 IR 中 `target_memory != Mat` 或缺失 | 拒绝；公开 `pl.load` 会将省略的 target 补为 `Mat` |
 | MX tensor 被不支持的算子使用 | 拒绝 |
-| 写入完整 FP8E8M0 16x2 scale box 的 `tile.store` | 改写为 rank-5 MX 目标 |
+| 写入完整 FP8E8M0 16x2 scale box、覆盖全部 group box 且源为完整 scale tile 的 `tile.store` | 改写为 rank-5 MX 目标；codegen 通过 store 专用的 ND view 写入 |
+| 只覆盖目标部分 group box 的 `tile.store` | 拒绝；打包后这些 box 并不相邻 |
+| 源是 boxed scale 的 view（`tile.slice`）的 `tile.store` | 拒绝；其记录的地址是逻辑地址而非打包地址 |
+| 选取范围小于整块 tile 的 MX scale tile `tile.slice` | 在 slice 处拒绝；只有那里还能看到父 tile 的 box 几何 |
 | 有 shape 的 FP8E8M0 ND/MX backing alias | 改写 |
 | distributed MX tensor | 拒绝 |
 

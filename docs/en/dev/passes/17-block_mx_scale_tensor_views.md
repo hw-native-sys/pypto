@@ -48,7 +48,24 @@ For every MX_A_ZZ or MX_B_NN tensor, the pass rewrites:
   iteration arguments, Calls, and Submits;
 - `tile.load` offsets and shapes into rank-5 coordinates;
 - `tile.store` MX-scale destinations and optional partition shapes into the
-  matching rank-5 coordinates; stores require complete FP8E8M0 16x2 boxes;
+  matching rank-5 coordinates; stores require complete FP8E8M0 16x2 boxes.
+  Codegen writes them through a store-local ND view of the same pointer, because
+  the pinned pto-isa TSTORE accepts only ND, DN and NZ GlobalTensor layouts
+  while the tensor's own view carries the MX layout its Cube-side load needs.
+  That needs the PYPTO or DSA_RP memory planner, which supplies the static
+  address the ND source alias is built at. Two further restrictions follow from
+  describing the store as one contiguous run: it must cover **every** group box
+  of each row it writes (a `[16, 2]` tile into a `[16, 4]` MX_A_ZZ tensor is
+  rejected, because its packed boxes 0 and 2 are not adjacent), and its source
+  must be the whole scale tile, not a `tile.slice` of one (a view of a boxed
+  scale records a logical row-major address, not its packed box address).
+  Independently of this pass, `tile.slice` of an MX scale tile may select only
+  the **whole** tile. A scale's bytes are stored in packed box order while a
+  slice records a logical row-major address, and the two agree only for the
+  whole tile; every sub-window is either a strided set of 32-byte runs or sits
+  at an address nothing downstream can correct, and by then the window is just
+  an offset into a shared buffer pool. Stage the scale through a plain
+  `FP8E8M0` tensor and slice that instead;
 - physical `valid_shape` arguments to the complete aligned load box while
   preserving a narrowed logical `TileType.valid_shape` as tile metadata;
 - shaped FP8E8M0 `tensor.view` aliases in both ND-to-MX and MX-to-ND directions;
@@ -97,7 +114,10 @@ fixed-width expression's evaluation before division.
 | narrowed load-level `valid_shape` | kept as tile metadata; physical box stays complete |
 | `target_memory != Mat` or missing in raw IR | rejected; public `pl.load` fills omitted target with `Mat` |
 | MX tensor used by an unsupported operator | rejected |
-| `tile.store` of complete FP8E8M0 16x2 scale boxes | rewritten to a rank-5 MX destination |
+| `tile.store` of complete FP8E8M0 16x2 scale boxes, covering every group box, from a whole scale tile | rewritten to a rank-5 MX destination; codegen writes it through a store-local ND view |
+| `tile.store` covering only some of the destination's group boxes | rejected; the packed boxes are not adjacent |
+| `tile.store` whose source is a view of a boxed scale (`tile.slice`) | rejected; its recorded address is logical, not packed |
+| `tile.slice` of an MX scale tile selecting less than the whole tile | rejected at the slice; the parent's box geometry is visible only there |
 | shaped FP8E8M0 ND/MX backing alias | rewritten |
 | distributed MX tensor | rejected |
 
