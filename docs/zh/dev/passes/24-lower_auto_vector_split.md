@@ -13,6 +13,9 @@ vector→cube 边界插入 `tile.aic_gather`，仅对**向量子区域**沿拆�
 本 pass 就地下降一等公民区域节点 `SplitAivScopeStmt` 并保留其包装；
 `ExpandMixedKernel` 在 codegen 前消费该结构。
 
+对具有显式连续 stride、无分形存储的二维 ND 或 DN tile，折半时按新的物理 shape
+重新计算 stride。非连续 stride 和分形布局保留原有存储元数据。
+
 ## 为什么需要本 pass
 
 用 `pl.split` 编写的混合 `InCore` 函数在同一函数体中描述 cube 与 vector 工作，拆分

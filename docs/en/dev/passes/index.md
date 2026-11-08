@@ -51,7 +51,7 @@ Keep the English and Chinese documentation synchronized.
 | 15 | [FlattenTileNdTo2D](15-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
 | 16 | [BlockNzTensorViews](16-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-5 form and retargets their `tile.load` coordinates |
 | 17 | [BlockMxScaleTensorViews](17-block_mx_scale_tensor_views.md) | Migrates logical MX scale views into canonical packed rank-5 physical form |
-| 18 | [LegalizeTileCast](18-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain |
+| 18 | [LegalizeTileCast](18-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain; repeats after vector splitting to revalidate geometry |
 | 19 | [AutoTileMatmulL0](19-auto_tile_matmul_l0.md) | Picks an L0 tile shape `(m, n, k)` from the backend's L0 capacities and tiles matmuls to it |
 | 20 | [CanonicalizeTileSlice](20-canonicalize_tile_slice.md) | Lowers `tile.slice` into the canonical `tile.extract` form |
 | 21 | [InferTileMemorySpace](21-infer_tile_memory_space.md) | Infers the on-chip `MemorySpace` of every tile and inserts `tile.move` to legalize mismatches |

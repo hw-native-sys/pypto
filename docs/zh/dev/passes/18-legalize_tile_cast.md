@@ -6,11 +6,11 @@
 
 `LegalizeTileCast` 是函数级 Pass。对每条 `var = tile.cast(...)`：
 
-1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换表（转录自 pto-isa `tcvt`
+1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换规则表（转录自 pto-isa `tcvt`
    Supported Conversions）。本 Pass 自身不含任何架构知识，新增后端只需提供自己的表，
    无需改动此处；未配置 backend 时本 Pass 不做任何事。
-2. 已原生：原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
-3. 非原生：在邻接图上 BFS 求最短路径；等长路径优先「同字节转浮点 → 再调宽度」。
+2. 调用 `backend::IsDirectCast(call, handler.GetTcvtAdjacency())`，检查当前类型、逻辑尺寸及规则中的实现条件；支持则原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
+3. 否则在邻接图上 BFS 求最短路径。每个候选 hop 均推导自己的类型并调用同一个 `IsDirectCast`，排除几何不合法的边；等长路径优先「同字节转浮点 → 再调宽度」。
 
 典型结果（A5）：
 
@@ -130,7 +130,8 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
 | `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
 | `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3`（满足 ND 几何约束） | `fp8e4m3`(3，回退), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e1m2x2` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
 | `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
@@ -140,6 +141,11 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+
+其他行中的 `fp4` 代表任一打包格式。E2M1x2→E4M3FN 直接边仅在无分块行主序 ND Vec
+二维几何满足约束且有效行列数为静态时选用，
+作为中间步骤时同样逐 hop 检查后端规则。条件不满足时保留三步回退链及警告；成功选择直接转换时
+不发出慢链警告。详见 [FP4 约束](../fp4.md#数值转换限制)。
 
 ### Ascend910 (a2a3)
 
@@ -163,9 +169,13 @@ Default 流水线：
 
 ```text
 lower_composite_ops → flatten_tile_nd_to_2d → legalize_tile_cast → auto_tile_matmul_l0
+... → split_vector_kernel → legalize_tile_cast → stamp_tfree_split
 ```
 
 放在 Flatten 之后以覆盖其新插入的 cast；放在 MatmulL0 之前以免拆开本可 fold 的原生降精度 cast。
+
+第二次执行在向量切分后重新检查有条件的原生转换。新增中间 tile 保留已推导的内存空间，
+不在该后期阶段重新执行内存放置 pass。空 replay lane 保持为空。
 
 ## API
 

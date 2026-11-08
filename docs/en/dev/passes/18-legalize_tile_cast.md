@@ -6,12 +6,12 @@ Expands `tile.cast` `(src, dst)` pairs that the active `pto.tcvt` profile cannot
 
 For each `var = tile.cast(...)`:
 
-1. Ask the active `BackendHandler` for its native-conversion table via `GetTcvtAdjacency()`
+1. Ask the active `BackendHandler` for its native-conversion rules via `GetTcvtAdjacency()`
    (transcribed from pto-isa `tcvt` Supported Conversions). The pass holds no per-architecture
    knowledge of its own, so a new backend ships its own table and needs no change here.
    With no backend configured the pass is a no-op.
-2. Already native: leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
-3. Non-native: BFS for a shortest path; among equal-length paths prefer "same byte-width → float, then adjust width".
+2. Query `backend::IsDirectCast(call, handler.GetTcvtAdjacency())` for the current dtype, logical extents, and registered implementation conditions. If supported, leave unchanged (including FIXPIPE-foldable `FP32→BF16/FP16` with `mode=rint`).
+3. Otherwise, BFS for a shortest path. Each candidate hop gets its own inferred type and calls the same `IsDirectCast` query; invalid geometry is excluded. Among equal-length paths prefer "same byte-width → float, then adjust width".
 
 Typical A5 results: `INT32→FP16` → `INT32→FP32→FP16`; `FP16→BF16` → `FP16→FP32→BF16`.
 
@@ -155,7 +155,8 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
 | `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
 | `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3` (compatible ND geometry) | `fp8e4m3`(3, fallback), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e1m2x2` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
 | `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
@@ -165,6 +166,13 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+
+The `fp4` shorthand in the other rows denotes either packed format. The
+E2M1x2→E4M3FN direct edge is selected only for compatible unboxed row-major
+2D ND Vec geometry with static valid rows and columns. Every candidate use,
+including an intermediate hop, is checked against the same backend rule. Otherwise
+this pair retains its three-hop fallback and warning; successful direct casts
+emit no slow-chain warning. See [FP4 constraints](../fp4.md#numerical-cast-constraints).
 
 ### Ascend910 (a2a3)
 
@@ -189,7 +197,12 @@ Default pipeline:
 
 ```text
 lower_composite_ops → flatten_tile_nd_to_2d → legalize_tile_cast → auto_tile_matmul_l0
+... → split_vector_kernel → legalize_tile_cast → stamp_tfree_split
 ```
+
+The second invocation revalidates conditional native casts after vector splitting.
+New intermediate tiles retain resolved memory spaces; no memory placement pass
+is rerun at this late stage. Empty replay lanes remain empty.
 
 ## API
 

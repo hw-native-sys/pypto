@@ -307,8 +307,9 @@ backing to `MX_A_ZZ` / `MX_B_NN` as a logical rank-2 view (`layout=mx_*`; PTOAS 
 physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
 `_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
 the op must be `FP8E4M3FN`. Either packed FP4 format may supply the left operand
-after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
-legalization pass expands that request to packed FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
+after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5,
+compatible ND E2M1x2 tiles use direct TCVT; E1M2 and incompatible direct-cast
+geometry retain packed FP4→BF16→FP32→FP8E4M3FN legalization. Native FP4×FP4 and the
 reverse FP8×FP4 form are not supported. `pl.quant_mx` supports MXFP8 and native
 E2M1 MXFP4, with `group_axis` matching PTOAS `grpAxis`. FP8 results can feed `matmul_mx` in one mixed InCore task
 through V2C, including the generated Vec-to-Mat-to-scale-memory path.

@@ -49,7 +49,8 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | 打包 GM 视图与 load/store | 两种格式均支持 ND/DN 载体维度、步长和偏移；宽度为一个载体时仍保持 ND；PTOAS v0.67 负责 DMA 描述符转换 |
 | 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同、连续且带地址的二维行主序 Vec 存储；使用 PYPTO 或 DSA_RP 内存规划器 |
 | 任一打包格式 ↔ BF16 转换 | 无分块 Vec 上的原生 TCVT；ND 列或完整静态连续 DN 行按 2:1 展开或收缩 |
-| 任一打包格式 → FP8E4M3FN/FP8E5M2 转换 | 经 BF16 和 FP32 合法化，并发出警告；也可使用主机参考实现或查找表 |
+| E2M1x2 → FP8E4M3FN 转换 | 几何满足约束时使用直接 ND Vec TCVT；`[16,32]` 载体转换为 `[16,64]` 个数值，无 BF16/FP32 中间 tile |
+| 其他打包 FP4 → FP8 转换 | 经 BF16 和 FP32 合法化，并发出警告；不满足直接转换几何要求时也使用此回退路径 |
 | E2M1↔E1M2 转换 | 经 BF16 进行数值转换，载体 shape 不变 |
 | 其他宽类型转换 | 使用现有合法化路径，要求中间转换无损；编码限制见下文 |
 | 打包 Vec 布局转换 | ND→NZ；载体维度随打包轴变化，数值维度保持不变 |
@@ -73,6 +74,20 @@ BF16 编码支持 `rint`、`round`、`floor`、`ceil` 和 `trunc`，拒绝 `odd`
 打包要求完整的数值对：源维度为正偶数，或动态 `valid_shape` 可证明为偶数，
 例如 `2 * n`。解码会展开载体维度，不要求该载体维度为偶数。
 
+在 A5 上，`pl.cast`、`pl.tile.cast` 和 InCore `pl.tensor.cast` 在输入输出均为
+二维无分块行主序 ND Vec tile 时，使用直接 E2M1x2→FP8E4M3FN `pto.tcvt`。
+物理维度与有效行列数须为静态正数，打包源的行跨度须为 32 字节的倍数。
+Tile 须使用规范的连续步长，UB `start_offset` 为零。
+输出的物理列数与有效列数均加倍；E2M1 的所有数值（包括有符号零）都能被 E4M3FN
+精确表示，因此无需舍入。PTOAS v0.72 还要求字节跨度与逻辑列数可用有符号 32 位
+整数表示，行数不超过 65,535，源寄存器计数（`packed_cols / 256`）可用 16 位表示。
+ND 几何不满足约束时仍经 BF16/FP32 合法化。此路径不开放直接 E1M2→FP8、E2M1→E5M2
+转换、NZ 输出，也不开放任何 DN 打包→FP8 转换 —— 见下文 DN 段落，该情况是拒绝而非回退。
+静态有效描述符对实际源 handle 创建别名，保留 tile 参数、跨核管道与轮转分配的运行时地址。
+三种内存规划器均使用此直接 ND 路径。向量切分后会重新检查最终 lane 几何；若打包行
+不再满足对齐要求或有效维度变为动态，则恢复回退链。空 replay lane 保留存储且不发射转换。
+GM 偏移仍按载体计数，输出偏移按 FP8 元素计数。
+
 所有打包转换均要求 `none_box` 存储；更宽类型的转换链要求 ND 布局。
 经 BF16 解码可精确保留每个 FP4 值。隐式编码链同样要求经 BF16 后保留原始源值：
 FP16/FP32 及较宽整数源会被拒绝，因为该中间步骤可能导致两次舍入。
@@ -85,6 +100,20 @@ DN 转换要求完整静态二维矩形、规范的连续列主序步长、零 t
 Tensor 转换遵守相同契约。PYPTO 或 DSA_RP 必须提供静态 tile 地址；代码生成绑定
 完整静态有效描述符，以选择安全的原生转换路径。动态有效 DN 描述符即使针对完整矩形
 也可能触发故障，因此仍不支持。
+
+**ND 与 DN 的失败方式不同，只有 ND 会降级。** ND 打包转换在几何不满足直接条件时，
+会经 BF16/FP32 合法化并仍能编译成功。而 DN 打包转换到任何 FP8 目标，会在
+`tile.cast` 类型推导阶段直接被拒绝，根本不会查询后端规则：
+
+```python
+# DN 打包源：pl.TileView(blayout=pl.TileLayout.col_major, stride=[1, 32])
+pl.cast(dn_packed_tile, pl.FP8E4M3FN)
+# ValueError: packed FP4 DN cast supports only BF16 and packed FP4 endpoints;
+#             use ND storage for wider cast chains
+```
+
+该检查与目标无关 —— 未配置 backend、Ascend910、Ascend950 三种情况下的报错完全相同
+—— 因此当目标类型为 FP8 时，请准备 ND 源。
 
 ## 通过 UB 别名解码 UINT8 载体（Ascend950）
 

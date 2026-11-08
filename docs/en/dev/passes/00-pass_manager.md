@@ -503,36 +503,37 @@ The PTO-oriented tile stage of `Default` is:
 12. `ExpandMixedKernel`
 13. [`InjectGMPipeBuffer`](26-inject_gm_pipe_buffer.md)
 14. [`SplitVectorKernel`](27-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)
-15. [`StampTfreeSplit`](28-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
-16. `NormalizeReturnOrder`
-17. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
-18. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) (opt-in fixed-address single-level Vec software pipelining under PyPTO, or same-iteration rotation under PTOAS; declined loops retain unroll)
-19. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
-20. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
-21. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
-22. [`MaterializeSimtOutputs`](35-materialize_simt_outputs.md)
-23. [`SpecializeSimtHelpers`](36-specialize_simt_helpers.md)
-24. `InitMemRef`
-25. [`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
-26. `MemoryReuse`
-27. `AllocateMemoryAddr`
-28. [`FoldNoOpReshape`](41-fold_no_op_reshape.md)
-29. [`FuseCreateAssembleToSlice`](42-fuse_create_assemble_to_slice.md)
-30. [`LowerL2TensorCollectives`](43-lower_l2_tensor_collectives.md) (distributed: a managed collective written in a CHIP orchestration body -> one local builtin AIV task; runs here so the emitted call gets its argument directions and TensorMap task edges derived like any kernel call)
-31. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md)
-32. [`DeriveCallDirections`](45-derive_call_directions.md)
-33. [`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
-34. [`ExpandManualPhaseFence`](47-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
-35. [`SynthesizeAllReduceSignals`](48-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
-36. [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
-37. [`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
-38. [`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
-39. `Simplify`
-40. [`LegalizeGraphBoundary`](52-legalize_graph_boundary.md) (hoists values a Graph body derives from its boundary scalars to the call sites, and rejects the boundaries the host_build_graph runtime cannot record; no-op for programs with no Graph function)
-41. [`MaterializeRuntimeScopes`](53-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1)
-42. [`ClassifyIterArgCarry`](54-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
-43. [`InsertCommFence`](55-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after every statement-reordering pass so the inserted ops stay adjacent to their notify through codegen)
-44. [`MaterializeValidShapeSymbols`](56-materialize_valid_shape_symbols.md) (runs dead last; turns each device-kernel valid_shape symbol the kernel cannot bind into a leading Scalar[INDEX] param fed from the call site's actual valid extent)
+15. [`LegalizeTileCast`](18-legalize_tile_cast.md) (revalidates conditional native casts after vector splitting)
+16. [`StampTfreeSplit`](28-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
+17. `NormalizeReturnOrder`
+18. [`SkewCrossCorePipeline`](30-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
+19. [`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) (opt-in fixed-address single-level Vec software pipelining under PyPTO, or same-iteration rotation under PTOAS; declined loops retain unroll)
+20. [`LowerPipelineLoops`](32-lower_pipeline_loops.md)
+21. [`CanonicalizeIOOrder`](33-canonicalize_io_order.md)
+22. [`MaterializeTensorStrides`](34-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
+23. [`MaterializeSimtOutputs`](35-materialize_simt_outputs.md)
+24. [`SpecializeSimtHelpers`](36-specialize_simt_helpers.md)
+25. `InitMemRef`
+26. [`MaterializeSemanticAliases`](38-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
+27. `MemoryReuse`
+28. `AllocateMemoryAddr`
+29. [`FoldNoOpReshape`](41-fold_no_op_reshape.md)
+30. [`FuseCreateAssembleToSlice`](42-fuse_create_assemble_to_slice.md)
+31. [`LowerL2TensorCollectives`](43-lower_l2_tensor_collectives.md) (distributed: a managed collective written in a CHIP orchestration body -> one local builtin AIV task; runs here so the emitted call gets its argument directions and TensorMap task edges derived like any kernel call)
+32. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md)
+33. [`DeriveCallDirections`](45-derive_call_directions.md)
+34. [`AutoDeriveTaskDependencies`](46-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
+35. [`ExpandManualPhaseFence`](47-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
+36. [`SynthesizeAllReduceSignals`](48-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
+37. [`MaterializeCommDomainScopes`](49-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
+38. [`LowerHostTensorCollectives`](50-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
+39. [`MaterializeDistTensorCtx`](51-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
+40. `Simplify`
+41. [`LegalizeGraphBoundary`](52-legalize_graph_boundary.md) (hoists values a Graph body derives from its boundary scalars to the call sites, and rejects the boundaries the host_build_graph runtime cannot record; no-op for programs with no Graph function)
+42. [`MaterializeRuntimeScopes`](53-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1)
+43. [`ClassifyIterArgCarry`](54-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+44. [`InsertCommFence`](55-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after every statement-reordering pass so the inserted ops stay adjacent to their notify through codegen)
+45. [`MaterializeValidShapeSymbols`](56-materialize_valid_shape_symbols.md) (runs dead last; turns each device-kernel valid_shape symbol the kernel cannot bind into a leading Scalar[INDEX] param fed from the call site's actual valid extent)
 
 [`ResolveBackendOpLayouts`](23-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.

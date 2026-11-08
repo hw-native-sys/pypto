@@ -11,10 +11,14 @@
 
 #include "pypto/backend/950/backend_950_handler.h"
 
+#include <cstdint>
 #include <initializer_list>
+#include <limits>
+#include <utility>
 
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
@@ -82,7 +86,55 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     TcvtAdjacency t;
     auto add = [&t](DataType from, std::initializer_list<DataType> tos) {
       for (DataType to : tos) {
-        t.edges.emplace_back(from, to);
+        TcvtRule rule{from, to, {}};
+        if (from.IsPackedFp4() || to.IsPackedFp4()) {
+          TcvtConditions nd;
+          nd.layout = ir::TileLayout::row_major;
+          nd.unboxed = true;
+          nd.matching_valid_shape = true;
+          TcvtConditions dn = nd;
+          dn.layout = ir::TileLayout::col_major;
+          dn.static_shape = true;
+          dn.full_valid = true;
+          dn.dense_stride = true;
+          dn.zero_start_offset = true;
+          dn.preserve_layout = true;
+          dn.descriptor = CastDescriptor::StaticPlannedAddress;
+          rule.alternatives = {nd, dn};
+        }
+        if (from == DataType::FP4E2M1X2 && to == DataType::FP8E4M3FN) {
+          // PTOAS v0.72 direct packed decode: ND only for this frontend path.
+          // All values/strides count byte carriers on the packed side.
+          //
+          // This REPLACES the generic packed {nd, dn} pair above rather than
+          // extending it: the generic `nd` alternative accepts dynamic validity
+          // and any column count, which the direct decode cannot implement, so
+          // an appended rule would be matched first and admit a cast that
+          // MakeTcvtCodegenPTO then rejects. Dropping `dn` costs nothing --
+          // DeduceTileCastType rejects every DN packed cast whose endpoints are
+          // not BF16 or packed FP4, so a DN packed->FP8 cast never reaches this
+          // table and the ND alternative is the only reachable one.
+          TcvtConditions direct;
+          direct.layout = ir::TileLayout::row_major;
+          direct.unboxed = true;
+          direct.null_compact = true;
+          direct.static_shape = true;
+          direct.static_valid = true;
+          direct.matching_valid_shape = true;
+          direct.dense_stride = true;
+          direct.zero_start_offset = true;
+          direct.vec_only = true;
+          direct.allow_empty_replay = true;
+          direct.source_col_alignment = 32;
+          direct.max_rows = std::numeric_limits<uint16_t>::max();
+          direct.max_columns = std::numeric_limits<int32_t>::max();
+          direct.max_byte_span = std::numeric_limits<int32_t>::max();
+          direct.source_register_bytes = 256;
+          direct.max_source_registers = std::numeric_limits<uint16_t>::max();
+          direct.descriptor = CastDescriptor::StaticValidShape;
+          rule.alternatives = {direct};
+        }
+        t.edges.push_back(std::move(rule));
       }
     };
     add(DataType::FP32, {DataType::FP16, DataType::BF16, DataType::INT16, DataType::INT32, DataType::INT64});
@@ -102,7 +154,7 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     add(DataType::FP8E4M3FN, {DataType::FP32});
     add(DataType::FP8E5M2, {DataType::FP32});
     add(DataType::HF8, {DataType::FP32});
-    add(DataType::FP4E2M1X2, {DataType::BF16});
+    add(DataType::FP4E2M1X2, {DataType::BF16, DataType::FP8E4M3FN});
     add(DataType::FP4E1M2X2, {DataType::BF16});
     return t;
   }();

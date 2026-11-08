@@ -350,7 +350,9 @@ class TestMxMatmulCodegen:
                 pl.store(pl.matmul_mx(ta, tas, tb, tbs), [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
-        assert mlir.count("pto.tcvt") == 3
+        casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+        assert len(casts) == 1
+        assert "f4E2M1x2" in casts[0] and "f8E4M3FN" in casts[0]
         assert "dtype=!pto.f4E2M1x2, rows=128, cols=32" in mlir
         assert "pto.tmatmul.mx" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2

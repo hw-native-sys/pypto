@@ -185,6 +185,19 @@ inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std:
   return true;
 }
 
+/// Whether an unboxed 2D view has canonical contiguous ND/DN strides.
+/// Empty strides denote the implicit dense descriptor. Unknown non-canonical
+/// expressions are not treated as proof of contiguity.
+inline bool HasCanonicalDenseStrides(const TileType& tile, const TileView& view) {
+  if (tile.shape_.size() != 2 || view.slayout != TileLayout::none_box) return false;
+  if (view.stride.empty()) return true;
+  if (view.stride.size() != 2) return false;
+  const bool dn = view.blayout == TileLayout::col_major;
+  if (!dn && view.blayout != TileLayout::row_major) return false;
+  const auto unit = As<ConstInt>(view.stride[dn ? 0 : 1]);
+  return unit && unit->value_ == 1 && AreExprsEqual(view.stride[dn ? 1 : 0], tile.shape_[dn ? 0 : 1]);
+}
+
 /// Return whether @p valid_shape is SplitVectorKernel's all-zero lane-1 sentinel.
 ///
 /// `WithZeroValidShape` stamps every dimension of a cloned lane-1 op with a

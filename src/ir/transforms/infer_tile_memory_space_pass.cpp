@@ -23,6 +23,8 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -42,7 +44,6 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -1091,8 +1092,13 @@ class TileMemorySpaceMutator : public IRMutator {
     // Look up backend layout spec so tile.move carries the correct layout for the consumer.
     // This avoids a later ResolveBackendOpLayouts repair pass needing to insert tile.reshape.
     const backend::BackendTileLayoutSpec* layout_spec = nullptr;
-    if (backend::BackendConfig::IsConfigured() && !IsDensePackedFp4DnCast(call)) {
-      layout_spec = backend::GetBackend()->GetTileLayoutSpec(call->op_->name_);
+    if (backend::BackendConfig::IsConfigured()) {
+      const auto* target = backend::GetBackend();
+      backend::DirectCastInfo cast_info;
+      if (!backend::IsDirectCast(call, target->GetHandler()->GetTcvtAdjacency(), &cast_info) ||
+          !cast_info.preserve_layout) {
+        layout_spec = target->GetTileLayoutSpec(call->op_->name_);
+      }
     }
 
     for (size_t i = 0; i < constraints->size() && i < call->args_.size(); ++i) {

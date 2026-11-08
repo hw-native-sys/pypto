@@ -24,11 +24,8 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -206,48 +203,8 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
                         "but got "
                      << args[0]->GetType()->TypeName();
 
-  ValidateCastSaturationModeKwarg(kwargs, "tensor.cast");
-
-  // Read target_type from kwargs
-  bool found_target_type = false;
-  DataType target_dtype;
-  for (const auto& [key, value] : kwargs) {
-    if (key == "target_type") {
-      // Handle both DataType and int for backward compatibility
-      if (value.type() == typeid(DataType)) {
-        target_dtype = AnyCast<DataType>(value, "kwarg key: target_type");
-      } else if (value.type() == typeid(int)) {
-        target_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: target_type"));
-      } else {
-        throw TypeError("target_type must be a DataType or int, but got " + std::string(value.type().name()));
-      }
-      found_target_type = true;
-      break;
-    }
-  }
-  CHECK(found_target_type) << "tensor.cast requires 'target_type' kwarg";
-
-  // Reject same-dtype cast: the hardware pto.tcvt instruction is for
-  // cross-dtype conversion, and a same-dtype invocation can corrupt values
-  // rather than acting as an identity copy. Detecting this at construction
-  // time keeps malformed casts out of every downstream pass and codegen.
-  CHECK(tensor_type->dtype_ != target_dtype)
-      << "tensor.cast: target_type " << target_dtype.ToString()
-      << " equals input dtype; same-dtype cast is not a valid operation. "
-      << "Remove the cast or use a different target_type.";
-
-  // `mode` does not affect type deduction, but ConvertTensorToTileOps forwards this
-  // op's kwargs verbatim to tile.cast, whose codegen reads `mode` unconditionally.
-  // Require it here so a missing kwarg is reported against the op the caller wrote
-  // rather than surfacing later as a tile.cast failure inside the conversion pass.
-  const bool found_mode =
-      std::any_of(kwargs.begin(), kwargs.end(), [](const auto& kv) { return kv.first == "mode"; });
-  CHECK(found_mode) << "tensor.cast requires a 'mode' kwarg (round mode: none(0), rint(1), "
-                       "round(2), floor(3), ceil(4), trunc(5), odd(6)). Pass mode=\"round\" (2) "
-                       "to match the pl.cast / tensor_ops.cast default.";
-
   const Span& span = args[0]->span_;
-  ValidatePackedFp4CastMode(target_dtype, GetRequiredKwarg<int>(kwargs, "mode", "cast"), span);
+  const DataType target_dtype = ValidateCastAttributes(kwargs, tensor_type->dtype_, "tensor.cast", span);
   const bool packed_cast = tensor_type->dtype_.IsPackedFp4() || target_dtype.IsPackedFp4();
   const auto source_view = tensor_type->tensor_view_.value_or(TensorView{});
   const auto source_layout = source_view.layout;
