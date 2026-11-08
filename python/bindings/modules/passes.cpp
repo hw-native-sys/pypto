@@ -420,6 +420,9 @@ void BindPass(nb::module_& m) {
       .def("get_passes", &PassPipeline::GetPasses, "Get copies of all passes in execution order");
 
   // Factory functions with snake_case names
+  passes.def("outline_simt_scopes", &pass::OutlineSimtScopes,
+             "Outline per-thread regions before SSA conversion");
+
   passes.def("specialize_simt_helpers", &pass::SpecializeSimtHelpers,
              "Specialize SIMT helpers by dimensions and storage ABI");
 

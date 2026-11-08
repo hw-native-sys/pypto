@@ -26,7 +26,7 @@ acc[t0 : t0 + R, :] = pl.matmul_acc(
 The first K step overwrites only that window; later steps accumulate into it.
 Other windows retain their values. The compiler can pack equal-size row windows
 of a local accumulator into contiguous L0C windows; see
-[accumulator row windows](../passes/15-flatten_tile_nd_to_2d.md#logical-accumulator-row-windows).
+[accumulator row windows](../passes/16-flatten_tile_nd_to_2d.md#logical-accumulator-row-windows).
 
 ### If Statement (SSA-style)
 
@@ -169,12 +169,12 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.cross_core_slot(slot_num=N)])` | `InCore` | InCore + cross-core pipe slot count |
 | `pl.at(level=pl.Level.HOST)` *(or any non-`CORE_GROUP` level)* | `Hierarchy` | Distributed hierarchy scope |
 | `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
-| `pl.graph("name")` | `Graph` | Recordable orchestration region; the name is required and becomes the outlined function's — see [OutlineGraphScopes](../passes/08-outline_graph_scopes.md) |
+| `pl.graph("name")` | `Graph` | Recordable orchestration region; the name is required and becomes the outlined function's — see [OutlineGraphScopes](../passes/09-outline_graph_scopes.md) |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd` (for-form wraps inner `InCore`) | SPMD multi-block dispatch — see [pl.spmd](#plspmd-multi-block-dispatch) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives) |
-| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/53-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/54-materialize_runtime_scopes.md) |
 
 `pl.scope(..., name_hint="label")` and `pl.manual_scope(name_hint="label")`
 accept an optional string literal, defaulting to `""`. The label is preserved
@@ -204,7 +204,7 @@ Potentially non-positive dynamic SPMD counts are guarded automatically: a count
 caller unless arithmetic analysis proves the count positive. Missing outputs
 are compile-time errors naming the tensor and parameter index. On the empty
 path, returned tensors keep their existing contents; no output is initialized.
-See [LegalizeSpmdLaunches](../passes/44-legalize_spmd_launches.md).
+See [LegalizeSpmdLaunches](../passes/45-legalize_spmd_launches.md).
 
 Optional `optimizations=[...]`. The entries are orthogonal and may be combined
 in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):
@@ -217,10 +217,10 @@ in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):
 `pl.cross_core_slot(slot_num=N, local_slot_num=L)` additionally sets the A2/A3
 local consumer depth (`1 <= L <= N`). Omitting `L` preserves the ring-depth-sized
 reserve. An explicit local depth is unsupported on A5. See
-[ExpandMixedKernel](../passes/25-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
+[ExpandMixedKernel](../passes/26-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
 
 > `pl.split(MODE, slot_num=N)` is a deprecated alias for the slot count and warns
-> — see [ExpandMixedKernel](../passes/25-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
+> — see [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
 
 ### Yield Statement
 

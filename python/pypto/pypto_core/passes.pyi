@@ -403,6 +403,9 @@ class PassPipeline:
 
 # Factory functions
 
+def outline_simt_scopes() -> Pass:
+    """Outline per-thread regions before SSA conversion."""
+
 def specialize_simt_helpers() -> Pass:
     """Specialize SIMT helpers by dimensions and storage ABI; pass dynamic metadata explicitly."""
 
@@ -1128,6 +1131,7 @@ __all__ = [
     "PassPipeline",
     "init_mem_ref",
     "materialize_simt_outputs",
+    "outline_simt_scopes",
     "specialize_simt_helpers",
     "memory_reuse",
     "allocate_memory_addr",

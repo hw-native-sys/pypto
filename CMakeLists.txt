@@ -237,6 +237,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/materialize_simt_outputs_pass.cpp
+    src/ir/transforms/outline_simt_scopes_pass.cpp
     src/ir/transforms/specialize_simt_helpers_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/utils/reg_memory_analysis.cpp

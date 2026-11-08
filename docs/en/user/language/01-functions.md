@@ -51,6 +51,7 @@ def entry(
 | Line | What it does |
 | ---- | ------------ |
 | `@pl.jit.incore` | Marks a device kernel — the execution plane, where operators live |
+| `@pl.jit.aiv` | Explicit AIV device kernel; required for `pl.simt_scope` |
 | `@pl.jit` | Marks the chip-level entry point — the control plane, which dispatches |
 | `add_kernel(a, b, out)` | A plain call; the decorator discovers the callee and wires it in |
 | `out: pl.Out[...]` | Declares the direction, which is how the compiler orders this task |
@@ -447,5 +448,5 @@ deps of a `@pl.jit` entry and spliced at the call site.
 - [Control Flow](02-control-flow.md) — loops and conditionals inside these bodies.
 - [Scopes and Placement](04-scopes.md) — `pl.at` and the other placement scopes.
 - [Quickstart](../02-quickstart.md) — the same decorators in a worked example.
-- [InlineFunctions](../../dev/passes/01-inline_functions.md) — how `Inline` bodies are spliced.
+- [InlineFunctions](../../dev/passes/02-inline_functions.md) — how `Inline` bodies are spliced.
 - [Integrating Hand-Written C++ Kernels](../../dev/language/04-external-kernels.md) — calling external kernels.

@@ -1,0 +1,278 @@
+# InlineFunctions Pass
+
+Eliminates `FunctionType.Inline` functions by splicing their bodies at every call site.
+
+## Overview
+
+Functions decorated as `@pl.function(type=pl.FunctionType.Inline)` (or via the JIT-side `@pl.jit.inline`) are *source-level utilities*: each call site expands into a fresh, alpha-renamed copy of the body, with formal parameters substituted by actual-argument expressions. After this pass, no `FunctionType.Inline` function and no `Call` to one survives in the program — subsequent passes treat the spliced code as if it had been written inline at the call site.
+
+Runs immediately after `OutlineSimtScopes` in `OptimizationStrategy.Default` so downstream passes (`UnrollLoops`, `OutlineIncoreScopes`, …) never observe Inline functions.
+
+**Produces**: `IRProperty.InlineFunctionsEliminated`.
+
+**Requires**: nothing — runs on a freshly parsed program.
+
+**When to use**: Always, as part of the default pipeline. The pass is a no-op when no Inline functions exist.
+
+## API
+
+| C++ | Python | Level |
+| --- | ------ | ----- |
+| `pass::InlineFunctions()` | `passes.inline_functions()` | Program-level |
+
+**Python usage**:
+
+```python
+from pypto.pypto_core import passes
+
+inline_pass = passes.inline_functions()
+program_inlined = inline_pass(program)
+```
+
+## Algorithm
+
+1. **Collect** all functions with `func_type == FunctionType::Inline`.
+2. **Cycle-detect and order** the Inline → Inline call graph; raise `pypto::ValueError` naming the cycle if one is found. Otherwise visit callees before callers.
+3. **Cache parameter classification**, then expand callers. Build one expanded analysis copy per inline helper in callee-first order and cache its alias classification together with the original body's syntactic parameter definitions. Analyze each helper once; clone sites use indexed lookups. Keep the original helper bodies for emitted code so caller-specific types and dump selections still pass through every nested call:
+   - For every top-level `LHS = inline_call(args)` or `EvalStmt(inline_call(args))` in a function body:
+     - Before substituting Tile arguments in surviving callers, validate dtype, physical rank/shape, and conflicting resolved memory spaces. Bind generic dimensions per Tile from its physical extents, independently of its valid shape; scalar shape parameters use the actual scalar argument. Defer this check during helper analysis so a generic wrapper can receive concrete shapes at its final call site. Nested emitted calls and discarded results are checked too.
+     - Build the param-substitution map (formal `Var` → actual `Expr`). The map applies at use-sites **and** def-sites, so a callee rebinding `out = pl.tensor.assemble(out, ...)` rebinds the caller's actual `Var` — but only for a param that carries an in-place contract (see [Rebinding a parameter](#rebinding-a-parameter)). Three kinds of actual arg are instead bound to a fresh `<param>_inline<counter>` `Var` ahead of the spliced body, and that `Var` is substituted: the arg of a rebound param that is not an assignable `Var` (a slice `c[r]`, an `IterArg`, a computed scalar); the arg of a rebound pass-by-value param (a plain scalar that is neither `pl.Out` nor `pl.InOut`, or a tensor / tile whose binding may change); and any computed tensor / tile arg (a `Call` such as `a[r]`), which Python evaluates once at the call site. Other args — `Var`s bound to read-only params, scalar expressions, constants — are substituted directly, so shape expressions that read a param still fold.
+     - Bind dynamic symbols in callee parameter types to the actual argument shapes and view metadata, reusing the binding collector for cross-function return types. The bound expressions belong to the caller and are substituted verbatim. Inlining preserves each actual argument's type without equating a shared dimension placeholder across different parameters: a helper may accept logical and padded buffers under one symbolic annotation. Conflicting extents are resolved per operation from its actual operands rather than choosing one global binding.
+     - Alpha-rename every locally-bound `Var` in the inlined body to a fresh name using `inline<counter>` (see naming rules below) to avoid collisions across multiple call sites. `DeepClone` creates these locals with their types remapped, including loop/branch results; seeded caller arguments remain unchanged. For example, a callee local with shape `[N, 4]` becomes `[caller_extent, 4]` when its input has that shape, so no callee-only `N` survives in the caller.
+     - In the existing `InlineCallsMutator` traversal, visit each cloned body before wiring its return values into the caller. Reuse the same variable map for receivers and downstream uses, without a separate whole-caller specialization walk. Specialize dynamic operation and writeback results through the operator registry, preserving allocation metadata, tile memory space and call attributes. Derive locals from their first assignment using the same `GetAuthoritativeAssignmentType` rule as SSA: known variable, shaped and tuple RHS types supply shape/dtype/view metadata; otherwise retain the LHS type, and preserve an LHS MemRef when the chosen type lacks one. Derive `For`/`While` tensor carries from their actual initializer, and merge results from the corresponding values. Propagate returned types to receivers and downstream uses, including `Submit` results and dependencies, while preserving subsequent rebinding identity. Reject any callee-only dimension still unresolved after specialization; explicitly using an ambiguous dimension requires distinct formal symbols.
+     - Splice the renamed-and-substituted body's statements before the call site.
+     - Wire up the callee's trailing return value according to the call-site form: `LHS = renamed_return` (single-return assign; omitted when `LHS` resolves to the same `Var` as the substituted value, to avoid a redundant SSA copy), per-element `TupleGetItemExpr` substitution instead of a `MakeTuple` binding (multi-return assign), a fresh `ReturnStmt` (`return inline_call(...)`), or a fresh `EvalStmt` when the value is discarded but its evaluation is observable (`EvalStmt` call site — see [Edge cases](#edge-cases)).
+4. **Drop** all Inline functions from the program.
+
+Tuple-element substitution applies the same identity-writeback rule as single
+returns: if `q, ready = helper(x, q)` produces `q = q`, the assignment is omitted
+before SSA conversion. This requires the exact same `Var` on both sides, not
+equal names, shapes, or backing buffers. Assignments between distinct variables
+(including returned views and loop-state snapshots) are preserved. Removing the
+self-assignment also avoids creating a redundant scope-local C++ Tensor alias
+when a caller consumes the result after a `pl.scope()` block.
+
+Graph ordering is linear in functions and call edges. Classification traverses each original and expanded analysis body once; its cost is measured against that materialized IR, which can be larger than the source program. A nested alias-only return therefore preserves the caller binding, while a nested fresh result still requires a local handle. Original syntactic definitions remain relevant even when analysis expansion removes a no-op assignment: a constant or computed argument must not be substituted into its assignment target.
+
+For names with a parsed auto-name role or version, `FreshName` inserts `inline<counter>` through `auto_name::AddQualifier`: `t__inline_arg_v0` becomes `t__inline7_inline_arg_v0`. This preserves the terminal role/version for `ConvertToSSA` through repeated inlining. Other names use a single-underscore (`_inline`) suffix because `__` is reserved by the IR's auto-naming convention (see `auto_name_utils.h`).
+
+A single-underscore suffix is not sufficient on its own: `<orig>` may itself end in `_` — `_` is Python's throwaway name and the documented loop variable of `for _ in pl.split_aiv(...)` — and plain concatenation would then fuse two individually-legal underscores into the reserved delimiter. For these names, `FreshName` joins through `auto_name::JoinNameSuffix`, which trims that tail: `_` renames to `_inline7`, not `__inline7`. An unrecognized name containing `__`, such as an author-written `a__b`, stays invalid for `ValidateBaseName` to report rather than being silently normalized.
+
+## Example
+
+### Single call site
+
+**Before**:
+
+```python
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(self, x):
+        y = pl.mul(x, x)
+        return y
+
+    @pl.function
+    def main(self, a):
+        z = self.helper(a)
+        return z
+```
+
+**After**:
+
+```python
+@pl.program
+class P:
+    @pl.function
+    def main(self, a):
+        y_inline0 = pl.mul(a, a)
+        z = y_inline0
+        return z
+```
+
+### Multiple call sites
+
+Each site is independently alpha-renamed, so locals never collide:
+
+**Before**:
+
+```python
+@pl.function(type=pl.FunctionType.Inline)
+def square(self, x):
+    y = pl.mul(x, x)
+    return y
+
+@pl.function
+def main(self, a, b):
+    a2 = self.square(a)
+    b2 = self.square(b)
+    return pl.add(a2, b2)
+```
+
+**After**:
+
+```python
+@pl.function
+def main(self, a, b):
+    y_inline0 = pl.mul(a, a)
+    a2 = y_inline0
+    y_inline1 = pl.mul(b, b)
+    b2 = y_inline1
+    return pl.add(a2, b2)
+```
+
+### Inline body containing `pl.at`
+
+The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later in the pipeline, exactly as if it had been written at the call site.
+
+## Rebinding a parameter
+
+Tensor storage is shared with the caller, but assigning a new value to a callee's parameter name must not rebind the caller's name. A definition/use walk records alias edges and value-producing definitions before cloning. A linear walk over the alias graph permits direct substitution only when all definitions preserve one parameter's storage; conflicting origins, branches and loop backedges conservatively require a local binding:
+
+| Parameter / definitions | Rebinding lands on | Why |
+| ----------------------- | ------------------ | --- |
+| Tensor / tile with only proven self-updates, such as `t = pl.tensor.assemble(t, x, [0])` | the caller's `Var` | The result aliases the current destination according to `ResultAliasedArgIndex`. This also preserves existing `set_validshape` refinement behavior. |
+| Tensor / tile with any other definition, including `t = pl.add(t, t)`, `t = other`, or a control-flow result | a fresh `<param>_inline<counter>` `Var` | The callee may change which value its parameter names. This applies regardless of `Out` / `InOut`. |
+| `Array` | the caller's `Var` | Preserve the existing element-update convention; orchestration codegen cannot declare a bare array alias. |
+| An explicit `pl.Out` / `pl.InOut` scalar | the caller's `Var` | Preserve the explicit scalar calling convention. |
+| A plain scalar | a fresh `<param>_inline<counter>` `Var` | Its rebinding is local. |
+
+For a shaped parameter that needs a local binding, initialize that binding once before the entire spliced body. Writes through it still reach the argument's storage until the local name is rebound to another value. Branches and loops carry this local handle through ordinary SSA conversion, including zero-iteration loops. Unknown results and aliases with conflicting definitions conservatively use a local binding too; an operator's ability to reuse an input buffer (`IsInplaceSafe`) alone does not establish a writeback contract.
+
+Call-site `pl.dump_tag` selections follow these local parameter bindings into scopes and nested dispatches, including `pl.submit` and `pl.spmd_submit`. The tags are transferred before recursively expanding nested inline calls, so each helper can map the selection through its own local handles. Submit nodes retain their launch attributes, task dependencies, and existing dump selections.
+
+For example, an inline helper containing `t = pl.add(t, t); return t`, called as `u = self.twice(a)`, expands to:
+
+```python
+t_inline0 = a
+t_inline0 = pl.add(t_inline0, t_inline0)
+u = t_inline0
+w = pl.add(a, u)                         # original a + doubled result
+```
+
+The last line computes `3A`, rather than replacing the caller's `a` and computing `4A`. `@pl.jit.inline` still accepts bare tensor parameters: its straight-line alpha-renaming can already separate local bindings, but loop-body assignments also need this pass's protection.
+
+The last row is the one that is easy to get wrong. Given:
+
+```python
+@pl.function(type=pl.FunctionType.Inline)
+def bump(self, n: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+    n = n + 1
+    return n
+
+@pl.function
+def main(self, k: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+    m: pl.Scalar[pl.INDEX] = self.bump(k)
+    return k + m                              # k + (k + 1)
+```
+
+the call site binds a temporary first, so the caller's `k` stays readable afterwards:
+
+```python
+n_inline0: pl.Scalar[pl.INDEX] = k
+n_inline0 = n_inline0 + 1
+m: pl.Scalar[pl.INDEX] = n_inline0
+s: pl.Scalar[pl.INDEX] = k + m                # the ORIGINAL k
+```
+
+Substituting `k` at the def-site instead would splice `k = k + 1` into the caller and silently compute `2k + 2`. Note that the JIT specializer's alpha-rename does **not** cover this: it renames a rebinding only at the scope depth where the name was first bound, so a rebind inside `pl.range` / `pl.spmd` reaches this pass as a genuine def-site of the param.
+
+## Edge cases
+
+| Case | Behaviour |
+| ---- | --------- |
+| Inline function with no callers | Silently removed from the program. |
+| Inline function as program entry | Not detected as an error here — but no Call to it exists, so it is removed in the cleanup phase like any other no-caller function. |
+| Inline calls Inline (transitive) | Callee-first analysis exposes nested aliases; emitted code recursively clones original helper bodies. |
+| Computed tensor / tile arg, e.g. `f(a[r], c[r])` where the callee reads `x` and writes `c[0:4, j] = v` | Each arg is bound once at the call site — `x_inline0 = a[r]`, `c_inline1 = c[r]`, then `c_inline1 = pl.tensor.assemble(c_inline1, v, ...)` — the IR the parser emits when the caller names the slices itself. Substituting `c[r]` would put a `Call` on the LHS of the rebinding; substituting `a[r]` would re-evaluate it inside the callee's `pl.spmd` / `pl.pipeline` bodies and move it into the outlined kernel. Each slice is a view of its source, so the write reaches the caller's `c`. |
+| Rebound pass-by-value param, e.g. an inline callee doing `n = n + 1` on a scalar param | The arg is bound once at the call site (`n_inline0 = k`) and the rebinding stays on that temporary, so the caller's `k` is unchanged afterwards. See [Rebinding a parameter](#rebinding-a-parameter). |
+| Recursive Inline (self or mutual) | `pypto::ValueError` raised before any splicing, with the cycle named (`a -> b -> a`). |
+| Multi-return inline | No `LHS = MakeTuple([rets...])` is emitted — orchestration codegen cannot lower `MakeTuple`. The cloned return values are recorded against the LHS `Var` and downstream `TupleGetItemExpr(LHS, i)` uses are rewritten to value `i`, leaving the LHS binding unreferenced (see `SpliceInlineCallAsTupleSub`). |
+| Nested call to Inline (e.g. `pl.add(inline_fn(x), y)`, or the `array.update_element(arr, i, inline_fn(x))` the parser desugars `arr[i] = inline_fn(x)` into) | Hoisted onto an `AssignStmt` of its own, then spliced in the same iteration — see [Nested call sites](#nested-call-sites). |
+| Nested call to a **tuple-returning** Inline, a `WhileStmt` condition, an `IterArg` init value, or a bare (non-`SeqStmts`) `ForStmt` / `IfStmt` body | Not hoisted. The `InlineFunctionsEliminated` verifier reports the surviving Call at its own source line right after this pass. |
+| `EvalStmt(inline_call(...))` — return value ignored | The value is discarded, its **evaluation** is not. See [Discarding a return value](#discarding-a-return-value) below. |
+
+## Nested call sites
+
+`HandleTopLevelInlineCall` recognises a call site only when the `Call` **is** the whole statement value — `LHS = f(...)`, `EvalStmt(f(...))`, `return f(...)`. A `Call` anywhere else would be skipped while step 5 dropped the callee anyway, leaving a reference to a deleted function that only failed at `GenerateOrchestration preconditions` with `references undefined function`.
+
+Such calls come from ordinary DSL, sometimes without the user writing a nested call at all. `arr[i] = f(x)` has no IR statement of its own; the parser desugars it to a functional update:
+
+```python
+arr[i] = f(x)                              # what the user writes
+arr = pl.array.update_element(arr, i, f(x))  # what the parser stores — f is now an argument
+```
+
+`NestedInlineCallHoister` therefore runs over each statement's own expressions before the call-site match, pulling every nested inline `Call` onto a fresh `t__inline_arg_vN` binding placed before that statement:
+
+```python
+# before                                   # after the hoist, before the splice
+k = self.half(n) + 1                       t__inline_arg_v0 = self.half(n)
+                                           k = t__inline_arg_v0 + 1
+```
+
+`SpliceHoisted` then splices each hoisted binding immediately, so a hoist and the splice it enables are handled in the same traversal without a later fixpoint scan.
+
+Three properties worth keeping in mind when editing this:
+
+- **A call already in top-level position is left alone** (`HoistInArgs` rewrites only its arguments). Hoisting it would add a redundant copy to every existing call site and churn every before/after test.
+- **Bodies are not touched.** The hoister rewrites only the statement's own expressions; `InlineCallsMutator` still recurses into loop and branch bodies, so a hoist inside a body lands inside that body.
+- **Every hoisted position is evaluated exactly once**, at the point the hoisted statement lands — a call argument, a binary operand, a loop bound, an `if` condition, a `yield` value. A `WhileStmt` condition is not, which is why it is excluded: hoisting it would evaluate the spliced body once instead of per iteration.
+- **A tuple-returning callee is never hoisted.** `SpliceInlineCallAsTupleSub` deliberately emits no `tmp = ...` binding — it records the cloned return values against the LHS `Var` and rewrites downstream `TupleGetItemExpr(tmp, i)` uses instead. A nested consumer holds `tmp` itself rather than a `TupleGetItemExpr`, so hoisting would leave the temp undefined: `return self.pair(x), y` printed `t__inline_arg_v0__FREE_VAR`. Leaving the `Call` in place keeps the pre-hoist behaviour, and the verifier names it.
+
+This is deliberately narrower than `FlattenCallExpr` (pass 06), which performs the same hoist for *all* calls. That pass declares `.required = {SSAForm, NormalizedStmtStructure}`, both established after this one, so it cannot simply run first.
+
+## Discarding a return value
+
+An `EvalStmt` call site — `self.wrapper(x, out)` with no LHS — has nowhere to put the callee's trailing return value. Dropping that **value** is correct; dropping its **evaluation** is not, because evaluating it can write through `Out` / `InOut` arguments, launch a task, block on a signal, or set up hardware. Each discarded value is therefore classified:
+
+| Discarded value | Behaviour |
+| --------------- | --------- |
+| A `Call` — any callee, cross-function or builtin | Re-emitted as an `EvalStmt`, in return order. Nested inline calls are recursively expanded while cloning the body; other calls stay ordinary dispatches, exactly as if the author had written them at the call site. |
+| A `Submit` | Re-emitted as an `EvalStmt`. A task launch is effectful whatever its callee does. |
+| Anything else that hides no call — a `Var`, a constant | Dropped. |
+| A value that is not itself call-like but *wraps* a call — scalar arithmetic such as `self.bump(n) + 1`, a `MakeTuple`, a `TupleGetItemExpr` | `pypto::ValueError`. It cannot become an `EvalStmt`, and deleting it would delete the nested call with it. Return that call directly, or bind the wrapper's result at the call site. |
+
+**Why every call, rather than only the ones that write.** Nothing in the IR answers "is this call safe to delete". The nearest registry data, `OpRegistryEntry::WritesAnyArg`, answers whether an operator writes *through an argument*, and keying deletion on it is wrong in both directions:
+
+- Most operators are simply unclassified — 263 of 315 at the time of writing, among them `tile.tpush_to_aiv` and `system.aic_initialize_pipe`, which `dce::IsSideEffectOp` lists as side-effecting. `OpRegistryEntry::HasDeclaredArgEffects` exists precisely so an analysis can tell "declared to write nothing" from "nobody looked yet".
+- A *positive* `no_arg_writes()` verdict does not mean deletable either. `pld.system.wait` blocks until a signal slot satisfies a threshold, `pld.system.defer_wait` registers a completion condition, and `system.set_ffts` hands the FFTS unit its workspace pointer — all three declare `no_arg_writes()` while carrying synchronization or hardware-setup semantics.
+
+So the pass keeps every call. A discarded genuinely pure call survives as a dead `EvalStmt`, which the pipeline carries harmlessly. Narrowing this needs a real "safely deletable" operator property, declared per operator rather than inferred from writes.
+
+**Before**:
+
+```python
+@pl.function(type=pl.FunctionType.Inline)
+def writeout(self, t, out: pl.Out[...]):
+    return pl.tile.store(t, [0, 0], out)   # the write IS the return expression
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, a, out: pl.Out[...]):
+    t = pl.tile.load(a, [0, 0], [64, 64])
+    self.writeout(t, out)                  # return value ignored
+    return out
+```
+
+**After** — the store survives:
+
+```python
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, a, out: pl.Out[...]):
+    t = pl.tile.load(a, [0, 0], [64, 64])
+    pl.tile.store(t, [0, 0], out)
+    return out
+```
+
+## Verification
+
+The `InlineFunctionsEliminated` `PropertyVerifier` (registered against `IRProperty.InlineFunctionsEliminated`) confirms:
+
+1. No `Function` with `func_type == FunctionType::Inline` remains.
+2. No `Call` whose callee resolves to one survives.
+
+## See also
+
+- `python/pypto/jit/decorator.py` — `@pl.jit.inline` is the user-facing front end (`_SubFunctionDecorator("inline", ...)`).
+- [02-unroll_loops](03-unroll_loops.md) — runs immediately after.
+- [09-outline_incore_scopes](10-outline_incore_scopes.md) — handles the `pl.at` scopes that survive splicing.

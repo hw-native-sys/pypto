@@ -75,10 +75,10 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 在构造时即进行校验，通过 `ir.set_call_attrs` 附加属性时也会校验。
 
 公开 Tile DSL 使用 `TileType`；默认完整 kernel 选择通过
-[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md) 转换支持的函数。直接 PTO 代码生成也支持
+[LowerTileToBuffer](../passes/58-lower_tile_to_buffer.md) 转换支持的函数。直接 PTO 代码生成也支持
 显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/BF16/FP32/INT32
 描述符，以及 `R` 为 8 的倍数、valid 为正静态值的 FP32 列优先 `[R,1]` 描述符，
-用于 [cast/compare/select 配方](../passes/57-lower_tile_to_buffer.md) 的 UINT8 谓词和 UINT32 工作空间描述符，
+用于 [cast/compare/select 配方](../passes/58-lower_tile_to_buffer.md) 的 UINT8 谓词和 UINT32 工作空间描述符，
 标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数支持
 物理形状静态、列数大于一的稠密 ND 二维 FP16/BF16/FP32/INT32 Tensor。
 算术配方分别施加更窄的 dtype 契约。规范化后的 Tensor
@@ -155,7 +155,7 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
 也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
-[LowerTileToBuffer](../passes/57-lower_tile_to_buffer.md) 转换 Tile IR。
+[LowerTileToBuffer](../passes/58-lower_tile_to_buffer.md) 转换 Tile IR。
 
 静态存储视图 (static storage view) 在同一 Buffer 阶段使用普通 SSA 别名边：
 
@@ -389,7 +389,7 @@ Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
 | ------ | ---------------- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` |
 | `DN`（`n ≥ 2`） | `stride[n-2] = 1`；`stride[n-1] = shape[n-2]`；`stride[n-3] = shape[n-2] * shape[n-1]`；外层按行主序 |
-| `NZ` | 对*分块*后的 rank-5 shape `[B, C/c0, R/16, 16, c0]` 求行主序 —— 见 [BlockNzTensorViews](../passes/16-block_nz_tensor_views.md) |
+| `NZ` | 对*分块*后的 rank-5 shape `[B, C/c0, R/16, 16, c0]` 求行主序 —— 见 [BlockNzTensorViews](../passes/17-block_nz_tensor_views.md) |
 
 **同一 canonical TensorView 的两种写法**：
 
@@ -397,7 +397,7 @@ Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
   stride 为空，消费者按对应 layout 的 packed canonical 解释。
 - **显式** —— 每个维度的 stride 都已写出。
 
-[`MaterializeTensorStrides`](../passes/34-materialize_tensor_strides.md) Pass
+[`MaterializeTensorStrides`](../passes/35-materialize_tensor_strides.md) Pass
 将所有隐式形态展开为显式 packed canonical，让 codegen 看到单一契约。
 `TensorViewCanonical` IRProperty + verifier 强制此不变量：
 
