@@ -2025,6 +2025,56 @@ def view(
     return _ir_core.create_op_call("tensor.view", args, kwargs, actual_span)
 
 
+def strided_view(
+    tensor: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    *,
+    strides: Sequence[int | Expr] | _ir_core.MakeTuple,
+    layout: TensorLayout | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Create a zero-copy ND view with explicit strides in dtype elements.
+
+    The source must be a fully valid, packed local ND tensor. The result must
+    have positive, non-overlapping ND strides with innermost stride 1, and its
+    last accessible element must fit within the source region. Static bounds
+    and int64 overflow are checked. Symbolic positivity, non-overlap, capacity,
+    and address-arithmetic bounds remain caller preconditions; no runtime guard
+    or copy is generated. FP4/sub-byte dtypes are unsupported.
+
+    This interface is supported only inside InCore functions. It uses the
+    existing four-operand tensor.view IR form so storage aliasing, dependency
+    analysis, and backend lowering retain their existing behavior. Ordinary
+    view() keeps its shape/layout interface without an explicit-stride option.
+
+    Args:
+        tensor: Packed source tensor expression.
+        shape: Target shape with rank at least 1.
+        valid_shape: Must be omitted, empty, or equal to shape.
+        strides: Address strides, in dtype elements, one per target dimension.
+        layout: Must be omitted or TensorLayout.ND.
+        span: Optional source span, auto-captured when omitted.
+
+    Returns:
+        Call describing an alias of the source storage, including its offset.
+
+    Raises:
+        ValueError: If the source, shape, strides, layout, or storage span is invalid.
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [
+        tensor,
+        _to_make_tuple(shape, actual_span),
+        _to_make_tuple([] if valid_shape is None else valid_shape, actual_span),
+        _to_make_tuple(strides, actual_span),
+    ]
+    kwargs: dict[str, Any] = {}
+    if layout is not None:
+        kwargs["layout"] = layout
+    return _ir_core.create_op_call("tensor.view", args, kwargs, actual_span)
+
+
 def set_validshape(
     tensor: Expr,
     valid_rows: int | Expr,

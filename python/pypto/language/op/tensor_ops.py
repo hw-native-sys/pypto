@@ -2201,6 +2201,46 @@ def view(
     return tensor.__class__(expr=call_expr)
 
 
+def strided_view(
+    tensor: _TensorT,
+    shape: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
+    *,
+    strides: Sequence[IntLike],
+    layout: TensorLayout | None = None,
+) -> _TensorT:
+    """Create an InCore zero-copy ND view with explicit element strides.
+
+    The source must be a fully valid, packed local ND tensor. Strides must be
+    positive, non-overlapping, and have innermost stride 1. The last accessible
+    element must fit the source region. Static bounds and int64 overflow are
+    checked; symbolic positivity, non-overlap, storage bounds, and address
+    arithmetic remain caller preconditions. No copy or runtime guard is added.
+    FP4/sub-byte dtypes are unsupported.
+
+    Args:
+        tensor: Packed source tensor.
+        shape: Target shape with rank at least 1.
+        valid_shape: Must be omitted, empty, or equal to shape.
+        strides: Address strides in dtype elements, one per target dimension.
+        layout: Must be omitted or TensorLayout.ND.
+
+    Returns:
+        Tensor aliasing the source storage and preserving its offset.
+
+    Raises:
+        ValueError: If the source, shape, strides, layout, or storage span is invalid.
+    """
+    call_expr = _ir_ops.strided_view(
+        tensor.unwrap(),
+        _normalize_intlike(shape),
+        None if valid_shape is None else _normalize_intlike(valid_shape),
+        strides=_normalize_intlike(strides),
+        layout=layout,
+    )
+    return tensor.__class__(expr=call_expr)
+
+
 def scatter_update(input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
     """Update input tensor rows at positions specified by 2D index with values from src.
 

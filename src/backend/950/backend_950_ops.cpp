@@ -13,7 +13,8 @@
  * @file backend_950_ops.cpp
  * @brief Backend op registration for Backend950
  *
- * Registers ops to the 950 backend. 950-specific op overrides should be
+ * Registers target-specific select, cast and load rules, then the remaining
+ * shared PTO ops. 950-specific shared-op overrides should be
  * registered here before calling RegisterPTOOps(), and the overridden op
  * names must be passed in the exclude_ops set to avoid duplicate registration.
  *
@@ -27,6 +28,7 @@
  * static const bool kOpsRegistered = [] {
  *   RegisterSelectOps(Backend950::Instance(), BackendType::Ascend950);
  *   RegisterCastOps(Backend950::Instance(), BackendType::Ascend950);
+ *   RegisterLoadOps(Backend950::Instance(), BackendType::Ascend950);
  *   RegisterPTOOps(Backend950::Instance(), {"tile.matmul"});
  *   return true;
  * }();
@@ -43,6 +45,7 @@ namespace backend {
 static const bool kOpsRegistered = [] {
   RegisterSelectOps(Backend950::Instance(), BackendType::Ascend950);
   RegisterCastOps(Backend950::Instance(), BackendType::Ascend950);
+  RegisterLoadOps(Backend950::Instance(), BackendType::Ascend950);
   RegisterPTOOps(Backend950::Instance());
   return true;
 }();

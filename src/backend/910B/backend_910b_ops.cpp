@@ -13,8 +13,8 @@
  * @file backend_910b_ops.cpp
  * @brief Backend op registration for Backend910B
  *
- * Registers all standard PTO ops to the 910B backend by delegating
- * to the shared RegisterPTOOps() function. To override specific ops for
+ * Registers target-specific select, cast and load rules, then the remaining
+ * standard PTO ops via RegisterPTOOps(). To override specific shared ops for
  * this backend, register them before calling RegisterPTOOps() and pass
  * the op names in the exclude_ops set.
  */
@@ -29,6 +29,7 @@ namespace backend {
 static const bool kOpsRegistered = [] {
   RegisterSelectOps(Backend910B::Instance(), BackendType::Ascend910);
   RegisterCastOps(Backend910B::Instance(), BackendType::Ascend910);
+  RegisterLoadOps(Backend910B::Instance(), BackendType::Ascend910);
   // MX block-scale matmul, scale-address binding, and quantization are A5-only.
   // Keep them out of the A2/A3 registry so direct codegen cannot emit PTO ops that the target ISA does not
   // support.
