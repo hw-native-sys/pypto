@@ -418,22 +418,18 @@ def renamed_shape_unpack(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tens
         n = pl.simt.thread_idx(pl.simt.Axis.X)
         n = n + 2
         # Tuple expansion must replace the current scalar alias as well.
-        n, width = src.shape  # pyright: ignore[reportOptionalIterable]
-        pl.simt.store(dst, (0, n), pl.cast(width, pl.FP32))
+        n, _width = src.shape  # pyright: ignore[reportOptionalIterable]
+        pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
     return dst
 
 
 @pl.jit
-def renamed_shape_index_entry(
-    src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]
-):
+def renamed_shape_index_entry(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
     return renamed_shape_index(src, dst)
 
 
 @pl.jit
-def renamed_shape_unpack_entry(
-    src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]
-):
+def renamed_shape_unpack_entry(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
     return renamed_shape_unpack(src, dst)
 
 

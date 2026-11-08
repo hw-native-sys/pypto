@@ -285,10 +285,11 @@ class BodyTransformer(ast.NodeTransformer):
         for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
             if not isinstance(tgt, ast.Name):
                 continue
-            if self._simt_depth and tgt.id in self._simt_runtime_names:
-                # Keep scalar expansion even when a conditional write
-                # prevents folding. A generic tuple temporary is illegal
-                # inside SIMT before simplification removes it.
+            if tgt.id in self._var_renames or (self._simt_depth and tgt.id in self._simt_runtime_names):
+                # Keep the current binding updated after scalar renaming or a
+                # conditional write. Folding only the source name would leave
+                # reads pointing at its old alias. Expand tuples into scalars
+                # because a tuple temporary is illegal inside SIMT.
                 value = (
                     self._dyn_dim_expr(param_name, i)
                     if isinstance(dim, DynDim) or param_name in self._alias_to_original
@@ -371,6 +372,9 @@ class BodyTransformer(ast.NodeTransformer):
         if (
             len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
+            # An active alias takes precedence in visit_Name. Emit a normal
+            # scalar assignment below so the new shape value replaces it.
+            and node.targets[0].id not in self._var_renames
             and not (self._simt_depth and node.targets[0].id in self._simt_runtime_names)
             and isinstance(node.value, ast.Subscript)
             and isinstance(node.value.value, ast.Attribute)

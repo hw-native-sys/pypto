@@ -24,8 +24,9 @@ handle a fresh version. Existing Tile output materialization preserves old Tile
 aliases and unwritten elements. Tensor aliases continue to reference GM.
 
 Outer `In` permissions survive storage copies/views. Captures must already be
-initialized. A complete, unmasked `tile.store` can initialize an `Out` Tensor
-before capture; a partial or conditional write is not proof at a later join.
+initialized. A complete, unmasked, overwriting `tile.store` can initialize an `Out`
+Tensor before capture; a partial or conditional write is not proof at a later join.
+Atomic stores read the old destination and cannot establish initialization.
 Initialization inside a branch is usable by a later scope in that same branch.
 Initialization follows the reaching storage value, separately from conservative
 alias permissions. A full store proves only its definite destination and aliases
@@ -35,7 +36,9 @@ not assumed after a join. A loop capture must also be initialized on later
 iterations; a fresh load before the capture supplies a new proof. JIT shape folding and scalar renaming inside a SIMT
 scope do not affect subsequent caller code. Conditionally rebound private scalar
 assignments are retained inside the region, including shape-derived assignments.
-A straight-line reassignment retires the old fold after evaluating its right-hand side. An incoming
+A straight-line reassignment retires the old fold after evaluating its right-hand side.
+Shape assignments, including unpacking, update the current scalar binding even
+when an earlier reassignment gave it a new internal name. An incoming
 shape constant read before a private write is materialized as a scalar, so
 conditional writes preserve both the original value and subsequent rebindings. Both sides of an `if`
 start from the incoming bindings; their changed bindings remain invalid at the

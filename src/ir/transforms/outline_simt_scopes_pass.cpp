@@ -681,6 +681,10 @@ class ScopeOutliner : public IRMutator {
   }
   void RecordFullInitialization(const CallPtr& call) {
     if (!IsOp(call, "tile.store") || call->args_.size() < 3) return;
+    // A read-modify-write store consumes the old destination even when its
+    // window covers the whole tensor, so it cannot establish initialization.
+    const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+    if (entry.GetArgEffect(2, call->kwargs_) != ArgEffect::Write) return;
     auto input = AsVarLike(call->args_[0]);
     if (!input || !IsInitialized(input)) return;
     auto source = As<TileType>(call->args_[0]->GetType());
