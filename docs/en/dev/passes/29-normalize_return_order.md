@@ -1,5 +1,47 @@
 # NormalizeReturnOrder Pass
 
+`Orchestration` tensor param-writeback returns are canonicalized before `InitMemRef`, so HOST codegen reads the declared returned parameters directly. Their order is preserved. Re-deriving SSA lineage after allocation can fail because aliases have different allocation metadata. Shape/view/type checks remain unchanged.
+
+A whole `Submit` result is `(results..., TaskId)`, not a tensor alias. Only
+explicit tensor projections may be canonicalized; returning the container keeps
+its completion handle and tuple type. Loop writeback proofs seed the alias prefix
+of an in-progress query under the carry assumption, so entering through an
+unrolled store does not turn a valid induction into a cached failure. This does
+not make fresh or rebinding loop results aliases of their initial buffers.
+
+A cached carry proof retains only ancestor assumptions actually consumed by its
+initializer or yield. Independently proven chains survive unrelated rejection.
+A meldable leftist heap keeps all observed requirements: discharging a proof
+selects its deepest dependency and melds the remaining requirements into that
+ancestor, with logarithmic overhead per recorded edge. Lexical nesting alone
+does not create a dependency.
+
+Storage-root queries may additionally designate trailing local definitions as roots.
+They explicitly identify the leading actual parameters: formal rebinding checks
+still apply to those parameters, while defined local tiles retain their storage
+identity so aliased returns share one output buffer and store.
+
+The strict cache spans one `DistributedCodegen::Generate` invocation, so distinct CHIP
+entries reuse shared helper maps. Normal return and exception unwinding both clear it;
+analysis state is never retained between invocations.
+
+Raw HOST result binding uses a separate strict trace-cache policy: every host-callable helper
+actually reached by return-lineage analysis must have zero returns (the existing
+implicit-output case), or one terminal return. Terminal AUTO/MANUAL runtime
+scopes are unconditional containers; conditional or competing returns require
+control-flow normalization before HOST code generation. A plain Call can bind
+tuple elements individually. An explicit CHIP tensor result with unknown storage
+identity cannot use the legacy writable-argument fallback.
+
+Device kernels and Group/SPMD wrappers retain their writeback-return contract:
+mixed-core splitting may leave returns in mutually exclusive core branches.
+Analyze them together and canonicalize only unanimous per-position storage
+identities. This does not relax HOST/helper return-control-flow validation.
+
+Before control-flow normalization, non-strict lineage queries also leave
+conditional or competing helper returns unknown, so caller canonicalization
+cannot hide them from the later strict validation.
+
 Reorders the return tuple of every InCore function so that `return[i]`
 corresponds to the i-th `Out`/`InOut` parameter in declaration order, and
 remaps `TupleGetItemExpr` indices in non-InCore callers accordingly. After
@@ -30,7 +72,7 @@ This pass canonicalizes the contract so codegen can rely on
 `return[k] ↔ out_indices[k]` by position alone:
 
 1. **Step A0 (param-return canonicalization)** — for every `InCore`,
-   `Group`, `Spmd`, and `Graph` function, rewrite each tensor return value that
+   `Group`, `Spmd`, `Graph`, and `Orchestration` function, rewrite each tensor return value that
    is a param writeback to reference the parameter directly (pointer identity),
    using the shared `return_lineage` utility. Kernel-allocated outputs (not
    traceable to any param) and scalar returns are exempt and stay unchanged.
@@ -48,7 +90,7 @@ This pass canonicalizes the contract so codegen can rely on
 The pass is a **no-op** for any function whose tensor returns already name
 their parameters and whose return order already matches its `Out`/`InOut`
 parameter order, and a no-op for any program with no `InCore`, `Group`,
-`Spmd`, or `Graph` function — Step A0 covers all four, so "no InCore
+`Spmd`, `Graph`, or `Orchestration` function — Step A0 covers all five, so "no InCore
 functions" alone no longer implies the pass does nothing.
 
 **Pipeline position**: slot #20 in the `Default` strategy — after
@@ -82,7 +124,7 @@ result = passes.normalize_return_order()(program)
 own functions; `IncoreTileOps` guarantees the body uses tile ops, so the
 `tile.store(_, _, out_param)` signal that drives Step A is present. The
 pass produces `ReturnParamsExplicit` (verified by
-`verify_return_params_explicit.cpp`): every InCore/Group/Spmd/Graph tensor
+`verify_return_params_explicit.cpp`): every InCore/Group/Spmd/Graph/Orchestration tensor
 return value that is a param writeback references the param by pointer
 identity, so orchestration codegen maps returns to args with a lookup.
 It invalidates nothing — SSA form, normalized statement structure, memory
@@ -92,8 +134,8 @@ inference, and every other upstream property are preserved.
 
 ### Step A0 — Canonicalize return values to params
 
-For each `InCore` / `Group` / `Spmd` / `Graph` function, `CanonicalizeReturnValues`
-calls `return_lineage::ReturnedParamIndices` (which traces var-to-var
+For each `InCore` / `Group` / `Spmd` / `Graph` / `Orchestration` function, the pass
+uses `return_lineage::ReturnedParamIndices` (which traces var-to-var
 aliases, loop carries, builtin writebacks, `TupleGetItem` of tuple calls,
 and Group/Spmd wrapper calls) and replaces every tensor return value that
 traces to a param with the param `Var` itself. Untraceable values
@@ -142,38 +184,15 @@ orchestration codegen directly must run this pass first (see
 
 ### Step A — Compute and apply per-function permutations
 
-For each `InCore` function, `BuildReturnToParamMapping` walks the body
-once (excluding the trailing `ReturnStmt`) and builds a
-`Var* → out_param_index` map by replaying three rules:
+Step A uses the same returned-parameter map as Step A0. For device kernels with
+multiple return sites, that map identifies a parameter only when all paths agree.
+Unknown positions keep their original index.
 
-| Rule | Pattern | Action |
-| ---- | ------- | ------ |
-| 1. `tile.store` writes an Out/InOut buffer | `lhs = tile.store(tile, offsets, out_param, ...)` | `lhs → param_index_of(out_param)` |
-| 2. Var-to-var alias | `lhs = rhs_var` (and `rhs_var` already mapped) | `lhs → lookup(rhs_var)` |
-| 3. `ForStmt` iter-arg yield | `for_stmt.iter_args[i].initValue_` already mapped | `for_stmt.return_vars_[i] → lookup(initValue)` |
-
-Each value of `ReturnStmt::value_` is then resolved by looking up its
-`Var` in this map, falling back to direct identity match against
-`Function::params_`. Returning `kNoParam` for an entry means "no out-param
-linkage detected" — that slot keeps its original index.
-
-`ComputeReturnPermutation` turns the mapping into
-`permutation[old_index] = new_index`, where `new_index` is the position
-of the matching parameter in `CollectOutIndices(func)`. The function
-returns the empty permutation in three cases (any of which makes the
-pass a no-op for that function):
-
-- The body has no `ReturnStmt` (open IR) or no Out/InOut parameters.
-- `out_indices.size() > ret_to_param.size()` — more declared output
-  parameters than returned values, so the analysis is incomplete and we
-  refuse to construct an out-of-bounds permutation.
-- The computed permutation is the identity (already canonical).
-
-When the permutation is non-empty, `ReorderReturns` builds a fresh
-`Function` via `MutableCopy`, replacing the trailing `ReturnStmt` with one
-whose `value_[permutation[i]] = old_value_[i]` and permuting
-`Function::return_types_` in lockstep so the type list stays aligned with
-the values.
+`ComputeReturnPermutation` maps each known position to the corresponding
+writable parameter's index in `CollectOutIndices(func)`. It skips incomplete
+arity, non-bijective permutations, and identity permutations. When it reorders,
+`ReorderReturns` applies the same permutation at every return site and to
+`Function::return_types_`. The property verifier also checks every return site.
 
 ### Step B — Remap `TupleGetItemExpr` at call sites
 
@@ -211,7 +230,7 @@ agree even when outputs have different dtypes or shapes.
 
 | Constraint | Reason |
 | ---------- | ------ |
-| Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / `Graph` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd`/`Graph` returns are still canonicalized to params in Step A0, but never reordered |
+| Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / `Graph` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd`/`Graph`/`Orchestration` returns are still canonicalized to params in Step A0, but never reordered |
 | Step A0 requires type-compatible branch consensus outside Graph functions | Every branch must resolve to the same parameter; the final returned tensor must preserve its type/view/valid shape. Intermediate narrowing may be restored. Graph merge returns remain unsupported |
 | Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
@@ -263,19 +282,20 @@ class Module:
         b_tile = pl.tile.mul(x_tile, x_tile)
         out_b_store = pl.store(b_tile, [0], out_b)
         out_a_store = pl.store(a_tile, [0], out_a)
-        return (out_a_store, out_b_store)        # ReorderReturns: permutation [1, 0]
+        return (out_a, out_b)        # ReorderReturns: permutation [1, 0]
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, out_a, out_b):
         ret = self.kernel(x, out_a, out_b)
         a = ret[1]                                # TupleIndexPermutationMutator: 0 → 1
         b = ret[0]                                # TupleIndexPermutationMutator: 1 → 0
-        return (a, b)
+        return (out_b, out_a)
 ```
 
-The same SSA assignment (`a = ...`) is still bound to the value produced
-by `pl.store(a_tile, ..., out_a)`; only the path through the tuple has
-changed. `InOut` parameters behave identically.
+The SSA variable `a` still refers to `out_b`, and `b` still refers to
+`out_a`; only their tuple projection indices change. The orchestrator
+returns those same buffers directly, preserving its original `(out_b, out_a)`
+result order. `InOut` parameters behave identically.
 
 See `tests/ut/ir/transforms/test_normalize_return_order.py` for the
 full set of cases:
@@ -283,7 +303,7 @@ full set of cases:
 - `test_swapped_returns_reordered` — the two-Out-param example above
 - `test_already_ordered_noop` — pass leaves canonical IR untouched
 - `test_single_return_noop` — single Out param needs no permutation
-- `test_non_incore_unchanged` — programs with no InCore functions are no-ops
+- `test_non_incore_unchanged` — an opaque tensor-compute function stays unchanged
 - `test_three_returns_scrambled` — three-way permutation
 - `test_2d_tensor_reorder` — 2-D tensors / multi-dim offsets
 - `test_inout_param_reorder` — `InOut` participates in reordering

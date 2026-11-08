@@ -558,18 +558,24 @@ def test_comm_less_dispatch_routes_through_submit_chip_unplaced():
     @pl.program
     class Prog:
         @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
-        def chip_worker(self, x: pl.Tensor[[SIZE], pl.FP32]) -> pl.Tensor[[SIZE], pl.FP32]:
+        def chip_worker(
+            self, x: pl.Tensor[[SIZE], pl.FP32], out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
             y: pl.Tensor[[SIZE], pl.FP32] = pl.add(x, x)
-            return y
+            return pl.tensor.assemble(out, y, [0])
 
         @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, x: pl.Tensor[[SIZE], pl.FP32]) -> pl.Tensor[[SIZE], pl.FP32]:
-            y: pl.Tensor[[SIZE], pl.FP32] = self.chip_worker(x)
+        def chip_orch(
+            self, x: pl.Tensor[[SIZE], pl.FP32], out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            y: pl.Tensor[[SIZE], pl.FP32] = self.chip_worker(x, out)
             return y
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self, x: pl.Tensor[[SIZE], pl.FP32]) -> pl.Tensor[[SIZE], pl.FP32]:
-            y: pl.Tensor[[SIZE], pl.FP32] = self.chip_orch(x)
+        def host_orch(
+            self, x: pl.Tensor[[SIZE], pl.FP32], out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            y: pl.Tensor[[SIZE], pl.FP32] = self.chip_orch(x, out)
             return y
 
     code = _lower(Prog)

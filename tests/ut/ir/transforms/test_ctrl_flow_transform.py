@@ -1773,10 +1773,8 @@ def test_pipeline_integration():
                 else:
                     x_new = pl.add(x_iter, x_iter)
                     phi = pl.yield_(x_new)
-                x_rv = pl.yield_(phi)  # noqa: F841
-            # ScopeOutliner canonicalizes the InCore return to the param Var the
-            # result writes through (IRProperty::ReturnParamsExplicit, #1702).
-            return x_0
+                x_rv = pl.yield_(phi)
+            return x_rv
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -1784,6 +1782,14 @@ def test_pipeline_integration():
             return x_rv
 
     ir.assert_structural_equal(After, Expected)
+
+    import torch  # noqa: PLC0415
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    x = torch.full((64,), 2.0)
+    namespace = {}
+    exec(torch_codegen(After), namespace)  # noqa: S102
+    torch.testing.assert_close(namespace["main"](x), x * 32)
 
 
 if __name__ == "__main__":
