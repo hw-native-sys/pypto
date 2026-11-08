@@ -41,6 +41,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -50,6 +51,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -78,20 +80,10 @@ void AddEdge(AdjList& adj, DataType from, DataType to) {
 // pass needs no change.
 AdjList BuildAdj(const backend::TcvtAdjacency& table) {
   AdjList adj;
-  for (const auto& [from, to] : table.edges) {
-    AddEdge(adj, from, to);
+  for (const auto& edge : table.edges) {
+    AddEdge(adj, edge.source, edge.destination);
   }
   return adj;
-}
-
-bool IsNativeCast(const AdjList& adj, DataType from, DataType to) {
-  if (from == to) return false;
-  auto it = adj.find(from.Code());
-  if (it == adj.end()) return false;
-  for (const DataType& d : it->second) {
-    if (d == to) return true;
-  }
-  return false;
 }
 
 // Preferred same-width float bridge used when preferring "convert kind without
@@ -116,6 +108,10 @@ std::optional<std::pair<int, int>> FloatFormat(DataType dt) {
   if (dt == DataType::FP32) return std::make_pair(24, 8);
   if (dt == DataType::FP16) return std::make_pair(11, 5);
   if (dt == DataType::BF16) return std::make_pair(8, 8);
+  if (dt == DataType::FP8E4M3FN) return std::make_pair(4, 4);
+  if (dt == DataType::FP8E5M2) return std::make_pair(3, 5);
+  if (dt == DataType::FP4E2M1X2) return std::make_pair(2, 2);
+  if (dt == DataType::FP4E1M2X2) return std::make_pair(3, 1);
   return std::nullopt;
 }
 
@@ -178,14 +174,19 @@ bool IsFp4FloatBridge(DataType dtype) {
   return dtype == DataType::BF16 || dtype == DataType::FP16 || dtype == DataType::FP32;
 }
 
-// BFS shortest path; returns the sequence of intermediate/final target types
-// (excluding `from`). Empty vector means already native? No — caller checks
-// native first. Empty here means unreachable.
-std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType to) {
+ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span);
+
+// BFS over typed candidate hops. Empty means no admissible native chain.
+std::vector<DataType> FindCastChain(const AdjList& adj, const backend::BackendHandler& handler,
+                                    const CallPtr& original) {
+  const auto& source = original->args_[0];
+  const auto to = As<TileType>(original->GetType())->dtype_;
+  const int mode = original->GetKwarg<int>("mode", kCastModeRound);
+  const auto& span = original->span_;
+  const auto source_type = As<TileType>(source->GetType());
+  INTERNAL_CHECK_SPAN(source_type, span) << "cast search requires a TileType source";
+  const DataType from = source_type->dtype_;
   if (from == to) return {};
-  if (IsNativeCast(adj, from, to)) {
-    return {to};
-  }
   if (to.IsPackedFp4() && !HasLosslessFp4EncodingBridge(from)) return {};
 
   // State: dtype code → (parent code, edge-to dtype, path_len, path_pref_cost)
@@ -194,11 +195,12 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
     DataType via = DataType::BOOL;  // dtype of this node
     int dist = -1;
     int pref = 0;
+    ExprPtr value;  // Typed candidate hop; search never emits these calls.
   };
   std::array<NodeInfo, 256> info{};
   std::queue<uint8_t> q;
 
-  info[from.Code()] = NodeInfo{from.Code(), from, 0, 0};
+  info[from.Code()] = NodeInfo{from.Code(), from, 0, 0, source};
   q.push(from.Code());
 
   while (!q.empty()) {
@@ -223,22 +225,48 @@ std::vector<DataType> FindCastChain(const AdjList& adj, DataType from, DataType 
       // Intermediates must preserve everything the destination can represent;
       // the destination itself is always admissible.
       // FP4 has a much smaller value set than wider destinations: its native
-      // BF16 decode, and subsequent FP16/FP32 bridges, preserve every source
-      // value exactly. Rejecting BF16 merely because FP32 has more precision
-      // would make an otherwise lossless FP4 -> BF16 -> FP32 cast unreachable.
-      const bool exact_fp4_decode = from.IsPackedFp4() && IsFp4FloatBridge(nxt);
+      // BF16 decode and FP16/FP32/FP8 bridges preserve every source value
+      // exactly. Conversely, BF16 -> FP4 -> FP8 is a lossy shortcut even though
+      // both hops can individually be native, so FloatFormat models FP4/FP8. Rejecting BF16 merely because
+      // FP32 has more precision would make an otherwise lossless FP4 -> BF16 -> FP32 cast unreachable.
+      const bool exact_fp4_decode =
+          from.IsPackedFp4() &&
+          (IsFp4FloatBridge(nxt) || nxt == DataType::FP8E4M3FN || nxt == DataType::FP8E5M2);
       if (nxt != to && !exact_fp4_decode && NarrowsRelativeTo(nxt, to)) continue;
+      // Geometry changes with packed/unpacked units. Validate every concrete
+      // candidate hop against the backend rule, not just the original cast.
+      // All cast paths preserve layout and logical value geometry, so a dtype
+      // uniquely determines its carrier geometry for this search.
+      ExprPtr candidate;
+      try {
+        if (nxt == to) {
+          // Validate the exact descriptor, attributes and scratch that the
+          // emitted terminal hop retains, rather than a re-inferred result.
+          auto args = original->args_;
+          args[0] = cur_info.value;
+          candidate = std::make_shared<Call>(original->op_, std::move(args), original->kwargs_,
+                                             original->attrs_, original->GetType(), original->span_);
+        } else {
+          candidate = MakeCast(cur_info.value, nxt, mode, span);
+        }
+      } catch (const ValueError&) {
+        continue;  // This candidate's dtype/packing contract is not admissible.
+      } catch (const TypeError&) {
+        continue;
+      }
+      if (!backend::IsDirectCast(As<Call>(candidate), handler.GetTcvtAdjacency())) continue;
       const int edge_cost = EdgePreferenceCost(cur_info.via, nxt);
       const int new_dist = cur_info.dist + 1;
       const int new_pref = cur_info.pref + edge_cost;
       NodeInfo& nxt_info = info[nxt.Code()];
       if (nxt_info.dist < 0) {
-        nxt_info = NodeInfo{cur, nxt, new_dist, new_pref};
+        nxt_info = NodeInfo{cur, nxt, new_dist, new_pref, candidate};
         q.push(nxt.Code());
       } else if (nxt_info.dist == new_dist && new_pref < nxt_info.pref) {
         nxt_info.parent = cur;
         nxt_info.via = nxt;
         nxt_info.pref = new_pref;
+        nxt_info.value = candidate;
       }
     }
   }
@@ -263,7 +291,51 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
 
 bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
 
-/// Packed FP4 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
+/// Whether the author explicitly asked for this cast's destination layout.
+///
+/// Keyed on the kwargs rather than on the result view, so the check below
+/// applies only to the explicit request and never to a tile that is merely
+/// boxed in passing (those keep the ordinary layout-repair path).
+bool RequestsDestinationLayout(const CallPtr& call) {
+  return std::any_of(call->kwargs_.begin(), call->kwargs_.end(),
+                     [](const auto& entry) { return entry.first == "blayout" || entry.first == "slayout"; });
+}
+
+/// Fail an explicitly requested destination layout that this backend cannot
+/// write natively, instead of letting it through.
+///
+/// A chain cannot rescue the request: every intermediate hop is ND, and the
+/// terminal hop is precisely the one that would have to write the boxed
+/// destination. Reporting it here names the dtype pair and the arch, which the
+/// generic "no native cast path" diagnostic below would not.
+///
+/// Silence is the specific hazard being closed. PTOAS's `tcvt` verifier
+/// inspects the destination layout ONLY for the packed FP4-to-FP8 pair; for
+/// every other pair it accepts a boxed destination without complaint and then
+/// addresses it as the ISA sees fit. So an unsupported request assembles
+/// cleanly and produces wrong bytes unless PyPTO rejects it.
+void CheckRequestedDestinationLayoutIsNative(const CallPtr& call, const backend::BackendHandler& handler,
+                                             const std::string& arch_name, DataType src, DataType dst,
+                                             const Span& span) {
+  if (!RequestsDestinationLayout(call)) return;
+  const auto result = As<TileType>(call->GetType());
+  INTERNAL_CHECK_SPAN(result, span) << "Internal error: tile.cast result must be TileType";
+  const auto view = tile_view_semantics::GetEffectiveTileView(*result);
+  if (view.slayout == TileLayout::none_box) return;
+
+  backend::DirectCastInfo info;
+  const bool native =
+      backend::IsDirectCast(call, handler.GetTcvtAdjacency(), &info) && info.preserve_output_layout;
+  CHECK_SPAN(native, span) << "LegalizeTileCast: a boxed destination layout ("
+                           << TileLayoutToString(view.blayout) << "/" << TileLayoutToString(view.slayout)
+                           << ", fractal=" << view.fractal << ") was requested for a " << src.ToString()
+                           << " to " << dst.ToString() << " cast, but arch " << arch_name
+                           << " has no native pto.tcvt that writes it"
+                           << (info.reason.empty() ? std::string{} : "; " + info.reason)
+                           << ". Cast into the source's layout and convert with tile.move";
+}
+
+/// Report only fallback chains; a supported native FP4 -> FP8 cast is silent.
 void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
   if (!diags || !src.IsPackedFp4() || !IsFp8DataCastTarget(dst)) return;
   diags->emplace_back(DiagnosticSeverity::Warning, "LegalizeTileCast", 0,
@@ -275,9 +347,11 @@ void MaybeWarnPackedFp4ToFp8(DataType src, DataType dst, const Span& span, std::
 
 class LegalizeTileCastMutator : public IRMutator {
  public:
-  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name,
-                          std::vector<Diagnostic>* diags)
-      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)), diags_(diags) {}
+  LegalizeTileCastMutator(const backend::BackendHandler& handler, std::vector<Diagnostic>* diags)
+      : handler_(handler),
+        arch_name_(handler.GetPtoTargetArch()),
+        adj_(BuildAdj(handler.GetTcvtAdjacency())),
+        diags_(diags) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -290,17 +364,20 @@ class LegalizeTileCastMutator : public IRMutator {
 
     auto src_tile = As<TileType>(call->args_[0]->GetType());
     INTERNAL_CHECK_SPAN(src_tile, op->span_) << "tile.cast input must be TileType";
+    const auto result_tile = As<TileType>(call->GetType());
+    INTERNAL_CHECK_SPAN(result_tile, op->span_) << "tile.cast result must be TileType";
     DataType src = src_tile->dtype_;
-    DataType dst = call->GetKwarg<DataType>("target_type");
+    DataType dst = result_tile->dtype_;
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
 
-    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
+    CheckRequestedDestinationLayoutIsNative(call, handler_, arch_name_, src, dst, op->span_);
 
-    if (IsNativeCast(adj_, src, dst)) {
+    if (backend::IsDirectCast(call, handler_.GetTcvtAdjacency())) {
       return IRMutator::VisitStmt_(op);
     }
 
-    std::vector<DataType> chain = FindCastChain(adj_, src, dst);
+    MaybeWarnPackedFp4ToFp8(src, dst, op->span_, diags_);
+    std::vector<DataType> chain = FindCastChain(adj_, handler_, call);
     CHECK_SPAN(!chain.empty() || !dst.IsPackedFp4() || HasLosslessFp4EncodingBridge(src), op->span_)
         << "LegalizeTileCast: no lossless cast path from " << src.ToString() << " to " << dst.ToString()
         << "; the required BF16 intermediate can double-round. Cast to BF16 explicitly before FP4 "
@@ -329,6 +406,19 @@ class LegalizeTileCastMutator : public IRMutator {
 
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
       ExprPtr cast_expr = MakeCast(cur, chain[i], mode, op->span_);
+      if (result_tile->memory_space_) {
+        // The late run follows memory inference and vector splitting. Fresh
+        // intermediate storage inherits the resolved placement, not the old
+        // result's MemRef. Early legalization leaves placement unresolved.
+        const auto hop = As<Call>(cast_expr);
+        const auto hop_type = As<TileType>(cast_expr->GetType());
+        INTERNAL_CHECK_SPAN(hop && hop_type, op->span_)
+            << "Internal error: native cast bridge must produce a tile Call";
+        const auto placed_type = std::make_shared<TileType>(hop_type->shape_, hop_type->dtype_, std::nullopt,
+                                                            hop_type->tile_view_, result_tile->memory_space_);
+        cast_expr =
+            std::make_shared<Call>(hop->op_, hop->args_, hop->kwargs_, hop->attrs_, placed_type, hop->span_);
+      }
       const std::string name =
           auto_name::BuildName(auto_name::GetBaseName(op->var_->name_hint_), "cast_" + chain[i].ToString(),
                                "tmp", static_cast<int>(temp_counter_++));
@@ -349,7 +439,10 @@ class LegalizeTileCastMutator : public IRMutator {
       final_args.push_back(VisitExpr(call->args_[i]));
     }
     auto final_assign = MutableCopy(op);
-    final_assign->value_ = OpRegistry::GetInstance().Create("tile.cast", final_args, final_kwargs, op->span_);
+    // Keep final storage/layout and call-site attrs (including the original
+    // tmp's argument directions). Intermediate calls carry their own schema.
+    final_assign->value_ = std::make_shared<Call>(call->op_, std::move(final_args), std::move(final_kwargs),
+                                                  call->attrs_, call->GetType(), call->span_);
     stmts.push_back(std::move(final_assign));
 
     if (stmts.size() == 1) return stmts.front();
@@ -357,6 +450,7 @@ class LegalizeTileCastMutator : public IRMutator {
   }
 
  private:
+  const backend::BackendHandler& handler_;
   std::string arch_name_;
   AdjList adj_;
   std::size_t temp_counter_ = 0;
@@ -383,7 +477,7 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
     return func;
   }
   std::vector<Diagnostic> diags;
-  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(), &diags);
+  LegalizeTileCastMutator mutator(*handler, &diags);
   auto result = mutator.VisitFunction(func);
   EmitDiagnostics(diags, "LegalizeTileCast");
   return result;

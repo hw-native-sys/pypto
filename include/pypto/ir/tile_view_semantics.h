@@ -46,6 +46,16 @@ inline constexpr int64_t kMXSFractalCols = 2;
 /// Acc (L0C) fractal size: the accumulator is NZ-boxed at 1024 bytes.
 inline constexpr uint64_t kAccFractal = 1024;
 
+/// Standard NZ/ZN fractal size: the 16x32-byte matrix-operand box (Mat / Left /
+/// Right). Also the TileView default, so a plain tile that is given a boxed
+/// slayout is already at this granularity.
+inline constexpr uint64_t kStandardNzFractalBytes = 512;
+
+/// Row granularity of one standard NZ box. A boxed tile's *physical* rows must
+/// be a whole multiple of this, or its fractal grid has a partial row of boxes
+/// that no address arithmetic can reach.
+inline constexpr int64_t kNzFractalRows = 16;
+
 /// Static row/column granularity of one boxed tile storage unit.
 struct BoxedTileAlignment {
   int64_t rows = 1;
@@ -183,6 +193,19 @@ inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std:
     }
   }
   return true;
+}
+
+/// Whether an unboxed 2D view has canonical contiguous ND/DN strides.
+/// Empty strides denote the implicit dense descriptor. Unknown non-canonical
+/// expressions are not treated as proof of contiguity.
+inline bool HasCanonicalDenseStrides(const TileType& tile, const TileView& view) {
+  if (tile.shape_.size() != 2 || view.slayout != TileLayout::none_box) return false;
+  if (view.stride.empty()) return true;
+  if (view.stride.size() != 2) return false;
+  const bool dn = view.blayout == TileLayout::col_major;
+  if (!dn && view.blayout != TileLayout::row_major) return false;
+  const auto unit = As<ConstInt>(view.stride[dn ? 0 : 1]);
+  return unit && unit->value_ == 1 && AreExprsEqual(view.stride[dn ? 1 : 0], tile.shape_[dn ? 0 : 1]);
 }
 
 /// Return whether @p valid_shape is SplitVectorKernel's all-zero lane-1 sentinel.

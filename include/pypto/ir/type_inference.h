@@ -999,6 +999,17 @@ inline TypePtr MakeFreshTensorType(std::vector<ExprPtr> shape, DataType dtype,
                                       std::make_optional(std::move(view)));
 }
 
+/// Validate shared tensor/tile cast attributes and return the destination dtype.
+/// Accepts DataType or an integer code without truncating out-of-range codes.
+/// Checks rounding and saturation through their existing IR semantic helpers.
+DataType ValidateCastAttributes(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                DataType source_dtype, const std::string& op_name, const Span& span);
+
+/// Compare cast extents in logical elements, expanding packed FP4 carriers.
+/// Supports ND and DN tensor/tile descriptors and arithmetic equality.
+bool CastExtentsEqual(const ShapedTypePtr& source, const ShapedTypePtr& result,
+                      const std::vector<ExprPtr>& source_extents, const std::vector<ExprPtr>& result_extents);
+
 /// Packed FP4 ↔ a wider element type is a 2:1 last-axis conversion.
 inline bool IsFp4PackedCastGeometryChange(DataType src, DataType dst) {
   return (src.IsPackedFp4() && !dst.IsPackedFp4()) || (!src.IsPackedFp4() && dst.IsPackedFp4());

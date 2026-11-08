@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -127,6 +128,9 @@ class TypeChecker : public IRVisitor {
    */
   void CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span,
                            bool is_device_dispatch);
+
+  /// Check cast contracts after rewrites that may bypass operator type deduction.
+  void CheckCastTypes(const CallPtr& call);
 
   /// Check packed numerical formats independently of layouts and return types.
   void CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span,
@@ -496,8 +500,82 @@ void TypeChecker::CheckCallPackedFp4Formats(const OpPtr& callee_op, const std::v
   }
 }
 
+void TypeChecker::CheckCastTypes(const CallPtr& call) {
+  const bool tile_cast = IsOp(call, "tile.cast");
+  if (!tile_cast && !IsOp(call, "tensor.cast")) return;
+  const std::string name = tile_cast ? "tile.cast" : "tensor.cast";
+  if (call->args_.empty() || call->args_.size() > (tile_cast ? 2U : 1U)) {
+    RecordError(typecheck::ErrorType::SIZE_MISMATCH, name + " has an invalid operand count", call->span_);
+    return;
+  }
+  const auto source = As<ShapedType>(call->args_[0]->GetType());
+  const auto result = As<ShapedType>(call->GetType());
+  // tensor.cast accepts tensor-like inputs but computes an ordinary TensorType result.
+  if (!source || !result || (tile_cast && (!As<TileType>(source) || !As<TileType>(result))) ||
+      (!tile_cast && (!AsTensorTypeLike(source) || !As<TensorType>(result)))) {
+    RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, name + " has invalid source/result types",
+                call->span_);
+    return;
+  }
+  if (tile_cast && call->args_.size() == 2 && !As<TileType>(call->args_[1]->GetType())) {
+    RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, name + " scratch must be a TileType", call->span_);
+    return;
+  }
+  try {
+    const auto target = ValidateCastAttributes(call->kwargs_, source->dtype_, name, call->span_);
+    if (target != result->dtype_) {
+      RecordError(typecheck::ErrorType::DTYPE_MISMATCH, name + " target_type disagrees with result dtype",
+                  call->span_);
+      return;
+    }
+  } catch (const ValueError& error) {
+    RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, error.what(), call->span_);
+    return;
+  } catch (const TypeError& error) {
+    RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, error.what(), call->span_);
+    return;
+  }
+  // Valid extents may intentionally differ after a full-box cross-core pop.
+  // General valid-shape bounds are already checked by TypeCheck per type.
+  if (!CastExtentsEqual(source, result, source->shape_, result->shape_)) {
+    const auto kind = source->shape_.size() == result->shape_.size()
+                          ? typecheck::ErrorType::SHAPE_VALUE_MISMATCH
+                          : typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH;
+    RecordError(kind, name + " source/result logical shapes disagree", call->span_);
+    return;
+  }
+  // A requested destination layout must be the layout the recorded result
+  // actually carries. Deduction keeps the two consistent, but legalization and
+  // the splitting passes rebuild a cast's recorded type directly, so a rebuild
+  // that dropped the boxing would otherwise leave an NZ-requesting call
+  // claiming an ND result -- and codegen renders the recorded type, so the
+  // emitted pto.tcvt would silently disagree with the request.
+  if (tile_cast) {
+    const auto result_tile = As<TileType>(result);
+    const auto view = tile_view_semantics::GetEffectiveTileView(*result_tile);
+    for (const auto& [key, value] : call->kwargs_) {
+      const bool is_blayout = key == "blayout";
+      if (!is_blayout && key != "slayout") continue;
+      const auto* requested = std::any_cast<TileLayout>(&value);
+      if (requested == nullptr) {
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH, name + " " + key + " must be a TileLayout",
+                    call->span_);
+        continue;
+      }
+      if (*requested != (is_blayout ? view.blayout : view.slayout)) {
+        RecordError(typecheck::ErrorType::TYPE_KIND_MISMATCH,
+                    name + " requested " + key + "=" + TileLayoutToString(*requested) +
+                        " but the result view carries " +
+                        TileLayoutToString(is_blayout ? view.blayout : view.slayout),
+                    call->span_);
+      }
+    }
+  }
+}
+
 void TypeChecker::VisitExpr_(const CallPtr& op) {
   if (op) {
+    CheckCastTypes(op);
     CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
     CheckCallPackedFp4Formats(op->op_, op->args_, op->span_, false);
   }

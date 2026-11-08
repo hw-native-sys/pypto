@@ -235,6 +235,11 @@ See [InitMemRef](../passes/37-init_memref.md#declared-allocations) and
 
 ### Tile Views (TileView)
 
+`blayout` and `slayout` accept `pl.TileLayout` constants from the enclosing Python scope.
+`pl.cast` / `pl.tile.cast` take the same two names as keyword-only options naming the
+*destination* layout; see
+[LegalizeTileCast](../passes/18-legalize_tile_cast.md#destination-layout-nz).
+
 ```python
 # Create TileView
 valid_shape = [pl.ConstInt(16, pl.INT64, span)] * 2

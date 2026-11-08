@@ -823,5 +823,132 @@ def test_dense_dn_tensor_slice_cast_preserves_other_consumer_layout(tmp_path, dt
         assert cpp.is_file()
 
 
+def _direct_fp8_program(surface: str, valid_rows: int, valid_cols: int):
+    """One program per authoring surface, selected in Python before parsing.
+
+    A DSL body cannot branch on the surface itself: the parser walks BOTH arms of
+    an ``if``, so a single kernel holding the Tensor and the Tile spelling would
+    rebind one name to two types. Each arm is therefore its own program.
+    """
+
+    @pl.program
+    class Tensor:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
+            packed = pl.tensor.slice(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
+            decoded = pl.cast(packed, pl.FP8E4M3FN)
+            return pl.assemble(output, decoded, [16, 64])
+
+    @pl.program
+    class Unified:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
+            packed = pl.load(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
+            decoded = pl.cast(packed, pl.FP8E4M3FN)
+            return pl.store(decoded, [16, 64], output)
+
+    @pl.program
+    class Tile:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            source: pl.Tensor[[32, 96], pl.fp4e2m1x2],
+            output: pl.Out[pl.Tensor[[32, 192], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[32, 192], pl.FP8E4M3FN]:
+            packed = pl.load(source, [16, 32], [16, 32], valid_shape=[valid_rows, valid_cols])
+            decoded = pl.tile.cast(packed, pl.FP8E4M3FN)
+            return pl.store(decoded, [16, 64], output)
+
+    return {"tensor": Tensor, "unified": Unified, "tile": Tile}[surface]
+
+
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+@pytest.mark.parametrize("surface", ["tensor", "unified", "tile"])
+@pytest.mark.parametrize("partial", [False, True])
+def test_e2m1_direct_fp8_cast_emits_one_tcvt(tmp_path, planner, surface, partial):
+    """Tensor lowering and both Tile APIs must reach the direct A5 instruction."""
+    valid_rows, valid_cols = (8, 24) if partial else (16, 32)
+
+    mlir = _emit_incore_mlir(_direct_fp8_program(surface, valid_rows, valid_cols), planner)
+    casts = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+    assert len(casts) == 1, mlir
+    assert f"dtype=!pto.f4E2M1x2, rows=16, cols=32, v_row={valid_rows}, v_col={valid_cols}" in casts[0]
+    assert f"dtype=f8E4M3FN, rows=16, cols=64, v_row={valid_rows}, v_col={2 * valid_cols}" in casts[0]
+    assert "dtype=bf16" not in mlir and "dtype=f32" not in mlir, mlir
+    assert "pto.ttrans" not in mlir, mlir
+    # Same-shape descriptor views preserve the actual source pointer for every
+    # planner, including runtime-owned and rotating addresses. They allocate no
+    # BF16/FP32 intermediate and need no second packed alloc at a planned offset.
+    packed_allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line and "f4E2M1x2" in line]
+    assert len(packed_allocs) == 1, mlir
+    packed_reshape = [line for line in mlir.splitlines() if "pto.treshape" in line and "f4E2M1x2" in line]
+    assert len(packed_reshape) == 1, mlir
+    if planner != passes.MemoryPlanner.PTOAS:
+        source_addresses = {
+            match.group(1) for line in packed_allocs if (match := re.search(r"addr = ([^, ]+)", line))
+        }
+        fp8_allocs = [
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and "dtype=f8E4M3FN" in line
+        ]
+        result_addresses = {
+            match.group(1) for line in fp8_allocs if (match := re.search(r"addr = ([^, ]+)", line))
+        }
+        # Decoding expands the byte region despite equal carrier dtype widths.
+        assert source_addresses and result_addresses and result_addresses.isdisjoint(source_addresses), mlir
+    if find_ptoas_binary() is not None:
+        pto = tmp_path / "direct_fp4_fp8.pto"
+        cpp = tmp_path / "direct_fp4_fp8.cpp"
+        pto.write_text(mlir)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(pto), str(cpp), ["--enable-insert-sync", f"--pto-level={level}", "--pto-arch=a5"])
+        assert cpp.is_file()
+
+
+def test_e2m1_direct_fp8_empty_replay_keeps_storage_without_tcvt():
+    """The empty AIV replay still needs its result for downstream handshakes."""
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend950)
+    span = ir.Span.unknown()
+    source_storage = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 512, 0)
+    result_storage = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(1024, pl.INT64, span), 1024, 1)
+    empty = ir.TileView(valid_shape=[0, 0])
+    source_type = ir.TileType([16, 32], pl.fp4e2m1x2, source_storage, empty, ir.MemorySpace.Vec)
+    result_type = ir.TileType([16, 64], pl.FP8E4M3FN, result_storage, empty, ir.MemorySpace.Vec)
+    source = ir.Var("source", source_type, span)
+    result = ir.Var("result", result_type, span)
+    # SplitVectorKernel creates this sentinel after legalization. Construct its
+    # lowered state directly to exercise the direct-cast emitter's empty-lane
+    # handling independently of pipeline relegalization.
+    cast = ir.Call(
+        ir.get_op("tile.cast"), [source], {"target_type": pl.FP8E4M3FN, "mode": 2}, result_type, span
+    )
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(source, ir.Call(ir.get_op("tile.create"), [], source_type, span), span),
+            ir.AssignStmt(result, cast, span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    function = ir.Function("empty_replay", [], [], body, span, ir.FunctionType.AIV)
+    program = ir.Program([function], "EmptyDirectFp4Replay", span)
+    mlir = codegen.PTOCodegen().generate(program, emit_tile_addr=True)
+    assert isinstance(mlir, str)
+    assert "pto.tcvt" not in mlir, mlir
+    allocations = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    assert any("dtype=!pto.f4E2M1x2" in line for line in allocations), mlir
+    assert any("dtype=f8E4M3FN" in line for line in allocations), mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

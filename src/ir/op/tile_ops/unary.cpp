@@ -26,11 +26,8 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -122,6 +119,79 @@ TypePtr DeduceTileFP32OnlyType(const std::vector<ExprPtr>& args,
   return base_type;
 }
 
+// Apply the optional `blayout` / `slayout` destination-layout request onto an
+// already-inherited result view, validating what the native conversion can
+// actually write.
+//
+// Contract (deliberately narrow): absent kwargs inherit the source layout,
+// which is what every cast did before these attributes existed. A request equal
+// to the inherited layout is accepted as a no-op. The ONLY layout *change* a
+// cast implements is ND source -> standard NZ destination, because that is the
+// only boxed `pto.tcvt` destination PTOAS has (PTO_IR_manual.md, the
+// `f4E2M1x2 -> f8E4M3FN` paragraph). Every other requested change is rejected
+// and pointed at tile.move rather than silently relaid out: PTOAS's verifier
+// does not inspect the destination layout for any other dtype pair, so an
+// unsupported boxing would assemble and then address the wrong bytes.
+//
+// `fractal` has no kwarg on purpose. It is inherited, and an ND source carries
+// the TileView default (`kStandardNzFractalBytes`), which is the one value the
+// native NZ destination accepts; the CHECK below pins that rather than
+// assuming it.
+void ApplyRequestedCastLayout(TileView& tile_view, const std::vector<ExprPtr>& shape,
+                              const TileView& src_view, DataType target_dtype,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name, const Span& span) {
+  const TileLayout requested_blayout = GetKwargOr<TileLayout>(kwargs, "blayout", tile_view.blayout);
+  const TileLayout requested_slayout = GetKwargOr<TileLayout>(kwargs, "slayout", tile_view.slayout);
+  if (requested_blayout == tile_view.blayout && requested_slayout == tile_view.slayout) {
+    return;
+  }
+
+  const bool requests_standard_nz =
+      requested_blayout == TileLayout::col_major && requested_slayout == TileLayout::row_major;
+  CHECK_SPAN(requests_standard_nz, span)
+      << op_name << ": the only destination layout a cast converts to is standard NZ (blayout=col_major, "
+      << "slayout=row_major); requested " << TileLayoutToString(requested_blayout) << "/"
+      << TileLayoutToString(requested_slayout)
+      << ". Cast into the source's own layout and relayout with tile.move";
+  CHECK_SPAN(src_view.blayout == TileLayout::row_major && src_view.slayout == TileLayout::none_box, span)
+      << op_name << ": an NZ destination requires an ND source (blayout=row_major, slayout=none_box), but "
+      << "the source is " << TileLayoutToString(src_view.blayout) << "/"
+      << TileLayoutToString(src_view.slayout) << ". Move the source to ND first";
+  CHECK_SPAN(tile_view.fractal == tile_view_semantics::kStandardNzFractalBytes, span)
+      << op_name << ": an NZ destination requires the standard "
+      << tile_view_semantics::kStandardNzFractalBytes << "-byte fractal, but the source tile carries "
+      << tile_view.fractal;
+  CHECK_SPAN(src_view.compact == CompactMode::null && tile_view.compact == CompactMode::null, span)
+      << op_name << ": an NZ destination requires compact=null on both tiles";
+
+  TileView boxed = tile_view;
+  boxed.blayout = requested_blayout;
+  boxed.slayout = requested_slayout;
+  const auto box = tile_view_semantics::GetBoxedTileAlignment(boxed, target_dtype);
+  CHECK_SPAN(box.has_value(), span) << op_name << ": " << target_dtype.ToString()
+                                    << " has no standard NZ box geometry";
+
+  // Both granularities are checked on the PHYSICAL shape. The box grid is what
+  // the hardware addresses; a narrower valid region is carried separately in
+  // the view and does not shrink the storage.
+  CHECK_SPAN(shape.size() == 2, span)
+      << op_name << ": an NZ destination requires a 2D tile, got rank " << shape.size();
+  const auto rows = As<ConstInt>(shape[0]);
+  const auto cols = As<ConstInt>(shape[1]);
+  CHECK_SPAN(rows && cols && rows->value_ > 0 && cols->value_ > 0, span)
+      << op_name << ": an NZ destination requires a static positive 2D shape";
+  CHECK_SPAN(rows->value_ % box->rows == 0, span)
+      << op_name << ": NZ destination physical rows (" << rows->value_ << ") must be a multiple of "
+      << box->rows << "; a partial row of fractal boxes has no addressable storage";
+  CHECK_SPAN(cols->value_ % box->cols == 0, span)
+      << op_name << ": NZ destination physical columns (" << cols->value_ << ") must be a multiple of "
+      << box->cols << " for " << target_dtype.ToString();
+
+  tile_view.blayout = requested_blayout;
+  tile_view.slayout = requested_slayout;
+}
+
 TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -140,53 +210,8 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
                     << args[1]->GetType()->TypeName();
   }
 
-  ValidateCastSaturationModeKwarg(kwargs, op_name);
-
-  // Read target_type from kwargs
-  bool found_target_type = false;
-  DataType target_dtype;
-  for (const auto& [key, value] : kwargs) {
-    if (key == "target_type") {
-      // Handle both DataType and int for backward compatibility
-      if (value.type() == typeid(DataType)) {
-        target_dtype = AnyCast<DataType>(value, "kwarg key: target_type");
-      } else if (value.type() == typeid(int)) {
-        target_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: target_type"));
-      } else {
-        throw TypeError("target_type must be a DataType or int, but got " + std::string(value.type().name()));
-      }
-      found_target_type = true;
-      break;
-    }
-  }
-  CHECK(found_target_type) << "tile.cast requires 'target_type' kwarg";
-
-  // `mode` is a declared attr that codegen reads unconditionally
-  // (MakeModalCodegenPTO -> pto.tcvt {rmode = ...}). A missing kwarg silently
-  // reads back as 0 == round_mode NONE instead of the DSL default ROUND, so
-  // require it here rather than let a mode-less cast reach the backend.
-  const bool found_mode =
-      std::any_of(kwargs.begin(), kwargs.end(), [](const auto& kv) { return kv.first == "mode"; });
-  CHECK(found_mode) << op_name
-                    << " requires a 'mode' kwarg (round mode: none(0), rint(1), round(2), "
-                       "floor(3), ceil(4), trunc(5), odd(6)). Pass mode=\"round\" (2) to match "
-                       "the pl.cast / tile_ops.cast default, or mode=\"none\" (0) when the "
-                       "conversion cannot round (e.g. int -> int).";
-
-  // Reject same-dtype cast: the hardware pto.tcvt instruction is for
-  // cross-dtype conversion, and a same-dtype invocation can corrupt values
-  // rather than acting as an identity copy. Detecting this at construction
-  // time keeps malformed casts out of every downstream pass and codegen.
-  CHECK(tile_type->dtype_ != target_dtype)
-      << op_name << ": target_type " << target_dtype.ToString()
-      << " equals input dtype; same-dtype cast is not a valid operation. "
-      << "Remove the cast or use a different target_type.";
-
-  // Packed FP4 ↔ a wider type is a 2:1 last-axis conversion
-  // (bf16[M,K] ↔ f4x2[M,K/2]): shape,
-  // valid_shape, and ND stride all follow that change.
   const Span& span = args[0]->span_;
-  ValidatePackedFp4CastMode(target_dtype, GetRequiredKwarg<int>(kwargs, "mode", "cast"), span);
+  const DataType target_dtype = ValidateCastAttributes(kwargs, tile_type->dtype_, op_name, span);
   const auto src_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
   const bool packed_cast = tile_type->dtype_.IsPackedFp4() || target_dtype.IsPackedFp4();
   const bool packed_dn_cast = packed_cast && src_view.blayout == TileLayout::col_major;
@@ -238,6 +263,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
     tile_view.stride = {std::make_shared<ConstInt>(1, DataType::INDEX, span), shape[0]};
   }
   InheritTileViewLayout(tile_view, tile_type);
+  ApplyRequestedCastLayout(tile_view, shape, src_view, target_dtype, kwargs, op_name, span);
   // Dense DN casts execute in Vec; recording that placement now keeps memory
   // inference from canonicalizing the BF16 intermediate back to row-major.
   const std::optional<MemorySpace> memory =
@@ -365,6 +391,13 @@ REGISTER_OP("tile.cast")
     // Optional destination saturation: OFF(0) / ON(1). Absent means "keep the
     // backend default" — see include/pypto/ir/cast_saturation.h.
     .set_attr<int>("saturation_mode")
+    // Optional destination block/scatter layout, spelled exactly as on
+    // tile.move. Absent means "inherit the source tile's layout", which is the
+    // behaviour every cast had before these attributes existed. Declared on
+    // tile.cast only: tensor.cast keeps rejecting them with the registry's
+    // "Unknown kwarg" error, so no Tensor-level destination-layout path exists.
+    .set_attr<TileLayout>("blayout")
+    .set_attr<TileLayout>("slayout")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)

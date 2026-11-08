@@ -19,6 +19,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Expr,
+    TileLayout,
 )
 
 from ..typing import Scalar, Tile
@@ -337,8 +338,15 @@ def cast(
     *,
     tmp: Tile | None = None,
     saturation_mode: str | int | None = None,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
 ) -> Tile:
     """Cast tile to target data type (element-wise).
+
+    On A5, unboxed row-major E2M1x2 tiles with compatible static geometry
+    convert directly to FP8E4M3FN. Packed physical and valid columns double
+    (e.g. [16,32] carriers become [16,64] values). Other packed FP4-to-FP8
+    cases retain BF16/FP32 legalization.
 
     Args:
         tile: Input tile (TileType)
@@ -361,15 +369,40 @@ def cast(
              of native conversions, the mode applies to the final hop. On A2/A3 a
              saturating narrowing cast needs no ``tmp``, so the compiler
              generates none; a caller-supplied ``tmp`` is still honored.
+        blayout: Optional block layout for the destination tile, spelled exactly
+             as on :func:`pl.tile.move`. Omitting it inherits the source tile's
+             layout — the behavior every cast had before this option existed.
+        slayout: Optional scatter layout for the destination tile. Together with
+             ``blayout`` this requests a boxed destination:
+             ``col_major`` / ``row_major`` is standard NZ, which the A5
+             E2M1x2-to-FP8E4M3FN conversion writes natively, so the FP8 result
+             lands the way the matrix unit wants it with no relayout move. That
+             ND-to-NZ change is the only layout conversion a cast performs; any
+             other requested change is rejected and belongs to
+             :func:`pl.tile.move`.
 
     Returns:
         Tile wrapping the cast operation
 
     Example:
         >>> tile_fp32 = pl.tile.cast(tile_bf16, pl.FP32)
+        >>> nz_fp8 = pl.tile.cast(
+        ...     packed_fp4,
+        ...     pl.FP8E4M3FN,
+        ...     blayout=pl.TileLayout.col_major,
+        ...     slayout=pl.TileLayout.row_major,
+        ... )
     """
     tmp_expr = None if tmp is None else tmp.unwrap()
-    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode, tmp=tmp_expr, saturation_mode=saturation_mode)
+    call_expr = _ir_ops.cast(
+        tile.unwrap(),
+        target_type,
+        mode,
+        tmp=tmp_expr,
+        saturation_mode=saturation_mode,
+        blayout=blayout,
+        slayout=slayout,
+    )
     return Tile(expr=call_expr)
 
 

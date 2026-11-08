@@ -6,11 +6,11 @@
 
 `LegalizeTileCast` 是函数级 Pass。对每条 `var = tile.cast(...)`：
 
-1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换表（转录自 pto-isa `tcvt`
+1. 通过 `GetTcvtAdjacency()` 向当前 `BackendHandler` 取原生转换规则表（转录自 pto-isa `tcvt`
    Supported Conversions）。本 Pass 自身不含任何架构知识，新增后端只需提供自己的表，
    无需改动此处；未配置 backend 时本 Pass 不做任何事。
-2. 已原生：原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
-3. 非原生：在邻接图上 BFS 求最短路径；等长路径优先「同字节转浮点 → 再调宽度」。
+2. 调用 `backend::IsDirectCast(call, handler.GetTcvtAdjacency())`，检查当前类型、逻辑尺寸及规则中的实现条件；支持则原样保留（含可被 `AutoTileMatmulL0` FIXPIPE-fold 的 `FP32→BF16/FP16` + `rint`）。
+3. 否则在邻接图上 BFS 求最短路径。每个候选 hop 均推导自己的类型并调用同一个 `IsDirectCast`，排除几何不合法的边；等长路径优先「同字节转浮点 → 再调宽度」。
 
 典型结果（A5）：
 
@@ -89,6 +89,64 @@ PTOAS 对该形式的实现用一段分块向量序列模拟目标平台的溢�
 不读取临时缓冲区。所有需要该缓冲区的组合目标类型都是整数，因此适用默认值为 `"on"`，
 只有显式关闭饱和的 cast 才会分配该 tile。调用方显式提供的 `tmp` 始终保留。
 
+## 目标布局（NZ）
+
+`pl.tile.cast` 与 `pl.cast` 接受可选的仅关键字参数 `blayout` 和 `slayout`，拼写与
+[`pl.tile.move`](../ir/05-operators.md) 完全一致：
+
+```python
+nz_fp8 = pl.cast(
+    packed_fp4,
+    pl.FP8E4M3FN,
+    blayout=pl.TileLayout.col_major,
+    slayout=pl.TileLayout.row_major,
+)
+```
+
+**两者都省略时继承源 tile 的布局**，即这些属性存在之前每个 cast 的行为；调用上不会记录任何内容，
+因此普通 cast 的 IR、打印形式和序列化结果保持不变。
+
+`blayout=col_major` + `slayout=row_major` 搭配默认的 512 字节 fractal 即**标准 NZ**：与
+`tile_view_semantics::GetImplicitTileLayout` 为 Mat 或 Left tile 指定的三元组相同，也是矩阵单元
+消费的布局。请求该布局后，A5 的打包 FP4 转换会直接把 FP8 结果写入分块网格，从而省去原本在操作数
+staging 到 Mat 之前的 Vec 到 Vec 的 ND 转 NZ `pto.tmov`，以及它占用的 Vec 缓冲。
+
+### 为何关键字拼作 `blayout` / `slayout`
+
+tile 的布局本身**就是** `blayout` / `slayout` / `fractal`，即 `TileLayout`，而不是 `pl.NZ` 所指的
+GM 侧 `TensorLayout`；并且 `tile.move` 已经以可选属性的形式接受这两个参数，契约同样是"省略即继承源"。
+复用它们无需新增枚举，也无需新增打印器、解析器或序列化支持，因为 `TileLayout` kwarg 本就可以往返。
+`fractal` 刻意不提供关键字：它由源继承，而 ND 源携带的 512 正是原生 NZ 目标唯一接受的取值。
+
+### cast 会转换与不会转换的布局
+
+cast 执行的**唯一**布局变更是 ND 源到标准 NZ 目标。与继承布局相同的请求按空操作接受；
+任何其他变更都会被拒绝并指向 `tile.move`。特别地，ZN（`row_major` / `col_major`）和非 512 的
+fractal 都会被拒绝，这与 PTOAS 一致——它对本转换同样不接受这两者。
+
+接受的几何形状，全部在**物理**形状上校验（PTOAS 会把分块目标补齐到块网格，并把更窄的范围
+记录为有效区域）：
+
+| 要求 | 原因 |
+| ---- | ---- |
+| 源为 ND（`row_major` / `none_box`） | 原生转换唯一能读取的源形式；同时避免后端结果修复重新推导该 cast，从而生成退化的 NZ 到 NZ 的 `tile.move` |
+| 目标行数为 16 的倍数 | 一个 NZ 块为 16 行；不完整的块行没有可寻址的存储 |
+| 目标列数为 `32 / dtype_bytes` 的倍数 | 块的列数；FP8 为 32 |
+| 两侧 `compact=null` | 带填充的分块目标不在本次范围内 |
+| 源打包列数为 32 的倍数 | 原生转换自身的寄存器对齐要求 |
+
+这两个粒度同时保证 tile 是整数个 512 字节块，因此其字节占用仍是分配器已经计算的
+`rows * cols` 乘积——不存在分块填充项，这也是没有任何分配代码变更的原因。
+
+**只有原生就能写出分块目标的 dtype 组合才会真正接受该请求。** PTOAS 的 `tcvt` 校验器*仅*对
+`!pto.f4E2M1x2 -> f8E4M3FN` 检查目标布局；对其他任何组合，它都会无提示地接受分块目标，然后按
+ISA 自身的方式寻址。无提示通过并不等于具备该能力，因此显式请求、而没有任何原生规则能写出的分块
+目标会在此处被拒绝，并报出 dtype 组合与架构名。该检查以*请求*为依据，因此只是顺带带有分块布局的
+tile 仍走常规的[布局修复路径](23-resolve_backend_op_layouts.md)。
+
+范围：仅 A5 `E2M1x2 -> FP8E4M3FN`、仅 `compact=null`、且仅 Tile 入口。`tensor.cast` 从不声明这些
+属性，因此算子注册表会以自身的 `Unknown kwarg` 错误在那里拒绝它们，不存在 Tensor 层的目标布局路径。
+
 ## 原生 cast 与展开链
 
 `pl.cast` 并不总是编译成一条指令。某个 `(src, dst)` 组合究竟是一条硬件
@@ -130,7 +188,8 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `bf16` | `fp16`, `fp32`, `fp4`, `int32` | `fp8e4m3`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `int8`(2), `uint16`(2), `uint8`(2) |
 | `fp16` | `fp32`, `hf8`, `int16`, `int32`, `int8`, `uint8` | `bf16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `uint16`(2), `fp4`(3) |
 | `fp32` | `bf16`, `fp16`, `fp8e4m3`, `fp8e5m2`, `hf8`, `int16`, `int32`, `int64` | `fp4`(2), `int8`(2), `uint16`(2), `uint8`(2) |
-| `fp4` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e2m1x2` | `bf16`, `fp8e4m3`（满足 ND 几何约束） | `fp8e4m3`(3，回退), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
+| `fp4e1m2x2` | `bf16` | `fp8e4m3`(3), `fp8e5m2`(3), `hf8`(3), `int8`(3), `uint8`(3) |
 | `fp8e4m3` | `fp32` | `bf16`(2), `fp16`(2), `fp8e5m2`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `fp8e5m2` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `hf8`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
 | `hf8` | `fp32` | `bf16`(2), `fp16`(2), `fp8e4m3`(2), `fp8e5m2`(2), `int16`(2), `fp4`(3), `int8`(3), `uint16`(3), `uint8`(3) |
@@ -140,6 +199,11 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `int8` | `fp16`, `int16`, `int32` | `hf8`(2), `uint16`(2), `uint8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
+
+其他行中的 `fp4` 代表任一打包格式。E2M1x2→E4M3FN 直接边仅在无分块行主序 ND Vec
+二维几何满足约束且有效行列数为静态时选用，
+作为中间步骤时同样逐 hop 检查后端规则。条件不满足时保留三步回退链及警告；成功选择直接转换时
+不发出慢链警告。详见 [FP4 约束](../fp4.md#数值转换限制)。
 
 ### Ascend910 (a2a3)
 
@@ -163,9 +227,13 @@ Default 流水线：
 
 ```text
 lower_composite_ops → flatten_tile_nd_to_2d → legalize_tile_cast → auto_tile_matmul_l0
+... → split_vector_kernel → legalize_tile_cast → stamp_tfree_split
 ```
 
 放在 Flatten 之后以覆盖其新插入的 cast；放在 MatmulL0 之前以免拆开本可 fold 的原生降精度 cast。
+
+第二次执行在向量切分后重新检查有条件的原生转换。新增中间 tile 保留已推导的内存空间，
+不在该后期阶段重新执行内存放置 pass。空 replay lane 保持为空。
 
 ## API
 

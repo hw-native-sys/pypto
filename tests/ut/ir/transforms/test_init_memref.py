@@ -1508,13 +1508,14 @@ class TestPtoLevel3Scratch:
         assert len(creates) == 1
 
     @staticmethod
-    def _cast_program(src_dtype, dst_dtype):
+    def _cast_program(src_dtype, dst_dtype, *, integer_code=False):
         """A narrowing cast that opts out of saturation — the only shape that needs scratch.
 
         The scratch backs PTOAS's non-saturating helper, and saturating is the
         default, so a cast has to ask for the non-saturating lowering before this
         pass has anything to materialize.
         """
+        target_type = dst_dtype.code() if integer_code else dst_dtype
 
         @pl.program
         class Before:
@@ -1527,7 +1528,7 @@ class TestPtoLevel3Scratch:
                     src, [0, 0], [16, 16], target_memory=pl.Mem.Vec
                 )
                 result: pl.Tile[[16, 16], dst_dtype, pl.Mem.Vec] = pl.tile.cast(
-                    tile, target_type=dst_dtype, mode="round", saturation_mode="off"
+                    tile, target_type=target_type, mode="round", saturation_mode="off"
                 )
                 return result
 
@@ -1537,8 +1538,10 @@ class TestPtoLevel3Scratch:
         ("src_dtype", "dst_dtype", "expected_bytes"),
         [(pl.FP32, pl.INT16, 1024), (pl.FP16, pl.INT16, 64), (pl.FP16, pl.INT8, 160)],
     )
-    def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes):
-        after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910)
+    @pytest.mark.parametrize("integer_code", [False, True])
+    def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes, integer_code):
+        before = self._cast_program(src_dtype, dst_dtype, integer_code=integer_code)
+        after = self._run(before, BackendType.Ascend910)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
         assert len(cast_call.args) == 2
         tmp = cast(ir.TileType, cast_call.args[1].type)

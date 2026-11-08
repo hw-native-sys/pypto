@@ -264,6 +264,12 @@ fractal-aligned trailing plane with a whole-byte dtype (`shape[-2] % 16 == 0`,
 `shape[-1] % (256 / dtype bits) == 0`) and logical rank at least 2. Leading axes fold into
 the descriptor's single batch slot.
 
+`pl.NZ` is a **tensor** layout, for bytes in global memory. An *on-chip tile* spells its
+layout differently — `blayout` / `slayout` / `fractal` in its `pl.TileView`, where standard
+NZ is `col_major` / `row_major` / 512 — and that is the spelling `pl.tile.move` and
+`pl.cast` take as keywords. The two are separate vocabularies on purpose; `pl.NZ` is not
+accepted on a tile.
+
 On A2/A3, `pl.store(acc, offsets, out)` also supports a fully valid, static 2-D FP32 Acc
 tile and an FP32 `pl.NZ` destination. Rows and columns must be multiples of 16; the tile
 must cover the destination's entire row axis at row offset 0. Each store writes one panel,
@@ -307,8 +313,9 @@ backing to `MX_A_ZZ` / `MX_B_NN` as a logical rank-2 view (`layout=mx_*`; PTOAS 
 physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
 `_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
 the op must be `FP8E4M3FN`. Either packed FP4 format may supply the left operand
-after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
-legalization pass expands that request to packed FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
+after conversion to FP8: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5,
+compatible ND E2M1x2 tiles use direct TCVT; E1M2 and incompatible direct-cast
+geometry retain packed FP4→BF16→FP32→FP8E4M3FN legalization. Native FP4×FP4 and the
 reverse FP8×FP4 form are not supported. `pl.quant_mx` supports MXFP8 and native
 E2M1 MXFP4, with `group_axis` matching PTOAS `grpAxis`. FP8 results can feed `matmul_mx` in one mixed InCore task
 through V2C, including the generated Vec-to-Mat-to-scale-memory path.

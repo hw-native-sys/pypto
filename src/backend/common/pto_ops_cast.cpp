@@ -19,6 +19,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cast_rules.h"
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/pto_ops_common.h"
 #include "pypto/codegen/codegen_base.h"
@@ -31,10 +32,8 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
-#include "pypto/ir/transforms/utils/packed_fp4_cast.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -58,18 +57,18 @@ enum class CastTarget { A2A3, A5 };
 std::string EnsurePackedFp4DnStaticView(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
                                         const std::string& name_hint) {
   const auto tile_type = As<ir::TileType>(expr->GetType());
-  INTERNAL_CHECK_SPAN(tile_type, expr->span_) << "Internal error: dense DN cast view requires a TileType";
+  INTERNAL_CHECK_SPAN(tile_type, expr->span_) << "Internal error: packed cast view requires a TileType";
   if (!tile_type->dtype_.IsPackedFp4()) {
     return EnsureStaticViewTileSsa(expr, codegen, name_hint);
   }
-  // PTOAS treshape does not accept custom FP4 types. Bind a descriptor with
-  // static valid dimensions to the existing planned address instead: TCVT's
-  // contiguous DN implementation is selected by the descriptor's static type.
+  // Bind static valid dimensions to the existing planned address so DN TCVT
+  // selects its contiguous conversion. This descriptor aliases storage and
+  // allocates no intermediate.
   const auto memref = ir::GetDefinedMemRef(tile_type);
   const auto offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr;
   CHECK_SPAN(codegen.EmitTileAddr() && offset, expr->span_)
       << "Packed FP4 DN cast requires static PYPTO or DSA_RP memory allocation; "
-         "use ND storage with the PTOAS memory planner";
+         "select an addressed planner for this static descriptor";
   const std::string view = codegen.NewNamedTemp(name_hint);
   const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(tile_type);
   const std::string address = codegen.GetOrEmitConstant(offset->value_, DataType::INT64);
@@ -175,6 +174,12 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
   INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
       << "tile.cast requires 1 or 2 arguments (src[, tmp]), but got " << op->args_.size();
 
+  DirectCastInfo cast_info;
+  CHECK_SPAN(IsDirectCast(op, codegen.GetBackendHandler()->GetTcvtAdjacency(), &cast_info), op->span_)
+      << "tile.cast has no direct TCVT implementation: " << cast_info.reason
+      << "; run LegalizeTileCast after geometry-changing transformations";
+  if (cast_info.empty_replay) return "";  // Keep allocated storage and downstream handshakes.
+
   if (codegen.EmitTileAddr() && ir::op_predicates::CastRequiresDisjointSource(
                                     op, codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3")) {
     const auto source_type = As<ir::TileType>(op->args_[0]->GetType());
@@ -220,15 +225,7 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
 
   auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
-  const bool dense_fp4_dn = ir::IsDensePackedFp4DnCast(op);
-  const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_type);
-  CHECK_SPAN(!(src_type->dtype_.IsPackedFp4() || op->GetKwarg<DataType>("target_type").IsPackedFp4()) ||
-                 src_view.blayout != ir::TileLayout::col_major || dense_fp4_dn,
-             op->span_)
-      << "Packed FP4 DN casts require full static dense tiles with zero start_offset; "
-         "use ND storage for partial or padded views";
-  if (dense_fp4_dn) {
-    CHECK_SPAN(target == CastTarget::A5, op->span_) << "Packed FP4 DN casts require the A5 target";
+  if (cast_info.descriptor == CastDescriptor::StaticPlannedAddress) {
     const auto dst_var = codegen.GetCurrentResultVar();
     const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
     INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: dense DN cast requires a result TileType";
@@ -239,8 +236,25 @@ std::string MakeTcvtCodegenPTO(const Backend& backend, CastTarget target, const 
                              dst_type, config_attr);
     return "";
   }
+  if (cast_info.descriptor == CastDescriptor::StaticValidShape) {
+    const auto dst_var = codegen.GetCurrentResultVar();
+    const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
+    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: direct FP8 cast requires a result TileType";
+    // PTOAS v0.72 supports same-shape packed TRESHAPE. A descriptor view
+    // preserves the source's actual address, including TPOP/parameter pointers
+    // and rotating slots; rebinding a planned byte offset would lose it.
+    const std::string src_ssa = EnsureStaticViewTileSsa(op->args_[0], codegen, "tcvt_fp4_src");
+    const std::string dst_ssa = EnsureStaticViewTileSsa(dst_var, codegen, "tcvt_fp8_dst");
+    std::vector<std::pair<std::string, std::string>> ins = {
+        {src_ssa, codegen.GetViewTileBufTypeStringFromTileType(src_type)}};
+    if (op->args_.size() == 2) {
+      ins.emplace_back(codegen.GetExprAsCode(op->args_[1]), codegen.GetExprTypeAnnotation(op->args_[1]));
+    }
+    EmitInsOutsWithViewTypes(codegen, "pto.tcvt", ins, dst_ssa, dst_type, config_attr);
+    return "";
+  }
   const bool explicit_tmp = op->args_.size() == 2;
-  const OpScratchRequest request{src_type->dtype_, std::nullopt, op->GetKwarg<DataType>("target_type"),
+  const OpScratchRequest request{src_type->dtype_, std::nullopt, As<ir::TileType>(op->GetType())->dtype_,
                                  saturation_mode == static_cast<int>(ir::SaturationMode::kOn), src_type};
   // Synthesis geometry does not constrain caller-owned scratch. In particular,
   // rank-one sources with explicit tmp are emitted as PTO [1, N] tiles.

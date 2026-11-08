@@ -47,6 +47,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "ExpandMixedKernel",
     "InjectGMPipeBuffer",
     "SplitVectorKernel",
+    "LegalizeTileCast",
     "StampTfreeSplit",
     "NormalizeReturnOrder",
     "SkewCrossCorePipeline",

@@ -260,7 +260,9 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
     if (IsOp(call, "tile.cast") && call->args_.size() == 1) {
       auto src_type = As<TileType>(call->args_[0]->GetType());
       INTERNAL_CHECK_SPAN(src_type, span) << "tile.cast source must be TileType before InitMemRef";
-      const DataType dst = call->GetKwarg<DataType>("target_type");
+      const auto result_type = As<TileType>(call->GetType());
+      INTERNAL_CHECK_SPAN(result_type, span) << "Internal error: tile.cast result must be TileType";
+      const DataType dst = result_type->dtype_;
       // Ask the backend whether this conversion needs scratch. Caller-provided
       // scratch is preserved because this arm only handles one-argument casts.
       const bool saturating = GetEmittedSaturationMode(call) == static_cast<int>(SaturationMode::kOn);

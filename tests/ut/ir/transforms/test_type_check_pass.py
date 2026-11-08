@@ -699,5 +699,179 @@ def test_submit_packed_format_checks_skip_omitted_outputs_before_commctx(directi
         assert "parameter 'source' expects fp4e1m2x2" in diagnostics[0].message
 
 
+@pytest.mark.parametrize("surface", ["tile", "tensor"])
+@pytest.mark.parametrize(
+    "case,message",
+    [
+        ("target_dtype", "target_type disagrees"),
+        ("packed_shape", "logical shapes disagree"),
+        ("round_mode", "mode must be in"),
+        ("target_code", "target_type code"),
+        ("saturation", "saturation_mode must be"),
+        ("valid_shape", "valid_shape"),
+    ],
+)
+def test_type_check_rejects_rewritten_cast_contract(surface, case, message):
+    """Explicit Call types bypass deduction; TypeCheck must detect broken rewrites."""
+    span = ir.Span.unknown()
+    packed = case == "packed_shape"
+    source_dtype = DataType.FP4E2M1X2 if packed else DataType.FP32
+    result_dtype = DataType.FP8E4M3FN if packed else DataType.FP16
+    shape = [16, 63] if packed else [16, 32]
+    valid = [16, 33] if case == "valid_shape" else []
+    if surface == "tile":
+        source_type = ir.TileType([16, 32], source_dtype)
+        result_type = ir.TileType(shape, result_dtype, None, ir.TileView(valid_shape=valid))
+    else:
+        source_type = ir.TensorType([16, 32], source_dtype)
+        result_type = ir.TensorType(
+            shape, result_dtype, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=valid)
+        )
+    source = ir.Var("source", source_type, span)
+    kwargs: dict[str, Any] = {"target_type": result_dtype, "mode": 2}
+    if case == "target_dtype":
+        kwargs["target_type"] = DataType.BF16
+    elif case == "round_mode":
+        kwargs["mode"] = 7
+    elif case == "target_code":
+        kwargs["target_type"] = DataType.FP16.code() + 256
+    elif case == "saturation":
+        kwargs["saturation_mode"] = 2
+    call = ir.Call(ir.get_op(f"{surface}.cast"), [source], kwargs, result_type, span)
+    result = ir.Var("result", result_type, span)
+    diagnostics = _typecheck_diagnostics(ir.AssignStmt(result, call, span), params=[source])
+    assert any(message in diagnostic.message for diagnostic in diagnostics), diagnostics
+    if case == "target_dtype":
+        assert any(
+            diagnostic.error_code == passes.TypeCheckErrorType.DTYPE_MISMATCH.value
+            for diagnostic in diagnostics
+        )
+    elif case == "packed_shape":
+        assert any(
+            diagnostic.error_code == passes.TypeCheckErrorType.SHAPE_VALUE_MISMATCH.value
+            for diagnostic in diagnostics
+        )
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_type_check_cast_allows_narrowed_destination_validity(dynamic):
+    """A full-box cross-core source can feed a cast with a narrower lane result."""
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    source = ir.Var("source", ir.TileType([32, 128], DataType.INT32), span)
+    result_type = ir.TileType(
+        [32, 128], DataType.FP32, None, ir.TileView(valid_shape=[n if dynamic else 20, 128])
+    )
+    call = ir.Call(
+        ir.get_op("tile.cast"), [source], {"target_type": DataType.FP32, "mode": 2}, result_type, span
+    )
+    result = ir.Var("result", result_type, span)
+    diagnostics = _typecheck_diagnostics(ir.AssignStmt(result, call, span), params=[source, n])
+    assert diagnostics == []
+
+
+@pytest.mark.parametrize("surface", ["tile", "tensor"])
+def test_type_check_cast_proves_equivalent_symbolic_packed_shapes(surface):
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    packed_cols = n + _idx(1)
+    # Inference and later simplification may spell the same extent differently.
+    unpacked_cols = n * _idx(2) + _idx(2)
+    # The shape bindings accept all-int or all-Expr lists, so the static row
+    # extent must be spelled as a ConstInt beside the symbolic column extent.
+    if surface == "tile":
+        source_type = ir.TileType([_idx(16), packed_cols], DataType.FP4E2M1X2)
+        result_type = ir.TileType([_idx(16), unpacked_cols], DataType.FP8E4M3FN)
+    else:
+        source_type = ir.TensorType([_idx(16), packed_cols], DataType.FP4E2M1X2)
+        result_type = ir.TensorType([_idx(16), unpacked_cols], DataType.FP8E4M3FN)
+    source = ir.Var("source", source_type, span)
+    call = ir.Call(
+        ir.get_op(f"{surface}.cast"),
+        [source],
+        {"target_type": DataType.FP8E4M3FN, "mode": 2},
+        result_type,
+        span,
+    )
+    result = ir.Var("result", result_type, span)
+    diagnostics = _typecheck_diagnostics(ir.AssignStmt(result, call, span), params=[source, n])
+    assert diagnostics == []
+
+
+@pytest.mark.parametrize("surface", ["tile", "tensor"])
+@pytest.mark.parametrize("decode", [False, True])
+@pytest.mark.parametrize("correct_axis", [False, True])
+def test_type_check_cast_accounts_for_dn_packed_axis(surface, decode, correct_axis):
+    """A DN packed pair expands the row axis, including when packing into FP4."""
+    packed_shape = [16, 32]
+    wide_shape = [32, 32] if correct_axis else [16, 64]
+    if surface == "tile":
+        view = ir.TileView(blayout=ir.TileLayout.col_major)
+        packed_type = ir.TileType(packed_shape, DataType.FP4E2M1X2, None, view)
+        wide_type = ir.TileType(wide_shape, DataType.BF16, None, view)
+    else:
+        view = ir.TensorView(layout=ir.TensorLayout.DN)
+        packed_type = ir.TensorType(packed_shape, DataType.FP4E2M1X2, None, view)
+        wide_type = ir.TensorType(wide_shape, DataType.BF16, None, view)
+    source_type, result_type = (packed_type, wide_type) if decode else (wide_type, packed_type)
+    source = ir.Var("source", source_type, _SPAN)
+    call = ir.Call(
+        ir.get_op(f"{surface}.cast"),
+        [source],
+        {"target_type": result_type.dtype, "mode": 2},
+        result_type,
+        _SPAN,
+    )
+    result = ir.Var("result", result_type, _SPAN)
+    diagnostics = _typecheck_diagnostics(ir.AssignStmt(result, call, _SPAN), params=[source])
+    if correct_axis:
+        assert diagnostics == []
+    else:
+        assert any("logical shapes disagree" in diagnostic.message for diagnostic in diagnostics)
+
+
+@pytest.mark.parametrize(
+    "recorded_blayout,recorded_slayout,expected",
+    [
+        # Consistent: the recorded result is the NZ the kwargs requested.
+        (ir.TileLayout.col_major, ir.TileLayout.row_major, None),
+        # A rebuild that dropped the boxing entirely.
+        (ir.TileLayout.row_major, ir.TileLayout.none_box, "requested blayout=col_major"),
+        # A rebuild that kept the block layout but lost the scatter layout.
+        (ir.TileLayout.col_major, ir.TileLayout.none_box, "requested slayout=row_major"),
+    ],
+)
+def test_type_check_rejects_a_cast_whose_recorded_layout_contradicts_its_request(
+    recorded_blayout, recorded_slayout, expected
+):
+    """A requested destination layout must be the layout the result carries.
+
+    Deduction keeps the two consistent, but legalization and the splitting
+    passes rebuild a cast's recorded type directly, and codegen renders that
+    recorded type. So a rebuild that dropped the boxing would emit a
+    ``pto.tcvt`` whose destination silently disagrees with what the author
+    asked for -- the recorded type wins and nothing else notices.
+    """
+    span = ir.Span.unknown()
+    source_type = ir.TileType([16, 32], DataType.FP4E2M1X2)
+    result_view = ir.TileView(blayout=recorded_blayout, slayout=recorded_slayout)
+    result_type = ir.TileType([16, 64], DataType.FP8E4M3FN, None, result_view)
+    source = ir.Var("source", source_type, span)
+    kwargs: dict[str, Any] = {
+        "target_type": DataType.FP8E4M3FN,
+        "mode": 2,
+        "blayout": ir.TileLayout.col_major,
+        "slayout": ir.TileLayout.row_major,
+    }
+    call = ir.Call(ir.get_op("tile.cast"), [source], kwargs, result_type, span)
+    result = ir.Var("result", result_type, span)
+    diagnostics = _typecheck_diagnostics(ir.AssignStmt(result, call, span), params=[source])
+    layout_diagnostics = [d for d in diagnostics if "layout" in d.message or "blayout" in d.message]
+    if expected is None:
+        assert layout_diagnostics == [], layout_diagnostics
+    else:
+        assert any(expected in d.message for d in layout_diagnostics), diagnostics
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
