@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -80,10 +81,10 @@ MatmulProductInfo DeduceMatmulProductInfo(const TileTypePtr& lhs_type, const Til
       << " requires rhs valid K to cover lhs valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
       << " and rhs K=" << PythonPrint(rhs_valid[0]);
 
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-  const auto accumulator_dtype = MatmulAccumulatorDataType(lhs_type->dtype_, rhs_type->dtype_);
+  // Operand dtypes need not be identical: on A5 the Cube multiplies the mixed
+  // FP8 orders (E4M3FN x E5M2 and E5M2 x E4M3FN) too. The accumulator the pair
+  // produces comes back from the same shared check.
+  const auto accumulator_dtype = ValidateMatmulOperandDataTypes(lhs_type->dtype_, rhs_type->dtype_, op_name);
 
   return MatmulProductInfo{{lhs_shape[0], rhs_shape[1]}, {lhs_valid[0], rhs_valid[1]}, accumulator_dtype};
 }
@@ -300,6 +301,38 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
 
 namespace {
 
+/// Validate the GEMV (lhs, rhs) operand pair and return the accumulator dtype.
+///
+/// `pto.tgemv`, `pto.tgemv.acc` and `pto.tgemv.bias` verify their element types
+/// through the *same* PTOAS rule as `pto.tmatmul` -- `verifyMatmulTypeTriple`,
+/// reached via `verifyMatmulOrGemv` / `verifyMatBiasCommon` -- and the a5
+/// TileLib templates for the three ops carry the matmul `MATMUL_*_DTYPES`
+/// signature lists. So the legal GEMV pairs are the `kGemv` rows of the shared
+/// Cube operand table, which on A5 include the four FP8 (E4M3FN / E5M2) pairs
+/// and HF8 x HF8.
+///
+/// Unlike matmul, this check has always been a closed allow-list, and stays
+/// one: a pair outside the table is rejected here rather than handed to PTOAS.
+/// Which table pairs the *configured* target can run is a separate, codegen-time
+/// question (`CheckMatmulOperandArch`) -- type deduction also runs with no
+/// backend configured, so it cannot answer it.
+DataType ValidateGemvInputDtypes(const TileTypePtr& lhs_type, const TileTypePtr& rhs_type,
+                                 const std::string& op_name) {
+  const auto* pair =
+      backend::FindCubeOperandPair(backend::CubeOpFamily::kGemv, lhs_type->dtype_, rhs_type->dtype_);
+  CHECK(pair != nullptr) << "The operator " << op_name
+                         << " supports only the (lhs, rhs) data type pairs the Cube multiplies ("
+                         << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kGemv) << "), but got "
+                         << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  return pair->accumulator;
+}
+
+}  // namespace
+
+// Declared in include/pypto/ir/type_inference.h: the A5 MX GEMV family
+// (src/ir/op/tile_ops/matmul_mx.cpp) accepts the same `acc_phase` kwarg and
+// shapes its result through the same 16-row Acc box, so these two live outside
+// the file-local namespace.
 void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
                       const std::string& op_name) {
   const int acc_phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
@@ -307,21 +340,6 @@ void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwarg
                                     << " requires acc_phase to be AccPhase.Unspecified, AccPhase.Partial, "
                                        "or AccPhase.Final, but got int "
                                     << acc_phase;
-}
-
-DataType ValidateGemvInputDtypes(const TileTypePtr& lhs_type, const TileTypePtr& rhs_type,
-                                 const std::string& op_name) {
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-
-  const auto input_dtype = lhs_type->dtype_;
-  CHECK(input_dtype == DataType::INT8 || input_dtype == DataType::FP16 || input_dtype == DataType::BF16 ||
-        input_dtype == DataType::FP32)
-      << "The operator " << op_name
-      << " supports only INT8 x INT8 -> INT32 and same-type FP16/BF16/FP32 inputs -> FP32, but got "
-      << input_dtype.ToString();
-  return input_dtype == DataType::INT8 ? DataType::INT32 : DataType::FP32;
 }
 
 TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,
@@ -352,6 +370,8 @@ TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_
   tile_view.valid_shape = {lhs_valid[0], rhs_valid[1]};
   return std::make_shared<TileType>(output_shape, inferred_type->dtype_, std::nullopt, tile_view);
 }
+
+namespace {
 
 TypePtr DeduceTileGemvType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,

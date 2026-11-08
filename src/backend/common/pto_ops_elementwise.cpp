@@ -28,6 +28,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -66,6 +67,7 @@ using pto_ops_detail::EnsureStaticViewTileSsa;
 using pto_ops_detail::EnsureTileViewSsa;
 using pto_ops_detail::GenerateInsOutsClause;
 using pto_ops_detail::GetTileViewTypeAnnotation;
+using pto_ops_detail::HasStaticValidShape;
 using pto_ops_detail::MaterializeSubviewOperandIfNeeded;
 using pto_ops_detail::MutableTileViewShape;
 using pto_ops_detail::RequireStaticValidShapeForPtoas;
@@ -220,6 +222,10 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
 }
 
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
+// Defined below, next to the matmul codegen it guards.
+static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t rhs_index,
+                                   codegen::PTOCodegen& codegen);
+
 static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
                                       codegen::CodegenBase& codegen_base,
                                       std::optional<size_t> i32_operand_idx = std::nullopt) {
@@ -284,6 +290,9 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
       return "";
     }
   }
+  if (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias")) {
+    CheckMatmulOperandArch(op, /*lhs_index=*/0, /*rhs_index=*/1, codegen);
+  }
   const auto tf32_attr =
       (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_bias"))
           ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
@@ -306,7 +315,11 @@ static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) 
   auto attrs = (ir::IsOp(op, "tile.matmul") || ir::IsOp(op, "tile.matmul_acc"))
                    ? codegen::FormatMatmulTf32Attr(op, codegen.GetBackendHandler()->GetPtoTargetArch())
                    : "";
-  auto phase = AccPhaseAttr(op);
+  // `pto.tgemv.mx.bias` is the one op in either matmul family with no accPhase
+  // attribute (PTOAS v0.72 PTOOps.td:1356-1367). MLIR accepts an unknown
+  // attribute as *discardable* and TGEMV_MX then ignores it, so emitting one
+  // would silently drop the phase instead of failing -- never emit it.
+  auto phase = ir::IsOp(op, "tile.gemv_mx_bias") ? "" : AccPhaseAttr(op);
   if (attrs.empty()) return phase;
   if (phase.empty()) return attrs;
   // Both formatters return one attribute dictionary; combine their entries.
@@ -314,11 +327,187 @@ static std::string MatmulAttrs(const CallPtr& op, codegen::PTOCodegen& codegen) 
   return attrs + ", " + phase.substr(2);
 }
 
+/// Is @p op one of the three ordinary GEMV operators?
+static bool IsOrdinaryGemv(const CallPtr& op) {
+  return ir::IsOp(op, "tile.gemv") || ir::IsOp(op, "tile.gemv_acc") || ir::IsOp(op, "tile.gemv_bias");
+}
+
+/// Is @p op one of the three A5 MX GEMV operators?
+static bool IsMxGemv(const CallPtr& op) {
+  return ir::IsOp(op, "tile.gemv_mx") || ir::IsOp(op, "tile.gemv_mx_acc") ||
+         ir::IsOp(op, "tile.gemv_mx_bias");
+}
+
+/// Is @p op any GEMV operator -- ordinary or MX?
+///
+/// Both families produce the same 16-row Acc box holding one logical row, so
+/// both need the static-valid accumulator bridge below. They differ in operand
+/// order and in which Cube operand family gates their dtypes, which is why the
+/// two narrower predicates also exist.
+static bool IsGemvFamily(const CallPtr& op) { return IsOrdinaryGemv(op) || IsMxGemv(op); }
+
+/// Reject a Cube operand pair the configured target cannot multiply.
+///
+/// Which (lhs, rhs) element types `pto.tmatmul*` / `pto.tgemv*` accept is an
+/// architecture fact: A5 multiplies any FP8 (E4M3FN / E5M2) pair and HF8 x HF8,
+/// A2/A3 neither (PTOAS `verifyMatmulTypeTriple`; pto-isa `npu/a5/TMatmul.hpp`).
+/// Type deduction cannot decide it -- it also runs with no backend configured,
+/// and the identical DSL program is legal on one target and not the other -- so
+/// the target-dependent half of the contract is checked here, where the handler
+/// is known. Same placement as the `tile.mgather` FP8 guard in pto_ops_memory.cpp.
+///
+/// Only pairs the table knows are judged. A pair outside it reached codegen
+/// through the legacy "identical lhs and rhs" arm of type deduction and is left
+/// for PTOAS to accept or reject, exactly as before.
+/// Which Cube operand family gates @p op's (lhs, rhs) dtype pair.
+///
+/// The MX families are gated by a *separate* PTOAS predicate
+/// (`isA5MxFp8InputType`) that excludes HiFloat8, so an MX op must be judged
+/// against `kMx` and not against the matmul / gemv rows -- otherwise HF8 x HF8
+/// would pass here and be rejected by PTOAS.
+static backend::CubeOpFamily CubeOperandFamilyOf(const CallPtr& op) {
+  if (IsMxGemv(op) || ir::IsOp(op, "tile.matmul_mx") || ir::IsOp(op, "tile.matmul_mx_acc") ||
+      ir::IsOp(op, "tile.matmul_mx_bias")) {
+    return backend::CubeOpFamily::kMx;
+  }
+  return IsOrdinaryGemv(op) ? backend::CubeOpFamily::kGemv : backend::CubeOpFamily::kMatmul;
+}
+
+static void CheckMatmulOperandArch(const CallPtr& op, size_t lhs_index, size_t rhs_index,
+                                   codegen::PTOCodegen& codegen) {
+  if (op->args_.size() <= std::max(lhs_index, rhs_index)) return;
+  auto lhs = As<ir::TileType>(op->args_[lhs_index]->GetType());
+  auto rhs = As<ir::TileType>(op->args_[rhs_index]->GetType());
+  if (!lhs || !rhs) return;
+  const auto family = CubeOperandFamilyOf(op);
+  const auto* pair = backend::FindCubeOperandPair(family, lhs->dtype_, rhs->dtype_);
+  if (pair == nullptr) return;
+  const auto* handler = codegen.GetBackendHandler();
+  INTERNAL_CHECK_SPAN(handler, op->span_)
+      << "Internal error: " << op->op_->name_ << " codegen requires a backend handler";
+  const std::string arch = handler->GetPtoTargetArch();
+  CHECK_SPAN(pair->SupportsArch(arch), op->span_)
+      << op->op_->name_ << " operand dtypes " << lhs->dtype_.ToString() << " x " << rhs->dtype_.ToString()
+      << " are not supported on the '" << arch << "' backend; it multiplies "
+      << backend::DescribeCubeOperandPairs(family, arch)
+      << ". Mixed and 1-byte float operand pairs require the Ascend950 ('a5') backend.";
+}
+
+/// A GEMV accumulator re-typed so its *type* carries the static valid extents.
+struct StaticValidAccView {
+  std::string ssa;   ///< empty when no bridge is needed
+  std::string type;  ///< the view's tile_buf type string
+};
+
+/// On A5, bridge a GEMV's accumulator to a static-valid view.
+///
+/// PTOAS v0.72 verifies a GEMV's operands on A5 through `verifyGemvTileOperandsA5`
+/// (lib/PTO/IR/PTOTile/PTOMatrixOperandVerification.cpp) -- and an *MX* GEMV
+/// through `verifyA5MxGemvTileOperands`
+/// (lib/PTO/IR/PTOTile/PTOMatrixQuantAndAdd.cpp:47) -- both of which chain into
+/// the *matmul* operand verifier `verifyMatTileOperandsA2A3` to pick up the A5
+/// layout rules -- and inherits its shape rule, "static matmul tile shapes lhs[M,K],
+/// rhs[K,N], and dst[M,N]". That rule compares `getMatmulLogicalShapeVec`
+/// (lib/PTO/IR/PTOTile/PTOStoreVerification.cpp:365), which falls back to the
+/// *physical* extent whenever the type's valid is dynamic. PyPTO's generic
+/// `pto.alloc_tile` path deliberately emits `v_row=?, v_col=?` and carries the
+/// live extent in separate `valid_row` / `valid_col` operands, and a GEMV result
+/// is the mandatory 16-row FP32 Acc box holding one logical row -- so the rule
+/// compares lhs rows 1 against dst rows 16 and rejects the op, at every dtype.
+///
+/// A2/A3 never reaches that rule: `verifyGemvTileOperandsA2A3` uses
+/// `verifyGemvValidShapes`, which compares *valid* rows only, where a dynamic
+/// valid simply skips the comparison. So the bridge is A5-only -- on A2/A3 the
+/// emitted instruction must stay byte-for-byte what it was.
+///
+/// The bridge is the one `pto.tquant.mx` already uses (`EmitStaticValidTileView`
+/// in pto_ops_datamove.cpp): a zero-copy `pto.treshape` whose *result type* holds
+/// the static valid extents. It aliases the same Acc address, so the downstream
+/// `pto.tstore` keeps reading the original SSA with its original type, and only
+/// the GEMV instruction sees the re-typed handle.
+///
+/// Returns an empty `ssa` when the bridge does not apply:
+///
+/// - a non-A5 target, or a non-GEMV operator (the MX *matmul* family keeps its
+///   multi-row Acc box, whose physical and logical rows already agree);
+/// - a result whose valid extents are not compile-time constants. A
+///   runtime-valued N has no static type to offer, so there is nothing to
+///   re-type, and PTOAS must be the one to report it rather than this emitter
+///   inventing a wrong constant;
+/// - a result whose valid N is *narrower* than its physical N. Making the dst
+///   logical shape static turns on comparisons the other operands cannot answer:
+///   the same rule also requires `rhs logical N == dst logical N`, and the rhs
+///   type's valid stays dynamic, so `getMatmulLogicalShapeVec` reads its
+///   *physical* N. A static dst N of 40 against a physical rhs N of 64 is a fresh
+///   mismatch the bridge would have introduced. Full-valid N is the case where
+///   the two provably agree, because `BuildGemvResultType` takes the result's
+///   physical N straight from the rhs's. A partially-valid N needs every GEMV
+///   operand re-typed, not just the accumulator -- deliberately out of scope
+///   here, and the same limit applies to the MX GEMV family.
+static StaticValidAccView EmitStaticValidGemvAccView(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                                     const std::string& acc_ssa,
+                                                     const std::string& acc_type) {
+  if (!IsGemvFamily(op)) return {};
+  const auto* handler = codegen.GetBackendHandler();
+  INTERNAL_CHECK_SPAN(handler, op->span_)
+      << "Internal error: " << op->op_->name_ << " codegen requires a backend handler";
+  if (handler->GetPtoTargetArch() != "a5") return {};
+  if (acc_ssa.empty() || acc_type.empty()) return {};
+  // Nothing to bridge when the type already states its valid extents.
+  if (acc_type.find("v_row=?") == std::string::npos) return {};
+
+  const auto acc_tile_type = codegen.GetCurrentResultTileType();
+  if (!HasStaticValidShape(acc_tile_type)) return {};
+  // Columns must be fully valid -- see the narrow-N paragraph above. Rows are not
+  // checked: a GEMV result is one valid row in a 16-row box by construction, and
+  // that mismatch is exactly what the bridge exists to resolve.
+  const auto acc_valid = ir::GetValidShape(acc_tile_type);
+  const auto valid_cols = ir::As<ir::ConstInt>(acc_valid.back());
+  const auto physical_cols = ir::As<ir::ConstInt>(acc_tile_type->shape_.back());
+  if (!valid_cols || !physical_cols || valid_cols->value_ != physical_cols->value_) return {};
+
+  const std::string static_type = codegen.GetViewTileBufTypeStringFromTileType(acc_tile_type);
+  if (static_type.empty() || static_type.find("v_row=?") != std::string::npos) return {};
+
+  const std::string view = codegen.NewNamedTemp("gemv_acc_static");
+  codegen.RegisterTileBufType(view, static_type, acc_tile_type);
+  // Record the alias so later readers resolving through the view still reach the
+  // accumulator's own storage.
+  codegen.RegisterTileViewName(view, acc_ssa);
+  codegen.Emit(view + " = pto.treshape " + acc_ssa + " : " + acc_type + " -> " + static_type);
+  return {view, static_type};
+}
+
+/// Emit a non-accumulating matmul/GEMV instruction, bridging an A5 GEMV's
+/// accumulator and appending the phase/tf32 attribute dictionary.
+///
+/// @param rhs_index Operand position of the rhs. The MX families interleave each
+///        scale after its data operand (`lhs, lhs_scale, rhs, rhs_scale[, bias]`),
+///        so their rhs sits at 2 rather than 1; reading `args_[1]` there would
+///        hand the *scale* dtype to the operand-pair check.
 static std::string MakePhasedMatmulCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
-                                              codegen::CodegenBase& codegen_base) {
+                                              codegen::CodegenBase& codegen_base, size_t rhs_index = 1) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
+  CheckMatmulOperandArch(op, /*lhs_index=*/0, rhs_index, codegen);
+  // The A5 GEMV accumulator needs a static-valid type at the instruction; every
+  // other case keeps the shared ins/outs clause verbatim.
+  const auto acc_view = EmitStaticValidGemvAccView(op, codegen, codegen.GetCurrentResultTarget(),
+                                                   codegen.GetCurrentResultTileBufTypeString());
+  if (acc_view.ssa.empty()) {
+    codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + MatmulAttrs(op, codegen));
+    return "";
+  }
+  std::string clause = GenerateInsOutsClause(op, codegen);
+  // Retarget only outs(): the ins() operands are the lhs / rhs / bias tiles.
+  const std::string outs_from =
+      "outs(" + codegen.GetCurrentResultTarget() + " : " + codegen.GetCurrentResultTileBufTypeString() + ")";
+  const std::string outs_to = "outs(" + acc_view.ssa + " : " + acc_view.type + ")";
+  const auto pos = clause.rfind(outs_from);
+  INTERNAL_CHECK_SPAN(pos != std::string::npos, op->span_)
+      << "Internal error: " << pto_op_name << " ins/outs clause has no outs() to retarget";
+  clause.replace(pos, outs_from.size(), outs_to);
+  codegen.Emit(pto_op_name + " " + clause + MatmulAttrs(op, codegen));
   return "";
 }
 
@@ -1313,6 +1502,16 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+      CheckMatmulOperandArch(op, /*lhs_index=*/1, /*rhs_index=*/2, codegen);
+      // An A5 ordinary GEMV needs a static-valid accumulator type at the
+      // instruction (see EmitStaticValidGemvAccView). Here the accumulator is
+      // both the ins() acc_in and the outs() dst -- the same SSA by
+      // construction, since InitMemRef makes the result reuse the accumulator's
+      // MemRef -- so the view replaces it in both positions and they stay equal.
+      if (auto acc_view = EmitStaticValidGemvAccView(op, codegen, dst, dst_type); !acc_view.ssa.empty()) {
+        dst = acc_view.ssa;
+        dst_type = acc_view.type;
+      }
       const std::string attrs = MatmulAttrs(op, codegen);
 
       // ins() carries the accumulator only on the accumulating form; the
@@ -1390,18 +1589,30 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   };
 
   // MX in-place acc (5 operands): same c_in==dst contract as make_acc_codegen,
-  // kept separate so the non-MX 3-arg helper stays untouched.
+  // kept separate so the non-MX 3-arg helper stays untouched. Serves both
+  // `pto.tmatmul.mx.acc` and `pto.tgemv.mx.acc`.
   auto make_mx_acc_codegen = [](const std::string& pto_op) {
     return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = AsPto(codegen_base);
       INTERNAL_CHECK_SPAN(op->args_.size() == 5, op->span_)
           << pto_op << " requires 5 arguments: acc, lhs, lhs_scale, rhs, rhs_scale, but got "
           << op->args_.size();
+      CheckMatmulOperandArch(op, /*lhs_index=*/1, /*rhs_index=*/3, codegen);
 
       std::string dst = codegen.GetCurrentResultTarget();
       INTERNAL_CHECK(!dst.empty()) << "Internal error: " << pto_op
                                    << " Acc SSA must resolve (in-place c_in==dst)";
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+      // An A5 MX GEMV needs a static-valid accumulator type at the instruction
+      // (see EmitStaticValidGemvAccView). The accumulator is both the ins()
+      // c_in and the outs() dst -- the same SSA by construction, since
+      // InitMemRef makes the result reuse the accumulator's MemRef -- so the
+      // view replaces it in both positions and they stay equal. Declines for
+      // `pto.tmatmul.mx.acc`, whose emission is therefore unchanged.
+      if (auto acc_view = EmitStaticValidGemvAccView(op, codegen, dst, dst_type); !acc_view.ssa.empty()) {
+        dst = acc_view.ssa;
+        dst_type = acc_view.type;
+      }
 
       std::ostringstream acc_inst;
       acc_inst << pto_op << " ins(" << dst;
@@ -1428,7 +1639,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
       acc_inst << ") outs(" << dst;
       if (!dst_type.empty()) acc_inst << " : " << dst_type;
-      acc_inst << ")";
+      acc_inst << ")" << MatmulAttrs(op, codegen);
       codegen.Emit(acc_inst.str());
       return "";
     };
@@ -1445,6 +1656,18 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
   reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePhasedMatmulCodegenPTO("pto.tgemv.bias", 3, op, codegen);
+  });
+
+  // A5 MX GEMV. These deliberately do not ride the `kSimpleOps` table that
+  // `tile.matmul_mx` / `_bias` use: `MakeSimpleCodegenPTO` neither bridges the
+  // accumulator to a static-valid view (without which PTOAS rejects every a5
+  // GEMV) nor emits the accPhase attribute.
+  reg("tile.gemv_mx", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePhasedMatmulCodegenPTO("pto.tgemv.mx", 4, op, codegen, /*rhs_index=*/2);
+  });
+  reg("tile.gemv_mx_acc", make_mx_acc_codegen("pto.tgemv.mx.acc"));
+  reg("tile.gemv_mx_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePhasedMatmulCodegenPTO("pto.tgemv.mx.bias", 5, op, codegen, /*rhs_index=*/2);
   });
 }
 }  // namespace backend

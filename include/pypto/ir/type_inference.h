@@ -310,15 +310,38 @@ void CheckMatmulInitCond(const std::vector<ExprPtr>& args, size_t index, const s
  * @brief Data type the Cube accumulator holds for a matmul over these operands
  *
  * The L0C accumulator is fixed by the operand domain, not by anything the caller
- * asks for: a pair of float operands accumulates in FP32, every other pair
- * (int operands, or a mixed pair) accumulates in INT32. ``tile.matmul`` and the
- * ``tensor.matmul`` that lowers to it must agree on this, so both read it here.
+ * asks for. Pairs the hardware really multiplies are listed in
+ * ``backend::kCubeOperandPairs`` and answer from there (every matmul pair
+ * accumulates in FP32 except INT8 x INT8, which accumulates in INT32); any other
+ * pair falls back to the historical rule, two floats accumulate in FP32 and
+ * everything else in INT32. ``tile.matmul`` and the ``tensor.matmul`` that lowers
+ * to it must agree on this, so both read it here.
  *
  * @param lhs Left operand element type
  * @param rhs Right operand element type
- * @return FP32 for two float operands, INT32 otherwise
+ * @return The L0C element type for this operand pair
  */
 DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs);
+
+/**
+ * @brief Validate a matmul operand pair and return its accumulator dtype
+ *
+ * Accepts a pair when it is a known-good Cube matmul pair (``backend::
+ * kCubeOperandPairs``, which on A5 includes the mixed FP8 orders E4M3FN x E5M2
+ * and E5M2 x E4M3FN) **or** when both operands share one dtype. The second arm
+ * preserves the historical "identical lhs and rhs" contract: dtypes PTOAS would
+ * reject anyway still reach it as they always have, and only the backend's own
+ * check rejects them. Per-architecture availability is not decided here — the
+ * same DSL program is legal or not depending on the compilation target, which
+ * type deduction does not see; the matmul codegen checks it against the
+ * configured backend instead.
+ *
+ * @param lhs Left operand element type
+ * @param rhs Right operand element type
+ * @param op_name Operator name used in diagnostics
+ * @return The L0C element type the product accumulates in
+ */
+DataType ValidateMatmulOperandDataTypes(DataType lhs, DataType rhs, const std::string& op_name);
 
 /// Validate opt-in HF32 rounding: two rank-2 FP32 operands and a supported mode.
 void CheckMatmulTf32Mode(const std::vector<std::pair<std::string, std::any>>& kwargs, DataType lhs,
@@ -1126,6 +1149,39 @@ std::vector<int64_t> ParseSliceDropDims(const ExprPtr& drop_dims_arg, const std:
  * Returns ``shape`` unchanged when ``drop_dims`` is empty.
  */
 std::vector<ExprPtr> ApplyDropDims(const std::vector<ExprPtr>& shape, const std::vector<int64_t>& drop_dims);
+
+/**
+ * @brief Reject an ``acc_phase`` kwarg that does not encode a valid ``AccPhase``.
+ *
+ * Shared by every operator that exposes producer-side unit-flag phasing: the
+ * matmul and GEMV families and the A5 MX GEMV family. Defined in
+ * src/ir/op/tile_ops/matmul.cpp.
+ */
+void ValidateAccPhase(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const std::string& op_name);
+
+/**
+ * @brief Shape the GEMV result: the mandatory 16-row FP32/INT32 Acc box holding one logical row.
+ *
+ * A GEMV multiplies a single-row lhs, but L0C is NZ-boxed at 16x16, so the
+ * smallest accumulator that can hold ``[1, N]`` is physically ``[16, N]`` with
+ * ``valid_shape = [1, N]``. The physical/logical split is load-bearing
+ * downstream: ``EmitStaticValidGemvAccView``
+ * (src/backend/common/pto_ops_elementwise.cpp) re-types that box so PTOAS's
+ * matmul operand verifier compares the *logical* 1 against the lhs rather than
+ * the physical 16.
+ *
+ * Shared by the ordinary GEMV family (``tile.gemv`` / ``_acc`` / ``_bias``) and
+ * the A5 MX GEMV family (``tile.gemv_mx`` / ``_acc`` / ``_bias``), which differ
+ * only in how the product itself is validated. Defined in
+ * src/ir/op/tile_ops/matmul.cpp.
+ *
+ * @param inferred The product type a matmul-style deducer produced; supplies the result dtype.
+ * @param lhs_type The single-row lhs tile; its physical and valid row extents must both be 1.
+ * @param rhs_type The rhs tile; supplies the physical and valid N extents.
+ */
+TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,
+                                const TileTypePtr& rhs_type);
 
 }  // namespace ir
 }  // namespace pypto

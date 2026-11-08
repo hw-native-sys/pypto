@@ -242,6 +242,89 @@ REGISTER_OP("tensor.matmul")
 M/N/K 装箱严格兼容，同时允许累加器的有效 M/N 矩形以及 rhs 的有效 K 包含 PTO 根据
 lhs M/K 与 rhs N 实际计算的较小矩形。
 
+#### Cube 操作数类型配对（operand dtype pairs）
+
+Cube 能相乘的元素类型是一张硬件表，而不是“两边必须相同”的对称规则：
+`backend::kCubeOperandPairs`（`include/pypto/backend/common/cube_operand_types.h`）
+即 PyPTO 对 PTOAS `verifyMatmulTypeTriple` 与 pto-isa `npu/a5/TMatmul.hpp` 的复刻。
+
+| lhs x rhs | 累加器 | A2/A3 | A5 | 算子族 |
+| --------- | ------ | ----- | -- | ------ |
+| INT8 x INT8 | INT32 | 支持 | 支持 | matmul、gemv |
+| FP16 x FP16 | FP32 | 支持 | 支持 | matmul、gemv |
+| BF16 x BF16 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP32 x FP32 | FP32 | 支持 | 支持 | matmul、gemv |
+| FP8E4M3FN x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| FP8E5M2 x FP8E4M3FN | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| FP8E5M2 x FP8E5M2 | FP32 | 不支持 | 支持 | matmul、gemv、mx |
+| HF8 x HF8 | FP32 | 不支持 | 支持 | matmul、gemv |
+
+`mx` 算子族同时覆盖 `tile.matmul_mx*` 与 `tile.gemv_mx*`：PTOAS 通过同一个判定
+`isA5MxFp8InputType` 为两者把关，它只接受每侧独立的 FP8E4M3FN 与 FP8E5M2，**不**接受
+HiFloat8——这也是 HF8 保持 `matmul、gemv` 而永远不会获得 `mx` 的原因。
+
+因此在 Ascend950 上，`tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、
+`tile.batch_matmul*`、`tensor.matmul` 与 `tensor.matmul_acc` 接受**两种顺序的
+FP8 混合操作数**；累加器、`matmul_acc` 的输入以及 `matmul_bias` 的 bias 仍为 FP32。
+`tf32_mode` 仍只支持 FP32，因此 FP8 操作数对会拒绝该参数。
+
+普通 GEMV 族——`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`——是该矩阵乘的
+`M == 1` 特化，并共用同一张表：`pto.tgemv`、`pto.tgemv.acc` 与 `pto.tgemv.bias`
+的元素类型都经由同一个 `verifyMatmulTypeTriple` 校验，其 a5 TileLib 模板也使用
+矩阵乘的 `MATMUL_*_DTYPES` 签名列表。因此 FP8 与 HF8 配对在这里同样可用，结果仍为
+FP32，`gemv_acc` 的累加器与 `gemv_bias` 的 bias 也仍为 FP32。**MX** GEMV 算子由另一个
+判定把关，不在这些行的覆盖范围内，见
+[MX GEMV（Ascend950）](#mx-gemvascend950)。
+
+与矩阵乘不同，GEMV 的 dtype 校验（`ValidateGemvInputDtypes`，
+`src/ir/op/tile_ops/matmul.cpp`）是针对 `gemv` 行的**封闭**白名单：GEMV 从未有过
+“两边 dtype 相同”这一历史兜底分支，因此表外配对在类型推导阶段就被拒绝，不会下达到 PTOAS。
+
+##### A5 GEMV：静态 valid 累加器桥接
+
+Ascend950 上的普通 GEMV 还需要在指令处**重新标注累加器类型**，这与操作数 dtype 无关。
+PTOAS v0.72 的 `verifyGemvTileOperandsA5` 会转调*矩阵乘*的操作数校验以复用 A5 布局规则，
+从而继承了它的形状规则——“static matmul tile shapes lhs[M,K], rhs[K,N], and dst[M,N]”。
+该规则比较 `getMatmulLogicalShapeVec`，而后者在类型的 valid 为动态时回退到*物理*尺寸。
+PyPTO 通用的 `pto.alloc_tile` 发出的是 `v_row=?, v_col=?`，真实尺寸由单独的
+`valid_row` / `valid_col` 操作数承载；而 GEMV 的结果必然是只有一个逻辑行的 16 行 FP32
+Acc 箱——于是该规则用 lhs 的 1 行去比 dst 的 16 行，在任何 dtype 下都拒绝 a5 的
+`pto.tgemv*`。A2/A3 不会走到这条规则：`verifyGemvTileOperandsA2A3` 使用
+`verifyGemvValidShapes`，只比较 *valid* 行。
+
+因此 `EmitStaticValidGemvAccView`（`src/backend/common/pto_ops_elementwise.cpp`）
+仅在 a5 上发出一个零拷贝的 `pto.treshape`，其*结果类型*携带累加器的静态 valid 尺寸——
+与 `pto.tquant.mx` 所用的桥接相同——并让 GEMV 的 `outs()`（以及 `.acc` 的 `ins()`
+累加器）指向该视图。累加器自身的分配与下游的 `pto.tstore` 保持不变，A2/A3 发出的指令
+逐字节不变。
+
+有两种情况刻意不做桥接：
+
+| 情况 | 原因 |
+| ---- | ---- |
+| 累加器的 valid 尺寸不是编译期常量 | 没有可用的静态类型；该由 PTOAS 报告，而不是由代码生成臆造常量 |
+| 累加器的 valid N 小于其物理 N | 静态的 dst N 会触发该规则的 `rhs logical N == dst logical N` 子句，而 rhs 类型的 valid 仍是动态的，该子句会读取 rhs 的*物理* N，从而引入新的不匹配。部分有效的 N 需要重新标注 GEMV 的每个操作数，而不只是累加器 |
+
+GEMV lhs 的物理 K 取决于操作数 dtype：Mat 到 Left 的提取（`TExtractToAVector`，
+pto-isa `npu/a5/TExtractCommon.hpp`）要求 `Cols % (512 / sizeof(dtype)) == 0`，
+即一个完整的 512 字节 K 块——1 字节操作数为 K = 512，2 字节为 256，4 字节为 128。
+
+该契约分两层实现，因为合法集合取决于编译目标，而类型推导看不到目标：类型推导
+（`ValidateMatmulOperandDataTypes`，`src/ir/op/type_inference.cpp`）接受表中的配对
+**或**两边 dtype 相同的配对——后者保留历史上“lhs 与 rhs 相同”的契约，使那些
+PTOAS 本来就会拒绝的类型仍像以前一样下达到后端；随后矩阵乘代码生成
+（`CheckMatmulOperandArch`，`src/backend/common/pto_ops_elementwise.cpp`）在 PTOAS
+之前拒绝当前目标不具备的表内配对（`a2a3` 上的 FP8 或 HF8 操作数），表外配对保持原样
+交给 PTOAS。
+
+当任一操作数为 FP8 或 HF8 时，`tensor.matmul` 省略 `out_dtype` 的默认值取累加器类型：
+类型提升会给出 FP8，而无缩放的 FIXPIPE 写回无法产生该类型，且混合配对的提升结果还会
+依赖操作数顺序。更宽的操作数配对保持原有的提升默认值。
+
+1 字节操作数的物理 K 必须是 32 的倍数（Left/Right fractal 沿 K 打包 32 字节）；
+有效 K 没有该限制。
+
 对于 Ascend950 上的二维 FP32 操作数，`matmul`、`matmul_acc` 和
 `tile.matmul_bias` 支持仅限关键字参数 `tf32_mode="round_even"` 或
 `tf32_mode="round_away"`。两者将输入舍入为 HF32（e8m10），仍使用 FP32 累加；
@@ -358,18 +441,98 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 ### MX block-scale matmul（Ascend950）
 
 MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale
-dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8，以及显式转换后的 FP4×FP8 路径。
+dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 与 `gemv_mx` 算子族支持 host-prequant MXFP8，以及显式转换后的 FP4×FP8 路径。
 `InsertMxScaleAddr`（在 `InferTileMemorySpace` 之后）在操作数内存空间解析完成后插入内部 `tile.tget_scale_addr` 绑定。
+
+两个算子族的每侧 data operand 都各自独立地接受 `FP8E4M3FN` 或 `FP8E5M2`，因此四种组合
+全部合法。尽管普通 matmul 与 GEMV 接受 `HF8 × HF8`，`HF8` **不是** MX 格式：PTOAS 通过
+`isA5MxFp8InputType` 为 MX 把关，而它只接受上述两种 FP8 格式。参见
+[Cube 操作数类型配对](#cube-操作数类型配对operand-dtype-pairs)。
 
 | IR / DSL | 说明 |
 | -------- | ---- |
 | `tile.load` 读取 `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | 源 TensorLayout 携带 MX scale GM layout。dtype 为 FP8E8M0，且不支持 strided source。公开 `pl.load` 在省略 target 时默认为 `Mat`；原始 IR 必须携带 `target_memory=Mat`。 |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；硬件 layout 固定为左侧 row/row/32、右侧 col/col/32，源 Mat tile 与 layout override 必须完全匹配。 |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | 不支持；应先把 MX scale 数据加载到 Mat，再 move 到 scale 内存。 |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；操作数位置驱动自动放置，包括为 `quant_mx` scale 生成 Vec→Mat→LeftScale/RightScale staging。进入算子的两块 data operand 必须都是 `FP8E4M3FN`，scale 为 `FP8E8M0`；`lhs_scale` 与 `rhs_scale` 必须是不同的 tile。支持的打包输入形式为任一 FP4 格式的左操作数×FP8 右操作数，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；操作数位置驱动自动放置，包括为 `quant_mx` scale 生成 Vec→Mat→LeftScale/RightScale staging。进入算子的每块 data operand 各自独立地为 `FP8E4M3FN` 或 `FP8E5M2`，scale 为 `FP8E8M0`；`lhs_scale` 与 `rhs_scale` 必须是不同的 tile。支持的打包输入形式为任一 FP4 格式的左操作数×FP8 右操作数，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
-| `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
+| `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` / `gemv_mx` 算子族。 |
+
+#### MX GEMV（Ascend950）
+
+MX 算子族的矩阵-向量形式：`C[1, N] = (A[1, K] · SA) @ (B[K, N] · SB)`。
+操作数配对、scale dtype 与 scale-group 计算都与 `matmul_mx` 完全一致；全部差异都是
+`M == 1` 的直接后果。
+
+| IR / DSL | 说明 |
+| -------- | ---- |
+| `tile.gemv_mx` / `pl.tile.gemv_mx` | `Left, LeftScale, Right, RightScale → Acc`。物理 `M` 必须**恰好为 1**，而不只是一行有效数据：Cube 是依据 Left tile 的物理行数选择 GEMV 模式（pto-isa `a5/TMatmulCommon.hpp` 中 `GetGemvCtrl` 即 `TileLeft::Rows != 1`）。结果是强制的 16 行 FP32 `Acc` box，`valid_shape = [1, N]`。物理 `K % 64 == 0`、`N % 32 == 0`，且 `ceil(validK/32) == ceil(physicalK/32)`。接受 `acc_phase`。 |
+| `tile.gemv_mx_acc` / `pl.tile.gemv_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；累加器的 physical/valid shape 必须与 `gemv_mx` 的结果一致。接受 `acc_phase`。与 `tile.gemv_acc` 不同，它**不接受 `init_cond`**：MX 累加指令没有通过 PTOAS 暴露条件初始化位，因此请改用 `tile.gemv_mx` 产生初值。 |
+| `tile.gemv_mx_bias` / `pl.tile.gemv_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。与 `tile.gemv_bias` / `tile.matmul_bias` 一致，**不接受 `acc_phase`**：`pto.tgemv.mx.bias` 未声明 `accPhase` 属性，发出的属性会被 MLIR 当作 discardable 属性保留并被静默忽略。 |
+
+scale 几何只在 A 侧与 `matmul_mx` 不同：
+
+| 操作数 | 物理 shape | 有效 shape | GM tensor layout |
+| ------ | ---------- | ---------- | ---------------- |
+| `lhs_scale` | `[1, ceil(K/32)]` | `[1, ceil(K/32)]` | 普通 ND —— **不是** `pl.MX_A_ZZ` |
+| `rhs_scale` | `[ceil(K/32), N]` | `[ceil(K/32), N_valid]` | `pl.MX_B_NN` |
+
+`pl.MX_A_ZZ` 把 16 行 × 2 个 group 交织进每个 32 字节 SFractal，这对 GEMV 所乘的单行
+没有意义——而且它的 block 维必须是 16 的倍数，因此 `[1, G]` 的 scale 根本无法用它表达。
+硬件把 `rows=1, fractal=32` 的 `ScaleLeft` tile 读作 `ceil(K/32)` 个**连续**字节，所以把
+`MX_A_ZZ` buffer 补齐到 16 行**不是**可行的替代方案：逻辑第 0 行的各 group 会落在 fractal
+内步长 32 的位置上。因此对于以 `Mat` 为目标的单行 `FP8E8M0` tile，`tile.load` 给出
+row/row/32 的 scale box，而不是给单行 *data* 操作数的那种 ND 行向量视图。
+
+有三条限制，它们都是工具链的性质，而非本次降级的性质：
+
+- 对这些 1 字节操作数，**物理 `K` 必须为 512**。单行 lhs 的 Mat→Left extract 是向量加载，
+  其 pto-isa `static_assert` 要求 `Cols % (512 / sizeof(DType)) == 0`
+  （`npu/a5/TExtractCommon.hpp`）。
+- **有效 `N` 必须等于物理 `N`。** 累加器会被桥接为静态 valid 视图，使 PTOAS 比较逻辑
+  extent（`EmitStaticValidGemvAccView`）；而把 dst 的逻辑 `N` 变为静态同时也会打开 PTOAS 的
+  `rhs logical N == dst logical N` 规则，该规则此时读取 rhs 类型的**物理** `N`。因此当 `N`
+  被收窄时桥接会主动放弃，使该情形与之前一样无法汇编。要修复它需要重新标注每个操作数的
+  类型，而不只是累加器。
+- **有效 `K` 必须等于物理 `K`，GEMV 算子族会拒绝其它情况。** 有效 K 更窄的 tile MX 程序
+  能够汇编，但随后会让卡发生故障，且对每种 FP8 配对都如此。scale 分组数一致
+  （`ceil(validK/32) == ceil(physicalK/32)`）**并不足够**：物理 K=512 配有效 K=481 同样
+  落在 16 组上，却仍会 fault。因此三种 `tile.gemv_mx*` 形式都会在类型推导阶段拒绝收窄的
+  有效 K。该限制早于本算子族存在，而 `tile.matmul_mx*` 仍然接受该形状——在那里收紧属于
+  对既有调用方的契约变更（pypto-lib 的 MX 模型正建立在 `matmul_mx` 之上），因此这一范围
+  划分是有意为之，而非疏漏。
+
+#### 分段 K 的 MX 归约暂不支持（PTOAS #1691）
+
+该限制适用于**整个 MX 算子族**，`tile.matmul_mx*` 与 `tile.gemv_mx*` 同等受影响，且属于
+工具链限制而非 PyPTO 限制。
+
+**对 GEMV 算子族，PyPTO 现在直接拒绝发出该形状**：当 `tile.gemv_mx*` 调用需要在某个 MX
+指令已消费过绑定之后再次绑定 scale 时，`InsertMxScaleAddr` 会报错。编译期报错严格优于下文
+描述的"静默算错"。`tile.matmul_mx*` **不**在拒绝范围内，原因见上文的范围说明——它仍然暴露
+该路径，而分块的 `matmul_mx` + `matmul_mx_acc` 正是 pypto-lib MX 模型的写法。
+
+累加第二个 K 分块意味着第二组 scale tile，因此在某个 MX 指令已经消费过一次绑定之后，还需要
+再做一次 `tile.tget_scale_addr` 绑定。`InsertMxScaleAddr` **只在绑定未发生变化时**才能省去
+消费者之后的重新绑定——其注释原文是"在消费者之后重复绑定会让 PTOAS 把它提升到该消费者之前、
+回到最初的 scale 填充处"——而各分块各自独立的 scale 使这种复用不可能成立。于是发出的序列是
+`绑定、绑定、消费者、绑定、绑定、消费者`，PTOAS #1691 会把它提升回最初的 scale 填充处，导致
+后一个分块的部分输出读到前一个分块的 scale。
+
+在设备上其结果是**不确定的**：一个两分块 `K = 1024` 的 GEMV 用例在 6 次运行中只有 3 次给出
+正确答案，并且去掉相位位后同样失败——因此这不是 `acc_phase` 的缺陷，`acc_phase` 在单个 K
+窗口内的生产者/消费者标志配对上仍然正确。在 #1691 修复之前，请在单个窗口内累加。
+
+该拒绝由
+`tests/ut/codegen/test_mx_ops_codegen.py::...::test_segmented_k_mx_gemv_is_rejected_rather_than_silently_wrong`
+固定，它也是 hoist 问题修复后重新加入设备覆盖的触发点：届时删除该拒绝、恢复用例中记录的发出
+顺序断言、再加回设备用例。旁边还有两个对照用例——单窗口的 `gemv_mx` + `gemv_mx_acc` 仍可编译
+（说明拒绝没有过宽），分段 K 的 `matmul_mx` 仍可编译（固定范围）。
+
+**拒绝未覆盖的情形**：循环携带形态，即绑定与消费者都位于同一个循环体内、危害只在迭代之间
+出现。绑定按直线区域跟踪，因此该形状仍可编译。它正是 matmul 模型使用的写法，且双向都没有
+真机实测数据。
 
 规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
 GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。左侧输入可使用任一打包 FP4 格式，但必须先显式转换为 FP8；对齐 M↑16、K↑64、N↑32。
@@ -448,8 +611,9 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 
 ### 累加器阶段（Accumulator phases，A2/A3）
 
-`tile.matmul`、`tile.matmul_acc`、`tile.gemv`、`tile.gemv_acc` 和
-`tile.gemv_bias` 的 `acc_phase` 可设为 `pl.AccPhase.Unspecified`（默认值）、
+`tile.matmul`、`tile.matmul_acc`、`tile.gemv`、`tile.gemv_acc`、
+`tile.gemv_bias`、`tile.gemv_mx` 和 `tile.gemv_mx_acc` 的 `acc_phase`
+可设为 `pl.AccPhase.Unspecified`（默认值）、
 `pl.AccPhase.Partial` 或 `pl.AccPhase.Final`。`Unspecified` 保持现有行为；
 后续仍有 K 分块时使用 `Partial`，最后一个分块使用 `Final`。Matmul DSL
 入口的 `acc_phase` 仅接受关键字传参，因此
@@ -797,7 +961,7 @@ a5 或不提供 SDMA provider 的 runtime 上，启用该能力的 worker 会在
 | `src/ir/op/type_inference.cpp` | 共享的类型推断工具 |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
 | `tile_ops/matmul.cpp` | TileOp：matmul、gemv |
-| `tile_ops/matmul_mx.cpp` | TileOp：matmul_mx、matmul_mx_acc、matmul_mx_bias、内部 tget_scale_addr 绑定 |
+| `tile_ops/matmul_mx.cpp` | TileOp：matmul_mx、matmul_mx_acc、matmul_mx_bias、gemv_mx、gemv_mx_acc、gemv_mx_bias、内部 tget_scale_addr 绑定 |
 | `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls 等 |
 | `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
