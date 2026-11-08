@@ -221,18 +221,29 @@ with pl.simt_scope(dims=(16, 1, 1)):
         passes.outline_simt_scopes()(before)
 
 
-def test_out_capture_after_full_initialization():
+@pytest.mark.parametrize("atomic", [False, True], ids=["overwrite", "atomic-add"])
+@pytest.mark.parametrize("initialized", [False, True], ids=["uninitialized", "initialized"])
+def test_out_capture_after_full_initialization(atomic, initialized):
+    # Atomic Add reads the old destination even when its window covers every
+    # element. Only an earlier overwrite can make that Out capture safe.
+    initial_store = "dst = pl.tile.store(value, [0, 0], dst)" if initialized else ""
+    atomic_kwarg = ", atomic=pl.AtomicType.Add" if atomic else ""
     before = program(
-        """
+        f"""
 value = pl.tile.load(src, [0, 0], [1, 32])
-dst = pl.tile.store(value, [0, 0], dst)
+{initial_store}
+dst = pl.tile.store(value, [0, 0], dst{atomic_kwarg})
 with pl.simt_scope(dims=(32, 1, 1)):
     pl.simt.store(dst, (0, 0), pl.const(1.0, pl.FP32))
 return dst
 """,
         direction="Out",
     )
-    assert len(launches(passes.outline_simt_scopes()(before))) == 1
+    if atomic and not initialized:
+        with pytest.raises((Error, ValueError), match="initialized storage"):
+            passes.outline_simt_scopes()(before)
+    else:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
 
 
 def test_partial_initialization_is_not_enough():

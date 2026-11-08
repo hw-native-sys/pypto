@@ -363,5 +363,113 @@ def test_conditional_shape_unpacking_compiles_as_scalars(tmp_path: Path, monkeyp
         backend.reset_for_testing()
 
 
+@pytest.mark.parametrize("assignment", ["n = src.shape[0]", "n, width = src.shape"])
+@pytest.mark.parametrize("rebind", [False, True], ids=["first-binding", "renamed-binding"])
+def test_shape_assignment_supersedes_scalar_binding(assignment, rebind):
+    prior_write = "n = n + 2" if rebind else ""
+    tree = ast.parse(f"""
+with pl.simt_scope(dims=(1, 1, 1)):
+    n = pl.simt.thread_idx(pl.simt.Axis.X)
+    {prior_write}
+    {assignment}
+    pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+""")
+    transformed = BodyTransformer(
+        tensor_meta={"src": TensorMeta(shape=(1, 32), dtype=DataType.FP32)},
+        dep_names=set(),
+        param_names=["src", "dst"],
+    ).visit(tree)
+    assert isinstance(transformed, ast.Module)
+    scope = transformed.body[0]
+    assert isinstance(scope, ast.With)
+    store = scope.body[-1]
+    assert isinstance(store, ast.Expr) and isinstance(store.value, ast.Call)
+    offsets = store.value.args[1]
+    assert isinstance(offsets, ast.Tuple)
+    index = offsets.elts[1]
+    # Resolve the actual store operand without relying on generated alias names.
+    # The last shape assignment must replace tid + 2, including after unpacking.
+    if isinstance(index, ast.Name):
+        definitions = {
+            target.id: stmt.value
+            for stmt in scope.body
+            if isinstance(stmt, ast.Assign)
+            for target in stmt.targets
+            if isinstance(target, ast.Name)
+        }
+        index = definitions[index.id]
+    assert isinstance(index, ast.Constant) and index.value == 1
+
+
+@pl.jit.aiv
+def renamed_shape_index(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    with pl.simt_scope(dims=(1, 1, 1)):
+        n = pl.simt.thread_idx(pl.simt.Axis.X)
+        n = n + 2
+        # The fixed annotation supplies a known shape; this replaces the alias.
+        n = src.shape[0]  # pyright: ignore[reportOptionalSubscript]
+        pl.simt.store(dst, (0, n), pl.const(1.0, pl.FP32))
+    return dst
+
+
+@pl.jit.aiv
+def renamed_shape_unpack(src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]):
+    with pl.simt_scope(dims=(1, 1, 1)):
+        n = pl.simt.thread_idx(pl.simt.Axis.X)
+        n = n + 2
+        # Tuple expansion must replace the current scalar alias as well.
+        n, width = src.shape  # pyright: ignore[reportOptionalIterable]
+        pl.simt.store(dst, (0, n), pl.cast(width, pl.FP32))
+    return dst
+
+
+@pl.jit
+def renamed_shape_index_entry(
+    src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]
+):
+    return renamed_shape_index(src, dst)
+
+
+@pl.jit
+def renamed_shape_unpack_entry(
+    src: pl.Tensor[[1, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[1, 32], pl.FP32]]
+):
+    return renamed_shape_unpack(src, dst)
+
+
+@pytest.mark.parametrize("entry", [renamed_shape_index_entry, renamed_shape_unpack_entry])
+def test_rebound_shape_store_index_full_compile(entry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(decorator, "_ptoas_available", lambda: False)
+    backend.reset_for_testing()
+    try:
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=backend.BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                cache_config=CacheConfig(enabled=False),
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+        assert isinstance(compiled, CompiledProgram) and compiled.program is not None
+        kernels = list((tmp_path / "kernels").rglob("*.pto"))
+        assert len(kernels) == 1 and "pto.stg" in kernels[0].read_text()
+        simplified = passes.simplify()(passes.convert_to_ssa()(passes.outline_simt_scopes()(compiled.program)))
+        stores: list[ir.Call] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == ir.get_op("simt.store").name:
+                    stores.append(op)
+
+        Collector().visit_program(simplified)
+        assert len(stores) == 1
+        indices = stores[0].args[1]
+        assert isinstance(indices, ir.MakeTuple)
+        index = indices.elements[1]
+        assert isinstance(index, ir.ConstInt) and index.value == 1
+    finally:
+        backend.reset_for_testing()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
