@@ -43,14 +43,20 @@ def _is_graph_context(value: ast.expr) -> bool:
 def _graph_local_capture_names(node: ast.With) -> set[str]:
     if not any(_is_graph_context(item.context_expr) for item in node.items):
         return set()
-    return {
-        item.optional_vars.id
-        for stmt in node.body
-        for inner in ast.walk(stmt)
-        if isinstance(inner, ast.With)
-        for item in inner.items
-        if isinstance(item.optional_vars, ast.Name)
-    }
+    names: set[str] = set()
+    for stmt in node.body:
+        for inner in ast.walk(stmt):
+            if isinstance(inner, ast.With):
+                names.update(
+                    item.optional_vars.id for item in inner.items if isinstance(item.optional_vars, ast.Name)
+                )
+            elif isinstance(inner, (ast.Assign, ast.AnnAssign)) and isinstance(inner.value, ast.Call):
+                callee = inner.value.func
+                name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
+                if name == "task_dummy":
+                    targets = inner.targets if isinstance(inner, ast.Assign) else [inner.target]
+                    names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return names
 
 
 class BodyTransformer(ast.NodeTransformer):

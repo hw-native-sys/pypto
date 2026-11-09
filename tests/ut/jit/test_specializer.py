@@ -412,6 +412,25 @@ class TestBodyTransformer:
         rendered = self._transform(source, {"c": TensorMeta(shape=(128, 64), dtype=DataType.FP32)})
         assert "pl.create_tensor([128, 64]" in rendered
 
+    def test_graph_plain_task_id_does_not_replace_outer_alias(self):
+        source = """
+            def f(self):
+                with pl.manual_scope():
+                    for i in pl.range(1):
+                        seed = pl.system.task_dummy(deps=[])
+                        latest = pl.system.task_dummy(deps=[])
+                        ready = seed
+                        ready = latest
+                    with pl.graph("recording") as done:
+                        ready = pl.system.task_dummy(deps=[])
+                    pl.system.task_dummy(deps=[ready, done])
+        """
+        rendered = self._transform(source, {})
+        assert "ready_v2 = pl.system.task_dummy(deps=[])" in rendered
+        assert "pl.system.task_dummy(deps=[ready_v1, done])" in rendered
+        program_source = "@pl.program\nclass Before:\n    @pl.function\n" + textwrap.indent(rendered, "    ")
+        assert pl.parse_program(program_source).get_function("f") is not None
+
     def test_bind_dynamic_removed(self):
         src = """
             def f(a):
