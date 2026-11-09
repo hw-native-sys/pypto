@@ -400,6 +400,11 @@ class BindCallsToVars : public IRMutator {
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
 
+  // A Var's type may carry metadata calls (e.g. ``tensor.dim`` in a dynamic
+  // shape). Rewriting that type would return a fresh Var and break the SSA
+  // binding established by the original definition, so leave Vars untouched.
+  ExprPtr VisitExpr_(const VarPtr& op) override { return op; }
+
  private:
   std::function<ExprPtr(const ExprPtr&)> bind_;
 };

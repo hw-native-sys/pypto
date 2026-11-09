@@ -24,7 +24,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
-from pypto.pypto_core import ir, passes
+from pypto.pypto_core import DataType, ir, passes
 
 SIZE = 64
 NR = 2
@@ -943,6 +943,60 @@ def test_compound_call_valued_core_num_hoists_the_call():
     assert not nested, [c.op.name for c in nested]
     # End-to-end gate: the launch legalizer requires NoNestedCalls.
     passes.legalize_spmd_launches()(after)
+
+
+def test_dynamic_shape_param_keeps_its_identity_when_lifted():
+    """Hoisting must not rewrite a Var type that carries a ``tensor.dim`` call.
+
+    The lifted ``y`` param's type shape contains ``tensor.dim(x, 0)``. A naive
+    mutator rewrites that type and returns a fresh Var, so the lifted assignment
+    reads an undefined ``y_N`` instead of the param.
+    """
+    base = _build_dynamic_request()
+    pipeline = _get_func(base, "chip_pipeline")
+    assert pipeline is not None
+    span = ir.Span.unknown()
+    x = ir.Var("x", ir.TensorType([TOTAL, SIZE], DataType.FP32), span)
+    dim = ir.create_op_call("tensor.dim", [x, ir.ConstInt(0, DataType.INDEX, span)], {}, span)
+    flat_type = ir.TensorType([dim, ir.ConstInt(SIZE, DataType.INDEX, span)], DataType.FP32)
+    y = ir.Var("y", flat_type, span)
+    ret = pipeline.body
+    assert isinstance(ret, ir.ReturnStmt)
+    collective = ret.value[0]
+    body = ir.ReturnStmt([y, collective], span)
+    rewritten = ir.Function(
+        pipeline.name,
+        list(
+            zip(
+                [*pipeline.params, x, y],
+                [*pipeline.param_directions, ir.ParamDirection.In, ir.ParamDirection.In],
+            )
+        ),
+        [flat_type, collective.type],
+        body,
+        pipeline.span,
+        type=ir.FunctionType.Orchestration,
+    )
+    before = ir.Program([rewritten], base.name, base.span)
+
+    after = passes.lower_l2_tensor_collectives()(before)
+    result = _get_func(after, "chip_pipeline")
+    assert result is not None
+
+    assigned = []
+
+    class _Assigns(ir.IRVisitor):
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            assigned.append(op)
+            super().visit_assign_stmt(op)
+
+    _Assigns().visit_stmt(result.body)
+    # The lifted copy must use the original `y` param, not a fresh `y_N` whose
+    # defining assignment does not exist.
+    assert any(isinstance(op.value, ir.Var) and op.value.name_hint == "y" for op in assigned), [
+        (op.var.name_hint, type(op.value).__name__) for op in assigned
+    ]
+    assert not any(op.var.name_hint.startswith("y_") for op in assigned), assigned
 
 
 def test_literal_core_num_needs_no_runtime_prelude():
