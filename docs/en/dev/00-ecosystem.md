@@ -110,14 +110,22 @@ A library of real-world models and primitive tensor functions built **on top of*
 
 **Compiler CI coverage:** The `pypto-lib-compile` job compiles only the named
 cases in [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json).
-Coverage focuses on 10 standalone operator entries under
-`models/deepseek_v4_1_flash/`: `compressor`, `sparse_attention`, `gate`,
-`expert_routed`, `expert_shared`, `hc`, `o_proj`, `engram`, `input_pack`, and
-`lm_head`. All listed cases run in the A5 compile job. Layer and full-model
-entries, composed decode/prefill attention and MoE blocks, DSpark, and vision are
-outside this list. New library files do not join automatically; add selected
-operator entries or parameter variants explicitly as coverage needs grow.
-Helpers are covered through their callers. Compilation needs no NPU.
+Coverage focuses on selected standalone operators, split by platform:
+
+- **A5:** 10 entries under `models/deepseek_v4_1_flash/`: `compressor`,
+  `sparse_attention`, `gate`, `expert_routed`, `expert_shared`, `hc`, `o_proj`,
+  `engram`, `input_pack`, and `lm_head`.
+- **A2/A3:** 10 entries under `models/deepseek_v4_flash_lowlat/`:
+  `decode_compressor_ratio128`, `decode_compressor_ratio4`, `decode_sparse_attn_swa`,
+  `expert_routed`, `gate`, `hc_post`, `hc_pre`, `o_proj_tp`, `qkv_proj_rope`, and
+  `rmsnorm`; plus three under `models/qwen3_14b/`: `greedy_sample`,
+  `test_paged_attention_pypto`, and `topk_select`. The Qwen attention case uses
+  the runnable native PyPTO operator driver.
+
+Layer and full-model entries, composed attention/MoE blocks, MTP, DSpark, vision,
+and drafts are outside this list. New library files do not join automatically;
+add selected operator entries or parameter variants explicitly as coverage needs
+grow. Helpers are covered through their callers. Compilation needs no NPU.
 The adapter forces `golden.run` into compile-only mode, records direct compile
 calls, and requires PTOAS. Coverage includes frontend, passes, verification,
 codegen, and PTOAS.
@@ -127,9 +135,9 @@ helper/component parsing while disabling post-compilation execution branches.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
 
-To add A5 operator coverage, append a case to the JSON list; no workflow or
-runner edit is needed. Save the list as UTF-8. For example, to compile a separate
-HC parameter variant:
+To add operator coverage on either configured platform, append a case to the
+JSON list; no workflow or runner edit is needed. Save the list as UTF-8.
+For example, to compile a separate HC parameter variant:
 
 ```json
 {
@@ -158,10 +166,10 @@ The runner validates the entire configuration before compiling; duplicate names,
 unknown fields/platforms, missing files, and an empty platform selection fail the
 job. Use `--cases /path/to/cases.json` to select an alternative list locally.
 
-The A5 compile job runs on a `cpu` host and does not acquire or execute on an
-NPU. The workflow has no A2/A3 leg because the current list selects only A5.
-The runner still supports A2/A3 for custom lists; adding that platform to CI
-also requires an appropriate workflow matrix entry and CANN environment.
+The A2/A3 compile leg runs on a CANN-equipped `npu` host so external wrappers
+can resolve SDK headers. It builds the A2/A3 and simulator runtime packages.
+The A5 leg runs on a `cpu` host with the simulator runtime package. Neither
+compile leg acquires or executes on an NPU.
 
 To reproduce after activating a built PyPTO environment with the pinned PTOAS:
 
@@ -170,6 +178,7 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
   --platform a5 --jobs 4 --output build/lib-compile-a5
 ```
 
+Repeat with `--platform a2a3 --output build/lib-compile-a2a3` for the A2/A3 list.
 Each entry has a 1200-second timeout (override with `--timeout`). Separately, each PTOAS kernel compilation defaults to 60 seconds.
 Set `PYPTO_PTOAS_TIMEOUT_SECONDS` to a positive integer to override that deadline;
 invalid values raise an error. The library compilation CI job sets it to `180`

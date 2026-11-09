@@ -722,15 +722,21 @@ def test_case_configuration_is_utf8_under_ascii_locale(library, case_config):
     assert json.loads(result.stdout) == cases
 
 
-def test_default_cases_cover_deepseek_operators_only():
+def test_default_cases_cover_selected_operator_families():
     cases = json.loads(audit.DEFAULT_CASES.read_text(encoding="utf-8"))
-    assert cases
+    platforms = {
+        "models/deepseek_v4_1_flash": "a5",
+        "models/deepseek_v4_flash_lowlat": "a2a3",
+        "models/qwen3_14b": "a2a3",
+    }
+    assert {Path(case["entry"]).parent.as_posix() for case in cases} == platforms.keys()
     for case in cases:
         entry = Path(case["entry"])
-        assert entry.parent.as_posix() == "models/deepseek_v4_1_flash"
-        assert case["platforms"] == ["a5"]
-        assert not entry.stem.startswith(("decode_", "prefill_", "dspark_"))
-        assert entry.stem != "vision"
+        assert case["platforms"] == [platforms[entry.parent.as_posix()]]
+        assert "layer" not in entry.stem and "fwd" not in entry.stem
+        assert not entry.stem.endswith("_draft")
+        assert not entry.stem.startswith("dspark_")
+        assert entry.stem not in {"decode_csa", "decode_hca", "decode_swa", "decode_moe", "moe", "vision"}
 
 
 def test_duplicate_case_name_fails(library, case_config):

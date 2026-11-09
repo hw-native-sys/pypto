@@ -1630,7 +1630,8 @@ jobs:
           checkout-path: dist-checkout
 
   pypto-lib-compile:
-    # Compile selected DeepSeek V4.1 operator cases on A5 without device execution.
+    # Compile selected DeepSeek and Qwen operator cases without device execution.
+    # A2/A3 extern wrappers need CANN headers from the npu runner.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
     permissions:
@@ -1641,6 +1642,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - platform: a2a3
+            runner: npu
+            needs-cann: 'true'
+            runtime-targets: build_package_a2a3;build_package_sim
           - platform: a5
             runner: cpu
             needs-cann: 'false'
