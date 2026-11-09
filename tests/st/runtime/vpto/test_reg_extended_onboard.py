@@ -14,8 +14,10 @@ artifacts with --worker OUTPUT DEVICE in a task-submit --device auto job, using
 TASK_DEVICE. Compilation never reserves a device; execution never skips pin
 validation or substitutes simulator code. Inputs and outputs are CPU tensors
 transferred by the production ChipWorker, as in test_reg_scope_onboard.py.
+Use --cases expdif_f16 gather_i8 on both commands to check only widening variants.
 """
 
+import argparse
 import json
 import os
 import runpy
@@ -40,6 +42,8 @@ ROOT = Path(__file__).resolve().parents[4]
 LENGTHS = (0, 1, 31, 32, 37, 63, 64)
 CASES = (
     "float32",
+    "expdif_f16",
+    "gather_i8",
     "integer_u32",
     "integer_i32",
     "indexed_f32",
@@ -51,6 +55,96 @@ CASES = (
 )
 FLOAT_OPS = ("expdif", "axpy", "mula", "lrelu", "prelu")
 INTEGER_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
+
+
+def _float32_body():
+    dtype = pl.FP32
+
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], dtype],
+        out: pl.InOut[pl.Tensor[[1, 1024], dtype]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], dtype]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            x = pl.reg.load(a, offset=0, lanes=64)
+            y = pl.reg.load(a, offset=64, lanes=64)
+            z = pl.reg.load(a, offset=128, lanes=64)
+            idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
+            limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
+            seed = pl.reg.full_mask(lanes=64)
+            mask = pl.reg.compare(idx, limit, seed, predicate="lt")
+            e = pl.reg.expdif(x, y, mask)
+            ax = pl.reg.axpy(x, y, 0.75, mask)
+            ma = pl.reg.mula(z, x, y, mask)
+            lr = pl.reg.lrelu(x, 0.125, mask)
+            pr = pl.reg.prelu(x, y, mask)
+            c = pl.reg.store(c, offset=64, value=e)
+            c = pl.reg.store(c, offset=128, value=ax)
+            c = pl.reg.store(c, offset=192, value=ma)
+            c = pl.reg.store(c, offset=256, value=lr)
+            c = pl.reg.store(c, offset=320, value=pr)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
+
+
+def _expdif_f16_body():
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], pl.FP16],
+        out: pl.InOut[pl.Tensor[[1, 1024], pl.FP32]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], pl.FP32]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            x = pl.reg.load(a, lanes=64)
+            y = pl.reg.load(a, offset=64, lanes=64)
+            idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
+            limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
+            seed = pl.reg.full_mask(lanes=64)
+            mask = pl.reg.compare(idx, limit, seed, predicate="lt")
+            result = pl.reg.expdif(x, y, mask)
+            # Store every result lane: a masked store would hide broken zeroing.
+            c = pl.reg.store(c, offset=64, value=result)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
+
+
+def _gather_i8_body():
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], pl.INT8],
+        out: pl.InOut[pl.Tensor[[1, 1024], pl.INT16]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], pl.INT16]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
+            limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
+            seed = pl.reg.full_mask(lanes=64)
+            mask = pl.reg.compare(idx, limit, seed, predicate="lt")
+            offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT16)
+            three = pl.reg.broadcast(3, lanes=64, dtype=pl.UINT16)
+            last = pl.reg.broadcast(255, lanes=64, dtype=pl.UINT16)
+            scaled = pl.reg.mul(offsets, three)
+            reverse = pl.reg.sub(last, scaled)
+            result = pl.reg.gather(a, reverse, mask)
+            c = pl.reg.store(c, offset=64, value=result)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
 
 
 def _histogram_body(bins):
@@ -186,6 +280,8 @@ def _indexed_body(dtype):
 
 def _program(case):
     dtype = {
+        "expdif_f16": pl.FP16,
+        "gather_i8": pl.INT8,
         "integer_u32": pl.UINT32,
         "integer_i32": pl.INT32,
         "indexed_u32": pl.UINT32,
@@ -194,39 +290,17 @@ def _program(case):
         "histogram256": pl.UINT8,
         "reinterpret": pl.UINT32,
     }.get(case, pl.FP32)
-    output_dtype = pl.UINT16 if case.startswith("histogram") else dtype
+    output_dtype = {
+        "expdif_f16": pl.FP32,
+        "gather_i8": pl.INT16,
+    }.get(case, pl.UINT16 if case.startswith("histogram") else dtype)
     bins = 128 if case == "histogram128" else 256
     if case == "float32":
-
-        @pl.jit.incore
-        def body(
-            src: pl.Tensor[[1, 256], dtype],
-            out: pl.InOut[pl.Tensor[[1, 1024], dtype]],
-            n: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, 1024], dtype]:
-            a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
-            c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
-            with pl.reg_scope():
-                x = pl.reg.load(a, offset=0, lanes=64)
-                y = pl.reg.load(a, offset=64, lanes=64)
-                z = pl.reg.load(a, offset=128, lanes=64)
-                idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
-                limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
-                seed = pl.reg.full_mask(lanes=64)
-                mask = pl.reg.compare(idx, limit, seed, predicate="lt")
-                e = pl.reg.expdif(x, y, mask)
-                ax = pl.reg.axpy(x, y, 0.75, mask)
-                ma = pl.reg.mula(z, x, y, mask)
-                lr = pl.reg.lrelu(x, 0.125, mask)
-                pr = pl.reg.prelu(x, y, mask)
-                c = pl.reg.store(c, offset=64, value=e)
-                c = pl.reg.store(c, offset=128, value=ax)
-                c = pl.reg.store(c, offset=192, value=ma)
-                c = pl.reg.store(c, offset=256, value=lr)
-                c = pl.reg.store(c, offset=320, value=pr)
-            c = pl.reshape(c, [1, 1024])
-            pl.store(c, [0, 0], out)
-            return out
+        body = _float32_body()
+    elif case == "expdif_f16":
+        body = _expdif_f16_body()
+    elif case == "gather_i8":
+        body = _gather_i8_body()
     elif case.startswith("histogram"):
         body = _histogram_body(bins)
     elif case == "reinterpret":
@@ -305,12 +379,12 @@ def _environment():
     return pin
 
 
-def _build(output):
+def _build(output, cases=CASES):
     pin = _environment()
     output.mkdir(parents=True, exist_ok=True)
     manifest = {"runtime_commit": pin.installed, "cases": []}
     recorder = runpy.run_path(str(ROOT / "examples/runtime/vf_emitc_vpto.py"))["_record_compilation"]
-    for case in CASES:
+    for case in cases:
         directory = output / case
         compiled = _program(case).compile(
             config=RunConfig(
@@ -326,6 +400,10 @@ def _build(output):
         ops = (
             FLOAT_OPS
             if case == "float32"
+            else ("expdif",)
+            if case == "expdif_f16"
+            else ("gather",)
+            if case == "gather_i8"
             else INTEGER_OPS
             if case.startswith("integer_")
             else ("chist", "dhist", "create_group_mask")
@@ -355,6 +433,10 @@ def _build(output):
 
 
 def _inputs(case, repeat):
+    if case == "gather_i8":
+        # Negative bytes distinguish zero-extension from sign-extension.
+        patterns = np.array([-128, -127, -1, 0, 1, 63, 126, 127], dtype=np.int8)
+        return np.resize(np.roll(patterns, repeat), 256)
     if case.startswith("histogram"):
         patterns = np.array([0, 1, 126, 127, 128, 129, 254, 255], dtype=np.uint8)
         return np.resize(np.roll(patterns, repeat), 256)
@@ -374,7 +456,7 @@ def _inputs(case, repeat):
         return data.view(np.int32) if case == "integer_i32" else data
     if case == "indexed_u32":
         return np.arange(256, dtype=np.uint32) * 104729 + repeat * 31
-    dtype = np.float16 if case == "indexed_f16" else np.float32
+    dtype = np.float16 if case in ("indexed_f16", "expdif_f16") else np.float32
     values = ((np.arange(256) % 29) * 0.125 - 1.75 + repeat * 0.25).astype(dtype)
     if case == "float32":
         values[64:128] = (np.arange(64) % 11) * 0.125 + 0.5
@@ -382,6 +464,9 @@ def _inputs(case, repeat):
 
 
 def _initial(case, data):
+    if case in ("expdif_f16", "gather_i8"):
+        dtype = np.float32 if case == "expdif_f16" else np.int16
+        return np.full(1024, -777, dtype=dtype)
     if case.startswith("histogram"):
         initial = np.full(1024, 0xCCCC, dtype=np.uint16)
         bins = 128 if case == "histogram128" else 256
@@ -392,6 +477,16 @@ def _initial(case, data):
 
 def _golden(case, data, n):
     expected = _initial(case, data)
+    if case in ("expdif_f16", "gather_i8"):
+        if case == "expdif_f16":
+            values = np.exp(data[:64].astype(np.float64) - data[64:128].astype(np.float64))
+        else:
+            indices = 255 - np.arange(64) * 3
+            # The public byte-gather contract zero-extends even signed INT8.
+            values = data.view(np.uint8)[indices].astype(np.int16)
+        expected[64:128] = 0
+        expected[64 : 64 + n] = values[:n]
+        return expected
     if case.startswith("histogram"):
         bins = 128 if case == "histogram128" else 256
         active = (np.arange(256) % 64 < 37) & (np.arange(256) < n * 4)
@@ -470,11 +565,11 @@ def _golden(case, data, n):
     return expected
 
 
-def _run(output, device):
+def _run(output, device, cases=CASES):
     pin = _environment()
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["runtime_commit"] == pin.installed
-    assert {case["name"] for case in manifest["cases"]} == set(CASES)
+    assert {case["name"] for case in manifest["cases"]} == set(cases)
     config = RunConfig(
         backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, device_id=device
     )
@@ -493,7 +588,7 @@ def _run(output, device):
                     actual = torch.from_numpy(_initial(case, data).reshape(1, 1024))
                     handle(src, actual, n)
                     try:
-                        if case == "float32":
+                        if case in ("float32", "expdif_f16"):
                             np.testing.assert_allclose(
                                 actual.numpy()[0],
                                 expected,
@@ -508,7 +603,7 @@ def _run(output, device):
                     except AssertionError as error:
                         mismatches = (
                             np.flatnonzero(~np.isclose(actual.numpy()[0], expected, rtol=3e-5, atol=2e-6))
-                            if case == "float32"
+                            if case in ("float32", "expdif_f16")
                             else np.flatnonzero(actual.numpy()[0] != expected)
                         )
                         failures.append(
@@ -560,9 +655,16 @@ def test_reg_extended_onboard(vpto_onboard_session: Path | None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--build":
-        _build(Path(sys.argv[2]).resolve())
-    elif len(sys.argv) == 4 and sys.argv[1] == "--worker":
-        _run(Path(sys.argv[2]).resolve(), int(sys.argv[3]))
+    if len(sys.argv) > 1 and sys.argv[1] in ("--build", "--worker"):
+        parser = argparse.ArgumentParser(description=__doc__)
+        mode = parser.add_mutually_exclusive_group(required=True)
+        mode.add_argument("--build", type=Path, metavar="OUTPUT")
+        mode.add_argument("--worker", nargs=2, metavar=("OUTPUT", "DEVICE"))
+        parser.add_argument("--cases", nargs="+", choices=CASES, default=CASES)
+        args = parser.parse_args()
+        if args.build is not None:
+            _build(args.build.resolve(), args.cases)
+        else:
+            _run(Path(args.worker[0]).resolve(), int(args.worker[1]), args.cases)
     else:
         pytest.main([__file__, "-v", *sys.argv[1:]])
