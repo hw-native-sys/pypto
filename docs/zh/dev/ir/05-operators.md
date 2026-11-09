@@ -881,3 +881,7 @@ dtype、内存、转换和归属契约见[寄存器操作](../language/06-regist
 `pypto.ir.op.simt` 提供 typed 坐标查询、`lane_id`，以及对 UB Tile 或 GM Tensor
 的标量 `load`/`store`。`store` 返回 `VoidType`，应放入 `EvalStmt`。
 操作、launch、cache 策略及验证契约见[标量 SIMT IR](11-simt.md)。
+
+Warp 内协作操作包括 `vote_all/any/uni`、`vote_ballot`、
+`shuffle_idx/up/down/bfly` 和 `redux_add/min/max`。参见
+[协作操作契约](11-simt.md#warp-内协作操作)，了解活跃 lane、支持类型和 shuffle 宽度。

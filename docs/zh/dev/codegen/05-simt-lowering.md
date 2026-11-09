@@ -1,8 +1,8 @@
 # SIMT lowering 与执行
 
-P3 将显式 `FunctionType.SIMT` helper 和 `SimtLaunchStmt` 接入正式 A5 编译器
-及持久运行时（persistent runtime）。输入为[规范 SIMT IR](../ir/11-simt.md)；
-更高层的 `simt_scope`/JIT 编写入口和自动 outlining 属于独立工作。
+公开的 `simt_scope`/JIT 入口先提取（outline）为 `FunctionType.SIMT` helper
+和 `SimtLaunchStmt`，再接入正式 A5 编译器及持久运行时（persistent runtime）。
+详见[规范 SIMT IR](../ir/11-simt.md)。
 
 ## 可执行子集
 
@@ -81,3 +81,18 @@ PYPTO_VPTO_TIMEOUT=600 python -m pytest \
 python tests/st/runtime/vpto/test_simt_ir_onboard.py --worker build/simt-ir-runtime gm
 python tests/st/runtime/vpto/test_simt_ir_onboard.py --worker build/simt-ir-runtime ub
 ```
+
+## Warp 协作扩展
+
+支持活跃 lane 的 vote/ballot、INT32/FP32 shuffle（width 为 16 或 32），以及
+INT32/FP32 的 add/min/max redux；整数 min/max 显式使用 signed 比较。
+参见[协作操作契约](../ir/11-simt.md#warp-内协作操作)。
+
+Warp 验收与上述 GM/UB 历史验收分开记录。
+`tests/st/runtime/vpto/test_simt_collectives_onboard.py` 使用相同环境开关提供编译和
+设备执行模式；JIT 单元测试还会在无需设备的情况下将所有协作形式经原生 PTOAS 导出为 LLVM。
+
+协作操作验收已在 Ascend950DT_9581、PTOAS v0.72、CANN 9.3.0 和运行时
+`391b2fbcd4dd053204a677662c39b6b7636e8043` 上通过。覆盖两个 warp 中的全部
+七种活跃 lane 数量（0、1、15、16、17、31、32），检查全部 11 个 API、
+INT32/FP32 载荷以及 16/32 宽度，包括分支中的参与集合和非活跃输出保持不变。

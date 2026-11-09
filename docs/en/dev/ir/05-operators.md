@@ -959,3 +959,8 @@ masks derive their lane count from static group geometry.
 `load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and
 belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation,
 launch, cache-policy, and validation contracts.
+
+Warp collectives include `vote_all/any/uni`, `vote_ballot`,
+`shuffle_idx/up/down/bfly` and `redux_add/min/max`. See the
+[collective contracts](11-simt.md#warp-collectives) for active-lane participation,
+supported types and shuffle widths.
