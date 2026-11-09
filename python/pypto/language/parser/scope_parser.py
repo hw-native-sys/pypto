@@ -2446,9 +2446,9 @@ class ScopeParser:
         if self.function.jit_graph_rebinds is not None:
             previous = manager.lookup_var(name)
             if isinstance(previous, ir.Var):
-                previous = self.function.shadowed_capture_tensors.get(previous.unique_id, previous)
-                if isinstance(previous.type, (ir.TensorType, ir.DistributedTensorType)):
-                    self.function.shadowed_capture_tensors[tid.unique_id] = previous
+                previous = self.function.shadowed_capture_vars.get(previous.unique_id, previous)
+                if not is_dep_var_type(previous.type):
+                    self.function.shadowed_capture_vars[tid.unique_id] = previous
         manager.define_var(name, tid, span=span)
 
     def emit_scope_task_id_placeholder(

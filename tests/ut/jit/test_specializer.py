@@ -4058,6 +4058,42 @@ def test_jit_dispatch_capture_then_tensor_assignment(capture_kind, write_scope):
     assert value.same_as(original)
 
 
+@pytest.mark.parametrize("capture_kind", ["dispatch", "graph"])
+def test_jit_dispatch_capture_then_scalar_assignment(capture_kind):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as index:
+            pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+    """).strip("\n")
+    if capture_kind == "graph":
+        capture = 'with pl.graph("recording") as index:\n' + textwrap.indent(
+            capture.replace(" as index", ""), "    "
+        )
+    source = textwrap.dedent("""
+        def f(c: pl.InOut[pl.Tensor]):
+            index = 1
+            index = 2
+            with pl.manual_scope():
+                CAPTURE
+                pl.system.task_dummy(deps=[index])
+                index = 3
+            return index
+    """).replace("        CAPTURE", textwrap.indent(capture, "        "))
+    ctx = _make_ctx("f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 128), DataType.FP32)})
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (original,) = (
+        stmt.var
+        for stmt in function.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "index_v1"
+    )
+    assert value.same_as(original)
+
+
 def test_jit_explicit_recorded_local_dependency_remains_rejected():
     """Fresh capture names must not erase an actual cross-recording TaskId read."""
 
