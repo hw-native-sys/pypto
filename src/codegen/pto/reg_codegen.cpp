@@ -41,6 +41,7 @@ std::string RegisterElement(DataType dtype) {
   if (dtype.IsUnsignedInt()) return "ui" + std::to_string(dtype.GetBit());
   if (dtype == DataType::FP16) return "f16";
   if (dtype == DataType::BF16) return "bf16";
+  if (dtype == DataType::FP8E4M3FN) return "f8E4M3FN";
   return "f32";
 }
 

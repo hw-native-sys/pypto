@@ -75,6 +75,12 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 内部状态，或修改编译器/源码文件。持久复用还需要完整的
 [产物身份与缓存策略](../10-jit-cache.md)。
 
+### JIT 特化中的常量条件
+
+替换 `pl.constexpr` 参数后，JIT 在 IR 解析前判定布尔和数字字面量、已知条件的取反，
+以及基本类型字面量之间的比较。只解析选中的分支，因此未选中的分支可以使用不同的
+Tile 形状或类型。依赖运行时值的条件仍保留为 IR 控制流。这一步不会执行 Python 调用。
+
 ### 动态维度元数据
 
 解析特化程序前，JIT 会推导局部 `TensorMeta`，为仅有裸张量注解的 helper 补齐实参类型。

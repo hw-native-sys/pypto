@@ -40,11 +40,13 @@ bool Supported(DataType t) {
          t == DataType::UINT32;
 }
 
-RegTypePtr Register(const ExprPtr& e, RegKind kind) {
+RegTypePtr Register(const ExprPtr& e, RegKind kind, bool allow_fp8 = false) {
   auto t = As<RegType>(e->GetType());
   CHECK_SPAN(t && t->kind_ == kind, e->span_)
       << "Expected " << (kind == RegKind::VecReg ? "VecReg" : "MaskReg");
-  CHECK_SPAN(kind == RegKind::MaskReg || Supported(t->dtype_), e->span_)
+  CHECK_SPAN(
+      kind == RegKind::MaskReg || Supported(t->dtype_) || (allow_fp8 && t->dtype_ == DataType::FP8E4M3FN),
+      e->span_)
       << "Unsupported register dtype " << t->dtype_.ToString();
   return t;
 }
@@ -180,15 +182,18 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
   auto x = Register(a[0], RegKind::VecReg);
   auto dst = GetRequiredKwarg<DataType>(k, "dtype", "reg.convert");
   const auto src = x->dtype_;
-  bool narrow_float = src == DataType::FP32 && dst == DataType::FP16;
+  // Pooling and normalization round through BF16 without changing logical lanes.
+  bool narrow_float =
+      src == DataType::FP32 && (dst == DataType::FP16 || dst == DataType::BF16 || dst == DataType::FP8E4M3FN);
   bool float_int = src == DataType::FP32 && dst == DataType::INT32;
   bool narrow_int = src == DataType::INT32 && dst == DataType::INT8;
-  bool plain =
-      (src == DataType::FP16 && dst == DataType::FP32) || (src == DataType::INT32 && dst == DataType::FP32) ||
-      (src == DataType::INT8 && dst == DataType::FP16) || (src == DataType::INT8 && dst == DataType::INT16) ||
-      (src == DataType::INT16 && dst == DataType::INT32) ||
-      (src == DataType::UINT8 && dst == DataType::UINT16) ||
-      (src == DataType::UINT16 && dst == DataType::UINT32);
+  bool plain = ((src == DataType::FP16 || src == DataType::BF16) && dst == DataType::FP32) ||
+               (src == DataType::INT32 && dst == DataType::FP32) ||
+               (src == DataType::INT8 && dst == DataType::FP16) ||
+               (src == DataType::INT8 && dst == DataType::INT16) ||
+               (src == DataType::INT16 && dst == DataType::INT32) ||
+               (src == DataType::UINT8 && dst == DataType::UINT16) ||
+               (src == DataType::UINT16 && dst == DataType::UINT32);
   CHECK(plain || narrow_float || float_int || narrow_int || src == dst) << "Unsupported convert dtype pair";
   bool rounding = false, saturate = false;
   for (const auto& [key, value] : k) {
@@ -441,7 +446,7 @@ REGISTER_OP("reg.interpret_cast")
     .no_arg_writes()
     .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
       CHECK(a.size() == 1) << "reg.interpret_cast expects one VecReg";
-      auto x = Register(a[0], RegKind::VecReg);
+      auto x = Register(a[0], RegKind::VecReg, true);
       auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.interpret_cast");
       CHECK(Supported(dtype)) << "Unsupported reinterpret destination dtype";
       const auto source_bits = static_cast<int64_t>(x->dtype_.GetBit());
@@ -532,13 +537,22 @@ static bool RegisterGenerators() {
       auto dtype = mask ? DataType::BOOL : GetRequiredKwarg<DataType>(k, "dtype", "reg");
       if (!mask) {
         CHECK(Supported(dtype)) << "Unsupported generator dtype";
-        Scalar(a[0], dtype);
+        if (op == "broadcast" && As<RegType>(a[0]->GetType())) {
+          // Broadcast reductions directly without a UB store/load or scalar transfer.
+          auto value = Register(a[0], RegKind::VecReg);
+          CHECK(value->shape_ == 1) << "Register broadcast requires a one-lane VecReg";
+          CHECK(value->dtype_ == dtype) << "Register broadcast dtype mismatch";
+        } else {
+          Scalar(a[0], dtype);
+        }
       }
       if (op == "active_mask") {
         auto t = As<ScalarType>(a[0]->GetType());
         CHECK(t && t->dtype_ == DataType::INDEX) << "active_lanes must be INDEX";
-        auto active = Constant(a[0], "active_lanes");
-        CHECK(active >= 0 && active <= n) << "active_lanes must be in [0, lanes]";
+        // Runtime counts are caller-bounded; retain early checks for constants.
+        if (auto active = As<ConstInt>(a[0])) {
+          CHECK(active->value_ >= 0 && active->value_ <= n) << "active_lanes must be in [0, lanes]";
+        }
       }
       if (op == "index_gen") {
         // A5 VCI has no BF16 form. Reject at the shared schema boundary so

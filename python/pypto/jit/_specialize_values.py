@@ -16,8 +16,9 @@ changed captured value cannot change the source without changing its key.
 import ast
 import enum
 import functools
+import operator
 import types
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from pypto.pypto_core import DataType
@@ -264,3 +265,36 @@ def array_dtype_str(dt: DataType) -> str:
     tensor/tile element dtype but does have a ``pl.TASK_ID`` constant).
     """
     return _DTYPE_TO_PL.get(dt, f"pl.{str(dt).upper()}")
+
+
+def literal_condition(node: ast.expr) -> bool | None:
+    """Resolve primitive literal conditions without evaluating calls or names."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (bool, int, float)):
+        return bool(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = literal_condition(node.operand)
+        return None if value is None else not value
+    if isinstance(node, ast.Compare):
+        comparisons: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+            ast.Lt: operator.lt,
+            ast.LtE: operator.le,
+            ast.Gt: operator.gt,
+            ast.GtE: operator.ge,
+        }
+        operands = [node.left, *node.comparators]
+        if not all(
+            isinstance(value, ast.Constant) and type(value.value) in (bool, int, float, str, type(None))
+            for value in operands
+        ):
+            return None
+        try:
+            literals = [cast(ast.Constant, operand).value for operand in operands]
+            return all(
+                comparisons[type(op)](left, right)
+                for left, op, right in zip(literals, node.ops, literals[1:])
+            )
+        except (KeyError, TypeError):
+            return None
+    return None

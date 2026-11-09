@@ -171,6 +171,41 @@ def test_invalid_function_context(kind):
     assert any("context" in d.message for d in verify(region(definition(register())), kind))
 
 
+def test_inline_register_helper_requires_final_aiv_placement():
+    # Inline helpers have no execution placement until expanded into a caller.
+    body = region(definition(register()))
+    assert verify(body, ir.FunctionType.Inline) == []
+    assert any("final placement" in d.message for d in verify(body, ir.FunctionType.Inline, final=True))
+    assert any("context" in d.message for d in verify(body, ir.FunctionType.Orchestration))
+
+
+def test_inline_register_helper_inherits_caller_context():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Inline)
+        def helper(self, src: pl.Tile[[64], pl.FP32, pl.Mem.Vec]) -> pl.Tile[[64], pl.FP32, pl.Mem.Vec]:
+            with pl.reg_scope():
+                value = pl.reg.load(src, lanes=64)
+                out = pl.reg.store(src, value=value)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, src: pl.Tile[[64], pl.FP32, pl.Mem.Vec]) -> pl.Tile[[64], pl.FP32, pl.Mem.Vec]:
+            return self.helper(src)
+
+    after = passes.inline_functions()(Before)
+    assert all(f.func_type != ir.FunctionType.Inline for f in after.functions.values())
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.RegScopeValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, after) == []
+    caller = next(iter(after.functions.values()))
+    # The exact same expanded body is invalid when placed in orchestration.
+    assert any(
+        "context" in d.message
+        for d in verify(caller.body, ir.FunctionType.Orchestration, params=caller.params)
+    )
+
+
 @pytest.mark.parametrize(
     "kind", [ir.FunctionType.Opaque, ir.FunctionType.Orchestration, ir.FunctionType.Graph]
 )

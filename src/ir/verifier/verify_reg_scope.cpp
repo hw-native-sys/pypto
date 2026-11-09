@@ -43,10 +43,7 @@ namespace {
 class RegionChecker : public IRVisitor {
  public:
   RegionChecker(FunctionPtr function, std::vector<Diagnostic>& diagnostics, bool final)
-      : function_(std::move(function)),
-        diagnostics_(diagnostics),
-        final_(final),
-        incore_(IsInCoreType(function_->func_type_) && function_->func_type_ != FunctionType::AIC) {}
+      : function_(std::move(function)), diagnostics_(diagnostics), final_(final) {}
 
   void Run() {
     for (const auto& p : function_->params_) {
@@ -329,7 +326,10 @@ class RegionChecker : public IRVisitor {
   bool final_;
   int hardware_loop_depth_ = 0;
   bool empty_hardware_loop_ = false;
-  bool incore_;
+  // Inline helpers inherit execution placement from their eventual caller.
+  // The final verifier still requires AIV after all helpers are expanded.
+  bool incore_ = (IsInCoreType(function_->func_type_) && function_->func_type_ != FunctionType::AIC) ||
+                 function_->func_type_ == FunctionType::Inline;
   bool collecting_ = true;
   bool blocked_ = false;
   bool storing_container_ = false;

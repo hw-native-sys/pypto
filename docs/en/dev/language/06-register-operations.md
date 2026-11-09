@@ -30,6 +30,11 @@ in orchestration code and orchestration scopes inside RegScope are rejected.
 Explicit non-A5 targets are rejected; target checks wait until compilation if no
 target has been selected.
 
+Inline helpers may contain `reg_scope` and accept explicitly typed Vec Tiles.
+They inherit their caller's execution context when expanded; final placement
+must still be AIV. A register value cannot cross the helper boundary: return
+Tiles written by `reg.store` instead.
+
 `pl.Reg[lanes, dtype]` describes a vector register (`VecReg`).
 `pl.Reg[lanes, pl.BOOL, pl.RegKind.MaskReg]` describes a predicate mask (`MaskReg`).
 The optional third annotation field is the register kind; its default is
@@ -105,10 +110,10 @@ aliases the destination and has exactly the destination Tile type.
 
 | API signature | Parameters and behavior | Result | Dtypes |
 | ------------- | ----------------------- | ------ | ------ |
-| `broadcast(scalar, *, lanes, dtype)` | Repeat `scalar` into every lane. Scalar dtype must equal `dtype`. | VecReg | `T` |
+| `broadcast(scalar, *, lanes, dtype)` | Repeat a scalar or one-lane VecReg into every lane. Input dtype must equal `dtype`. | VecReg | `T` |
 | `index_gen(base, *, lanes, dtype, order="ascending")` | `base`: scalar start value; result lane `i` is `base + i`. `order` accepts only `"ascending"`. Base dtype must equal `dtype`. | VecReg | `F + I`; BF16 is rejected during type deduction, before codegen |
 | `full_mask(*, lanes)` | Activate every logical lane. | BOOL MaskReg | BOOL |
-| `active_mask(active_lanes, *, lanes)` | Activate the prefix `[0, active_lanes)`. `active_lanes` is a static INDEX integer in `[0, lanes]`; zero creates an all-false mask. Dynamic counts are unsupported. | BOOL MaskReg | BOOL |
+| `active_mask(active_lanes, *, lanes)` | Activate the prefix `[0, active_lanes)` using a static or runtime INDEX count. Constants are checked against `[0, lanes]`; callers must keep runtime counts in that range. Zero creates an all-false mask; the input count is unchanged. | BOOL MaskReg | BOOL |
 
 ## Vector arithmetic
 
@@ -243,7 +248,10 @@ chooses saturation. They are not universal flags: only the pairs below accept th
 | Source | Destination | `rounding` | `saturate` |
 | ------ | ----------- | ---------- | ---------- |
 | FP16 | FP32 | Must be omitted | Must be omitted |
+| BF16 | FP32 | Must be omitted | Must be omitted |
 | FP32 | FP16 | R/A/Z; DSL default R | Required: True or False |
+| FP32 | BF16 | R/A/Z; DSL default R | Required: True or False |
+| FP32 | FP8E4M3FN | R/A/Z; DSL default R | Required: True or False |
 | FP32 | INT32 | R/A/F/C/Z; DSL default Z | Required: True or False |
 | INT32 | FP32 | Must be omitted | Must be omitted |
 | INT8 | FP16 | Must be omitted | Must be omitted |
@@ -258,8 +266,13 @@ toward negative infinity; C toward positive infinity; Z toward zero. H is not su
 `saturate=True` selects saturation (clamping to the target range);
 `saturate=False` selects non-saturating conversion.
 Same-dtype DSL conversion returns the original register if both optional
-attributes are omitted. Other dtype pairs are rejected, including BF16
-conversions. Raw IR/Builder calls must supply normalized rounding explicitly
+attributes are omitted. Other dtype pairs are rejected.
+FP8E4M3FN conversion preserves logical lanes as compact FP8 values.
+Use `interpret_cast(result, dtype=pl.UINT8)` to store their raw bytes through
+an integer Tile. FP8 arithmetic, direct register loads/stores and reverse numeric
+conversion are not enabled by this conversion pair.
+
+Raw IR/Builder calls must supply normalized rounding explicitly
 where required; the defaults above are supplied by the DSL wrapper.
 
 ## Extended VMI operations

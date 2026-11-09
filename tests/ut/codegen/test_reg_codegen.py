@@ -22,6 +22,30 @@ from pypto.ir.op import tile
 SPAN = ir.Span("register_kernel.py", 10, 1, 10, 60)
 
 
+@pytest.mark.ptoas_compile
+def test_dynamic_active_mask_compiles_without_vector_comparison(tmp_path):
+    ib = IRBuilder()
+    with ib.function("dynamic_mask", span=SPAN, type=ir.FunctionType.AIV) as f:
+        count = f.param("count", ir.ScalarType(DataType.INDEX), SPAN)
+        dst = ib.let("dst", tile.full([64], dtype=DataType.FP32, value=0))
+        with ib.reg_scope(SPAN):
+            mask = ib.let("mask", pl.reg.active_mask(count, lanes=64).unwrap())
+            value = ib.emit_reg(
+                "value",
+                "reg.broadcast",
+                [ir.ConstFloat(1, DataType.FP32, SPAN)],
+                {"lanes": 64, "dtype": DataType.FP32},
+                SPAN,
+            )
+            ib.emit_reg_store("out", dst, value, mask=mask, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "DynamicMask", SPAN))
+    source = generate(program)
+    assert "pto.vmi.create_mask %arg0 : index" in source
+    assert "pto.vmi.vcmp" not in source
+    compile_review_pto(source, tmp_path)
+
+
 @pytest.fixture(autouse=True)
 def a5_backend():
     backend.reset_for_testing()
@@ -658,6 +682,40 @@ def compile_review_pto(source, tmp_path, level="level2"):
 
 
 @pytest.mark.ptoas_compile
+@pytest.mark.parametrize("operation", ["reduce_sum", "reduce_max", "reduce_min"])
+@pytest.mark.parametrize(
+    "dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.UINT16, DataType.INT32, DataType.UINT32]
+)
+def test_reduction_register_broadcast(operation, dtype, tmp_path):
+    ib = IRBuilder()
+    with ib.function("reduction_broadcast", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = ib.let("dst", tile.create([64], dtype=dtype, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            x = ib.emit_reg(
+                "x",
+                "reg.broadcast",
+                [ir.ConstFloat(1.0, dtype, SPAN) if dtype.is_float() else ir.ConstInt(1, dtype, SPAN)],
+                {"lanes": 64, "dtype": dtype},
+                SPAN,
+            )
+            m = ib.emit_reg("m", "reg.full_mask", [], {"lanes": 64}, SPAN)
+            reduced = ib.emit_reg(
+                "reduced",
+                f"reg.{operation}",
+                [x, m],
+                {"reassoc": True} if operation == "reduce_sum" else {},
+                SPAN,
+            )
+            result = ib.emit_reg("result", "reg.broadcast", [reduced], {"lanes": 64, "dtype": dtype}, SPAN)
+            ib.emit_reg_store("out", dst, result, span=SPAN)
+    with passes.PassContext([]):
+        source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "Broadcast", SPAN)))
+    broadcast = next(line for line in source.splitlines() if "pto.vmi.vbrc %reduced" in line)
+    assert "!pto.vmi.vreg<1x" in broadcast and "-> !pto.vmi.vreg<64x" in broadcast
+    compile_review_pto(source, tmp_path)
+
+
+@pytest.mark.ptoas_compile
 def test_review_masked_store_preserves_inactive_lanes(tmp_path):
     source = generate(build_kernel(masked=True))
     store = next(line for line in source.splitlines() if "pto.vmi.vstore" in line)
@@ -670,6 +728,12 @@ def test_review_masked_store_preserves_inactive_lanes(tmp_path):
     "src_dtype,dst_dtype,attrs",
     [
         (DataType.FP16, DataType.FP32, {}),
+        (DataType.BF16, DataType.FP32, {}),
+        *[
+            (DataType.FP32, DataType.BF16, {"saturate": sat, "rounding": rounding})
+            for rounding in ("R", "A", "Z")
+            for sat in (False, True)
+        ],
         (DataType.INT32, DataType.FP32, {}),
         (DataType.INT8, DataType.FP16, {}),
         (DataType.INT8, DataType.INT16, {}),
@@ -696,7 +760,7 @@ def test_review_conversion_attribute_presence(src_dtype, dst_dtype, attrs, tmp_p
         with ib.reg_scope(SPAN):
             scalar = (
                 ir.ConstFloat(1.0, src_dtype, SPAN)
-                if src_dtype in (DataType.FP16, DataType.FP32)
+                if src_dtype in (DataType.FP16, DataType.BF16, DataType.FP32)
                 else ir.ConstInt(1, src_dtype, SPAN)
             )
             x = ib.emit_reg("x", "reg.broadcast", [scalar], {"lanes": 64, "dtype": src_dtype}, SPAN)
@@ -1191,3 +1255,29 @@ class RegisterCache:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("rounding", ["R", "A", "Z"])
+@pytest.mark.parametrize("saturate", [False, True])
+def test_fp32_to_fp8_register_conversion_preserves_compact_bytes(tmp_path, rounding, saturate):
+    """Window publication needs 64 contiguous FP8 bytes after FP32 conversion."""
+    ib = IRBuilder()
+    with ib.function("fp8_publish", span=SPAN, type=ir.FunctionType.AIV) as f:
+        src = ib.let("src", tile.full([64], dtype=DataType.FP32, value=1.0))
+        dst = ib.let("dst", tile.create([64], dtype=DataType.UINT8, target_memory=ir.MemorySpace.Vec))
+        with ib.reg_scope(SPAN):
+            value = ib.emit_reg("value", "reg.load", [src, integer(0)], {"lanes": 64}, SPAN)
+            fp8 = ib.emit_reg(
+                "fp8",
+                "reg.convert",
+                [value],
+                {"dtype": DataType.FP8E4M3FN, "rounding": rounding, "saturate": saturate},
+                SPAN,
+            )
+            packed = ib.emit_reg("packed", "reg.interpret_cast", [fp8], {"dtype": DataType.UINT8}, SPAN)
+            ib.emit_reg_store("written", dst, packed, span=SPAN)
+    with passes.PassContext([]):
+        source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "FP8Publish", SPAN)))
+    assert "!pto.vmi.vreg<64xf8E4M3FN>" in source
+    compile_review_pto(source, tmp_path)

@@ -15,6 +15,27 @@ from pypto import DataType, ir
 SPAN = ir.Span.unknown()
 
 
+def test_dynamic_active_mask_accepts_index_scalar():
+    # Tail sizes arrive as scalar SSA values rather than compile-time constants.
+    count = ir.Var("count", ir.ScalarType(DataType.INDEX), SPAN)
+    result = call("active_mask", [count], lanes=64)
+    assert reg_type(result).kind == ir.RegKind.MaskReg
+    assert reg_type(result).lanes == 64
+
+
+@pytest.mark.parametrize("active", [-1, 65])
+def test_active_mask_rejects_out_of_range_constants(active):
+    with pytest.raises(ValueError, match="active_lanes"):
+        call("active_mask", [integer(active)], lanes=64)
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.UINT32, DataType.FP32])
+def test_active_mask_rejects_non_index_scalar(dtype):
+    count = ir.Var("count", ir.ScalarType(dtype), SPAN)
+    with pytest.raises(ValueError, match="INDEX"):
+        call("active_mask", [count], lanes=64)
+
+
 def integer(value):
     return ir.ConstInt(value, DataType.INDEX, SPAN)
 
@@ -42,6 +63,44 @@ def call(name, args=(), **kwargs):
 def reg_type(expr: ir.Expr) -> ir.RegType:
     assert isinstance(expr.type, ir.RegType)
     return expr.type
+
+
+@pytest.mark.parametrize(
+    "src,dst,attrs",
+    [
+        (DataType.FP32, DataType.BF16, {"rounding": "R", "saturate": False}),
+        (DataType.BF16, DataType.FP32, {}),
+    ],
+)
+def test_bf16_round_trip_conversion(src, dst, attrs):
+    # Compressor pooling rounds before RMS, so FP16 is not a valid substitute.
+    result = call("convert", [vec(dtype=src)], dtype=dst, **attrs)
+    assert reg_type(result).dtype == dst
+    assert reg_type(result).lanes == 64
+
+
+def test_broadcast_one_lane_register_reduction():
+    reduced = call("reduce_sum", [vec(), mask()], reassoc=True)
+    assert reg_type(reduced).lanes == 1
+    result = call("broadcast", [reduced], lanes=64, dtype=DataType.FP32)
+    assert reg_type(result).lanes == 64
+    with pytest.raises(ValueError, match="one.lane|single.lane"):
+        call("broadcast", [vec()], lanes=64, dtype=DataType.FP32)
+    with pytest.raises(ValueError, match="dtype mismatch"):
+        call("broadcast", [reduced], lanes=64, dtype=DataType.INT32)
+
+
+def test_fp8_conversion_requires_byte_reinterpretation_for_register_memory():
+    fp8 = DataType.FP8E4M3FN
+    converted = call("convert", [vec()], dtype=fp8, rounding="R", saturate=False)
+    fp8_tile = ir.Var("fp8", ir.TileType([64], fp8, memory_space=ir.MemorySpace.Vec), SPAN)
+    with pytest.raises(ValueError, match="dtype"):
+        call("load", [fp8_tile, integer(0)], lanes=64)
+    with pytest.raises(ValueError, match="dtype"):
+        call("store", [fp8_tile, integer(0), converted])
+    as_bytes = call("interpret_cast", [converted], dtype=DataType.UINT8)
+    assert reg_type(as_bytes).dtype == DataType.UINT8
+    assert reg_type(as_bytes).lanes == 64
 
 
 def test_load_store_type_alias_and_effect():
@@ -246,7 +305,7 @@ def test_convert_whitelist(src, dst, attrs):
 @pytest.mark.parametrize(
     "src,dst,attrs",
     [
-        (DataType.BF16, DataType.FP32, {}),
+        (DataType.BF16, DataType.FP32, {"rounding": "R"}),
         (DataType.UINT32, DataType.FP32, {}),
         (DataType.INT32, DataType.UINT32, {}),
         (DataType.FP32, DataType.FP16, {"rounding": "R"}),

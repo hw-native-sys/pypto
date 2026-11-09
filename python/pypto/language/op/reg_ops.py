@@ -67,8 +67,8 @@ def store(
     return Tile(expr=_call("store", args))
 
 
-def broadcast(scalar: Scalar | ir.Expr | int | float, *, lanes: int, dtype: DataType) -> Reg:
-    """Broadcast a scalar without implicitly casting an existing Scalar SSA."""
+def broadcast(scalar: Reg | Scalar | ir.Expr | int | float, *, lanes: int, dtype: DataType) -> Reg:
+    """Broadcast a scalar or one-lane VecReg without implicitly casting its dtype."""
     return Reg(_call("broadcast", [_expr(scalar, dtype)], lanes=_lanes(lanes), dtype=dtype))
 
 
@@ -85,7 +85,11 @@ def full_mask(*, lanes: int) -> Reg:
 
 
 def active_mask(active_lanes: Scalar | ir.Expr | int, *, lanes: int) -> Reg:
-    """Activate a statically proven prefix of the logical lanes."""
+    """Activate a prefix using a static or runtime INDEX count.
+
+    The caller must keep runtime counts in [0, lanes]. Constants are checked
+    eagerly; zero creates an all-false mask. The count is not modified.
+    """
     return Reg(_call("active_mask", [_expr(active_lanes)], lanes=_lanes(lanes)))
 
 
@@ -203,7 +207,7 @@ def convert(
         return Reg(expr)
     kwargs: dict[str, Any] = {"dtype": dtype}
     if rounding is None and src == DataType.FP32:
-        if dtype == DataType.FP16:
+        if dtype in (DataType.FP16, DataType.BF16, DataType.FP8E4M3FN):
             rounding = "R"
         elif dtype == DataType.INT32:
             rounding = "Z"
