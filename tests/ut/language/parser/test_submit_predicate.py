@@ -978,7 +978,13 @@ def test_graph_completion_covers_nested_predicate_producer(producer, dependency,
 
 
 @pytest.mark.parametrize("dependency", ["seed", "done"])
-def test_graph_local_task_id_does_not_replace_an_outer_tensor_producer(dependency):
+@pytest.mark.parametrize("writes_predicate_tensor", [False, True])
+def test_graph_producer_tracks_tensor_identity_despite_local_task_id(dependency, writes_predicate_tensor):
+    write = (
+        "                with pl.at(level=pl.Level.CORE_GROUP):\n                    rc = self.gate(rc)\n"
+        if writes_predicate_tensor
+        else ""
+    )
     source = (
         _SCOPE_HEAD
         + f"""
@@ -989,8 +995,8 @@ def test_graph_local_task_id_does_not_replace_an_outer_tensor_producer(dependenc
         with pl.manual_scope():
             with pl.at(level=pl.Level.CORE_GROUP) as seed:
                 rc = self.gate(rc)
-            with pl.graph("unrelated") as done:
-                with pl.at(level=pl.Level.CORE_GROUP) as rc:
+            with pl.graph("recording") as done:
+{write}                with pl.at(level=pl.Level.CORE_GROUP) as rc:
                     rc2 = self.gate(rc2)
                 inner = pl.system.task_dummy(deps=[rc])
                 rc = inner
@@ -999,11 +1005,12 @@ def test_graph_local_task_id_does_not_replace_an_outer_tensor_producer(dependenc
         return out
 """
     )
-    if dependency == "done":
-        with pytest.raises(ParserSyntaxError, match="'seed' is not in deps="):
-            pl.parse_program(source)
+    producer = "done" if writes_predicate_tensor else "seed"
+    if dependency == producer:
+        pl.parse_program(source)
     else:
-        assert pl.parse_program(source) is not None
+        with pytest.raises(ParserSyntaxError, match=f"'{producer}' is not in deps="):
+            pl.parse_program(source)
 
 
 def test_plain_graph_local_task_id_assignment_does_not_export_a_task_id():

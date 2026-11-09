@@ -426,7 +426,7 @@ class TestBodyTransformer:
                     pl.system.task_dummy(deps=[ready, done])
         """
         rendered = self._transform(source, {})
-        assert "ready_v2 = pl.system.task_dummy(deps=[])" in rendered
+        assert "ready_v1 = pl.system.task_dummy(deps=[])" in rendered
         assert "pl.system.task_dummy(deps=[ready_v1, done])" in rendered
         program_source = "@pl.program\nclass Before:\n    @pl.function\n" + textwrap.indent(rendered, "    ")
         assert pl.parse_program(program_source).get_function("f") is not None
@@ -3818,6 +3818,29 @@ def test_jit_recorded_local_capture_name_can_be_reused():
                         pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
                 with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
                     pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+def test_jit_plain_recorded_local_assignment_preserves_caller_task_id():
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            seed = pl.system.task_dummy(deps=[])
+            latest = pl.system.task_dummy(deps=[seed])
+            for _ in pl.range(1):
+                ready = seed
+                ready = latest
+            with pl.graph("recording") as done:
+                inner = pl.system.task_dummy(deps=[])
+                ready = inner
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                    c = pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready, done]):
+                c = pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
         return c
 
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):

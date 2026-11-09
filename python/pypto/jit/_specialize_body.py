@@ -41,22 +41,14 @@ def _is_graph_context(value: ast.expr) -> bool:
 
 
 def _graph_local_capture_names(node: ast.With) -> set[str]:
-    if not any(_is_graph_context(item.context_expr) for item in node.items):
-        return set()
-    names: set[str] = set()
-    for stmt in node.body:
-        for inner in ast.walk(stmt):
-            if isinstance(inner, ast.With):
-                names.update(
-                    item.optional_vars.id for item in inner.items if isinstance(item.optional_vars, ast.Name)
-                )
-            elif isinstance(inner, (ast.Assign, ast.AnnAssign)) and isinstance(inner.value, ast.Call):
-                callee = inner.value.func
-                name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
-                if name == "task_dummy":
-                    targets = inner.targets if isinstance(inner, ast.Assign) else [inner.target]
-                    names.update(target.id for target in targets if isinstance(target, ast.Name))
-    return names
+    return {
+        item.optional_vars.id
+        for stmt in node.body
+        for inner in ast.walk(stmt)
+        if isinstance(inner, ast.With)
+        for item in inner.items
+        if isinstance(item.optional_vars, ast.Name)
+    }
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -885,7 +877,8 @@ class BodyTransformer(ast.NodeTransformer):
 
     def visit_With(self, node: ast.With) -> ast.stmt:
         """Visit With block, incrementing scope depth for its body."""
-        graph_locals = _graph_local_capture_names(node)
+        graph = any(_is_graph_context(item.context_expr) for item in node.items)
+        graph_locals: set[str] = _graph_local_capture_names(node) if graph else set()
         captures: dict[str, str] = {}
         for item in node.items:
             item.context_expr = self.visit(item.context_expr)
@@ -947,6 +940,16 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
+        # A binding visible at Graph entry is outside the recording, even
+        # when its previous assignment was in a sibling at the same depth.
+        # Keep its emitted name so the parser can isolate TaskIds by type
+        # and still recognize writes to caller-owned tensors.
+        outer_depths = (
+            {name: depth for name, depth in self._assign_depth.items() if depth > self._scope_depth}
+            if graph
+            else {}
+        )
+        self._assign_depth.update(dict.fromkeys(outer_depths, self._scope_depth))
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
@@ -975,6 +978,7 @@ class BodyTransformer(ast.NodeTransformer):
                 _restore_bindings(self._assign_count, old_counts, graph_locals)
                 _restore_bindings(self._assign_depth, old_depths, graph_locals)
                 _restore_bindings(self._var_renames, old_renames, graph_locals)
+            self._assign_depth.update(outer_depths)
         # A capture binds the dispatch result, not a body-local reassignment
         # of the same spelling. Do not create another alpha version here:
         # the parser reuses the source Var and native SSA builds carries/phis.

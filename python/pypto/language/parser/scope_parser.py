@@ -1937,7 +1937,7 @@ class ScopeParser:
             sync_start=sync_start,
             manual=manual,
             attrs=attrs,
-        ):
+        ) as scope:
             with (
                 self.regions.scope_kind_context(scope_kind),
                 self.regions.incore_user_split_context(scope_kind, split),
@@ -1962,11 +1962,27 @@ class ScopeParser:
                 bindings = self.services.scope_manager.exit_scope(
                     leak_vars=True, exclude_names=local_task_ids
                 )
-                return [
-                    value
-                    for name, value in bindings.items()
-                    if isinstance(value, ir.Var) and (local_task_ids is None or name not in local_task_ids)
-                ]
+        exported = [
+            value
+            for name, value in bindings.items()
+            if isinstance(value, ir.Var) and (local_task_ids is None or name not in local_task_ids)
+        ]
+        if local_task_ids:
+            # A TaskId can hide an earlier assignment to a caller's tensor
+            # in the symbol table. Check the actual IR definition by identity.
+            shadowed_tensors = {
+                value.unique_id
+                for name in local_task_ids
+                if isinstance(value := self.services.scope_manager.lookup_var(name), ir.Var)
+                and isinstance(value.type, (ir.TensorType, ir.DistributedTensorType))
+            }
+            if shadowed_tensors:
+                exported.extend(
+                    var
+                    for var in ir.collect_def_vars(scope.get_result().body)
+                    if var.unique_id in shadowed_tensors
+                )
+        return exported
 
     def parse_graph_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
