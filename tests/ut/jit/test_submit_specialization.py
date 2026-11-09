@@ -9,6 +9,7 @@
 
 """JIT dependency discovery and binding through explicit submissions."""
 
+import ast
 from pathlib import Path
 
 import pypto.language as pl
@@ -17,12 +18,15 @@ import torch
 from pypto import passes
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram
+from pypto.jit import _ast_analysis, _tensor_meta
 from pypto.jit.decorator import _discover_dep_bindings
+from pypto.jit.specializer import TensorMeta
 from pypto.pypto_core import ir
 from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # The callee constexpr must take precedence over this module shape constant.
 _RETURN_WIDTH = 64
+_FACTORY_ROWS = 64
 
 
 def _submissions(program: ir.Program) -> list[ir.Submit]:
@@ -390,11 +394,12 @@ def test_graph_call_expression_retains_single_output_metadata():
     assert len(_submissions(entry.specialize(torch.empty(16, 32), torch.empty(16, 32)))) == 2
 
 
-@pytest.mark.parametrize("capture", ["shape", "dtype"])
+@pytest.mark.parametrize("capture", ["shape", "dtype", "shadow"])
 def test_ordinary_expression_return_keeps_annotation_only_factory_captures(capture, tmp_path, monkeypatch):
     monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
     output_shape = [16, 32]
     output_dtype = pl.FP32
+    _FACTORY_ROWS = 16
 
     @pl.jit.incore
     def body(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
@@ -407,15 +412,23 @@ def test_ordinary_expression_return_keeps_annotation_only_factory_captures(captu
         @pl.jit
         def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[output_shape, pl.FP32]:
             return body(x, out)
-    else:
+    elif capture == "dtype":
 
         @pl.jit
         def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[16, 32], output_dtype]:
             return body(x, out)
 
+    else:
+
+        @pl.jit
+        def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[_FACTORY_ROWS, 32], pl.FP32]:
+            return body(x, out)
+
     program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
     main = program.get_function("entry")
     assert main is not None
+    assert len(main.return_types) == 1
+    assert ir.structural_equal(main.return_types[0], ir.TensorType([16, 32], pl.FP32))
     _assert_codegen_artifacts(entry, [torch.empty(16, 32), torch.empty(16, 32)], tmp_path)
 
 
@@ -544,6 +557,79 @@ def test_first_omitted_output_uses_call_owned_constexpr_shape(tmp_path, monkeypa
     ]
     assert outputs and all(ir.structural_equal(typ, ir.TensorType([16, 32], pl.FP32)) for typ in outputs)
     _assert_codegen_artifacts(entry, [torch.empty(16, 32)], tmp_path)
+
+
+def test_omitted_output_uses_eager_factory_capture_even_when_global_resolves():
+    _FACTORY_ROWS = 16
+
+    @pl.jit.incore
+    def kernel(x: pl.Tensor, out: pl.Out[pl.Tensor[[_FACTORY_ROWS, 32], pl.FP32]]):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        value, done = pl.submit(kernel, x)
+        return value
+
+    program = entry.specialize(torch.empty(16, 32))
+    kernel_ir = program.get_function("kernel")
+    assert kernel_ir is not None
+    assert ir.structural_equal(kernel_ir.params[1].type, ir.TensorType([16, 32], pl.FP32))
+
+
+def test_factory_annotation_changes_the_compiler_source_key():
+    def factory(rows):
+        @pl.jit.incore
+        def body(x: pl.Tensor, out: pl.Out[pl.Tensor[[rows, 32], pl.FP32]]):
+            return out
+
+        return body
+
+    assert factory(16)._get_source_hash() != factory(64)._get_source_hash()
+
+
+def test_submit_rejects_runtime_argument_after_omitted_output():
+    @pl.jit.incore
+    def kernel(
+        x: pl.Tensor, left: pl.Out[pl.Tensor[[16, 32], pl.FP32]], right: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+    ):
+        return left, right
+
+    @pl.jit
+    def entry(x: pl.Tensor, supplied: pl.InOut[pl.Tensor]):
+        launch = pl.submit(kernel, x, right=supplied)
+        return launch[0]
+
+    with pytest.raises(ValueError, match="cannot skip a runtime argument"):
+        entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+
+
+def test_returned_submit_projection_uses_rebound_tuple():
+    @pl.jit.incore
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return pl.store(pl.load(out, [0, 0], [16, 64]), [0, 0], out)
+
+    @pl.jit.graph
+    def relay(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        launch = (x, x)
+        launch = pl.submit(stage, x, out)
+        return launch[0], launch[-1]
+
+    definition = _ast_analysis.get_func_def(relay._func)
+    site = _tensor_meta._return_site(definition)
+    assert site is not None and isinstance(site.value, ast.Tuple)
+    returned = _tensor_meta._ReturnMeta(site, list(site.value.elts))
+    out = TensorMeta((16, 64), pl.FP32)
+    _tensor_meta.extract_local_tensor_metas(
+        relay._func,
+        seed_meta={"x": TensorMeta((16, 32), pl.FP32), "out": out},
+        caller_func_type="graph",
+        discover_deps=_discover_dep_bindings,
+        outputs=_tensor_meta._MetadataOutputs(return_meta=returned),
+    )
+    result, task_id = site.value.elts
+    assert returned.metas[result] == out
+    assert returned.metas[task_id] is None
 
 
 def test_submit_task_id_projection_is_not_inferred_as_a_tensor():

@@ -216,6 +216,7 @@ class SpecializeContext:
     # remain expressions so call bindings and local dimensions take precedence.
     eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    eager_return_annotation: Any = inspect.Signature.empty
 
     @property
     def source_def_name(self) -> str:
@@ -1624,16 +1625,31 @@ def _validate_extern_return_mapping(
             )
 
 
-def _infer_expression_return_type(
+def _infer_expression_return_type(  # noqa: PLR0913
     annotation: ast.expr | None,
     tensor_meta: Mapping[str, TensorMeta],
     py_globals: Mapping[str, Any],
     constexpr_values: Mapping[str, str] | None,
     value: ast.Call,
     distributed_params: set[str],
+    eager_annotation: Any,
 ) -> str | None:
-    """Emit a resolved contract or a proven writeback result, never guess an Out."""
-    rendered = _render_complete_return_annotation(annotation, py_globals, constexpr_values)
+    """Emit a resolved contract or a proven writeback result."""
+    if isinstance(eager_annotation, _LangTensor) or _tuple_annotation_elements(eager_annotation) is not None:
+        from . import _arguments  # noqa: PLC0415 - annotation helpers import this module
+
+        canonical = {
+            "pl": importlib.import_module("pypto.language"),
+            "pld": importlib.import_module("pypto.language.distributed"),
+            "tuple": tuple,
+        }
+        bindings = constexpr_values or {}
+        namespace = {**canonical, **py_globals}
+        namespace.update({name: _eval_annotation(text, canonical) for name, text in bindings.items()})
+        resolved = _arguments.resolve_call_annotation(annotation, eager_annotation, namespace, bindings)
+        rendered = _extern_annotation_source(resolved)
+    else:
+        rendered = _render_complete_return_annotation(annotation, py_globals, constexpr_values)
     known_names = {"pl", "pld", "tuple"} | {
         dim.name for meta in tensor_meta.values() for dim in meta.shape if isinstance(dim, DynDim)
     }
@@ -1651,13 +1667,15 @@ def _infer_expression_return_type(
     return None
 
 
-def _infer_return_type(
+def _infer_return_type(  # noqa: PLR0913
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
     distributed_params: set[str] | None = None,
     py_globals: Mapping[str, Any] | None = None,
     constexpr_values: Mapping[str, str] | None = None,
+    *,
+    eager_annotation: Any = inspect.Signature.empty,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1782,6 +1800,7 @@ def _infer_return_type(
             constexpr_values,
             return_node.value,
             dist_set,
+            eager_annotation,
         )
 
     # `return name`: use that name's tensor type if known.
@@ -2414,7 +2433,13 @@ class Specializer:
             )
 
         ret_type = _infer_return_type(
-            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals, ctx.constexpr_values
+            func_def,
+            ctx.tensor_meta,
+            out_params,
+            distributed_params,
+            ctx.py_globals,
+            ctx.constexpr_values,
+            eager_annotation=ctx.eager_return_annotation,
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
@@ -2838,7 +2863,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     orig_file = src_file if (src_file and not src_file.startswith("<")) else None
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
-    param_names = [p for p in inspect.signature(func).parameters if p != "self"]
+    signature = inspect.signature(func)
+    param_names = [p for p in signature.parameters if p != "self"]
     eager_data = (
         _eager_tile_annotation_data(func)
         if func_type == "inline"
@@ -2864,6 +2890,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         py_globals=func_name_lookup(func),
         eager_tile_annotations=eager_data,
         annotation_dynvars=dict(eager_data.dynvars),
+        eager_return_annotation=signature.return_annotation,
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

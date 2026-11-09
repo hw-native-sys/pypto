@@ -305,60 +305,6 @@ def _dep_annotation_namespace(dep: "JITFunction", binding: Mapping[str, str]) ->
     return namespace
 
 
-def _resolve_omitted_output_annotation(
-    source: ast.expr | None, eager: Any, namespace: dict[str, Any], binding: Mapping[str, str]
-) -> Any:
-    if source is None:
-        return _arguments.resolve_annotation(eager, namespace)
-    spelling = ast.unparse(source)
-    annotation = _arguments.resolve_annotation(spelling, namespace)
-    if not isinstance(annotation, str):
-        return annotation
-    eager = _arguments.resolve_annotation(eager, namespace)
-    referenced = {node.id for node in ast.walk(source) if isinstance(node, ast.Name)}
-    if binding.keys().isdisjoint(referenced):
-        return eager
-
-    def unresolved() -> ValueError:
-        return ValueError(
-            f"Cannot resolve omitted Out annotation {spelling!r} with its call-owned constexpr bindings"
-        )
-
-    if not isinstance(eager, _LangTensor) or eager.shape is None or not isinstance(source, ast.Subscript):
-        raise unresolved()
-    tensor = source.slice
-    if not isinstance(tensor, ast.Subscript) or not isinstance(tensor.slice, ast.Tuple):
-        raise unresolved()
-    fields = tensor.slice.elts
-    if not 2 <= len(fields) <= 4:
-        raise unresolved()
-
-    def resolve_field(expr: ast.expr, captured: Any) -> Any:
-        # The eager object preserves factory values, including names used
-        # only in the annotation. Reevaluate just the fields owned by the call.
-        if not any(isinstance(node, ast.Name) and node.id in binding for node in ast.walk(expr)):
-            return captured
-        result = _arguments.resolve_annotation(ast.unparse(expr), namespace)
-        if isinstance(result, str):
-            raise unresolved()
-        return result
-
-    shape = fields[0]
-    if isinstance(shape, (ast.List, ast.Tuple)) and len(shape.elts) == len(eager.shape):
-        dimensions = [resolve_field(axis, value) for axis, value in zip(shape.elts, eager.shape, strict=True)]
-    else:
-        dimensions = resolve_field(shape, eager.shape)
-    captured_fields: list[Any] = [eager.dtype]
-    if len(fields) == 3:
-        captured_fields.append(eager.memref if eager.memref is not None else eager.layout)
-    elif len(fields) == 4:
-        captured_fields.extend([eager.layout, eager.memref])
-    values = [
-        resolve_field(expr, captured) for expr, captured in zip(fields[1:], captured_fields, strict=True)
-    ]
-    return _LangTensor[tuple([dimensions, *values])]
-
-
 def _omitted_output_metas(
     dep: "JITFunction", call: ast.Call, binding: Mapping[str, str]
 ) -> dict[str, TensorMeta]:
@@ -376,7 +322,7 @@ def _omitted_output_metas(
     result: dict[str, TensorMeta] = {}
     for name in outputs:
         eager = signature.parameters[name].annotation
-        annotation = _resolve_omitted_output_annotation(
+        annotation = _arguments.resolve_call_annotation(
             source_annotations.get(name), eager, namespace, binding
         )
         if (
@@ -1107,7 +1053,9 @@ def _resolve_returned_exprs(
 ) -> None:
     """Snapshot the return at its original point in the local metadata walk."""
     if isinstance(site.value, ast.Name):
-        return_meta.tuple_result = return_meta.tuples.get(site.value.id)
+        return_meta.tuple_result = deps.submit_results.get(
+            site.value.id, return_meta.tuples.get(site.value.id)
+        )
     elif isinstance(site.value, ast.Call):
         return_meta.tuple_result = _dep_tuple_meta(site.value, deps, local)
     if return_meta.tuple_result is None:
@@ -1381,6 +1329,7 @@ def _update_submit_assignment(
     local: dict[str, TensorMeta],
     deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
+    return_meta: _ReturnMeta | None,
 ) -> tuple[bool, TensorMeta | None]:
     """Apply tuple bindings before their names can hide their RHS metadata."""
     projection = _submitted_projection_meta(value, deps.submit_results, resolve_int)
@@ -1388,20 +1337,24 @@ def _update_submit_assignment(
     if value is not None:
         _forget_submit_bindings(stmt, deps)
     if aliased is None:
-        return _update_submit_result_meta(targets, value, local, deps), projection
-    for target in targets:
-        if isinstance(target, ast.Name):
-            deps.submit_results[target.id] = aliased
-            local.pop(target.id, None)
-        elif isinstance(target, ast.Tuple):
-            for index, element in enumerate(target.elts):
-                for name in _target_names(element):
-                    local.pop(name, None)
-                if isinstance(element, ast.Name) and len(target.elts) == len(aliased):
-                    meta = aliased[index]
-                    if meta is not None:
-                        local[element.id] = meta
-    return True, None
+        handled = _update_submit_result_meta(targets, value, local, deps)
+    else:
+        handled = True
+        for target in targets:
+            if isinstance(target, ast.Name):
+                deps.submit_results[target.id] = aliased
+                local.pop(target.id, None)
+            elif isinstance(target, ast.Tuple):
+                for index, element in enumerate(target.elts):
+                    for name in _target_names(element):
+                        local.pop(name, None)
+                    if isinstance(element, ast.Name) and len(target.elts) == len(aliased):
+                        meta = aliased[index]
+                        if meta is not None:
+                            local[element.id] = meta
+    if handled and return_meta is not None:
+        return_meta.assign(targets, None, local)
+    return handled, projection
 
 
 def _subscript_meta(
@@ -1412,6 +1365,8 @@ def _subscript_meta(
     deps: _DepScan,
     resolve_dim: Callable[[ast.expr], _DimValue],
 ) -> TensorMeta | None:
+    if isinstance(value.value, ast.Name) and value.value.id in deps.submit_results:
+        return _submitted_projection_meta(value, deps.submit_results, resolve_int)
     items = None
     if return_meta is not None:
         if isinstance(value.value, ast.Name):
@@ -1463,7 +1418,9 @@ def _update_local_tensor_meta(
         _forget_rebound_dims(stmt, dim_values)
         return
     targets, value = parts
-    handled, projection = _update_submit_assignment(stmt, targets, value, local, deps, resolve_int)
+    handled, projection = _update_submit_assignment(
+        stmt, targets, value, local, deps, resolve_int, return_meta
+    )
     if handled:
         for target in targets:
             _forget_names(target, dim_values)

@@ -650,6 +650,11 @@ class JITFunction:
                 if folded is None:
                     continue
                 records.append((index, func.__module__, func.__qualname__, name, folded))
+            if jit_func._func_type != "extern":
+                for name, source in _arguments.eager_tensor_annotation_fingerprints(
+                    func, _ast_analysis.get_func_def(func)
+                ).items():
+                    records.append((index, func.__module__, func.__qualname__, f"<eager:{name}>", source))
             if jit_func._func_type == "inline":
                 # Tile annotations can retain factory values without closure
                 # cells or name DynVars with no body-value rendering. Hash the
@@ -1216,6 +1221,11 @@ class JITFunction:
                 folded = free_name_source(name, namespace)
                 if folded is not None:
                     values.append((index, name, folded))
+            if fn._func_type != "extern":
+                for name, source in _arguments.eager_tensor_annotation_fingerprints(
+                    fn._func, _ast_analysis.get_func_def(fn._func)
+                ).items():
+                    values.append((index, f"<eager:{name}>", source))
             if fn._func_type == "inline":
                 for name, source in tile_annotation_fingerprints(fn._func).items():
                     values.append((index, f"<annotation:{name}>", source))

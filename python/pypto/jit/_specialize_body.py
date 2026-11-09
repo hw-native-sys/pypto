@@ -585,6 +585,15 @@ class BodyTransformer(ast.NodeTransformer):
                     # slots: a later keyword constexpr is not the missing output.
                     bound_args = [(param, arg) for param, arg in bound_args if param not in constexpr_params]
                     remaining_kw = [kw for kw in remaining_kw if kw.arg not in constexpr_params]
+                if original is not normalized:
+                    # Submit can allocate a suffix of omitted outputs. The
+                    # native ABI has no way to encode a hole in that prefix.
+                    runtime_params = [param for param in param_order if param not in constexpr_params]
+                    supplied = [param for param, _ in bound_args if param is not None]
+                    if supplied != runtime_params[: len(supplied)]:
+                        raise ValueError(
+                            f"Submit to {callee_name!r} cannot skip a runtime argument before a supplied one"
+                        )
                 new_node = ast.Call(func=new_func, args=[arg for _, arg in bound_args], keywords=remaining_kw)
             else:
                 new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
