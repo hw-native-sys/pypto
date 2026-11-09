@@ -69,8 +69,28 @@ def collective_entry(
     return collective_kernel(integers, floats, active)
 
 
-def compile_collectives(directory: Path):
-    return collective_entry.compile(
+@pl.jit.aiv
+def while_collective_kernel(dst: pl.InOut[pl.Tensor[[64], pl.INT32]], active: pl.Scalar[pl.INT32]):
+    with pl.simt_scope(dims=(64, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        lane = pl.simt.lane_id()
+        if lane < active:
+            n = lane
+            # The collective must read the current loop-carried n on each check.
+            # Even lane zero keeps iterating until the highest active lane finishes.
+            while pl.simt.vote_any(n > 0):
+                n = pl.cast(n - 1, pl.INT32)
+            pl.simt.store(dst, (tid,), n)
+    return dst
+
+
+@pl.jit
+def while_collective_entry(dst: pl.InOut[pl.Tensor[[64], pl.INT32]], active: pl.Scalar[pl.INT32]):
+    return while_collective_kernel(dst, active)
+
+
+def compile_collectives(directory: Path, *, entry=collective_entry):
+    return entry.compile(
         config=RunConfig(
             backend_type=BackendType.Ascend950,
             execution_mode=ExecutionMode.ONBOARD,
@@ -129,20 +149,31 @@ def check_results(integers, floats, active):
 def acceptance(output: Path, device: int | None):
     compiled = compile_collectives(output)
     compiled.load()
+    loop = compile_collectives(output / "while", entry=while_collective_entry)
+    loop.load()
     checks = 0
+    while_checks = 0
     if device is not None:
         config = RunConfig(
             backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, device_id=device
         )
         with runtime.ChipWorker(config=config, runtime=compiled.runtime_name) as worker:
             handle = worker.register(compiled)
+            loop_handle = worker.register(loop)
             for active in (0, 1, 15, 16, 17, 31, 32):
                 integers = torch.full((11, 64), -777, dtype=torch.int32)
                 floats = torch.full((7, 64), -777, dtype=torch.float32)
                 handle(integers, floats, active)
                 check_results(integers, floats, active)
                 checks += 1
-    (output / "result.json").write_text(json.dumps({"checks": checks}))
+                dst = torch.full((64,), -777, dtype=torch.int32)
+                loop_handle(dst, active)
+                expected = torch.full_like(dst, -777)
+                for warp in range(2):
+                    expected[warp * 32 : warp * 32 + active] = torch.arange(active) - (active - 1)
+                torch.testing.assert_close(dst, expected, rtol=0, atol=0)
+                while_checks += 1
+    (output / "result.json").write_text(json.dumps({"checks": checks, "while_checks": while_checks}))
 
 
 @pytest.mark.parametrize("onboard", [False, True], ids=["build", "persistent"])
@@ -155,7 +186,9 @@ def test_simt_collectives(tmp_path, onboard):
         command.append(os.environ["PYPTO_VPTO_DEVICE_ID"])
     support = runpy.run_path(str(ROOT / "tests/ut/backend/vpto_vf_validation/test_validation.py"))
     support["run"](tmp_path, "collectives", command, timeout=int(os.environ.get("PYPTO_VPTO_TIMEOUT", "600")))
-    assert json.loads((tmp_path / "result.json").read_text())["checks"] == (7 if onboard else 0)
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert result["checks"] == (7 if onboard else 0)
+    assert result["while_checks"] == (7 if onboard else 0)
 
 
 if __name__ == "__main__":

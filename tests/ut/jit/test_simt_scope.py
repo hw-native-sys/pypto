@@ -472,7 +472,8 @@ def test_rebound_shape_store_index_full_compile(entry, tmp_path: Path, monkeypat
 
 
 @pytest.mark.ptoas_compile
-def test_public_warp_collectives_native_compile(tmp_path, pytestconfig):
+@pytest.mark.parametrize("entry_name", ["collective_entry", "while_collective_entry"])
+def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_name):
     binary = find_ptoas_binary()
     if binary is None:
         pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
@@ -481,12 +482,12 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig):
     fixture = runpy.run_path(str(source))
     backend.reset_for_testing()
     try:
-        compiled = fixture["compile_collectives"](tmp_path)
+        compiled = fixture["compile_collectives"](tmp_path, entry=fixture[entry_name])
         assert isinstance(compiled, CompiledProgram)
         helpers = list((tmp_path / "vpto").rglob("*.pto"))
         assert len(helpers) == 1
         text = helpers[0].read_text()
-        for op in (
+        native_ops = (
             "vote_all",
             "vote_any",
             "vote_uni",
@@ -501,13 +502,23 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig):
             "redux_addf",
             "redux_minf",
             "redux_maxf",
-        ):
+        )
+        is_while = entry_name == "while_collective_entry"
+        for op in ("vote_any",) if is_while else native_ops:
             assert f"pto.{op} " in text
-        assert " signed : i32" in text
+        if not is_while:
+            assert " signed : i32" in text
         # Collectives must remain within the divergent branch after the full
         # PyPTO pass pipeline; their implicit active mask is part of the input.
         helper_body = text[text.index("pto.simt_entry") :]
-        assert helper_body.index("scf.if") < helper_body.index("pto.vote_all")
+        if is_while:
+            assert (
+                helper_body.index("scf.while")
+                < helper_body.index("pto.vote_any")
+                < helper_body.index("scf.condition")
+            )
+        else:
+            assert helper_body.index("scf.if") < helper_body.index("pto.vote_all")
         output = tmp_path / "collectives.ll"
         result = subprocess.run(
             [
@@ -526,7 +537,7 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig):
         )
         assert result.returncode == 0, result.stdout + result.stderr
         llvm = output.read_text()
-        for intrinsic in (
+        intrinsics = (
             "vote.all",
             "vote.any",
             "vote.uni",
@@ -537,7 +548,8 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig):
             "redux.add.f32",
             "redux.min.f32",
             "redux.max.f32",
-        ):
+        )
+        for intrinsic in ("vote.any",) if is_while else intrinsics:
             assert f"@llvm.hivm.{intrinsic}" in llvm
         assert "asm " not in llvm
     finally:
