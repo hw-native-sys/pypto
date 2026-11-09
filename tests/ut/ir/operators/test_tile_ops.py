@@ -21,8 +21,10 @@ from pypto.language.parser.diagnostics import InvalidOperationError
 
 _OP_TILE_EXTRACT = ir.get_op("tile.extract").name
 _OP_TILE_FILLPAD_EXPAND = ir.get_op("tile.fillpad_expand").name
+_OP_TILE_FILLPAD_INPLACE = ir.get_op("tile.fillpad_inplace").name
 _OP_TILE_MSCATTER = ir.get_op("tile.mscatter").name
 _OP_TILE_ROW_EXPAND_ADD = ir.get_op("tile.row_expand_add").name
+_OP_TILE_ROW_SUM = ir.get_op("tile.row_sum").name
 _OP_TILE_SET_VALIDSHAPE = ir.get_op("tile.set_validshape").name
 _OP_TILE_SLICE = ir.get_op("tile.slice").name
 _OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
@@ -1670,8 +1672,10 @@ class TestTileReductionOps:
         tmp_var = self._make_row_tmp_var()
 
         call = tile.row_sum(sliced, tmp_var)
-        assert call.op.name == "tile.row_sum"
-        assert [_const_int(d) for d in call.type.shape] == [8, 1]
+        assert call.op.name == _OP_TILE_ROW_SUM
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert [_const_int(d) for d in result_type.shape] == [8, 1]
 
     def test_tile_row_sum_out_layout_row_major_pads_and_zeroes(self):
         """out_layout=row_major pads the physical last dim and zeroes it in place."""
@@ -1682,21 +1686,27 @@ class TestTileReductionOps:
 
         # The wrapper composes tile.row_sum with a tile.fillpad_inplace that zeroes
         # the padding, so the returned Call is the fillpad_inplace one.
-        assert call.op.name == "tile.fillpad_inplace"
-        assert [_const_int(d) for d in call.type.shape] == [8, 8]  # 32B / 4B(FP32) = 8
-        assert call.type.tile_view is not None
-        assert call.type.tile_view.blayout == ir.TileLayout.row_major
-        assert call.type.tile_view.pad == ir.PadValue.zero
+        assert call.op.name == _OP_TILE_FILLPAD_INPLACE
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert [_const_int(d) for d in result_type.shape] == [8, 8]  # 32B / 4B(FP32) = 8
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.blayout == ir.TileLayout.row_major
+        assert result_type.tile_view.pad == ir.PadValue.zero
         # The whole padded physical shape is now a defined value (real sum in
         # column 0, zero elsewhere), so valid_shape canonicalizes away.
-        assert call.type.tile_view.valid_shape == []
+        assert result_type.tile_view.valid_shape == []
 
         inner = call.args[0]
-        assert inner.op.name == "tile.row_sum"
-        assert [_const_int(d) for d in inner.type.shape] == [8, 8]
-        assert inner.type.tile_view.blayout == ir.TileLayout.row_major
+        assert isinstance(inner, ir.Call)
+        assert inner.op.name == _OP_TILE_ROW_SUM
+        inner_type = inner.type
+        assert isinstance(inner_type, ir.TileType)
+        assert [_const_int(d) for d in inner_type.shape] == [8, 8]
+        assert inner_type.tile_view is not None
+        assert inner_type.tile_view.blayout == ir.TileLayout.row_major
         # Before zeroing, only column 0 (the real per-row sum) is valid.
-        assert [_const_int(d) for d in inner.type.tile_view.valid_shape] == [4, 1]
+        assert [_const_int(d) for d in inner_type.tile_view.valid_shape] == [4, 1]
 
     @pytest.mark.parametrize(
         ("dtype", "expected_pad_cols"),
@@ -1718,7 +1728,10 @@ class TestTileReductionOps:
 
         call = tile.row_sum(src_var, tmp_var, out_layout=ir.TileLayout.row_major)
         inner = call.args[0]
-        assert [_const_int(d) for d in inner.type.shape] == [8, expected_pad_cols]
+        assert isinstance(inner, ir.Call)
+        inner_type = inner.type
+        assert isinstance(inner_type, ir.TileType)
+        assert [_const_int(d) for d in inner_type.shape] == [8, expected_pad_cols]
 
     @pytest.mark.parametrize("op", [tile.row_max, tile.row_sum, tile.row_min, tile.row_prod])
     def test_tile_row_reduction_out_layout_row_major_supported_by_every_op(self, op):
@@ -1727,11 +1740,15 @@ class TestTileReductionOps:
         tmp_var = self._make_row_tmp_var()
 
         call = op(sliced, tmp_var, out_layout=ir.TileLayout.row_major)
-        assert call.op.name == "tile.fillpad_inplace"
+        assert call.op.name == _OP_TILE_FILLPAD_INPLACE
         inner = call.args[0]
-        assert [_const_int(d) for d in inner.type.shape] == [8, 8]
-        assert inner.type.tile_view.blayout == ir.TileLayout.row_major
-        assert [_const_int(d) for d in inner.type.tile_view.valid_shape] == [4, 1]
+        assert isinstance(inner, ir.Call)
+        inner_type = inner.type
+        assert isinstance(inner_type, ir.TileType)
+        assert [_const_int(d) for d in inner_type.shape] == [8, 8]
+        assert inner_type.tile_view is not None
+        assert inner_type.tile_view.blayout == ir.TileLayout.row_major
+        assert [_const_int(d) for d in inner_type.tile_view.valid_shape] == [4, 1]
 
     def test_tile_row_sum_out_layout_rejects_non_layout_value(self):
         """out_layout must be col_major or row_major; none_box is not a result layout."""
