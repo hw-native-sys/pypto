@@ -4009,6 +4009,32 @@ def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(n
     assert value.same_as(selected)
 
 
+def test_jit_dispatch_capture_then_sibling_kernel_tensor_assignment():
+    @pl.jit
+    def chain(
+        a: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        b: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ):
+        with pl.manual_scope():
+            selected = a
+            selected = b
+            with pl.at(level=pl.Level.CORE_GROUP) as selected:  # noqa: F811
+                pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+                selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+        return selected
+
+    function = chain.specialize().get_function("chain")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert isinstance(value, ir.Var)
+    assert isinstance(value.type, ir.TensorType)
+    assert value.name_hint == "selected_v2"
+
+
 def test_jit_explicit_recorded_local_dependency_remains_rejected():
     """Fresh capture names must not erase an actual cross-recording TaskId read."""
 

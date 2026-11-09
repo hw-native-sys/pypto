@@ -22,6 +22,7 @@ from . import _specialize_values as values
 from ._specialize_types import DynDim, TensorMeta
 
 _BindingValue = TypeVar("_BindingValue")
+_DEVICE_SCOPES = ("at", "spmd", "cluster", "split_aiv", "simt_scope")
 
 
 def _restore_bindings(
@@ -130,7 +131,9 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
-        self._graph_capture_depths: dict[str, int] | None = None
+        self._capture_depths: dict[str, int] = {}
+        self._in_graph = False
+        self._in_device = False
         self.graph_rebinds: dict[str, str | int] = {}
         self._simt_depth: int = 0
         self._simt_runtime_names: set[str] = set()
@@ -169,7 +172,7 @@ class BodyTransformer(ast.NodeTransformer):
             count += 1
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
-        if self._graph_capture_depths is not None:
+        if self._in_graph:
             folded = self._folded_graph_shape(var_name)
             previous = self._var_renames.get(var_name, var_name)
             self.graph_rebinds[new_name] = previous if folded is None else folded
@@ -208,35 +211,37 @@ class BodyTransformer(ast.NodeTransformer):
 
     def _folded_graph_shape(self, name: str) -> int | None:
         # As in visit_Name, an active alias wins over a historical fold.
-        if self._graph_capture_depths is not None and name not in self._var_renames:
+        if self._in_graph and name not in self._var_renames:
             return self._shape_inlined.get(name)
         return None
 
     def _capture_name(self, name: str) -> str:
         # A folded literal needs an emitted name so the parser can restore it
         # after filtering the recorded-local capture.
-        captured = (
+        return (
             self._rebind(name)
             if self._folded_graph_shape(name) is not None
             else self._var_renames.get(name, name)
         )
-        if self._graph_capture_depths is not None:
-            self._graph_capture_depths[captured] = self._scope_depth
-        return captured
+
+    def _bind_capture(self, name: str, alias: str) -> None:
+        self._capture_depths[alias] = self._scope_depth
+        self._var_renames[name] = alias
+        self._shape_inlined.pop(name, None)
+        self._record_tensor_meta(alias, None)
 
     def _needs_alpha_rename(self, name: str) -> bool:
-        # A recorded capture can remain visible after leaving its nested
-        # scope. An assignment at that scope or an enclosing scope rebinds
-        # it. Deeper assignments keep the usual loop-carry behavior.
-        capture_depth = (
-            self._graph_capture_depths.get(self._var_renames.get(name, name))
-            if self._graph_capture_depths is not None
-            else None
-        )
+        capture_depth = self._capture_depths.get(self._var_renames.get(name, name))
+        # Device assignments need a separate version from a host TaskId.
+        # In Graph orchestration, preserve deeper TaskId carries and rename
+        # only assignments at or outside the recorded capture's depth.
         return (
             self._scope_depth == self._assign_depth[name]
-            or (capture_depth is not None and self._scope_depth <= capture_depth)
             or self._folded_graph_shape(name) is not None
+            or (
+                capture_depth is not None
+                and (self._in_device or (self._in_graph and self._scope_depth <= capture_depth))
+            )
         )
 
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
@@ -866,9 +871,14 @@ class BodyTransformer(ast.NodeTransformer):
         # assignment is treated as a first binding (no rename, no bridge).
         for name in fresh:
             self._forget_rename_bookkeeping(name)
+        previous_device = self._in_device
+        self._in_device = previous_device or _scope_call_name(node.iter) == "spmd"
         self._scope_depth += 1
-        node.body = self._visit_scoped_body(node.body)
-        self._scope_depth -= 1
+        try:
+            node.body = self._visit_scoped_body(node.body)
+        finally:
+            self._scope_depth -= 1
+            self._in_device = previous_device
         if bridges:
             return bridges + [node]
         return node
@@ -928,9 +938,7 @@ class BodyTransformer(ast.NodeTransformer):
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
                 if _scope_call_name(item.context_expr) != "graph":
-                    self._var_renames[original.id] = captured
-                    self._shape_inlined.pop(original.id, None)
-                    self._record_tensor_meta(captured, None)
+                    self._bind_capture(original.id, captured)
             elif item.optional_vars is not None:
                 item.optional_vars = self.visit(item.optional_vars)
         simt = "simt_scope" in scope_names
@@ -975,14 +983,20 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
-        previous_captures = self._graph_capture_depths
-        self._graph_capture_depths = {} if graph else previous_captures
+        previous_captures = self._capture_depths
+        previous_graph = self._in_graph
+        previous_device = self._in_device
+        self._capture_depths = previous_captures.copy() if graph else previous_captures
+        self._in_graph = previous_graph or graph
+        self._in_device = previous_device or not scope_names.isdisjoint(_DEVICE_SCOPES)
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
-            self._graph_capture_depths = previous_captures
+            self._capture_depths = previous_captures
+            self._in_graph = previous_graph
+            self._in_device = previous_device
             if simt:
                 self._simt_depth -= 1
             if state is not None and simt:
@@ -1018,7 +1032,5 @@ class BodyTransformer(ast.NodeTransformer):
         # of the same spelling. Do not create another alpha version here:
         # the parser reuses the source Var and native SSA builds carries/phis.
         for original, captured in captures.items():
-            self._var_renames[original] = captured
-            self._shape_inlined.pop(original, None)
-            self._record_tensor_meta(captured, None)
+            self._bind_capture(original, captured)
         return node
