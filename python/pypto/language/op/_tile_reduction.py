@@ -34,10 +34,11 @@ def row_max(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
             Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
             ``pl.store`` can honor a destination window's row stride (issue
             #3319). The real per-row max is column 0; columns 1..pad-1 are
-            **not currently guaranteed zero** -- a caller storing into a
-            destination window wider than column 0 must zero-initialize it
-            first, since TSTORE bursts the whole physical row regardless of
-            what the type claims is valid (tracked as a follow-up to #3319).
+            **not currently guaranteed zero** -- ``pl.store`` writes them
+            from the tile's own padding lanes regardless of what the
+            destination held before, so a caller cannot make them safe by
+            zero-initializing the destination; treat anything landing there
+            as undefined until #3319's pad-zeroing follow-up lands.
 
     Returns:
         Tile wrapping the row_max operation
@@ -62,10 +63,11 @@ def row_sum(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
             Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
             ``pl.store`` can honor a destination window's row stride (issue
             #3319). The real per-row sum is column 0; columns 1..pad-1 are
-            **not currently guaranteed zero** -- a caller storing into a
-            destination window wider than column 0 must zero-initialize it
-            first, since TSTORE bursts the whole physical row regardless of
-            what the type claims is valid (tracked as a follow-up to #3319).
+            **not currently guaranteed zero** -- ``pl.store`` writes them
+            from the tile's own padding lanes regardless of what the
+            destination held before, so a caller cannot make them safe by
+            zero-initializing the destination; treat anything landing there
+            as undefined until #3319's pad-zeroing follow-up lands.
 
     Returns:
         Tile wrapping the row_sum operation
@@ -90,10 +92,11 @@ def row_min(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
             Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
             ``pl.store`` can honor a destination window's row stride (issue
             #3319). The real per-row min is column 0; columns 1..pad-1 are
-            **not currently guaranteed zero** -- a caller storing into a
-            destination window wider than column 0 must zero-initialize it
-            first, since TSTORE bursts the whole physical row regardless of
-            what the type claims is valid (tracked as a follow-up to #3319).
+            **not currently guaranteed zero** -- ``pl.store`` writes them
+            from the tile's own padding lanes regardless of what the
+            destination held before, so a caller cannot make them safe by
+            zero-initializing the destination; treat anything landing there
+            as undefined until #3319's pad-zeroing follow-up lands.
 
     Returns:
         Tile wrapping the row_min operation
@@ -118,10 +121,11 @@ def row_prod(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -
             Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
             ``pl.store`` can honor a destination window's row stride (issue
             #3319). The real per-row product is column 0; columns 1..pad-1 are
-            **not currently guaranteed zero** -- a caller storing into a
-            destination window wider than column 0 must zero-initialize it
-            first, since TSTORE bursts the whole physical row regardless of
-            what the type claims is valid (tracked as a follow-up to #3319).
+            **not currently guaranteed zero** -- ``pl.store`` writes them
+            from the tile's own padding lanes regardless of what the
+            destination held before, so a caller cannot make them safe by
+            zero-initializing the destination; treat anything landing there
+            as undefined until #3319's pad-zeroing follow-up lands.
 
     Returns:
         Tile wrapping the row_prod operation
