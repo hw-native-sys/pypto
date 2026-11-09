@@ -4139,7 +4139,8 @@ def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive
     assert isinstance(value.type.shape[0], ir.ConstInt) and value.type.shape[0].value == 64
 
 
-def test_jit_inactive_graph_capture_preserves_later_shape_fold():
+@pytest.mark.parametrize("enabled", [False, True])
+def test_jit_graph_capture_preserves_later_shape_fold(enabled):
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor], enabled: pl.constexpr):
             rows = a.shape[0]
@@ -4161,7 +4162,7 @@ def test_jit_inactive_graph_capture_preserves_later_shape_fold():
         param_names=["a", "b"],
         tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
     )
-    ctx.constexpr_values = {"enabled": "False"}
+    ctx.constexpr_values = {"enabled": str(enabled)}
     function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
     assert isinstance(function.body, ir.SeqStmts)
