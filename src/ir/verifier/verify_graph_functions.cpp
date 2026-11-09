@@ -640,7 +640,7 @@ class GraphBodyChecker : public IRVisitor {
       if (var && scalar_params_.count(var.get()) != 0) continue;
       // No slot, but nothing to patch either: replay recomputes this value
       // identically, so the copy frozen into the recording is the right one.
-      if (invariant_.IsInvariant(arg)) continue;
+      if (topology_invariant_.IsInvariant(arg)) continue;
       Report(
           "passes a scalar to a task that has no argument slot and can differ between calls, so the "
           "runtime would freeze the first call's value into the recording.",

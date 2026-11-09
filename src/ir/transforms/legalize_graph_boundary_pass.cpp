@@ -128,7 +128,6 @@ struct GraphPlan {
   std::vector<HoistedValue> hoisted;
   // Identity-only compiler proof, computed from original expressions before
   // they become scalar parameters. Original runtime formals are never seeded.
-  std::unordered_set<const Var*> proven_fixed_scalar_params;
   /// `alias = <var>` bindings, in definition order, alias -> what it names.
   ///
   /// Not hoisted — a bare reference names something that already has a binding —
@@ -215,7 +214,32 @@ class DerivedScalarCollector : public IRVisitor {
     return scalar_alias_target_;
   }
 
+ private:
+  // A hoisted argument is evaluated on both paths. Without a range proof,
+  // the divisor must be a literal other than zero or minus one.
+  [[nodiscard]] static bool MayTrapWhenSpeculated(const ExprPtr& expr) {
+    if (auto binary = std::dynamic_pointer_cast<const BinaryExpr>(expr)) {
+      if (As<FloorDiv>(expr) || As<FloorMod>(expr)) {
+        auto divisor = As<ConstInt>(binary->right_);
+        if (!divisor || divisor->value_ == 0 || divisor->value_ == -1) return true;
+      }
+      return MayTrapWhenSpeculated(binary->left_) || MayTrapWhenSpeculated(binary->right_);
+    }
+    if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
+      return MayTrapWhenSpeculated(unary->operand_);
+    }
+    return false;
+  }
+
+  bool in_conditional_ = false;
+
  protected:
+  void VisitStmt_(const IfStmtPtr& op) override {
+    const bool was_conditional = std::exchange(in_conditional_, true);
+    IRVisitor::VisitStmt_(op);
+    in_conditional_ = was_conditional;
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     auto var = AsVarLike(op->var_);
@@ -223,6 +247,9 @@ class DerivedScalarCollector : public IRVisitor {
 
     if (IsScalarType(var->GetType())) {
       if (!IsDerivable(op->value_)) return;
+      CHECK_SPAN(!in_conditional_ || !MayTrapWhenSpeculated(op->value_), op->span_)
+          << "Graph scalar hoist would evaluate a guarded integer division or remainder "
+             "before the Graph conditional. Keep the division and its guard together outside the Graph.";
       // A bare parameter reference is already a pass-through; only a *computed*
       // value needs hoisting.
       if (auto aliased = AsVarLike(op->value_)) {
@@ -624,6 +651,7 @@ class UnhoistableScalarChecker : public IRVisitor {
     for (const auto& param : func->params_) {
       if (IsScalarType(param->GetType())) scalar_params_.insert(param.get());
     }
+    invariant_.SeedBoundaryDimensionSymbols(func);
     invariant_.Collect(func->body_);
   }
 
@@ -1317,15 +1345,9 @@ class GraphCallSiteChecker : public IRVisitor {
   DerivedScalarCollector collector(func, program);
   collector.VisitStmt(func->body_);
 
-  graph_replay::ReplayInvariantSet original_invariants(func);
-  original_invariants.Collect(func->body_);
-  auto add = [&plan, &original_invariants](const VarPtr& var, const ExprPtr& value, ParamDirection dir,
-                                           bool is_tensor) {
+  auto add = [&plan](const VarPtr& var, const ExprPtr& value, ParamDirection dir, bool is_tensor) {
     auto param = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
     plan.hoisted.push_back(HoistedValue{param, var, value, dir, is_tensor});
-    if (!is_tensor && original_invariants.IsInvariant(var)) {
-      plan.proven_fixed_scalar_params.insert(param.get());
-    }
   };
 
   // Step B: a hoisted view takes the direction of the boundary tensor it views.
@@ -1611,6 +1633,45 @@ class ReturnOnlyPhiRewriter : public IRMutator {
       : aliases_(std::move(aliases)) {}
 
  protected:
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto rewritten = As<IfStmt>(IRMutator::VisitStmt_(op));
+    std::vector<VarPtr> live_results;
+    std::vector<size_t> live_slots;
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (aliases_.count(op->return_vars_[i].get()) != 0) continue;
+      live_slots.push_back(i);
+      live_results.push_back(rewritten->return_vars_[i]);
+    }
+    if (live_slots.size() == op->return_vars_.size()) return rewritten;
+
+    // The return now uses the caller's descriptor. Remove the dead phi
+    // positions as well, leaving the branch calls and other results intact.
+    auto prune_yield = [&](const StmtPtr& branch) {
+      return transform_utils::RewriteLastYieldStmt(branch, [&](const YieldStmtPtr& yield) -> StmtPtr {
+        std::vector<ExprPtr> values;
+        std::vector<StmtPtr> statements;
+        size_t live_index = 0;
+        for (size_t i = 0; i < yield->value_.size(); ++i) {
+          if (live_index < live_slots.size() && live_slots[live_index] == i) {
+            values.push_back(yield->value_[i]);
+            ++live_index;
+          } else if (As<Call>(yield->value_[i]) || As<Submit>(yield->value_[i])) {
+            statements.push_back(std::make_shared<EvalStmt>(yield->value_[i], yield->span_));
+          }
+        }
+        if (!values.empty()) {
+          statements.push_back(std::make_shared<YieldStmt>(std::move(values), yield->span_));
+        }
+        return SeqStmts::Flatten(std::move(statements), yield->span_);
+      });
+    };
+    auto result = MutableCopy(rewritten);
+    result->return_vars_ = std::move(live_results);
+    result->then_body_ = prune_yield(rewritten->then_body_);
+    if (rewritten->else_body_) result->else_body_ = prune_yield(*rewritten->else_body_);
+    return result;
+  }
+
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
     std::vector<ExprPtr> values = op->value_;
     bool changed = false;
@@ -1623,7 +1684,7 @@ class ReturnOnlyPhiRewriter : public IRMutator {
         }
       }
     }
-    return changed ? std::make_shared<ReturnStmt>(std::move(values), op->span_) : op;
+    return changed ? std::make_shared<ReturnStmt>(values, op->span_) : op;
   }
 
  private:
@@ -1652,8 +1713,9 @@ class ReturnOnlyPhiRewriter : public IRMutator {
       const auto& candidate = collector.candidates[i];
       if (collector.non_return_uses.count(candidate.get()) != 0 || !roots[i].has_value()) continue;
       const size_t index = roots[i].value();  // NOLINT(bugprone-unchecked-optional-access)
-      if (index >= func->param_directions_.size() || func->param_directions_[index] == ParamDirection::In)
+      if (index >= func->param_directions_.size() || func->param_directions_[index] == ParamDirection::In) {
         continue;
+      }
       aliases.emplace(candidate.get(), func->params_[index]);
     }
     if (aliases.empty()) continue;
@@ -1767,9 +1829,10 @@ class ReturnOnlyPhiRewriter : public IRMutator {
       // user's own line.
       CheckGraphSignature(func);
       std::unordered_set<const Var*> hoistable;  // all hoistable values are now params
-      const auto plan = plans.find(func->name_);
-      const std::unordered_set<const Var*> no_fixed_scalars;
-      const auto& fixed = plan == plans.end() ? no_fixed_scalars : plan->second.proven_fixed_scalar_params;
+      // Use facts from the rewritten call sites, which the independent
+      // verifier can also recover after the original bindings are gone.
+      const auto& fixed =
+          graph_replay::ReplayInvariantSet::FixedScalarsForGraph(fixed_topology_scalars, func);
       UnhoistableScalarChecker checker(func, hoistable, fixed);
       checker.VisitStmt(func->body_);
       // Also after the rewrite: Step A turns a derived scalar into a parameter,
@@ -1785,9 +1848,7 @@ class ReturnOnlyPhiRewriter : public IRMutator {
       // re-derives the same count from this rewritten IR. The message still
       // names the user's own function: `ExtendGraphSignature` carries `name_`
       // and `span_` through unchanged.
-      const auto& topology_scalars =
-          graph_replay::ReplayInvariantSet::FixedScalarsForGraph(fixed_topology_scalars, func);
-      GraphNodeCounter counter(func, result, topology_scalars);
+      GraphNodeCounter counter(func, result, fixed);
       counter.VisitStmt(func->body_);
       CHECK_SPAN(counter.count() >= 1, func->span_)
           << "Graph function '" << func->name_

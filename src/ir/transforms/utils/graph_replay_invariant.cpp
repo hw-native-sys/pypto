@@ -12,6 +12,8 @@
 #include "pypto/ir/transforms/utils/graph_replay_invariant.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <optional>
@@ -26,6 +28,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -197,8 +200,9 @@ void ReplayInvariantSet::TrackTensorAlias(const AssignStmtPtr& op) {
   // In particular a fixed shape does not bless a data-dependent offset.
   auto call = As<Call>(op->value_);
   if (!call || !(IsOp(call, "tensor.slice") || IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view")) ||
-      call->args_.empty())
+      call->args_.empty()) {
     return;
+  }
   auto source = AsVarLike(call->args_.front());
   auto root = boundary_tensors_.find(source.get());
   if (root == boundary_tensors_.end()) return;
@@ -222,8 +226,9 @@ void ReplayInvariantSet::Collect(const StmtPtr& body, bool include_constant_trip
     void VisitStmt_(const ForStmtPtr& op) override {
       // Recorded *before* descending, so the body sees its own induction
       // variable as invariant.
-      if (include_indices_ && HasConstantBounds(op) && op->loop_var_)
+      if (include_indices_ && HasConstantBounds(op) && op->loop_var_) {
         owner_->invariant_.try_emplace(op->loop_var_.get());
+      }
       IRVisitor::VisitStmt_(op);
     }
 
@@ -236,8 +241,9 @@ void ReplayInvariantSet::Collect(const StmtPtr& body, bool include_constant_trip
       auto then_yield = transform_utils::GetLastYieldStmt(op->then_body_);
       auto else_yield = transform_utils::GetLastYieldStmt(*op->else_body_);
       if (!then_yield || !else_yield || then_yield->value_.size() != op->return_vars_.size() ||
-          else_yield->value_.size() != op->return_vars_.size())
+          else_yield->value_.size() != op->return_vars_.size()) {
         return;
+      }
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         auto var = AsVarLike(op->return_vars_[i]);
         if (!var || !As<ScalarType>(var->GetType()) || IsTaskIdScalar(var->GetType())) continue;
@@ -353,10 +359,15 @@ ReplayInvariantSet::FixedScalarIndex ReplayInvariantSet::IndexFixedScalarsFromCa
     }
   }
   FixedScalarIndex result;
-  for (const auto& [graph, params] : fixed) {
-    if (invalid_arity.count(graph) != 0) continue;
-    for (const auto& [param, all_sites] : params) {
-      if (all_sites) result[graph].insert(param);
+  // Keep traversal in program and signature order. Pointer identity is
+  // only used for lookup, never to decide which function or parameter is next.
+  for (const auto& [gvar, graph] : program->functions_) {
+    if (invalid_arity.count(graph.get()) != 0) continue;
+    const auto params = fixed.find(graph.get());
+    if (params == fixed.end()) continue;
+    for (const auto& param : graph->params_) {
+      const auto all_sites = params->second.find(param.get());
+      if (all_sites != params->second.end() && all_sites->second) result[graph.get()].insert(param.get());
     }
   }
   return result;

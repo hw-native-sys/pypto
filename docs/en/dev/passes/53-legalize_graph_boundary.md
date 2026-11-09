@@ -64,6 +64,11 @@ through those two base classes and treats everything else as a leaf.
 New parameters are **appended**, not prepended: `CoreTaskArgs` requires every
 tensor argument to precede every scalar one.
 
+Hoisting a scalar out of a conditional also moves its evaluation before the guard.
+A branch-local integer division or remainder that would require hoisting is rejected
+unless its divisor is a literal other than zero or minus one. Compute the guarded
+value at the call site or move the conditional outside the Graph.
+
 ### A bare rename is deleted, not accepted
 
 `n = batch` computes nothing, so there is nothing to hoist — but leaving it alone

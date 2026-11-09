@@ -223,5 +223,22 @@ def test_non_graph_terminal_incore_fallback_is_unchanged():
     assert any(isinstance(t, ir.TensorType) for t in kernels[0].return_types)
 
 
+def test_terminal_graph_preserves_write_to_captured_tensor_through_alias():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, src: pl.Tensor[[16], pl.FP32], dst: pl.InOut[pl.Tensor[[16], pl.FP32]]):
+            with pl.graph("terminal"):
+                alias = dst
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    value = pl.load(src, [0], [16])
+                    alias = pl.store(value, [0], alias)
+
+    graph = _graph(passes.outline_graph_scopes()(passes.convert_to_ssa()(Before)))
+    directions = {p.name_hint: d for p, d in zip(graph.params, graph.param_directions, strict=True)}
+    assert next(d for n, d in directions.items() if n.startswith("dst")) != ir.ParamDirection.In
+    assert not graph.return_types
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

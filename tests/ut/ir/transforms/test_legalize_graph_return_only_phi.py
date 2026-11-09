@@ -12,8 +12,9 @@
 
 import pypto.language as pl
 import pytest
-from pypto import passes
+from pypto import backend, passes
 from pypto.ir.printer import python_print
+from pypto.pypto_core import codegen
 
 N = pl.dynamic("alias_profile_rows")
 
@@ -225,11 +226,10 @@ def test_unknown_descriptor_or_nonreturn_phi_remains_rejected(program):
 
 @pl.program
 class SameOutCapture:
-    @pl.function
+    @pl.function(type=pl.FunctionType.AIV)
     def write(self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            tile = pl.create_tile([16, 16], dtype=pl.FP32)
-            pl.store(tile, [0, 0], target)
+        tile = pl.create_tile([16, 16], dtype=pl.FP32)
+        pl.store(tile, [0, 0], target)
         return target
 
     @pl.function(type=pl.FunctionType.Graph)
@@ -292,6 +292,20 @@ def test_written_capture_phi_preserves_exact_return_alias(program, count):
     assert "if " in printed and "write" in printed
     if program is SameSubmitCaptures:
         assert printed.count("pl.submit(write,") == 2, printed
+
+
+def test_codegen_does_not_initialize_a_dead_tensor_phi():
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.derive_call_directions()(_legalize(SameOutCapture))
+        program = passes.materialize_runtime_scopes()(program)
+        program = passes.classify_iter_arg_carry()(program)
+        main = program.get_function("main")
+        assert main is not None
+        cpp = codegen.generate_orchestration(program, main).code
+    assert "rt_submit_graph" in cpp
+    assert "merged__phi" not in cpp
 
 
 if __name__ == "__main__":

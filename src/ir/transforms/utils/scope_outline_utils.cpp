@@ -2663,6 +2663,29 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
     var_to_idx[input_vars[i].get()] = i;
   }
 
+  if (target_scope_kind_ == ScopeKind::Graph) {
+    // Terminal Graphs drop dead aliases from their results. Their effects
+    // still reach the captured descriptor, so direction inference must see
+    // direct tensor copies as references to the same parameter.
+    class CaptureAliasCollector : public IRVisitor {
+     public:
+      explicit CaptureAliasCollector(std::unordered_map<const Var*, size_t>& indices) : indices_(indices) {}
+
+     protected:
+      void VisitStmt_(const AssignStmtPtr& op) override {
+        if (!AsTensorTypeLike(op->var_->GetType())) return;
+        auto source = AsVarLike(op->value_);
+        if (!source) return;
+        const auto root = indices_.find(source.get());
+        if (root != indices_.end()) indices_.emplace(op->var_.get(), root->second);
+      }
+
+     private:
+      std::unordered_map<const Var*, size_t>& indices_;
+    };
+    CaptureAliasCollector(var_to_idx).VisitStmt(body);
+  }
+
   // Step 0: which captured vars does the body read? A written param earns
   // ``InOut`` only when it is also read; write-only earns ``Out``.
   std::vector<bool> has_read(input_vars.size(), false);

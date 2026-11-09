@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import passes
+from pypto.pypto_core import passes as core_passes
 
 
 @pytest.mark.parametrize("case", ["metadata", "num_tokens", "data", "incoming_data"])
@@ -44,11 +45,22 @@ class Before:
             flag = {yes}
         self.consume(c, flag)
         return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, c: pl.InOut[pl.Tensor[[80, 16], pl.FP32]], index: pl.Tensor[[1], pl.INT32],
+        num_tokens: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[80, 16], pl.FP32]:
+        self.graph(c, index, num_tokens)
+        return c
 """
     program = pl.parse_program(source)
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         if case == "metadata":
-            passes.legalize_graph_boundary()(passes.convert_to_ssa()(program))
+            legalized = passes.legalize_graph_boundary()(passes.convert_to_ssa()(program))
+            properties = core_passes.IRPropertySet()
+            properties.insert(core_passes.IRProperty.GraphBoundaryLegalized)
+            assert core_passes.PropertyVerifierRegistry.verify(properties, legalized) == []
         else:
             with pytest.raises(ValueError, match="value can differ between calls"):
                 passes.legalize_graph_boundary()(passes.convert_to_ssa()(program))

@@ -19,9 +19,12 @@ from pypto.pypto_core import passes as core_passes
 
 def _program(case):
     implicit = case == "posthoist"
+    guarded = case == "guarded_division"
     tail = "" if implicit else ", width: pl.Scalar[pl.INDEX]"
     condition = "pl.tensor.dim(profile, 0) > 8" if implicit else "width > 8"
     calls = "            self.touch(out)\n"
+    if guarded:
+        calls = "            quotient = 128 // (width - 8)\n" + calls
     if case == "overflow":
         calls = "            for i in pl.range(600):\n                self.touch(out)\n"
     source = f"""
@@ -47,6 +50,7 @@ class P:
         return pl.parse_program(source)
     argument = {
         "metadata": "pl.tensor.dim(profile, 0)",
+        "guarded_division": "pl.tensor.dim(profile, 0)",
         "posthoist": "",
         "local_tensor": "pl.tensor.dim(local, 0)",
         "num_tokens": "runtime",
@@ -347,6 +351,14 @@ def test_explicit_dim_call_and_posthoist_scalar_are_independently_reproved():
         assert graph is not None
         assert any(isinstance(p.type, public_ir.ScalarType) for p in graph.params)
         assert _diagnostics(legalized) == []
+
+
+def test_graph_hoisting_does_not_speculate_guarded_integer_division():
+    with (
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+        pytest.raises(ValueError, match="guarded integer division"),
+    ):
+        passes.legalize_graph_boundary()(_lower(_program("guarded_division")))
 
 
 if __name__ == "__main__":
