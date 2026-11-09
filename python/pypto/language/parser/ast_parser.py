@@ -976,19 +976,18 @@ class ASTParser:
                 existing_var = None
 
         value_type = override_type or value_expr.type
-        # Only caller-side writes can recover a TaskId array from beneath a
-        # scalar capture. Recorded Graphs must keep their dependency Vars local.
-        allow_task_array = not in_graph and isinstance(value_type, ir.ArrayType)
+        dependency_value = is_dep_var_type(value_type)
+        task_array = dependency_value and isinstance(value_type, ir.ArrayType)
         if (
             isinstance(existing_var, ir.Var)
             and not isinstance(value_type, ir.UnknownType)
-            and (not is_dep_var_type(value_type) or allow_task_array)
-            and (previous := self.scopes.capture_predecessor(existing_var, allow_task_array=allow_task_array))
+            and (not dependency_value or task_array)
+            and (previous := self.scopes.capture_predecessor(existing_var, allow_task_array=task_array))
             is not None
         ):
-            # Resume writes to the typed Var beneath any temporary TaskIds
-            # so its type checks and SSA carries still apply.
-            existing_var = previous
+            # Resume writes to the typed Var beneath the scalar captures.
+            # A recreated dependency array in a Graph gets its own binding.
+            existing_var = None if in_graph and task_array else previous
 
         # ``n = pl.tensor.dim(x, 0)`` folded to a dyn-dim symbol (see
         # ``_fold_tensor_dim``): bind the Python name straight to the symbol. A Let

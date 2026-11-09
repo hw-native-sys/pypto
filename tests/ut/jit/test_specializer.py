@@ -4222,21 +4222,29 @@ def test_jit_dispatch_capture_then_folded_scalar_assignment(capture_kind):
     assert value.type.dtype == DataType.INDEX
 
 
-def test_jit_dispatch_capture_then_task_id_array_assignment():
+@pytest.mark.parametrize("recorded", [False, True])
+def test_jit_dispatch_capture_then_task_id_array_assignment(recorded):
+    body = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as ids:
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ids]):
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+        ids = pl.array.create(1, pl.TASK_ID)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ids]):
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+    """).strip("\n")
+    if recorded:
+        body = 'with pl.graph("recording") as done:\n' + textwrap.indent(body, "    ")
+        body += "\nwith pl.at(level=pl.Level.CORE_GROUP, deps=[ids, done]):\n"
+        body += "    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)"
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor]):
             ids = pl.array.create(1, pl.TASK_ID)
             ids = pl.array.create(1, pl.TASK_ID)
             with pl.manual_scope():
-                with pl.at(level=pl.Level.CORE_GROUP) as ids:
-                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
-                with pl.at(level=pl.Level.CORE_GROUP, deps=[ids]):
-                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
-                ids = pl.array.create(1, pl.TASK_ID)
-                with pl.at(level=pl.Level.CORE_GROUP, deps=[ids[0]]):
-                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                BODY
             return a
-    """)
+    """).replace("        BODY", textwrap.indent(body, "        "))
     ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
     function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
@@ -4248,7 +4256,26 @@ def test_jit_dispatch_capture_then_task_id_array_assignment():
     )
     runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
     assert isinstance(runtime.body, ir.SeqStmts)
-    assert any(isinstance(stmt, ir.AssignStmt) and stmt.var.same_as(original) for stmt in runtime.body.stmts)
+    scope_body = runtime.body
+    if recorded:
+        graph = next(stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+        assert isinstance(graph.body, ir.SeqStmts)
+        scope_body = graph.body
+        consumer = runtime.body.stmts[-1]
+        assert isinstance(consumer, ir.InCoreScopeStmt)
+        outer_ids, done = consumer.attrs["manual_dep_edges"]
+        assert outer_ids.same_as(original)
+        assert done.same_as(graph.attrs["task_id_var"])
+    (recreated,) = (
+        stmt.var
+        for stmt in scope_body.stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ArrayType)
+    )
+    assert recreated.same_as(original) is not recorded
+    consumer = scope_body.stmts[-1]
+    assert isinstance(consumer, ir.InCoreScopeStmt)
+    (dep,) = consumer.attrs["manual_dep_edges"]
+    assert dep.same_as(recreated)
 
 
 def test_jit_dispatch_capture_then_rebinding_keeps_parameter_dim_immutable():
