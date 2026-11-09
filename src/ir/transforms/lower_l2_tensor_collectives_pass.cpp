@@ -388,15 +388,17 @@ class ValueSourceIndex : public IRVisitor {
   return is_packed ? "" : "a non-packed-stride ";
 }
 
-/// Replaces every Call subexpression with a fresh Var, binding each through
-/// ``bind`` in source order (depth first, left to right). A call-valued
-/// argument is bound before the call that contains it.
+/// Replaces every Call/Submit subexpression with a fresh Var, binding each
+/// through ``bind`` in source order (depth first, left to right). A call-like
+/// argument is bound before the expression that contains it.
 class BindCallsToVars : public IRMutator {
  public:
   explicit BindCallsToVars(std::function<ExprPtr(const ExprPtr&)> bind) : bind_(std::move(bind)) {}
 
  protected:
   ExprPtr VisitExpr_(const CallPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
 
  private:
   std::function<ExprPtr(const ExprPtr&)> bind_;
@@ -502,6 +504,17 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     for (size_t i = 0; i < values.size(); ++i) {
       for (auto& stmt : preludes[i]) stmts.push_back(std::move(stmt));
       if (!needs_lift[i]) continue;
+      // A lifted expression can itself contain a Call or Submit (for example
+      // a tuple projection of a kernel call). Bind those first: the result
+      // assignment must not carry a nested call-like node, which
+      // LegalizeSpmdLaunches rejects. A direct Call/Submit is already a
+      // top-level RHS and needs no unwrapping.
+      if (!As<Call>(values[i]) && !As<Submit>(values[i]) &&
+          transform_utils::ExprContainsCallLike(values[i])) {
+        values[i] = HoistCallSubexpressions(values[i], op->span_);
+        for (auto& stmt : pending_prefix_) stmts.push_back(std::move(stmt));
+        pending_prefix_.clear();
+      }
       auto result =
           std::make_shared<Var>(FreshGeneratedName("a2av_result_"), values[i]->GetType(), op->span_);
       stmts.push_back(std::make_shared<AssignStmt>(result, values[i], op->span_));
@@ -1017,6 +1030,10 @@ class ReturnStmtReplacer : public IRMutator {
 /// requires such a return to reference the param directly. The lifted call
 /// remains its own statement, so side effects and task edges are unchanged.
 ProgramPtr CanonicalizeParamReturns(const ProgramPtr& program) {
+  // Reuse the recursive callee maps across every orchestration; otherwise each
+  // top-level query clears them and a shared K-node callee is indexed once per
+  // function, making the scan O(M*K).
+  return_lineage::ScopedTraceCache trace_scope;
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions;
   bool changed = false;
   for (const auto& [gvar, func] : program->functions_) {

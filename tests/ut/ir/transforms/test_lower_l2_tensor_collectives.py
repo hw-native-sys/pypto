@@ -1170,6 +1170,9 @@ def test_tuple_projected_call_is_lifted_before_a_runtime_collective():
     returned = body.stmts[-1]
     assert isinstance(returned, ir.ReturnStmt), returned
     assert all(isinstance(value, ir.Var) for value in returned.value), returned.value
+    # The lifted projection must not leave a Call under the TupleGetItemExpr;
+    # the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
 
 
 def _build_indexed_runtime_return():
