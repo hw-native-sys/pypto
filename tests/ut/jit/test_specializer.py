@@ -400,25 +400,20 @@ class TestBodyTransformer:
         ast.fix_missing_locations(new_func)
         return ast.unparse(new_func)
 
-    def test_graph_local_capture_preserves_outer_folded_shape(self):
-        source = """
-            def f(c):
-                width = c.shape[1]
-                with pl.graph("recording") as done:
-                    with pl.at(level=pl.Level.CORE_GROUP) as width:
-                        work()
-                return pl.create_tensor([128, width], dtype=pl.FP32)
-        """
-        rendered = self._transform(source, {"c": TensorMeta(shape=(128, 64), dtype=DataType.FP32)})
-        assert "pl.create_tensor([128, 64]" in rendered
-
-    def test_graph_plain_task_id_shadow_preserves_folded_shape(self):
-        source = textwrap.dedent("""
-            def f(c: pl.Tensor):
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_graph_local_task_id_shadow_preserves_folded_shape(self, capture):
+        producer = (
+            "with pl.at(level=pl.Level.CORE_GROUP) as width:\n"
+            "                            pl.store(pl.load(c, [0, 0], [128, 64]), [0, 0], c)"
+            if capture
+            else "width = pl.system.task_dummy(deps=[])"
+        )
+        source = textwrap.dedent(f"""
+            def f(c: pl.InOut[pl.Tensor]):
                 width = c.shape[1]
                 with pl.manual_scope():
                     with pl.graph("recording"):
-                        width = pl.system.task_dummy(deps=[])
+                        {producer}
                         pl.system.task_dummy(deps=[width])
                 return pl.create_tensor([128, width], dtype=pl.FP32)
         """)
@@ -3956,6 +3951,31 @@ def test_jit_graph_host_alias_keeps_independent_kernel_tensor_rebinding():
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
     assert compiled.program is not None
+
+
+def test_jit_graph_tensor_rebinding_after_same_name_task_capture_is_exported():
+    @pl.jit
+    def chain(
+        a: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        b: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+        with pl.graph("recording"):
+            with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+            selected = b
+        return selected
+
+    function = chain.specialize().get_function("chain")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (selected,) = (var for var in ir.collect_def_vars(graph.body) if var.name_hint == "selected_v1")
+    assert value.same_as(selected)
 
 
 def test_jit_explicit_recorded_local_dependency_remains_rejected():

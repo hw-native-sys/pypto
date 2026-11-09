@@ -170,12 +170,9 @@ class BodyTransformer(ast.NodeTransformer):
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
         if self._in_graph:
-            # Match visit_Name: an active alias takes precedence over a
-            # folded shape left by an earlier assignment to the same name.
-            previous = self._var_renames.get(var_name)
-            self.graph_rebinds[new_name] = (
-                previous if previous is not None else self._shape_inlined.get(var_name, var_name)
-            )
+            folded = self._folded_graph_shape(var_name)
+            previous = self._var_renames.get(var_name, var_name)
+            self.graph_rebinds[new_name] = previous if folded is None else folded
         self._var_renames[var_name] = new_name
         self._alias_to_original[new_name] = var_name
         self._used_names.add(new_name)
@@ -209,10 +206,15 @@ class BodyTransformer(ast.NodeTransformer):
         elif self._var_renames.get(name) == name:
             self._var_renames.pop(name)
 
+    def _folded_graph_shape(self, name: str) -> int | None:
+        # As in visit_Name, an active alias wins over a historical fold.
+        if self._in_graph and name not in self._var_renames:
+            return self._shape_inlined.get(name)
+        return None
+
     def _needs_alpha_rename(self, name: str) -> bool:
         # A folded name has no IR binding for the Graph body to assign to.
-        folded = name not in self._var_renames and name in self._shape_inlined
-        return self._scope_depth == self._assign_depth[name] or (self._in_graph and folded)
+        return self._scope_depth == self._assign_depth[name] or self._folded_graph_shape(name) is not None
 
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
@@ -899,7 +901,13 @@ class BodyTransformer(ast.NodeTransformer):
             item.context_expr = self.visit(item.context_expr)
             if isinstance(item.optional_vars, ast.Name):
                 original = item.optional_vars
-                captured = self._var_renames.get(original.id, original.id)
+                # Use a fresh capture alias when the caller only has a
+                # folded literal, so the parser can restore that predecessor.
+                captured = (
+                    self._rebind(original.id)
+                    if self._folded_graph_shape(original.id) is not None
+                    else self._var_renames.get(original.id, original.id)
+                )
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
                 if _scope_call_name(item.context_expr) != "graph":
@@ -971,6 +979,14 @@ class BodyTransformer(ast.NodeTransformer):
                 ) = state
             elif state is not None:
                 old_meta, old_shapes, old_counts, old_depths, old_renames, _ = state
+                # A later alpha-renamed binding may be a Tensor live-out. Keep
+                # its name and let the parser restore only actual local TaskIds.
+                graph_locals = {
+                    name
+                    for name in graph_locals
+                    if (current := self._var_renames.get(name, name)) == old_renames.get(name, name)
+                    or current not in self.graph_rebinds
+                }
                 meta_names = (
                     graph_locals
                     | {old_renames.get(name, name) for name in graph_locals}
