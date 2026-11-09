@@ -1843,6 +1843,10 @@ void BindIR(nb::module_& m) {
       .value("None_", AtomicType::kNone, "Plain store — overwrite the destination")
       .value("Add", AtomicType::kAdd, "Atomically add the source data into the destination");
 
+  nb::enum_<CommEngine>(ir, "CommEngine", nb::is_arithmetic(),
+                        "Async communication engine for pld.tensor.put_async / get_async")
+      .value("URMA", CommEngine::kURMA, "A5 URMA remote transfer (V1 accepts this engine only)");
+
   nb::enum_<AccPhase>(ir, "AccPhase", nb::is_arithmetic(),
                       "Producer-side unit-flag phase for GEMV accumulator operations")
       .value("Unspecified", AccPhase::kUnspecified, "Do not use the unit-flag protocol")
