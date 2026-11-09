@@ -2036,11 +2036,11 @@ class ScopeParser:
         if not isinstance(tid, ir.Var):
             return
         name = tid.name_hint
-        for value in reversed(bindings.values()):
+        for binding_name, value in reversed(bindings.items()):
             if (
                 isinstance(value, ir.Var)
                 and isinstance(value.type, (ir.TensorType, ir.DistributedTensorType))
-                and (value.name_hint == name or name in self.graph_rebind_predecessors(value.name_hint))
+                and (binding_name == name or name in self.graph_rebind_predecessors(binding_name))
             ):
                 self.function.shadowed_capture_bindings[tid.unique_id] = value
                 manager = self.services.scope_manager

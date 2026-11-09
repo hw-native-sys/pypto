@@ -4032,6 +4032,42 @@ def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture, o
         assert assignment.value.same_as(function.params[2])
 
 
+def test_jit_graph_capture_matches_restored_tensor_alias():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.graph("first"):
+                    selected = pl.system.task_dummy(deps=[])
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.graph("second"):
+                    with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                        selected = pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+                        pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+            return selected
+    """)
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    _, graph = (stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    assert isinstance(graph.body, ir.SeqStmts)
+    producer, consumer = (stmt for stmt in graph.body.stmts if isinstance(stmt, ir.InCoreScopeStmt))
+    (dependency,) = consumer.attrs["manual_dep_edges"]
+    assert dependency.same_as(producer.attrs["task_id_var"])
+    (selected,) = (var for var in ir.collect_def_vars(producer.body) if isinstance(var.type, ir.TensorType))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert value.same_as(selected)
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(nested):
     capture = textwrap.dedent("""
