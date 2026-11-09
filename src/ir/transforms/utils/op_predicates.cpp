@@ -130,6 +130,11 @@ bool IsPublishingWrite(const CallPtr& call) {
       call->args_[0] && As<DistributedTensorType>(call->args_[0]->GetType())) {
     return true;
   }
+  // Async transfers (`pld.tensor.put_async` / `get_async`) are deliberately
+  // absent: their issue point is not the publication point. Completion is
+  // owned by the enclosing task, so ordering is established when that task
+  // completes, not by a fence at submission. Listing them here would fence
+  // while the transfer is still in flight.
   // Conservative: an unregistered op name is a call to a user function whose body
   // is not analysed interprocedurally — assume it may publish. Registered builtin
   // and distributed ops fall through to false (handled above or non-publishing).

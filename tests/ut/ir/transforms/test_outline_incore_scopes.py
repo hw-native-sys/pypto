@@ -1114,6 +1114,30 @@ class Expected:
 
         assert self._outlined_directions(Before)["dst"] == ir.ParamDirection.InOut
 
+    def test_outline_async_transfer_dest_is_inout_src_is_in(self):
+        """``put_async`` writes ``dst`` through arg 0 (ReadWrite) and reads ``src``.
+
+        A captured destination is a write *and* a read, so it becomes ``InOut``;
+        ``src`` stays ``In``. This is the dependency carrier the V1 completion
+        model relies on.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        directions = self._outlined_directions(Before)
+        assert directions["dst"] == ir.ParamDirection.InOut
+        assert directions["src"] == ir.ParamDirection.In
+
     def test_outline_write_only_assemble_dest_becomes_out(self):
         """``tensor.assemble`` destination captured by a scope becomes an Out param.
 
