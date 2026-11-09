@@ -34,21 +34,37 @@ def _restore_bindings(
             current.pop(name, None)
 
 
-def _is_graph_context(value: ast.expr) -> bool:
-    return (
-        isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "graph"
-    )
+def _scope_call_name(value: ast.expr) -> str | None:
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+        return value.func.attr
+    return None
 
 
-def _graph_local_capture_names(node: ast.With) -> set[str]:
-    return {
-        item.optional_vars.id
-        for stmt in node.body
-        for inner in ast.walk(stmt)
-        if isinstance(inner, ast.With)
-        for item in inner.items
-        if isinstance(item.optional_vars, ast.Name)
-    }
+def _graph_body_bindings(node: ast.With) -> tuple[set[str], set[str]]:
+    """Collect recorded captures and assignments in the host orchestration."""
+    if not any(_scope_call_name(item.context_expr) == "graph" for item in node.items):
+        return set(), set()
+
+    captures: set[str] = set()
+    assignments: set[str] = set()
+    pending: list[tuple[ast.AST, bool]] = [(stmt, True) for stmt in node.body]
+    while pending:
+        inner, orchestration = pending.pop()
+        if isinstance(inner, ast.With):
+            captures.update(
+                item.optional_vars.id for item in inner.items if isinstance(item.optional_vars, ast.Name)
+            )
+            orchestration = orchestration and not any(
+                _scope_call_name(item.context_expr) in ("at", "spmd", "cluster", "split_aiv", "simt_scope")
+                for item in inner.items
+            )
+        elif isinstance(inner, ast.For) and _scope_call_name(inner.iter) == "spmd":
+            orchestration = False
+        elif orchestration and isinstance(inner, (ast.Assign, ast.AnnAssign)):
+            targets = inner.targets if isinstance(inner, ast.Assign) else [inner.target]
+            assignments.update(target.id for target in targets if isinstance(target, ast.Name))
+        pending.extend((child, orchestration) for child in ast.iter_child_nodes(inner))
+    return captures, assignments
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -877,8 +893,7 @@ class BodyTransformer(ast.NodeTransformer):
 
     def visit_With(self, node: ast.With) -> ast.stmt:
         """Visit With block, incrementing scope depth for its body."""
-        graph = any(_is_graph_context(item.context_expr) for item in node.items)
-        graph_locals: set[str] = _graph_local_capture_names(node) if graph else set()
+        graph_locals, graph_assignments = _graph_body_bindings(node)
         captures: dict[str, str] = {}
         for item in node.items:
             item.context_expr = self.visit(item.context_expr)
@@ -887,18 +902,13 @@ class BodyTransformer(ast.NodeTransformer):
                 captured = self._var_renames.get(original.id, original.id)
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
-                if not _is_graph_context(item.context_expr):
+                if _scope_call_name(item.context_expr) != "graph":
                     self._var_renames[original.id] = captured
                     self._shape_inlined.pop(original.id, None)
                     self._record_tensor_meta(captured, None)
             elif item.optional_vars is not None:
                 item.optional_vars = self.visit(item.optional_vars)
-        simt = any(
-            isinstance(item.context_expr, ast.Call)
-            and isinstance(item.context_expr.func, ast.Attribute)
-            and item.context_expr.func.attr == "simt_scope"
-            for item in node.items
-        )
+        simt = any(_scope_call_name(item.context_expr) == "simt_scope" for item in node.items)
         # SIMT assignments are per-thread. Folding a local shape or renaming a
         # shadowed scalar must not change the caller's later specialization.
         # Generated-name reservations and diagnostic aliases remain global to
@@ -940,15 +950,14 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
-        # A binding visible at Graph entry is outside the recording, even
-        # when its previous assignment was in a sibling at the same depth.
-        # Keep its emitted name so the parser can isolate TaskIds by type
-        # and still recognize writes to caller-owned tensors.
-        outer_depths = (
-            {name: depth for name, depth in self._assign_depth.items() if depth > self._scope_depth}
-            if graph
-            else {}
-        )
+        # Keep incoming names for recording-side orchestration assignments
+        # so the parser can isolate TaskIds by type. Kernel temporaries still
+        # need the ordinary sibling-scope alpha-renaming rules.
+        outer_depths = {
+            name: depth
+            for name in graph_assignments
+            if (depth := self._assign_depth.get(name, -1)) > self._scope_depth
+        }
         self._assign_depth.update(dict.fromkeys(outer_depths, self._scope_depth))
         self._scope_depth += 1
         try:
