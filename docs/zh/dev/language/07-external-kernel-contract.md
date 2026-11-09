@@ -1,6 +1,6 @@
 # 外部 Kernel 契约（内部 v1）
 
-本文是任务 34.1 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
+本文是任务 34.1/34.2 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
 范围是数据交接与可执行 IR 原型，不是公开 provider 注册 API，也不代表已经接入 CANNBotDSL runtime。
 
 ## 职责
@@ -14,7 +14,66 @@
 
 实现位于 `python/pypto/jit/external/`；bridge 协议位于
 `python/pypto/backend/external_bridge.py`。导入这些模块不会导入可选 DSL。
-34.2 实现注册与绑定，34.3 实现全程序规范化，34.4 实现原生 wrapper 和运行期绑定检查。
+内部注册与捕获已在 `registry.py` 和 `compatibility.py` 实现。
+34.3 将实现全程序规范化，34.4 将实现原生 wrapper 和运行期绑定检查。
+
+## Provider 发现与捕获
+
+`ProviderRegistry` 的作用域由调用者显式管理。注册时分别提供轻量的
+`matches(object) -> bool` 识别函数和 `load() -> CapturingKernelProvider` 工厂。
+注册与发现阶段都不会加载编译器、捕获输入或编译 kernel。识别函数只能检查对象，
+不能导入可选 DSL。框架不隐式扫描插件，也不安装全局 kernel 缓存。
+
+```python
+from pypto.jit.external.registry import ProviderRegistry
+
+# ExampleKernel and ExampleProvider are supplied by the integration.
+registry = ProviderRegistry()
+registry.register("example", matches=lambda obj: isinstance(obj, ExampleKernel),
+                  load=ExampleProvider)
+ref = registry.discover(kernel)  # None when no provider recognizes the object.
+# Explicit selection is available when multiple providers recognize an object.
+ref = registry.bind(kernel, provider="example")
+captured = ref.capture(request)  # Validated signature and target are now known.
+prepared = captured.prepare()
+```
+
+多个 provider 同时匹配时明确报错，注册顺序不决定优先级。重复名称和非布尔识别结果也会报错。
+显式绑定直接选择指定 provider，不执行自动识别。`KernelRef` 强引用 kernel 和注册项；
+registry 不持有已发现的 kernel 或捕获结果。注销只影响后续发现，已有引用仍然有效。
+每个注册项的工厂只加载一次，包括并发捕获场景。Provider 必须支持独立并发请求，
+或自行串行化编译器调用。
+
+捕获型 provider 实现 `capture(kernel, request) -> CapturedInputs` 和
+`prepare(captured, request) -> PreparedKernel`。`CapturedInputs` 持有不可变的、
+由 provider 编码的字节快照及 `PreparationIdentity`；摘要必须与快照字节一致。
+Provider 将相关源码、引用常量和依赖编码到快照中，并在准备阶段解码快照。
+`complete` 仍是 provider 对完整性的承诺，摘要校验无法证明未声明的依赖已被捕获。
+`False` 不产生可复用的准备键。`CapturedKernel.prepare()` 每次重新准备；
+任务 34.6 将接入 artifact store 复用。输出校验拒绝 provider 改变请求或捕获身份。
+原有仅提供 prepare 的 `ExternalKernelProvider` 协议继续供直接调用者使用；
+registry 使用支持 capture 的协议。
+
+`make_request` 复制参数、常量、选项容器并校验其不可变内容。
+`request_from_context` 是兼容边界：仅从 `SpecializeContext` 复制签名元数据和字面量常量，
+规范化共享动态维度名称，并将不精确的范围保留为动态维度。
+声明的维度按 DSL 符号字面量共享，即使 Python 别名不同也一样；
+合成维度（synthesized dimension）仅在引用同一实例时共享，
+因此复用局部变量名不会给独立的范围强加相等约束。
+长度未经证明的切片使用独立符号，即使元数据回退为父张量的动态维度也不例外；
+全切片保留已证明的相等关系。
+同一不精确张量元数据的重复别名共享轴符号，独立视图则不共享。
+缩短视图在回退边界之外保留独立的运行时维度身份。全切片、整形状读取和基于描述符的
+reshape 会保留这些身份，包括将派生视图传给普通 JIT 依赖的情况。
+省略的 layout 规范化为 ND，不支持的常量会明确报错。旧 context 无法证明 stride 和 offset，
+因此分别保留为未约束和运行期绑定。
+
+现有 `__pypto_jit__()` 钩子可返回稳定的 `JITFunction`；发现阶段检查返回类型，
+编译继续由普通 JIT 路径执行。`legacy_builder(ref, target, lower)` 将接收 context 的
+builder 回调转换成 capture/prepare，再显式调用 `lower(PreparedKernel)` 生成旧 builder 结果。
+Provider 不接触实际 context、AST、globals 或 tensor 地址。这是 PR #3231 中 builder 路径的
+适配边界，不安装该 PR 的 runtime wrapper，也不让任意注册对象直接在 JIT 程序中执行。
+通用调用的自动 lowering 和真实 DSL 迁移仍属于后续任务。
 
 ## 请求与编译结果
 
@@ -158,3 +217,6 @@ runtime target 字段与 provider 记录采用相同的严格类型校验。支�
 
 这些是 CPU 编译器检查，不能证明设备数值正确性、自动源码写回传播、重叠执行安全或完整 runtime 完成行为。
 后续接入任务及定向设备测试负责这些验证。已有 extern API 继续使用兼容路径。
+
+`test_external_registry.py` 覆盖惰性加载、匹配歧义、生命周期、不可变捕获、并发加载和
+builder 请求隔离；`test_extern_kernel.py` 中的旧钩子回归执行完整 JIT 编译。

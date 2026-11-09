@@ -71,6 +71,16 @@ class TensorMeta:
     # Bounds retained by local inference are useful for compatibility, but are
     # not exact dimensions and must never establish a constant-width proof.
     inexact_axes: frozenset[int] = field(default_factory=frozenset[int], compare=False, repr=False)
+    # A fallback bound in shape is not the view's descriptor extent. Keep that
+    # extent's independent identity so descriptor reads and full views can share
+    # it without asserting equality with the parent bound.
+    runtime_dims: dict[int, DynDim] = field(default_factory=dict[int, DynDim], compare=False, repr=False)
+
+    def actual_dim(self, axis: int) -> ShapeDim | None:
+        """Return a proven static/symbolic extent, never an inexact fallback bound."""
+        if axis in self.inexact_axes:
+            return self.runtime_dims.get(axis)
+        return self.shape[axis]
 
     def static_shape(self) -> tuple[int, ...]:
         """Concrete shape tuple — DynDim dims collapse to their static_bound."""

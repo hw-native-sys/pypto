@@ -1,6 +1,6 @@
 # External Kernel Contract (Internal v1)
 
-This is the interface baseline for task 34.1 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
+This is the interface baseline for tasks 34.1/34.2 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
 It defines data exchange and executable IR prototypes, not a public provider
 registration API or an installed CANNBotDSL runtime adapter.
 
@@ -15,8 +15,77 @@ registration API or an installed CANNBotDSL runtime adapter.
 
 The implementation lives in `python/pypto/jit/external/`; the bridge protocol is
 in `python/pypto/backend/external_bridge.py`. Importing either does not import an
-optional DSL. Registration/binding follows in 34.2, whole-program normalization
-in 34.3, and native wrappers/runtime binding checks in 34.4.
+optional DSL. Internal registration and capture are implemented in `registry.py` and
+`compatibility.py`. Whole-program normalization follows in 34.3, and native
+wrappers/runtime binding checks in 34.4.
+
+## Provider discovery and capture
+
+`ProviderRegistry` is explicitly scoped. Registration separates a cheap
+`matches(object) -> bool` predicate from a `load() -> CapturingKernelProvider`
+factory. Neither registration nor discovery loads a compiler, captures inputs,
+or compiles kernels. Matchers must only recognize objects without importing an
+optional DSL. No implicit plugin scanning or global kernel cache is installed.
+
+```python
+from pypto.jit.external.registry import ProviderRegistry
+
+# ExampleKernel and ExampleProvider are supplied by the integration.
+registry = ProviderRegistry()
+registry.register("example", matches=lambda obj: isinstance(obj, ExampleKernel),
+                  load=ExampleProvider)
+ref = registry.discover(kernel)  # None when no provider recognizes the object.
+# Explicit selection is available when multiple providers recognize an object.
+ref = registry.bind(kernel, provider="example")
+captured = ref.capture(request)  # Validated signature and target are now known.
+prepared = captured.prepare()
+```
+
+Multiple matches are errors; registration order never chooses a winner. Duplicate
+names and non-boolean matcher results also fail. Explicit binding selects a named
+provider without running matchers. A `KernelRef` strongly owns its kernel and
+registration; the registry retains neither discovered kernels nor captures.
+Removing a registration affects future discovery, while existing refs remain usable.
+Provider factories load once per registration, including concurrent captures.
+Providers must support independent concurrent requests or serialize their own compiler.
+
+A capturing provider implements `capture(kernel, request) -> CapturedInputs` and
+`prepare(captured, request) -> PreparedKernel`. `CapturedInputs` owns immutable
+provider-encoded bytes and a `PreparationIdentity`. Its digest must match those
+bytes. Providers encode all relevant source, referenced constants and dependencies
+into the snapshot, and decode that snapshot during preparation. The `complete`
+flag is still a provider promise of completeness; digest verification cannot prove
+that an undeclared dependency was included. `False` yields no reusable preparation
+key. `CapturedKernel.prepare()` always prepares afresh; task 34.6 adds artifact-store
+reuse. Output validation rejects a changed request or capture identity.
+The earlier prepare-only `ExternalKernelProvider` protocol remains available for
+direct callers; registration uses the capture-aware protocol.
+
+`make_request` copies parameter/constant/option containers and validates their
+immutable contents. `request_from_context` is the compatibility boundary: it copies
+only signature metadata and literal constants from `SpecializeContext`, canonicalizes
+shared dynamic dimension names, and keeps inexact extents dynamic. Declared dimensions
+share by their DSL symbol literal, even through different Python aliases;
+synthesized dimensions share only when they are the same instance,
+so reusing a local name does not impose equality on independent extents. A slice whose
+length is unproven receives an independent symbol even if metadata retains its parent's
+dynamic dimension as a fallback; full slices preserve proven equality. Repeated aliases
+of the same inexact tensor metadata share their axis symbols; independent views do not.
+Shortened views retain separate runtime extent identities alongside their fallback
+bounds. Full slices, whole-shape reads, and descriptor-based reshapes preserve these
+identities, including when the derived view crosses an ordinary JIT dependency.
+Omitted layouts normalize to ND, while unsupported constants fail explicitly.
+Strides remain unconstrained and offsets
+runtime-bound because the legacy context cannot prove those values.
+
+Existing `__pypto_jit__()` hooks may return a stable `JITFunction`; discovery checks
+the return type and leaves compilation to the ordinary JIT path. `legacy_builder(ref,
+target, lower)` adapts a context-based builder callback to capture/prepare, then calls
+an explicitly supplied `lower(PreparedKernel)` to produce the legacy builder result.
+The provider never sees the live context, AST, globals or tensor addresses. This is
+an adapter boundary for the builder path in PR #3231; it does not install that PR's
+runtime wrappers or make arbitrary registered objects executable in JIT programs.
+Automatic generic call lowering and real DSL migration remain subsequent tasks.
 
 ## Requests and prepared kernels
 
@@ -194,6 +263,10 @@ integrity and reserved manifest paths. `test_external_ir_semantics.py` checks no
 through round-trip serialization, the default pass pipeline and orchestration
 code generation: explicit public return plus hidden state writeback, inline,
 zero/multi-trip loops, branches, AIC/AIV/MIX and a view-to-root dependency.
+
+`test_external_registry.py` covers lazy loading, ambiguous selection, lifetimes,
+immutable captures, concurrent loading and builder request isolation. The legacy
+hook regression in `test_extern_kernel.py` runs a full JIT compile.
 
 These are CPU compiler checks. They do not establish numerical device correctness,
 automatic source-level writeback propagation, safe overlapping execution, or full
