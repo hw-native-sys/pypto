@@ -18,10 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from pypto._const_expr import UNKNOWN, evaluate
-
 from . import _arguments, _ast_analysis
-from ._specialize_values import constexpr_pruned_def
 from .specializer import (
     DynDim,
     free_name_source,
@@ -174,15 +171,15 @@ def extract_call_args_for_dep(
     return call_arg_refs(min(calls, key=lambda call: (call.lineno, call.col_offset)))
 
 
-def _dep_call_nodes(func_def: ast.FunctionDef) -> dict[str, list[ast.Call]]:
-    """Index a variant's calls once, in source order within each name."""
-    calls: dict[str, list[ast.Call]] = {}
-    for node in ast.walk(func_def):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            calls.setdefault(node.func.id, []).append(node)
-    for sites in calls.values():
-        sites.sort(key=lambda call: (call.lineno, call.col_offset))
-    return calls
+def _dep_call_nodes(caller_func: Any, dep_call_name: str) -> list[ast.Call]:
+    """Every call to ``dep_call_name`` in ``caller_func``'s body, in source order."""
+    func_def = _ast_analysis.get_func_def(caller_func)
+    calls = [
+        node
+        for node in ast.walk(func_def)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_call_name
+    ]
+    return sorted(calls, key=lambda call: (call.lineno, call.col_offset))
 
 
 def _fold_call_site_constant(
@@ -228,14 +225,10 @@ def _fold_call_site_constant(
     namespace = {k: v for k, v in caller_globals.items() if k not in caller_locals}
     namespace["__builtins__"] = {}
     for forwarded_name, text in caller_constexpr.items():
-        forwarded_value = evaluate(ast.parse(text, mode="eval").body)
-        if forwarded_value is not UNKNOWN:
-            namespace[forwarded_name] = forwarded_value
-    value = evaluate(arg, lambda name: namespace.get(name, UNKNOWN))
-    if value is not UNKNOWN:
-        return constant_source(value)
-    # Keep the existing path for symbolic dtype/enum expressions and other
-    # trusted call-site constructs outside the primitive expression grammar.
+        try:
+            namespace[forwarded_name] = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            continue
     try:
         value = eval(ast.unparse(arg), namespace)  # noqa: S307
     except Exception:  # noqa: BLE001 - any failure means "no compile-time value"
@@ -349,7 +342,7 @@ class VariantPlan:
     order: list[VariantKey]
     jit_func: "dict[VariantKey, JITFunction]"
     binding: dict[VariantKey, dict[str, str]]
-    origin: dict[VariantKey, tuple[VariantKey, str, ast.Call | None]]
+    origin: dict[VariantKey, tuple[VariantKey, str, ast.Call]]
     call_targets: dict[VariantKey, dict[tuple[str, int], VariantKey]]
 
     def naming_order(self, entry_key: VariantKey) -> "list[tuple[VariantKey, JITFunction]]":
@@ -417,8 +410,6 @@ def expand_constexpr_variants(
         call_targets={entry_key: {}},
     )
     variants_by_func: dict[int, list[VariantKey]] = {id(entry._func): [entry_key]}
-    original_calls: dict[int, dict[str, list[ast.Call]]] = {}
-    active_calls: dict[VariantKey, dict[str, list[ast.Call]]] = {}
 
     for dep in reversed(deps_topo):
         # Both lists cost a full ``inspect.signature`` with annotation
@@ -427,27 +418,13 @@ def expand_constexpr_variants(
         # skips call-site folding entirely.
         signature = (_arguments.constexpr_params(dep._func), dep._param_names())
         splits = bool(signature[0])
-        fallback_origin: tuple[VariantKey, str, ast.Call | None] | None = None
         for caller_func, call_name in callers_by_id.get(id(dep._func), ()):
-            caller_keys = variants_by_func.get(id(caller_func), ())
-            if not caller_keys:
-                continue
             caller_globals = func_name_lookup(caller_func)
             caller_locals = frozenset(_ast_analysis.body_local_names(caller_func))
             caller_name = getattr(caller_func, "__name__", "<caller>")
-            caller_def = _ast_analysis.get_func_def(caller_func)
-            if id(caller_func) not in original_calls:
-                original_calls[id(caller_func)] = _dep_call_nodes(caller_def)
-            for caller_key in caller_keys:
+            call_nodes = _dep_call_nodes(caller_func, call_name)
+            for caller_key in variants_by_func.get(id(caller_func), ()):
                 caller_binding = plan.binding[caller_key]
-                if caller_key not in active_calls:
-                    pruned = constexpr_pruned_def(caller_def, caller_binding, caller_globals, caller_locals)
-                    active_calls[caller_key] = (
-                        original_calls[id(caller_func)] if pruned is caller_def else _dep_call_nodes(pruned)
-                    )
-                call_nodes = active_calls[caller_key].get(call_name, [])
-                if call_name not in original_calls[id(caller_func)] and fallback_origin is None:
-                    fallback_origin = (caller_key, call_name, None)
                 for ordinal, call in enumerate(call_nodes):
                     values = (
                         resolve_call_site_constexpr(
@@ -471,7 +448,7 @@ def expand_constexpr_variants(
                         plan.origin[dep_key] = (caller_key, call_name, call)
                         variants_by_func.setdefault(id(dep._func), []).append(dep_key)
                     plan.call_targets[caller_key][(call_name, ordinal)] = dep_key
-        if id(dep._func) not in variants_by_func and fallback_origin is not None:
+        if id(dep._func) not in variants_by_func:
             # Reached by dep discovery but with no ``name(...)`` call node to
             # fold against. It still has to be emitted -- dropping it would
             # leave the caller calling an undefined function -- so it gets the
@@ -480,7 +457,6 @@ def expand_constexpr_variants(
             plan.order.append(fallback)
             plan.jit_func[fallback] = dep
             plan.binding[fallback] = {}
-            plan.origin[fallback] = fallback_origin
             plan.call_targets[fallback] = {}
             variants_by_func[id(dep._func)] = [fallback]
 

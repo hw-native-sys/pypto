@@ -28,7 +28,6 @@ from pypto.pypto_core import ir as _ir
 
 from . import _arguments, _ast_analysis, _call_binding
 from ._specialize_body import BodyTransformer
-from ._specialize_values import constexpr_pruned_def
 from .specializer import (
     DynDim,
     ShapeDim,
@@ -435,9 +434,6 @@ def _summarize_dep_results(
         func_def = _ast_analysis.get_func_def(dep._func)
     except OSError:
         return None
-    func_def = constexpr_pruned_def(
-        func_def, constexpr, func_name_lookup(dep._func), _ast_analysis.body_local_names(dep._func)
-    )
     site = _return_site(func_def)
     if site is None or site.value is None:
         return None
@@ -1911,10 +1907,8 @@ def extract_local_tensor_metas(
     expressions, using the callee's locals and tuple construction snapshots.
     """
     return_meta = return_meta or (_ReturnMeta(None, []) if caller_func_type == "host" else None)
+    func_def = _ast_analysis.get_func_def(func)
     scope = _StaticScope.of(func, constexpr_values)
-    func_def = constexpr_pruned_def(
-        _ast_analysis.get_func_def(func), constexpr_values or {}, scope.namespace, scope.shadowed
-    )
     dim_values: dict[str, _DimValue] = {name: None for name in scope.shadowed}
     local = dict(seed_meta or {})
     collected = dict(local)

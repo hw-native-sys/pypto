@@ -818,7 +818,7 @@ class BodyTransformer(ast.NodeTransformer):
         node.orelse = self._visit_scoped_body(node.orelse)
         return node
 
-    def visit_If(self, node: ast.If) -> ast.stmt:
+    def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
         A name first-assigned inside the then-branch is branch-local: the
@@ -834,6 +834,11 @@ class BodyTransformer(ast.NodeTransformer):
         (``exit_scope(leak_vars=True)``) and ConvertToSSA, as for ``@pl.program``.
         """
         node.test = self.visit(node.test)
+        condition = values.literal_condition(node.test)
+        if condition is not None:
+            # Prune before parsing: an inactive constexpr branch may have an
+            # intentionally incompatible Tile dtype or storage extent.
+            return self._visit_scoped_body(node.body if condition else node.orelse)
         self._scope_depth += 1
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)

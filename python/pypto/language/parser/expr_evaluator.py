@@ -13,7 +13,6 @@ import ast
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from pypto._const_expr import UNKNOWN, evaluate
 from pypto.pypto_core import DataType, ir
 
 from ..typing.dynamic import DynVar
@@ -204,9 +203,6 @@ class ExprEvaluator:
         Raises:
             ParserTypeError: If the value is resolved but has an unsupported type.
         """
-        value = evaluate(node, lambda name: self.closure_vars.get(name, UNKNOWN))
-        if value is not UNKNOWN:
-            return self.python_value_to_ir(value, self._get_span(node))
         success, value = self.try_eval_expr(node)
         if not success:
             return None

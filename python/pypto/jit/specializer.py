@@ -2363,21 +2363,19 @@ class Specializer:
                 self._external_return_params(func_def, tensor_params, out_params, ret_type),
             )
 
-        # Preserve lexical shadowing even when a local's assignment was in an
-        # inactive branch. The same pruned body feeds call ordinals and returns.
+        ret_type = _infer_return_type(
+            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+        )
+        ret_ann = f" -> {ret_type}" if ret_type else ""
+
+        # Transform body
+        dep_names = set(ctx.dep_names)
+        # Collect all names defined anywhere in the function to seed collision avoidance.
         all_defined = {
             node.id
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
-        func_def = values.constexpr_pruned_def(
-            func_def, ctx.constexpr_values, ctx.py_globals, set(all_param_names) | all_defined
-        )
-        ret_type = _infer_return_type(
-            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
-        )
-        ret_ann = f" -> {ret_type}" if ret_type else ""
-        dep_names = set(ctx.dep_names)
         transformer = BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             constexpr_values=ctx.constexpr_values,
