@@ -48,7 +48,7 @@ class AccessCollector : public IRVisitor {
           // Scalar parameters have no physical memory effect. Use registered
           // effects for storage so atomics also drive outlining and scheduling.
           const auto& type = call->args_[i]->GetType();
-          if (!As<TileType>(type) && !As<TensorType>(type)) continue;
+          if (!As<TileType>(type) && !AsTensorTypeLike(type)) continue;
           const auto effect = entry->GetArgEffect(i, call->kwargs_);
           summary[it->second].reads |= ArgEffectReads(effect);
           summary[it->second].writes |= ArgEffectWrites(effect);

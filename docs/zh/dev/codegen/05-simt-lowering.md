@@ -124,3 +124,8 @@ SIMT 测试相同环境开关控制的 `build`/`persistent` pytest 变体，及
 `--worker OUTPUT [DEVICE]` 入口。JIT 单测在无设备时编译全部四个入口并导出原生 LLVM。
 结构回归拒绝只读或未初始化的原子捕获、嵌套屏障以及绕过屏障的退出。
 未验证无锁前进性保证。
+
+`tests/st/runtime/vpto/test_simt_atomic_regressions_onboard.py` 额外验证五种原子对
+`[2, 3, 32]` UB Tile 的三维坐标 `(1, 2, 7)`（物理元素 167）的更新、未写元素，
+以及算术、分支和 while 条件中的原子求值次数。三项 A5 检查与原生 LLVM 地址和
+调用保留断言配合；codegen 会拒绝与展平后存储秩不一致的索引数量。

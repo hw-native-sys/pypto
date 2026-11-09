@@ -211,10 +211,12 @@ ATOMICS = ("atomic_add", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas"
 
 
 @pytest.mark.parametrize("name", ATOMICS)
-@pytest.mark.parametrize("storage_type", [ir.TensorType, ir.TileType])
+@pytest.mark.parametrize("storage_type", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
 @pytest.mark.parametrize("dtype", [DataType.INT32, DataType.FP32])
 def test_atomic_types_effects_and_round_trip(name, storage_type, dtype):
-    storage = ir.Var("target", storage_type([4, 8], dtype), SPAN)
+    storage = ir.Var(
+        "target", storage_type([ir.ConstInt(d, DataType.INDEX, SPAN) for d in (4, 8)], dtype), SPAN
+    )
     value = ir.Var("value", ir.ScalarType(dtype), SPAN)
     args = [storage, [1, 2], value] + ([value] if name == "atomic_cas" else [])
     call = getattr(simt, name)(*args)

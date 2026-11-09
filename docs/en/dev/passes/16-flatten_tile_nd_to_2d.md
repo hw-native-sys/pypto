@@ -513,7 +513,7 @@ Only InCore-type functions (InCore, AIC, AIV) are processed. Orchestration and O
 
 ## SIMT helpers
 
-The pass flattens ND Tile parameters and rewrites `simt.load`/`simt.store`
+The pass flattens ND Tile parameters and rewrites `simt.load`/`simt.store` and all five `simt.atomic_*`
 indices together with caller launch operands/results. Leading coordinates
 collapse in row-major order. Initial support requires implicit packed layouts
 and positive static leading extents; explicit ND Tile views are rejected.

@@ -145,6 +145,8 @@ NaN 载荷。UINT32/INT64、FP16/BF16 和 packed 原子不属于当前前端子�
 即使 PTOAS 支持其中部分组合。没有可选内存顺序或 scope 参数：操作使用目标地址空间
 的原生原子契约，不对其他地址额外提供 acquire/release 或顺序一致性保证。
 可选 `l2cache=` 使用 store 缓存策略，仅允许用于 GM。
+`DistributedTensor` 窗口按当前 rank 的本地 GM 切片访问，沿用相同的物理 stride、
+初始化要求和读写效果；这些操作不提供跨 rank 的远端原子更新。
 
 所有原子均为 `ReadWrite`，包括 Exch 以及未使用返回值的操作。目标必须已初始化；
 原子操作不能证明 `Out` 捕获已完整初始化，之前的完整普通覆盖写可以建立此证明。

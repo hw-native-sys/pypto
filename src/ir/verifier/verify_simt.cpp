@@ -36,7 +36,7 @@
 
 namespace pypto::ir {
 namespace {
-bool IsStorage(const TypePtr& type) { return As<TileType>(type) || As<TensorType>(type); }
+bool IsStorage(const TypePtr& type) { return As<TileType>(type) || AsTensorTypeLike(type); }
 bool IsSimtOp(const CallPtr& call) {
   const auto* entry = LookupOpEntry(call->op_);
   return entry && entry->GetOpCategory() == "SimtOp";
@@ -222,9 +222,9 @@ class SimtChecker : public IRVisitor {
             tile && tile->memory_space_ && tile->memory_space_ != MemorySpace::Vec) {
           compatible = false;
         }
-        if (auto tensor = As<TensorType>(arg_type); tensor && tensor->tensor_view_ &&
-                                                    tensor->tensor_view_->layout != TensorLayout::ND &&
-                                                    tensor->tensor_view_->layout != TensorLayout::DN) {
+        if (auto tensor = AsTensorTypeLike(arg_type); tensor && tensor->tensor_view_ &&
+                                                      tensor->tensor_view_->layout != TensorLayout::ND &&
+                                                      tensor->tensor_view_->layout != TensorLayout::DN) {
           compatible = false;
         }
       } else {

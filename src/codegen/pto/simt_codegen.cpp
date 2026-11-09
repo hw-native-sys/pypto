@@ -283,6 +283,8 @@ std::string PTOCodegen::SimtElementOffset(const ir::ExprPtr& storage, const ir::
   INTERNAL_CHECK_SPAN(tile || tensor, storage->span_)
       << "Internal error: SIMT addressing requires borrowed storage";
   const auto& shape = tile ? tile->shape_ : tensor->shape_;
+  INTERNAL_CHECK_SPAN(indices && indices->elements_.size() == shape.size(), storage->span_)
+      << "Internal error: SIMT indices must match the storage rank after flattening";
   std::vector<ir::ExprPtr> strides;
   ir::ExprPtr origin;
   bool column_major = false;

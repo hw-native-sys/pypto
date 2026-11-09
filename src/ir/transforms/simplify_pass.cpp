@@ -552,6 +552,42 @@ class UnreachableBodyRemapper : public IRMutator {
   const std::unordered_set<const Var*>& multi_assigned_;
 };
 
+// Calls have no purity contract. Cache occurrence information over immutable
+// expression nodes so guarding each nested arithmetic node remains O(N), rather
+// than rescanning its entire subtree. Owning keys prevent address reuse after
+// a rewritten temporary expression is destroyed. The cache lives for one pass
+// invocation; Var/IterArg uses do not re-evaluate their types or initializers.
+class CallLikePresence : public IRVisitor {
+ public:
+  bool Contains(const ExprPtr& expr) {
+    found_ = false;
+    VisitExpr(expr);
+    return found_;
+  }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!expr) return;
+    if (auto it = cache_.find(expr); it != cache_.end()) {
+      found_ |= it->second;
+      return;
+    }
+    const bool enclosing = found_;
+    found_ = false;
+    IRVisitor::VisitExpr(expr);
+    cache_.emplace(expr, found_);
+    found_ |= enclosing;
+  }
+
+ protected:
+  void VisitExpr_(const CallPtr&) override { found_ = true; }
+  void VisitExpr_(const SubmitPtr&) override { found_ = true; }
+  void VisitVarLike_(const VarPtr&) override {}
+
+ private:
+  bool found_ = false;
+  std::unordered_map<ExprPtr, bool> cache_;
+};
+
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
   SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned,
@@ -773,7 +809,9 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // CanProve is used instead of literal-only ConstInt matching so closure-
     // captured trip counts like `for k in pl.range(C, C + 1)` collapse the
     // same way `pl.range(0, 1)` does.
-    const bool is_pure_for = op->attrs_.empty() && op->kind_ == ForKind::Sequential;
+    const bool is_pure_for = op->attrs_.empty() && op->kind_ == ForKind::Sequential &&
+                             !call_presence_.Contains(new_start) && !call_presence_.Contains(new_stop) &&
+                             !call_presence_.Contains(new_step);
     if (!constants_only_ && is_pure_for && analyzer_->CanProveGreaterEqual(new_step, 1)) {
       const Span& sp = op->span_;
       int trips = -1;
@@ -999,9 +1037,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // facts valid at entry. Constants-only mode also needs this proof: entering
     // an impossible branch can produce an empty scalar range. Keep its control
     // flow below, but only remap its unreachable body without analyzing it.
-    const bool always_true = analyzer_->CanProve(new_condition);
-    const bool always_false =
-        !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
+    // Calls remain observable even when the surrounding predicate is constant.
+    const bool has_calls = call_presence_.Contains(new_condition);
+    const bool always_true = !has_calls && analyzer_->CanProve(new_condition);
+    const bool always_false = !has_calls && !always_true &&
+                              analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
 
     // Snapshot var_remap_ so each branch's internal remap additions stay
     // scoped to that branch. Without this, a remap recorded inside the
@@ -1027,7 +1067,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // Defer the unreachable body until we know whether the IfStmt survives.
     StmtPtr new_then = op->then_body_;
     if (!always_false) {
-      auto ctx = analyzer_->GetConstraintContext(new_condition);
+      // A second structurally equal call is a new evaluation, not a fact
+      // established by the earlier condition. Do not propagate such predicates.
+      auto ctx = analyzer_->GetConstraintContext(
+          has_calls ? std::make_shared<ConstBool>(true, new_condition->span_) : new_condition);
       new_then = VisitStmt(op->then_body_);
     }
     auto then_remap = std::move(var_remap_);
@@ -1037,7 +1080,9 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // Enter constraint scope for else branch (condition is known false → Not(condition)).
     std::optional<StmtPtr> new_else = op->else_body_;
     if (!always_true && op->else_body_.has_value()) {
-      auto ctx = analyzer_->GetConstraintContext(MakeNot(new_condition, new_condition->span_));
+      auto ctx =
+          analyzer_->GetConstraintContext(has_calls ? std::make_shared<ConstBool>(true, new_condition->span_)
+                                                    : MakeNot(new_condition, new_condition->span_));
       new_else = VisitStmt(*op->else_body_);
     }
     auto else_remap = std::move(var_remap_);
@@ -1239,6 +1284,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   ExprPtr SimplifyValue(const ExprPtr& expr) {
+    // Algebraic identities can erase, duplicate or reorder observable calls
+    // (e.g. atomic_add(...) - atomic_add(...)). Leave their enclosing expression
+    // intact until FlattenCallExpr materializes them. This also preserves SIMT
+    // while-condition calls, which must execute on every condition evaluation.
+    if (call_presence_.Contains(expr)) return expr;
     auto folded = analyzer_->Simplify(expr);
     return !constants_only_ || IsConstScalar(folded) ? folded : expr;
   }
@@ -1440,6 +1490,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// whatever its dtype -- but the rule stands on its own, and still holds for
   /// any var the caller has bound before this point.
   void BindScalarBound(const VarPtr& var, const ExprPtr& value) {
+    // A direct Call's bound comes only from the builtin's result contract
+    // (e.g. get_subblock_idx >= 0), never from rewriting its arguments. Keep
+    // that fact for the materialized result without eliminating the call.
+    // Nested call expressions still cannot establish scalar bounds.
+    if (!As<Call>(value) && call_presence_.Contains(value)) return;
     analyzer_->const_int_bound.Update(var, analyzer_->const_int_bound(value));
     scalar_binding_log_.push_back(var);
   }
@@ -1668,6 +1723,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// above any real nest of *provably* one-trip pure loops (a handful at most),
   /// so no kernel in the pipeline reaches it.
   static constexpr int kMaxNestedSingleTripFolds = 16;
+  CallLikePresence call_presence_;
 };
 
 FunctionPtr TransformSimplify(const FunctionPtr& func, bool constants_only) {

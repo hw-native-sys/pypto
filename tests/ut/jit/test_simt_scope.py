@@ -616,3 +616,45 @@ def test_public_atomics_native_compile(tmp_path, pytestconfig, entry_name):
                         assert f"@llvm.hivm.atom.{op}.{space}.{dtype}(" in llvm
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+def test_atomic_nd_address_and_nested_calls_native(tmp_path, pytestconfig):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_atomic_regressions_onboard.py"
+    pytestconfig.addinivalue_line("markers", "platforms(*ids, reason): supported ST platforms")
+    fixture = runpy.run_path(str(source))
+    backend.reset_for_testing()
+    try:
+        fixture["compile_case"](tmp_path)
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        text = helpers[0].read_text()
+        assert text.count("pto.atomic_add ") == 8
+        # The while condition must still perform an atomic on each evaluation.
+        condition = text[text.index("scf.while") : text.index("scf.condition")]
+        assert "pto.atomic_add " in condition
+        result = subprocess.run(
+            [
+                binary,
+                str(helpers[0]),
+                "--pto-arch=a5",
+                "--pto-backend=vpto",
+                "--emit-vpto-llvm-ir",
+                "-o",
+                str(tmp_path / "regression.ll"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        llvm = (tmp_path / "regression.ll").read_text()
+        assert "i64 167" in llvm
+        assert "i64 34" not in llvm
+        assert llvm.count("call i32 @llvm.hivm.atom.ADD.") == 8
+    finally:
+        backend.reset_for_testing()

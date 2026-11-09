@@ -167,6 +167,9 @@ subset, even when PTOAS supports some of them. There is no selectable memory-ord
 or scope argument: each operation uses the native address-space atomic contract.
 No acquire/release or sequential-consistency guarantee is added for other addresses.
 Optional `l2cache=` uses store cache tokens and is allowed only on GM.
+A `DistributedTensor` window is accessed as this rank's local GM slice, with
+the same physical strides, initialization requirements and read/write effects.
+These operations do not provide remote-rank atomics.
 
 An atomic is always `ReadWrite`, including Exch and an unused return value.
 Targets must already be initialized; an atomic cannot establish full initialization

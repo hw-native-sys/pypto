@@ -52,7 +52,9 @@ TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
   CHECK(args.size() == expected_args) << "simt." << (store ? "store" : "load") << " requires exactly "
                                       << expected_args << " arguments, got " << args.size();
   const auto tile = As<TileType>(args[0]->GetType());
-  const auto tensor = As<TensorType>(args[0]->GetType());
+  // A distributed window is this rank's local GM slice, with the same
+  // addressing and permission contract as an ordinary Tensor.
+  const auto tensor = AsTensorTypeLike(args[0]->GetType());
   CHECK(tile || tensor) << "SIMT memory access requires Tile (UB) or Tensor (GM) storage";
   if (tile) {
     CHECK(!tile->memory_space_ || tile->memory_space_ == MemorySpace::Vec)

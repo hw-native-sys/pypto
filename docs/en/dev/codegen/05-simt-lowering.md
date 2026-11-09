@@ -145,3 +145,10 @@ the same environment gates as the other SIMT tests, plus `--worker OUTPUT [DEVIC
 The unit JIT tests compile all four entries and export native LLVM without a device.
 Structural regressions reject readonly/uninitialized atomic captures and nested
 barriers or bypassing exits. No lock-free forward-progress guarantee is tested.
+
+`tests/st/runtime/vpto/test_simt_atomic_regressions_onboard.py` additionally
+checks all five atomics at rank-3 UB coordinate `(1, 2, 7)` in a `[2, 3, 32]`
+Tile (physical element 167), untouched elements, and atomic evaluation counts
+in arithmetic, branches and while conditions. Its three A5 checks complement
+native LLVM assertions for the address and retained calls. Codegen rejects
+index counts that disagree with the post-flatten storage rank.

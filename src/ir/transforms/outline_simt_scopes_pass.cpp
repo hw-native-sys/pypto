@@ -87,7 +87,7 @@ class RegionIndex : public IRVisitor {
     var_collectors::VarDefUseCollector collector;
     collector.VisitStmt(scope->body_);
     for (const auto* var : collector.var_defs) {
-      CHECK_SPAN(!As<TileType>(var->GetType()) && !As<TensorType>(var->GetType()), var->span_)
+      CHECK_SPAN(!As<TileType>(var->GetType()) && !AsTensorTypeLike(var->GetType()), var->span_)
           << "SIMT helpers cannot allocate or rebind storage handles";
     }
     for (const auto& var : scope->private_scalars_) collector.var_defs.erase(var.get());
@@ -236,7 +236,7 @@ class StoragePermissions : public IRVisitor {
     return nullptr;
   }
   static bool IsStorage(const VarPtr& var) {
-    return As<TileType>(var->GetType()) || As<TensorType>(var->GetType());
+    return As<TileType>(var->GetType()) || AsTensorTypeLike(var->GetType());
   }
   void Unite(const VarPtr& a, const VarPtr& b) {
     if (!a || !b || !IsStorage(a) || !IsStorage(b)) return;
@@ -690,7 +690,7 @@ class ScopeOutliner : public IRMutator {
     auto source = As<TileType>(call->args_[0]->GetType());
     auto offsets = As<MakeTuple>(call->args_[1]);
     auto destination = AsVarLike(call->args_[2]);
-    auto tensor = destination ? As<TensorType>(destination->GetType()) : nullptr;
+    auto tensor = destination ? AsTensorTypeLike(destination->GetType()) : nullptr;
     if (!source || !offsets || !tensor || source->shape_.size() != tensor->shape_.size()) return;
     if (!SameShape(source->shape_, tensor->shape_)) return;
     if (source->tile_view_ && !source->tile_view_->valid_shape.empty() &&

@@ -1,7 +1,7 @@
 # MaterializeDistTensorCtx Pass
 
 本 pass 为每个 `DistributedTensorType` 函数参数显式物化一个对应的
-`CommCtxType` 参数和实参。
+`CommCtxType` 参数和实参，SIMT helper 除外。
 
 ## 概览
 
@@ -13,10 +13,15 @@ codegen 再用它降低 `pld.system.rank`、`pld.system.nranks`、`notify`、`wa
 旧路径在多个 codegen 站点分别合成 ctx，容易漏站点或顺序漂移。本 pass 把这条
 数据流放进 IR：
 
-1. 对每个带 `DistributedTensorType` 参数的函数，按分布式 tensor 参数顺序在签名
+SIMT helper 仅借用当前 rank 的本地 GM 指针，不能执行通信操作，因此保持本地
+指针 ABI；其外层设备核函数仍接收显式通信上下文。
+
+1. 对每个带 `DistributedTensorType` 参数的非 SIMT 函数，按分布式 tensor 参数顺序在签名
    末尾追加 `CommCtxType` 参数，方向为 `ParamDirection::In`。
 2. 对每个调用点追加对应 ctx 实参。若 distributed tensor 是调用者自己的参数或其
-   SSA alias，则转发调用者已有的 ctx 参数。返回位置按被调函数实际返回的参数
+   SSA alias，则转发调用者已有的 ctx 参数。`SimtLaunchStmt` 的可写结果从映射的
+   存储实参继承上下文，保证原子更新产生新 SSA 名称后，后续上下文查询和派发仍
+   使用同一窗口上下文。返回位置按被调函数实际返回的参数
    建立对应关系，因此混合类型或重排后的返回 tuple 不会退化为尾部位置猜测。
    `Submit` 同理：它的结果位置就是被调函数的返回位置（末尾的
    `Scalar[TASK_ID]` 没有对应 ctx）。把新 SSA 变量绑定到「已经存在的
