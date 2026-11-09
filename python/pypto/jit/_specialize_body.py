@@ -925,9 +925,14 @@ class BodyTransformer(ast.NodeTransformer):
         """
         node.test = self.visit(node.test)
         self._scope_depth += 1
-        if (selected := _constant_condition(node.test)) is not None:
-            # Keep both bodies for the parser's yield handling. Only the
-            # selected body can update the surrounding specialization state.
+        selected = _constant_condition(node.test)
+        if selected is not None and any(
+            isinstance(item, ast.withitem) and isinstance(item.optional_vars, ast.Name)
+            for stmt in (*node.body, *node.orelse)
+            for item in ast.walk(stmt)
+        ):
+            # Keep both bodies for the parser's yield handling. Isolate the
+            # inactive capture so it cannot overwrite the live binding.
             if selected:
                 if node.orelse:
                     node.orelse = self._visit_inactive_branch(node.orelse)
