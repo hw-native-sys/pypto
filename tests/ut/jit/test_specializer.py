@@ -412,9 +412,32 @@ class TestBodyTransformer:
         rendered = self._transform(source, {"c": TensorMeta(shape=(128, 64), dtype=DataType.FP32)})
         assert "pl.create_tensor([128, 64]" in rendered
 
+    def test_graph_plain_task_id_shadow_preserves_folded_shape(self):
+        source = textwrap.dedent("""
+            def f(c: pl.Tensor):
+                width = c.shape[1]
+                with pl.manual_scope():
+                    with pl.graph("recording"):
+                        width = pl.system.task_dummy(deps=[])
+                        pl.system.task_dummy(deps=[width])
+                return pl.create_tensor([128, width], dtype=pl.FP32)
+        """)
+        ctx = _make_ctx(
+            "f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 64), DataType.FP32)}
+        )
+        function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+        assert function is not None
+        assert isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        (value,) = returned.value
+        result = value.type
+        assert isinstance(result, ir.TensorType)
+        assert isinstance(result.shape[1], ir.ConstInt) and result.shape[1].value == 64
+
     def test_graph_plain_task_id_does_not_replace_outer_alias(self):
         source = """
-            def f(self):
+            def f():
                 with pl.manual_scope():
                     for i in pl.range(1):
                         seed = pl.system.task_dummy(deps=[])
@@ -425,11 +448,37 @@ class TestBodyTransformer:
                         ready = pl.system.task_dummy(deps=[])
                     pl.system.task_dummy(deps=[ready, done])
         """
-        rendered = self._transform(source, {})
-        assert "ready_v1 = pl.system.task_dummy(deps=[])" in rendered
-        assert "pl.system.task_dummy(deps=[ready_v1, done])" in rendered
-        program_source = "@pl.program\nclass Before:\n    @pl.function\n" + textwrap.indent(rendered, "    ")
-        assert pl.parse_program(program_source).get_function("f") is not None
+        rendered = specialize("Before", [_make_ctx("f", textwrap.dedent(source))])
+        assert "ready_v2 = pl.system.task_dummy(deps=[])" in rendered
+        assert pl.parse_program(rendered).get_function("f") is not None
+
+    @pytest.mark.parametrize(
+        "rhs",
+        ["recorded", "pl.create_tensor([64, 64], dtype=pl.FP32)", "pl.tensor.reshape(recorded, [32, 128])"],
+    )
+    def test_graph_host_tensor_assignments_can_change_shape(self, rhs):
+        source = textwrap.dedent(f"""
+            def f(first: pl.Tensor, recorded: pl.InOut[pl.Tensor]):
+                for i in pl.range(1):
+                    out = first
+                with pl.graph("recording"):
+                    out = {rhs}
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(recorded, [0, 0], [64, 64]), [0, 0], recorded)
+                return recorded
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["first", "recorded"],
+            tensor_meta={
+                "first": TensorMeta((128, 128), DataType.FP32),
+                "recorded": TensorMeta((64, 64), DataType.FP32),
+            },
+        )
+        rendered = specialize("Before", [ctx])
+        assert "out_v1 =" in rendered
+        assert pl.parse_program(rendered).get_function("f") is not None
 
     def test_bind_dynamic_removed(self):
         src = """

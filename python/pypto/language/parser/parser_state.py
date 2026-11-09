@@ -25,6 +25,8 @@ from .type_resolver import (
     TypeResolver,  # noqa: PLC2701
 )
 
+JIT_GRAPH_REBINDS_ATTR = "__pypto_jit_graph_rebinds__"
+
 
 class AssignCallback(Protocol):
     """Bind a value using the entry parser's existing SSA/aliasing rules."""
@@ -80,6 +82,9 @@ class FunctionContext:
 
         # Current function name (set during parse_function)
         self.func_name: str = ""
+
+        # Generated Graph aliases to their prior emitted name or folded shape.
+        self.jit_graph_rebinds: dict[str, str | int] = {}
 
         # Current function level (set during parse_function). Drives
         # context-scoped op constraints (e.g. pld.system.world_size is host-only).

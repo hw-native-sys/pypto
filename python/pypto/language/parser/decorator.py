@@ -29,6 +29,7 @@ from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
 from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
+from .parser_state import JIT_GRAPH_REBINDS_ATTR
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
 
 
@@ -1257,6 +1258,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     end = max((fd.end_lineno or fd.lineno), max(pending_comments, default=fd.lineno))
                 method_boundaries[id(fd)] = (start, end)
 
+            jit_graph_rebinds: dict[str, dict[str, str | int]] = getattr(c, JIT_GRAPH_REBINDS_ATTR, {})
             for func_def in func_defs:
                 # Extract function type, level/role, and attrs from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
@@ -1326,6 +1328,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     pending_comments=method_comments,
                     alloc_window_buffer_names=alloc_window_buffer_names,
                 )
+                parser.function.jit_graph_rebinds = jit_graph_rebinds.get(func_def.name, {})
 
                 try:
                     ir_func = parser.parse_function(

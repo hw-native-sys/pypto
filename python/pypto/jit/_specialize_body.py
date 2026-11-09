@@ -15,15 +15,13 @@ and rebinding rules stay aligned with emitted source.
 """
 
 import ast
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from typing import Any, TypeVar, cast
 
 from . import _specialize_values as values
 from ._specialize_types import DynDim, TensorMeta
 
 _BindingValue = TypeVar("_BindingValue")
-_DEVICE_SCOPES = ("at", "spmd", "cluster", "split_aiv", "simt_scope")
 
 
 def _restore_bindings(
@@ -132,7 +130,8 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
-        self._graph_outer_bindings: frozenset[str] = frozenset()
+        self._in_graph = False
+        self.graph_rebinds: dict[str, str | int] = {}
         self._simt_depth: int = 0
         self._simt_runtime_names: set[str] = set()
         # Pre-register function parameters as "already assigned at depth 0" so
@@ -170,6 +169,10 @@ class BodyTransformer(ast.NodeTransformer):
             count += 1
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
+        if self._in_graph:
+            folded = self._shape_inlined.get(var_name)
+            previous = self._var_renames.get(var_name, var_name)
+            self.graph_rebinds[new_name] = previous if folded is None else folded
         self._var_renames[var_name] = new_name
         self._alias_to_original[new_name] = var_name
         self._used_names.add(new_name)
@@ -203,24 +206,11 @@ class BodyTransformer(ast.NodeTransformer):
         elif self._var_renames.get(name) == name:
             self._var_renames.pop(name)
 
-    def _can_rebind(self, name: str) -> bool:
-        # Keep incoming names in Graph orchestration so the parser can
-        # isolate TaskIds by type and keep caller-owned tensor writes.
-        return name not in self._graph_outer_bindings and self._assign_depth.get(name) == self._scope_depth
-
-    @contextmanager
-    def _graph_binding_context(self, *, graph: bool = False, device: bool = False) -> Iterator[None]:
-        previous = self._graph_outer_bindings
-        if graph:
-            self._graph_outer_bindings = frozenset(self._assign_count)
-        elif device:
-            # Kernel-local rebindings use normal alpha-renaming, even
-            # when a host statement in this recording uses the same name.
-            self._graph_outer_bindings = frozenset()
-        try:
-            yield
-        finally:
-            self._graph_outer_bindings = previous
+    def _needs_alpha_rename(self, name: str) -> bool:
+        # A folded name has no IR binding for the Graph body to assign to.
+        return self._scope_depth == self._assign_depth[name] or (
+            self._in_graph and name in self._shape_inlined
+        )
 
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
@@ -234,7 +224,7 @@ class BodyTransformer(ast.NodeTransformer):
             # Only rename at the same scope where the variable was first defined.
             # Rebindings at a deeper scope (inside for/with) are loop-carried
             # updates — do not rename them.
-            if self._can_rebind(var_name):
+            if self._needs_alpha_rename(var_name):
                 new_name = self._rebind(var_name)
                 self._record_tensor_meta(new_name, value_meta)
                 new_node = ast.Assign(
@@ -469,7 +459,7 @@ class BodyTransformer(ast.NodeTransformer):
         if self._simt_depth:
             self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
-            if self._can_rebind(var_name):
+            if self._needs_alpha_rename(var_name):
                 new_name = self._rebind(var_name)
                 self._record_tensor_meta(new_name, value_meta)
                 new_node = ast.AnnAssign(
@@ -778,7 +768,7 @@ class BodyTransformer(ast.NodeTransformer):
                 for name in self._names_by_ctx(target, ast.Store):
                     if name in seen:
                         continue
-                    if self._can_rebind(name):
+                    if name in self._assign_count and self._scope_depth == self._assign_depth.get(name, -1):
                         seen.add(name)
                         (carried if name in exposed else fresh).append(name)
         return carried, fresh
@@ -840,19 +830,18 @@ class BodyTransformer(ast.NodeTransformer):
         neither bridged nor renamed.
         """
         node.iter = self.visit(node.iter)
-        with self._graph_binding_context(device=_scope_call_name(node.iter) == "spmd"):
-            self._scope_depth += 1
-            carried, fresh = self._classify_loop_locals(node.body)
-            self._scope_depth -= 1
-            # Carried names: bridge + rename so the carried value threads across.
-            bridges = self._make_bridge_assignments(carried)
-            # Fresh names: forget the same-depth sibling binding so the body's
-            # assignment is treated as a first binding (no rename, no bridge).
-            for name in fresh:
-                self._forget_rename_bookkeeping(name)
-            self._scope_depth += 1
-            node.body = self._visit_scoped_body(node.body)
-            self._scope_depth -= 1
+        self._scope_depth += 1
+        carried, fresh = self._classify_loop_locals(node.body)
+        self._scope_depth -= 1
+        # Carried names: bridge + rename so the carried value threads across.
+        bridges = self._make_bridge_assignments(carried)
+        # Fresh names: forget the same-depth sibling binding so the body's
+        # assignment is treated as a first binding (no rename, no bridge).
+        for name in fresh:
+            self._forget_rename_bookkeeping(name)
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        self._scope_depth -= 1
         if bridges:
             return bridges + [node]
         return node
@@ -959,12 +948,14 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
+        previous_graph = self._in_graph
+        self._in_graph = previous_graph or graph
         self._scope_depth += 1
         try:
-            with self._graph_binding_context(graph=graph, device=not scope_names.isdisjoint(_DEVICE_SCOPES)):
-                node.body = self._visit_scoped_body(node.body)
+            node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
+            self._in_graph = previous_graph
             if simt:
                 self._simt_depth -= 1
             if state is not None and simt:
