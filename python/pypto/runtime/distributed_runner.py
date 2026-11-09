@@ -62,6 +62,18 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
     "FP4E2M1": (ctypes.c_uint8, torch.uint8),
 }
 
+# Low-precision dtypes torch gained after the >=2.0 floor declared in
+# pyproject.toml. This map is built at import, so naming one unconditionally
+# would break importing this module on a supported older torch instead of
+# only when the dtype is actually carried. An absent entry falls through to the
+# ``Unsupported simpler Tensor dtype`` error below, which is the same result the
+# runtime already gives for any dtype it cannot name. Bytes are allocated
+# through c_uint8 and viewed, exactly as FLOAT16/BFLOAT16 above.
+for _wire_name, _torch_dtype_name in (("FP8E5M2", "float8_e5m2"),):
+    _optional_dtype = getattr(torch, _torch_dtype_name, None)
+    if isinstance(_optional_dtype, torch.dtype):
+        _DTYPE_MAP[_wire_name] = (ctypes.c_uint8, _optional_dtype)
+
 
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
     """Resolve the retained-window reset policy.

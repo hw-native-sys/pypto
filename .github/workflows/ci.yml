@@ -2168,7 +2168,7 @@ jobs:
     # because the job now also runs MX ST (matmul_mx / quant_mx) on the same
     # npu-a5 card. Three steps share one checkout / install:
     #   1. mixed-kernel-tests-a5 — cross_core V<->C path on silicon
-    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul
+    #   2. mx-tests-a5           — host-prequant matmul_mx + on-board quant/quant-to-matmul + E5M2 transfer
     #   3. vf-tests-a5           — EmitC adapters + VPTO helpers through persistent Workers
     #
     # Everything else in this workflow exercises the mixed / cross-core path on
@@ -2229,8 +2229,11 @@ jobs:
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
-    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # MX_A_ZZ / MX_B_NN), test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul), and test_fp8e5m2_transfer.py (byte-exact E5M2 host/device
+    # round trip). All are `@pytest.mark.platforms("a5")`, so the explicit file
+    # list is what reaches them: every directory-glob ST step runs at the default
+    # --platform=a2a3 and deselects them.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2266,6 +2269,13 @@ jobs:
       # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
       # the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # Every pytest step below runs under --forked, which imports all collected
+      # modules in the parent and then forks a child per test. An ATen parallel
+      # region opened in the parent leaves the child with a threadpool that did
+      # not survive the fork (pytorch#17199); the child then hangs with no
+      # verdict until --max-time kills the step. Pinning the intraop pool to one
+      # thread removes the fault.
+      OMP_NUM_THREADS: 1
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -2332,6 +2342,7 @@ jobs:
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp8e5m2_transfer.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: vf-tests-a5

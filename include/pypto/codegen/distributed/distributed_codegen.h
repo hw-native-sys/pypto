@@ -266,6 +266,11 @@ class DistributedCodegen : public CodegenBase {
   [[nodiscard]] bool IsSubWorker(const ir::FunctionPtr& func) const;
   [[nodiscard]] static std::string DataTypeToPythonDType(const DataType& dtype);
 
+  /// Build the ``torch.zeros(...)`` expression for a HOST-allocated tensor of
+  /// ``dtype``, routing dtypes whose CPU ``fill_`` kernel torch lacks through a
+  /// same-size uint8 allocation plus a zero-copy reinterpreting view.
+  [[nodiscard]] static std::string HostZerosExpr(const std::string& shape, const DataType& dtype);
+
   /// Look up the innermost open CommDomainScopeStmt whose ``slots_`` contain
   /// ``wb`` (by shared_ptr identity — ``MaterializeCommDomainScopes`` shares
   /// the same ``shared_ptr<const WindowBuffer>`` between the scope's slots

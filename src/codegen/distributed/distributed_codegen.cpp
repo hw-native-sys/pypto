@@ -1312,10 +1312,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     }
     if (ret_type->shape_.size() == 1) shape += ",";
     shape += ")";
-    const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
     emitter_.EmitLine("if \"" + target + "\" not in tensors:");
-    emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
-                      torch_dtype + ").share_memory_()");
+    emitter_.EmitLine("    tensors[\"" + target + "\"] = " + HostZerosExpr(shape, ret_type->dtype_) +
+                      ".share_memory_()");
     emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
                       "\"]), TensorArgType.OUTPUT_EXISTING)");
   }
@@ -1524,11 +1523,9 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
   if (result_type->shape_.size() == 1) shape += ",";  // trailing comma for 1-tuple
   shape += ")";
 
-  std::string torch_dtype = DataTypeToPythonDType(result_type->dtype_);
-
   // share_memory_() is required for fork-based distributed runtime visibility.
-  emitter_.EmitLine("tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." + torch_dtype +
-                    ").share_memory_()");
+  emitter_.EmitLine("tensors[\"" + target + "\"] = " + HostZerosExpr(shape, result_type->dtype_) +
+                    ".share_memory_()");
 
   declared_vars_.insert(target);
   current_expr_value_ = "";
@@ -1705,16 +1702,50 @@ void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& h
 }
 
 std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
-  // Most dtype names match torch directly; only fp16/fp32/fp64 differ.
+  // The emitted host code is ``torch.zeros(..., dtype=torch.<name>)``, so <name>
+  // must be torch's own spelling. Integer and bfloat16 tags already match, but
+  // every float whose IR tag is an abbreviation needs translating: an
+  // untranslated tag reaches the generated ``host_orch.py`` as a torch
+  // attribute that does not exist and raises AttributeError at dispatch,
+  // before the kernel runs.
   static const std::unordered_map<std::string, std::string> kRenames = {
       {"fp16", "float16"},
       {"fp32", "float32"},
       {"fp64", "float64"},
+      {"fp8e4m3fn", "float8_e4m3fn"},
+      {"fp8e5m2", "float8_e5m2"},
+      {"fp8e8m0", "float8_e8m0fnu"},
+      {"fp4e2m1x2", "float4_e2m1fn_x2"},
+      // Torch has no hifloat8 and no packed E1M2 dtype. Both are byte-sized,
+      // and the IR shape of a packed carrier is already its physical byte
+      // extent, so a uint8 host buffer holds exactly the same bytes. This
+      // substitution is local to the distributed host allocator and is NOT
+      // hf8 support elsewhere: ``CodegenBase::GetRuntimeDataTypeString`` has
+      // no hf8 arm at all and falls through to ``DataType::UNKNOWN``.
+      {"fp4e1m2x2", "uint8"},
+      {"hf8", "uint8"},
   };
   std::string name = dtype.ToString();
   auto it = kRenames.find(name);
   CHECK(name != "unknown") << "Unsupported dtype for distributed tensor create: " << name;
   return it != kRenames.end() ? it->second : name;
+}
+
+std::string DistributedCodegen::HostZerosExpr(const std::string& shape, const DataType& dtype) {
+  const std::string name = DataTypeToPythonDType(dtype);
+  // Torch has no CPU ``fill_`` kernel for the packed FP4 E2M1 dtype, and
+  // ``Tensor::zero_`` only avoids ``fill_`` by taking a serial memset shortcut
+  // BELOW ATen's parallelisation grain (``at::internal::GRAIN_SIZE`` == 32768).
+  // So a buffer of 32768 bytes or more -- and only such a buffer -- dies with
+  //   NotImplementedError: "fill_cpu" not implemented for 'Float4_e2m1fn_x2'
+  // in the generated ``host_orch.py``, before the kernel runs. Allocate the
+  // bytes through uint8, which does have the kernel, and reinterpret: a packed
+  // carrier reports ``element_size() == 1``, so the view is zero-copy, keeps
+  // the dtype the user declared, and holds the same zeroed bytes.
+  if (name == "float4_e2m1fn_x2") {
+    return "torch.zeros(" + shape + ", dtype=torch.uint8).view(torch." + name + ")";
+  }
+  return "torch.zeros(" + shape + ", dtype=torch." + name + ")";
 }
 
 std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
@@ -1734,6 +1765,20 @@ std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
   if (dtype == DataType::UINT32) return "UINT32";
   if (dtype == DataType::UINT64) return "UINT64";
   if (dtype == DataType::BOOL) return "BOOL";
+  // A window descriptor names the element type the receiving side reconstructs
+  // from, so a low-precision window must say its own type rather than a
+  // same-width integer: ``_tensor_from_continuous`` picks the torch dtype from
+  // this name alone. The runtime spells packed E2M1 ``FP4E2M1``, without the
+  // ``X2`` of PyPTO's IR tag.
+  if (dtype == DataType::FP8E4M3FN) return "FP8E4M3FN";
+  if (dtype == DataType::FP8E5M2) return "FP8E5M2";
+  if (dtype == DataType::FP8E8M0) return "FP8E8M0";
+  if (dtype == DataType::FP4E2M1X2) return "FP4E2M1";
+  // The runtime has no E1M2 enum, matching ``GetRuntimeDataTypeString``. Torch
+  // has no E1M2 dtype either, so a byte carrier is the only representation the
+  // receiving side can build, and a packed carrier's IR shape is already its
+  // physical byte extent.
+  if (dtype == DataType::FP4E1M2X2) return "UINT8";
   CHECK(false) << "Unsupported DistributedTensor dtype for simpler.DataType mapping: " << dtype.ToString();
   return "FLOAT32";
 }

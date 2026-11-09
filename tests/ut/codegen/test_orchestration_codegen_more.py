@@ -186,6 +186,30 @@ int main() {{
         assert "uint32_t out_ci_shapes[2] = {8, 32};" in code
         assert f"DataType::{runtime_dtype}" in code
 
+    def test_e5m2_descriptor_names_the_native_runtime_dtype(self):
+        """A runtime-allocated E5M2 tensor is described by the runtime's own E5M2 enum.
+
+        The descriptor dtype is what the receiving side reconstructs the element
+        type from, so naming a same-width integer here would silently hand a
+        consumer raw byte codes instead of E5M2 values.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class E5M2Program:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[8, 32], pl.FP8E5M2],
+            ) -> pl.Tensor[[8, 32], pl.FP8E5M2]:
+                out = pl.create_tensor([8, 32], dtype=pl.FP8E5M2)
+                return out
+
+        code = _generate_orch_code(_run_through_frontend_normalization(E5M2Program))
+        assert "DataType::FP8E5M2" in code
+        assert "DataType::UINT8" not in code
+
     @pytest.mark.parametrize("dtype", [pl.fp4e2m1x2, pl.fp4e1m2x2])
     def test_fp4_slice_and_view_use_carrier_units(self, dtype):
         """Odd carrier widths/offsets are legal bytes and must never be halved."""

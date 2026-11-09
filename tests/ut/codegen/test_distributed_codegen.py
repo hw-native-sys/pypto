@@ -1415,5 +1415,57 @@ class Program:
     assert re.search(r'tensors\["right(?:__ssa_v\d+)?"\] = tensors\["first(?:__ssa_v\d+)?"\]', emitted)
 
 
+@pytest.mark.parametrize(
+    ("dtype", "expected_alloc"),
+    [
+        # Abbreviated float tags must reach the emitted source as torch's own
+        # spelling; an untranslated tag is a torch attribute that does not exist
+        # and raises AttributeError in host_orch.py before the kernel runs.
+        (pl.FP8E4M3FN, "torch.zeros((64,), dtype=torch.float8_e4m3fn)"),
+        (pl.FP8E5M2, "torch.zeros((64,), dtype=torch.float8_e5m2)"),
+        (pl.FP8E8M0, "torch.zeros((64,), dtype=torch.float8_e8m0fnu)"),
+        # Torch has no E1M2 dtype; the IR shape already counts carrier bytes.
+        (pl.FP4E1M2X2, "torch.zeros((64,), dtype=torch.uint8)"),
+        # Packed E2M1 has a torch dtype but no CPU fill_ kernel, so the bytes are
+        # allocated through uint8 and reinterpreted (zero-copy, element_size 1).
+        (pl.FP4E2M1X2, "torch.zeros((64,), dtype=torch.uint8).view(torch.float4_e2m1fn_x2)"),
+    ],
+)
+def test_host_tensor_create_emits_a_real_torch_dtype(dtype, expected_alloc):
+    """A HOST tensor.create of any low-precision dtype emits allocatable torch source."""
+
+    @pl.program
+    class Input:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
+        def chip_worker(
+            self,
+            a: pl.Tensor[[64], dtype],
+            buf: pl.Out[pl.Tensor[[64], dtype]],
+        ) -> pl.Tensor[[64], dtype]:
+            return buf
+
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip_orch(
+            self,
+            a: pl.Tensor[[64], dtype],
+            buf: pl.Out[pl.Tensor[[64], dtype]],
+        ) -> pl.Tensor[[64], dtype]:
+            result: pl.Tensor[[64], dtype] = self.chip_worker(a, buf)
+            return result
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            a: pl.Tensor[[64], dtype],
+        ) -> pl.Tensor[[64], dtype]:
+            buf: pl.Tensor[[64], dtype] = pl.create_tensor([64], dtype=dtype)
+            result: pl.Tensor[[64], dtype] = self.chip_orch(a, buf)
+            return result
+
+    program = passes.convert_to_ssa()(Input)
+    code = codegen.DistributedCodegen().generate(program)
+    assert expected_alloc in code, f"missing {expected_alloc!r} in:\n{code}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
