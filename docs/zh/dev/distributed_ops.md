@@ -17,7 +17,7 @@ HOST 通信域分配会将每个 buffer 的物理大小向上取整到 64 字节
 缓存行（cache line）中：暂存 counts 时的 DCCI 回写不能覆盖 peer 并发写入相邻
 buffer 的 signal credit。同一个 buffer 内共享缓存行的多个 view 仍需自行同步。
 
-共有**十五个算子**和**四个 ABI 枚举**：
+共有**十七个算子**和**五个 ABI 枚举**：
 
 | 算子 | 方向 | 结果 | 硬件 |
 | ---- | ---- | ---- | ---- |
@@ -26,6 +26,8 @@ buffer 的 signal credit。同一个 buffer 内共享缓存行的多个 view 仍
 | `pld.tensor.remote_store` | push（写本地 tensor 级值 → peer）；1:1 下降为 `pld.tile.remote_store` | `Unknown`（副作用） | TSTORE |
 | `pld.tensor.get` | pull（读 peer → 本地 GM） | `Unknown`（副作用） | TGET |
 | `pld.tensor.put` | push（写本地 → peer） | `Unknown`（副作用） | TPUT |
+| `pld.tensor.get_async` | 异步拉取（peer → 本地 GM） | 与 `dst` 别名 | URMA；仅 IR/DSL |
+| `pld.tensor.put_async` | 异步推送（本地 → peer GM） | 与 `dst` 别名 | URMA；仅 IR/DSL |
 | `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.barrier` | 跨 rank 同步窗口数据可见性 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.broadcast` | 将 root rank 的数据复制到所有 rank | `DistributedTensorType`（同 src） | builtin collective |
@@ -40,6 +42,24 @@ buffer 的 signal credit。同一个 buffer 内共享缓存行的多个 view 仍
 七个仅有副作用（side-effect-only）的算子产生
 [`UnknownType`](ir/02-types.md)：它们因跨 rank 副作用而存在，而非为消费者读取的
 SSA 值而存在。
+
+## 异步传输校验（Async Transfer Validation）
+
+`pld.tensor.put_async` 和 `pld.tensor.get_async` 当前仅提供 IR/DSL 契约；
+设备下降（device lowering）和任务完成集成尚待实现。
+两端都必须是窗口绑定、稠密行主序（dense row-major）的 `DistributedTensor`。
+结果与 `dst` 共用存储；算子返回不代表传输完成。
+
+- Python builder 要求 `engine=pld.CommEngine.URMA`（也是默认值）。
+  整数、浮点数、布尔值、字符串及其他枚举在整数转换前即被拒绝。
+  原始 IR 将 engine 存储为整数 `1`。
+- `peer` 必须是整数/index 标量。负的常量 rank 会被拒绝；
+  该检查不保证通信域内运行时 rank 的边界合法。
+- `dst_offsets`、`src_offsets` 和 `shape` 必须一起提供。区域在两端都必须连续：
+  跳过传输形状开头已知等于一的维度，再要求第一个非单元素维度之后的各维取满。
+  动态长度可能大于一，因此不能跳过。
+  所以 `[16, 64]` 中的 `[1, 32]` 和 `[2, 4, 64]` 中的 `[1, 2, 64]` 连续，
+  而对应的 `[2, 32]` 和 `[2, 1, 64]` 不连续。
 
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 
@@ -102,8 +122,8 @@ no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md
 
 ## ABI 枚举（`include/pypto/ir/comm.h`）
 
-四个枚举是**仅追加（append-only）的 ABI**。它们的底层 `int` 值被序列化为算子的
-kwarg 负载（notify 的 `op`、wait/defer_wait 的 `cmp`、put 的 `atomic`）,并在 codegen 时转
+五个枚举是**仅追加（append-only）的 ABI**。它们的底层 `int` 值被序列化为算子的
+kwarg 负载（notify 的 `op`、wait/defer_wait 的 `cmp`、put 的 `atomic`、异步传输的 `engine`）,并在 codegen 时转
 回枚举。新变体只能加在**末尾**,以保证已有 IR 和缓存程序的语义不变。
 
 ```cpp
@@ -111,6 +131,7 @@ enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
 enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait / defer_wait
 enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put、remote_store
 enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
+enum class CommEngine : int { kURMA = 1 };  // pld.tensor.put_async / get_async
 ```
 
 | 枚举 | 变体 | 含义 |
@@ -125,9 +146,10 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 | `ReduceOp` | `kMax` | 对所有参与 rank 的窗口切片做最大值规约 |
 | `ReduceOp` | `kMin` | 对所有参与 rank 的窗口切片做最小值规约 |
 | `ReduceOp` | `kProd` | 对所有参与 rank 的窗口切片做乘法规约 |
+| `CommEngine` | `kURMA` | URMA 异步传输引擎 |
 
 每个枚举跨三层保持一致（C++ `enum class` → bindings 中的 `nb::enum_` → `.pyi`
-存根）,并以 `pld.NotifyOp` / `pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp` 暴露给 DSL。
+存根）,并以 `pld.NotifyOp` / `pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp` / `pld.CommEngine` 暴露给 DSL。
 deducer 会校验打包的 `int` 落在枚举范围内,使 codegen 无需二次保护即可转回。
 
 ## 屏障-信号协议

@@ -2928,9 +2928,9 @@ def test_put_async_rejects_noncontiguous_subregion():
     src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
     dst_offsets = _make_shape_tuple([0, 0], span)
     src_offsets = _make_shape_tuple([0, 0], span)
-    narrow = _make_shape_tuple([1, 32], span)
+    narrow = _make_shape_tuple([2, 32], span)
 
-    with pytest.raises(ValueError, match="full innermost dimension"):
+    with pytest.raises(ValueError, match="subregion is not contiguous"):
         ir.create_op_call(
             "pld.tensor.put_async",
             [dst, peer, src, dst_offsets, src_offsets, narrow],
@@ -2959,7 +2959,7 @@ def test_put_async_rejects_partial_inner_dimension():
     offsets = _make_shape_tuple([0, 0, 0], span)
     partial = _make_shape_tuple([2, 1, 64], span)
 
-    with pytest.raises(ValueError, match="full innermost dimension"):
+    with pytest.raises(ValueError, match="subregion is not contiguous"):
         ir.create_op_call(
             "pld.tensor.put_async",
             [dst, peer, src, offsets, offsets, partial],
@@ -2977,7 +2977,7 @@ def test_get_async_rejects_partial_inner_dimension():
     offsets = _make_shape_tuple([0, 0, 0], span)
     partial = _make_shape_tuple([2, 1, 64], span)
 
-    with pytest.raises(ValueError, match="full innermost dimension"):
+    with pytest.raises(ValueError, match="subregion is not contiguous"):
         ir.create_op_call(
             "pld.tensor.get_async",
             [dst, peer, src, offsets, offsets, partial],
@@ -3070,6 +3070,118 @@ def test_put_async_rejects_non_integer_offsets():
             {"engine": int(ir.CommEngine.URMA)},
             span,
         )
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize(
+    "tensor_shape, offsets, transfer_shape",
+    [
+        ([16, 64], [3, 8], [1, 32]),
+        ([2, 4, 64], [1, 1, 0], [1, 2, 64]),
+        ([2, 4, 64], [1, 2, 8], [1, 1, 32]),
+        ([2, 4, 64], [1, 2, 8], [1, 1, 1]),
+        ([64], [8], [32]),
+    ],
+)
+def test_async_transfer_accepts_contiguous_singleton_prefix(op_name, tensor_shape, offsets, transfer_shape):
+    """Singleton outer dimensions never cross their physical strides."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", tensor_shape, DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", tensor_shape, DataType.FP16, span)
+
+    call = getattr(dist_tensor_ops, op_name)(
+        dst, 0, src, dst_offsets=offsets, src_offsets=offsets, shape=transfer_shape, span=span
+    )
+    assert call.type is dst.type
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize(
+    "dst_shape, src_shape, transfer_shape",
+    [
+        ([16, 64], [16, 64], [2, 32]),
+        ([2, 4, 64], [2, 4, 64], [2, 1, 64]),
+        ([2, 4, 64], [2, 4, 64], [1, 2, 32]),
+        ([2, 2, 64], [2, 4, 64], [2, 2, 64]),
+        ([2, 4, 64], [2, 2, 64], [2, 2, 64]),
+    ],
+)
+def test_async_transfer_rejects_gaps_on_either_endpoint(op_name, dst_shape, src_shape, transfer_shape):
+    """A region must be contiguous under both endpoints' physical row strides."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", dst_shape, DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", src_shape, DataType.FP16, span)
+    offsets = [0] * len(transfer_shape)
+
+    with pytest.raises(ValueError, match="subregion is not contiguous"):
+        getattr(dist_tensor_ops, op_name)(
+            dst, 0, src, dst_offsets=offsets, src_offsets=offsets, shape=transfer_shape, span=span
+        )
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_async_transfer_dynamic_extent_requires_full_inner_dimension(op_name):
+    """A runtime row count cannot be assumed to be one to allow narrow rows."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
+    builder = getattr(dist_tensor_ops, op_name)
+
+    call = builder(dst, 0, src, dst_offsets=[0, 0], src_offsets=[0, 0], shape=[rows, 64], span=span)
+    assert call.type is dst.type
+    with pytest.raises(ValueError, match="subregion is not contiguous"):
+        builder(dst, 0, src, dst_offsets=[0, 0], src_offsets=[0, 0], shape=[rows, 32], span=span)
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("surface", ["raw", "ir", "dsl"])
+def test_async_transfer_rejects_negative_peer(op_name, surface):
+    """Reject a known invalid rank even when the IR builder is bypassed."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(ValueError, match="peer rank must be non-negative, got -1"):
+        if surface == "raw":
+            ir.create_op_call(
+                f"pld.tensor.{op_name}",
+                [dst, ir.ConstInt(-1, DataType.INT32, span), src],
+                {"engine": int(ir.CommEngine.URMA)},
+                span,
+            )
+        elif surface == "ir":
+            getattr(dist_tensor_ops, op_name)(dst, -1, src, span=span)
+        else:
+            getattr(dsl_tensor_ops, op_name)(DistributedTensor(expr=dst), -1, DistributedTensor(expr=src))
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("peer_value", [0, 1])
+def test_async_transfer_accepts_nonnegative_constant_peer(op_name, peer_value):
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    call = getattr(dist_tensor_ops, op_name)(dst, peer_value, src, span=span)
+    assert call.args[1].value == peer_value
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize("surface", ["ir", "dsl"])
+@pytest.mark.parametrize("engine", [1.9, True, "1", 1, None, _ir.AtomicType.Add])
+def test_async_transfer_rejects_engine_coercion(op_name, surface, engine):
+    """Values convertible to integer 1 must not silently select URMA."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    with pytest.raises(TypeError, match="engine must be CommEngine.URMA"):
+        if surface == "ir":
+            getattr(dist_tensor_ops, op_name)(dst, 0, src, engine=engine, span=span)
+        else:
+            getattr(dsl_tensor_ops, op_name)(
+                DistributedTensor(expr=dst), 0, DistributedTensor(expr=src), engine=engine
+            )
 
 
 if __name__ == "__main__":

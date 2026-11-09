@@ -287,21 +287,31 @@ inline void ValidateAsyncPeer(const ExprPtr& peer, const std::string& op_name) {
   CHECK(scalar) << op_name << " peer must be a scalar (rank index), got " << peer->GetType()->TypeName();
   CHECK(scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX)
       << op_name << " peer must be an integer rank index, got " << peer->GetType()->TypeName();
+  if (auto rank = As<ConstInt>(peer)) {
+    CHECK_SPAN(rank->value_ >= 0, peer->span_)
+        << op_name << " peer rank must be non-negative, got " << rank->value_;
+  }
 }
 
-// A row-major region is one contiguous GM range only when every dimension after
-// the leading one spans its full extent. Checking just the innermost dimension
-// accepts [2, 1, 64] inside [2, 4, 64], whose rows are 4*64 apart — not one
-// range. The leading dimension may still be a subrange, which keeps the common
-// [rows, full-width] case legal.
+// Leading singleton transfer dimensions never advance their physical strides.
+// After the first dimension that may contain multiple elements, every inner
+// dimension must be full to avoid gaps. Thus [1, 2, 64] inside [2, 4, 64] is
+// contiguous, while [2, 1, 64] is not. A dynamic extent may exceed one, so only
+// statically proven singleton dimensions can be skipped.
 inline void ValidateAsyncContiguousTransfer(const std::vector<ExprPtr>& transfer_shape,
                                             const std::vector<ExprPtr>& global_shape,
                                             const std::string& op_name) {
-  if (transfer_shape.size() <= 1) return;
-  for (size_t i = 1; i < transfer_shape.size(); ++i) {
+  size_t first = 0;
+  while (first < transfer_shape.size()) {
+    auto extent = As<ConstInt>(transfer_shape[first]);
+    if (!extent || extent->value_ != 1) break;
+    ++first;
+  }
+  if (first == transfer_shape.size()) return;
+  for (size_t i = first + 1; i < transfer_shape.size(); ++i) {
     CHECK_SPAN(AreExprsEqual(transfer_shape[i], global_shape[i]), transfer_shape[i]->span_)
-        << op_name << " subregion must span the full innermost dimension of every row; dimension " << i
-        << " is partial and leaves gaps between rows, so the region is not one contiguous transfer";
+        << op_name << " subregion is not contiguous: dimension " << i
+        << " must span its full extent when an outer dimension may contain multiple elements";
   }
 }
 

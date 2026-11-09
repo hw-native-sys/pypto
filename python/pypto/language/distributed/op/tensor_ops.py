@@ -602,9 +602,11 @@ def put_async(
     it as ``In``.
 
     ``engine`` is a compile-time kwarg; V1 accepts
-    :attr:`pld.CommEngine.URMA` only and rejects any other engine. Offsets and
-    shape, when supplied, must be provided together and describe a contiguous
-    subregion that spans the full innermost dimension.
+    :attr:`pld.CommEngine.URMA` only; other types are rejected before integer
+    conversion. A constant ``peer`` must be non-negative. Offsets and shape,
+    when supplied, must be provided together and describe a contiguous GM
+    range: skip leading singleton transfer dimensions, then require every
+    dimension after the first non-singleton to span its full extent.
     """
     dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst, src=src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
@@ -649,9 +651,11 @@ def get_async(
     may read the fetched data only after that dependency is released.
 
     ``engine`` is a compile-time kwarg; V1 accepts
-    :attr:`pld.CommEngine.URMA` only and rejects any other engine. Offsets and
-    shape, when supplied, must be provided together and describe a contiguous
-    subregion that spans the full innermost dimension.
+    :attr:`pld.CommEngine.URMA` only; other types are rejected before integer
+    conversion. A constant ``peer`` must be non-negative. Offsets and shape,
+    when supplied, must be provided together and describe a contiguous GM
+    range: skip leading singleton transfer dimensions, then require every
+    dimension after the first non-singleton to span its full extent.
     """
     dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.get_async", dst=dst, src=src)
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None

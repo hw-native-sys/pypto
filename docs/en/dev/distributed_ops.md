@@ -22,7 +22,7 @@ lines: a DCCI writeback while staging counts must not overwrite signal credits
 concurrently delivered by a peer into a neighbouring buffer. Views within one
 buffer still require their own synchronization when sharing a cache line.
 
-There are **fifteen ops** and **four ABI enums**:
+There are **seventeen ops** and **five ABI enums**:
 
 | Op | Direction | Result | Hardware |
 | -- | --------- | ------ | -------- |
@@ -31,6 +31,8 @@ There are **fifteen ops** and **four ABI enums**:
 | `pld.tensor.remote_store` | push (write local tensor-level value → peer); lowered 1:1 to `pld.tile.remote_store` | `Unknown` (side effect) | TSTORE |
 | `pld.tensor.get` | pull (read peer → local GM) | `Unknown` (side effect) | TGET |
 | `pld.tensor.put` | push (write local → peer) | `Unknown` (side effect) | TPUT |
+| `pld.tensor.get_async` | asynchronous pull (peer → local GM) | aliases `dst` | URMA; IR/DSL only |
+| `pld.tensor.put_async` | asynchronous push (local → peer GM) | aliases `dst` | URMA; IR/DSL only |
 | `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.barrier` | synchronise visibility of window data across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.broadcast` | replicate root rank's data to all ranks | `DistributedTensorType` (same as src) | builtin collective |
@@ -44,6 +46,25 @@ There are **fifteen ops** and **four ABI enums**:
 
 The seven side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
 exist for their cross-rank effect, not for an SSA value a consumer reads.
+
+## Async transfer validation
+
+`pld.tensor.put_async` and `pld.tensor.get_async` currently expose the IR/DSL
+contract only; device lowering and task-completion integration are pending.
+Both endpoints must be window-bound, dense row-major `DistributedTensor`s.
+The result aliases `dst`; returning from the op does not imply completion.
+
+- Python builders require `engine=pld.CommEngine.URMA` (also the default).
+  Integers, floats, booleans, strings, and unrelated enums are rejected before
+  integer conversion. Raw IR stores the engine as integer `1`.
+- `peer` must be an integer/index scalar. Negative constant ranks are rejected;
+  this check does not establish runtime rank bounds for a communication domain.
+- `dst_offsets`, `src_offsets`, and `shape` must be supplied together. A region
+  must be contiguous on both endpoints: skip leading transfer dimensions known
+  to equal one, then require every dimension after the first non-singleton to
+  span its full extent. Dynamic extents may exceed one and are not skipped.
+  Thus `[1, 32]` inside `[16, 64]` and `[1, 2, 64]` inside `[2, 4, 64]` are
+  contiguous, but `[2, 32]` and `[2, 1, 64]`, respectively, are not.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
@@ -116,9 +137,9 @@ the author's job; see `docs/en/user/language/04-scopes.md`.
 
 ## ABI enums (`include/pypto/ir/comm.h`)
 
-The four enums are an **append-only ABI**. Their underlying `int` values are
+The five enums are an **append-only ABI**. Their underlying `int` values are
 serialised as the op's kwarg payload (`op` for notify, `cmp` for wait/defer_wait, `atomic`
-for put) and cast back to the enum at codegen time. New variants may only be
+for put, `engine` for async transfers) and cast back to the enum at codegen time. New variants may only be
 added **at the end** so existing IR and cached programs keep their meaning.
 
 ```cpp
@@ -126,6 +147,7 @@ enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
 enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait / defer_wait
 enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put, remote_store
 enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
+enum class CommEngine : int { kURMA = 1 };  // pld.tensor.put_async / get_async
 ```
 
 | Enum | Variant | Meaning |
@@ -140,10 +162,11 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 | `ReduceOp` | `kMax` | max-reduce every participating rank's window slice |
 | `ReduceOp` | `kMin` | min-reduce every participating rank's window slice |
 | `ReduceOp` | `kProd` | product-reduce every participating rank's window slice |
+| `CommEngine` | `kURMA` | URMA asynchronous transfer engine |
 
 Each enum is mirrored across three layers (C++ `enum class` → `nb::enum_` in the
 bindings → `.pyi` stub) and surfaced to the DSL as `pld.NotifyOp` /
-`pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp`. The deducer validates the packed `int`
+`pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp` / `pld.CommEngine`. The deducer validates the packed `int`
 against the enum range so codegen can cast back without a second guard.
 
 ## Barrier-signal protocol

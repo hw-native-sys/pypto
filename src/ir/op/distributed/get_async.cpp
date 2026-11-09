@@ -41,13 +41,13 @@
  *   registration, which is outside the V1 interface.
  * * ``src`` must be a :class:`DistributedTensorType` — the peer needs a window
  *   slot to read from.
- * * ``peer`` must be a scalar integer rank expression.
+ * * ``peer`` must be a scalar integer rank expression; constants must be non-negative.
  * * ``dst`` / ``src`` share element type and rank; static dims are positive.
  *   Full-slice transfers require matching shapes; subregions supply
  *   ``dst_offsets``, ``src_offsets`` and ``shape`` together.
- * * A subregion must span the full innermost dimension on both endpoints. A
- *   narrower row leaves gaps between rows, so the transfer is not one
- *   contiguous GM range and the logical byte count would be wrong.
+ * * Leading singleton transfer dimensions may select partial inner regions.
+ *   After the first non-singleton transfer dimension, every inner dimension
+ *   must be full on both endpoints so the selected GM range is contiguous.
  * * ``engine`` must be :enum:`CommEngine::kURMA`.
  */
 

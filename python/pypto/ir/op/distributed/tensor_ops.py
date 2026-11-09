@@ -252,6 +252,13 @@ def get(
     return _ir_core.create_op_call("pld.tensor.get", args, attrs, actual_span)
 
 
+def _normalize_async_engine(engine: object, op_name: str) -> int:
+    """Validate the enum before conversion can erase an invalid input's type."""
+    if not isinstance(engine, CommEngine):
+        raise TypeError(f"{op_name} engine must be CommEngine.URMA, got {engine!r} ({type(engine).__name__})")
+    return int(engine)
+
+
 def put_async(
     dst: Expr,
     peer: int | Expr,
@@ -275,9 +282,12 @@ def put_async(
     and rejects any other engine. With no offsets/shape this transfers the full
     local ``src`` into the full peer ``dst`` slice. Supplying ``dst_offsets``,
     ``src_offsets`` and ``shape`` narrows the transfer to matching subregions;
-    all three must be provided together, and the subregion must span the full
-    innermost dimension (a contiguous flattened GM range).
+    all three must be provided together. After any leading singleton transfer
+    dimensions, every dimension after the first non-singleton must be full,
+    so the region is one contiguous flattened GM range. A constant ``peer``
+    must be non-negative; ``engine`` must be a :class:`CommEngine` member.
     """
+    engine_value = _normalize_async_engine(engine, "pld.tensor.put_async")
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
     args: list[Expr] = [dst, peer_expr, src]
@@ -295,7 +305,7 @@ def put_async(
                 _to_make_tuple(shape, actual_span),
             ]
         )
-    return _ir_core.create_op_call("pld.tensor.put_async", args, {"engine": int(engine)}, actual_span)
+    return _ir_core.create_op_call("pld.tensor.put_async", args, {"engine": engine_value}, actual_span)
 
 
 def get_async(
@@ -321,9 +331,12 @@ def get_async(
     and rejects any other engine. With no offsets/shape this reads the full
     peer ``src`` slice into the full local ``dst``. Supplying ``dst_offsets``,
     ``src_offsets`` and ``shape`` narrows the transfer to matching subregions;
-    all three must be provided together, and the subregion must span the full
-    innermost dimension (a contiguous flattened GM range).
+    all three must be provided together. After any leading singleton transfer
+    dimensions, every dimension after the first non-singleton must be full,
+    so the region is one contiguous flattened GM range. A constant ``peer``
+    must be non-negative; ``engine`` must be a :class:`CommEngine` member.
     """
+    engine_value = _normalize_async_engine(engine, "pld.tensor.get_async")
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
     args: list[Expr] = [dst, peer_expr, src]
@@ -341,7 +354,7 @@ def get_async(
                 _to_make_tuple(shape, actual_span),
             ]
         )
-    return _ir_core.create_op_call("pld.tensor.get_async", args, {"engine": int(engine)}, actual_span)
+    return _ir_core.create_op_call("pld.tensor.get_async", args, {"engine": engine_value}, actual_span)
 
 
 @overload
