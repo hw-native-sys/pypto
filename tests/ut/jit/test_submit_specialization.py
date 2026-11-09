@@ -13,12 +13,13 @@ import ast
 from pathlib import Path
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 import torch
 from pypto import passes
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram
-from pypto.jit import _ast_analysis, _tensor_meta
+from pypto.jit import _arguments, _ast_analysis, _tensor_meta
 from pypto.jit.decorator import _discover_dep_bindings
 from pypto.jit.specializer import TensorMeta
 from pypto.pypto_core import ir
@@ -377,8 +378,10 @@ def test_graph_call_expression_retains_single_output_metadata():
         out = pl.store(value, [0, 0], out)
         return out
 
+    _FACTORY_ROWS = 16
+
     @pl.jit.graph
-    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[16, 32], pl.FP32]:
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[_FACTORY_ROWS, 32], pl.FP32]:
         return kernel(x, out)
 
     @pl.jit.graph
@@ -391,7 +394,11 @@ def test_graph_call_expression_retains_single_output_metadata():
         result, consumed = pl.submit(consume, value, deps=[done])
         return result
 
-    assert len(_submissions(entry.specialize(torch.empty(16, 32), torch.empty(16, 32)))) == 2
+    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    assert len(_submissions(program)) == 2
+    stage_ir = program.get_function("stage")
+    assert stage_ir is not None
+    assert ir.structural_equal(stage_ir.return_types[0], ir.TensorType([16, 32], pl.FP32))
 
 
 @pytest.mark.parametrize("capture", ["shape", "dtype", "shadow"])
@@ -424,12 +431,12 @@ def test_ordinary_expression_return_keeps_annotation_only_factory_captures(captu
         def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[_FACTORY_ROWS, 32], pl.FP32]:
             return body(x, out)
 
-    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    samples = [torch.empty(32, 64), torch.empty(32, 64)]
+    program = entry.specialize(*samples)
     main = program.get_function("entry")
     assert main is not None
-    assert len(main.return_types) == 1
-    assert ir.structural_equal(main.return_types[0], ir.TensorType([16, 32], pl.FP32))
-    _assert_codegen_artifacts(entry, [torch.empty(16, 32), torch.empty(16, 32)], tmp_path)
+    assert not main.return_types
+    _assert_codegen_artifacts(entry, samples, tmp_path)
 
 
 def test_first_submission_allocates_typed_omitted_output(tmp_path, monkeypatch):
@@ -630,6 +637,43 @@ def test_returned_submit_projection_uses_rebound_tuple():
     result, task_id = site.value.elts
     assert returned.metas[result] == out
     assert returned.metas[task_id] is None
+
+
+def test_distributed_eager_annotation_keeps_its_kind_with_constexpr():
+    source = ast.parse("pld.DistributedTensor[[16, WIDTH], pl.FP32]", mode="eval").body
+    eager = pld.DistributedTensor[[16, 64], pl.FP32]
+    result = _arguments.resolve_call_annotation(
+        source, eager, {"pld": pld, "pl": pl, "WIDTH": 32}, {"WIDTH": "32"}
+    )
+    assert type(result) is pld.DistributedTensor
+    assert result.shape == [16, 32]
+
+
+def test_submit_tuple_metadata_joins_zero_trip_loop_path():
+    @pl.jit.graph
+    def stage(out: pl.InOut[pl.Tensor]):
+        return out
+
+    @pl.jit
+    def entry(first: pl.InOut[pl.Tensor], next_out: pl.InOut[pl.Tensor], trips: pl.Scalar[pl.INDEX]):
+        launch = pl.submit(stage, first)
+        for i in pl.range(trips):
+            launch = pl.submit(stage, next_out)
+        return launch[0]
+
+    definition = _ast_analysis.get_func_def(entry._func)
+    site = _tensor_meta._return_site(definition)
+    assert site is not None and site.value is not None
+    returned = _tensor_meta._ReturnMeta(site, [site.value])
+    first = TensorMeta((16, 32), pl.FP32)
+    next_out = TensorMeta((16, 64), pl.FP32)
+    _tensor_meta.extract_local_tensor_metas(
+        entry._func,
+        seed_meta={"first": first, "next_out": next_out},
+        discover_deps=_discover_dep_bindings,
+        outputs=_tensor_meta._MetadataOutputs(return_meta=returned),
+    )
+    assert returned.metas[site.value] is None
 
 
 def test_submit_task_id_projection_is_not_inferred_as_a_tensor():

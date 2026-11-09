@@ -216,7 +216,7 @@ class SpecializeContext:
     # remain expressions so call bindings and local dimensions take precedence.
     eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
-    eager_return_annotation: Any = inspect.Signature.empty
+    eager_return_annotation: Any = None
 
     @property
     def source_def_name(self) -> str:
@@ -1633,8 +1633,17 @@ def _infer_expression_return_type(  # noqa: PLR0913
     value: ast.Call,
     distributed_params: set[str],
     eager_annotation: Any,
+    *,
+    emit_declared_contract: bool,
 ) -> str | None:
     """Emit a resolved contract or a proven writeback result."""
+    target = _writeback_return_operand(value)
+    if isinstance(target, ast.Name) and target.id in tensor_meta:
+        return _build_tensor_annotation(
+            tensor_meta[target.id], is_out=False, is_distributed=target.id in distributed_params
+        )
+    if not emit_declared_contract:
+        return None
     if isinstance(eager_annotation, _LangTensor) or _tuple_annotation_elements(eager_annotation) is not None:
         from . import _arguments  # noqa: PLC0415 - annotation helpers import this module
 
@@ -1657,11 +1666,6 @@ def _infer_expression_return_type(  # noqa: PLR0913
     # still contains their names is not a contract the generated module can use.
     if rendered is not None and _annotation_names(ast.parse(rendered, mode="eval").body) <= known_names:
         return rendered
-    target = _writeback_return_operand(value)
-    if isinstance(target, ast.Name) and target.id in tensor_meta:
-        return _build_tensor_annotation(
-            tensor_meta[target.id], is_out=False, is_distributed=target.id in distributed_params
-        )
     # Opaque calls keep ordinary-call inference. Native Submit remains governed
     # by declared returns; only JIT-generated, proven writebacks get a contract.
     return None
@@ -1675,7 +1679,8 @@ def _infer_return_type(  # noqa: PLR0913
     py_globals: Mapping[str, Any] | None = None,
     constexpr_values: Mapping[str, str] | None = None,
     *,
-    eager_annotation: Any = inspect.Signature.empty,
+    eager_annotation: Any = None,
+    emit_expression_contract: bool = False,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1801,6 +1806,7 @@ def _infer_return_type(  # noqa: PLR0913
             return_node.value,
             dist_set,
             eager_annotation,
+            emit_declared_contract=emit_expression_contract,
         )
 
     # `return name`: use that name's tensor type if known.
@@ -2440,6 +2446,7 @@ class Specializer:
             ctx.py_globals,
             ctx.constexpr_values,
             eager_annotation=ctx.eager_return_annotation,
+            emit_expression_contract=ctx.func_type == "graph",
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 

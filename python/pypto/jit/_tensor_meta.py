@@ -1619,10 +1619,18 @@ def _walk_local_tensor_meta_stmts(
     tuples = {} if tuple_values is None else tuple_values
     tuple_undo: list[tuple[str, _TupleMeta | None]] = []
 
-    def forget_tuples(names: set[str]) -> None:
+    def forget_tuple_facts(
+        table: dict[str, _TupleMeta], undo: list[tuple[str, _TupleMeta | None]], names: set[str]
+    ) -> None:
         for name in names:
-            if name in tuples:
-                tuple_undo.append((name, tuples.pop(name)))
+            if name in table:
+                undo.append((name, table.pop(name)))
+
+    tuple_environments = ((tuples, tuple_undo), (submitted, submit_undo))
+
+    def forget_tuples(names: set[str]) -> None:
+        for table, undo in tuple_environments:
+            forget_tuple_facts(table, undo, names)
 
     def forget_dims(names: set[str]) -> None:
         for name in names:
@@ -1640,26 +1648,34 @@ def _walk_local_tensor_meta_stmts(
         tuples = _rewind_metadata(submitted, submit_undo, submit_mark)
         return dims, tensors, tuples
 
-    def join_tuple(name: str, left: _TupleMeta | None, right: _TupleMeta | None) -> None:
-        tuple_undo.append((name, tuples.get(name)))
+    def join_tuple(
+        table: dict[str, _TupleMeta],
+        undo: list[tuple[str, _TupleMeta | None]],
+        name: str,
+        left: _TupleMeta | None,
+        right: _TupleMeta | None,
+    ) -> None:
+        undo.append((name, table.get(name)))
         if left is not None and right is not None and len(left) == len(right):
-            tuples[name] = tuple(_merge_tensor_metas(x, y) for x, y in zip(left, right, strict=True))
+            table[name] = tuple(_merge_tensor_metas(x, y) for x, y in zip(left, right, strict=True))
         else:
-            tuples.pop(name, None)
+            table.pop(name, None)
 
     def walk_loop_body(body: list[ast.stmt], written: set[str]) -> bool:
-        # Forget incoming tuple facts while analyzing an arbitrary iteration.
-        # After the loop, keep only facts valid on both zero trips and the
-        # post-iteration path, just like a branch join.
-        initial = {name: tuples[name] for name in written if name in tuples}
+        # Tuple results from either ABI must agree across a zero-trip path
+        # and a post-iteration path to survive the loop.
+        initial = [
+            {name: table[name] for name in written if name in table} for table, _ in tuple_environments
+        ]
         forget_dims(written)
         forget_tuples(written)
         if walk(body):
             return True
         forget_dims(written)
-        for name in written:
-            if name in tuples or name in initial:
-                join_tuple(name, initial.get(name), tuples.get(name))
+        for (table, undo), before in zip(tuple_environments, initial, strict=True):
+            for name in written:
+                if name in table or name in before:
+                    join_tuple(table, undo, name, before.get(name), table.get(name))
         return False
 
     def walk_if(stmt: ast.If) -> bool:
@@ -1683,17 +1699,12 @@ def _walk_local_tensor_meta_stmts(
                 local[name] = merged
             else:
                 local.pop(name, None)
-        for name in true_tuples.keys() | false_tuples.keys():
-            previous = tuples.get(name)
-            join_tuple(name, true_tuples.get(name, previous), false_tuples.get(name, previous))
-        for name in true_submits.keys() | false_submits.keys():
-            lhs = true_submits.get(name, submitted.get(name))
-            rhs = false_submits.get(name, submitted.get(name))
-            submit_undo.append((name, submitted.get(name)))
-            if lhs is not None and rhs is not None and len(lhs) == len(rhs):
-                submitted[name] = tuple(_merge_tensor_metas(a, b) for a, b in zip(lhs, rhs, strict=True))
-            else:
-                submitted.pop(name, None)
+        for (table, undo), lhs, rhs in zip(
+            tuple_environments, (true_tuples, true_submits), (false_tuples, false_submits), strict=True
+        ):
+            for name in lhs.keys() | rhs.keys():
+                previous = table.get(name)
+                join_tuple(table, undo, name, lhs.get(name, previous), rhs.get(name, previous))
         return False
 
     def record_tuple_writes(stmt: ast.stmt, names: set[str]) -> None:
@@ -1702,7 +1713,7 @@ def _walk_local_tensor_meta_stmts(
         if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             tuple_undo.extend((name, tuples.get(name)) for name in names)
         else:
-            forget_tuples(names)
+            forget_tuple_facts(tuples, tuple_undo, names)
 
     def walk(body: list[ast.stmt]) -> bool:
         for stmt in body:

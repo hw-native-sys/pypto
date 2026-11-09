@@ -17,7 +17,7 @@ import inspect
 import warnings
 from collections.abc import Mapping, Sequence
 from types import GenericAlias
-from typing import Any
+from typing import Any, cast
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -259,7 +259,7 @@ def _resolve_tensor_annotation_fields(
     elif len(fields) == 4:
         captured.extend([eager.layout, eager.memref])
     values = [resolve_field(expr, value) for expr, value in zip(fields[1:], captured, strict=True)]
-    return _LangTensor[tuple([dimensions, *values])]
+    return cast("Any", type(eager))[tuple([dimensions, *values])]
 
 
 def eager_tensor_annotation_fingerprints(func: Any, definition: ast.FunctionDef) -> dict[str, str]:
