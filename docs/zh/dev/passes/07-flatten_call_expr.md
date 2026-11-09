@@ -18,6 +18,12 @@
 破坏循环携带类型和提取后的函数签名。`NoNestedCalls` 遵循相同边界。
 作用域提取会捕获这些类型引用的张量，并将其排在依赖它的参数之前。
 
+SIMT 函数保留完整的 `while` 条件表达式，包括其中的嵌套调用。PTO 代码生成在
+`scf.while` 的前置区域（before region）中逐次求值，此时循环携带变量位于作用域内。
+将 vote 或 shuffle 提到循环之前会改变求值频率，并可能产生超出作用域的 IterArg。
+`NoNestedCalls` 仅豁免这一条件表达式；循环体仍按原规则展平并验证，其他函数类型
+保持既有处理方式。
+
 **需要**：TypeChecked、SSAForm 属性 (Property)（通常由前序 Pass 产生；如需在执行前校验 required/produced，请在 `PassContext` 中启用 `VerificationInstrument`）。
 
 **使用时机**：通常在类型检查 Pass 之后、代码生成 (CodeGen) 之前运行此 Pass，以简化下游分析和代码生成；此顺序是约定而非自动强制的要求。

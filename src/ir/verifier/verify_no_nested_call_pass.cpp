@@ -16,6 +16,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -60,7 +61,8 @@ namespace {
  */
 class NoNestedCallVerifier : public IRVisitor {
  public:
-  explicit NoNestedCallVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  NoNestedCallVerifier(std::vector<Diagnostic>& diagnostics, bool preserve_while_conditions)
+      : diagnostics_(diagnostics), preserve_while_conditions_(preserve_while_conditions) {}
 
   // Three-address form constrains evaluated expressions, not declarative type
   // metadata. Shape calls must retain their operands across outlining.
@@ -103,6 +105,7 @@ class NoNestedCallVerifier : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
+  bool preserve_while_conditions_;
 
   /**
    * @brief Record a nested call error
@@ -244,6 +247,16 @@ void NoNestedCallVerifier::VisitStmt_(const ForStmtPtr& op) {
 void NoNestedCallVerifier::VisitStmt_(const WhileStmtPtr& op) {
   if (!op) return;
 
+  if (preserve_while_conditions_) {
+    // FlattenCallExpr preserves the entire SIMT condition for per-iteration
+    // evaluation in scf.while's before region. Only that expression is exempt:
+    // loop bodies (including nested loops) retain the three-address contract.
+    for (const auto& iter_arg : op->iter_args_) VisitExpr(iter_arg);
+    VisitStmt(op->body_);
+    for (const auto& return_var : op->return_vars_) VisitExpr(return_var);
+    return;
+  }
+
   // Check if condition is a call
   if (As<Call>(op->condition_)) {
     RecordError(nested_call::ErrorType::CALL_IN_WHILE_CONDITION,
@@ -274,7 +287,7 @@ class NoNestedCallPropertyVerifierImpl : public PropertyVerifier {
       }
 
       // Create verifier and run verification
-      NoNestedCallVerifier verifier(diagnostics);
+      NoNestedCallVerifier verifier(diagnostics, func->func_type_ == FunctionType::SIMT);
 
       // Visit function body
       if (func->body_) {

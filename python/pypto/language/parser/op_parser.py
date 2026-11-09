@@ -17,6 +17,7 @@ from pypto.language.distributed import op as _dsl_pld
 from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import prefetch_ops as _dsl_prefetch
 from pypto.language.op import reg_ops as _dsl_reg
+from pypto.language.op import simt_ops as _dsl_simt
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
@@ -85,6 +86,22 @@ class OpParser:
 
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
         """Parse the public and canonical SIMT operation spellings."""
+        if name in {
+            "vote_all",
+            "vote_any",
+            "vote_uni",
+            "vote_ballot",
+            "shuffle_idx",
+            "shuffle_up",
+            "shuffle_down",
+            "shuffle_bfly",
+            "redux_add",
+            "redux_min",
+            "redux_max",
+        }:
+            # The public wrappers own keyword binding and literal normalization,
+            # just as they do for other schema-validated DSL operations.
+            return self.dispatch_op(_dsl_simt, "pl.simt", name, call)
         kwargs = self.parse_op_kwargs(call)
         args = call.args
         if name in {"thread_idx", "block_idx", "block_dim", "grid_dim"}:

@@ -1,9 +1,8 @@
 # SIMT lowering and execution
 
-P3 lowers explicit `FunctionType.SIMT` helpers and `SimtLaunchStmt` through the
-production A5 compiler and persistent runtime. The input is the
-[canonical SIMT IR](../ir/11-simt.md); a higher-level `simt_scope`/JIT authoring
-surface and automatic outlining are separate work.
+The public `simt_scope`/JIT surface outlines into `FunctionType.SIMT` helpers
+and `SimtLaunchStmt`, then lowers through the production A5 compiler and
+persistent runtime. See the [canonical SIMT IR](../ir/11-simt.md).
 
 ## Supported executable subset
 
@@ -26,6 +25,9 @@ surface and automatic outlining are separate work.
   treats NaN as unequal, and numeric-to-BOOL conversion compares against zero.
 - Thread/block/grid coordinates and extents, lane ID, and scalar loads/stores.
   GM cache policies pass through unchanged to native PTOAS operations.
+- Active-lane votes/ballot, INT32/FP32 shuffle (width 16 or 32), and
+  INT32/FP32 add/min/max redux. Integer min/max lower with explicit signed
+  comparison. See the [collective contract](../ir/11-simt.md#warp-collectives).
 
 Unsigned arithmetic, other storage dtypes, scalar exponentiation (`**`), floating-point floor division/modulo,
 early return, break/continue, boxed Tile layouts and grouped kernel execution
@@ -100,3 +102,14 @@ invoke the bounded build worker directly with an existing output directory:
 python tests/st/runtime/vpto/test_simt_ir_onboard.py --worker build/simt-ir-runtime gm
 python tests/st/runtime/vpto/test_simt_ir_onboard.py --worker build/simt-ir-runtime ub
 ```
+
+Warp acceptance is separate from the earlier GM/UB acceptance above.
+`tests/st/runtime/vpto/test_simt_collectives_onboard.py` provides opt-in build
+and device variants using the same environment gates. The unit JIT test also
+exports every collective form through native PTOAS to LLVM without a device.
+
+The collective acceptance passed all seven active-lane cases (0, 1, 15, 16,
+17, 31 and 32) across two warps on Ascend950DT_9581 with PTOAS v0.72, CANN
+9.3.0 and runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. This checks all
+11 APIs with INT32/FP32 payloads and widths 16/32, including divergent
+participation and untouched inactive outputs.

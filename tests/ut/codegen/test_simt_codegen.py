@@ -631,5 +631,25 @@ class Assembled:
         assert "pto.load" in bundle.helpers[0].source
 
 
+@pytest.mark.parametrize("keyword", [False, True])
+def test_collectives_text_round_trip_and_keywords(keyword):
+    shuffle = "value=lane, index=0, width=16" if keyword else "lane, 0, width=16"
+    predicate = "predicate=lane > 0" if keyword else "lane > 0"
+    program = parse_program(
+        textwrap.dedent(f"""
+        @pl.program
+        class Collectives:
+            @pl.function(type=pl.FunctionType.SIMT)
+            def helper(self, dst: pl.InOut[pl.Tensor[[32], pl.INT32]]):
+                lane = pl.simt.lane_id()
+                moved = pl.simt.shuffle_idx({shuffle})
+                bits = pl.simt.vote_ballot({predicate})
+                pl.simt.store(dst, (lane,), moved + bits)
+                return
+    """)
+    )
+    ir.assert_structural_equal(program, parse_program(ir.python_print(program)))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

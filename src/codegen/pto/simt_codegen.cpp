@@ -355,6 +355,38 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     }
     return true;
   }
+  // Keep the collective at its original control-flow location: its implicit
+  // active-lane mask changes across branches and loop iterations.
+  const bool vote = ir::IsOp(call, "simt.vote_all") || ir::IsOp(call, "simt.vote_any") ||
+                    ir::IsOp(call, "simt.vote_uni") || ir::IsOp(call, "simt.vote_ballot");
+  const bool shuffle = ir::IsOp(call, "simt.shuffle_idx") || ir::IsOp(call, "simt.shuffle_up") ||
+                       ir::IsOp(call, "simt.shuffle_down") || ir::IsOp(call, "simt.shuffle_bfly");
+  const bool redux = ir::IsOp(call, "simt.redux_add") || ir::IsOp(call, "simt.redux_min") ||
+                     ir::IsOp(call, "simt.redux_max");
+  if (vote || shuffle || redux) {
+    INTERNAL_CHECK_SPAN(call->args_.size() == (shuffle ? 2 : 1), call->span_)
+        << "Internal error: SIMT collective arity";
+    const auto input = GetExprAsCode(call->args_[0]);
+    const auto input_type = GetExprTypeAnnotation(call->args_[0]);
+    const auto output_type = GetExprTypeAnnotation(call);
+    auto operation = "pto." + call->op_->name_.substr(5);
+    auto operands = input;
+    std::string attributes;
+    auto types = input_type;
+    if (shuffle) {
+      operands += ", " + GetExprAsCode(call->args_[1]);
+      types += ", i32";
+      attributes = " {width = " + std::to_string(call->GetKwarg<int>("width", 32)) + " : i32}";
+    } else if (redux) {
+      const bool integer = ir::As<ir::ScalarType>(call->GetType())->dtype_ == DataType::INT32;
+      operation += integer ? "i" : "f";
+      if (integer && !ir::IsOp(call, "simt.redux_add")) attributes = " signed";
+    }
+    const auto result = NewTemp();
+    Emit(result + " = " + operation + " " + operands + attributes + " : " + types + " -> " + output_type);
+    fs_.current_expr_value = result;
+    return true;
+  }
   std::string operation;
   if (ir::IsOp(call, "simt.lane_id")) {
     operation = "pto.get_laneid";

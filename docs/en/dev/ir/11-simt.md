@@ -32,7 +32,7 @@ typed axis, positional or `axis=`; `lane_id()` takes none. Dimensions are three
 positive compile-time integers. They describe threads, not an element allocation
 or grid; bounds checks remain explicit. GM Tensor and Vec/UB Tile operands use
 their existing storage. The initial API supports the backend's scalar subset;
-lane collectives, atomics and expanded math remain separate milestones.
+INT32/FP32 lane collectives are described below. Atomics and expanded math remain separate milestones.
 
 Scalar assignments are thread-private, including shadowing an outer scalar.
 A private scalar cannot be read after the scope. Stores automatically rebind the
@@ -105,6 +105,45 @@ views carry their existing strides and offsets; fractal layouts are rejected.
 Explicitly non-Vec Tile storage is rejected. GM accepts PTOAS `l1cache` policies
 `cache`/`uncache` and separate load/store `l2cache` policy sets. Cache attributes
 on UB accesses are invalid.
+
+## Warp collectives
+
+The public `pl.simt` and IR `pypto.ir.op.simt` namespaces expose:
+
+| Operation | Input → result | Meaning |
+| --------- | -------------- | ------- |
+| `vote_all`, `vote_any`, `vote_uni` | BOOL → BOOL | All true, any true, or all predicates equal |
+| `vote_ballot` | BOOL → INT32 | Bit i is set for active lane i with a true predicate |
+| `shuffle_idx(value, index, *, width=32)` | INT32/FP32 → same type | Read subgroup-relative source lane |
+| `shuffle_up`, `shuffle_down` | INT32/FP32 → same type | Read lower/higher source lane by an offset |
+| `shuffle_bfly(value, mask, *, width=32)` | INT32/FP32 → same type | Read source lane selected by local-lane XOR mask |
+| `redux_add`, `redux_min`, `redux_max` | INT32/FP32 → same type | Reduce active lanes; return the result to each active lane |
+
+The A5 warp contains 32 lanes. Participation is the current active execution
+mask at the instruction; there is no explicit participation-mask argument.
+Inactive lanes contribute nothing. These are register collectives, not memory
+fences or block barriers. Their results depend on control flow, so they must
+not be hoisted across branches or iterations that change active lanes.
+
+Shuffle widths are **16 or 32**, defaulting to 32. Width splits the warp into
+contiguous subgroups; it does not alter vote or redux participation. Lane controls
+are INT32 (Python integer literals are normalized). A shuffle source must be
+active and inside the same subgroup. Results from inactive or out-of-range
+sources are unspecified; algorithms must not rely on boundary self-copy.
+
+Ballot returns an INT32 bit carrier, so bit 31 can make its numeric value
+negative. Use bit operations to inspect it. INT32 min/max use signed comparisons;
+integer sums wrap at 32 bits. FP32 follows the target reduction order and
+special-value rules, without a promise of sequential summation or portable
+NaN/signed-zero selection. FP16, UINT32 and packed values remain unsupported
+in this initial frontend/backend subset.
+
+The native mapping is `pto.vote_*`, `pto.shuffle_*` and `pto.redux_{add,min,max}{i,f}`;
+integer min/max explicitly carry `signed`. Tests compile all forms through the
+public JIT and PTOAS LLVM export. Opt-in device acceptance lives in
+`tests/st/runtime/vpto/test_simt_collectives_onboard.py`, covering two warps,
+partial active sets, ballot bit 31, signed reductions, shuffle subgroups and
+untouched inactive outputs. Compile-only tests do not establish device execution.
 
 ## Effects and validation
 
