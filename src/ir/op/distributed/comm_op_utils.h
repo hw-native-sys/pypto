@@ -272,17 +272,17 @@ inline std::vector<ExprPtr> ValidateRegionArgs(const std::vector<ExprPtr>& args,
 // Async URMA transfer contract (pld.tensor.put_async / get_async)
 // ============================================================================
 
-// V1 accepts a single async engine. Reject any other value by name; a future
-// engine must be added here deliberately rather than silently downgraded.
+// The async interface accepts a single engine. Reject any other value by name;
+// a future engine must be added here deliberately rather than silently
+// downgraded.
 inline void ValidateAsyncEngine(const Kwargs& kwargs, const std::string& op_name) {
   const int engine = GetRequiredKwarg<int>(kwargs, "engine", op_name);
   CHECK(engine == static_cast<int>(CommEngine::kURMA))
-      << op_name << " supports only engine=CommEngine.URMA in V1; SDMA/RDMA are not available in V1, got "
-      << engine;
+      << op_name << " supports only engine=CommEngine.URMA; SDMA/RDMA are not available, got " << engine;
 }
 
 // The peer rank selects an address; a floating-point scalar must not become a
-// rank coordinate. V1 accepts integer and index scalars only.
+// rank coordinate. Only integer and index scalars are accepted.
 inline void ValidateAsyncPeer(const ExprPtr& peer, const std::string& op_name) {
   auto scalar = As<ScalarType>(peer->GetType());
   CHECK(scalar) << op_name << " peer must be a scalar (rank index), got " << peer->GetType()->TypeName();
