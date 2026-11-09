@@ -2684,6 +2684,7 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
 
      protected:
       void VisitStmt_(const AssignStmtPtr& op) override {
+        if (auto tuple = FindTuple(op->value_)) tuples_.emplace(op->var_.get(), tuple);
         auto call = As<Call>(op->value_);
         if (!call) {
           AddEdge(op->value_, op->var_);
@@ -2713,10 +2714,28 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
       }
 
      private:
+      [[nodiscard]] MakeTuplePtr FindTuple(const ExprPtr& value) const {
+        if (auto tuple = As<MakeTuple>(value)) return tuple;
+        auto var = AsVarLike(value);
+        auto found = tuples_.find(var.get());
+        return found == tuples_.end() ? nullptr : found->second;
+      }
+
       void AddEdge(const ExprPtr& source, const VarPtr& target) {
         if (!target || !AsTensorTypeLike(target->GetType())) return;
-        if (auto var = AsVarLike(source)) successors[var.get()].push_back(target.get());
+        if (auto projection = As<TupleGetItemExpr>(source)) {
+          auto tuple = FindTuple(projection->tuple_);
+          if (tuple && projection->index_ >= 0 &&
+              static_cast<size_t>(projection->index_) < tuple->elements_.size()) {
+            AddEdge(tuple->elements_[projection->index_], target);
+          }
+        } else if (auto var = AsVarLike(source)) {
+          successors[var.get()].push_back(target.get());
+        }
       }
+
+      // Tuple packaging preserves the backing storage of each element.
+      std::unordered_map<const Var*, MakeTuplePtr> tuples_;
 
       void AddYieldEdges(const StmtPtr& body, const std::vector<VarPtr>& targets) {
         auto yield = transform_utils::GetLastYieldStmt(body);

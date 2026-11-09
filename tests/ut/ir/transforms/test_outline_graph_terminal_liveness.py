@@ -240,7 +240,7 @@ def test_terminal_graph_preserves_write_to_captured_tensor_through_alias():
     assert not graph.return_types
 
 
-@pytest.mark.parametrize("case", ["loop", "if", "view_if"])
+@pytest.mark.parametrize("case", ["loop", "if", "view_if", "tuple_if"])
 def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
     body = {
         "loop": (
@@ -255,6 +255,16 @@ def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
             "                target = dst\n"
             "            else:\n"
             "                target = other\n"
+            "            with pl.at(level=pl.Level.CORE_GROUP):\n"
+            "                value = pl.load(src, [0], [16])\n"
+            "                pl.store(value, [0], target)\n"
+        ),
+        "tuple_if": (
+            "            pair = (dst, other)\n"
+            "            if flag > 0:\n"
+            "                target = pair[0]\n"
+            "            else:\n"
+            "                target = pair[1]\n"
             "            with pl.at(level=pl.Level.CORE_GROUP):\n"
             "                value = pl.load(src, [0], [16])\n"
             "                pl.store(value, [0], target)\n"
