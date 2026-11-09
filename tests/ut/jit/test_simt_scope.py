@@ -558,3 +558,61 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_na
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("entry_name", ["atomic_entry", "barrier_entry", "integer_entry", "floating_entry"])
+def test_public_atomics_native_compile(tmp_path, pytestconfig, entry_name):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    edges = entry_name in {"integer_entry", "floating_entry"}
+    filename = "test_simt_atomic_edges_onboard.py" if edges else "test_simt_atomics_onboard.py"
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto" / filename
+    pytestconfig.addinivalue_line("markers", "platforms(*ids, reason): supported ST platforms")
+    fixture = runpy.run_path(str(source))
+    backend.reset_for_testing()
+    try:
+        fixture["compile_case"](tmp_path, entry=fixture[entry_name])
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        text = helpers[0].read_text()
+        if entry_name == "atomic_entry":
+            for op in ("add", "min", "max", "exch", "cas"):
+                assert f"pto.atomic_{op} " in text
+            # Four storage targets, each with a consumed and an ignored Add.
+            assert text.count("pto.atomic_add ") == 8
+            assert " signed :" in text and "!pto.ptr<i32, ub>" in text
+        elif not edges:
+            assert "pto.syncthreads" in text
+        if not edges:
+            assert "pto.threadfence" in text and "pto.threadfence_block" in text
+        result = subprocess.run(
+            [
+                binary,
+                str(helpers[0]),
+                "--pto-arch=a5",
+                "--pto-backend=vpto",
+                "--emit-vpto-llvm-ir",
+                "-o",
+                str(tmp_path / "atomics.ll"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        llvm = (tmp_path / "atomics.ll").read_text()
+        if not edges:
+            assert "call void @llvm.hivm.fence.workitems()" in llvm
+            assert "call void @llvm.hivm.fenceblock.workitems()" in llvm
+        if entry_name == "barrier_entry":
+            assert "call void @llvm.hivm.sync.workitems()" in llvm
+        if entry_name == "atomic_entry":
+            for space in ("G", "S"):
+                for dtype in ("s32", "fp32"):
+                    for op in ("ADD", "MIN", "MAX", "EXCH", "CAS"):
+                        assert f"@llvm.hivm.atom.{op}.{space}.{dtype}(" in llvm
+    finally:
+        backend.reset_for_testing()

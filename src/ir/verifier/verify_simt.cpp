@@ -77,7 +77,13 @@ class SimtChecker : public IRVisitor {
         }
       }
     }
+    const auto sequence = As<SeqStmts>(function_->body_);
+    final_return_ = sequence && !sequence->stmts_.empty() ? sequence->stmts_.back() : function_->body_;
     VisitStmt(function_->body_);
+    if (has_barrier_ && unsafe_exit_) {
+      Error("SIMT syncthreads requires structured control flow without early return, break or continue",
+            function_->span_);
+    }
   }
 
   void VisitStmt(const StmtPtr& stmt) override {
@@ -101,7 +107,11 @@ class SimtChecker : public IRVisitor {
               stmt->span_);
       }
     }
+    const bool control = helper_ && (IsA<IfStmt>(stmt) || IsA<ForStmt>(stmt) || IsA<WhileStmt>(stmt));
+    if (control) ++control_depth_;
+    if (helper_ && (IsA<BreakStmt>(stmt) || IsA<ContinueStmt>(stmt))) unsafe_exit_ = true;
     IRVisitor::VisitStmt(stmt);
+    if (control) --control_depth_;
   }
 
  protected:
@@ -120,6 +130,7 @@ class SimtChecker : public IRVisitor {
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitStmt_(const ReturnStmtPtr& stmt) override {
+    if (helper_ && stmt != final_return_) unsafe_exit_ = true;
     if (helper_ && !stmt->value_.empty()) Error("SIMT helpers must return void", stmt->span_);
     IRVisitor::VisitStmt_(stmt);
   }
@@ -145,7 +156,17 @@ class SimtChecker : public IRVisitor {
       Error("SIMT helper contains an unsupported call or whole-storage operation", call->span_);
     }
     if (!helper_ && IsSimtOp(call)) Error("SIMT operations are only valid inside SIMT helpers", call->span_);
-    if (helper_ && (IsOp(call, "simt.load") || IsOp(call, "simt.store"))) {
+    if (helper_ && IsOp(call, "simt.syncthreads")) {
+      has_barrier_ = true;
+      // The initial proof accepts reconverged top-level barriers only. Even a
+      // uniform-looking loop can carry a lane-dependent value on its backedge.
+      // Reject nested barriers until a block-uniform control-flow analysis exists.
+      if (control_depth_ != 0) {
+        Error("SIMT syncthreads must be unconditional; barriers inside branches or loops are unsupported",
+              call->span_);
+      }
+    }
+    if (helper_ && !call->args_.empty() && IsStorage(call->args_[0]->GetType())) {
       const bool borrowed = !call->args_.empty() && parameters_.count(call->args_[0].get());
       if (!borrowed) {
         Error("SIMT memory access must refer directly to a borrowed helper parameter", call->span_);
@@ -232,6 +253,10 @@ class SimtChecker : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
   bool helper_;
   size_t register_scope_depth_ = 0;
+  size_t control_depth_ = 0;
+  bool has_barrier_ = false;
+  bool unsafe_exit_ = false;
+  StmtPtr final_return_;
   std::unordered_set<const Expr*> parameters_;
 };
 

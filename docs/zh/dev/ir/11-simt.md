@@ -29,7 +29,7 @@ def copy(src: pl.Tensor[[1, 128], pl.FP32],
 `pl.simt.Axis` 与 `ir.SimtAxis` 是同一枚举。坐标查询必须传入类型化 axis，支持位置
 参数或 `axis=`；`lane_id()` 无参数。dims 是三个编译期正整数，描述线程维度，不分配
 元素或创建 grid；边界保护必须显式编写。GM Tensor 和 Vec/UB Tile 复用既有存储。
-初始 API 支持当前后端标量子集及下述 INT32/FP32 lane 协作操作；原子和扩展数学仍属于后续里程碑。
+初始 API 支持当前后端标量子集及下述 INT32/FP32 lane 协作、原子和同步操作；扩展数学仍属于后续里程碑。
 
 标量赋值属于线程私有绑定，包括对外层标量的遮蔽，scope 外不能读取私有值。store
 自动重新绑定外层存储句柄，每个可写捕获只产生一个结果。Tile 更新之前保存的别名
@@ -125,6 +125,57 @@ min/max 显式携带 `signed`。测试经公共 JIT 和 PTOAS LLVM 导出编译�
 可选设备验收位于 `tests/st/runtime/vpto/test_simt_collectives_onboard.py`，覆盖两个
 warp、部分活跃集合、ballot bit 31、有符号归约、shuffle 子组及非活跃输出保留。
 仅编译测试不代表设备执行验收通过。
+
+## 原子操作与同步
+
+`pl.simt.atomic_add/min/max/exch(storage, indices, value)` 和
+`pl.simt.atomic_cas(storage, indices, compare, value)` 返回**更新前的标量值**。
+`pypto.ir.op.simt` 提供同名接口。操作数必须与存储的 INT32/FP32 类型一致。
+索引沿用 `load`/`store` 的逻辑坐标和物理步长；地址必须满足 4 字节自然对齐且不越界。
+
+| 操作 | INT32 | FP32 | 存储与返回值 |
+| ---- | ----- | ---- | ------------ |
+| `atomic_add` | 32 位回绕加法 | 目标浮点加法 | GM 和 Vec/UB；返回旧标量 |
+| `atomic_min`、`atomic_max` | 有符号比较 | 仅一个操作数为 NaN 时选择数值；均为 NaN 时返回 NaN | GM 和 Vec/UB；返回旧标量 |
+| `atomic_exch` | 替换 | 替换 | GM 和 Vec/UB；返回旧标量 |
+| `atomic_cas` | 按位比较 | 按位比较，包括 NaN 载荷及正负零 | GM 和 Vec/UB；返回旧标量 |
+
+已验证的 A5 目标比较正负零时，min 选择负零，max 选择正零。不保证算术结果的
+NaN 载荷。UINT32/INT64、FP16/BF16 和 packed 原子不属于当前前端子集，
+即使 PTOAS 支持其中部分组合。没有可选内存顺序或 scope 参数：操作使用目标地址空间
+的原生原子契约，不对其他地址额外提供 acquire/release 或顺序一致性保证。
+可选 `l2cache=` 使用 store 缓存策略，仅允许用于 GM。
+
+所有原子均为 `ReadWrite`，包括 Exch 以及未使用返回值的操作。目标必须已初始化；
+原子操作不能证明 `Out` 捕获已完整初始化，之前的完整普通覆盖写可以建立此证明。
+忽略旧值不会删除原子更新。竞争同一位置的线程观察到一个串行化顺序，
+但不保证具体线程先后次序。
+
+```python
+@pl.jit.aiv
+def increment(counter: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+    with pl.simt_scope(dims=(64, 1, 1)):
+        pl.simt.atomic_add(counter, (0,), pl.const(1, pl.INT32))
+    return counter
+```
+
+调用方初始化 `counter`；调用一次增加 64。
+
+| 操作 | 契约 |
+| ---- | ---- |
+| `syncthreads()` | 当前 SIMT 入口内线程会合；参与线程此前的内存效果先于此后的效果 |
+| `threadfence()` | 原生目标 workitem fence；约束调用线程的内存效果顺序 |
+| `threadfence_block()` | 原生 block 范围 workitem fence；约束调用线程的内存效果顺序 |
+
+这些操作返回 void，并作为有序调用保留。Fence 不等待其他线程，不是跨 AIV 或全局
+屏障；`threadfence` 的名称不代表 CUDA 的 device/system 范围或 CPU 可见性语义。
+读取其他线程写入前需要会合，单独 fence 不能使缺少同步的生产消费协议变得安全。
+
+当前版本保守要求 `syncthreads` 位于**所有分支和循环之外**，即使看起来一致的控制流
+也拒绝；允许位于已重新汇合的分支之后。含屏障的 helper 不允许提前 return、break
+或 continue。Warp vote 不能证明整个 block 一致到达。Fence 不会合，因此允许位于
+分歧控制流中。外部 MTE/Vector → SIMT → MTE/Vector 依赖仍由 launch 的存储效果
+及 PTOAS 同步处理，这些 builtin 不替代该协议。
 
 ## 效果与验证
 

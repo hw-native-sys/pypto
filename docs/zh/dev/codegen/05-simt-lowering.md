@@ -96,3 +96,31 @@ Warp 验收与上述 GM/UB 历史验收分开记录。
 `391b2fbcd4dd053204a677662c39b6b7636e8043` 上通过。覆盖两个 warp 中的全部
 七种活跃 lane 数量（0、1、15、16、17、31、32），检查全部 11 个 API、
 INT32/FP32 载荷以及 16/32 宽度，包括分支中的参与集合和非活跃输出保持不变。
+
+## 原子与同步验收
+
+原生映射使用 `pto.atomic_add/min/max/exch/cas`、`pto.syncthreads`、
+`pto.threadfence` 和 `pto.threadfence_block`。整数 min/max 显式携带 `signed`。
+原子沿用标量访存的仿射元素偏移计算，再通过 `pto.addptr` 寻址；不暴露无类型字节
+地址或绕过分配的路径。所有原子目标均为 ReadWrite，即使未使用旧标量返回值。
+同步调用保持有序副作用，`no_arg_writes` 不表示纯函数。
+
+| 能力 | 原生编译 | A5 数值覆盖 |
+| ---- | -------- | ----------- |
+| 五种原子 × INT32/FP32 × GM/UB | 全部 20 个组合，使用或丢弃返回值 | 竞争、旧值、CAS 成功/失败、未写元素 |
+| INT32 Add/Min/Max/CAS 边界 | GM 与 UB | 回绕、有符号极值、条件替换 |
+| FP32 Add/Min/Max/CAS 边界 | GM 与 UB | NaN、无穷、正负零、按位 CAS |
+| `syncthreads` 与两种 fence | LLVM workitem 同步/fence intrinsic | 四个 warp 的 UB/GM 发布与读取，以及后续 MTE 输出 |
+
+此矩阵已在 Ascend950DT_9581、PTOAS v0.72、CANN 9.3.0 及 runtime
+`391b2fbcd4dd053204a677662c39b6b7636e8043` 上验证。原子位置为自然对齐的 4 字节
+元素；UINT32/INT64、half/bfloat16、packed 值、可选顺序/scope 及跨 AIV 同步不属于
+当前前端契约。详见 [API 语义与限制](../ir/11-simt.md#原子操作与同步)。
+发布测试使用了会合，不能证明单独 fence 构成同步协议，也不承诺系统级可见性。
+
+`tests/st/runtime/vpto/test_simt_atomics_onboard.py` 提供竞争和屏障用例（15 项检查），
+`test_simt_atomic_edges_onboard.py` 提供边界用例（9 项检查）。两者均提供与其他
+SIMT 测试相同环境开关控制的 `build`/`persistent` pytest 变体，及
+`--worker OUTPUT [DEVICE]` 入口。JIT 单测在无设备时编译全部四个入口并导出原生 LLVM。
+结构回归拒绝只读或未初始化的原子捕获、嵌套屏障以及绕过屏障的退出。
+未验证无锁前进性保证。

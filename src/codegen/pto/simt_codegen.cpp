@@ -324,9 +324,11 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
   if (!entry || entry->GetOpCategory() != "SimtOp") return false;
   INTERNAL_CHECK_SPAN(inside_simt_function_, call->span_) << "Internal error: SIMT op outside helper";
   const bool store = ir::IsOp(call, "simt.store");
-  if (store || ir::IsOp(call, "simt.load")) {
-    INTERNAL_CHECK_SPAN(call->args_.size() == (store ? 3 : 2), call->span_)
-        << "Internal error: SIMT memory arity";
+  const bool atomic =
+      entry->HasDeclaredArgEffect(0) && entry->GetArgEffect(0, call->kwargs_) == ir::ArgEffect::ReadWrite;
+  if (store || atomic || ir::IsOp(call, "simt.load")) {
+    const size_t arity = ir::IsOp(call, "simt.atomic_cas") ? 4 : (store || atomic ? 3 : 2);
+    INTERNAL_CHECK_SPAN(call->args_.size() == arity, call->span_) << "Internal error: SIMT memory arity";
     const auto& storage = call->args_[0];
     const auto indices = ir::As<ir::MakeTuple>(call->args_[1]);
     INTERNAL_CHECK_SPAN(indices, call->span_) << "Internal error: SIMT indices must be a tuple";
@@ -342,7 +344,22 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
         policy += " " + std::string(key) + "(" + value + ")";
       }
     }
-    if (store) {
+    if (atomic) {
+      // addptr uses element offsets, including the affine view's physical stride.
+      const auto address = NewTemp();
+      const auto ptr_body = "<" + element + (gm ? ", gm>" : ", ub>");
+      Emit(address + " = pto.addptr " + pointer + ", " + offset + " : " + ptr_body + " -> " + ptr_body);
+      auto operands = address;
+      for (size_t i = 2; i < call->args_.size(); ++i) operands += ", " + GetExprAsCode(call->args_[i]);
+      if ((ir::IsOp(call, "simt.atomic_min") || ir::IsOp(call, "simt.atomic_max")) &&
+          shaped->dtype_ == DataType::INT32) {
+        policy += " signed";
+      }
+      const auto result = NewTemp();
+      Emit(result + " = pto." + call->op_->name_.substr(5) + " " + operands + policy + " : " + type + ", " +
+           element + " -> " + element);
+      fs_.current_expr_value = result;
+    } else if (store) {
       const auto value = GetExprAsCode(call->args_[2]);
       Emit(std::string(gm ? "pto.stg " : "pto.store ") + value + ", " + pointer + "[" + offset + "]" +
            policy + " : " + type + ", " + element);
@@ -353,6 +370,12 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
            type + " -> " + element);
       fs_.current_expr_value = result;
     }
+    return true;
+  }
+  if (ir::IsOp(call, "simt.syncthreads") || ir::IsOp(call, "simt.threadfence") ||
+      ir::IsOp(call, "simt.threadfence_block")) {
+    Emit("pto." + call->op_->name_.substr(5));
+    fs_.current_expr_value.clear();
     return true;
   }
   // Keep the collective at its original control-flow location: its implicit

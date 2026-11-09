@@ -27,6 +27,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 namespace {
@@ -40,10 +41,18 @@ class AccessCollector : public IRVisitor {
 
  protected:
   void VisitExpr_(const CallPtr& call) override {
-    if ((IsOp(call, "simt.load") || IsOp(call, "simt.store")) && !call->args_.empty()) {
-      if (auto it = parameters_.find(call->args_[0].get()); it != parameters_.end()) {
-        summary[it->second].reads |= IsOp(call, "simt.load");
-        summary[it->second].writes |= IsOp(call, "simt.store");
+    const auto* entry = LookupOpEntry(call->op_);
+    if (entry && entry->GetOpCategory() == "SimtOp") {
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        if (auto it = parameters_.find(call->args_[i].get()); it != parameters_.end()) {
+          // Scalar parameters have no physical memory effect. Use registered
+          // effects for storage so atomics also drive outlining and scheduling.
+          const auto& type = call->args_[i]->GetType();
+          if (!As<TileType>(type) && !As<TensorType>(type)) continue;
+          const auto effect = entry->GetArgEffect(i, call->kwargs_);
+          summary[it->second].reads |= ArgEffectReads(effect);
+          summary[it->second].writes |= ArgEffectWrites(effect);
+        }
       }
     }
     IRVisitor::VisitExpr_(call);
