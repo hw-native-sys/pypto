@@ -12,6 +12,7 @@
 import ast
 import keyword as _keyword_mod
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -1377,7 +1378,8 @@ class ScopeParser:
                         self.callbacks.body(stmt.body)
                         self.comments.discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                         self.services.scope_manager.exit_scope(leak_vars=True)
-                self.services.scope_manager.exit_scope(leak_vars=True)
+                bindings = self.services.scope_manager.exit_scope(leak_vars=True)
+        self.remember_graph_dispatch_tensor(scope_attrs, bindings)
 
     def parse_spmd_scope(
         self,
@@ -1962,6 +1964,7 @@ class ScopeParser:
                 bindings = self.services.scope_manager.exit_scope(
                     leak_vars=True, exclude_names=local_task_ids
                 )
+        self.remember_graph_dispatch_tensor(attrs, bindings)
         exported = [
             value
             for name, value in bindings.items()
@@ -1989,8 +1992,7 @@ class ScopeParser:
         self, bindings: dict[str, Any], local_task_ids: set[str], span: "ir.Span"
     ) -> None:
         """Restore bindings shadowed by recorded TaskIds."""
-        aliases = self.function.jit_graph_rebinds
-        if aliases is None:
+        if self.function.jit_graph_rebinds is None:
             return
         manager = self.services.scope_manager
         for name in local_task_ids:
@@ -2004,20 +2006,48 @@ class ScopeParser:
                 if entry is None or not shadowed.same_as(entry):
                     manager.define_var(name, shadowed)
                 continue
-            if name not in aliases:
-                continue
-            previous = aliases[name]
-            # Several Graph-local rebindings can precede the live-in alias.
-            for _ in aliases:
+            for previous in self.graph_rebind_predecessors(name):
                 if isinstance(previous, int):
                     manager.define_var(name, ir.ConstInt(previous, DataType.INDEX, span))
                     break
                 if (value := manager.lookup_var(previous)) is not None:
                     manager.define_var(name, value)
                     break
-                if previous not in aliases:
-                    break
-                previous = aliases[previous]
+
+    def graph_rebind_predecessors(self, name: str) -> Iterator[str | int]:
+        aliases = self.function.jit_graph_rebinds or {}
+        # Each generated alias points to an older name or a folded dimension.
+        for _ in aliases:
+            previous = aliases.get(name)
+            if previous is None:
+                break
+            yield previous
+            if isinstance(previous, int):
+                break
+            name = previous
+
+    def remember_graph_dispatch_tensor(
+        self, attrs: "list[tuple[str, Any]] | None", bindings: dict[str, Any]
+    ) -> None:
+        """Keep a captured dispatch's actual tensor write as its typed predecessor."""
+        if not self.function.jit_graph_rebinds or not self.regions.is_inside_scope(ir.ScopeKind.Graph):
+            return
+        tid = next((value for key, value in attrs or () if key == "task_id_var"), None)
+        if not isinstance(tid, ir.Var):
+            return
+        name = tid.name_hint
+        for value in reversed(bindings.values()):
+            if (
+                isinstance(value, ir.Var)
+                and isinstance(value.type, (ir.TensorType, ir.DistributedTensorType))
+                and (value.name_hint == name or name in self.graph_rebind_predecessors(value.name_hint))
+            ):
+                self.function.shadowed_capture_bindings[tid.unique_id] = value
+                manager = self.services.scope_manager
+                current = manager.lookup_var(name)
+                if isinstance(current, ir.Var) and current.same_as(value):
+                    manager.define_var(name, tid)
+                break
 
     def parse_graph_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None

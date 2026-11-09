@@ -3987,15 +3987,18 @@ def test_jit_graph_tensor_rebinding_with_same_name_task_capture_is_exported(writ
 
 
 @pytest.mark.parametrize("repeat_capture", [False, True])
-def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture):
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture, overwrite):
     second_capture = (
         "        with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]) as selected:\n"
         "            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)"
         if repeat_capture
         else ""
     )
+    if overwrite:
+        second_capture += "\n        selected = c"
     source = textwrap.dedent("""
-        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor], c: pl.InOut[pl.Tensor]):
             for i in pl.range(1):
                 with pl.at(level=pl.Level.CORE_GROUP):
                     selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
@@ -4006,7 +4009,7 @@ def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture):
             return selected
     """).replace("    SECOND_CAPTURE", second_capture)
     meta = TensorMeta((128, 128), DataType.FP32)
-    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+    ctx = _make_ctx("f", source, param_names=["a", "b", "c"], tensor_meta={"a": meta, "b": meta, "c": meta})
     function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
     assert isinstance(function.body, ir.SeqStmts)
@@ -4014,12 +4017,19 @@ def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture):
     returned = function.body.stmts[-1]
     assert isinstance(returned, ir.ReturnStmt)
     (value,) = returned.value
+    assert isinstance(graph.body, ir.SeqStmts)
+    device_scope = next(stmt for stmt in graph.body.stmts if isinstance(stmt, ir.InCoreScopeStmt))
     (selected,) = (
         var
-        for var in ir.collect_def_vars(graph.body)
+        for var in ir.collect_def_vars(device_scope.body)
         if var.name_hint == "selected_v1" and isinstance(var.type, ir.TensorType)
     )
     assert value.same_as(selected)
+    if overwrite:
+        assignment = graph.body.stmts[-1]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert assignment.var.same_as(selected)
+        assert assignment.value.same_as(function.params[2])
 
 
 @pytest.mark.parametrize("nested", [False, True])

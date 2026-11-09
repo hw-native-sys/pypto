@@ -153,8 +153,7 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
-        # Original name -> (dispatch alias, newer alias written inside its body).
-        self._graph_captures: dict[str, tuple[str, str | None]] | None = None
+        self._graph_captures: dict[str, str] | None = None
         self.graph_rebinds: dict[str, str | int] = {}
         self.has_scope_capture = False
         self._simt_depth: int = 0
@@ -245,8 +244,7 @@ class BodyTransformer(ast.NodeTransformer):
         return (
             self._graph_captures is not None
             and alias is not None
-            and (capture := self._graph_captures.get(name)) is not None
-            and capture[0] == alias
+            and self._graph_captures.get(name) == alias
             and isinstance(self.graph_rebinds.get(alias), int)
         )
 
@@ -1001,9 +999,7 @@ class BodyTransformer(ast.NodeTransformer):
                     )
                     prefix.append(ast.copy_location(assignment, node))
                 if self._graph_captures is not None:
-                    previous = self._graph_captures.get(original.id)
-                    if previous is None or previous[0] != captured:
-                        self._graph_captures[original.id] = (captured, None)
+                    self._graph_captures[original.id] = captured
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
                 if _scope_call_name(item.context_expr) != "graph":
@@ -1084,12 +1080,9 @@ class BodyTransformer(ast.NodeTransformer):
                 ) = state
             elif state is not None and graph_locals:
                 old_meta, old_shapes, old_counts, old_depths, old_renames, _ = state
-                for name, (capture_alias, body_alias) in graph_locals.items():
-                    if body_alias is not None and self._var_renames.get(name) == capture_alias:
-                        self._var_renames[name] = body_alias
                 # Keep a new shape fold or a later alpha-renamed live-out.
                 # The parser handles any alpha-renamed local TaskIds.
-                restore_names = {
+                graph_locals = {
                     name
                     for name in graph_locals
                     if self._active_shape_fold(name) is None
@@ -1099,27 +1092,19 @@ class BodyTransformer(ast.NodeTransformer):
                     )
                 }
                 meta_names = (
-                    restore_names
-                    | {old_renames.get(name, name) for name in restore_names}
-                    | {self._var_renames.get(name, name) for name in restore_names}
+                    graph_locals
+                    | {old_renames.get(name, name) for name in graph_locals}
+                    | {self._var_renames.get(name, name) for name in graph_locals}
                 )
                 _restore_bindings(self._meta, old_meta, meta_names)
-                _restore_bindings(self._shape_inlined, old_shapes, restore_names)
-                _restore_bindings(self._assign_count, old_counts, restore_names)
-                _restore_bindings(self._assign_depth, old_depths, restore_names)
-                _restore_bindings(self._var_renames, old_renames, restore_names)
+                _restore_bindings(self._shape_inlined, old_shapes, graph_locals)
+                _restore_bindings(self._assign_count, old_counts, graph_locals)
+                _restore_bindings(self._assign_depth, old_depths, graph_locals)
+                _restore_bindings(self._var_renames, old_renames, graph_locals)
         # A capture binds the dispatch result, not a body-local reassignment
         # of the same spelling. Do not create another alpha version here:
         # the parser reuses the source Var and native SSA builds carries/phis.
         for original, captured in captures.items():
-            body_alias = self._var_renames.get(original)
-            if (
-                self._graph_captures is not None
-                and body_alias is not None
-                and body_alias != captured
-                and body_alias in self.graph_rebinds
-            ):
-                self._graph_captures[original] = (captured, body_alias)
             self._var_renames[original] = captured
             self._shape_inlined.pop(original, None)
             self._record_tensor_meta(captured, None)
