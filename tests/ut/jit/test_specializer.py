@@ -3986,6 +3986,42 @@ def test_jit_graph_tensor_rebinding_with_same_name_task_capture_is_exported(writ
     assert value.same_as(selected)
 
 
+@pytest.mark.parametrize("repeat_capture", [False, True])
+def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture):
+    second_capture = (
+        "        with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]) as selected:\n"
+        "            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)"
+        if repeat_capture
+        else ""
+    )
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            for i in pl.range(1):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            with pl.graph("recording"):
+                with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                    selected = pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+            SECOND_CAPTURE
+            return selected
+    """).replace("    SECOND_CAPTURE", second_capture)
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (selected,) = (
+        var
+        for var in ir.collect_def_vars(graph.body)
+        if var.name_hint == "selected_v1" and isinstance(var.type, ir.TensorType)
+    )
+    assert value.same_as(selected)
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(nested):
     capture = textwrap.dedent("""
