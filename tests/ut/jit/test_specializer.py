@@ -3953,28 +3953,36 @@ def test_jit_graph_host_alias_keeps_independent_kernel_tensor_rebinding():
     assert compiled.program is not None
 
 
-def test_jit_graph_tensor_rebinding_after_same_name_task_capture_is_exported():
-    @pl.jit
-    def chain(
-        a: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        b: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-    ):
-        with pl.at(level=pl.Level.CORE_GROUP):
-            selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
-        with pl.graph("recording"):
-            with pl.at(level=pl.Level.CORE_GROUP) as selected:
-                pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
-            selected = b
-        return selected
+@pytest.mark.parametrize("write_first", [False, True])
+def test_jit_graph_tensor_rebinding_with_same_name_task_capture_is_exported(write_first):
+    capture = (
+        "with pl.at(level=pl.Level.CORE_GROUP) as selected:\n"
+        "    pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)"
+    )
+    lines = ["selected = b", capture] if write_first else [capture, "selected = b"]
+    source = textwrap.dedent("""
+        def chain(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            with pl.graph("recording"):
+                CAPTURE
+            return selected
+    """).replace("        CAPTURE", textwrap.indent("\n".join(lines), "        "))
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("chain", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
 
-    function = chain.specialize().get_function("chain")
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("chain")
     assert function is not None
     assert isinstance(function.body, ir.SeqStmts)
     graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
     returned = function.body.stmts[-1]
     assert isinstance(returned, ir.ReturnStmt)
     (value,) = returned.value
-    (selected,) = (var for var in ir.collect_def_vars(graph.body) if var.name_hint == "selected_v1")
+    (selected,) = (
+        var
+        for var in ir.collect_def_vars(graph.body)
+        if var.name_hint == "selected_v1" and isinstance(var.type, ir.TensorType)
+    )
     assert value.same_as(selected)
 
 
@@ -4092,6 +4100,59 @@ def test_jit_dispatch_capture_then_scalar_assignment(capture_kind):
         if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "index_v1"
     )
     assert value.same_as(original)
+
+
+def test_jit_graph_capture_does_not_reuse_sibling_branch_shape():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], flag: pl.Scalar[pl.BOOL]):
+            if flag:
+                rows = a.shape[0]
+            else:
+                with pl.graph("recording"):
+                    with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            return a
+    """)
+    ctx = _make_ctx(
+        "f", source, param_names=["a", "flag"], tensor_meta={"a": TensorMeta((128, 128), DataType.FP32)}
+    )
+    assert pl.parse_program(specialize("Before", [ctx])).get_function("f") is not None
+
+
+@pytest.mark.parametrize("capture_kind", ["dispatch", "graph"])
+def test_jit_dispatch_capture_then_folded_scalar_assignment(capture_kind):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as rows:
+            pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+    """).strip("\n")
+    if capture_kind == "graph":
+        capture = 'with pl.graph("recording") as rows:\n' + textwrap.indent(
+            capture.replace(" as rows", ""), "    "
+        )
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            rows = a.shape[0]
+            with pl.manual_scope():
+                CAPTURE
+                pl.system.task_dummy(deps=[rows])
+                rows = b.shape[0]
+            return rows
+    """).replace("        CAPTURE", textwrap.indent(capture, "        "))
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert isinstance(value.type, ir.ScalarType)
+    assert value.type.dtype == DataType.INDEX
 
 
 def test_jit_explicit_recorded_local_dependency_remains_rejected():

@@ -1968,7 +1968,7 @@ class ScopeParser:
             if isinstance(value, ir.Var) and (local_task_ids is None or name not in local_task_ids)
         ]
         if local_task_ids:
-            self.restore_graph_rebinds(local_task_ids, span)
+            self.restore_graph_rebinds(bindings, local_task_ids, span)
             # A TaskId can hide an earlier assignment to a caller's tensor
             # in the symbol table. Check the actual IR definition by identity.
             shadowed_tensors = {
@@ -1985,11 +1985,24 @@ class ScopeParser:
                 )
         return exported
 
-    def restore_graph_rebinds(self, local_task_ids: set[str], span: "ir.Span") -> None:
-        """Resolve JIT aliases of recorded TaskIds to their caller bindings."""
-        aliases = self.function.jit_graph_rebinds or {}
+    def restore_graph_rebinds(
+        self, bindings: dict[str, Any], local_task_ids: set[str], span: "ir.Span"
+    ) -> None:
+        """Restore bindings shadowed by recorded TaskIds."""
+        aliases = self.function.jit_graph_rebinds
+        if aliases is None:
+            return
         manager = self.services.scope_manager
-        for name in local_task_ids & aliases.keys():
+        for name in local_task_ids:
+            captured = bindings[name]
+            if (
+                isinstance(captured, ir.Var)
+                and (shadowed := self.function.shadowed_capture_vars.get(captured.unique_id)) is not None
+            ):
+                manager.define_var(name, shadowed)
+                continue
+            if name not in aliases:
+                continue
             previous = aliases[name]
             # Several Graph-local rebindings can precede the live-in alias.
             for _ in aliases:

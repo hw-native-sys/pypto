@@ -790,6 +790,7 @@ class BodyTransformer(ast.NodeTransformer):
         self._assign_depth.pop(name, None)
         self._var_renames.pop(name, None)
         self._meta.pop(name, None)
+        self._shape_inlined.pop(name, None)
 
     def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
         """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
@@ -892,12 +893,10 @@ class BodyTransformer(ast.NodeTransformer):
         self._scope_depth -= 1
         return node
 
-    def visit_With(self, node: ast.With) -> ast.stmt:
-        """Visit With block, incrementing scope depth for its body."""
-        scope_names = {_scope_call_name(item.context_expr) for item in node.items}
-        graph = "graph" in scope_names
-        graph_locals: set[str] = _graph_local_capture_names(node) if graph else set()
+    def _visit_with_captures(self, node: ast.With) -> tuple[dict[str, str], list[ast.stmt]]:
+        """Rewrite capture names and materialize folded host predecessors."""
         captures: dict[str, str] = {}
+        prefix: list[ast.stmt] = []
         for item in node.items:
             item.context_expr = self.visit(item.context_expr)
             if isinstance(item.optional_vars, ast.Name):
@@ -910,6 +909,18 @@ class BodyTransformer(ast.NodeTransformer):
                     if self._folded_graph_shape(original.id) is not None
                     else self._var_renames.get(original.id, original.id)
                 )
+                # An outer dispatch may be followed by a write to this scalar.
+                # Materialize the folded predecessor so the parser can restore
+                # it when the temporary TaskId binding is overwritten.
+                if (
+                    not self._in_graph
+                    and original.id not in self._var_renames
+                    and (folded := self._shape_inlined.get(original.id)) is not None
+                ):
+                    assignment = ast.Assign(
+                        targets=[ast.Name(id=captured, ctx=ast.Store())], value=ast.Constant(value=folded)
+                    )
+                    prefix.append(ast.copy_location(assignment, node))
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
                 if _scope_call_name(item.context_expr) != "graph":
@@ -918,6 +929,14 @@ class BodyTransformer(ast.NodeTransformer):
                     self._record_tensor_meta(captured, None)
             elif item.optional_vars is not None:
                 item.optional_vars = self.visit(item.optional_vars)
+        return captures, prefix
+
+    def visit_With(self, node: ast.With) -> ast.stmt | list[ast.stmt]:
+        """Visit With block, incrementing scope depth for its body."""
+        scope_names = {_scope_call_name(item.context_expr) for item in node.items}
+        graph = "graph" in scope_names
+        graph_locals: set[str] = _graph_local_capture_names(node) if graph else set()
+        captures, capture_prefix = self._visit_with_captures(node)
         simt = "simt_scope" in scope_names
         # SIMT assignments are per-thread. Folding a local shape or renaming a
         # shadowed scalar must not change the caller's later specialization.
@@ -1006,4 +1025,4 @@ class BodyTransformer(ast.NodeTransformer):
             self._var_renames[original] = captured
             self._shape_inlined.pop(original, None)
             self._record_tensor_meta(captured, None)
-        return node
+        return [*capture_prefix, node] if capture_prefix else node
