@@ -240,7 +240,7 @@ def test_terminal_graph_preserves_write_to_captured_tensor_through_alias():
     assert not graph.return_types
 
 
-@pytest.mark.parametrize("case", ["loop", "if"])
+@pytest.mark.parametrize("case", ["loop", "if", "view_if"])
 def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
     body = {
         "loop": (
@@ -259,13 +259,24 @@ def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
             "                value = pl.load(src, [0], [16])\n"
             "                pl.store(value, [0], target)\n"
         ),
+        "view_if": (
+            "            if flag > 0:\n"
+            "                target = pl.tensor.slice(dst, [16], [0])\n"
+            "            else:\n"
+            "                target = pl.tensor.slice(other, [16], [16])\n"
+            "            with pl.at(level=pl.Level.CORE_GROUP):\n"
+            "                value = pl.load(src, [0], [16])\n"
+            "                pl.store(value, [0], target)\n"
+        ),
     }[case]
+    capture_rows = 32 if case == "view_if" else 16
     program = pl.parse_program(
         "@pl.program\n"
         "class P:\n"
         "    @pl.function(type=pl.FunctionType.Orchestration)\n"
-        "    def main(self, src: pl.Tensor[[16], pl.FP32], dst: pl.InOut[pl.Tensor[[16], pl.FP32]],\n"
-        "             other: pl.InOut[pl.Tensor[[16], pl.FP32]], flag: pl.Scalar[pl.INDEX]):\n"
+        "    def main(self, src: pl.Tensor[[16], pl.FP32], "
+        f"dst: pl.InOut[pl.Tensor[[{capture_rows}], pl.FP32]],\n"
+        f"             other: pl.InOut[pl.Tensor[[{capture_rows}], pl.FP32]], flag: pl.Scalar[pl.INDEX]):\n"
         '        with pl.graph("terminal"):\n' + body
     )
     graph = _graph(passes.outline_graph_scopes()(passes.convert_to_ssa()(program)))
@@ -276,6 +287,20 @@ def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
     assert directions["other"] == ir.ParamDirection.InOut
     assert directions["src"] == ir.ParamDirection.In
     assert not graph.return_types
+
+
+def test_terminal_graph_rejects_oversized_tensor_capture_before_alias_analysis():
+    params = ", ".join(f"x{i}: pl.Tensor[[16], pl.FP32]" for i in range(129))
+    uses = "".join(f"            alias{i} = x{i}\n" for i in range(129))
+    program = pl.parse_program(
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Orchestration)\n"
+        f"    def main(self, {params}):\n"
+        '        with pl.graph("oversized"):\n' + uses
+    )
+    with pytest.raises(ValueError, match="Graph scope captures more than 128 tensor parameters"):
+        passes.outline_graph_scopes()(passes.convert_to_ssa()(program))
 
 
 if __name__ == "__main__":

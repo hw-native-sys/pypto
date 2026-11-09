@@ -2668,17 +2668,30 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
   // add roots that were absent at the first iteration.
   std::unordered_map<const Var*, std::vector<size_t>> merged_roots;
   if (target_scope_kind_ == ScopeKind::Graph) {
+    // Reject an oversized boundary before walking the alias graph once per
+    // tensor. LegalizeGraphBoundary also checks the final, post-hoist count.
+    constexpr size_t kMaxGraphTensorCaptures = 128;  // Runtime GRAPH_MAX_TENSOR_ARGS.
+    const auto tensor_captures = std::count_if(input_vars.begin(), input_vars.end(), [](const VarPtr& var) {
+      return AsTensorTypeLike(var->GetType()) != nullptr;
+    });
+    CHECK_SPAN(static_cast<size_t>(tensor_captures) <= kMaxGraphTensorCaptures, body->span_)
+        << "Graph scope captures more than " << kMaxGraphTensorCaptures
+        << " tensor parameters. Split the scope into smaller Graphs.";
+
     class CaptureAliasCollector : public IRVisitor {
      public:
       std::unordered_map<const Var*, std::vector<const Var*>> successors;
 
      protected:
       void VisitStmt_(const AssignStmtPtr& op) override {
-        if (auto store = As<Call>(op->value_);
-            store && IsOp(store, "tile.store") && store->args_.size() >= 3) {
-          AddEdge(store->args_[2], op->var_);
-        } else {
+        auto call = As<Call>(op->value_);
+        if (!call) {
           AddEdge(op->value_, op->var_);
+        } else if (!call->args_.empty() && (IsOp(call, "tensor.slice") || IsOp(call, "tensor.view") ||
+                                            IsOp(call, "tensor.reshape"))) {
+          AddEdge(call->args_.front(), op->var_);
+        } else if (auto index = ResultAliasedArgIndex(call)) {
+          AddEdge(call->args_[*index], op->var_);
         }
         IRVisitor::VisitStmt_(op);
       }
@@ -2730,6 +2743,7 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
     // Walk each capture's reachable aliases once, including loop cycles.
     for (size_t i = 0; i < input_vars.size(); ++i) {
       const auto* input = input_vars[i].get();
+      if (!AsTensorTypeLike(input->GetType())) continue;
       std::vector<const Var*> pending{input};
       std::unordered_set<const Var*> visited{input};
       for (size_t next = 0; next < pending.size(); ++next) {
