@@ -1328,7 +1328,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     pending_comments=method_comments,
                     alloc_window_buffer_names=alloc_window_buffer_names,
                 )
-                parser.function.jit_graph_rebinds = jit_graph_rebinds.get(func_def.name, {})
+                parser.function.jit_graph_rebinds = jit_graph_rebinds.get(func_def.name)
 
                 try:
                     ir_func = parser.parse_function(

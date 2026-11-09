@@ -2076,7 +2076,7 @@ class Specializer:
         self._contexts = contexts
         # Accumulated alias→original map across all specialized functions.
         self._rename_map: dict[str, str] = {}
-        self._graph_rebinds: dict[str, dict[str, str | int]] = {}
+        self._graph_rebinds: dict[str, dict[str, str | int] | None] = {}
         # Param order per function — lets the body transformer rewrite
         # ``self.<dep>(a, out=out)`` keyword args into all-positional form
         # (the parser rejects keyword args on inter-function calls).
@@ -2160,7 +2160,9 @@ class Specializer:
         # Open @pl.program class
         lines.append("@pl.program")
         lines.append(f"class {self._class_name}:")
-        graph_rebinds = {name: aliases for name, aliases in self._graph_rebinds.items() if aliases}
+        graph_rebinds = {
+            name: aliases for name, aliases in self._graph_rebinds.items() if aliases is not None
+        }
         if graph_rebinds:
             lines.append(f"    {JIT_GRAPH_REBINDS_ATTR} = {graph_rebinds!r}")
         lines.extend(body_lines)
@@ -2399,7 +2401,9 @@ class Specializer:
             ),
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
-        self._graph_rebinds[ctx.func_name] = transformer.graph_rebinds
+        self._graph_rebinds[ctx.func_name] = (
+            transformer.graph_rebinds if transformer.graph_rebinds or transformer.has_scope_capture else None
+        )
         # Accumulate alias→original renames for error message rewriting.
         # Don't overwrite entries from earlier functions — in multi-function JIT,
         # two functions may independently generate the same alias (e.g. t_v1) for

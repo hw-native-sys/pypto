@@ -339,6 +339,7 @@ class ASTParser:
         self.function.func_type = func_type
         self.function.param_dim_symbols = set()
         self.function.shape_dim_aliases = {}
+        self.function.shadowed_capture_tensors.clear()
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -998,10 +999,18 @@ class ASTParser:
         if self.ops.is_param_dim_symbol(existing_var):
             existing_var = None
 
+        value_type = override_type or value_expr.type
+        if isinstance(existing_var, ir.Var) and isinstance(
+            value_type, (ir.TensorType, ir.DistributedTensorType)
+        ):
+            # A JIT dispatch can temporarily bind the emitted name to a
+            # TaskId. A Tensor write still updates the prior Tensor Var, so
+            # the existing storage checks and SSA carries apply to that Var.
+            existing_var = self.function.shadowed_capture_tensors.get(existing_var.unique_id, existing_var)
+
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
             # Reject changes to the storage contract (#642). Pre-SSA tensor
             # validity may refine per definition; SSA keeps each RHS's view.
-            value_type = override_type or value_expr.type
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)

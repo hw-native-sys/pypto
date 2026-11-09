@@ -4009,30 +4009,42 @@ def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(n
     assert value.same_as(selected)
 
 
-def test_jit_dispatch_capture_then_sibling_kernel_tensor_assignment():
-    @pl.jit
-    def chain(
-        a: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        b: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-    ):
-        with pl.manual_scope():
+@pytest.mark.parametrize("write_scope", ["device", "host", "loop"])
+def test_jit_dispatch_capture_then_tensor_assignment(write_scope):
+    second_dispatch = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+            pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+    """).strip("\n")
+    if write_scope == "device":
+        second_dispatch = second_dispatch.replace("    pl.store", "    selected = pl.store")
+    else:
+        write = "selected = a" if write_scope == "host" else "for i in pl.range(1):\n    selected = a"
+        second_dispatch += "\n" + write
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
             selected = a
             selected = b
-            with pl.at(level=pl.Level.CORE_GROUP) as selected:  # noqa: F811
-                pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
-            with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
-                selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
-        return selected
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                    pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+                SECOND_DISPATCH
+            return selected
+    """).replace("        SECOND_DISPATCH", textwrap.indent(second_dispatch, "        "))
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
 
-    function = chain.specialize().get_function("chain")
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
     assert isinstance(function.body, ir.SeqStmts)
     returned = function.body.stmts[-1]
     assert isinstance(returned, ir.ReturnStmt)
     (value,) = returned.value
-    assert isinstance(value, ir.Var)
-    assert isinstance(value.type, ir.TensorType)
-    assert value.name_hint == "selected_v2"
+    (original,) = (
+        stmt.var
+        for stmt in function.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "selected_v1"
+    )
+    assert value.same_as(original)
 
 
 def test_jit_explicit_recorded_local_dependency_remains_rejected():

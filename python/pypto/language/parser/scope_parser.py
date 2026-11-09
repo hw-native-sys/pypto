@@ -1535,7 +1535,7 @@ class ScopeParser:
         # ``predicate`` in particular carries live SSA Vars (the operand tensor and
         # its indices), which ConvertToSSA versions via SubstScopeAttrs.
         tid_var = self.services.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
-        self.services.scope_manager.define_var(optional_vars.id, tid_var, span=span)
+        self.bind_dispatch_capture(optional_vars.id, tid_var, span)
         scope_attrs = self.build_spmd_scope_attrs(
             dep_vars, allow_early_resolve, predicate, tid_var, dump_vars=dump_vars
         )
@@ -1987,7 +1987,7 @@ class ScopeParser:
 
     def restore_graph_rebinds(self, local_task_ids: set[str], span: "ir.Span") -> None:
         """Resolve JIT aliases of recorded TaskIds to their caller bindings."""
-        aliases = self.function.jit_graph_rebinds
+        aliases = self.function.jit_graph_rebinds or {}
         manager = self.services.scope_manager
         for name in local_task_ids & aliases.keys():
             previous = aliases[name]
@@ -2194,7 +2194,7 @@ class ScopeParser:
         # next, absorbs them.
         tid_var = self.emit_scope_task_id_placeholder(scope_attrs, span)
         if tid_var is not None and isinstance(optional_vars, ast.Name):
-            self.services.scope_manager.define_var(optional_vars.id, tid_var, span=span)
+            self.bind_dispatch_capture(optional_vars.id, tid_var, span)
 
         if not is_core_group:
             # SubWorker scopes are no longer supported as inline `with pl.at(...)`
@@ -2435,6 +2435,16 @@ class ScopeParser:
             attrs.append(("predicate", predicate))
 
         return attrs if attrs else None
+
+    def bind_dispatch_capture(self, name: str, tid: "ir.Var", span: "ir.Span") -> None:
+        manager = self.services.scope_manager
+        if self.function.jit_graph_rebinds is not None:
+            previous = manager.lookup_var(name)
+            if isinstance(previous, ir.Var):
+                previous = self.function.shadowed_capture_tensors.get(previous.unique_id, previous)
+                if isinstance(previous.type, (ir.TensorType, ir.DistributedTensorType)):
+                    self.function.shadowed_capture_tensors[tid.unique_id] = previous
+        manager.define_var(name, tid, span=span)
 
     def emit_scope_task_id_placeholder(
         self, attrs: "list[tuple[str, Any]] | None", span: "ir.Span"

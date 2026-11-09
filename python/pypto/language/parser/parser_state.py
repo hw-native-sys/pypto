@@ -83,8 +83,10 @@ class FunctionContext:
         # Current function name (set during parse_function)
         self.func_name: str = ""
 
-        # Generated Graph aliases to their prior emitted name or folded shape.
-        self.jit_graph_rebinds: dict[str, str | int] = {}
+        # Generated aliases to their predecessor. None marks handwritten
+        # DSL; a JIT function with only dispatch captures has an empty map.
+        self.jit_graph_rebinds: dict[str, str | int] | None = None
+        self.shadowed_capture_tensors: dict[int, ir.Var] = {}
 
         # Current function level (set during parse_function). Drives
         # context-scoped op constraints (e.g. pld.system.world_size is host-only).
