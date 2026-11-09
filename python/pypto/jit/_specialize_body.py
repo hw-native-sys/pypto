@@ -867,6 +867,20 @@ class BodyTransformer(ast.NodeTransformer):
         node.orelse = self._visit_scoped_body(node.orelse)
         return node
 
+    def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        """Transform a constexpr-dead branch without publishing its bindings."""
+        state = (
+            self._meta.copy(),
+            self._shape_inlined.copy(),
+            self._assign_count.copy(),
+            self._assign_depth.copy(),
+            self._var_renames.copy(),
+        )
+        try:
+            return self._visit_scoped_body(statements)
+        finally:
+            self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
+
     def visit_If(self, node: ast.If) -> ast.stmt:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
@@ -884,6 +898,20 @@ class BodyTransformer(ast.NodeTransformer):
         """
         node.test = self.visit(node.test)
         self._scope_depth += 1
+        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+            # Keep both bodies for the parser's yield handling. Only the
+            # selected body can update the surrounding specialization state.
+            if node.test.value:
+                if node.orelse:
+                    node.orelse = self._visit_inactive_branch(node.orelse)
+                node.body = self._visit_scoped_body(node.body)
+            else:
+                node.body = self._visit_inactive_branch(node.body)
+                if node.orelse:
+                    node.orelse = self._visit_scoped_body(node.orelse)
+            self._scope_depth -= 1
+            return node
+
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)
         if node.orelse:
