@@ -3184,5 +3184,95 @@ def test_async_transfer_rejects_engine_coercion(op_name, surface, engine):
             )
 
 
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_async_transfer_declares_dst_src_effects(op_name):
+    """The registration declares dst ReadWrite and src Read."""
+    full = f"pld.tensor.{op_name}"
+    assert ir.op_has_declared_arg_effect(full, 0)
+    assert ir.op_has_declared_arg_effect(full, 2)
+    assert ir.get_op_arg_effect(full, 0) == ir.ArgEffect.ReadWrite
+    assert ir.get_op_arg_effect(full, 2) == ir.ArgEffect.Read
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_async_transfer_engine_rejection_names_sdma_rdma(op_name):
+    """The engine error names the unavailable engines, not just the value."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(ValueError, match="SDMA/RDMA"):
+        ir.create_op_call(f"pld.tensor.{op_name}", [dst, peer, src], {"engine": 0}, span)
+
+
+def test_get_async_requires_region_args_together():
+    """GET mirrors PUT: the three region arguments are all-or-nothing."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        dist_tensor_ops.get_async(dst, peer, src, dst_offsets=[0, 0], span=span)
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+@pytest.mark.parametrize(
+    "dst_shape, src_shape, dst_dtype, src_dtype, region, match",
+    [
+        ([16, 64], [16, 64], DataType.FP16, DataType.FP32, None, "same element type"),
+        ([16, 64], [16, 64, 1], DataType.FP16, DataType.FP16, None, "rank"),
+        ([16, 64], [8, 64], DataType.FP16, DataType.FP16, None, "same static shape"),
+        ([16, 64], [16, 64], DataType.FP16, DataType.FP16, ([-1, 0], [0, 0], [1, 64]), "non-negative"),
+        ([16, 64], [16, 64], DataType.FP16, DataType.FP16, ([15, 0], [0, 0], [2, 64]), "exceeds dst shape"),
+        ([16, 64], [16, 64], DataType.FP16, DataType.FP16, ([0, 0], [0, 0], [0, 64]), "must be positive"),
+    ],
+)
+def test_async_transfer_rejects_invalid_shape_or_region(
+    op_name, dst_shape, src_shape, dst_dtype, src_dtype, region, match
+):
+    """Dtype/rank/full-slice shape and static-region bounds share the transfer validators."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", dst_shape, dst_dtype, span)
+    src = _make_distributed_tensor_var("src", src_shape, src_dtype, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    args: list[ir.Expr] = [dst, peer, src]
+    if region is not None:
+        dst_offsets, src_offsets, transfer_shape = region
+        args.extend(
+            [
+                _make_shape_tuple(dst_offsets, span),
+                _make_shape_tuple(src_offsets, span),
+                _make_shape_tuple(transfer_shape, span),
+            ]
+        )
+
+    with pytest.raises(ValueError, match=match):
+        ir.create_op_call(
+            f"pld.tensor.{op_name}",
+            args,
+            {"engine": int(ir.CommEngine.URMA)},
+            span,
+        )
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_async_transfer_rejects_unknown_atomic_kwarg(op_name):
+    """Atomic accumulation is not part of this interface; an unknown kwarg is rejected."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(ValueError, match="Unknown kwarg 'atomic'"):
+        ir.create_op_call(
+            f"pld.tensor.{op_name}",
+            [dst, peer, src],
+            {"engine": int(ir.CommEngine.URMA), "atomic": 1},
+            span,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
