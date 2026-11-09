@@ -217,6 +217,8 @@ class SpecializeContext:
     eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
     eager_return_annotation: Any = None
+    # An incoming Submit needs explicit result arity before its body is lowered.
+    requires_return_contract: bool = False
 
     @property
     def source_def_name(self) -> str:
@@ -2446,7 +2448,7 @@ class Specializer:
             ctx.py_globals,
             ctx.constexpr_values,
             eager_annotation=ctx.eager_return_annotation,
-            emit_expression_contract=ctx.func_type == "graph",
+            emit_expression_contract=ctx.requires_return_contract,
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
@@ -2817,6 +2819,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     dep_func_names: dict[str, str] | None = None,
     constexpr_values: dict[str, str] | None = None,
     dep_call_variants: dict[tuple[str, int], str] | None = None,
+    requires_return_contract: bool = False,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -2898,6 +2901,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         eager_tile_annotations=eager_data,
         annotation_dynvars=dict(eager_data.dynvars),
         eager_return_annotation=signature.return_annotation,
+        requires_return_contract=requires_return_contract,
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

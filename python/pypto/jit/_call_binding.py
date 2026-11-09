@@ -344,6 +344,8 @@ class VariantPlan:
     binding: dict[VariantKey, dict[str, str]]
     origin: dict[VariantKey, tuple[VariantKey, str, ast.Call]]
     call_targets: dict[VariantKey, dict[tuple[str, int], VariantKey]]
+    # Submit parses result arity from the emitted declaration.
+    submitted: set[VariantKey]
 
     def naming_order(self, entry_key: VariantKey) -> "list[tuple[VariantKey, JITFunction]]":
         """The order generated names are handed out in, entry first.
@@ -408,6 +410,7 @@ def expand_constexpr_variants(
         binding={entry_key: dict(entry_constexpr)},
         origin={},
         call_targets={entry_key: {}},
+        submitted=set(),
     )
     variants_by_func: dict[int, list[VariantKey]] = {id(entry._func): [entry_key]}
 
@@ -448,6 +451,9 @@ def expand_constexpr_variants(
                         plan.origin[dep_key] = (caller_key, call_name, call)
                         variants_by_func.setdefault(id(dep._func), []).append(dep_key)
                     plan.call_targets[caller_key][(call_name, ordinal)] = dep_key
+                    # Dependency views only admit a bare call or a Submit.
+                    if isinstance(call.func, ast.Attribute):
+                        plan.submitted.add(dep_key)
         if id(dep._func) not in variants_by_func:
             # Reached by dep discovery but with no ``name(...)`` call node to
             # fold against. It still has to be emitted -- dropping it would

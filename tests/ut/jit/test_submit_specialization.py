@@ -371,6 +371,29 @@ def test_submitted_expression_return_resolves_constexpr_annotation():
     assert len(_submissions(entry.specialize(torch.empty(16, 32), torch.empty(16, 32)))) == 1
 
 
+def test_submitted_incore_wrapper_keeps_declared_return_arity():
+    @pl.jit.inline
+    def identity(value: pl.Tensor):
+        return value
+
+    @pl.jit.incore
+    def kernel(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[16, 32], pl.FP32]:
+        out = pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+        return identity(out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        first = kernel(x, out)
+        result, done = pl.submit(kernel, x, first)
+        return result
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    assert len(_submissions(program)) == 1
+    kernel_ir = program.get_function("kernel")
+    assert kernel_ir is not None
+    assert ir.structural_equal(kernel_ir.return_types[0], ir.TensorType([16, 32], pl.FP32))
+
+
 def test_graph_call_expression_retains_single_output_metadata():
     @pl.jit.incore
     def kernel(x: pl.Tensor, out: pl.InOut[pl.Tensor]):

@@ -1800,6 +1800,7 @@ class JITFunction:
                     external_aiv_source=dep._external_aiv_source,
                     external_dual_aiv_dispatch=dep._external_dual_aiv_dispatch,
                     external_include_dirs=dep._external_include_dirs,
+                    requires_return_contract=key in plan.submitted,
                 )
             )
         contexts.reverse()
