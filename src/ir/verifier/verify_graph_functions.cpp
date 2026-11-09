@@ -462,6 +462,14 @@ class GraphBodyChecker : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     TrackTensorAlias(op);
+    // Even a fixed parameter must be forwarded directly. A surviving value
+    // copy has no argument slot, and legalization is responsible for erasing it.
+    auto source = AsVarLike(op->value_);
+    if (source && scalar_params_.count(source.get()) != 0 &&
+        !graph_replay::IsTaskIdScalar(source->GetType())) {
+      Report("copies a boundary scalar to a local with no argument slot. Forward the parameter directly.",
+             op->span_);
+    }
     auto call = As<Call>(op->value_);
     if (call && IsAllocation(call) && batched_.count(op.get()) == 0) count_ = SatAdd(count_, 1);
   }

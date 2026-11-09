@@ -25,6 +25,8 @@ def _program(case):
     calls = "            self.touch(out)\n"
     if guarded:
         calls = "            quotient = 128 // (width - 8)\n" + calls
+    if case == "guarded_view":
+        calls = "            slab = pl.tensor.slice(profile, [16, 16], [128 // (width - 8), 0])\n" + calls
     if case == "overflow":
         calls = "            for i in pl.range(600):\n                self.touch(out)\n"
     source = f"""
@@ -51,6 +53,7 @@ class P:
     argument = {
         "metadata": "pl.tensor.dim(profile, 0)",
         "guarded_division": "pl.tensor.dim(profile, 0)",
+        "guarded_view": "pl.tensor.dim(profile, 0)",
         "posthoist": "",
         "local_tensor": "pl.tensor.dim(local, 0)",
         "num_tokens": "runtime",
@@ -353,12 +356,13 @@ def test_explicit_dim_call_and_posthoist_scalar_are_independently_reproved():
         assert _diagnostics(legalized) == []
 
 
-def test_graph_hoisting_does_not_speculate_guarded_integer_division():
+@pytest.mark.parametrize("case", ["guarded_division", "guarded_view"])
+def test_graph_hoisting_does_not_speculate_guarded_integer_division(case):
     with (
         passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
         pytest.raises(ValueError, match="guarded integer division"),
     ):
-        passes.legalize_graph_boundary()(_lower(_program("guarded_division")))
+        passes.legalize_graph_boundary()(_lower(_program(case)))
 
 
 if __name__ == "__main__":

@@ -240,5 +240,43 @@ def test_terminal_graph_preserves_write_to_captured_tensor_through_alias():
     assert not graph.return_types
 
 
+@pytest.mark.parametrize("case", ["loop", "if"])
+def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
+    body = {
+        "loop": (
+            "            for _, (carry,) in pl.range(2, init_values=(dst,)):\n"
+            "                with pl.at(level=pl.Level.CORE_GROUP):\n"
+            "                    value = pl.load(src, [0], [16])\n"
+            "                    pl.store(value, [0], carry)\n"
+            "                carry_next = pl.yield_(other)\n"
+        ),
+        "if": (
+            "            if flag > 0:\n"
+            "                target = dst\n"
+            "            else:\n"
+            "                target = other\n"
+            "            with pl.at(level=pl.Level.CORE_GROUP):\n"
+            "                value = pl.load(src, [0], [16])\n"
+            "                pl.store(value, [0], target)\n"
+        ),
+    }[case]
+    program = pl.parse_program(
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Orchestration)\n"
+        "    def main(self, src: pl.Tensor[[16], pl.FP32], dst: pl.InOut[pl.Tensor[[16], pl.FP32]],\n"
+        "             other: pl.InOut[pl.Tensor[[16], pl.FP32]], flag: pl.Scalar[pl.INDEX]):\n"
+        '        with pl.graph("terminal"):\n' + body
+    )
+    graph = _graph(passes.outline_graph_scopes()(passes.convert_to_ssa()(program)))
+    directions = {
+        p.name_hint.split("__")[0]: d for p, d in zip(graph.params, graph.param_directions, strict=True)
+    }
+    assert directions["dst"] == ir.ParamDirection.InOut
+    assert directions["other"] == ir.ParamDirection.InOut
+    assert directions["src"] == ir.ParamDirection.In
+    assert not graph.return_types
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

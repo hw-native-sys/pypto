@@ -228,7 +228,16 @@ class DerivedScalarCollector : public IRVisitor {
     if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
       return MayTrapWhenSpeculated(unary->operand_);
     }
+    if (auto tuple = As<MakeTuple>(expr)) {
+      return std::any_of(tuple->elements_.begin(), tuple->elements_.end(), MayTrapWhenSpeculated);
+    }
     return false;
+  }
+
+  void CheckConditionalHoist(bool may_trap, const Span& span) const {
+    CHECK_SPAN(!in_conditional_ || !may_trap, span)
+        << "Graph hoist would evaluate a guarded integer division or remainder "
+           "before the Graph conditional. Keep the division and its guard together outside the Graph.";
   }
 
   bool in_conditional_ = false;
@@ -247,9 +256,7 @@ class DerivedScalarCollector : public IRVisitor {
 
     if (IsScalarType(var->GetType())) {
       if (!IsDerivable(op->value_)) return;
-      CHECK_SPAN(!in_conditional_ || !MayTrapWhenSpeculated(op->value_), op->span_)
-          << "Graph scalar hoist would evaluate a guarded integer division or remainder "
-             "before the Graph conditional. Keep the division and its guard together outside the Graph.";
+      if (in_conditional_) CheckConditionalHoist(MayTrapWhenSpeculated(op->value_), op->span_);
       // A bare parameter reference is already a pass-through; only a *computed*
       // value needs hoisting.
       if (auto aliased = AsVarLike(op->value_)) {
@@ -435,6 +442,10 @@ class DerivedScalarCollector : public IRVisitor {
       tensor_root_[var.get()] = root;
       in_place_views_.insert(var.get());
       return;
+    }
+    if (in_conditional_) {
+      CheckConditionalHoist(std::any_of(call->args_.begin(), call->args_.end(), MayTrapWhenSpeculated),
+                            call->span_);
     }
     slice_vars_.insert(var.get());
     tensor_root_[var.get()] = root;
