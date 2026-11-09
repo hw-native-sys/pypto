@@ -255,9 +255,7 @@ class DispatchSemantics:
             "or omit it from the inner Submit.",
         )
 
-    def record_scope_producer(
-        self, body: "list[ast.stmt]", tid_var: "ir.Var", *, recursive: bool = False
-    ) -> None:
+    def record_scope_producer(self, body: "list[ast.stmt]", tid_var: "ir.Var") -> None:
         """Record ``body``'s assigned Vars as produced by the scope's ``tid_var``.
 
         The scope-form counterpart of the tracking ``_parse_submit_tuple_lhs``
@@ -271,8 +269,7 @@ class DispatchSemantics:
         Same best-effort scope as the call form: only names bound by a
         top-level assignment in the scope body are tracked (aliases, writes
         through ``pl.Out`` arguments, and rebinds via an intervening call are
-        not). Graph completion also covers nested dispatches, so its caller
-        requests recursive tracking of assignments exported by those regions.
+        not).
         The generation counter mirrors the submit path so a ``tid`` name
         rebound by a later scope cannot match by Var identity alone.
         """
@@ -285,18 +282,21 @@ class DispatchSemantics:
                 for elt in target.elts:
                     collect(elt)
 
-        nodes = (node for stmt in body for node in ast.walk(stmt)) if recursive else iter(body)
-        for node in nodes:
+        for node in body:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     collect(target)
             elif isinstance(node, ast.AnnAssign):
                 collect(node.target)
+        bindings = (self.services.scope_manager.lookup_var(name) for name in names)
+        self.record_produced_vars([var for var in bindings if isinstance(var, ir.Var)], tid_var)
+
+    def record_produced_vars(self, bindings: "list[ir.Var]", tid_var: "ir.Var") -> None:
+        """Record completion against the actual Vars exported by a scope."""
         gen = self.tid_binding_generation.get(tid_var.unique_id, 0) + 1
         self.tid_binding_generation[tid_var.unique_id] = gen
-        for name in names:
-            produced = self.services.scope_manager.lookup_var(name)
-            if isinstance(produced, ir.Var):
+        for produced in bindings:
+            if isinstance(produced.type, (ir.TensorType, ir.DistributedTensorType)):
                 self.submit_producer_tid[produced.unique_id] = (tid_var, gen)
 
     def is_python_resolvable_ast(

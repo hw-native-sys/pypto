@@ -977,5 +977,55 @@ def test_graph_completion_covers_nested_predicate_producer(producer, dependency,
         assert outlined is not None
 
 
+@pytest.mark.parametrize("dependency", ["seed", "done"])
+def test_graph_local_task_id_does_not_replace_an_outer_tensor_producer(dependency):
+    source = (
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}], rc2: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                rc = self.gate(rc)
+            with pl.graph("unrelated") as done:
+                with pl.at(level=pl.Level.CORE_GROUP) as rc:
+                    rc2 = self.gate(rc2)
+                inner = pl.system.task_dummy(deps=[rc])
+                rc = inner
+            with pl.spmd(1, deps=[{dependency}], predicate=(rc[0, 0] > 0)):
+                out = self.expert(x, out)
+        return out
+"""
+    )
+    if dependency == "done":
+        with pytest.raises(ParserSyntaxError, match="'seed' is not in deps="):
+            pl.parse_program(source)
+    else:
+        assert pl.parse_program(source) is not None
+
+
+def test_plain_graph_local_task_id_assignment_does_not_export_a_task_id():
+    source = (
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, rc: pl.Out[{_INT32_T}]) -> {_INT32_T}:
+        with pl.manual_scope():
+            ready = pl.system.task_dummy(deps=[])
+            with pl.graph("recording") as done:
+                rc = self.gate(rc)
+                inner = pl.system.task_dummy(deps=[])
+                ready = inner
+            pl.system.task_dummy(deps=[ready, done])
+        return rc
+"""
+    )
+    program = passes.outline_graph_scopes()(passes.convert_to_ssa()(pl.parse_program(source)))
+    graph = next(f for f in program.functions.values() if f.func_type == ir.FunctionType.Graph)
+    assert all(isinstance(t, ir.TensorType) for t in graph.return_types)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

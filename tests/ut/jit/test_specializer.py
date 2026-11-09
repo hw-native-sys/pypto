@@ -400,6 +400,18 @@ class TestBodyTransformer:
         ast.fix_missing_locations(new_func)
         return ast.unparse(new_func)
 
+    def test_graph_local_capture_preserves_outer_folded_shape(self):
+        source = """
+            def f(c):
+                width = c.shape[1]
+                with pl.graph("recording") as done:
+                    with pl.at(level=pl.Level.CORE_GROUP) as width:
+                        work()
+                return pl.create_tensor([128, width], dtype=pl.FP32)
+        """
+        rendered = self._transform(source, {"c": TensorMeta(shape=(128, 64), dtype=DataType.FP32)})
+        assert "pl.create_tensor([128, 64]" in rendered
+
     def test_bind_dynamic_removed(self):
         src = """
             def f(a):

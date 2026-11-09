@@ -16,10 +16,41 @@ and rebinding rules stay aligned with emitted source.
 
 import ast
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from . import _specialize_values as values
 from ._specialize_types import DynDim, TensorMeta
+
+_BindingValue = TypeVar("_BindingValue")
+
+
+def _restore_bindings(
+    current: dict[str, _BindingValue], before: dict[str, _BindingValue], names: set[str]
+) -> None:
+    for name in names:
+        if name in before:
+            current[name] = before[name]
+        else:
+            current.pop(name, None)
+
+
+def _is_graph_context(value: ast.expr) -> bool:
+    return (
+        isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "graph"
+    )
+
+
+def _graph_local_capture_names(node: ast.With) -> set[str]:
+    if not any(_is_graph_context(item.context_expr) for item in node.items):
+        return set()
+    return {
+        item.optional_vars.id
+        for stmt in node.body
+        for inner in ast.walk(stmt)
+        if isinstance(inner, ast.With)
+        for item in inner.items
+        if isinstance(item.optional_vars, ast.Name)
+    }
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -848,6 +879,7 @@ class BodyTransformer(ast.NodeTransformer):
 
     def visit_With(self, node: ast.With) -> ast.stmt:
         """Visit With block, incrementing scope depth for its body."""
+        graph_locals = _graph_local_capture_names(node)
         captures: dict[str, str] = {}
         for item in node.items:
             item.context_expr = self.visit(item.context_expr)
@@ -856,9 +888,10 @@ class BodyTransformer(ast.NodeTransformer):
                 captured = self._var_renames.get(original.id, original.id)
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
-                self._var_renames[original.id] = captured
-                self._shape_inlined.pop(original.id, None)
-                self._record_tensor_meta(captured, None)
+                if not _is_graph_context(item.context_expr):
+                    self._var_renames[original.id] = captured
+                    self._shape_inlined.pop(original.id, None)
+                    self._record_tensor_meta(captured, None)
             elif item.optional_vars is not None:
                 item.optional_vars = self.visit(item.optional_vars)
         simt = any(
@@ -872,7 +905,7 @@ class BodyTransformer(ast.NodeTransformer):
         # Generated-name reservations and diagnostic aliases remain global to
         # this function so distinct regions never reuse a generated name.
         state = None
-        if simt:
+        if simt or graph_locals:
             state = (
                 self._meta.copy(),
                 self._shape_inlined.copy(),
@@ -881,6 +914,7 @@ class BodyTransformer(ast.NodeTransformer):
                 self._var_renames.copy(),
                 self._simt_runtime_names,
             )
+        if simt:
             self._simt_runtime_names = set()
             pending: list[tuple[ast.AST, bool]] = [(stmt, False) for stmt in node.body]
             while pending:
@@ -914,7 +948,7 @@ class BodyTransformer(ast.NodeTransformer):
             self._scope_depth -= 1
             if simt:
                 self._simt_depth -= 1
-            if state is not None:
+            if state is not None and simt:
                 (
                     self._meta,
                     self._shape_inlined,
@@ -923,6 +957,18 @@ class BodyTransformer(ast.NodeTransformer):
                     self._var_renames,
                     self._simt_runtime_names,
                 ) = state
+            elif state is not None:
+                old_meta, old_shapes, old_counts, old_depths, old_renames, _ = state
+                meta_names = (
+                    graph_locals
+                    | {old_renames.get(name, name) for name in graph_locals}
+                    | {self._var_renames.get(name, name) for name in graph_locals}
+                )
+                _restore_bindings(self._meta, old_meta, meta_names)
+                _restore_bindings(self._shape_inlined, old_shapes, graph_locals)
+                _restore_bindings(self._assign_count, old_counts, graph_locals)
+                _restore_bindings(self._assign_depth, old_depths, graph_locals)
+                _restore_bindings(self._var_renames, old_renames, graph_locals)
         # A capture binds the dispatch result, not a body-local reassignment
         # of the same spelling. Do not create another alpha version here:
         # the parser reuses the source Var and native SSA builds carries/phis.

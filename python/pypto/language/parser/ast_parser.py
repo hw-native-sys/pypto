@@ -58,6 +58,7 @@ from .span_tracker import SpanTracker
 from .subscript_parser import SubscriptParser
 from .syntax_helpers import (
     is_cache_policy_marker,
+    is_dep_var_type,
     is_docstring_stmt,
     is_dsl_call,
     is_empty_body,
@@ -964,6 +965,13 @@ class ASTParser:
     ) -> ir.Var:
         """Assign to existing Var if possible, otherwise create a new let binding."""
         existing_var = self.scope_manager.lookup_var(var_name)
+
+        if self.regions.is_inside_scope(ir.ScopeKind.Graph) and is_dep_var_type(value_expr.type):
+            graph_scope = self.scope_manager.scope_types.index("graph")
+            # A recorded task ID may shadow an outer name, but must never
+            # assign through the outer Var and accidentally become a live-out.
+            if not any(var_name in scope for scope in self.scope_manager.scopes[graph_scope:]):
+                existing_var = None
 
         # ``n = pl.tensor.dim(x, 0)`` folded to a dyn-dim symbol (see
         # ``_fold_tensor_dim``): bind the Python name straight to the symbol. A Let

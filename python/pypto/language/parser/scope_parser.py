@@ -1917,8 +1917,8 @@ class ScopeParser:
         sync_start: bool | None = None,
         manual: bool | None = None,
         attrs: "list[tuple[str, Any]] | None" = None,
-    ) -> None:
-        """Build a scope statement from a with-statement body."""
+    ) -> list[ir.Var]:
+        """Build a scope statement and return the IR Vars exported by its body."""
         attrs = self.merge_forward_sticky_dump(attrs, scope_kind)
         # Hoist the body's ``pl.set_cache_policy`` markers onto this scope before
         # it begins — ``begin_scope`` fixes the attrs, so there is no later point
@@ -1942,7 +1942,9 @@ class ScopeParser:
                 self.regions.scope_kind_context(scope_kind),
                 self.regions.incore_user_split_context(scope_kind, split),
             ):
-                self.services.scope_manager.enter_scope("scope")
+                self.services.scope_manager.enter_scope(
+                    "graph" if scope_kind == ir.ScopeKind.Graph else "scope"
+                )
                 self.callbacks.body(stmt.body)
                 self.comments.discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                 # A recorded Definition owns its TaskIds and TaskId arrays.
@@ -1957,7 +1959,14 @@ class ScopeParser:
                     if scope_kind == ir.ScopeKind.Graph
                     else None
                 )
-                self.services.scope_manager.exit_scope(leak_vars=True, exclude_names=local_task_ids)
+                bindings = self.services.scope_manager.exit_scope(
+                    leak_vars=True, exclude_names=local_task_ids
+                )
+                return [
+                    value
+                    for name, value in bindings.items()
+                    if isinstance(value, ir.Var) and (local_task_ids is None or name not in local_task_ids)
+                ]
 
     def parse_graph_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
@@ -2068,7 +2077,7 @@ class ScopeParser:
             construct="pl.graph",
         )
         tid_var = self.emit_scope_task_id_placeholder(scope_attrs, span)
-        self.parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name, attrs=scope_attrs)
+        exported = self.parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name, attrs=scope_attrs)
         if tid_var is not None and capture_name is not None:
             if isinstance(previous_capture, ir.Var) and not self.services.scope_manager.strict_ssa:
                 # Keep the placeholder separate from incoming dependencies. Only
@@ -2079,7 +2088,7 @@ class ScopeParser:
             # Bind only after parsing the recording. A same-name assignment
             # inside the body must not write through the completion placeholder.
             self.services.scope_manager.define_var(capture_name, tid_var, span=span)
-            self.dispatch.record_scope_producer(stmt.body, tid_var, recursive=True)
+            self.dispatch.record_produced_vars(exported, tid_var)
 
     def parse_at_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
