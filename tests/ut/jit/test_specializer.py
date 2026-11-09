@@ -435,6 +435,26 @@ class TestBodyTransformer:
         assert isinstance(result, ir.TensorType)
         assert isinstance(result.shape[1], ir.ConstInt) and result.shape[1].value == 64
 
+    def test_graph_rebind_prefers_task_id_alias_over_old_folded_shape(self):
+        source = textwrap.dedent("""
+            def f(c: pl.Tensor):
+                with pl.manual_scope():
+                    seed = pl.system.task_dummy(deps=[])
+                    for i in pl.range(1):
+                        ready = c.shape[1]
+                        ready = seed
+                    with pl.graph("recording") as done:
+                        ready = pl.system.task_dummy(deps=[])
+                        pl.system.task_dummy(deps=[ready])
+                    pl.system.task_dummy(deps=[ready, done])
+        """)
+        ctx = _make_ctx(
+            "f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 64), DataType.FP32)}
+        )
+        rendered = specialize("Before", [ctx])
+        assert "ready_v2 = pl.system.task_dummy(deps=[])" in rendered
+        assert pl.parse_program(rendered).get_function("f") is not None
+
     def test_graph_plain_task_id_does_not_replace_outer_alias(self):
         source = """
             def f():

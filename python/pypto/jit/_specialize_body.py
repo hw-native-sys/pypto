@@ -170,9 +170,12 @@ class BodyTransformer(ast.NodeTransformer):
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
         if self._in_graph:
-            folded = self._shape_inlined.get(var_name)
-            previous = self._var_renames.get(var_name, var_name)
-            self.graph_rebinds[new_name] = previous if folded is None else folded
+            # Match visit_Name: an active alias takes precedence over a
+            # folded shape left by an earlier assignment to the same name.
+            previous = self._var_renames.get(var_name)
+            self.graph_rebinds[new_name] = (
+                previous if previous is not None else self._shape_inlined.get(var_name, var_name)
+            )
         self._var_renames[var_name] = new_name
         self._alias_to_original[new_name] = var_name
         self._used_names.add(new_name)
@@ -208,9 +211,8 @@ class BodyTransformer(ast.NodeTransformer):
 
     def _needs_alpha_rename(self, name: str) -> bool:
         # A folded name has no IR binding for the Graph body to assign to.
-        return self._scope_depth == self._assign_depth[name] or (
-            self._in_graph and name in self._shape_inlined
-        )
+        folded = name not in self._var_renames and name in self._shape_inlined
+        return self._scope_depth == self._assign_depth[name] or (self._in_graph and folded)
 
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
