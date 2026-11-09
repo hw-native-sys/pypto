@@ -141,7 +141,8 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
   if (out_layout == TileLayout::row_major) {
     const int64_t elem_bytes = static_cast<int64_t>(tile_type->dtype_.GetByte());
     CHECK_SPAN(elem_bytes > 0, args[0]->span_)
-        << "The operator " << op_name << " requires a whole-byte element dtype for out_layout=row_major, "
+        << "The operator " << op_name
+        << " requires a whole-byte element dtype for out_layout=row_major, "
            "but got "
         << tile_type->dtype_.ToString();
     const int64_t pad_cols = (kVecRowAlignBytes + elem_bytes - 1) / elem_bytes;
