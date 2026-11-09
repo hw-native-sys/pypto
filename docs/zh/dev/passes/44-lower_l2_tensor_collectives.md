@@ -147,7 +147,7 @@ B = L - (L % NR) * (L >= NR)
 
 `NR` 由 deducer 保证为正，因此除数始终有定义；不发射运行期 context 读取，也不需要向下取整保护。
 得到的 `B` 原样附加到启动规格上。
-[`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md) 无法证明运行期 `B` 为正，因此会把 dispatch
+[`LegalizeSpmdLaunches`](45-legalize_spmd_launches.md) 无法证明运行期 `B` 为正，因此会把 dispatch
 包进 `if (B > 0)` 并保留空分支；若把宽度钳位成 `max(B, 1)`，畸形调用反而会启动一个 block。
 
 动态参数的有效性 —— `L > 0`、`P == NR`、`S >= B` 以及不超过 AIV 数 —— 由调用方负责，本 pass
