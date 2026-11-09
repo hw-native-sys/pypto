@@ -4137,6 +4137,36 @@ def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive
     assert isinstance(value.type.shape[0], ir.ConstInt) and value.type.shape[0].value == 64
 
 
+def test_jit_inactive_graph_capture_preserves_later_shape_fold():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor], enabled: pl.constexpr):
+            rows = a.shape[0]
+            with pl.graph("recording"):
+                if enabled:
+                    with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                rows = b.shape[0]
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(b, [0, 0], [64, 128]), [0, 0], b)
+            for i in pl.range(rows):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(b, [i, 0], [1, 128]), [i, 0], b)
+            return b
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    ctx.constexpr_values = {"enabled": "False"}
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    loop = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.ForStmt))
+    assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == 64
+
+
 def test_jit_graph_capture_does_not_reuse_sibling_branch_shape():
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor], flag: pl.Scalar[pl.BOOL]):

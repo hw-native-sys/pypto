@@ -40,17 +40,6 @@ def _scope_call_name(value: ast.expr) -> str | None:
     return None
 
 
-def _graph_local_capture_names(node: ast.With) -> set[str]:
-    return {
-        item.optional_vars.id
-        for stmt in node.body
-        for inner in ast.walk(stmt)
-        if isinstance(inner, ast.With)
-        for item in inner.items
-        if isinstance(item.optional_vars, ast.Name)
-    }
-
-
 class BodyTransformer(ast.NodeTransformer):
     """Rewrites a JIT function body for use inside @pl.program.
 
@@ -130,7 +119,7 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
-        self._in_graph = False
+        self._graph_captures: set[str] | None = None
         self.graph_rebinds: dict[str, str | int] = {}
         self.has_scope_capture = False
         self._simt_depth: int = 0
@@ -170,7 +159,7 @@ class BodyTransformer(ast.NodeTransformer):
             count += 1
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
-        if self._in_graph:
+        if self._graph_captures is not None:
             folded = self._active_shape_fold(var_name)
             previous = self._var_renames.get(var_name, var_name)
             self.graph_rebinds[new_name] = previous if folded is None else folded
@@ -217,7 +206,7 @@ class BodyTransformer(ast.NodeTransformer):
     def _needs_alpha_rename(self, name: str) -> bool:
         # A folded name has no IR binding for the Graph body to assign to.
         return self._scope_depth == self._assign_depth[name] or (
-            self._in_graph and self._active_shape_fold(name) is not None
+            self._graph_captures is not None and self._active_shape_fold(name) is not None
         )
 
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
@@ -876,10 +865,14 @@ class BodyTransformer(ast.NodeTransformer):
             self._assign_depth.copy(),
             self._var_renames.copy(),
         )
+        graph_captures = self._graph_captures
+        if graph_captures is not None:
+            self._graph_captures = graph_captures.copy()
         try:
             return self._visit_scoped_body(statements)
         finally:
             self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
+            self._graph_captures = graph_captures
 
     def visit_If(self, node: ast.If) -> ast.stmt:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
@@ -932,18 +925,20 @@ class BodyTransformer(ast.NodeTransformer):
             if isinstance(item.optional_vars, ast.Name):
                 self.has_scope_capture = True
                 original = item.optional_vars
+                if self._graph_captures is not None:
+                    self._graph_captures.add(original.id)
                 # Use a fresh capture alias when the caller only has a
                 # folded literal, so the parser can restore that predecessor.
                 folded = self._active_shape_fold(original.id)
                 captured = (
                     self._rebind(original.id)
-                    if self._in_graph and folded is not None
+                    if self._graph_captures is not None and folded is not None
                     else self._var_renames.get(original.id, original.id)
                 )
                 # An outer dispatch may be followed by a write to this scalar.
                 # Materialize the folded predecessor so the parser can restore
                 # it when the temporary TaskId binding is overwritten.
-                if not self._in_graph and folded is not None:
+                if self._graph_captures is None and folded is not None:
                     assignment = ast.Assign(
                         targets=[ast.Name(id=captured, ctx=ast.Store())], value=ast.Constant(value=folded)
                     )
@@ -962,7 +957,6 @@ class BodyTransformer(ast.NodeTransformer):
         """Visit With block, incrementing scope depth for its body."""
         scope_names = {_scope_call_name(item.context_expr) for item in node.items}
         graph = "graph" in scope_names
-        graph_locals: set[str] = _graph_local_capture_names(node) if graph else set()
         captures, capture_prefix = self._visit_with_captures(node)
         simt = "simt_scope" in scope_names
         # SIMT assignments are per-thread. Folding a local shape or renaming a
@@ -970,7 +964,7 @@ class BodyTransformer(ast.NodeTransformer):
         # Generated-name reservations and diagnostic aliases remain global to
         # this function so distinct regions never reuse a generated name.
         state = None
-        if simt or graph_locals:
+        if simt or graph:
             state = (
                 self._meta.copy(),
                 self._shape_inlined.copy(),
@@ -1006,14 +1000,16 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
-        previous_graph = self._in_graph
-        self._in_graph = previous_graph or graph
+        previous_graph = self._graph_captures
+        if graph:
+            self._graph_captures = set()
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
-            self._in_graph = previous_graph
+            graph_locals = self._graph_captures if graph else None
+            self._graph_captures = previous_graph
             if simt:
                 self._simt_depth -= 1
             if state is not None and simt:
@@ -1025,7 +1021,7 @@ class BodyTransformer(ast.NodeTransformer):
                     self._var_renames,
                     self._simt_runtime_names,
                 ) = state
-            elif state is not None:
+            elif state is not None and graph_locals:
                 old_meta, old_shapes, old_counts, old_depths, old_renames, _ = state
                 # A later alpha-renamed binding may be a Tensor live-out. Keep
                 # its name and let the parser restore only actual local TaskIds.
