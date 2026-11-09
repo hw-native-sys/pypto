@@ -405,6 +405,11 @@ class BindCallsToVars : public IRMutator {
   // binding established by the original definition, so leave Vars untouched.
   ExprPtr VisitExpr_(const VarPtr& op) override { return op; }
 
+  // IterArg has its own visitor; without this override the inherited one
+  // rewrites a loop-carried Var's shape metadata into a fresh, undefined
+  // IterArg while the loop header still defines the original.
+  ExprPtr VisitExpr_(const IterArgPtr& op) override { return op; }
+
  private:
   std::function<ExprPtr(const ExprPtr&)> bind_;
 };
