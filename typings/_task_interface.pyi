@@ -55,6 +55,8 @@ class DataType(enum.Enum):
 
     FP4E2M1 = 14
 
+    FP8E5M2 = 15
+
 def get_element_size(dtype: DataType) -> int:
     """Return the byte size of a single element of the given DataType."""
 

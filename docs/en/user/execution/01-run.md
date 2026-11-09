@@ -130,6 +130,13 @@ can quantize on the host with torch and pass the result straight in. Outputs com
 the dtype your kernel declared, bit for bit — including both signed zeros, which a
 `torch.isclose` comparison cannot tell apart.
 
+**Each of these needs a torch build that defines it**, and all four arrived after the
+`torch>=2.0.0` floor this project declares: `float8_e4m3fn` and `float8_e5m2` need torch
+2.1 or newer, `float8_e8m0fnu` needs 2.7 or newer, and `float4_e2m1fn_x2` needs a recent
+build. Check with `hasattr(torch, "float8_e5m2")` before relying on one; a dtype your
+torch cannot name is simply absent from the wire mapping, and passing it fails with an
+unsupported-dtype error rather than silently mistyping your data.
+
 `pl.FP4E1M2X2` has no torch dtype at all and is therefore exchanged as a `torch.uint8`
 carrier of the same byte width. The shape you declare already counts carrier bytes, so a
 `uint8` host buffer holds exactly the same bytes; reinterpret in your own code if you need

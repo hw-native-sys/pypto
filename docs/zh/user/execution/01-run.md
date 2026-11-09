@@ -112,6 +112,12 @@ Host 侧 `torch.Tensor` 实参在 wire 上由其 dtype 命名，因此运行时�
 `float4_e2m1fn_x2` 均已支持，所以可以在 host 侧用 torch 量化后直接传入。输出按 kernel 声明的
 dtype 原样返回，逐比特一致 —— 两种有符号零也各自保留，而 `torch.isclose` 是分辨不出它们的。
 
+**这些 dtype 都要求 torch 构建本身定义了它**，而四者都晚于本项目声明的 `torch>=2.0.0` 下限：
+`float8_e4m3fn` 与 `float8_e5m2` 需要 torch 2.1 及以上，`float8_e8m0fnu` 需要 2.7 及以上，
+`float4_e2m1fn_x2` 需要较新的构建。使用前请先用 `hasattr(torch, "float8_e5m2")` 检查；你的
+torch 无法命名的 dtype 不会出现在 wire 映射中，传入时会报 unsupported-dtype 错误，而不会静默地
+把数据错当成别的类型。
+
 `pl.FP4E1M2X2` 在 torch 中没有对应 dtype，因此以同等字节宽度的 `torch.uint8` 载体交换。你声明的
 shape 本就以载体字节计数，所以 `uint8` host 缓冲区持有的就是同一批字节；需要数值视图时在自己的
 代码里重解释即可。
