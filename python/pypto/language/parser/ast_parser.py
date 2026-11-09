@@ -974,6 +974,17 @@ class ASTParser:
             if not any(var_name in scope for scope in self.scope_manager.scopes[graph_scope:]):
                 existing_var = None
 
+        value_type = override_type or value_expr.type
+        if (
+            isinstance(existing_var, ir.Var)
+            and not isinstance(value_type, ir.UnknownType)
+            and not is_dep_var_type(value_type)
+        ):
+            # A JIT dispatch can temporarily bind the emitted name to a
+            # TaskId. Resume writes to the prior Var so its type checks and
+            # SSA carries still apply.
+            existing_var = self.function.shadowed_capture_vars.get(existing_var.unique_id, existing_var)
+
         # ``n = pl.tensor.dim(x, 0)`` folded to a dyn-dim symbol (see
         # ``_fold_tensor_dim``): bind the Python name straight to the symbol. A Let
         # would copy it, and every shape later built from ``n`` would then carry the
@@ -998,17 +1009,6 @@ class ASTParser:
         # alias into the symbol itself.
         if self.ops.is_param_dim_symbol(existing_var):
             existing_var = None
-
-        value_type = override_type or value_expr.type
-        if (
-            isinstance(existing_var, ir.Var)
-            and not isinstance(value_type, ir.UnknownType)
-            and not is_dep_var_type(value_type)
-        ):
-            # A JIT dispatch can temporarily bind the emitted name to a
-            # TaskId. Resume writes to the prior Var so its type checks and
-            # SSA carries still apply.
-            existing_var = self.function.shadowed_capture_vars.get(existing_var.unique_id, existing_var)
 
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
             # Reject changes to the storage contract (#642). Pre-SSA tensor

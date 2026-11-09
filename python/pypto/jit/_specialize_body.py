@@ -171,7 +171,7 @@ class BodyTransformer(ast.NodeTransformer):
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
         if self._in_graph:
-            folded = self._folded_graph_shape(var_name)
+            folded = self._active_shape_fold(var_name)
             previous = self._var_renames.get(var_name, var_name)
             self.graph_rebinds[new_name] = previous if folded is None else folded
         self._var_renames[var_name] = new_name
@@ -207,15 +207,18 @@ class BodyTransformer(ast.NodeTransformer):
         elif self._var_renames.get(name) == name:
             self._var_renames.pop(name)
 
-    def _folded_graph_shape(self, name: str) -> int | None:
-        # As in visit_Name, an active alias wins over a historical fold.
-        if self._in_graph and name not in self._var_renames:
+    def _active_shape_fold(self, name: str) -> int | None:
+        # A fold from a forgotten sibling binding can still be needed after
+        # a constexpr branch, but cannot serve as this scope's predecessor.
+        if name in self._assign_count and name not in self._var_renames:
             return self._shape_inlined.get(name)
         return None
 
     def _needs_alpha_rename(self, name: str) -> bool:
         # A folded name has no IR binding for the Graph body to assign to.
-        return self._scope_depth == self._assign_depth[name] or self._folded_graph_shape(name) is not None
+        return self._scope_depth == self._assign_depth[name] or (
+            self._in_graph and self._active_shape_fold(name) is not None
+        )
 
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
@@ -790,7 +793,6 @@ class BodyTransformer(ast.NodeTransformer):
         self._assign_depth.pop(name, None)
         self._var_renames.pop(name, None)
         self._meta.pop(name, None)
-        self._shape_inlined.pop(name, None)
 
     def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
         """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
@@ -904,19 +906,16 @@ class BodyTransformer(ast.NodeTransformer):
                 original = item.optional_vars
                 # Use a fresh capture alias when the caller only has a
                 # folded literal, so the parser can restore that predecessor.
+                folded = self._active_shape_fold(original.id)
                 captured = (
                     self._rebind(original.id)
-                    if self._folded_graph_shape(original.id) is not None
+                    if self._in_graph and folded is not None
                     else self._var_renames.get(original.id, original.id)
                 )
                 # An outer dispatch may be followed by a write to this scalar.
                 # Materialize the folded predecessor so the parser can restore
                 # it when the temporary TaskId binding is overwritten.
-                if (
-                    not self._in_graph
-                    and original.id not in self._var_renames
-                    and (folded := self._shape_inlined.get(original.id)) is not None
-                ):
+                if not self._in_graph and folded is not None:
                     assignment = ast.Assign(
                         targets=[ast.Name(id=captured, ctx=ast.Store())], value=ast.Constant(value=folded)
                     )

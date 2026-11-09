@@ -4102,6 +4102,27 @@ def test_jit_dispatch_capture_then_scalar_assignment(capture_kind):
     assert value.same_as(original)
 
 
+def test_jit_constexpr_selected_branch_preserves_folded_shape():
+    source = textwrap.dedent("""
+        def f(a: pl.Tensor, enabled: pl.constexpr):
+            if enabled:
+                rows = a.shape[0]
+            else:
+                pass
+            return pl.create_tensor([rows, 128], dtype=pl.FP32)
+    """)
+    ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
+    ctx.constexpr_values = {"enabled": "True"}
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert isinstance(value.type, ir.TensorType)
+    assert isinstance(value.type.shape[0], ir.ConstInt) and value.type.shape[0].value == 64
+
+
 def test_jit_graph_capture_does_not_reuse_sibling_branch_shape():
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor], flag: pl.Scalar[pl.BOOL]):
@@ -4153,6 +4174,37 @@ def test_jit_dispatch_capture_then_folded_scalar_assignment(capture_kind):
     (value,) = returned.value
     assert isinstance(value.type, ir.ScalarType)
     assert value.type.dtype == DataType.INDEX
+
+
+def test_jit_dispatch_capture_then_rebinding_keeps_parameter_dim_immutable():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor]):
+            rows = 0
+            rows = pl.tensor.dim(a, 0)
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                    pl.store(pl.load(a, [0, 0], [1, 128]), [0, 0], a)
+                rows = 1
+            return rows
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a"],
+        tensor_meta={"a": TensorMeta((DynDim("M", "M", 128), 128), DataType.FP32)},
+    )
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (parameter,) = function.params
+    assert isinstance(parameter.type, ir.TensorType)
+    assert isinstance(value, ir.Var)
+    assert value.name_hint == "rows_v1"
+    assert not value.same_as(parameter.type.shape[0])
 
 
 def test_jit_explicit_recorded_local_dependency_remains_rejected():
