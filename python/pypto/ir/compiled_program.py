@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 import torch
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
+from pypto._environment import env_flag_disabled
 from pypto._target import (
     ExecutionMode,
     _parse_platform,
@@ -411,7 +412,7 @@ def _write_debug_runner(
     Disable globally by setting ``PYPTO_EMIT_DEBUG_RUNNER=0`` (also accepts
     ``false`` / ``no``).
     """
-    if os.environ.get("PYPTO_EMIT_DEBUG_RUNNER", "").strip().lower() in ("0", "false", "no"):
+    if env_flag_disabled(os.environ.get("PYPTO_EMIT_DEBUG_RUNNER")):
         return
 
     from pypto.runtime.debug.run_script_writer import write_run_script  # noqa: PLC0415

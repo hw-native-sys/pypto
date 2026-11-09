@@ -355,10 +355,6 @@ def test_required_ptoas_prevents_silent_compilation_skip(tmp_path, compiler, req
     assert diagnostic in output, output
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 @pytest.mark.parametrize(
     "returncode,stdout,stderr,expected",
     [
@@ -378,3 +374,86 @@ def test_run_ptoas_reports_process_failure(monkeypatch, returncode, stdout, stde
     with pytest.raises(RuntimeError) as exc:
         pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
     assert str(exc.value) == f"ptoas compilation failed: {expected}"
+
+
+def test_version_probe_omits_runtime_injection_but_assembly_keeps_it(tmp_path, monkeypatch):
+    ptoas = _make_executable(tmp_path / "ptoas")
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_AUDIT", "libobserver.so")
+    monkeypatch.setenv("LD_DEBUG", "libs")
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: str(ptoas))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "--version" in command:
+            assert all(name not in kwargs["env"] for name in ("LD_PRELOAD", "LD_AUDIT", "LD_DEBUG"))
+        else:
+            # env=None is subprocess' ordinary inheritance behavior.
+            environment = kwargs.get("env")
+            if environment is None:
+                environment = os.environ
+            assert environment["LD_PRELOAD"] == "liballocator.so:"
+            assert environment["LD_AUDIT"] == "libobserver.so"
+        return SimpleNamespace(returncode=0, stdout=f"ptoas {_PINNED}", stderr="")
+
+    monkeypatch.setattr(pto_backend.subprocess, "run", run)
+    check_ptoas_version(str(ptoas))
+    pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert len(calls) == 2  # One memoized version probe and one actual assembly.
+    assert os.environ["LD_DEBUG"] == "libs"
+
+
+@pytest.mark.parametrize("value,expected", [(None, 60), ("180", 180), ("1", 1)])
+def test_run_ptoas_uses_configured_timeout(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("PYPTO_PTOAS_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", value)
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: None)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pto_backend.subprocess, "run", run)
+    pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert calls == [expected]
+    # Read per invocation, including after the module was imported.
+    monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", "240")
+    pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert calls == [expected, 240]
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "nan", "inf", "invalid"])
+def test_run_ptoas_rejects_invalid_timeout(monkeypatch, value):
+    monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", value)
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: None)
+
+    def run(*args, **kwargs):
+        pytest.fail("Invalid timeout must be rejected before assembling")
+
+    monkeypatch.setattr(pto_backend.subprocess, "run", run)
+    with pytest.raises(ValueError, match="PYPTO_PTOAS_TIMEOUT_SECONDS must be a positive integer"):
+        pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+
+
+def test_run_ptoas_timeout_reports_configured_deadline(monkeypatch):
+    monkeypatch.setenv("PYPTO_PTOAS_TIMEOUT_SECONDS", "180")
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: None)
+
+    def run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(pto_backend.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="timed out after 180s.*PYPTO_PTOAS_TIMEOUT_SECONDS") as exc:
+        pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert isinstance(exc.value.__cause__, subprocess.TimeoutExpired)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

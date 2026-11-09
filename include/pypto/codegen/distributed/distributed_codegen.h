@@ -314,7 +314,6 @@ class DistributedCodegen : public CodegenBase {
   // HOST presence alone never opts ordinary Generate into the embedded ABI.
   bool embedded_mode_{false};
   std::string embedded_entry_alias_;
-  std::string embedded_builtins_alias_;
   std::string embedded_support_alias_;
   std::string embedded_layout_alias_;
   std::map<const ir::Function*, std::vector<ReturnPosition>> return_plans_;
@@ -374,6 +373,10 @@ class DistributedCodegen : public CodegenBase {
   // EmitCallToWorker when the callee has a TupleType return; consumed by
   // VisitStmt_(AssignStmt) when it encounters TupleGetItemExpr unpacking.
   std::map<std::pair<std::string, int>, std::string> tuple_element_tensors_;
+
+  // Exact return-position -> parameter mapping, local to one Generate call.
+  // Out/InOut parameters not named by ReturnStmt do not occupy result slots.
+  std::unordered_map<const ir::Function*, std::vector<std::optional<size_t>>> returned_param_indices_;
 
   // A distributed ``pl.submit`` returns the runtime TaskHandle as its final
   // tuple element. Keep it separate from tensor aliases so a later

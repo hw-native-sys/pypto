@@ -700,6 +700,33 @@ class TestTileUnaryOps:
         ir_str = str(Program)
         assert "tile.sqrt" in ir_str
 
+    @pytest.mark.parametrize("high_precision", [False, True])
+    @pytest.mark.parametrize("with_tmp", [False, True])
+    def test_tile_rsqrt_explicit_precision_contract(self, high_precision, with_tmp):
+        """Scratch must never silently select precision, including raw IR calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        args = [src, tmp] if with_tmp else [src]
+        if high_precision != with_tmp:
+            message = "requires a tmp" if high_precision else "tmp requires high_precision=True"
+            with pytest.raises(ValueError, match=message):
+                ir.create_op_call("tile.rsqrt", args, {"high_precision": high_precision}, span)
+            return
+        call = tile.rsqrt(src, tmp=tmp, high_precision=True) if with_tmp else tile.rsqrt(src)
+        assert dict(call.kwargs).get("high_precision", False) == high_precision
+        assert len(call.args) == len(args)
+        default = tile.rsqrt(src) if not high_precision else call
+        ir.assert_structural_equal(call, default)
+
+    def test_tile_rsqrt_tmp_requires_explicit_high_precision(self):
+        """The IR Python wrapper must reject legacy scratch-only calls."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 32], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([16, 32], DataType.FP32), span)
+        with pytest.raises(ValueError, match="tmp requires high_precision=True"):
+            tile.rsqrt(src, tmp=tmp)
+
     def test_tile_rsqrt_rejects_tmp_shape_mismatch(self):
         """tile.rsqrt rejects a tmp tile whose per-dim shape differs from the input."""
         span = ir.Span.unknown()
@@ -709,10 +736,10 @@ class TestTileUnaryOps:
         tmp_var = ir.Var("tmp", tmp_type, span)
 
         with pytest.raises(ValueError, match="shape mismatch"):
-            tile.rsqrt(input_var, tmp_var)
+            tile.rsqrt(input_var, tmp_var, high_precision=True)
 
     def test_tile_rsqrt_high_precision(self):
-        """tile.rsqrt accepts an optional tmp tile for the high-precision path."""
+        """tile.rsqrt carries an explicit high_precision attribute and scratch."""
 
         @pl.program
         class Program:
@@ -726,7 +753,7 @@ class TestTileUnaryOps:
                 tmp: pl.Tile[[32, 32], pl.FP32] = pl.tile.create(
                     [32, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp)
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.tile.rsqrt(tile_a, tmp=tmp, high_precision=True)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -9710,6 +9737,93 @@ def test_matmul_tf32_mode_rejects_unsupported_inputs(namespace, accumulate, mode
             ops.matmul_acc(acc, lhs, rhs, tf32_mode=mode)
         else:
             ops.matmul(lhs, rhs, tf32_mode=mode)
+
+
+@pytest.mark.parametrize("policy", [-1, 8, 255, 256])
+def test_load_rejects_invalid_cache_policy(policy):
+    src = ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="invalid CachePolicy value"):
+        tile.load(src, [0, 0], [32, 32], cache=policy)
+
+
+@pytest.mark.parametrize("policy", [-1, 8, 255, 256])
+def test_store_rejects_invalid_cache_policy(policy):
+    src = _partial_tile([32, 32], [32, 32])
+    dst = ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="invalid CachePolicy value"):
+        tile.store(src, [0, 0], dst, cache=policy)
+
+
+@pytest.mark.parametrize("policy", [pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP])
+def test_store_rejects_load_only_cache_policy(policy):
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    with pytest.raises(ValueError, match="load-only CachePolicy"):
+        pl.store(src, [0, 0], dst, cache=policy)
+
+
+@pytest.mark.parametrize("policy", list(pl.CachePolicy))
+def test_dsl_load_preserves_semantic_cache_policy(policy):
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    call = pl.load(src, [0, 0], [32, 32], cache=policy).unwrap()
+    assert isinstance(call, ir.Call)
+    assert dict(call.kwargs)["cache"] == int(policy)
+    assert "l2_hint" not in dict(call.kwargs)
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        p
+        for p in list(pl.CachePolicy)
+        if p not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
+    ],
+)
+def test_dsl_store_preserves_semantic_cache_policy(policy):
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    call = pl.store(src, [0, 0], dst, cache=policy).unwrap()
+    assert isinstance(call, ir.Call)
+    assert dict(call.kwargs)["cache"] == int(policy)
+    assert "l2_hint" not in dict(call.kwargs)
+
+
+def test_dsl_cache_rejects_unrelated_enum_types():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    value = pl.load(src, [0, 0], [32, 32])
+    for hint in (pl.AtomicType.Add, pl.STPhase.Final):
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
+            pl.load(src, [0, 0], [32, 32], cache=cast(Any, hint))
+        with pytest.raises(TypeError, match="cache must be CachePolicy"):
+            pl.store(value, [0, 0], src, cache=cast(Any, hint))
+
+
+def test_cache_policy_unifies_all_modes_and_keeps_legacy_values():
+    assert {policy.name: int(policy) for policy in pl.CachePolicy} == {
+        "DEFAULT": 0,
+        "BYPASS": 1,
+        "NORMAL_FIRST_VICTIM": 2,
+        "NORMAL_LAST_VICTIM": 3,
+        "NORMAL_PERSISTENT": 4,
+        "NOT_ALLOC_KEEP": 5,
+        "NOT_ALLOC_CLEAN": 6,
+        "NOT_ALLOC_DROP": 7,
+    }
+    assert not hasattr(pl, "A2A3CachePolicy")
+    assert not hasattr(pl, "A5CachePolicy")
+    assert not hasattr(pl, "LoadL2Hint")
+    assert not hasattr(pl, "StoreL2Hint")
+
+
+def test_omitted_cache_policy_stays_absent():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    value = pl.load(src, [0, 0], [32, 32])
+    load_call = value.unwrap()
+    store_call = pl.store(value, [0, 0], src).unwrap()
+    assert isinstance(load_call, ir.Call)
+    assert isinstance(store_call, ir.Call)
+    assert "cache" not in dict(load_call.kwargs)
+    assert "cache" not in dict(store_call.kwargs)
 
 
 if __name__ == "__main__":

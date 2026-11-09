@@ -45,6 +45,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/simt.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/signature_symbols.h"
 #include "pypto/ir/type.h"
@@ -425,6 +426,11 @@ class Projection {
       CheckField("value", assign->value_);
       CheckField("var", assign->var_, true);
       Activate(assign->var_);
+    } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+      CheckField("callee", launch->callee_);
+      CheckField("block_dims", launch->block_dims_);
+      CheckField("args", launch->args_);
+      DefineResults(launch->results_);
     } else if (auto loop = As<ForStmt>(stmt)) {
       CheckField("attrs", loop->attrs_);
       CheckField("start", loop->start_);
@@ -454,6 +460,12 @@ class Projection {
       CheckField("else_body", branch->else_body_);
       RestoreScope(checkpoint);
       DefineResults(branch->return_vars_);
+    } else if (auto scope = As<SimtScopeStmt>(stmt)) {
+      CheckField("block_dims", scope->block_dims_);
+      CheckField("private_scalars", scope->private_scalars_);
+      size_t checkpoint = scope_definitions_.size();
+      CheckField("body", scope->body_);
+      RestoreScope(checkpoint);
     } else if (auto scope = As<ScopeStmt>(stmt)) {
       // Scope metadata is evaluated on entry; these straight-line regions do
       // not hide definitions from subsequent statements (see ScopeStmt).
@@ -630,6 +642,8 @@ class Projection {
     PROJECT_NODE(CommDomainScopeStmt)
     PROJECT_NODE(GraphScopeStmt)
     PROJECT_NODE(RegScopeStmt)
+    PROJECT_NODE(SimtScopeStmt)
+    PROJECT_NODE(SimtLaunchStmt)
     PROJECT_NODE(SeqStmts)
     PROJECT_NODE(EvalStmt)
     PROJECT_NODE(BreakStmt)
@@ -797,6 +811,7 @@ class Projection {
     PROJECT_ANY(double)
     PROJECT_ANY(float)
     PROJECT_ANY(DataType)
+    PROJECT_ANY(SimtAxis)
     PROJECT_ANY(MemorySpace)
     PROJECT_ANY(TensorLayout)
     PROJECT_ANY(TileLayout)

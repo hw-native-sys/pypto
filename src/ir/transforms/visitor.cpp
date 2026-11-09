@@ -372,6 +372,18 @@ void IRVisitor::VisitStmt_(const ContinueStmtPtr& op) {}
 
 void IRVisitor::VisitStmt_(const InlineStmtPtr& op) {}
 
+void IRVisitor::VisitStmt_(const SimtScopeStmtPtr& op) {
+  for (const auto& var : op->private_scalars_) VisitExpr(var);
+  for (const auto& dim : op->block_dims_) VisitExpr(dim);
+  VisitStmt(op->body_);
+}
+
+void IRVisitor::VisitStmt_(const SimtLaunchStmtPtr& op) {
+  for (const auto& dim : op->block_dims_) VisitExpr(dim);
+  for (const auto& arg : op->args_) VisitExpr(arg);
+  for (const auto& result : op->results_) VisitExpr(result);
+}
+
 void IRVisitor::VisitStmt_(const StmtPtr& op) {}
 
 }  // namespace ir

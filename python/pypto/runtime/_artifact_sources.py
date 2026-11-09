@@ -299,8 +299,7 @@ def _encode_cluster_payloads(payloads: dict[str, bytes]) -> tuple[str, bytes]:
 
 _SESSION_HELPER_EXPORTS = (
     "_ChipCallables",
-    "_EmbeddedEntryState",
-    "_EmbeddedNodeState",
+    "_bind_embedded_invocation",
     "_copy_return_tensor",
     "make_tensor_arg",
     "add_chip_tensor_arg",
@@ -316,8 +315,10 @@ _SESSION_HELPER_EXPORTS = (
 )
 
 
-def build_cluster_session_bundle(programs: list["DistributedCompiledProgram"]) -> tuple[str, bytes]:
-    """Relocate program closures around one canonical runtime-only helper/hook.
+def build_cluster_session_bundle(
+    programs: list["DistributedCompiledProgram"], bindings: list[dict[str, Any]] | None = None
+) -> tuple[str, bytes]:
+    """Relocate program closures and package each L3 entry's runtime bindings.
 
     Input artifacts are immutable. Every helper copy is validated before a
     source-relative shim replaces it in this privately owned aggregate.
@@ -325,7 +326,6 @@ def build_cluster_session_bundle(programs: list["DistributedCompiledProgram"]) -
     payloads = {"programs/__init__.py": b"", "orchestration/__init__.py": b""}
     for portable in (
         "_distributed_support.py",
-        "cluster_bootstrap.py",
         "_cluster_controller.py",
         "_cluster_channel.py",
     ):
@@ -340,6 +340,13 @@ def build_cluster_session_bundle(programs: list["DistributedCompiledProgram"]) -
         assert closure is not None
         source = _cluster_source_payloads(program.output_dir, closure["entries"], remaining)
         prefix = f"programs/p{index}"
+        if bindings is not None:
+            for entry in closure["entries"]:
+                logical = entry["logical_path"]
+                path = f"{logical}/orchestration/host_orch.py"
+                source[path] += (
+                    f"\n{entry['qualname']}._pypto_embedded_bindings = {bindings[index][logical]!r}\n"
+                ).encode()
         for path, data in source.items():
             if path.endswith("/_distributed_support.py"):
                 if data != helper:

@@ -195,7 +195,7 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
     if (key == "rounding") {
       rounding = true;
       auto mode = AnyCast<std::string>(value, key);
-      CHECK((narrow_float && (mode == "R" || mode == "A" || mode == "H" || mode == "Z")) ||
+      CHECK((narrow_float && (mode == "R" || mode == "A" || mode == "Z")) ||
             (float_int && (mode == "R" || mode == "A" || mode == "F" || mode == "C" || mode == "Z")))
           << "Unsupported rounding for convert pair";
     }
@@ -290,6 +290,78 @@ TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& nam
   return std::make_shared<RegType>(1, x->dtype_, RegKind::VecReg);
 }
 
+TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
+  const size_t inputs = (name == "axpy" || name == "mula") ? 3 : 2;
+  CHECK(a.size() == inputs + 1 || (name == "mula" && a.size() == inputs))
+      << "reg." << name << " has invalid operand count";
+  auto x = Register(a[0], RegKind::VecReg);
+  const auto dtype = x->dtype_;
+  if (name == "mula") {
+    CHECK(dtype != DataType::INT8 && dtype != DataType::UINT8)
+        << "reg.mula requires floating-point or 16/32-bit integer registers";
+  } else {
+    CHECK(dtype == DataType::FP16 || dtype == DataType::FP32)
+        << "reg." << name << " requires FP16/FP32 registers";
+  }
+  for (size_t i = 1; i < inputs; ++i) {
+    if ((name == "axpy" && i == 2) || name == "lrelu") {
+      Scalar(a[i], dtype);
+    } else {
+      Match(x, Register(a[i], RegKind::VecReg));
+    }
+  }
+  if (a.size() > inputs) Mask(a.back(), x);
+  Pmode(k);
+  // EXPDIF widens its FP16 inputs; it is not a dtype-preserving binary op.
+  if (name == "expdif") return std::make_shared<RegType>(x->shape_, DataType::FP32, RegKind::VecReg);
+  return x;
+}
+
+TypePtr Paired(const Args& a, const Kwargs& k, const std::string& name) {
+  const bool carry = name == "addc" || name == "subc" || name == "addcs" || name == "subcs";
+  const bool carry_in = name == "addcs" || name == "subcs";
+  CHECK(a.size() == (carry_in ? 4 : 3)) << "reg." << name << " has invalid operand count";
+  auto x = Register(a[0], RegKind::VecReg);
+  Match(x, Register(a[1], RegKind::VecReg));
+  Mask(a.back(), x);
+  if (carry_in) Mask(a[2], x);
+  if (carry || name == "mull") {
+    CHECK(x->dtype_ == DataType::INT32 || x->dtype_ == DataType::UINT32)
+        << "reg." << name << " requires INT32/UINT32 registers";
+  }
+  if (name == "mull") {
+    CHECK(x->shape_ == 64 || x->shape_ == 128 || x->shape_ == 256)
+        << "reg.mull requires 64, 128, or 256 lanes";
+  } else if (!carry) {
+    CHECK(x->shape_ % 2 == 0) << "Interleave/deinterleave require even lane counts";
+  }
+  if (!carry) Pmode(k);
+  TypePtr second = carry ? std::make_shared<RegType>(x->shape_, DataType::BOOL, RegKind::MaskReg) : x;
+  return std::make_shared<TupleType>(std::vector<TypePtr>{x, second});
+}
+
+TileTypePtr IndexedMemory(const Args& a, bool read) {
+  // The index vector can repeat addresses and need not fit in the Tile's lane
+  // count. Validate the storage geometry only; bounds and initialization of
+  // active indexed addresses are runtime obligations, as with dynamic offsets.
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, a[0]->span_);
+  auto tile = Memory({a[0], zero}, 1, false);
+  auto offsets = Register(a[1], RegKind::VecReg);
+  CHECK(offsets->dtype_ == DataType::UINT16 || offsets->dtype_ == DataType::UINT32)
+      << "Indexed register memory requires UINT16/UINT32 element offsets";
+  // The physical indexed paths use 16-bit offsets for byte/halfword data,
+  // and 32-bit offsets for word data. Byte gathers promote their result.
+  const auto offset_dtype = tile->dtype_.GetBit() == 32 ? DataType::UINT32 : DataType::UINT16;
+  CHECK(offsets->dtype_ == offset_dtype)
+      << "Indexed memory requires UINT16 offsets for 8/16-bit data and UINT32 offsets for 32-bit data";
+  Mask(a.back(), offsets);
+  if (!read) {
+    auto value = Register(a[2], RegKind::VecReg);
+    CHECK(value->shape_ == offsets->shape_) << "Indexed value/offset lane mismatch";
+    CHECK(value->dtype_ == tile->dtype_) << "Scatter dtype mismatch";
+  }
+  return tile;
+}
 }  // namespace
 
 REGISTER_OP("reg.load")
@@ -359,6 +431,80 @@ REGISTER_OP("reg.convert")
     .set_attr<bool>("saturate")
     .no_arg_writes()
     .f_deduce_type(Convert);
+
+REGISTER_OP("reg.interpret_cast")
+    .set_op_category("RegOp")
+    .set_description("Reinterpret register bits without numeric conversion")
+    .set_reg_op("pto.vmi.vinterpret_cast")
+    .add_argument("value", "VecReg")
+    .set_attr<DataType>("dtype")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 1) << "reg.interpret_cast expects one VecReg";
+      auto x = Register(a[0], RegKind::VecReg);
+      auto dtype = GetRequiredKwarg<DataType>(k, "dtype", "reg.interpret_cast");
+      CHECK(Supported(dtype)) << "Unsupported reinterpret destination dtype";
+      const auto source_bits = static_cast<int64_t>(x->dtype_.GetBit());
+      const auto target_bits = static_cast<int64_t>(dtype.GetBit());
+      INTERNAL_CHECK(source_bits > 0 && target_bits > 0) << "Supported register widths must be positive";
+      CHECK(x->shape_ <= std::numeric_limits<int64_t>::max() / source_bits)
+          << "Reinterpret total bit count is too large";
+      const int64_t bits = x->shape_ * source_bits;
+      CHECK(bits % target_bits == 0) << "Reinterpret total bits must form whole destination lanes";
+      CHECK(bits / target_bits <= std::numeric_limits<int>::max())
+          << "Reinterpret result lane count is too large";
+      return std::make_shared<RegType>(bits / target_bits, dtype, RegKind::VecReg);
+    });
+
+REGISTER_OP("reg.create_group_mask")
+    .set_op_category("RegOp")
+    .set_description("Activate a prefix within each logical lane group")
+    .set_reg_op("pto.vmi.create_group_mask")
+    .add_argument("active_elems_per_group", "INDEX scalar")
+    .set_attr<int>("num_groups")
+    .set_attr<int>("group_size")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 1) << "reg.create_group_mask expects one INDEX scalar";
+      Scalar(a[0], DataType::INDEX);
+      const auto groups = GetRequiredKwarg<int>(k, "num_groups", "reg.create_group_mask");
+      const auto size = GetRequiredKwarg<int>(k, "group_size", "reg.create_group_mask");
+      CHECK(groups > 0 && size > 0 && groups <= std::numeric_limits<int>::max() / size)
+          << "Grouped mask requires positive num_groups and group_size with representable lane count";
+      if (auto active = As<ConstInt>(a[0])) {
+        CHECK_SPAN(active->value_ >= 0 && active->value_ <= size, a[0]->span_)
+            << "active_elems_per_group must be in [0, group_size]";
+      } else {
+        CHECK((size & (size - 1)) == 0) << "Dynamic grouped mask requires power-of-two group_size";
+      }
+      return std::make_shared<RegType>(groups * size, DataType::BOOL, RegKind::MaskReg);
+    });
+
+static bool RegisterHistograms() {
+  for (const auto& name : {"chist", "dhist"}) {
+    OpRegistry::GetInstance()
+        .Register(std::string("reg.") + name)
+        .set_op_category("RegOp")
+        .set_description("Accumulate masked UINT8 histogram counts into UINT16 bins")
+        .set_reg_op(std::string("pto.vmi.v") + name)
+        .add_argument("acc", "UINT16 VecReg with 128 or 256 bins")
+        .add_argument("source", "UINT8 VecReg")
+        .add_argument("mask", "MaskReg selecting source lanes")
+        .no_arg_writes()
+        .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+          CHECK(a.size() == 3) << "Histogram expects accumulator, source and mask";
+          auto acc = Register(a[0], RegKind::VecReg);
+          auto source = Register(a[1], RegKind::VecReg);
+          CHECK(acc->dtype_ == DataType::UINT16 && (acc->shape_ == 128 || acc->shape_ == 256))
+              << "Histogram accumulator must be UINT16 with 128 or 256 bins";
+          CHECK(source->dtype_ == DataType::UINT8) << "Histogram source must be UINT8";
+          Mask(a[2], source);
+          return acc;
+        });
+  }
+  return true;
+}
+static const bool histograms_registered = RegisterHistograms();
 
 static bool RegisterGenerators() {
   for (const auto& name : {"broadcast", "index_gen", "full_mask", "active_mask"}) {
@@ -573,14 +719,97 @@ REGISTER_OP("reg.gather_lanes")
       return x;
     });
 
+static bool RegisterFusedOps() {
+  for (const std::string name : {"expdif", "axpy", "mula", "lrelu", "prelu"}) {
+    auto& e = OpRegistry::GetInstance().Register("reg." + name);
+    e.set_op_category("RegOp")
+        .set_reg_op("pto.vmi.v" + name)
+        .set_description("Fused register arithmetic/activation")
+        .add_argument(name == "mula" ? "acc" : "x", "VecReg");
+    if (name == "mula") {
+      e.add_argument("lhs", "VecReg").add_argument("rhs", "VecReg");
+    } else if (name == "axpy") {
+      e.add_argument("acc", "VecReg").add_argument("alpha", "Matching float scalar");
+    } else {
+      e.add_argument(name == "lrelu" ? "slope" : (name == "prelu" ? "alpha" : "max_value"),
+                     name == "lrelu" ? "Matching float scalar" : "VecReg");
+    }
+    e.add_argument("mask", "MaskReg (optional for mula)")
+        .set_attr<std::string>("pmode")
+        .no_arg_writes()
+        .f_deduce_type([name](const Args& a, const Kwargs& k) { return Fused(a, k, name); });
+  }
+  return true;
+}
+static const bool fused_registered = RegisterFusedOps();
+
+static bool RegisterPairedOps() {
+  for (const std::string name : {"mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv"}) {
+    auto& e = OpRegistry::GetInstance().Register("reg." + name);
+    e.set_op_category("RegOp")
+        .set_reg_op("pto.vmi.v" + name)
+        .set_description("Two-result register operation")
+        .add_argument("lhs", "VecReg")
+        .add_argument("rhs", "VecReg");
+    if (name == "addcs" || name == "subcs") e.add_argument("carry_in", "Carry/not-borrow MaskReg");
+    e.add_argument("mask", "MaskReg").set_output_arity(2).no_arg_writes();
+    if (name == "mull" || name == "intlv" || name == "dintlv") e.set_attr<std::string>("pmode");
+    e.f_deduce_type([name](const Args& a, const Kwargs& k) { return Paired(a, k, name); });
+  }
+  return true;
+}
+static const bool paired_registered = RegisterPairedOps();
+
+REGISTER_OP("reg.gather")
+    .set_op_category("RegOp")
+    .set_reg_op("pto.vmi.vgather")
+    .set_description("Masked indexed UB read with element offsets")
+    .add_argument("tile", "Source Vec Tile")
+    .add_argument("offsets", "Unsigned index VecReg")
+    .add_argument("mask", "MaskReg")
+    .set_attr<std::string>("pmode")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_arg_effect(0, ArgEffect::Read)
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 3) << "reg.gather expects tile, offsets, mask";
+      auto tile = IndexedMemory(a, true);
+      auto indices = Register(a[1], RegKind::VecReg);
+      auto dtype = tile->dtype_;
+      // The byte gather form zero-extends, including signed byte sources.
+      if (dtype == DataType::INT8) dtype = DataType::INT16;
+      if (dtype == DataType::UINT8) dtype = DataType::UINT16;
+      CHECK(indices->dtype_ != DataType::UINT16 || dtype.GetBit() == 16)
+          << "UINT16 gather offsets require 16-bit results";
+      Pmode(k);
+      return std::make_shared<RegType>(indices->shape_, dtype, RegKind::VecReg);
+    });
+REGISTER_OP("reg.scatter")
+    .set_op_category("RegOp")
+    .set_reg_op("pto.vmi.vscatter")
+    .set_description("Masked indexed UB write; return destination alias")
+    .add_argument("tile", "Destination Vec Tile")
+    .add_argument("offsets", "Unsigned index VecReg")
+    .add_argument("value", "VecReg")
+    .add_argument("mask", "MaskReg")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .set_arg_effect(0, ArgEffect::Write)
+    .set_output_reuses_input(0)
+    .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
+      CHECK(a.size() == 4) << "reg.scatter expects tile, offsets, value, mask";
+      return IndexedMemory(a, false);
+    });
+
 RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
-  CHECK(call && call->op_ && (call->op_->name_ == "reg.load" || call->op_->name_ == "reg.store"))
-      << "Memory effect requires reg.load/store";
+  CHECK(IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+        IsOp(call, "reg.scatter"))
+      << "Memory effect requires reg.load/store/gather/scatter";
   // This query is public and can receive a manually created Call. Validate
   // operand arity and types before indexing, even if its result type is forged.
   auto validated =
       OpRegistry::GetInstance().Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
-  bool load = call->op_->name_ == "reg.load";
+  bool load = IsOp(call, "reg.load") || IsOp(call, "reg.gather");
+  bool indexed = IsOp(call, "reg.gather") || IsOp(call, "reg.scatter");
   auto tile = As<TileType>(call->args_[0]->GetType());
   auto validated_reg = As<RegType>(load ? validated->GetType() : call->args_[2]->GetType());
   INTERNAL_CHECK_SPAN(validated_reg, call->span_)
@@ -596,7 +825,9 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
                          load ? ArgEffect::Read : ArgEffect::Write,
                          std::nullopt,
                          std::nullopt,
-                         call->args_.size() == 4 ? call->args_[3] : nullptr};
+                         indexed ? call->args_.back() : (call->args_.size() == 4 ? call->args_[3] : nullptr)};
+  // An index vector describes an unknown set, never a contiguous lane interval.
+  if (indexed) return result;
   auto offset = As<ConstInt>(call->args_[1]);
   ExprPtr base = tile->tile_view_ ? tile->tile_view_->start_offset : nullptr;
   auto base_const = As<ConstInt>(base);

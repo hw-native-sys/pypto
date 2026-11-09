@@ -20,6 +20,7 @@ the page covering what you are changing.
 | [Parameter Directions](08-param-directions.md) | How `In`/`Out`/`InOut` is inferred — the registry declaration every stage reads, and the four passes that build on it |
 | [Multi-Output Operators](09-multi_output_ops.md) | Operators that produce several values: `TupleType` results, why destinations never become arguments, and what the registry enforces |
 | [Operator Effects](10-operator-effects.md) | Functional argument access, write channels, and core placement/replication contracts |
+| [Scalar SIMT IR](11-simt.md) | Void helpers, explicit launch results, scalar GM/UB access, and derived resources |
 
 ## See Also
 

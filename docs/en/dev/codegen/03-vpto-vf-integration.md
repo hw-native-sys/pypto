@@ -16,8 +16,8 @@ flowchart TD
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
   Helper --> LLVM[PTOAS VPTO LLVM and VF synchronization]
-  LLVM --> Admission[Validate supported synchronization contract]
-  Admission --> HelperObj[Bisheng device helper objects]
+  LLVM --> Symbols[Check helper external symbols]
+  Symbols --> HelperObj[Bisheng device helper objects]
   CallerObj --> Link[ld.lld: kernel_entry first]
   HelperObj --> Link
   Link --> ELF[Validate linked device ELF]
@@ -59,11 +59,17 @@ PyPTO adds no fixed `pipe_barrier(PIPE_ALL)` around the call. The normal kernel
 tail synchronization remains enabled. The boundary contract relies on A5 VF
 completion semantics and is restricted to AIV helpers.
 
-Before compiling LLVM to a device object, PyPTO validates the supported
-instruction subset, pointer provenance and existing barrier coverage. This
-check inserts no barriers. Unknown relationships or LLVM output forms fail
-with a diagnostic rather than silently executing. Masked accesses are checked
-over all 64 lanes, so this is not a mask-aware minimal-barrier optimizer.
+PTOAS owns VF dependency analysis and barrier placement, including ordering
+proved by SSA data dependencies. PyPTO passes its LLVM output to Bisheng without
+reconstructing memory dependencies or imposing an LLVM instruction whitelist.
+PTOAS/Bisheng diagnostics propagate to the caller. The separate external-symbol
+and device-image checks below enforce the helper packaging contract.
+
+Indexed gather/scatter rely on the pinned PTOAS 0.72 or newer for conservative
+RAW/WAR/WAW synchronization of unknown footprints within a vecscope. This
+includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730);
+PyPTO does not add per-access `VV_ALL` fences. Caller/helper boundary and GM
+synchronization continue to use their existing mechanisms.
 
 ## Device code and ABI
 
@@ -71,7 +77,7 @@ The LLVM pointer `ptr addrspace(6)`, PTO `!pto.ptr<f32, ub>` and the caller's
 `__ubuf__ float*` must describe the same UB address space and parameter ABI.
 Helper compilation retains `--cce-generic-addrspace=off` and uses the A5 vector
 device target. It emits a device object, not a host fat object. LLVM export
-and Bisheng compilation are separate to validate the helper before linking;
+and Bisheng compilation are separate to check external helper symbols before linking;
 all relevant flags participate in the binary cache identity.
 
 The runtime consumes raw code bytes. This path extracts only `.text`, so the
@@ -92,21 +98,45 @@ is position independent; helpers still have to obey the device-call ABI.
 | Property | Current support |
 | -------- | --------------- |
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
-| Scope | Straight-line register operations; static loops must be unrolled |
-| Memory | Contiguous FP32 accesses, 64 lanes, static offsets aligned to 32 bytes |
+| Scope | Register operations and canonical hardware loops nested up to four levels |
+| Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed Tile dtypes share one UB base |
 | Aliasing | Common UB base, static view displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
 | Packaging | Source artifact relocation, helper-aware binary cache |
 
-Grouped/peer functions, CPU simulation of device objects, Bridge calls,
-dynamic memory offsets, general helper control flow and other memory formats
-are not admitted. Diagnostic VMI generation supports a wider IR subset than
-this execution path. Extending admission requires corresponding compiler and
-hardware evidence; it must not weaken rejection of unknown relationships.
+Grouped/peer functions, CPU simulation of device objects, Bridge calls and
+general helper control flow remain outside the current executable frontend.
+Memory-mode and alignment constraints are checked by the
+frontend and toolchain; supported combinations require compiler and hardware
+coverage. See the [register operation reference](../language/06-register-operations.md)
+for dtype, mask and indexed-access contracts.
+
+## Required hardware loops
+
+A5 PTO codegen accepts canonical `pl.hardware_loop(stop)` inside `pl.reg_scope()`
+with nesting up to four levels and no loop-carried values. `start` is zero and
+`step` is one. Integer stops may be static or dynamic. The scalar capture ABI supports signed
+and unsigned 8-, 16-, 32-, and 64-bit integers and index values. The verifier
+rejects a nonempty loop when the computed stop exceeds 65535. Static evaluation accounts for the result dtype when it can prove the value,
+including narrow unsigned wraparound. Unproven bounds pass through; callers must keep counts
+and memory accesses within their valid ranges.
+Runtime branches and while loops are rejected.
+
+Scalar integer powers with nonnegative constant exponents, such as `n ** 2`,
+lower to scalar multiplications without adding loops. Dynamic or negative
+exponents are currently unsupported by the scalar PTO emitter; this is an
+operator limitation rather than a hardware-loop range requirement.
+
+Codegen preserves these loops as `scf.for` with `index` induction variables inside
+`pto.vecscope`. A runtime `i32` stop is captured as a scalar parameter and converted
+with `arith.index_cast`. Qualification and regression testing stop at the generated
+PTO boundary. PyPTO adds no hardware-loop marker, LLVM counter rewrite, memory
+barrier insertion or post-link instruction checker. PTOAS owns subsequent lowering,
+synchronization and optimization.
 
 ## Run the complete examples
 
-Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.70
+Build PyPTO and its pinned runtime in the current checkout, select PTOAS v0.72
 or newer, and configure the matching CANN/Bisheng toolchain. Keep runtime pin
 checking enabled. Reserve an idle A5 device before running either command:
 

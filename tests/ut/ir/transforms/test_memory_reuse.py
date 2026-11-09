@@ -9343,6 +9343,110 @@ class TestAliasingOutputPropagation:
         assert "pl.tile.move(" not in after.as_python(), "phi repair emitted an unlowerable Mat->Mat move"
 
 
+class TestConditionalResetCapacity:
+    """A conditional overwrite can reuse storage only when the old payload is dead."""
+
+    def test_conditional_reset_reuses_value_read_only_in_sibling(self, ascend_backend):
+        """Keep issue #3256's exact same-range and two-allocation capacity contract."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 256], pl.FP32],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
+                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+                flag = pl.tensor.read(flags, [0])
+                if flag != 0:
+                    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+                    selected = reset
+                else:
+                    selected = current
+                saved = pl.tile.store(selected, [0, 0], out)
+                result = pl.tile.store(held, [64, 0], saved)
+                return result
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        allocated = passes.allocate_memory_addr()(after)
+        ranges = _collect_allocated_tile_ranges(allocated)
+        assert ranges["current__ssa_v0"] == ranges["reset__ssa_v0"]
+        # The independently live held value must not overlap the shared reset slot.
+        assert set(ranges.values()) == {(0, 65536), (65536, 65536)}
+        function = allocated.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        allocations = [
+            stmt.value
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == ir.get_op("tile.alloc").name
+        ]
+        assert len(allocations) == 2
+        assert all(
+            isinstance(alloc.args[1], ir.ConstInt) and alloc.args[1].value == 65536 for alloc in allocations
+        )
+
+    def test_conditional_reset_preserves_same_branch_tail_read(self, ascend_backend):
+        """A read after reset on the taken arm still observes the old payload."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 256], pl.FP32],
+                flags: pl.Tensor[[1], pl.INT32],
+                out: pl.Out[pl.Tensor[[192, 256], pl.FP32]],
+            ) -> pl.Tensor[[192, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
+                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+                flag = pl.tensor.read(flags, [0])
+                if flag != 0:
+                    reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+                    out = pl.tile.store(current, [64, 0], out)
+                    selected = reset
+                else:
+                    selected = current
+                saved = pl.tile.store(selected, [0, 0], out)
+                result = pl.tile.store(held, [128, 0], saved)
+                return result
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        with pytest.raises(ValueError, match="exceeds"):
+            passes.allocate_memory_addr()(after)
+
+    def test_conditional_reset_preserves_loop_invariant(self, ascend_backend):
+        """A sibling-only old-value read can execute on a later iteration."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                pool: pl.Tensor[[128, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                held = pl.tile.load(pool, [64, 0], [64, 256], target_memory=pl.Mem.Vec)
+                current = pl.tile.load(pool, [0, 0], [64, 256], target_memory=pl.Mem.Vec)
+                for i in pl.range(2):
+                    if i == 0:
+                        reset = pl.tile.full([64, 256], dtype=pl.FP32, value=0.0)
+                        selected = reset
+                    else:
+                        selected = current
+                    out = pl.tile.store(selected, [0, 0], out)
+                result = pl.tile.store(held, [64, 0], out)
+                return result
+
+        after = _run_pipeline(passes.convert_to_ssa()(Before))
+        with pytest.raises(ValueError, match="exceeds"):
+            passes.allocate_memory_addr()(after)
+
+
 class TestChainedInPlaceIfPhis:
     """An in-place producer must never be anchored onto an unsettled `if` phi.
 

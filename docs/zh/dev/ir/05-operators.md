@@ -30,6 +30,11 @@
 | `buffer.extract` | 源 buffer、行偏移、列偏移、目标 buffer | Void |
 | `buffer.matmul` | Left buffer、Right buffer、Acc 目标 | Void |
 | `buffer.matmul_acc` | Left buffer、Right buffer、被读写的 Acc buffer | Void |
+| `buffer.cast` | FP16/FP32 源、目的地；显式舍入/饱和属性 | Void |
+| `buffer.cmp`、`buffer.cmps` | FP32 源、Tile/标量比较操作数、打包 UINT8 目的地 | Void |
+| `buffer.sel`、`buffer.sels` | 打包谓词、值操作数、显式 scratch、目的地 | Void |
+| `buffer.row_max`、`buffer.row_sum` | FP32 矩阵、显式 scratch、列向量目的地 | Void |
+| `buffer.row_expand_sub`、`buffer.row_expand_div` | FP32 矩阵、列向量、矩阵目的地 | Void |
 
 这些算子分别声明数据/元数据效应。形状、dtype、valid 状态和别名要求见
 [Buffer 契约](02-types.md#buffer-算子契约)。
@@ -242,7 +247,7 @@ lhs M/K 与 rhs N 实际计算的较小矩形。
 `tf32_mode="round_away"`。两者将输入舍入为 HF32（e8m10），仍使用 FP32 累加；
 中间值分别采用向偶数舍入或远离零舍入。省略该参数时保持普通 FP32 矩阵乘法。
 该设置贯穿 tensor 到 tile 的降级和自动 L0 分块，仅作用于指定操作。
-需要 PTOAS v0.70 或更新版本的 PTO/EmitC 路径，不支持 VPTO 降级。
+需要 PTOAS v0.72 或更新版本的 PTO/EmitC 路径，不支持 VPTO 降级。
 其他输入类型、非二维操作数和 Ascend910 会被拒绝。
 Torch 参考代码生成器会在 Tensor、Tile 和 Buffer IR 中按指定模式舍入两个乘法操作数；
 偏置与累加器的值保持 FP32。
@@ -298,14 +303,14 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
 支写入同一缓冲区，`scf.if` 不产生返回值 —— Acc tile 上不会生成 phi。
 
 字面量谓词一律是 `ConstBool`，无论是用户写的 `init_cond=True`/`False`，还是由 pass
-判定得到的 —— 例如 [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
+判定得到的 —— 例如 [`LowerPipelineLoops`](../passes/33-lower_pipeline_loops.md)
 复制 K-loop 后生成的 `ko == 0`。emitter 同样接受 BOOL 类型的 `ConstInt`，即直接通过
 绑定构建 IR 时的写法。两者都会直接选定一个分支；若 emitter 两者都不折叠，每个 K
 block 都会发出双倍 MAD。
 
 因此该折叠取决于 trip count，并非普遍成立：在 `16x512x64` 下流水循环被完全消除，
 最终 PTO 中没有 `scf.if`；而在 `16x2048x64` 下主循环保留，副本索引为 `ko` 与
-`ko + 256`。[`Simplify`](../passes/05-simplify.md#操作数中的可证明比较) 依据循环的静态
+`ko + 256`。[`Simplify`](../passes/06-simplify.md#操作数中的可证明比较) 依据循环的静态
 范围判定副本 1 的谓词（`ko == -256`）恒为假，并将其折叠为 `ConstBool`；副本 0 的
 `ko == 0` 是真正的运行期测试（它负责初始化累加器），因此恰好保留一个 `scf.if`。
 
@@ -407,7 +412,7 @@ Torch E2M1 x2 张量与显式标注的 UINT8 载体在 JIT 和编译后调用中
 | shape-matched Mat→Scale `tmov` | flat `[1,G]` 须先 `treshape` 到 `[M,K/32]`（或 B 侧 shape） |
 | 顺序 | PyPTO 按源序发 Mat→scaling `tmov`；PTOAS `PTOA5NormalizeTMovPass` 把 `tget_scale_addr` 重排到它前面（ISA bind-before-fill） |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；codegen 发射逻辑 rank-2 `make_tensor_view`（PTOAS v0.60 InferPTOLayout / EmitC 映射物理 pack） |
-| 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/14-lower_composite_ops.md) |
+| 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/15-lower_composite_ops.md) |
 
 ### 仅 Tile 的 GEMV 家族（A2/A3）
 
@@ -467,7 +472,7 @@ final 配对：应绑定 final 生产者的结果，并在同一个直线控制�
 在配对 store 清除 flag 之前，只允许普通 SSA 别名转发 final 结果，其他操作
 均不得消费它。这也避免 view 或 copy 隐藏不安全的累加器复用。同一个分支或循环体内
 完整配对是受支持的；尚未排空的 final 结果跨分支、循环或 scope 边界则会被拒绝。
-[`AutoTileMatmulL0`](../passes/19-auto_tile_matmul_l0.md) 保留该契约：中间 K 分块
+[`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) 保留该契约：中间 K 分块
 使用 `Partial`，只有最后一个分块使用 `Final`。显式阶段不会删除其他自动插入的同步。
 
 存储检查遵循注册的原地操作与视图关系，包括 Final 更新之前创建的别名，以及
@@ -856,8 +861,27 @@ a5 或不提供 SDMA provider 的 runtime 上，启用该能力的 worker 会在
 
 ## 寄存器操作
 
-`reg.*` P0 schema 使用 `RegOp` 类别、显式参数效应及寄存器区域要求。
+`reg.*` schema 使用 `RegOp` 类别、显式参数效应及寄存器区域要求。
 dtype、内存、转换和归属契约见[寄存器操作](../language/06-register-operations.md)。
 
 普通 RegOp 扩展包含 unary、整数 bitwise/shifts、vector-scalar、scalar compare、
 动态 lane 选择和单 lane 归约；具体 dtype 与 mask 约束参见上述寄存器操作文档。
+
+融合算术（`expdif`、`axpy`、`mula`、`lrelu`、`prelu`）、双结果操作
+（`mull`、`addc`、`subc`、`addcs`、`subcs`、`intlv`、`dintlv`）和索引 UB
+访存（`gather`、`scatter`）扩展了初始寄存器集合。双结果操作声明输出数量为二，
+返回 `TupleType`；scatter 返回目标 Tile 的别名，并将参数 0 标记为写入。
+
+`interpret_cast`、`chist`、`dhist` 和 `create_group_mask` 是单结果的纯寄存器算子。
+位重解释保持总位数；直方图结果与 UINT16 累加器一致，而不是与 UINT8 源一致；
+分组掩码的 lane 数由静态组几何参数确定。
+
+## 标量 SIMT 操作
+
+`pypto.ir.op.simt` 提供 typed 坐标查询、`lane_id`，以及对 UB Tile 或 GM Tensor
+的标量 `load`/`store`。`store` 返回 `VoidType`，应放入 `EvalStmt`。
+操作、launch、cache 策略及验证契约见[标量 SIMT IR](11-simt.md)。
+
+Warp 内协作操作包括 `vote_all/any/uni`、`vote_ballot`、
+`shuffle_idx/up/down/bfly` 和 `redux_add/min/max`。参见
+[协作操作契约](11-simt.md#warp-内协作操作)，了解活跃 lane、支持类型和 shuffle 宽度。

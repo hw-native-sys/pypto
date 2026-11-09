@@ -160,7 +160,7 @@ partition stride are independent: splitting ten source rows gives each lane a
 The split facts must follow both bound and inline tuple projections and their
 consumers; inferring a stride of eight from the aligned capacity would expose
 padding and misplace the second lane's counts.
-See [LowerAutoVectorSplit](../passes/24-lower_auto_vector_split.md)
+See [LowerAutoVectorSplit](../passes/25-lower_auto_vector_split.md)
 for partition tracking, consumer validation, and control-flow propagation.
 
 ## Codegen
@@ -214,5 +214,5 @@ body rescan per call.
 - [Operator System](05-operators.md) — the general registration API and argument effects
 - [Types and Examples](02-types.md) — `TupleType` and the rest of the type system
 - [Parameter Directions](08-param-directions.md) — how an undeclared write loses its dependency edge
-- [InitMemRef](../passes/35-init_memref.md) — the pass that owns tile allocation
-- [MemoryReuse](../passes/37-memory_reuse.md) — lifetime reuse across tuple elements
+- [InitMemRef](../passes/38-init_memref.md) — the pass that owns tile allocation
+- [MemoryReuse](../passes/40-memory_reuse.md) — lifetime reuse across tuple elements

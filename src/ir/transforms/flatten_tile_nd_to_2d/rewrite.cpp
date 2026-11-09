@@ -558,6 +558,21 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // from an RHS `Call` use that Call's tighter span — see `span`, bound once the
     // Call is in hand.
 
+    if (auto launch = As<SimtLaunchStmt>(stmt)) {
+      auto rewritten = MutableCopy(launch);
+      for (auto& dim : rewritten->block_dims_) dim = Substitute(dim, ctx.var_map);
+      for (auto& argument : rewritten->args_) argument = Substitute(argument, ctx.var_map);
+      for (size_t i = 0; i < rewritten->results_.size(); ++i) {
+        const auto& original = launch->results_[i];
+        const auto& type = rewritten->args_[rewritten->result_param_indices_[i]]->GetType();
+        auto value = std::make_shared<Var>(original->name_hint_, type, original->span_);
+        ctx.Insert(original, value);
+        rewritten->results_[i] = std::move(value);
+      }
+      result.push_back(std::move(rewritten));
+      continue;
+    }
+
     // ReturnStmt: substitute return values
     if (auto ret = As<ReturnStmt>(stmt)) {
       std::vector<ExprPtr> new_values;

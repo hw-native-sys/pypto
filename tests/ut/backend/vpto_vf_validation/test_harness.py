@@ -17,8 +17,35 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pypto.jit.decorator import JITFunction
 
-RUN = runpy.run_path(str(Path(__file__).with_name("test_validation.py")))["run"]
+SUPPORT = runpy.run_path(str(Path(__file__).with_name("test_validation.py")))
+RUN = SUPPORT["run"]
+
+
+@pytest.mark.parametrize("pin_available", [True, False])
+def test_vf_compiler_selection_honors_ptoas_root(tmp_path, monkeypatch, pin_available):
+    # CANN also installs a ptoas launcher on PATH. The acceptance harness must
+    # use the same pinned compiler as production, even when PATH points elsewhere.
+    path_dir = tmp_path / "cann-bin"
+    path_dir.mkdir()
+    fallback = path_dir / "ptoas"
+    fallback.write_text("#!/bin/sh\nexit 99\n")
+    fallback.chmod(0o755)
+    root = tmp_path / "pinned"
+    pinned = root / "bin/ptoas"
+    if pin_available:
+        pinned.parent.mkdir(parents=True)
+        pinned.write_text("#!/bin/sh\nexit 0\n")
+        pinned.chmod(0o755)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setenv("PTOAS_ROOT", str(root))
+    if pin_available:
+        assert SUPPORT["require_ptoas"]() == str(pinned)
+    else:
+        # A missing pin must fail rather than silently validating another compiler.
+        with pytest.raises(AssertionError, match="PTOAS_ROOT"):
+            SUPPORT["require_ptoas"]()
 
 
 def test_nonzero_exit_keeps_diagnostics(tmp_path):
@@ -49,6 +76,8 @@ def test_timeout_keeps_partial_diagnostics(tmp_path):
         "tests/st/runtime/vpto/test_alias_helper_sync.py",
         "tests/st/runtime/vpto/test_tile_helper_sync.py",
         "tests/st/runtime/vpto/test_reg_scope_onboard.py",
+        "tests/st/runtime/vpto/test_simt_gm_copy_onboard.py",
+        "tests/st/runtime/vpto/test_simt_ir_onboard.py",
         "tests/st/runtime/vpto/test_vpto_vf_onboard.py",
         "tests/ut/backend/vpto_vf_validation/test_alias_sync.py",
         "examples/runtime/vf_emitc_vpto.py",
@@ -146,6 +175,54 @@ def test_vf_preflight_retains_device_type_check(monkeypatch, tmp_path, name):
         with pytest.raises(AssertionError, match="requires an A5"):
             fixture.__wrapped__()
     assert name in (tmp_path / "device.txt").read_text()
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_onboard_caller_uses_selected_ptoas(monkeypatch, tmp_path, available):
+    root = Path(__file__).resolve().parents[4]
+    prepare = runpy.run_path(str(root / "tests/st/runtime/vpto/test_vpto_vf_onboard.py"))["_prepare"]
+    pinned = tmp_path / "pinned" / "bin" / "ptoas"
+    shadow = tmp_path / "system" / "ptoas"
+    for executable in (pinned, shadow) if available else (shadow,):
+        executable.parent.mkdir(parents=True)
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PTOAS_ROOT", str(pinned.parent.parent))
+    monkeypatch.setenv("PATH", str(shadow.parent))
+    source = tmp_path / "kernel.cpp"
+    source.write_text("int32_t n = args[3];")
+    (tmp_path / "kernel_config.py").write_text("")
+    config = SimpleNamespace(
+        KERNELS=[
+            {
+                "core_type": "aiv",
+                "signature": [SimpleNamespace(name=name) for name in ("IN", "IN", "INOUT")],
+                "source": str(source),
+            }
+        ]
+    )
+    compiled = object()
+    monkeypatch.setattr(JITFunction, "compile", lambda *args, **kwargs: compiled)
+    monkeypatch.setitem(prepare.__globals__, "read_kernel_config", lambda _: config)
+    monkeypatch.setitem(prepare.__globals__, "package_generated_sources", lambda *args: None)
+    commands = []
+
+    def run(directory, name, command):
+        assert name == "emit-caller"
+        commands.append(command)
+        Path(command[-1]).write_text("selected compiler output")
+
+    support = {"run": run, "make_wrapper": lambda text: text, "require_ptoas": SUPPORT["require_ptoas"]}
+    monkeypatch.setitem(prepare.__globals__, "runpy", SimpleNamespace(run_path=lambda _: support))
+    if available:
+        assert prepare(tmp_path) is compiled
+        assert len(commands) == 1
+        assert commands[0][0] == str(pinned)
+        assert source.read_text() == "selected compiler output"
+    else:
+        with pytest.raises(AssertionError, match="PTOAS_ROOT"):
+            prepare(tmp_path)
+        assert commands == []
 
 
 if __name__ == "__main__":

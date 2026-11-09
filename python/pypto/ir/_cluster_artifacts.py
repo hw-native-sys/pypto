@@ -24,7 +24,7 @@ _LAYOUT_FIELDS = {
     "scalar_slots",
     "window_slots",
     "implicit_outputs",
-    "prefork_requirements",
+    "invocation_requirements",
 }
 _ENTRY_FIELDS = {
     "entry_name",
@@ -242,12 +242,12 @@ def _rows(layout: dict[str, Any], field: str, length: int) -> list[list[Any]]:
 
 
 def _validate_requirements(layout: dict[str, Any], local_count: int) -> None:
-    requirements = layout["prefork_requirements"]
-    _require(isinstance(requirements, list), "layout prefork_requirements must be a list")
+    requirements = layout["invocation_requirements"]
+    _require(isinstance(requirements, list), "layout invocation_requirements must be a list")
     names: set[str] = set()
     contexts = {row[2] for row in layout["scalar_slots"] if row[3] == "comm_ctx"}
     for row in requirements:
-        _require(isinstance(row, list) and bool(row), "invalid layout prefork requirement")
+        _require(isinstance(row, list) and bool(row), "invalid layout invocation requirement")
         kind = row[0]
         if kind == "tensor_storage":
             _require(
@@ -256,16 +256,11 @@ def _validate_requirements(layout: dict[str, Any], local_count: int) -> None:
                 and row[1] not in names
                 and row[2] in _TENSORS
                 and _shape(row[3]),
-                "invalid prefork tensor_storage",
+                "invalid invocation tensor_storage",
             )
             names.add(row[1])
         elif kind == "return_copy_subworker":
             _require(len(row) == 2 and type(row[1]) is int and row[1] == 1, "invalid return copy capacity")
-        elif kind == "inherited_domain_tokens":
-            _require(
-                len(row) == 2 and _integer(row[1], 1) and row[1] == len(contexts),
-                "invalid inherited domain token capacity",
-            )
         elif kind in {"domain_dispatch", "local_domain_tokens"}:
             _require(len(row) == 3, "invalid domain dispatch requirement")
             _require(
@@ -290,10 +285,10 @@ def _validate_requirements(layout: dict[str, Any], local_count: int) -> None:
                 "invalid same_domain context group",
             )
         else:
-            raise ValueError(f"l3_entries unknown layout prefork requirement {kind!r}")
+            raise ValueError(f"l3_entries unknown layout invocation requirement {kind!r}")
     _require(
         len(requirements) == len({json.dumps(row, sort_keys=True) for row in requirements}),
-        "duplicate layout prefork requirements",
+        "duplicate layout invocation requirements",
     )
     _require(
         bool(layout["implicit_outputs"]) == (["return_copy_subworker", 1] in requirements),
@@ -303,7 +298,7 @@ def _validate_requirements(layout: dict[str, Any], local_count: int) -> None:
 
 def _validate_layout(layout: Any, geometry: Any, local_count: int) -> None:
     _require(isinstance(layout, dict) and set(layout) == _LAYOUT_FIELDS, "invalid layout fields")
-    _require(type(layout["version"]) is int and layout["version"] == 1, "unsupported layout version")
+    _require(type(layout["version"]) is int and layout["version"] == 2, "unsupported layout version")
     tensors = _rows(layout, "tensor_slots", 6)
     scalars = _rows(layout, "scalar_slots", 4)
     windows = _rows(layout, "window_slots", 8)
@@ -431,7 +426,7 @@ def validate_entry_records(value: Any, local_device_count: int) -> dict[str, Any
         _require(
             type(entry["minimum_sub_workers"]) is int
             and entry["minimum_sub_workers"] == len(entry["sub_worker_paths"]) + int(copying),
-            "entry minimum SubWorkers disagrees with prefork requirements",
+            "entry minimum SubWorkers disagrees with invocation requirements",
         )
     _require([entry["entry_name"] for entry in entries] == sorted(seen), "entry order must be canonical")
     return value

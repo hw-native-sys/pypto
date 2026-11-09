@@ -30,6 +30,11 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.extract` | source buffer, row offset, column offset, destination buffer | Void |
 | `buffer.matmul` | Left buffer, Right buffer, Acc destination | Void |
 | `buffer.matmul_acc` | Left buffer, Right buffer, Acc buffer read and written | Void |
+| `buffer.cast` | FP16/FP32 source, destination; explicit rounding/saturation attrs | Void |
+| `buffer.cmp`, `buffer.cmps` | FP32 source, tile/scalar comparison operand, packed UINT8 destination | Void |
+| `buffer.sel`, `buffer.sels` | packed predicate, value operands, explicit scratch, destination | Void |
+| `buffer.row_max`, `buffer.row_sum` | FP32 matrix, explicit scratch, column-vector destination | Void |
+| `buffer.row_expand_sub`, `buffer.row_expand_div` | FP32 matrix, column vector, matrix destination | Void |
 
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.
@@ -265,7 +270,7 @@ For rank-2 FP32 operands on Ascend950, `matmul`, `matmul_acc`, and
 FP32; halfway values round to even or away from zero, respectively. Omitting
 the option preserves ordinary FP32 matmul. The setting survives tensor-to-tile
 lowering and automatic L0 tiling and applies only to that operation. This
-requires PTOAS v0.70 or newer and its PTO/EmitC path; it does not enable VPTO
+requires PTOAS v0.72 or newer and its PTO/EmitC path; it does not enable VPTO
 lowering. Other input dtypes, non-2D operands, and Ascend910 are rejected.
 The Torch reference generator rounds both multiplicands using the requested
 mode for Tensor, Tile, and Buffer IR; bias and accumulator values stay FP32.
@@ -330,7 +335,7 @@ yields no value — no phi is materialized on the Acc tile.
 
 A literal predicate is a `ConstBool`, whether the user wrote `init_cond=True`/`False`
 or a pass decided it — e.g. the generated `ko == 0` once
-[`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md) replicates the K-loop.
+[`LowerPipelineLoops`](../passes/33-lower_pipeline_loops.md) replicates the K-loop.
 The emitter also accepts a BOOL-typed `ConstInt`, the spelling of IR built directly
 through the bindings. Either picks an arm outright; an emitter that folded neither
 would double the MADs of every K block.
@@ -338,7 +343,7 @@ would double the MADs of every K block.
 The fold is therefore conditional on the trip count, not universal: at
 `16x512x64` the pipelined loop disappears and the emitted PTO has no `scf.if`,
 while at `16x2048x64` the main loop survives with replica indices `ko` and
-`ko + 256`. [`Simplify`](../passes/05-simplify.md#provable-comparison-in-an-operand)
+`ko + 256`. [`Simplify`](../passes/06-simplify.md#provable-comparison-in-an-operand)
 decides replica 1's predicate (`ko == -256`) false from the loop's static range and
 folds it to a `ConstBool`, while replica 0's `ko == 0` is a genuine runtime test —
 it seeds the accumulator — so exactly one `scf.if` remains.
@@ -461,7 +466,7 @@ quantization alignment and memory-planner requirements.
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first. |
 | Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
-| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/14-lower_composite_ops.md). |
+| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md). |
 
 ### Tile-only GEMV family (A2/A3)
 
@@ -528,7 +533,7 @@ Before its matching store clears the flag, a final result may only be
 forwarded through a plain SSA alias; no other operation may consume it. This
 also prevents a view or copy from hiding an unsafe accumulator reuse. A complete pair inside a branch or loop body is supported; carrying a
 pending final result across a branch, loop, or scope boundary is rejected.
-[`AutoTileMatmulL0`](../passes/19-auto_tile_matmul_l0.md) preserves this contract:
+[`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) preserves this contract:
 intermediate K blocks use `Partial`, and the last block alone uses `Final`.
 Explicit phases do not remove other automatically inserted synchronization.
 
@@ -929,10 +934,33 @@ Core definitions live in `include/pypto/core/common.h` and `include/pypto/ir/`; 
 
 ## Register operations
 
-The `reg.*` P0 schemas use category `RegOp`, explicit argument effects and
+The `reg.*` schemas use category `RegOp`, explicit argument effects and
 register-region requirements. See [register operations](../language/06-register-operations.md)
 for dtype, memory, conversion and ownership contracts.
 
 Ordinary RegOp extensions include unary, integer bitwise/shifts, vector-scalar,
 scalar compare, dynamic lane selection and single-lane reductions; see the linked
 register operations contract for exact dtype and mask restrictions.
+
+Fused arithmetic (`expdif`, `axpy`, `mula`, `lrelu`, `prelu`), paired results
+(`mull`, `addc`, `subc`, `addcs`, `subcs`, `intlv`, `dintlv`) and indexed UB
+access (`gather`, `scatter`) extend the initial register set. Paired operations
+declare output arity two and return a `TupleType`; scatter returns an alias of
+its destination Tile and declares argument 0 as written.
+
+`interpret_cast`, `chist`, `dhist` and `create_group_mask` are pure register
+operations with one result. Reinterpretation preserves bit capacity; histogram
+results match the UINT16 accumulator rather than the UINT8 source; grouped
+masks derive their lane count from static group geometry.
+
+## Scalar SIMT operations
+
+`pypto.ir.op.simt` exposes typed coordinate queries, `lane_id`, and scalar
+`load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and
+belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation,
+launch, cache-policy, and validation contracts.
+
+Warp collectives include `vote_all/any/uni`, `vote_ballot`,
+`shuffle_idx/up/down/bfly` and `redux_add/min/max`. See the
+[collective contracts](11-simt.md#warp-collectives) for active-lane participation,
+supported types and shuffle widths.

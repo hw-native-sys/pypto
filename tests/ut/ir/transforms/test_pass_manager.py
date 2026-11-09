@@ -25,6 +25,7 @@ TENSOR_ONLY_PASSES = [
 ]
 
 TENSOR_OPTIMIZATION_PASSES = [
+    "OutlineSimtScopes",
     "InlineFunctions",
     "UnrollLoops",
     "CtrlFlowTransform",
@@ -54,6 +55,8 @@ TENSOR_OPTIMIZATION_PASSES = [
     "LowerPipelineLoops",
     "CanonicalizeIOOrder",
     "MaterializeTensorStrides",
+    "MaterializeSimtOutputs",
+    "SpecializeSimtHelpers",
     "InitMemRef",
     "SelectBufferIRFunctions",
     "MaterializeSemanticAliases",

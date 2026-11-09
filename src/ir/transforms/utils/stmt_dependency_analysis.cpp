@@ -61,17 +61,21 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
   // Last stmt in the region that defined each Var (tracked by raw pointer).
   std::unordered_map<const Var*, const Stmt*> last_def;
 
-  // A register region can read or mutate storage also named by older Tile
+  // A register region or SIMT launch can read or mutate storage also named by older Tile
   // SSA values or overlapping views. Until general memory SSA exists, preserve
-  // the entire region's source order whenever it contains register operations.
+  // the entire region's source order whenever it contains these storage effects.
   // This covers ordinary Tile accesses, unknown aliases, nested loops and WAW,
   // without a quadratic pairwise alias scan. Def-use-only graphs are otherwise
   // unchanged. The extra chain has at most N-1 edges.
-  class RegisterPresence final : public IRVisitor {
+  class StorageEffectPresence final : public IRVisitor {
    public:
     bool found = false;
 
    protected:
+    void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+      found = true;
+      IRVisitor::VisitStmt_(op);
+    }
     void VisitStmt_(const RegScopeStmtPtr& op) override {
       found = true;
       IRVisitor::VisitStmt_(op);
@@ -83,8 +87,8 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
       }
       IRVisitor::VisitExpr_(call);
     }
-  } registers;
-  registers.VisitStmt(region);
+  } effects;
+  effects.VisitStmt(region);
   const Stmt* previous = nullptr;
 
   for (const auto& stmt : graph.stmts) {
@@ -108,7 +112,7 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
       last_def[v] = raw_stmt;
     }
 
-    if (registers.found && previous) graph.predecessors[raw_stmt].insert(previous);
+    if (effects.found && previous) graph.predecessors[raw_stmt].insert(previous);
     previous = raw_stmt;
   }
 
@@ -194,6 +198,17 @@ class InOutUseDisciplineChecker : public IRVisitor {
     if (op->var_) {
       dead_.erase(op->var_.get());
       dead_origin_.erase(op->var_.get());
+    }
+  }
+
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (const auto& dim : op->block_dims_) VisitExpr(dim);
+    for (const auto& arg : op->args_) VisitExpr(arg);
+    // Tile inputs retain value semantics; GM inputs are reference handles.
+    // Neither becomes a dead SSA value through this device-side launch.
+    for (const auto& result : op->results_) {
+      dead_.erase(result.get());
+      dead_origin_.erase(result.get());
     }
   }
 

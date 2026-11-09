@@ -316,6 +316,27 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
   return if_stmt;
 }
 
+void IRBuilder::BeginSimtScope(const std::vector<ExprPtr>& block_dims, const Span& span) {
+  CHECK(!context_stack_.empty()) << "SIMT scope requires an enclosing function";
+  context_stack_.push_back(std::make_unique<SimtScopeContext>(block_dims, span));
+}
+
+StmtPtr IRBuilder::EndSimtScope(const Span& end_span, const std::vector<VarPtr>& private_scalars) {
+  CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SIMT_SCOPE)
+      << "EndSimtScope requires an open SIMT scope";
+  const auto* context = static_cast<SimtScopeContext*>(CurrentContext());
+  const auto& stmts = context->GetStmts();
+  StmtPtr body = stmts.size() == 1 ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
+  const auto& begin = context->GetBeginSpan();
+  Span span(begin.filename_, begin.begin_line_, begin.begin_column_, end_span.begin_line_,
+            end_span.begin_column_);
+  auto scope = std::make_shared<SimtScopeStmt>(context->GetBlockDims(), body, span, private_scalars);
+  context_stack_.pop_back();
+  ApplyPendingLeadingComments(scope);
+  if (!context_stack_.empty()) CurrentContext()->AddStmt(scope);
+  return scope;
+}
+
 void IRBuilder::BeginRegScope(const Span& span) { BeginScope(ScopeKind::Reg, span); }
 
 StmtPtr IRBuilder::EndRegScope(const Span& span) {
@@ -337,32 +358,20 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
     }
   }
   CHECK_SPAN(inside, span) << "EmitReg requires RegScope";
-  // Keep raw builder calls equivalent to the public DSL wrappers. The wrappers
-  // materialize these defaults before creating a Call, so omitting them here
-  // would make print/parse roundtrips structurally different despite identical
-  // op inference.
-  auto normalized_kwargs = kwargs;
-  auto has_kwarg = [&normalized_kwargs](const std::string& key) {
-    return std::any_of(normalized_kwargs.begin(), normalized_kwargs.end(),
-                       [&key](const auto& item) { return item.first == key; });
+  // The registry normalizes defaults for both Builder and raw IR calls.
+  const auto op = OpRegistry::GetInstance().GetOp(op_name);
+  auto has_kwarg = [&kwargs](const std::string& key) {
+    return std::any_of(kwargs.begin(), kwargs.end(), [&key](const auto& item) { return item.first == key; });
   };
-  if ((op_name == "reg.add" || op_name == "reg.sub" || op_name == "reg.mul" || op_name == "reg.div" ||
-       op_name == "reg.minimum" || op_name == "reg.maximum") &&
-      !has_kwarg("pmode")) {
-    normalized_kwargs.emplace_back("pmode", std::string("zero"));
-  }
-  if (op_name == "reg.index_gen" && !has_kwarg("order")) {
-    normalized_kwargs.emplace_back("order", std::string("ascending"));
-  }
-  auto call = OpRegistry::GetInstance().Create(op_name, args, normalized_kwargs, span);
+  auto call = OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
   auto var = Var(name, call->GetType(), span);
   // The DSL treats a same-dtype conversion without modifiers as a no-op and
   // returns its operand. Preserve that canonical form for raw builder users.
   bool no_op_convert = false;
-  if (op_name == "reg.convert" && args.size() == 1 && !has_kwarg("rounding") && !has_kwarg("saturate")) {
+  if (IsOp(op, "reg.convert") && args.size() == 1 && !has_kwarg("rounding") && !has_kwarg("saturate")) {
     auto source = std::dynamic_pointer_cast<const RegType>(args[0]->GetType());
     const DataType* dtype = nullptr;
-    for (const auto& [key, value] : normalized_kwargs) {
+    for (const auto& [key, value] : kwargs) {
       if (key == "dtype") dtype = std::any_cast<DataType>(&value);
     }
     no_op_convert = source != nullptr && dtype != nullptr && source->dtype_ == *dtype;
@@ -401,7 +410,8 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
 
 StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
                             std::vector<WindowBufferPtr> slots,
-                            std::vector<std::pair<std::string, std::any>> extra_attrs) {
+                            std::vector<std::pair<std::string, std::any>> extra_attrs,
+                            std::vector<std::string> engines) {
   CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
       << "Cannot end scope: not inside a scope context at " << end_span.to_string();
 
@@ -481,9 +491,9 @@ StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
                                                           std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::CommDomain:
-      scope_stmt = std::make_shared<const CommDomainScopeStmt>(std::move(devices), std::move(slots),
-                                                               std::move(name_hint), body, combined_span,
-                                                               std::vector<std::string>{}, std::move(attrs));
+      scope_stmt = std::make_shared<const CommDomainScopeStmt>(
+          std::move(devices), std::move(slots), std::move(name_hint), body, combined_span,
+          std::vector<std::string>{}, std::move(attrs), std::move(engines));
       break;
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has

@@ -80,7 +80,7 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
   return !(a.last_use_point <= b.def_point || b.last_use_point <= a.def_point);
 }
 
-// Cross-group shed objective (see docs/en/dev/passes/37-memory_reuse.md, pipeline-stage guard): when a
+// Cross-group shed objective (see docs/en/dev/passes/39-memory_reuse.md, pipeline-stage guard): when a
 // space overflows at every group's max-affordable depth,
 // the packer lowers one pipeline group's double-buffering depth by a residue. The MaxRelief heuristic
 // selects **which** group loses a level — lower score sheds first; ties always break by lowest group id
@@ -105,6 +105,8 @@ struct PackedBuffer {
   uint64_t capacity = 0;
   bool pinned = false;
   BufferRootCompatibility::Root buffer_root;
+  bool contains_retired_scratch = false;
+  bool all_retired_scratch_peers = true;
 };
 
 }  // namespace
@@ -297,15 +299,30 @@ ReuseMap IdentifyReuseOpportunities(
     return in_workspace_set(interval, hazard.looping_written_workspaces,
                             hazard.looping_written_workspace_bases);
   };
-  auto workspace_blocks = [&is_written_workspace, &is_looping_written_workspace](
-                              const LifetimeInterval& workspace, const LifetimeInterval& other) {
-    // Inside a loop the directional argument collapses: the back edge re-writes
-    // the workspace from the scalar pipe on iteration i+1 while iteration i's
-    // vector reads of anything sharing that buffer -- the TSELS `dst`, say, and
-    // whatever consumes it -- can still be in flight. Lifetime order within one
-    // iteration proves nothing about the next, so a looping workspace takes an
-    // exclusive buffer.
-    if (is_looping_written_workspace(workspace)) return true;
+  // Preserve affordable layouts: even safe sharing can add an unnecessary
+  // cross-pipe dependency. Only a capacity-relief retry enables retirement.
+  bool allow_retired_scratch_reuse = false;
+  auto workspace_blocks = [&hazard, &allow_retired_scratch_reuse, &is_written_workspace,
+                           &is_looping_written_workspace](const LifetimeInterval& workspace,
+                                                          const LifetimeInterval& other) {
+    if (is_looping_written_workspace(workspace)) {
+      const Var* base = TileMemRefBase(workspace.variable);
+      const Var* other_base = TileMemRefBase(other.variable);
+      if (!allow_retired_scratch_reuse || hazard.retirable_pipeline_scratch_bases.count(base) == 0 ||
+          hazard.retired_scratch_peer_bases.count(other_base) == 0) {
+        return true;
+      }
+      // Full allocation lifetimes include every alias and drain use. A later
+      // allocation is safe only outside all common repeating scopes: a parent's
+      // next iteration can otherwise rewrite scratch while DMA still reads it.
+      if (other.def_point <= workspace.last_use_point) return true;
+      const auto wi = hazard.allocation_loop_ranges.find(base);
+      const auto oi = hazard.allocation_loop_ranges.find(other_base);
+      if (wi == hazard.allocation_loop_ranges.end() || oi == hazard.allocation_loop_ranges.end()) return true;
+      const auto& a = wi->second;
+      const auto& b = oi->second;
+      return a.first != 0 && b.first != 0 && a.first <= b.second && b.first <= a.second;
+    }
     return is_written_workspace(workspace) && other.last_use_point <= workspace.def_point;
   };
 
@@ -491,6 +508,9 @@ ReuseMap IdentifyReuseOpportunities(
   auto alloc_policy = pack_be ? pack_be->CreateMemoryAllocatorPolicy() : nullptr;
 
   for (auto& [space_binding, indices_binding] : by_space) {
+    // Each space starts with the original predicate, independently of whether
+    // an earlier space needed and accepted the retired-scratch retry.
+    allow_retired_scratch_reuse = false;
     // Bind the structured bindings to regular local references: the lambdas below capture by `[&]`,
     // and capturing a structured binding name directly is only a C++20 extension (project is C++17).
     auto& space = space_binding;
@@ -561,15 +581,31 @@ ReuseMap IdentifyReuseOpportunities(
     auto pack = [&](bool allow_subranges) {
       std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
+        const Var* base = TileMemRefBase(lifetimes[idx].variable);
+        const bool retired_scratch =
+            allow_retired_scratch_reuse && hazard.retirable_pipeline_scratch_bases.count(base) != 0;
+        const bool local_peer =
+            allow_retired_scratch_reuse && hazard.retired_scratch_peer_bases.count(base) != 0;
         if (is_pinned[idx]) {
-          buffers.push_back(
-              PackedBuffer{{PackedMember{idx, 0}}, lifetimes[idx].size, true, buffer_roots[idx]});
+          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}},
+                                         lifetimes[idx].size,
+                                         true,
+                                         buffer_roots[idx],
+                                         retired_scratch,
+                                         local_peer});
           continue;
         }
         const auto& cand = lifetimes[idx];
         bool placed = false;
         for (PackedBuffer& buffer : buffers) {
           if (buffer.pinned || cand.size > buffer.capacity) continue;
+          // Even disjoint subranges acquire the arena's symbolic allocation
+          // base. Keep unknown families out of a retired-scratch arena in both
+          // insertion orders, without rescanning all prior members.
+          if ((buffer.contains_retired_scratch && !local_peer) ||
+              (retired_scratch && !buffer.all_retired_scratch_peers)) {
+            continue;
+          }
           // A disjoint subrange is still the same symbolic byte root. Dynamic
           // metadata requires a compatible full-capacity typed allocation even
           // when the original lifetimes do not overlap.
@@ -619,11 +655,14 @@ ReuseMap IdentifyReuseOpportunities(
                                       });
           buffer.members.insert(pos, placement);
           buffer.buffer_root = BufferRootCompatibility::Merge(buffer.buffer_root, buffer_roots[idx]);
+          buffer.contains_retired_scratch |= retired_scratch;
+          buffer.all_retired_scratch_peers &= local_peer;
           placed = true;
           break;
         }
         if (!placed) {
-          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, cand.size, false, buffer_roots[idx]});
+          buffers.push_back(PackedBuffer{
+              {PackedMember{idx, 0}}, cand.size, false, buffer_roots[idx], retired_scratch, local_peer});
         }
       }
       return buffers;
@@ -658,6 +697,23 @@ ReuseMap IdentifyReuseOpportunities(
       // Preserve the legacy layout whenever it fits. Only an actual overflow
       // enables subdivision, before sacrificing software-pipeline depth.
       retry_with_subranges();
+      if (cap != 0 && footprint(buffers) > cap &&
+          std::any_of(indices.begin(), indices.end(), [&](size_t index) {
+            return hazard.retirable_pipeline_scratch_bases.count(TileMemRefBase(lifetimes[index].variable)) !=
+                   0;
+          })) {
+        // One retry at unchanged stage depths. FFD is not monotone under a
+        // relaxed predicate: accept only a complete fit, otherwise restore the
+        // original packing and predicate before the existing shedding path.
+        auto original = std::move(buffers);
+        allow_retired_scratch_reuse = true;
+        buffers = pack(/*allow_subranges=*/false);
+        retry_with_subranges();
+        if (footprint(buffers) > cap) {
+          buffers = std::move(original);
+          allow_retired_scratch_reuse = false;
+        }
+      }
       // Bound the shed re-packs so the loop stays within the pass-complexity budget
       // (.claude/rules/pass-complexity.md). A legitimate shed converges in Σ_g(F_g−1) steps over the few
       // co-live groups, but the pipeline-group count can grow with generated IR, so cap the full re-packs

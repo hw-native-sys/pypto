@@ -27,6 +27,7 @@ def test_function_type_enum():
         ir.FunctionType.Spmd,
         ir.FunctionType.Inline,
         ir.FunctionType.Graph,
+        ir.FunctionType.SIMT,
     ]
     assert len(all_types) == len(set(all_types))
     # Distinctness alone cannot notice a member missing from the list above, so
@@ -246,6 +247,7 @@ def test_function_type_serialization():
     non_opaque_types = [
         ir.FunctionType.Orchestration,
         ir.FunctionType.Graph,
+        ir.FunctionType.SIMT,
         ir.FunctionType.InCore,
         ir.FunctionType.AIC,
         ir.FunctionType.AIV,
@@ -256,8 +258,9 @@ def test_function_type_serialization():
     for func_type in non_opaque_types:
         with ib.function("test_func", span=span, type=func_type) as f:
             x = f.param("x", ir.ScalarType(dtype), span=span)
-            f.return_type(ir.ScalarType(dtype))
-            ib.return_stmt(x, span=span)
+            if func_type != ir.FunctionType.SIMT:
+                f.return_type(ir.ScalarType(dtype))
+                ib.return_stmt(x, span=span)
 
         original = f.get_result()
         serialized = ir.serialize(original)

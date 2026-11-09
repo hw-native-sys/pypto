@@ -65,6 +65,7 @@ from .syntax_helpers import (
     is_empty_body,
     is_pl_call,
     is_pld_call,
+    is_simt_launch,
 )
 from .type_resolver import (
     TypeResolver,
@@ -1065,6 +1066,11 @@ class ASTParser:
         Args:
             stmt: Assign AST node
         """
+        if len(stmt.targets) == 1 and is_simt_launch(stmt.value):
+            assert isinstance(stmt.value, ast.Call)
+            self._parse_simt_launch(stmt.value, stmt.targets[0])
+            return
+
         # Intercept ``buf = pld.[tensor.]alloc_window_buffer(...)``: the alloc
         # op derives its ``name`` kwarg from the LHS, and the LHS name must be
         # globally unique within the @pl.program.
@@ -1538,6 +1544,58 @@ class ASTParser:
             return_expr = self.parse_expression(stmt.value)
             self.builder.return_stmt([return_expr], span)
 
+    def _parse_simt_launch(self, call: ast.Call, target: ast.expr | None) -> None:
+        """Read the canonical launch spelling emitted by the IR printer."""
+        span = self.span_tracker.get_span(call)
+        if not call.args or not isinstance(call.args[0], ast.Attribute):
+            raise ParserSyntaxError("SIMT launch requires self.<helper> as its first argument", span=span)
+        ref = call.args[0]
+        if not isinstance(ref.value, ast.Name) or ref.value.id != "self":
+            raise ParserSyntaxError("SIMT launch requires self.<helper>", span=span)
+        callee = self.bindings.global_vars.get(ref.attr)
+        if callee is None:
+            raise ParserSyntaxError(f"Unknown SIMT helper '{ref.attr}'", span=span)
+        args = [self.parse_expression(arg) for arg in call.args[1:]]
+        kwargs = {kw.arg: kw.value for kw in call.keywords}
+        if len(kwargs) != len(call.keywords) or set(kwargs) != {"block_dims", "result_param_indices"}:
+            raise ParserSyntaxError(
+                "Canonical SIMT launch requires block_dims and result_param_indices", span=span
+            )
+        dims_node = kwargs["block_dims"]
+        indices_node = kwargs["result_param_indices"]
+        if not isinstance(dims_node, (ast.Tuple, ast.List)) or not isinstance(
+            indices_node, (ast.Tuple, ast.List)
+        ):
+            raise ParserSyntaxError("SIMT dimensions and result indices must be sequences", span=span)
+        dims = [self.parse_expression(dim) for dim in dims_node.elts]
+        indices: list[int] = []
+        for node in indices_node.elts:
+            if (
+                not isinstance(node, ast.Constant)
+                or type(node.value) is not int
+                or not 0 <= node.value < len(args)
+            ):
+                raise ParserSyntaxError("SIMT result indices must be integer argument positions", span=span)
+            indices.append(node.value)
+        targets = [] if target is None else list(target.elts) if isinstance(target, ast.Tuple) else [target]
+        if len(targets) != len(indices) or any(not isinstance(item, ast.Name) for item in targets):
+            raise ParserSyntaxError(
+                "SIMT launch needs one named result per result parameter index", span=span
+            )
+        results: list[ir.Var] = []
+        for item, index in zip(targets, indices):
+            assert isinstance(item, ast.Name)
+            previous = self.scope_manager.lookup_var(item.id)
+            if isinstance(previous, (ir.Var, ir.IterArg)) and not self.scope_manager.strict_ssa:
+                result = previous
+            else:
+                result = ir.Var(item.id, args[index].type, span)
+            results.append(result)
+        launch = ir.SimtLaunchStmt(callee, dims, args, results, indices, span)
+        for result in results:
+            self.scope_manager.define_var(result.name_hint, result, span=span)
+        self.builder.emit(launch)
+
     def parse_evaluation_statement(self, stmt: ast.Expr) -> None:
         """Parse evaluation statement (EvalStmt).
 
@@ -1547,6 +1605,11 @@ class ASTParser:
         Args:
             stmt: Expr AST node
         """
+        if is_simt_launch(stmt.value):
+            assert isinstance(stmt.value, ast.Call)
+            self._parse_simt_launch(stmt.value, None)
+            return
+
         # Intercept compile-time-only constructs (produce no IR)
         if is_dsl_call(stmt, "static_print"):
             self._handle_static_print(stmt)

@@ -118,10 +118,18 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 共享发布成功。运行目录及私有构建树随编译对象保持有效；没有在线清理或淘汰 API。
 离线删除缓存条目或锁文件前须停止所有消费者。
 
-缓存策略由 JIT 在选择编译对象前消费，不传入编译器选项或逐次启动选项。私有输出通常
-位于工作目录的 `build_output`；若它位于缓存根内，则使用不可预测、权限为 0700 的临时
+缓存策略由 JIT 在选择编译对象前消费，不传入编译器选项或逐次启动选项。
+`PYPTO_PROG_BUILD_DIR` 指定新建私有构建和运行目录的父目录；未设置或为空时使用
+工作目录的 `build_output`。此设置不强制编译，也不改变产物身份。应在启动服务前设置；
+已有缓存对象保留原运行目录，新恢复对象使用当前设置，不复制共享产物，其 `output_dir`
+仍指向共享产物。若私有父目录位于缓存根内，则使用不可预测、权限为 0700 的临时
 父目录隔离私有构建和运行输出，不对 `TMPDIR` 执行写探测。此回退父目录可能在缓存命中
 时创建，并随编译对象保留，不自动清理。
+
+逐次调用显式请求输出、dump 或编译 profiling 时，仍实际执行编译。
+`PYPTO_EMIT_DEBUG_RUNNER` 和 `PYPTO_REBUILD_FROM_PTO` 仅在显式启用时请求重新编译；
+`0`、`false`、`no`（忽略大小写及两端空白）关闭此请求。已设置为空字符串时，保留
+原有的启用/默认行为。关闭调试脚本生成，不会删除不可变共享产物中已存在的脚本。
 
 ## 工具链支持与开销
 
@@ -174,8 +182,22 @@ Python 根目录和原生扩展位置来自实际导入结果，支持 `pip inst
 `PYPTO_CACHE_IDENTITY=content` 保留之前的 Linux 依赖清单：ELF 依赖闭包、编译器资源、
 隐式 include、链接输入和 Python/native runtime 内容。它仍保留原有 PTOAS/CANN
 报告版本及经验证 PTO-ISA revision 的快捷路径，不代表对所有厂商文件逐字节审计。
-不支持的启动器、sanitizer 构建以及 `CPATH`、`LD_PRELOAD` 等未建模隐式覆盖会绕过
+不支持的启动器、sanitizer 构建以及 `CPATH`、`COMPILER_PATH`、`GCC_EXEC_PREFIX`、
+`LIBRARY_PATH` 等未建模隐式搜索覆盖会绕过
 缓存。两种策略均通过 `cache_stats().last_bypass_reason` 报告原因，身份相互隔离。
+
+两种策略均在以下部署契约下支持 `LD_PRELOAD` 和 `LD_AUDIT`：注入可以用于内存分配或
+观测，但不能改变编译器选择、编译输入或生成语义。不维护库名白名单，也不新增预加载
+库发现或哈希。元数据探测移除这两个变量及加载器跟踪/性能分析设置（`LD_DEBUG`、
+`LD_DEBUG_OUTPUT`、`LD_PROFILE`、`LD_PROFILE_OUTPUT`），避免注入依赖和诊断输出进入
+工具链身份。服务及实际编译保留原环境。这只规范化探测，不会卸载父进程已加载的库，
+也不是对任意注入代码的隔离。
+
+如果注入确实影响编译，部署方必须通过 `CacheConfig.extra_fingerprint` 或
+`PYPTO_CACHE_EPOCH` 标识全部相关输入，并在输入变化时更新该标识，否则应禁用缓存。
+标识应在缓存查找之外预先准备；它是调用方声明，不是自动依赖审计。`CPATH`、
+`LD_LIBRARY_PATH` 等搜索变量不能当成加载器诊断处理：前者仍不支持，后者保留现有的
+选择及身份处理。额外源码文件仍逐请求读取，不要为了开启复用而把 allocator 库加入其中。
 
 缓存产物仍进行完整 manifest/内容校验。新打包的产物携带 `kernel_config.json`，READY
 发现无需执行 Python 配置。恢复复用 lookup 已验证的 manifest，直接构造原生 callable，

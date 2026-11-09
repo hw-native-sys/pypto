@@ -154,17 +154,24 @@ try:
 
     worker = Worker(level=3, num_sub_workers=2)
     producer_handle = worker.register(producer)
-    copy_handle = worker.register(support._copy_return_tensor)
-    state = support._EmbeddedEntryState(
-        generated.node._pypto_embedded_layout, callables={}, sub_ids={}, world_size=1,
-        prepared_tensors={}, domain_provider=None, return_copy_callable=copy_handle,
-    )
-    generated.node._pypto_embedded_state = state
-    # Registered callable, state and named HOST storage all exist before fork.
+    from simpler.callable_identity import build_python_import_descriptor, compute_callable_hashid
+    from simpler.remote_l3_session import _install_manifest_inner_registry
+
+    callback = support._copy_return_tensor
+    module, name = callback.__module__, callback.__qualname__
+    _install_manifest_inner_registry({"inner_l3_worker": [{
+        "kind": "PYTHON_IMPORT",
+        "hashid": compute_callable_hashid(build_python_import_descriptor(module, name)),
+        "target": f"{module}:{name}",
+    }]}, worker)
+    generated.node._pypto_embedded_bindings = {
+        "module": "entry", "world_size": 1, "chips": {}, "sub_workers": {}, "domain_bindings": [],
+    }
     worker.init()
 
     routed = []
     packed = []
+    sources = []
     node_handle = object()
     def io_arg(binding, tensor, direction):
         routed.append((tensor, direction))
@@ -172,8 +179,10 @@ try:
     caller._io_arg = io_arg
 
     def orchestration(orch, args, config):
+        actual_source = source if strided else support._alloc_invocation_tensor(orch, "fp32", (2, 2))
+        sources.append(actual_source)
         producer_args = TaskArgs()
-        producer_args.add_tensor(source, TensorArgType.INOUT)
+        producer_args.add_tensor(actual_source, TensorArgType.INOUT)
         producer_args.add_tensor(ready, TensorArgType.INPUT)
         orch.submit_sub(producer_handle, producer_args)
 
@@ -186,20 +195,19 @@ try:
 
         caller.cluster(
             SimpleNamespace(submit_next_level=submit_node), args, config,
-            tensors={"x__ssa_v0": source, "count__ssa_v0": 3, "result__ssa_v0": destination},
+            tensors={"x__ssa_v0": actual_source, "count__ssa_v0": 3, "result__ssa_v0": destination},
             callables={"node": [node_handle]}, nodes=[7], node_sizes=[1], node_bindings=[object()],
             _keep=[], _retain=False,
         )
         buffers[2].shm.buf[0] = 1
 
     worker.run(orchestration, args=None, config=CallConfig())
-    state.complete_invocation()
     assert len(packed) == 1
     assert packed[0].tensor_count() == 2 and packed[0].scalar_count() == 1
-    assert packed[0].tensor(0) == source and packed[0].tensor(1) == destination
+    assert packed[0].tensor(0) == sources[0] and packed[0].tensor(1) == destination
     assert packed[0].scalar(0) == 3
-    assert routed == [(source, TensorArgType.INPUT), (destination, TensorArgType.OUTPUT_EXISTING)]
-    assert packed[0].tensor(0).buffer == source.buffer
+    assert routed == [(sources[0], TensorArgType.INPUT), (destination, TensorArgType.OUTPUT_EXISTING)]
+    assert packed[0].tensor(0).buffer == sources[0].buffer
     assert packed[0].tensor(1).buffer == destination.buffer
     # Source and destination views use different offsets. The final partial
     # element in a 35-byte backing must not make torch.frombuffer reject it.
@@ -243,7 +251,6 @@ try:
         assert bytes(buffers[1].shm.buf) == bytes(expected)
     finally:
         registry.close()
-    state.close()
     assert not any(name == "pypto" or name.startswith("pypto.") for name in sys.modules)
     print("C3B_RETURN_COPY_CPU_" + sys.argv[1].upper() + "_PASS")
 finally:
@@ -303,6 +310,7 @@ _DOMAIN_DESCRIPTOR_CPU_PROOF = r"""
 import importlib.abc
 import importlib.util
 import sys
+from types import SimpleNamespace
 
 class RejectPyPTO(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -341,14 +349,17 @@ try:
     assert support._ordering_domain_key(local) == ("local", 23)
     assert support._domain_context(local, 0) is context
 
-    frame = support._EmbeddedFrame({}, None)
-    local_token = torch.zeros(1, dtype=torch.int32).share_memory_()
-    global_token = torch.zeros(1, dtype=torch.int32).share_memory_()
-    frame.local_specs["node"] = ((0,), {0: local_token})
+    allocated = []
+    def allocate(shape, dtype):
+        item = create_host_shared_buffer(64, buffer.identity.owner_instance_id, 2 + len(allocated))
+        allocated.append(item)
+        return item
+    frame = support._EmbeddedFrame({}, SimpleNamespace(_worker=SimpleNamespace(alloc_shared_tensor=allocate)))
+    frame.local_workers["node"] = (0,)
     frame.bind_local_domain(local, "node", ("values",))
-    assert frame.local_tokens[23][0] is local_token
     tokens = frame.ordering_tokens((local, local), 0)
-    assert len(tokens) == 1 and tokens[0] is local_token
+    assert len(tokens) == 1 and len(allocated) == 1
+    local_token = tokens[0]
 
     # The overlapping runtime IDs must not apply global slot translation to
     # an owning local handle, even though it also exposes domain_id/generation.
@@ -362,7 +373,6 @@ try:
     )
     assert support._ordering_domain_key(imported) == ("global", 91, 7)
     assert not imported.committed
-    frame.domain_tokens[(91, 7)] = {0: global_token}
     for operation in (
         lambda: support._domain_context(imported, 0),
         lambda: frame.ordering_tokens((imported,), 0),
@@ -380,12 +390,15 @@ try:
     imported._committed = True
     assert support._domain_context(imported, 0) is imported_context
     tokens = frame.ordering_tokens((local, imported, local, imported), 0)
-    assert len(tokens) == 2 and tokens[0] is local_token and tokens[1] is global_token
+    assert len(tokens) == 2 and tokens[0] is local_token and tokens[1] != local_token
+    assert len(allocated) == 2
     imported_tensor = frame.window_tensor(imported, 0, "values", shapes=(1,), dtype=DataType.INT32)
     assert imported_tensor.buffer == buffer.to_descriptor()
     assert not any(name == "pypto" or name.startswith("pypto.") for name in sys.modules)
     print("REAL_DOMAIN_DESCRIPTOR_CPU_PASS")
 finally:
+    for item in allocated:
+        item.close()
     buffer.close()
 """
 

@@ -19,6 +19,7 @@ Uses assert_structural_equal to compare pass output with expected IR.
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.language.parser import parse_program
 from pypto.pypto_core import passes as _core_passes
 
 
@@ -417,6 +418,53 @@ class TestFlattenCallInWhileCondition:
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "pl.simt.vote_any(n > 0)",
+        "pl.simt.vote_any(pl.simt.shuffle_idx(n, 0) > 0)",
+        "pl.simt.vote_ballot(n > 0) != 0",
+        "not pl.simt.vote_all(n <= 0)",
+    ],
+)
+def test_simt_while_condition_keeps_calls_in_loop(condition):
+    """Condition calls use loop IterArgs and must execute on every check."""
+    before = parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.SIMT)
+    def helper(self, dst: pl.InOut[pl.Tensor[[32], pl.INT32]]):
+        n = pl.simt.lane_id()
+        while {condition}:
+            pl.simt.store(dst, (n,), pl.cast(pl.simt.redux_max(n) + 1, pl.INT32))
+            n = pl.cast(n - 1, pl.INT32)
+        return
+""")
+    before = passes.convert_to_ssa()(before)
+    props = _core_passes.IRPropertySet()
+    props.insert(_core_passes.IRProperty.NoNestedCalls)
+    # Exempting conditions must not also exempt nested calls in the body.
+    assert _core_passes.PropertyVerifierRegistry.verify(props, before)
+    after = passes.flatten_call_expr()(before)
+    props.insert(_core_passes.IRProperty.SSAForm)
+    props.insert(_core_passes.IRProperty.UseAfterDef)
+    assert not _core_passes.PropertyVerifierRegistry.verify(props, after)
+
+    def condition_of(program):
+        loops = []
+
+        class Collector(ir.IRVisitor):
+            def visit_while_stmt(self, op):
+                loops.append(op)
+                super().visit_while_stmt(op)
+
+        Collector().visit_program(program)
+        assert len(loops) == 1
+        return loops[0].condition
+
+    ir.assert_structural_equal(condition_of(before), condition_of(after))
 
 
 class TestFlattenCallInForRange:

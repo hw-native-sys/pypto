@@ -110,6 +110,9 @@ void BindIRBuilder(nb::module_& m) {
           "    RuntimeError: If not inside a function context\n"
           "    ValueError: If a key is already present (attrs are unique-keyed)")
 
+      .def("begin_simt_scope", &IRBuilder::BeginSimtScope, nb::arg("block_dims"), nb::arg("span"))
+      .def("end_simt_scope", &IRBuilder::EndSimtScope, nb::arg("span"),
+           nb::arg("private_scalars") = std::vector<VarPtr>{})
       .def("begin_reg_scope", &IRBuilder::BeginRegScope, nb::arg("span"),
            "Begin an implicit-capture register region")
       .def("end_reg_scope", &IRBuilder::EndRegScope, nb::arg("span"), "End a register region")
@@ -311,12 +314,13 @@ void BindIRBuilder(nb::module_& m) {
       .def(
           "end_scope",
           [](IRBuilder& self, const Span& end_span, std::vector<int64_t> devices,
-             std::vector<WindowBufferPtr> slots, const nb::object& attrs) {
+             std::vector<WindowBufferPtr> slots, const nb::object& attrs, std::vector<std::string> engines) {
             return self.EndScope(end_span, std::move(devices), std::move(slots),
-                                 ConvertAttrsFromPython(attrs, false));
+                                 ConvertAttrsFromPython(attrs, false), std::move(engines));
           },
           nb::arg("end_span"), nb::arg("devices") = std::vector<int64_t>{},
           nb::arg("slots") = std::vector<WindowBufferPtr>{}, nb::arg("attrs") = nb::none(),
+          nb::arg("engines") = std::vector<std::string>{},
           "End building a scope statement.\n\n"
           "Finalizes the scope statement and returns it.\n\n"
           "Args:\n"

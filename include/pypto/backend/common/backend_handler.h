@@ -12,7 +12,9 @@
 #ifndef PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
 #define PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -120,6 +122,13 @@ struct L0CostModel {
                                  ///< bf16 and other <=2-byte inputs are 1 pass (unaffected).
 };
 
+/// Target SIMT resource envelope. Absent means scalar SIMT is unsupported.
+struct SimtLimits {
+  std::array<int, 3> max_block_dims;
+  int max_threads;
+  std::vector<std::pair<int, int>> register_tiers;
+};
+
 /**
  * @brief Backend-specific behavior dispatch interface
  *
@@ -148,6 +157,7 @@ class BackendHandler {
                                                      const std::string& /*artifact*/) const {
     return false;
   }
+  [[nodiscard]] virtual std::optional<SimtLimits> GetSimtLimits() const { return std::nullopt; }
 
   // ---------------------------------------------------------------------------
   // Codegen hooks
@@ -221,9 +231,10 @@ class BackendHandler {
    * parameter and never read it, so the request is silently dropped and the
    * result is bit-identical to the default algorithm.
    *
-   * `tile.rsqrt` is not covered by this hook: it opts into high precision by
-   * taking a scratch tile rather than by carrying `precisionType`, and that
-   * form is implemented on every backend.
+   * `tile.rsqrt` is not covered by this hook. Its explicit `high_precision`
+   * attribute requires scratch and emits `precisionType` for A5. A2/A3 honour
+   * the request through their scratch overload even though they ignore the
+   * selector, so this hook must not produce a false warning for rsqrt.
    */
   [[nodiscard]] virtual bool HonorsHighPrecisionAlgorithm() const = 0;
 

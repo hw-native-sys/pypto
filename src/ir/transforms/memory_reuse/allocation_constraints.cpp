@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -18,6 +19,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -25,6 +27,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -32,6 +35,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
@@ -39,9 +43,12 @@
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
+#include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 #include "src/ir/transforms/memory_reuse/storage.h"
@@ -321,6 +328,15 @@ class ForbidAliasCollector : public IRVisitor {
         } else {
           for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
         }
+        // Buffer conversion contracts constrain packing before lowering. This
+        // is scoped to selected kernels, preserving legacy Tile allocation.
+        if (views_) {
+          if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
+            for (const auto& pair : backend::BufferConversionAliasPairs(*conversion)) {
+              if (pair.second == conversion->input_count && !pair.exact_allowed) forbid_arg(pair.first);
+            }
+          }
+        }
         // Narrowing is also unsafe on A2/A3: TCVT writes every row's head
         // before reading the tails, clobbering earlier rows' unread source.
         if (op_predicates::CastRequiresDisjointSource(call, !IsA5Target())) {
@@ -370,6 +386,264 @@ class ForbidAliasCollector : public IRVisitor {
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
+/// Prove the deliberately small storage-only retirement subset in one walk.
+/// Facts use original allocation bases, so every alias participates regardless
+/// of the lifetime representative. Unknown references and control-flow edges
+/// reject the whole family; no general alias or loop-carry proof is attempted.
+class ScratchRetirementCollector : public IRVisitor {
+ public:
+  ScratchRetirementCollector(HazardInputs& inputs, const LifetimeAnalysisResult& lifetimes)
+      : inputs_(inputs), lifetimes_(lifetimes) {}
+
+  void Run(const FunctionPtr& func, const std::set<const Var*>& declared_bases) {
+    VisitFunction(func);  // Parameters and reference-valued attrs are rejecting uses.
+    for (const auto& [member, base] : members_) {
+      if (base && (definitions_.count(member) == 0 || lifetimes_.var_liveness.count(member) == 0)) {
+        families_[base].eligible = false;
+      }
+    }
+    const auto allocation_sizes = memref_collectors::CollectAllocSizes(func->body_);
+    for (const auto& [base, family] : families_) {
+      const auto allocation = allocation_sizes.find(base);
+      if (!family.eligible || !family.root || declared_bases.count(base) ||
+          allocation == allocation_sizes.end() ||
+          allocation->second != GetDefinedMemRef(As<TileType>(family.window->GetType()))->size_) {
+        inputs_.retirable_pipeline_scratch_bases.erase(base);
+        continue;
+      }
+      inputs_.retired_scratch_peer_bases.insert(base);
+      if (!family.create_root || !family.scratch_only) inputs_.retirable_pipeline_scratch_bases.erase(base);
+    }
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    definitions_.insert(op->var_.get());
+    VisitUse(op->var_, Use::Definition);
+    const auto call = As<Call>(op->value_);
+    auto source = AsVarLike(op->value_);
+    if (call && IsImmutableAlias(call) && !call->args_.empty()) source = AsVarLike(call->args_[0]);
+    const bool full_alias = source && FullWindowAlias(op->var_, source);
+    // A missing/different result base must reject the source too: later alias
+    // fixup can retarget the result, but cannot repair a retired source family.
+    if (source && !full_alias) VisitUse(source, Use::Reject);
+    if (const Var* base = TileMemRefBase(op->var_)) {
+      auto& family = families_[base];
+      if (source) {
+        if (!full_alias) family.eligible = false;
+      } else if (call && IsFreshProducer(call)) {
+        if (family.root && family.root != op->var_.get()) family.eligible = false;
+        family.root = op->var_.get();
+        family.create_root = IsOp(call, "tile.create");
+      } else {
+        family.eligible = false;
+      }
+    }
+    if (source && !call) {
+      VisitUse(source, Use::Alias);
+    } else {
+      active_call_ = call.get();
+      VisitExpr(op->value_);
+      active_call_ = nullptr;
+    }
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    const auto call = As<Call>(op->expr_);
+    // Unbound views have no tracked result on which to prove a full window.
+    active_call_ = call && !IsImmutableAlias(call) ? call.get() : nullptr;
+    IRVisitor::VisitStmt_(op);
+    active_call_ = nullptr;
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    const auto* entry = LookupOpEntry(op->op_);
+    const bool synchronous = op.get() == active_call_ && entry &&
+                             entry->GetIRStage() == OpIRStage::Functional && !entry->GetCrossCoreRole();
+    for (size_t index = 0; index < op->args_.size(); ++index) {
+      Use use = Use::Reject;
+      // An explicit workspace must not become a peer through Functional's
+      // ordinary-input fallback, even in a disjoint subrange of the arena.
+      const bool written_workspace = entry && entry->IsWorkspaceArg(index) && entry->MayWriteArg(index);
+      if (synchronous && !written_workspace) {
+        if (entry->GetLaneInvariantArgKind(index) == LaneInvariantArg::Scratch &&
+            !entry->IsWorkspaceArg(index)) {
+          use = Use::Scratch;
+        } else if (index == 0 && IsImmutableAlias(op)) {
+          use = Use::Alias;
+        } else if (entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional ||
+                   (index == 0 && (IsLegacyReduction(op) || IsOp(op, "tile.store")))) {
+          use = Use::Payload;
+        }
+      }
+      VisitUse(op->args_[index], use);
+    }
+    // Attributes and kwargs are real Expr edges but have no tracked payload
+    // lifetime contract here, even on an otherwise recognized operation.
+    VisitAttributes(op->attrs_);
+    VisitAttributes(op->kwargs_);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    VisitAttributes(op->kwargs_);
+  }
+
+  void VisitExpr_(const IterArgPtr& op) override {
+    VisitVarLike_(op);
+    // A carry can still have a different base from its init before fixup.
+    VisitUse(op->initValue_, Use::Reject);
+  }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    for (const auto& value : op->value_) VisitUse(value, Use::Reject);
+  }
+
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    for (const auto& value : op->value_) VisitUse(value, Use::Reject);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    const int previous = EnterLoop();
+    VisitAttributes(op->attrs_);
+    IRVisitor::VisitStmt_(op);
+    current_loop_ = previous;
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    const int previous = EnterLoop();
+    IRVisitor::VisitStmt_(op);
+    current_loop_ = previous;
+  }
+
+  void VisitVarLike_(const VarPtr& var) override {
+    const auto tile = As<TileType>(var->GetType());
+    const Var* base = TileMemRefBase(var);
+    const bool first = tile && members_.emplace(var.get(), base).second;
+    if (base) {
+      auto& family = families_[base];
+      auto& range = inputs_.allocation_loop_ranges[base];
+      if (current_loop_ != 0) {
+        range.first = range.first == 0 ? current_loop_ : std::min(range.first, current_loop_);
+        range.second = std::max(range.second, current_loop_);
+      }
+      if (first) {
+        if (!IsCompleteStaticTile(tile) || As<IterArg>(var)) family.eligible = false;
+        if (family.window && !FullWindowAlias(var, family.window)) family.eligible = false;
+        if (!family.window) family.window = var;
+      }
+      if (use_ == Use::Reject) family.eligible = false;
+      if (use_ == Use::Payload) family.scratch_only = false;
+    }
+    // The base visitor does not walk TileType metadata. These are unknown
+    // reference contexts, including metadata on an unallocated/rejected peer.
+    if (first) {
+      for (const auto& dim : tile->shape_) VisitUse(dim, Use::Reject);
+      if (tile->tile_view_) {
+        const auto& view = *tile->tile_view_;
+        for (const auto& dim : view.valid_shape) VisitUse(dim, Use::Reject);
+        for (const auto& stride : view.stride) VisitUse(stride, Use::Reject);
+        if (view.start_offset) VisitUse(view.start_offset, Use::Reject);
+      }
+      if (tile->memref_ && *tile->memref_) {
+        const auto& ref = *tile->memref_;
+        VisitUse(ref->byte_offset_, Use::Reject);
+        if (ref->slot_index_ && *ref->slot_index_) VisitUse(*ref->slot_index_, Use::Reject);
+      }
+    }
+    IRVisitor::VisitVarLike_(var);
+  }
+
+ private:
+  enum class Use { Reject, Definition, Alias, Scratch, Payload };
+  struct Family {
+    VarPtr window;
+    const Var* root = nullptr;
+    bool eligible = true;
+    bool create_root = false;
+    bool scratch_only = true;
+  };
+
+  // Legacy reductions predate Functional access evidence. Their existing
+  // registry Scratch contract is sufficient for this narrow synchronous case.
+  static bool IsLegacyReduction(const CallPtr& call) {
+    return IsOp(call, "tile.row_sum") || IsOp(call, "tile.row_max") || IsOp(call, "tile.row_min") ||
+           IsOp(call, "tile.row_prod") || IsOp(call, "tile.col_sum");
+  }
+
+  static bool IsFreshProducer(const CallPtr& call) {
+    const auto* entry = LookupOpEntry(call->op_);
+    return entry && entry->GetIRStage() == OpIRStage::Functional && !entry->GetCrossCoreRole() &&
+           !op_predicates::OutputInheritsSourceBuffer(call->op_->name_) &&
+           (IsOp(call, "tile.create") || IsLegacyReduction(call) ||
+            entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional);
+  }
+
+  static bool IsImmutableAlias(const CallPtr& call) {
+    const auto* entry = LookupOpEntry(call->op_);
+    // NoAccess alone also includes descriptor setters such as set_validshape.
+    return entry && entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::NoAccess &&
+           (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view") || IsOp(call, "tile.slice") ||
+            IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view"));
+  }
+
+  static bool IsCompleteStaticTile(const TileTypePtr& tile) {
+    if (!tile || !tile->memref_ || !*tile->memref_ || tile->shape_.empty() || tile->shape_.size() > 2) {
+      return false;
+    }
+    const auto& ref = *tile->memref_;
+    if (ref->is_pinned_ || ref->slot_count_ != 1 || ref->slot_index_ || ref->size_ == 0 ||
+        transform_utils::EvalConstInt(ref->byte_offset_) != 0) {
+      return false;
+    }
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    if (view.start_offset && transform_utils::EvalConstInt(view.start_offset) != 0) return false;
+    if (!view.stride.empty() || view.valid_shape.size() != tile->shape_.size()) return false;
+    for (size_t i = 0; i < tile->shape_.size(); ++i) {
+      const auto dim = transform_utils::EvalConstInt(tile->shape_[i]);
+      if (!dim || *dim <= 0 || transform_utils::EvalConstInt(view.valid_shape[i]) != dim) return false;
+    }
+    return true;
+  }
+
+  static bool FullWindowAlias(const VarPtr& lhs, const VarPtr& rhs) {
+    const auto a = As<TileType>(lhs->GetType());
+    const auto b = As<TileType>(rhs->GetType());
+    return a && b && a->memref_ && b->memref_ && memory_reuse::SamePhysicalWindow(*a->memref_, *b->memref_) &&
+           TileBufSignature::FromTileType(*a).IsFullSlotAlias(TileBufSignature::FromTileType(*b));
+  }
+
+  void VisitUse(const ExprPtr& expr, Use use) {
+    const Use previous = use_;
+    // Only a direct operand has the recognized role. A tuple, scalar expression
+    // or other wrapper must not smuggle an untracked tile reference through it.
+    use_ = AsVarLike(expr) ? use : Use::Reject;
+    VisitExpr(expr);
+    use_ = previous;
+  }
+
+  void VisitAttributes(const std::vector<std::pair<std::string, std::any>>& attrs) {
+    for (const auto& [key, value] : attrs) {
+      ForEachAttrExpr(value, [this](const ExprPtr& expr) { VisitUse(expr, Use::Reject); });
+    }
+  }
+
+  int EnterLoop() {
+    const int previous = current_loop_;
+    if (current_loop_ == 0) current_loop_ = next_loop_++;
+    return previous;
+  }
+
+  int current_loop_ = 0;
+  int next_loop_ = 1;
+  Use use_ = Use::Reject;
+  const Call* active_call_ = nullptr;
+  HazardInputs& inputs_;
+  const LifetimeAnalysisResult& lifetimes_;
+  std::unordered_map<const Var*, Family> families_;
+  std::unordered_map<const Var*, const Var*> members_;
+  std::unordered_set<const Var*> definitions_;
+};
+
 /// Collect every tile operand an operator declares as a WRITTEN WORKSPACE.
 ///
 /// `set_workspace_arg(i)` means "compiler-supplied scratch: the hardware writes
@@ -389,14 +663,14 @@ class ForbidAliasCollector : public IRVisitor {
 class WrittenWorkspaceCollector : public IRVisitor {
  public:
   void VisitExpr_(const CallPtr& op) override {
-    Record(op->op_, op->args_);
+    Record(op->op_, op->args_, true);
     IRVisitor::VisitExpr_(op);
   }
 
   // The registry keys both call-like kinds the same way; classifying only Call
   // would silently skip an operator launched through pl.submit.
   void VisitExpr_(const SubmitPtr& op) override {
-    Record(op->op_, op->args_);
+    Record(op->op_, op->args_, false);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -422,9 +696,10 @@ class WrittenWorkspaceCollector : public IRVisitor {
   std::unordered_set<const Var*> TakeBases() { return std::move(bases_); }
   std::unordered_set<const Var*> TakeLoopingVars() { return std::move(looping_workspaces_); }
   std::unordered_set<const Var*> TakeLoopingBases() { return std::move(looping_bases_); }
+  std::unordered_set<const Var*> TakePipelineScratchBases() { return std::move(pipeline_scratch_bases_); }
 
  private:
-  void Record(const OpPtr& op, const std::vector<ExprPtr>& args) {
+  void Record(const OpPtr& op, const std::vector<ExprPtr>& args, bool ordinary_call) {
     // LookupOpEntry, not a name lookup: a Submit's callee is a GlobalVar naming
     // a *function*, and resolving that against the operator registry would hand
     // a user function whose name collides with an operator that operator's
@@ -446,7 +721,12 @@ class WrittenWorkspaceCollector : public IRVisitor {
       workspaces_.insert(workspace.get());
       // Record the allocation base as well -- see `written_workspace_bases`.
       const Var* base = TileMemRefBase(workspace);
-      if (base != nullptr) bases_.insert(base);
+      if (base != nullptr) {
+        bases_.insert(base);
+        if (pipeline_scratch && !explicit_workspace && ordinary_call) {
+          pipeline_scratch_bases_.insert(base);
+        }
+      }
       if (loop_depth_ > 0) {
         looping_workspaces_.insert(workspace.get());
         if (base != nullptr) looping_bases_.insert(base);
@@ -460,6 +740,7 @@ class WrittenWorkspaceCollector : public IRVisitor {
   std::unordered_set<const Var*> bases_;
   std::unordered_set<const Var*> looping_workspaces_;
   std::unordered_set<const Var*> looping_bases_;
+  std::unordered_set<const Var*> pipeline_scratch_bases_;
 };
 
 /// True only for Ascend910 AIV split-mode functions, which need the load +
@@ -630,19 +911,12 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
   return pinned_allocations;
 }
 
-}  // namespace
-
-AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
-                                                          const LifetimeAnalysisResult& lifetimes,
-                                                          const char* consumer) {
-  AllocationConstraintAnalysis result;
-  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
-  for (const auto& [base, size] : result.declared_allocation_sizes) {
-    static_cast<void>(size);
-    result.declared_allocation_bases.insert(base);
-  }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
-
+// Share the registry/backend access facts without requiring the lifetime
+// analyzer's per-member copies of complete alias groups. An empty group map
+// retains individual output keys, which selection planning folds by base.
+void CollectAccessConstraints(const FunctionPtr& func,
+                              const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+                              AllocationConstraintAnalysis& result) {
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {
     HazardInputCollector collector;
@@ -656,13 +930,42 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   result.target_hazard_inputs.written_workspace_bases = workspace_collector.TakeBases();
   result.target_hazard_inputs.looping_written_workspaces = workspace_collector.TakeLoopingVars();
   result.target_hazard_inputs.looping_written_workspace_bases = workspace_collector.TakeLoopingBases();
+  result.target_hazard_inputs.retirable_pipeline_scratch_bases =
+      workspace_collector.TakePipelineScratchBases();
 
   const auto* context = PassContext::Current();
   std::optional<BufferViewAnalysis> views;
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
-  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr);
+  ForbidAliasCollector forbid_collector(sharing_groups, views ? &*views : nullptr);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
+}
+
+}  // namespace
+
+AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
+                                                          const LifetimeAnalysisResult& lifetimes,
+                                                          const char* consumer) {
+  AllocationConstraintAnalysis result;
+  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
+  for (const auto& [base, size] : result.declared_allocation_sizes) {
+    static_cast<void>(size);
+    result.declared_allocation_bases.insert(base);
+  }
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+  CollectAccessConstraints(func, lifetimes.var_sharing_groups, result);
+  // Retirement needs tracked lifetimes and declared-allocation exclusions.
+  // Keep this proof out of the shared, lifetime-free storage-selection path.
+  if (!result.target_hazard_inputs.retirable_pipeline_scratch_bases.empty()) {
+    ScratchRetirementCollector retirement(result.target_hazard_inputs, lifetimes);
+    retirement.Run(func, result.declared_allocation_bases);
+  }
+  return result;
+}
+
+AllocationConstraintAnalysis memory_reuse::CollectStorageSelectionConstraints(const FunctionPtr& function) {
+  AllocationConstraintAnalysis result;
+  CollectAccessConstraints(function, {}, result);
   return result;
 }
 

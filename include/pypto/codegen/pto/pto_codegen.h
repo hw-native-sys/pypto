@@ -78,18 +78,21 @@ std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 std::vector<ir::VarPtr> CollectTensorShapeDynVars(const ir::FunctionPtr& func);
 
 /// Backend artifacts, not IR nodes. The adapter retains capture order. The
-/// caller retains Tiles for PTOAS sync; the separate VPTO helper receives UB
-/// pointers. Effects conservatively cover each entire captured Tile footprint.
+/// caller retains storage handles for PTOAS sync; the separate VPTO helper
+/// receives UB/GM pointers. Effects conservatively cover the entire storage.
 struct VFHelper {
+  /// Execution family; both VF and SIMT exports use the device helper bundle.
+  std::string kind = "vf";
   std::string symbol;
   std::string adapter_symbol;
   std::string source;
   std::vector<std::string> parameter_types;
   std::vector<std::string> caller_parameter_types;
   std::vector<std::string> parameter_effects;
-  /// Helper argument -> caller argument; memory uses the lowest static UB address.
+  /// Helper argument -> caller argument; VF collapses memory onto one UB base,
+  /// while SIMT retains each storage pointer and scalar argument in ABI order.
   std::vector<size_t> parameter_indices;
-  /// Per-caller-argument byte offset from the shared UB base (zero for scalars).
+  /// VF byte offsets from its shared UB base; zero for scalars and SIMT pointers.
   std::vector<int64_t> capture_byte_offsets;
 };
 
@@ -129,7 +132,10 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Warn that `high_precision=True` will not run on the target backend.
    *
-   * Call this wherever a `precisionType` attribute is written. Two emitters do:
+   * Call this for precision attributes governed by HonorsHighPrecisionAlgorithm.
+   * rsqrt is excluded: high_precision=True supplies scratch for A2/A3 and a
+   * selector for A5, so both backends honour it regardless of this hook.
+   * Two emitters handle the remaining precision attributes:
    * the Tile op callbacks in `pto_ops_elementwise.cpp` and the Buffer IR
    * emitter in `pto_buffer_codegen.cpp`. Both lower the same `tile.div` /
    * `tile.log` / `tile.recip` onto the same `pto.*` op, so a backend that
@@ -830,6 +836,8 @@ class PTOCodegen : public CodegenBase {
   void VisitStmt_(const ir::WhileStmtPtr& op) override;
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
+  void VisitStmt_(const ir::SimtScopeStmtPtr& op) override;
+  void VisitStmt_(const ir::SimtLaunchStmtPtr& op) override;
 
   /// Emit a registered RegOp as typed VMI SSA; return false for ordinary calls
   /// so assignment emission can fall back to the normal Tile/scalar path.
@@ -840,6 +848,9 @@ class PTOCodegen : public CodegenBase {
   /// Accessed Tile variable -> UB pointer SSA hoisted before pto.vecscope.
   /// Store-result aliases may share one pointer; cleared after each RegScope.
   std::map<const ir::Var*, std::string> reg_addresses_;
+  /// Tuple SSA values have no aggregate MLIR representation. Keep each result
+  /// independently addressable, including when only one projection is consumed.
+  std::map<const ir::Var*, std::vector<std::string>> reg_tuple_values_;
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
   bool separate_vf_ = false;
@@ -848,6 +859,16 @@ class PTOCodegen : public CodegenBase {
   std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
   void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
   void EmitVFAdapter(const VFHelper& helper);
+  /// SIMT functions borrow storage through a pointer ABI, never Tile values.
+  bool inside_simt_function_ = false;
+  std::map<std::string, ir::FunctionPtr> simt_functions_;
+  std::map<std::string, std::vector<std::string>> simt_effects_;
+  std::map<std::pair<std::string, std::vector<std::string>>, size_t> simt_artifacts_;
+  std::set<std::string> used_simt_functions_;
+  std::string GenerateSimtFunction(const ir::FunctionPtr& function);
+  std::string SimtParameterType(const ir::TypePtr& type);
+  bool TryEmitSimtCall(const ir::CallPtr& call);
+  std::string SimtElementOffset(const ir::ExprPtr& storage, const ir::MakeTuplePtr& indices);
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;
@@ -882,6 +903,7 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::FloatDivPtr& op) override;
   void VisitExpr_(const ir::MinPtr& op) override;
   void VisitExpr_(const ir::MaxPtr& op) override;
+  void VisitExpr_(const ir::PowPtr& op) override;
   // Unary
   void VisitExpr_(const ir::NotPtr& op) override;
   void VisitExpr_(const ir::NegPtr& op) override;
@@ -925,7 +947,8 @@ class PTOCodegen : public CodegenBase {
   void GenerateBufferFunction(const ir::FunctionPtr& func);
   bool TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);
   std::string EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataType target);
-  std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs, const ir::ExprPtr& destination);
+  std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs, const ir::ExprPtr& destination,
+                                  const std::string& attributes = "");
 
   /**
    * @brief Collect deterministic GM slot buffer byte offsets for frontend pipe ids in a module.

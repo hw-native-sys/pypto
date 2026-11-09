@@ -348,7 +348,9 @@ def test_orchestration_codegen_precondition_entry_point():
             return y
 
     program = passes.classify_iter_arg_carry()(
-        passes.materialize_runtime_scopes()(passes.derive_call_directions()(passes.convert_to_ssa()(Input)))
+        passes.materialize_runtime_scopes()(
+            passes.derive_call_directions()(passes.normalize_return_order()(passes.convert_to_ssa()(Input)))
+        )
     )
     for func in program.functions.values():
         if func.func_type == pl.FunctionType.Orchestration:

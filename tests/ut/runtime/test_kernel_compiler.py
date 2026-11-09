@@ -10,6 +10,7 @@
 """Build ownership, command compatibility and failure cleanup regressions."""
 
 import importlib
+import os
 import struct
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION
 
 
 @pytest.fixture
@@ -298,23 +300,50 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
-@pytest.mark.parametrize("bridge", [False, True])
-def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monkeypatch, tmp_path, bridge):
+@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "bridge", "simt_asm"])
+def test_vpto_compilation_links_helpers_and_rejects_bridge(
+    compiler_module, monkeypatch, tmp_path, helper_kind
+):
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_DEBUG", "libs")
     compiler = compiler_module.KernelCompiler("a5")
     monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    # A load-dependent writeback needs no additional frontend synchronization
+    # proof. Forward the LLVM produced by PTOAS unchanged to Bisheng.
+    writeback = """declare <64 x float> @llvm.hivm.vldsx1.v64f32(ptr addrspace(6), i32, i32, i32)
+declare void @llvm.hivm.vstsx1.v64f32(<64 x float>, ptr addrspace(6), i32, i32, i32, <256 x i1>)
+define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
+  %acc = call <64 x float> @llvm.hivm.vldsx1.v64f32(ptr addrspace(6) %base, i32 0, i32 0, i32 0)
+  %result = fadd <64 x float> %acc, %acc
+  call void @llvm.hivm.vstsx1.v64f32(<64 x float> %result, ptr addrspace(6) %base,
+    i32 0, i32 2, i32 0, <256 x i1> %mask)
+  ret void
+}
+"""
+    llvm = {
+        "empty": "define void @helper() {\n  ret void\n}\n",
+        "ssa_writeback": writeback,
+        "bridge": "declare void @bridge()",
+        "simt_asm": 'define simt_entry void @helper() {\n call void asm sideeffect "nop", ""()\n ret void\n}',
+    }[helper_kind]
     helpers = [tmp_path / "first.pto", tmp_path / "second.pto"]
     for helper in helpers:
         helper.write_text("module {}")
     commands = []
 
     def run(command, **kwargs):
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        assert environment["LD_PRELOAD"] == "liballocator.so:"
+        assert environment["LD_DEBUG"] == "libs"
         commands.append(command)
         output = Path(command[command.index("-o") + 1])
         if command[0] == "ptoas":
-            output.write_text(
-                "declare void @bridge()" if bridge else "define void @helper() {\n  ret void\n}\n"
-            )
+            output.write_text(llvm)
         else:
+            if command[0] == "bisheng":
+                assert Path(command[command.index("ir") + 1]).read_text() == llvm
             if command[0] == "linker":
                 order = next(
                     arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering-file=")
@@ -325,8 +354,9 @@ def test_vpto_compilation_links_helpers_and_rejects_bridge(compiler_module, monk
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), vpto_sources=list(map(str, helpers)))
-    if bridge:
-        with pytest.raises(ValueError, match="not self-contained: bridge"):
+    if helper_kind in ("bridge", "simt_asm"):
+        error = "not self-contained: bridge" if helper_kind == "bridge" else "VF_SIMT launch size"
+        with pytest.raises(ValueError, match=error):
             compiler.compile_incore(_source(tmp_path), **kwargs)
         assert not any(command[0] == "linker" for command in commands)
     else:
@@ -368,16 +398,50 @@ def test_vpto_cache_tracks_contents_options_and_versions(compiler_module, monkey
     identities.append(key())
     monkeypatch.setattr(compiler_module._vpto, "LINK_SYMBOL_ORDER", ("another_entry",))
     identities.append(key())
-    monkeypatch.setattr(compiler_module._vpto_sync, "VERSION", "next-contract")
+    monkeypatch.setattr(compiler_module._vpto, "PTOAS_FLAGS", ("--enable-vecscope-mem-bar=true",))
     identities.append(key())
     assert len(set(identities)) == 7
+
+
+def test_vpto_identity_excludes_loader_diagnostics(compiler_module, monkeypatch, tmp_path):
+    ignored = ("LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_PROFILE", "LD_PROFILE_OUTPUT")
+    for name in ignored:
+        monkeypatch.setenv(name, "runtime-only")
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path / "libraries"))
+    compiler = compiler_module.KernelCompiler("a5")
+    monkeypatch.setattr(compiler, "_vpto_toolchain", lambda: ("ptoas", "bisheng"))
+    monkeypatch.setattr(compiler_module, "check_ptoas_version", lambda _: "ptoas 0.72")
+    calls = []
+
+    def run(command, **kwargs):
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        calls.append(dict(environment))
+        # Loader tracing includes a child PID, so inherited diagnostics would
+        # give the cache lookup and publication different identities.
+        diagnostics = f"{len(calls)}: loader trace" if environment.get("LD_DEBUG") else ""
+        return SimpleNamespace(stdout="bisheng 1", stderr=diagnostics)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    helper = tmp_path / "helper.pto"
+    helper.write_text("module {}")
+    first = compiler.vpto_cache_identity((str(helper),), "aiv")
+    assert compiler.vpto_cache_identity((str(helper),), "aiv") == first
+    assert len(calls) == 2
+    for environment in calls:
+        assert all(name not in environment for name in ignored)
+        assert environment["LD_LIBRARY_PATH"] == str(tmp_path / "libraries")
+    assert all(os.environ[name] == "runtime-only" for name in ignored)
 
 
 def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, monkeypatch, tmp_path):
     caller = tmp_path / "caller"
     launcher = caller / "tools/ptoas"
     launcher.parent.mkdir(parents=True)
-    launcher.write_text("#!/bin/sh\nprintf 'ptoas 0.70\\n'\n")
+    # Keep this path-resolution test valid when the supported compiler advances.
+    version_output = f"ptoas {PTOAS_MIN_VERSION.removeprefix('v')}"
+    launcher.write_text(f"#!/bin/sh\nprintf '{version_output}\\n'\n")
     launcher.chmod(0o755)
     monkeypatch.chdir(caller)
     monkeypatch.setenv("PTOAS_ROOT", "tools")
@@ -388,7 +452,26 @@ def test_vpto_toolchain_preserves_relative_launcher_across_cwd(compiler_module, 
     result = subprocess.run(
         [ptoas, "--version"], cwd=compiler.project_root, capture_output=True, text=True, check=True
     )
-    assert result.stdout.strip() == "ptoas 0.70"
+    assert result.stdout.strip() == version_output
+
+
+def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypatch, tmp_path):
+    monkeypatch.setenv("LD_PRELOAD", "liballocator.so:")
+    monkeypatch.setenv("LD_AUDIT", "libobserver.so")
+
+    def run(command, **kwargs):
+        # Metadata probes may normalize their environment; compilation may not.
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        assert environment["LD_PRELOAD"] == "liballocator.so:"
+        assert environment["LD_AUDIT"] == "libobserver.so"
+        Path(command[command.index("-o") + 1]).write_bytes(b"binary")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    compiler = compiler_module.KernelCompiler("a2a3")
+    assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == b"binary"
 
 
 if __name__ == "__main__":

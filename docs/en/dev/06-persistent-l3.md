@@ -149,9 +149,13 @@ allocate their domains directly from the invocation's arguments. Preparation
 snapshots the configuration so later changes to the original mapping have no
 effect. Sharing does not enter JIT compilation identity.
 
-The session installs one bounded aggregate source package with a canonical
-runtime helper and one prefork token pool per node. All programs use the same
-actual retained R1 domain and its `(domain_id, generation)` ordering state.
+The session installs one bounded source package with a canonical runtime
+helper and each L3 entry's callable and domain bindings. Simpler registers the
+packaged callables before workers start. The generated entry binds its arguments
+at invocation time and obtains intermediate tensors and ordering tokens from
+Simpler's shared allocator. Dispatches on the same domain and worker share a
+token within that invocation. Programs can share one retained R1 domain
+identified by `(domain_id, generation)`.
 Slot translation selects the real runtime Buffer; it does not wrap or rename
 the imported global-domain view. Simpler verifies the source package digest
 before importing it. Cold schema-4 artifacts preserve the domain descriptors;
@@ -163,10 +167,10 @@ use chunks of at most 8 MiB. Fresh allocations need no additional reset.
 With `reset_persistent_windows=False`, data, signals and user epochs all retain
 their previous contents. Kernel protocols using credits or signals must manage
 their own reset/epoch progression. The compute-then-TLOAD example needs only
-the run fences. Ordering-token storage remains stable across both programs.
+the run fences.
 
 Normal close explicitly releases retained domains after the last fence.
-Failure close drains the worker tree before dropping domain, I/O or prefork
+Failure close drains the worker tree before dropping domain and I/O
 references. An uncertain close retains its journals, refuses new runs, and
 permits a close retry. CLUSTER sessions expose synchronous `run` only.
 Their retention uses R1's public `retain_after_run` contract and does not

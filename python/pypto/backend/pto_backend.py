@@ -51,6 +51,8 @@ from pypto._function_attrs import (
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
+from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
+from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -206,6 +208,8 @@ def _run_ptoas(
     Locates ptoas via the PTOAS_ROOT env var, probing ``$PTOAS_ROOT/ptoas``
     (pre-v0.51 launcher), ``$PTOAS_ROOT/ptoas.sh`` (v0.55+ bundled-CPython
     launcher) then ``$PTOAS_ROOT/bin/ptoas``, or PATH fallback.
+    ``PYPTO_PTOAS_TIMEOUT_SECONDS`` overrides the default 60-second deadline
+    for each kernel. It must be a positive integer.
 
     Args:
         pto_path: Path to the input .pto file
@@ -214,6 +218,7 @@ def _run_ptoas(
 
     Raises:
         FileNotFoundError: If the ptoas binary cannot be found
+        ValueError: If PYPTO_PTOAS_TIMEOUT_SECONDS is not a positive integer
         RuntimeError: If ptoas is older than the pinned minimum, or compilation fails
     """
     ptoas_bin = _find_ptoas_binary()
@@ -231,6 +236,7 @@ def _run_ptoas(
         )
     _check_ptoas_version(ptoas_bin)
 
+    timeout = _get_ptoas_timeout()
     cmd = [ptoas_bin, pto_path, "-o", output_path]
     if ptoas_flags:
         cmd.extend(ptoas_flags)
@@ -241,10 +247,13 @@ def _run_ptoas(
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
+        raise RuntimeError(
+            f"ptoas compilation timed out after {exc.timeout}s; "
+            f"set {_PTOAS_TIMEOUT_ENV} to adjust the per-kernel deadline"
+        ) from exc
     if result.returncode != 0:
         status = f"signal {-result.returncode}" if result.returncode < 0 else f"exit code {result.returncode}"
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
@@ -1347,6 +1356,10 @@ class _CallCollector(_ir_core.IRVisitor):
             self.callee_names.append(op.op.name)
         super().visit_call(op)
 
+    def visit_simt_launch_stmt(self, op: _ir_core.SimtLaunchStmt) -> None:
+        self.callee_names.append(op.callee.name)
+        super().visit_simt_launch_stmt(op)
+
     def visit_expr(self, expr: _ir_core.Expr) -> None:
         # ``Submit`` has no dedicated Python visitor hook, so collect its callee
         # here on the generic expr dispatch before delegating. ``super()`` routes
@@ -1741,9 +1754,12 @@ def _emit_unit(
                     "core_type": "aiv",
                     "bridge": False,
                     "synchronization": "ptoas-insert-sync",
-                    "effect_scope": "whole-tile",
+                    "effect_scope": "whole-storage"
+                    if any(h.kind == "simt" for h in unit.helpers)
+                    else "whole-tile",
                     "helpers": [
                         {
+                            "kind": h.kind,
                             "symbol": h.symbol,
                             "adapter_symbol": h.adapter_symbol,
                             "parameter_types": h.parameter_types,
@@ -1766,7 +1782,7 @@ def _emit_unit(
         if unit.helpers and not skip_ptoas:
             ptoas_bin = _find_ptoas_binary()
             if ptoas_bin is None:
-                raise RuntimeError("VF Tile adapter compilation requires PTOAS; set PTOAS_ROOT.")
+                raise RuntimeError("VF/SIMT adapter compilation requires PTOAS; set PTOAS_ROOT.")
             _check_ptoas_version(ptoas_bin)
         if unit.is_group:
             _emit_group_output(
@@ -2277,6 +2293,7 @@ def _collect_chip_task_functions(
         _ir_core.FunctionType.Group,
         _ir_core.FunctionType.Spmd,
         _ir_core.FunctionType.Graph,
+        _ir_core.FunctionType.SIMT,
     )
 
     result: list[_ir_core.Function] = [orch_func]
@@ -2358,10 +2375,35 @@ def _generate_pto_bundle(
     )
     if bundle.helpers:
         if is_group:
-            raise ValueError("VF execution does not yet support grouped functions")
-        if memory_planner != _passes.MemoryPlanner.PYPTO:
+            raise ValueError("VF/SIMT execution does not yet support grouped functions")
+        if any(h.kind == "vf" for h in bundle.helpers) and memory_planner != _passes.MemoryPlanner.PYPTO:
             raise ValueError("VF execution requires the PyPTO Tile memory planner")
     return bundle.caller_source, tuple(bundle.helpers)
+
+
+def _with_simt_helpers(
+    entries: list[_ir_core.Function], program: _ir_core.Program
+) -> list[_ir_core.Function]:
+    """Keep reachable device helpers in a unit without registering runtime tasks.
+
+    One body walk per entry/helper and a visited set give stable deduplication;
+    unused original helpers left behind by specialization need not be emitted.
+    """
+    functions = list(entries)
+    visited = {function.name for function in entries}
+    index = 0
+    while index < len(functions):
+        collector = _CallCollector()
+        collector.visit_stmt(functions[index].body)
+        index += 1
+        for name in collector.callee_names:
+            if name in visited:
+                continue
+            callee = program.get_function(name)
+            if callee is not None and callee.func_type == _ir_core.FunctionType.SIMT:
+                visited.add(name)
+                functions.append(callee)
+    return functions
 
 
 def _generate_single_chip(
@@ -2448,7 +2490,9 @@ def _generate_single_chip(
                         f"(DSL members: {dsl}). A group must be all-external or all-DSL."
                     )
                 continue
-            grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
+            grouped_program = _ir_core.Program(
+                _with_simt_helpers(members, transformed_program), group_name, transformed_program.span
+            )
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code, _ = _generate_pto_bundle(
@@ -2479,7 +2523,11 @@ def _generate_single_chip(
                 peer_func = transformed_program.get_function(name)
                 if peer_func is not None:
                     peer_funcs.append(peer_func)
-            single_program = _ir_core.Program([*peer_funcs, func], func.name, transformed_program.span)
+            single_program = _ir_core.Program(
+                _with_simt_helpers([*peer_funcs, func], transformed_program),
+                func.name,
+                transformed_program.span,
+            )
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code, helpers = _generate_pto_bundle(

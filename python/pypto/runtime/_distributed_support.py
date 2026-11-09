@@ -19,7 +19,6 @@ import math
 import struct
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, cast
 
 import torch
@@ -331,16 +330,16 @@ def _decode_scalar(raw: int, dtype: str) -> int | float | bool:
 
 
 class _EmbeddedFrame:
-    """One invocation's bindings and references, retained through DAG drain."""
+    """Bind one L3 invocation and reuse a token for each physical domain and worker."""
 
-    def __init__(self, tensors: dict[str, Any], args: Any) -> None:
+    def __init__(self, tensors: dict[str, Any], orch: Any) -> None:
         self.tensors = tensors
+        self.orch = orch
         self.implicit_outputs: dict[int, Any] = {}
-        self.keepalive: list[Any] = [args]
-        self.domain_tokens: dict[tuple[int, int], dict[int, Any]] = {}
-        self.local_tokens: dict[int, Mapping[int, Any]] = {}
-        self.local_specs: dict[str, tuple[tuple[int, ...], Mapping[int, Any]]] = {}
-        self.window_slots: Mapping[tuple[int, int, str], str] = {}
+        self.return_copy_callable: Any = None
+        self.tokens: dict[tuple[Any, ...], Any] = {}
+        self.local_workers: dict[str, tuple[int, ...]] = {}
+        self.window_slots: dict[tuple[int, int, str], str] = {}
 
     def window_tensor(self, domain: Any, worker: int, logical_name: str, **view: Any) -> Any:
         """Translate a slot identity, then use the actual runtime Buffer object."""
@@ -357,26 +356,24 @@ class _EmbeddedFrame:
             raise ValueError("Builtin window arguments require the same physical domain")
 
     def bind_local_domain(self, domain: Any, key: str, window_names: tuple[str, ...]) -> None:
-        workers, tokens = self.local_specs[key]
+        workers = self.local_workers[key]
         for worker in workers:
             context = _domain_context(domain, worker)
             for name in window_names:
                 if name not in context.buffers:
                     raise ValueError(f"Local domain is missing named window {name!r} for worker {worker}")
-        self.local_tokens[domain.allocation_id] = tokens
 
     def ordering_tokens(self, domains: tuple[Any, ...], worker: int) -> tuple[Any, ...]:
         tokens, seen = [], set()
         for domain in domains:
-            key = _ordering_domain_key(domain)
+            key = (*_ordering_domain_key(domain), worker)
             if key in seen:
                 continue
             seen.add(key)
             _domain_context(domain, worker)
-            if key[0] == "global":
-                tokens.append(self.domain_tokens[(key[1], key[2])][worker])
-            else:
-                tokens.append(self.local_tokens[key[1]][worker])
+            if key not in self.tokens:
+                self.tokens[key] = _alloc_invocation_tensor(self.orch, "int32", (1,))
+            tokens.append(self.tokens[key])
         return tuple(tokens)
 
 
@@ -405,118 +402,6 @@ def _domain_context(domain: Any, worker: int) -> Any:
     ):
         raise ValueError(f"Domain worker {worker} has an invalid device context or domain size/rank")
     return context
-
-
-class _EmbeddedNodeState:
-    """Bounded shared token leases; storage is supplied before the inner fork.
-
-    Worker IDs identify participating local workers, independently of global
-    domain ranks. Completed leases remain stable across entry calls while the
-    imported view stays committed. Invalidated, drained views can release their
-    slots on the next acquisition; explicit retirement remains available after
-    drain. No method allocates tensors.
-    """
-
-    def __init__(
-        self, *, local_worker_ids: tuple[int, ...], prepared_domain_tokens: tuple[tuple[Any, ...], ...]
-    ) -> None:
-        if (
-            not isinstance(local_worker_ids, tuple)
-            or not local_worker_ids
-            or any(
-                not isinstance(worker, int) or isinstance(worker, bool) or worker < 0
-                for worker in local_worker_ids
-            )
-            or len(set(local_worker_ids)) != len(local_worker_ids)
-        ):
-            raise ValueError("Node token storage requires unique nonnegative local worker IDs")
-        if not isinstance(prepared_domain_tokens, tuple):
-            raise ValueError("Prepared domain tokens must be immutable bundles")
-        seen: set[int] = set()
-        for bundle in prepared_domain_tokens:
-            if not isinstance(bundle, tuple) or len(bundle) != len(local_worker_ids):
-                raise ValueError("Each prepared domain token bundle must cover the local worker IDs")
-            for token in bundle:
-                _validate_prepared_tensor(token, "domain ordering token", "int32", (1,))
-                if not isinstance(token, torch.Tensor):
-                    raise ValueError("Prepared domain ordering tokens require shared CPU Torch storage")
-                storage = token.untyped_storage().data_ptr()
-                if storage in seen:
-                    raise ValueError("Domain ordering tokens must have separate physical storage")
-                seen.add(storage)
-        self.local_worker_ids = local_worker_ids
-        self._tokens = prepared_domain_tokens
-        self._bindings: dict[tuple[int, int], tuple[int, int]] = {}
-        self._domain_views: dict[tuple[int, int], Any] = {}
-        self._closed = False
-
-    def acquire(self, domains: Mapping[tuple[int, int], Any]) -> dict[tuple[int, int], dict[int, Any]]:
-        if self._closed:
-            raise RuntimeError("Embedded node state is closed")
-        # R1 invalidates the same imported view before destructive domain
-        # release. Keep a strong reference until that boundary AND completion
-        # of every entry lease; task completion alone cannot break the shared
-        # ordering chain of a still-live physical domain.
-        retired = {
-            key
-            for key, (_, active) in self._bindings.items()
-            if not active and not self._domain_views[key].committed
-        }
-        bindings = {key: binding for key, binding in self._bindings.items() if key not in retired}
-        missing = [key for key in domains if key not in bindings]
-        occupied = {slot for slot, _ in bindings.values()}
-        free = [slot for slot in range(len(self._tokens)) if slot not in occupied]
-        if len(missing) > len(free):
-            raise ValueError(
-                "Insufficient prefork domain token capacity; retire completed leases before reuse"
-            )
-        for domain_id, generation in domains:
-            if any(
-                existing_id == domain_id and existing_generation != generation and active
-                for (existing_id, existing_generation), (_, active) in bindings.items()
-            ):
-                raise RuntimeError("A prior generation still has active invocation leases")
-        # All validation/capacity checks precede the commit. Calls with aliases
-        # acquire one canonical key once; no failed preflight changes this map.
-        for key, slot in zip(missing, free):
-            bindings[key] = (slot, 0)
-        result = {}
-        for key in domains:
-            slot, active = bindings[key]
-            bindings[key] = (slot, active + 1)
-            result[key] = dict(zip(self.local_worker_ids, self._tokens[slot]))
-        views = {key: view for key, view in self._domain_views.items() if key not in retired}
-        views.update((key, domains[key]) for key in missing)
-        self._bindings = bindings
-        self._domain_views = views
-        return result
-
-    def release(self, keys: tuple[tuple[int, int], ...]) -> None:
-        for key in keys:
-            slot, active = self._bindings[key]
-            if active <= 0:
-                raise RuntimeError("Embedded domain invocation lease was already completed")
-            self._bindings[key] = (slot, active - 1)
-
-    def retire_domain(self, domain_id: int, generation: int) -> None:
-        key = (domain_id, generation)
-        binding = self._bindings.get(key)
-        if binding is None:
-            return
-        if binding[1]:
-            raise RuntimeError(
-                "Domain retirement requires all active invocation frames to complete and drain"
-            )
-        del self._bindings[key]
-        self._domain_views.pop(key)
-
-    def close(self) -> None:
-        if any(active for _, active in self._bindings.values()):
-            raise RuntimeError("Node close requires active invocation frames to complete and drain")
-        self._bindings.clear()
-        self._domain_views.clear()
-        self._tokens = ()
-        self._closed = True
 
 
 def _tensor_dtype_code(dtype: Any) -> int:
@@ -760,283 +645,20 @@ def _copy_return_tensor(args: Any) -> None:
         destination_view.copy_(source_view)
 
 
-def _validate_prepared_tensor(value: Any, name: str, dtype: str, shape: tuple[int, ...]) -> None:
-    """Check prefork storage without allocating or reminting its provenance."""
-    torch_name = {"fp16": "float16", "bf16": "bfloat16", "fp32": "float32"}.get(dtype, dtype)
-    if isinstance(value, torch.Tensor):
-        if (
-            value.device.type != "cpu"
-            or not value.is_shared()
-            or value.dtype != getattr(torch, torch_name, None)
-            or tuple(value.shape) != shape
-        ):
-            raise ValueError(
-                f"Prepared tensor {name!r} requires shared CPU {dtype} storage with shape {shape}"
-            )
-        return
-    from simpler.buffer import AddressSpace, Tensor  # noqa: PLC0415
+def _alloc_invocation_tensor(orch: Any, dtype: str, shape: tuple[int, ...]) -> Any:
     from simpler.task_interface import DataType  # noqa: PLC0415
 
-    enum = {"fp16": "FLOAT16", "bf16": "BFLOAT16", "fp32": "FLOAT32"}.get(dtype, dtype.upper())
-    if (
-        not isinstance(value, Tensor)
-        or value.buffer.address_space != AddressSpace.HOST
-        or tuple(value.shapes) != shape
-        or _tensor_dtype_code(value.dtype) != getattr(getattr(DataType, enum, None), "value", None)
-    ):
-        raise ValueError(f"Prepared tensor {name!r} requires a HOST {dtype} descriptor with shape {shape}")
-
-
-def _validate_return_preparation(
-    layout: Mapping[str, Any],
-    prepared_tensors: Mapping[str, Any],
-    return_copy_callable: Any,
-) -> None:
-    """Validate persisted return layout and prefork requirements without allocation."""
-    outputs = layout["implicit_outputs"]
-    positions: set[int] = set()
-    for row in outputs:
-        if not isinstance(row, tuple) or len(row) != 4:
-            raise ValueError("Embedded implicit output must declare return position, slot, dtype and shape")
-        position, index, dtype, shape = row
-        if (
-            not isinstance(position, int)
-            or isinstance(position, bool)
-            or position < 0
-            or position in positions
-            or not isinstance(index, int)
-            or isinstance(index, bool)
-            or not isinstance(dtype, str)
-            or not isinstance(shape, tuple)
-            or any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape)
-        ):
-            raise ValueError(
-                "Embedded implicit output has an invalid position, slot, dtype or constant shape"
-            )
-        positions.add(position)
-    output_indices = [row[1] for row in outputs]
-    if output_indices != list(range(len(layout["tensor_slots"]), len(layout["tensor_slots"]) + len(outputs))):
-        raise ValueError("Embedded implicit output indices must follow the dense tensor formals")
-    requirements = layout["prefork_requirements"]
-    if bool(outputs) != (("return_copy_subworker", 1) in requirements):
-        raise ValueError("Embedded implicit outputs require one registered return-copy SubWorker")
-    if outputs and return_copy_callable is None:
-        raise ValueError("Embedded implicit outputs require return_copy_callable before worker init")
-    for requirement in requirements:
-        if not isinstance(requirement, tuple):
-            raise ValueError("Embedded prefork requirement must be an immutable tuple")
-        if requirement == ("return_copy_subworker", 1):
-            continue
-        if requirement and requirement[0] in {
-            "inherited_domain_tokens",
-            "domain_dispatch",
-            "same_domain",
-            "local_domain_tokens",
-        }:
-            continue
-        if len(requirement) != 4 or requirement[0] != "tensor_storage":
-            raise ValueError(f"Unsupported embedded prefork requirement {requirement!r}")
-        _, name, dtype, shape = requirement
-        if not isinstance(name, str) or not isinstance(dtype, str) or not isinstance(shape, tuple):
-            raise ValueError("Prepared tensor requirement must declare name, dtype and shape")
-        if any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape):
-            raise ValueError(f"Prepared tensor {name!r} requires a constant nonnegative shape")
-        if name not in prepared_tensors:
-            raise ValueError(f"Missing prefork prepared tensor {name!r}")
-        _validate_prepared_tensor(prepared_tensors[name], name, dtype, shape)
-
-
-def _local_token_spec(row: tuple[Any, ...], prepared: Mapping[str, Any], world_size: int) -> tuple[Any, Any]:
-    if len(row) != 3 or not isinstance(row[1], str) or not isinstance(row[2], tuple):
-        raise ValueError("Local domain token requirement must declare its key and workers")
-    workers = row[2] or tuple(range(world_size))
-    if any(
-        not isinstance(worker, int) or isinstance(worker, bool) or not 0 <= worker < world_size
-        for worker in workers
-    ):
-        raise ValueError("Local domain token worker lies outside the node topology")
-    tokens = prepared.get(row[1])
-    if not isinstance(tokens, (tuple, list)) or len(tokens) < world_size:
-        raise ValueError(f"Missing prefork local domain token capacity for {row[1]!r}")
-    for token in tokens:
-        _validate_prepared_tensor(token, row[1], "int32", (1,))
-        if not isinstance(token, torch.Tensor):
-            raise ValueError("Local ordering tokens require shared CPU Torch storage")
-    return workers, dict(enumerate(tokens))
-
-
-def _validate_window_slots(layout: Mapping[str, Any], contexts: Mapping[int, tuple[Any, ...]]) -> None:
-    windows = layout["window_slots"]
-    for row in windows:
-        if not isinstance(row, tuple) or len(row) != 8:
-            raise ValueError("Window slot must declare formal, paired ctx, named buffer, dtype and shape")
-        position, name, ctx_position, ctx_index, window, dtype, direction, shape = row
-        if (
-            not isinstance(position, int)
-            or isinstance(position, bool)
-            or position < 0
-            or not all(isinstance(value, str) for value in (name, window, dtype))
-            or direction not in ("In", "Out", "InOut")
-            or not isinstance(shape, tuple)
-            or any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape)
-            or ctx_index not in contexts
-            or contexts[ctx_index][0] != ctx_position
-        ):
-            raise ValueError("Invalid embedded window/ctx binding record")
-    if windows:
-        formals = [
-            row[0] for field in ("tensor_slots", "scalar_slots", "window_slots") for row in layout[field]
-        ]
-        if sorted(formals) != list(range(len(formals))):
-            raise ValueError("Embedded formals must preserve every original position")
-        if [row[2] for row in windows] != list(range(len(formals) - len(windows), len(formals))):
-            raise ValueError("Window ctx pairs must use only the final materialized suffix")
-
-
-def _domain_requirements(
-    layout: Mapping[str, Any],
-    prepared: Mapping[str, Any],
-    world_size: int,
-    node: _EmbeddedNodeState | None,
-) -> tuple[dict[int, tuple[int, ...]], tuple[tuple[int, ...], ...], dict[str, Any]]:
-    contexts = {row[2]: row for row in layout["scalar_slots"] if row[3] == "comm_ctx"}
-    if contexts and not isinstance(node, _EmbeddedNodeState):
-        raise ValueError("Received CommCtx formals require bound prefork node token state")
-    _validate_window_slots(layout, contexts)
-    workers, groups, locals_ = {}, [], {}
-    upper_bounds = []
-    for row in layout["prefork_requirements"]:
-        kind = row[0]
-        if kind == "inherited_domain_tokens":
-            upper_bounds.append(row[1] if len(row) == 2 else None)
-        elif kind == "domain_dispatch":
-            if (
-                len(row) != 3
-                or row[1] not in contexts
-                or row[2] is not None
-                and not isinstance(row[2], tuple)
-            ):
-                raise ValueError("Domain dispatch must declare a received ctx scalar and local workers")
-            selected = tuple(range(world_size)) if row[2] is None else row[2]
-            if any(
-                not isinstance(worker, int)
-                or isinstance(worker, bool)
-                or not 0 <= worker < world_size
-                or node is None
-                or worker not in node.local_worker_ids
-                for worker in selected
-            ):
-                raise ValueError("Prefork domain tokens do not cover a required local worker")
-            workers[row[1]] = selected
-        elif kind == "same_domain":
-            if (
-                len(row) != 2
-                or not isinstance(row[1], tuple)
-                or any(index not in contexts for index in row[1])
-            ):
-                raise ValueError("Physical domain consensus must name received ctx scalar slots")
-            groups.append(row[1])
-        elif kind == "local_domain_tokens":
-            spec = _local_token_spec(row, prepared, world_size)
-            locals_[row[1]] = spec
-    if upper_bounds != ([len(contexts)] if contexts else []):
-        raise ValueError("Inherited token upper bound must preserve every received CommCtx formal")
-    # Shared ordering must never accidentally reuse one physical backing for
-    # separate local/global domains or worker lanes. This only inspects Torch
-    # storage identity; it does not wrap or dereference an address.
-    seen = (
-        {token.untyped_storage().data_ptr() for bundle in node._tokens for token in bundle} if node else set()
-    )
-    for _, tokens in locals_.values():
-        for token in tokens.values():
-            storage = token.untyped_storage().data_ptr()
-            if storage in seen:
-                raise ValueError("Local and inherited ordering tokens require separate physical storage")
-            seen.add(storage)
-    return workers, tuple(groups), locals_
-
-
-def _domain_bindings(value: Any, layout: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    """Snapshot bounded native binding records without requiring the compiler."""
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("Domain slot bindings must be a sequence")
-    result, names = [], set()
-    windows = {(row[3], row[4]) for row in layout["window_slots"]}
-    for binding in value:
-        if (
-            not isinstance(binding, Mapping)
-            or set(binding) != {"name", "members", "window_size", "slots", "windows"}
-            or not isinstance(binding["name"], str)
-            or not binding["name"]
-            or binding["name"] in names
-        ):
-            raise ValueError("Invalid domain slot binding fields/name")
-        slots, members, selected = binding["slots"], binding["members"], binding["windows"]
-        if (
-            not isinstance(slots, (list, tuple))
-            or not 0 < len(slots) <= 64
-            or any(
-                not isinstance(slot, (list, tuple))
-                or len(slot) != 2
-                or not isinstance(slot[0], str)
-                or not slot[0]
-                or type(slot[1]) is not int
-                or slot[1] <= 0
-                or slot[1] % 64
-                for slot in slots
-            )
-            or len({slot[0] for slot in slots}) != len(slots)
-            or type(binding["window_size"]) is not int
-            or sum(slot[1] for slot in slots) != binding["window_size"]
-        ):
-            raise ValueError("Invalid canonical slot sizes/alignment/window")
-        if (
-            not isinstance(members, (list, tuple))
-            or not 0 < len(members) <= 64
-            or any(
-                not isinstance(member, (list, tuple))
-                or len(member) != 3
-                or any(type(item) is not int or item < 0 for item in member)
-                or member[2] != rank
-                for rank, member in enumerate(members)
-            )
-            or len({member[0] for member in members}) != len(members)
-        ):
-            raise ValueError("Invalid ordered domain member layout")
-        if (
-            not isinstance(selected, (list, tuple))
-            or not selected
-            or any(
-                not isinstance(row, (list, tuple))
-                or len(row) != 3
-                or type(row[0]) is not int
-                or (row[0], row[1]) not in windows
-                or row[2] not in {slot[0] for slot in slots}
-                for row in selected
-            )
-            or len({(row[0], row[1]) for row in selected}) != len(selected)
-        ):
-            raise ValueError("Invalid logical-to-canonical window bindings")
-        names.add(binding["name"])
-        result.append(
-            MappingProxyType(
-                {
-                    "name": binding["name"],
-                    "window_size": binding["window_size"],
-                    "members": tuple(tuple(row) for row in members),
-                    "slots": tuple(tuple(row) for row in slots),
-                    "windows": tuple(tuple(row) for row in selected),
-                }
-            )
-        )
-    return tuple(result)
+    enum = {"fp16": "FLOAT16", "bf16": "BFLOAT16", "fp32": "FLOAT32", "fp64": "FLOAT64"}
+    native_dtype = getattr(DataType, enum.get(dtype, dtype.upper()))
+    buffer = orch._worker.alloc_shared_tensor(shape, native_dtype)
+    return buffer.tensor(shapes=shape, dtype=native_dtype)
 
 
 def _validate_physical_domain(view: Any, binding: Mapping[str, Any]) -> None:
     members = tuple(
         (member.global_device_rank, member.local_worker_id, member.domain_rank) for member in view.members
     )
-    if members != binding["members"] or view.mapping_size < binding["window_size"]:
+    if members != tuple(map(tuple, binding["members"])) or view.mapping_size < binding["window_size"]:
         raise ValueError("Global domain ordered members or mapping size differ from session layout")
     for worker in view.contexts:
         context = _domain_context(view, worker)
@@ -1066,10 +688,10 @@ def _resolve_embedded_domains(
     orch: Any,
     workers: Mapping[int, tuple[int, ...]],
     groups: tuple[tuple[int, ...], ...],
-    bindings: tuple[Mapping[str, Any], ...] = (),
-    slot_map: dict[tuple[int, int, str], str] | None = None,
-) -> dict[tuple[int, int], Any]:
-    by_id, by_scalar, domains = {}, {}, {}
+    bindings: list[dict[str, Any]],
+    slot_map: dict[tuple[int, int, str], str],
+) -> None:
+    by_id, by_scalar = {}, {}
     for _, name, index, dtype in layout["scalar_slots"]:
         if dtype != "comm_ctx":
             tensors[name] = _decode_scalar(args.scalar(index), dtype)
@@ -1095,7 +717,7 @@ def _resolve_embedded_domains(
                 raise ValueError("Received global domain is absent from the prepared slot bindings")
             _validate_physical_domain(view, binding)
             for ctx_index, logical, physical in binding["windows"]:
-                if ctx_index == index and slot_map is not None:
+                if ctx_index == index:
                     key = (view.domain_id, view.generation, logical)
                     if key in slot_map and slot_map[key] != physical:
                         raise ValueError("Aliased CommCtx formals have conflicting canonical slots")
@@ -1104,141 +726,78 @@ def _resolve_embedded_domains(
             _domain_context(view, worker)
         tensors[name] = view
         by_scalar[index] = view
-        domains[(view.domain_id, view.generation)] = view
     for group in groups:
         _EmbeddedFrame.require_same_domain(tuple(by_scalar[index] for index in group))
     for _, _, _, ctx_index, window, *_ in layout["window_slots"]:
         view = by_scalar[ctx_index]
-        physical = (slot_map or {}).get((view.domain_id, view.generation, window), window)
+        physical = slot_map.get((view.domain_id, view.generation, window), window)
         for worker in workers.get(ctx_index, ()):
             context = _domain_context(view, worker)
             if physical not in context.buffers:
                 raise ValueError(
                     f"Global domain is missing named window {window!r} for local worker {worker}"
                 )
-    return domains
 
 
-class _EmbeddedEntryState:
-    """Bound dense-wire entry state with explicit invocation completion.
+def _bind_embedded_invocation(
+    entry: Any, orch: Any, args: Any
+) -> tuple[_EmbeddedFrame, _ChipCallables, dict[str, Any], int]:
+    """Decode a generated entry's ABI and bind its pre-registered callables."""
+    from simpler.callable_identity import (  # noqa: PLC0415
+        build_python_import_descriptor,
+        compute_callable_hashid,
+    )
+    from simpler.remote_l3_session import get_inner_handle  # noqa: PLC0415
 
-    Startup supplies registered handles and any prepared tensor storage before
-    the inner worker forks. A frame survives the generated entry's return:
-    complete_invocation must be called only after the corresponding Worker.run
-    has drained, and close only after worker shutdown has drained pending work.
-    No method allocates Torch storage or shared-memory ordering tokens.
-    """
+    layout = entry._pypto_embedded_layout
+    bindings = entry._pypto_embedded_bindings
+    world_size = bindings["world_size"]
+    outputs = layout["implicit_outputs"]
+    for pool, expected in (
+        ("tensor", len(layout["tensor_slots"]) + len(outputs)),
+        ("scalar", len(layout["scalar_slots"])),
+    ):
+        actual = getattr(args, f"{pool}_count")()
+        if actual != expected:
+            raise ValueError(f"Embedded {pool} pool expected {expected} slots, got {actual}")
 
-    def __init__(
-        self,
-        layout: Mapping[str, Any],
-        *,
-        callables: dict[str, Any],
-        sub_ids: dict[str, Any],
-        world_size: int,
-        prepared_tensors: Mapping[str, Any],
-        domain_provider: Any,
-        return_copy_callable: Any = None,
-        node_state: _EmbeddedNodeState | None = None,
-        domain_bindings: Any = (),
-    ) -> None:
-        if layout.get("version") != 1:
-            raise ValueError(f"Expected embedded layout version 1, got {layout.get('version')!r}")
-        if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size <= 0:
-            raise ValueError(f"Expected a positive local device count, got {world_size!r}")
-        for field in (
-            "tensor_slots",
-            "scalar_slots",
-            "window_slots",
-            "implicit_outputs",
-            "prefork_requirements",
-        ):
-            if not isinstance(layout.get(field), tuple):
-                raise ValueError(f"Embedded layout {field!r} must be an immutable tuple")
-        for field in ("tensor_slots", "scalar_slots"):
-            indices = [row[2] for row in layout[field]]
-            if indices != list(range(len(indices))):
-                raise ValueError(f"Embedded {field} indices must be dense from zero, got {indices}")
-        for row in layout["tensor_slots"]:
-            if len(row) != 6 or not isinstance(row[5], tuple):
-                raise ValueError("Embedded tensor formal must declare an immutable shape tuple")
-            for dimension in row[5]:
-                _formal_dimension(dimension)
-        _validate_return_preparation(layout, prepared_tensors, return_copy_callable)
-        self._domain_workers, self._domain_groups, self._local_specs = _domain_requirements(
-            layout,
-            prepared_tensors,
-            world_size,
-            node_state,
+    tensors = {name: args.tensor(index) for _, name, index, *_ in layout["tensor_slots"]}
+    _validate_formal_shapes(layout, tensors)
+    frame = _EmbeddedFrame(tensors, orch)
+    frame.implicit_outputs = {position: args.tensor(index) for position, index, *_ in outputs}
+    workers, groups = {}, []
+    for kind, *values in layout["invocation_requirements"]:
+        if kind == "domain_dispatch":
+            index, selected = values
+            workers[index] = tuple(range(world_size)) if selected is None else selected
+        elif kind == "same_domain":
+            groups.append(values[0])
+        elif kind == "local_domain_tokens":
+            name, selected = values
+            frame.local_workers[name] = selected or tuple(range(world_size))
+    _resolve_embedded_domains(
+        layout, args, tensors, orch, workers, tuple(groups), bindings["domain_bindings"], frame.window_slots
+    )
+    for kind, *values in layout["invocation_requirements"]:
+        if kind == "tensor_storage":
+            name, dtype, shape = values
+            tensors[name] = _alloc_invocation_tensor(orch, dtype, shape)
+
+    def python_handle(module, name):
+        return get_inner_handle(compute_callable_hashid(build_python_import_descriptor(module, name)))
+
+    callables = _ChipCallables()
+    for name, (digest, host_indices) in bindings["chips"].items():
+        callables.add(name, get_inner_handle(digest), {"host_tensor_indices": host_indices})
+    prefix = entry.__module__.removesuffix("." + bindings["module"])
+    sub_ids = {
+        name: python_handle(f"{prefix}.{module}", name) for name, module in bindings["sub_workers"].items()
+    }
+    if outputs:
+        frame.return_copy_callable = python_handle(
+            _copy_return_tensor.__module__, _copy_return_tensor.__qualname__
         )
-        self.node_state = node_state
-        self._domain_bindings = _domain_bindings(domain_bindings, layout)
-        self.layout = MappingProxyType(dict(layout))
-        self.callables = callables
-        self.sub_ids = sub_ids
-        self.world_size = world_size
-        self.domain_provider = domain_provider
-        self.return_copy_callable = return_copy_callable
-        self._prepared_tensors = dict(prepared_tensors)
-        self._frame: _EmbeddedFrame | None = None
-        self._closed = False
-
-    def begin_invocation(self, orch: Any, args: Any, config: Any) -> _EmbeddedFrame:
-        """Bind dense pools without retiring an incomplete invocation."""
-        if self._closed:
-            raise RuntimeError("Embedded entry state is closed")
-        if self._frame is not None:
-            raise RuntimeError("Previous embedded invocation requires completion before reuse")
-        for pool, field in (("tensor", "tensor_slots"), ("scalar", "scalar_slots")):
-            expected = len(self.layout[field])
-            if pool == "tensor":
-                expected += len(self.layout["implicit_outputs"])
-            actual = getattr(args, f"{pool}_count")()
-            if actual != expected:
-                raise ValueError(f"Embedded {pool} pool expected {expected} slots, got {actual}")
-        tensors = dict(self._prepared_tensors)
-        for _, name, index, *_ in self.layout["tensor_slots"]:
-            tensors[name] = args.tensor(index)
-        _validate_formal_shapes(self.layout, tensors)
-        slot_map = {}
-        domains = _resolve_embedded_domains(
-            self.layout,
-            args,
-            tensors,
-            orch,
-            self._domain_workers,
-            self._domain_groups,
-            self._domain_bindings,
-            slot_map,
-        )
-        frame = _EmbeddedFrame(tensors, args)
-        frame.window_slots = MappingProxyType(slot_map)
-        frame.local_specs = self._local_specs
-        frame.implicit_outputs = {
-            position: args.tensor(index) for position, index, *_ in self.layout["implicit_outputs"]
-        }
-        orch._pypto_chip_count = self.world_size
-        orch._pypto_commless_seq = 0
-        _reset_dfx_dispatch_state(orch, self.callables)
-        # Publish only after every decode/view/context/slot check has passed.
-        # Node acquisition preflights all requested capacity before mutation.
-        if self.node_state is not None:
-            frame.domain_tokens = self.node_state.acquire(domains)
-        self._frame = frame
-        return frame
-
-    def complete_invocation(self) -> None:
-        """Release invocation references after its runtime DAG has drained."""
-        if self._frame is not None:
-            if self.node_state is not None:
-                self.node_state.release(tuple(self._frame.domain_tokens))
-            self._frame.domain_tokens.clear()
-            self._frame.local_tokens.clear()
-            self._frame.keepalive.clear()
-            self._frame = None
-
-    def close(self) -> None:
-        """Retire state after the bound worker has drained and closed."""
-        self.complete_invocation()
-        self._prepared_tensors.clear()
-        self._closed = True
+    orch._pypto_chip_count = world_size
+    orch._pypto_commless_seq = 0
+    _reset_dfx_dispatch_state(orch, callables)
+    return frame, callables, sub_ids, world_size

@@ -38,13 +38,17 @@ class _OrchWithSubmit:
 
 def _program_without_materialized_scopes():
     """Stop after DeriveCallDirections — omit MaterializeRuntimeScopes."""
-    return passes.derive_call_directions()(passes.convert_to_ssa()(_OrchWithSubmit))
+    return passes.derive_call_directions()(
+        passes.normalize_return_order()(passes.convert_to_ssa()(_OrchWithSubmit))
+    )
 
 
 def _program_with_materialized_scopes():
     return passes.classify_iter_arg_carry()(
         passes.materialize_runtime_scopes()(
-            passes.derive_call_directions()(passes.convert_to_ssa()(_OrchWithSubmit))
+            passes.derive_call_directions()(
+                passes.normalize_return_order()(passes.convert_to_ssa()(_OrchWithSubmit))
+            )
         )
     )
 
@@ -72,7 +76,9 @@ def test_runtime_scopes_materialized_codegen_precondition_rejects_unmaterialized
 
 
 def test_runtime_scopes_materialized_rejects_stale_function_handle():
-    program = passes.derive_call_directions()(passes.convert_to_ssa()(_OrchWithSubmit))
+    program = passes.derive_call_directions()(
+        passes.normalize_return_order()(passes.convert_to_ssa()(_OrchWithSubmit))
+    )
     stale_func = _orch_func(program)
     program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
     with pytest.raises(pypto.Error, match=r"stale function handle|stale handle"):
@@ -96,7 +102,9 @@ def test_generate_orchestration_rejects_function_not_in_program():
     program = _program_with_materialized_scopes()
     other_program = passes.classify_iter_arg_carry()(
         passes.materialize_runtime_scopes()(
-            passes.derive_call_directions()(passes.convert_to_ssa()(_OtherOrchProgram))
+            passes.derive_call_directions()(
+                passes.normalize_return_order()(passes.convert_to_ssa()(_OtherOrchProgram))
+            )
         )
     )
     foreign_func = _orch_func(other_program)

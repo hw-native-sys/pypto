@@ -12,6 +12,8 @@ IR to generated code. Anything that needs a decision was already decided by a pa
 | [Orchestration Code Generation](01-orchestration_codegen.md) | Generating the host-side C++ that submits tasks to the runtime |
 | [PTO Kernel Wrapper Generation](02-kernel_wrapper.md) | Connecting ptoas-generated kernels to runtime dispatch |
 | [EmitC and VPTO VF Execution](03-vpto-vf-integration.md) | Separate VF helpers, synchronization contracts and persistent A5 execution |
+| [Native SIMT Runtime Validation](04-simt-native-validation.md) | P0 GM-copy ABI, linked device image and persistent A5 acceptance |
+| [SIMT Lowering and Execution](05-simt-lowering.md) | P3 explicit IR, GM/UB addressing, synchronization and A5 acceptance |
 
 ## See Also
 

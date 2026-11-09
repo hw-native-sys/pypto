@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
+from pypto._environment import explicit_env_request
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
 from pypto._target import _platform_string
@@ -94,6 +95,7 @@ from .specializer import (
     TensorMeta,
     _classify_params,
     build_specialize_context,
+    extern_return_annotation_fingerprint,
     free_name_source,
     func_name_lookup,
     tile_annotation_fingerprints,
@@ -302,9 +304,8 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         or kwargs["profiling"]
         or get_active_profiler() is not None
         or kwargs.get("output_dir") is not None
-        or bool(os.environ.get("PYPTO_PROG_BUILD_DIR"))
-        or os.environ.get("PYPTO_EMIT_DEBUG_RUNNER") is not None
-        or os.environ.get("PYPTO_REBUILD_FROM_PTO") is not None
+        or explicit_env_request(os.environ.get("PYPTO_EMIT_DEBUG_RUNNER"))
+        or explicit_env_request(os.environ.get("PYPTO_REBUILD_FROM_PTO"))
         or kwargs.get("verification_level") is not None
         or kwargs["diagnostic_phase"] is not None
         or kwargs["disabled_diagnostics"] is not None
@@ -660,6 +661,16 @@ class JITFunction:
                     records.append(
                         (index, func.__module__, func.__qualname__, f"<annotation:{name}>", source)
                     )
+            if jit_func._func_type == "extern":
+                records.append(
+                    (
+                        index,
+                        func.__module__,
+                        func.__qualname__,
+                        "<extern-return>",
+                        extern_return_annotation_fingerprint(func),
+                    )
+                )
         return compute_source_hash([source_hash, json.dumps(records, separators=(",", ":"))])
 
     def _resolve_constexpr_bindings(self, entry_constexpr: Mapping[str, str]) -> _call_binding.VariantPlan:
@@ -1226,6 +1237,7 @@ class JITFunction:
                 for name, source in tile_annotation_fingerprints(fn._func).items():
                     values.append((index, f"<annotation:{name}>", source))
             if fn._func_type == "extern":
+                values.append((index, "<extern-return>", extern_return_annotation_fingerprint(fn._func)))
                 external = external_source_digest(
                     fn._external_source_paths(),
                     include_dirs=fn._external_include_dirs,
@@ -1815,6 +1827,25 @@ class JITFunction:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_jit_hook(value: object) -> JITFunction | None:
+    """Keep legacy hook discovery separate from provider compilation.
+
+    Hooks return a stable JIT object. Its ordinary extern path (or a deferred
+    builder) owns compilation; discovery does not receive a target or signature.
+    """
+    if isinstance(value, JITFunction):
+        return value
+    hook = getattr(value, "__pypto_jit__", None)
+    if hook is None:
+        return None
+    if not callable(hook):
+        raise TypeError("__pypto_jit__: expected a callable hook")
+    result = hook()
+    if not isinstance(result, JITFunction):
+        raise TypeError(f"__pypto_jit__: expected JITFunction, got {type(result).__name__}")
+    return result
+
+
 def _discover_dep_bindings(
     func: Any, caller_func_type: str = "orchestration"
 ) -> list[_call_binding.DepBinding]:
@@ -1844,7 +1875,7 @@ def _discover_dep_bindings(
 
     all_vars = func_name_lookup(func)
 
-    allowed_dep_types: set[str] = {"incore", "inline", "opaque", "extern", "graph"}
+    allowed_dep_types: set[str] = {"incore", "aiv", "inline", "opaque", "extern", "graph"}
     if caller_func_type == "host":
         allowed_dep_types.add("orchestration")
     elif caller_func_type == "pod":
@@ -1855,7 +1886,7 @@ def _discover_dep_bindings(
     deps: list[_call_binding.DepBinding] = []
     seen: set[str] = set()
     for name in called_names:
-        obj = all_vars.get(name)
+        obj = _resolve_jit_hook(all_vars.get(name))
         if (
             isinstance(obj, JITFunction)
             and caller_func_type in orchestration_levels
@@ -2135,6 +2166,7 @@ class _JITDecorator:
         @pl.jit                               # entry-point (Orchestration)
         @pl.jit.host                          # entry-point (HOST Orchestrator)
         @pl.jit.pod                           # CLUSTER_0 Orchestrator
+        @pl.jit.aiv                           # explicit AIV sub-function
         @pl.jit.incore                        # InCore sub-function
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
@@ -2152,6 +2184,7 @@ class _JITDecorator:
         self.host = _SubFunctionDecorator("host", allow_level=False, allow_auto_scope=True)
         self.pod = _SubFunctionDecorator("pod", allow_level=False, allow_auto_scope=True)
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
+        self.aiv = _SubFunctionDecorator("aiv", allow_level=False)
         self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
         self.graph = _SubFunctionDecorator("graph", allow_level=False)

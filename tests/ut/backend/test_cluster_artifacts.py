@@ -164,7 +164,7 @@ def test_c3c_recursive_entries_keep_full_logical_chip_paths(cluster_artifact):
         assert entry["qualname"] == name
         assert entry["chip_paths"] == {"chip": f"{prefix}/next_levels/chip"}
         assert entry["layout"] == _layout(files[f"{prefix}/orchestration/host_orch.py"])
-        assert entry["layout"]["version"] == 1
+        assert entry["layout"]["version"] == 2
         assert [row[0:3:2] for row in entry["layout"]["tensor_slots"]] == [[0, 0], [2, 1]]
         assert [row[0:3:2] for row in entry["layout"]["scalar_slots"]] == [[1, 0]]
         assert entry["host_tensor_indices"] == [0, 1]
@@ -206,7 +206,6 @@ def cluster_runner_harness(cluster_artifact, cluster_startup_cache, tmp_path, mo
         activate_startup_artifacts,
         install_startup_artifacts,
     )
-    from simpler.startup_preparation import NodeStartupHook  # noqa: PLC0415
     from simpler.task_interface import RemoteAddressSpace, RemoteBufferHandle  # noqa: PLC0415
     from simpler.worker import RemoteCallable  # noqa: PLC0415
 
@@ -229,7 +228,7 @@ def cluster_runner_harness(cluster_artifact, cluster_startup_cache, tmp_path, mo
             registrations.append((target, workers))
             remote = isinstance(target, RemoteCallable)
             return CallableHandle(
-                "sha256:" + hashlib.sha256(str(len(registrations)).encode()).hexdigest(),
+                "sha256:" + hashlib.sha256(str(target).encode()).hexdigest(),
                 "PYTHON_IMPORT" if remote else "CHIP_CALLABLE",
                 "REMOTE_TASK_DISPATCHER" if remote else "LOCAL_CHIP",
             )
@@ -307,10 +306,7 @@ def cluster_runner_harness(cluster_artifact, cluster_startup_cache, tmp_path, mo
                 artifacts.append(StartupArtifactSpec(archive, record["sha256"], record["module_prefix"]))
             state.spec = SimpleNamespace(
                 startup_artifacts=tuple(artifacts),
-                startup_hooks_by_rank=tuple(
-                    NodeStartupHook(**startup_by_rank[rank]["startup_hook"])
-                    for rank in range(1, len(topology["executor_ranks"]) + 1)
-                ),
+                startup_by_rank=startup_by_rank,
             )
             parameters = startup_by_rank[0]["parameters"]
             self.data_dir = parameters["data_dir"]
@@ -350,7 +346,7 @@ def cluster_runner_harness(cluster_artifact, cluster_startup_cache, tmp_path, mo
     return runner, state
 
 
-def _i2_compile(root, *, second=False, two_slots=False, reverse=False, dtype="FP32", nbytes=32):
+def _i2_compile(root, *, second=False, two_slots=False, reverse=False, dtype="FP32", nbytes=32, repeat=False):
     """Compile native roots with identical callable names and distinct logical WBs."""
     elements = nbytes // 4  # FP32/INT32 views must cover the whole logical window.
     payload = "decode_payload" if second else "prefill_payload"
@@ -364,6 +360,9 @@ def _i2_compile(root, *, second=False, two_slots=False, reverse=False, dtype="FP
     credit_formal = ", credit: pld.DistributedTensor[[1], pl.INT32]" if two_slots else ""
     credit_arg = ", credit" if two_slots else ""
     credit_window = f"credit = pld.window({signal}, [1], dtype=pl.INT32)" if two_slots else ""
+    intermediate = "scratch = pl.create_tensor([8], dtype=pl.FP32)" if repeat else ""
+    target = "scratch" if repeat else "out"
+    repeat_dispatch = f"out = self.chip(scratch, count, data{credit_arg}, out, worker=1)" if repeat else ""
     program = pl.parse_program(f"""
 @pl.program
 class SharedEntries:
@@ -376,7 +375,9 @@ class SharedEntries:
     def node(self, x: pl.Tensor[[8], pl.FP32], count: pl.Scalar[pl.INT32],
              data: pld.DistributedTensor[[{elements}], pl.{dtype}]{credit_formal},
              out: pl.Out[pl.Tensor[[8], pl.FP32]]) -> pl.Tensor[[8], pl.FP32]:
-        out = self.chip(x, count, data{credit_arg}, out, worker=1)
+        {intermediate}
+        {target} = self.chip(x, count, data{credit_arg}, {target}, worker=1)
+        {repeat_dispatch}
         return out
     @pl.function(level=pl.Level.CLUSTER_0, role=pl.Role.Orchestrator)
     def root(self, x: pl.Tensor[[8], pl.FP32], count: pl.Scalar[pl.INT32],
@@ -461,7 +462,7 @@ def direct_adapter_harness(cluster_runner_harness, monkeypatch):
 
 
 @pytest.mark.parametrize("shared", [False, True])
-def test_direct_adapter_prepares_static_world_and_prefork_programs(
+def test_direct_adapter_prepares_static_world_and_packs_entry_bindings(
     i2_programs, direct_adapter_harness, shared
 ):
     _, state = direct_adapter_harness
@@ -494,24 +495,21 @@ def test_direct_adapter_prepares_static_world_and_prefork_programs(
         plans = [program["plans"] for program in execution["programs"]]
         assert all(len(program_plans) == 1 for program_plans in plans)
         assert (plans[0][0]["pool_key"] == plans[1][0]["pool_key"]) is shared
-        prefixes = []
         for rank in (1, 2):
             startup = session.startup_by_rank[rank]
             assert len(startup["startup_artifacts"]) == 1
+            assert "startup_hook" not in startup
             assert startup["inner_l3_worker"] == []
-            hook = startup["startup_hook"]
-            assert hook["import_path"].endswith(".orchestration.cluster_bootstrap:prepare_node")
-            parameters = hook["parameters"]
-            programs = parameters["programs"]
-            assert len(programs) == 2
-            prefixes.append([program["module_prefix"] for program in programs])
-            for index, program in enumerate(programs):
-                assert program["module_prefix"].endswith(f".programs.p{index}")
-                assert program["entries"] == [left, right][index].l3_entries["entries"]
-                assert set(program["domain_bindings"]) == {
-                    entry["logical_path"] for entry in program["entries"]
-                }
-        assert prefixes[0] == prefixes[1] and prefixes[0][0] != prefixes[0][1]
+            artifact = startup["startup_artifacts"][0]
+            with tarfile.open(fileobj=io.BytesIO(artifact["payload"]), mode="r:gz") as archive:
+                for index, program in enumerate((left, right)):
+                    for entry in program.l3_entries["entries"]:
+                        source = archive.extractfile(
+                            f"programs/p{index}/{entry['logical_path']}/orchestration/host_orch.py"
+                        ).read()
+                        assert b"._pypto_embedded_bindings = " in source
+                        assert b"'domain_bindings': [" in source
+                assert "orchestration/cluster_bootstrap.py" not in archive.getnames()
         assert not session.closed
         assert (left.comm_domains, right.comm_domains) == domains
     assert session.closed
@@ -522,12 +520,35 @@ def test_direct_adapter_single_program_still_uses_session_source_bundle(i2_progr
     left, _ = i2_programs
     with left.prepare():
         session = state.sessions[0]
-        parameters = session.startup_by_rank[1]["startup_hook"]["parameters"]
-        assert len(parameters["programs"]) == 1
-        assert parameters["programs"][0]["module_prefix"].endswith(".programs.p0")
-        # Per-invocation domains keep generated names; canonical bindings are
-        # supplied only when the controller installs its domain provider.
-        assert all(not bindings for bindings in parameters["programs"][0]["domain_bindings"].values())
+        startup = session.startup_by_rank[1]
+        assert "startup_hook" not in startup
+        artifact = startup["startup_artifacts"][0]
+        with tarfile.open(fileobj=io.BytesIO(artifact["payload"]), mode="r:gz") as archive:
+            for entry in left.l3_entries["entries"]:
+                source = archive.extractfile(
+                    f"programs/p0/{entry['logical_path']}/orchestration/host_orch.py"
+                ).read()
+                assert b"'domain_bindings': []" in source
+
+
+def test_direct_adapter_registers_packaged_subworkers_on_executor_ranks(cluster_runner_harness):
+    _, state = cluster_runner_harness
+    with state.compiled.prepare():
+        records = state.spec.startup_by_rank
+        prefix = records[0]["startup_artifacts"][0]["module_prefix"]
+        assert records[0]["inner_l3_worker"] == []
+        for rank in (1, 2):
+            registered = records[rank]["inner_l3_worker"]
+            assert registered
+            assert all(entry["kind"] == "PYTHON_IMPORT" for entry in registered)
+            assert any(
+                entry["target"].startswith(f"{prefix}.programs.p0.") and entry["target"].endswith(":observe")
+                for entry in registered
+            )
+            assert any(
+                entry["target"] == f"{prefix}.orchestration._distributed_support:_copy_return_tensor"
+                for entry in registered
+            )
 
 
 def test_direct_adapter_run_failure_keeps_caller_outputs(i2_programs, direct_adapter_harness):
@@ -732,7 +753,7 @@ def i2_runner_harness(cluster_runner_harness, monkeypatch):
         runner,
         "_assemble_cluster_chips",
         lambda compiled: {
-            path: (object(), compiled.cluster_config.runtime, {})
+            path: (path, compiled.cluster_config.runtime, {})
             for entry in compiled.l3_entries["entries"]
             for path in entry["chip_paths"].values()
         },
@@ -752,7 +773,7 @@ def test_i2_persistent_programs_share_only_explicit_keys(i2_programs, i2_runner_
         ]
     with left.prepare(**options) as prepared:
         assert len(state.spec.startup_artifacts) == 1, "All programs require one aggregate source package"
-        assert all(hook is not None for hook in state.spec.startup_hooks_by_rank)
+        assert all("startup_hook" not in record for record in state.spec.startup_by_rank.values())
         assert len(set(state.targets)) == 2, "Same entry names require program-qualified import targets"
         for _ in range(2):
             prepared.run(left, torch.ones(8), 11, torch.zeros(8))
@@ -985,14 +1006,14 @@ def test_i2_aggregate_is_deterministic_plain_ustar_and_program_qualified(i2_prog
                     assert base + "/orchestration/cluster_orch.py" in names
                     assert base + "/next_levels/node/orchestration/host_orch.py" in names
                     shim = archive.extractfile(base + "/orchestration/_distributed_support.py").read()
-                    assert b"class _EmbeddedNodeState" not in shim
+                    assert b"def _bind_embedded_invocation(" not in shim
                 implementations = []
                 for member in archive.getmembers():
                     assert member.isfile() and member.uid == member.gid == member.mtime == 0
                     assert raw[member.offset + 257 : member.offset + 265] == b"ustar\x0000"
                     data = archive.extractfile(member).read()
                     assert artifact.sha256.encode() not in data
-                    if b"class _EmbeddedNodeState" in data:
+                    if b"def _bind_embedded_invocation(" in data:
                         implementations.append(member.name)
                 assert implementations == ["orchestration/_distributed_support.py"]
     assert payloads[0] == payloads[1], "Session sources must not embed temporary paths or session identities"
@@ -1041,7 +1062,7 @@ from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
 from simpler.startup_artifacts import (
     StartupArtifactSpec, read_startup_artifacts, install_startup_artifacts, activate_startup_artifacts,
 )
-from simpler.startup_preparation import NodeStartupContext
+from simpler import remote_l3_session
 from simpler.task_interface import (
     CallConfig, ChipDomainContext, DataType, GlobalCommDomainView, GlobalDomainMember,
     TaskArgs, TensorArgType,
@@ -1055,15 +1076,8 @@ namespace = artifact['module_prefix']
 artifact['archive_path'] = archive_path
 installed = install_startup_artifacts(read_startup_artifacts([artifact]), cache_root)
 activate_startup_artifacts(installed)
-hook = description['hook']
-module, qualname = hook['import_path'].split(':')
-prepare = getattr(importlib.import_module(module), qualname)
-inner = SimpleNamespace(_config={'device_ids': [12, 15]}, register=lambda function: object())
-bindings = prepare(NodeStartupContext(
-    rank=0, artifact_roots={artifact['sha256']: installed[0].root}, inner_worker=inner,
-    chip_handles={digest: object() for digest in description['chip_digests']},
-    parameters=hook['parameters'],
-))
+chip_handles = {digest: object() for digest in description['chip_digests']}
+remote_l3_session.get_inner_handle = chip_handles.__getitem__
 entries = []
 for target in description['targets']:
     module, qualname = target.split(':')
@@ -1072,18 +1086,9 @@ assert len(entries) == 2 and entries[0] is not entries[1]
 support = importlib.import_module(namespace + '.orchestration._distributed_support')
 for slot in ('p0', 'p1'):
     shim = importlib.import_module(namespace + '.programs.' + slot + '.orchestration._distributed_support')
-    assert shim._EmbeddedNodeState is support._EmbeddedNodeState
+    assert shim._bind_embedded_invocation is support._bind_embedded_invocation
     assert shim._ChipCallables is support._ChipCallables
-states = [entry._pypto_embedded_state for entry in entries]
-node = states[0].node_state
-assert node is states[1].node_state and node.local_worker_ids == (0, 1)
-assert isinstance(states[0].callables, support._ChipCallables)
-assert isinstance(states[1].callables, support._ChipCallables)
-capacity = len(node._tokens)
-assert capacity == sum(row[1] for entry in entries
-                       for row in entry._pypto_embedded_layout['prefork_requirements']
-                       if row[0] == 'inherited_domain_tokens')
-assert all(token.is_shared() for bundle in node._tokens for token in bundle)
+assert all(not hasattr(entry, '_pypto_embedded_state') for entry in entries)
 
 owner = mint_owner_instance_id()
 backings = [create_host_shared_buffer(64, owner, index + 1) for index in range(4)]
@@ -1110,12 +1115,15 @@ try:
         args.add_scalar(ctypes.c_int32(7))
         args.add_scalar(ctypes.c_uint64(view.domain_id))
         return args
+    def invoke(entry):
+        worker.run(lambda _orch, args, config: entry(orch, args, config), incoming(), CallConfig())
+
     def forbidden(*args, **kwargs):
-        raise AssertionError('I2 allocated shared storage after bootstrap')
+        raise AssertionError('L3 intermediates and tokens must use the Simpler allocator')
     with mock.patch.object(torch, 'zeros', forbidden), mock.patch.object(torch, 'empty', forbidden), \
          mock.patch.object(torch.Tensor, 'share_memory_', forbidden), \
          mock.patch.object(buffer_api, 'create_host_shared_buffer', forbidden):
-        for generation in range(1, capacity + 4):
+        for generation in range(1, 5):
             contexts = {local: ChipDomainContext(
                 name=physical['name'], domain_rank=local, domain_size=4,
                 device_ctx=70000 + local, local_window_base=int(backings[2 + local].base),
@@ -1126,7 +1134,6 @@ try:
             view._committed = True
             for broken in ('missing_slot', 'misaligned_base', 'wrong_size', 'uncommitted'):
                 context = view.contexts[1]
-                before = dict(node._bindings)
                 original_base, original_size = context.local_window_base, context.actual_window_size
                 removed = context.buffers.pop('values') if broken == 'missing_slot' else None
                 if broken == 'misaligned_base':
@@ -1137,7 +1144,7 @@ try:
                     view._committed = False
                 calls.clear()
                 try:
-                    entries[0](orch, incoming(), CallConfig())
+                    invoke(entries[0])
                 except (ValueError, RuntimeError, KeyError):
                     pass
                 else:
@@ -1147,12 +1154,12 @@ try:
                     if removed is not None:
                         context.buffers['values'] = removed
                     view._committed = True
-                assert not calls and node._bindings == before and states[0]._frame is None
-            shared_token = None
-            for entry, state in zip(entries, states):
+                assert not calls
+            previous_token = None
+            for entry in entries:
                 calls.clear()
-                entry(orch, incoming(), CallConfig())
-                assert len(calls) == 1 and state._frame is not None
+                invoke(entry)
+                assert len(calls) == 2
                 outgoing = calls[0]
                 assert outgoing.tensor_count() == 4 and outgoing.scalar_count() == 2
                 expected = backings[3].tensor(shapes=(8,), dtype=DataType.FLOAT32)
@@ -1160,34 +1167,29 @@ try:
                 assert outgoing.scalar(1) == view[1].device_ctx == 70001
                 token = outgoing.tensor(3)
                 assert outgoing.tag(3) == TensorArgType.INOUT
-                if shared_token is not None:
-                    assert token == shared_token, 'Two programs lost the canonical ordering token'
-                shared_token = token
-                bindings.task_completed()
-                assert state._frame is None
-                assert (view.domain_id, view.generation) in node._bindings
-            assert len(node._bindings) <= capacity
+                assert calls[1].tensor(3) == token, 'One invocation must reuse its domain/worker token'
+                assert calls[1].tensor(0) == outgoing.tensor(2), 'Intermediate was not forwarded'
+                if previous_token is not None:
+                    assert token != previous_token, 'Each invocation must allocate its own token'
+                previous_token = token
             view._committed = False
-        assert len(node._tokens) == capacity
     assert not guard.attempts
     print('I2_CANONICAL_SESSION_PASS')
 finally:
     worker.close()
-    bindings.close()
     for backing in backings:
         backing.close()
 """
 
 
-def test_i2_installed_native_entries_share_actual_views_and_prefork_pool(
-    i2_programs, i2_runner_harness, tmp_path
-):
+def test_i2_installed_native_entries_share_views_and_use_invocation_tokens(i2_runner_harness, tmp_path):
     runtime_python = os.environ.get("L4_RUNTIME_ONLY_PYTHON")
     runtime_pythonpath = os.environ.get("L4_RUNTIME_ONLY_PYTHONPATH")
     if not runtime_python or not runtime_pythonpath:
         pytest.skip("Set L4_RUNTIME_ONLY_PYTHON and L4_RUNTIME_ONLY_PYTHONPATH")
     _, state = i2_runner_harness
-    left, right = i2_programs
+    left = _i2_compile(tmp_path / "prefill", repeat=True)
+    right = _i2_compile(tmp_path / "decode", second=True, repeat=True)
     with left.prepare(
         extra_compiled=[right],
         persistent=True,
@@ -1201,7 +1203,6 @@ def test_i2_installed_native_entries_share_actual_views_and_prefork_pool(
         handle = state.allocations[0]["handle"]
         description = {
             "artifact": artifact.to_manifest(),
-            "hook": state.spec.startup_hooks_by_rank[0].to_manifest(),
             "targets": state.targets,
             "chip_digests": state.chip_digests,
             "physical": {

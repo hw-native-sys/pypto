@@ -102,6 +102,12 @@ class UseAfterDefChecker : public IRVisitor {
     }
   }
 
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    for (const auto& dim : op->block_dims_) VisitExpr(dim);
+    for (const auto& arg : op->args_) VisitExpr(arg);
+    for (const auto& result : op->results_) AddDefinition(result.get());
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
     // Evaluate RHS first (use site), then define LHS.

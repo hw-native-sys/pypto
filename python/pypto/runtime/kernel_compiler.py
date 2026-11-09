@@ -25,10 +25,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+from pypto._environment import toolchain_probe_env
 from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
 
-from . import _vpto, _vpto_sync
+from . import _vpto
 
 # `check_runtime_pin()` has to run before the simpler imports it guards, so the imports
 # below are deliberately not at the top of the file (E402 is ignored in pyproject.toml).
@@ -282,12 +283,19 @@ class KernelCompiler:
         _vpto.validate_target(self.platform, core_type)
         ptoas, bisheng = self._vpto_toolchain()
         result = subprocess.run(
-            [bisheng, "--version"], capture_output=True, text=True, check=True, timeout=self._timeout_s
+            [bisheng, "--version"],
+            env=toolchain_probe_env(),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=self._timeout_s,
         )
         assert self.sdk.ccec is not None
         return external_source_digest(
             sources,
             metadata=(
+                # Revalidate binaries admitted before the SIMT inline-asm check.
+                "intrinsic-simt-abi-v1",
                 check_ptoas_version(ptoas),
                 result.stdout,
                 result.stderr,
@@ -295,7 +303,6 @@ class KernelCompiler:
                 repr(_vpto.DEVICE_FLAGS),
                 repr(_vpto.CALLER_FLAGS),
                 repr(_vpto.LINK_SYMBOL_ORDER),
-                _vpto_sync.VERSION,
                 repr(self.sdk.ccec.get_compile_flags(core_type=core_type)),
             ),
         )
@@ -308,12 +315,20 @@ class KernelCompiler:
             llvm = directory / f"vpto_{index}.ll"
             obj = directory / f"vpto_{index}.o"
             self._run([ptoas, source, *_vpto.PTOAS_FLAGS, "-o", str(llvm)], llvm, "VPTO lowering")
+            llvm_text = llvm.read_text()
+            # LLVM export bypasses PTOAS's object-level VF_SIMT size patcher.
+            # Bisheng computes intrinsic-only bodies correctly, but inline asm
+            # can leave the 0xffff size sentinel. Reject that unsupported path
+            # before linking; never patch device instruction bytes here.
+            if "simt_entry" in llvm_text and re.search(r"\basm\s", llvm_text):
+                raise ValueError(
+                    f"SIMT helper {source} contains inline assembly; LLVM export cannot guarantee "
+                    "its VF_SIMT launch size. Use intrinsic-only SIMT operations."
+                )
             # LLVM text export does not link PTOAS's generated Bridge wrappers.
             # Reject all non-intrinsic declarations instead of producing an
             # object that only fails later or depends on hidden runtime support.
-            declarations = re.findall(
-                r'^declare\b[^\n]*?@(?:"([^"]+)"|([^\s(]+))', llvm.read_text(), re.MULTILINE
-            )
+            declarations = re.findall(r'^declare\b[^\n]*?@(?:"([^"]+)"|([^\s(]+))', llvm_text, re.MULTILINE)
             unsupported = [
                 quoted or plain for quoted, plain in declarations if not (quoted or plain).startswith("llvm.")
             ]
@@ -322,7 +337,8 @@ class KernelCompiler:
                     f"VPTO helper {source} is not self-contained: {', '.join(unsupported)}. "
                     "Bridge operations and external helper dependencies are not supported."
                 )
-            _vpto_sync.validate_sync_contract(llvm.read_text(), source)
+            # PTOAS owns VF dependency analysis, including ordering through SSA
+            # values. Do not re-infer synchronization from emitted LLVM text.
             self._run(
                 [bisheng, *_vpto.DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)],
                 obj,

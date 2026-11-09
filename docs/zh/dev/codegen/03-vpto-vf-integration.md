@@ -15,8 +15,8 @@ flowchart TD
   EmitC --> Wrapper[C++ kernel_entry wrapper]
   Wrapper --> CallerObj[kernel.o]
   Helper --> LLVM[PTOAS VPTO LLVM 与 VF 同步]
-  LLVM --> Admission[验证受支持的同步契约]
-  Admission --> HelperObj[Bisheng 设备 helper 对象]
+  LLVM --> Symbols[检查 helper 外部符号]
+  Symbols --> HelperObj[Bisheng 设备 helper 对象]
   CallerObj --> Link[ld.lld: kernel_entry 位于首部]
   HelperObj --> Link
   Link --> ELF[验证链接后的设备 ELF]
@@ -55,16 +55,23 @@ Masked store 使用 `readwrite`，表示未激活 lane 的内容需要保留，�
 PyPTO 不在调用前后添加固定的 `pipe_barrier(PIPE_ALL)`，正常的 kernel 尾部同步仍
 保留。调用边界契约依赖 A5 VF 完成语义，因此当前限定为 AIV helper。
 
-在把 LLVM 编译为设备对象前，PyPTO 验证受支持的指令子集、指针来源及已有屏障的
-覆盖情况。此检查不会插入屏障。未知关系或未知 LLVM 输出形式会明确报错，避免
-静默执行。Masked 访问按完整 64 个 lane 检查，因此这不是基于 mask 的最少屏障优化器。
+PTOAS 负责 VF 依赖分析与屏障插入，包括通过 SSA 数据依赖证明的执行顺序。
+PyPTO 将生成的 LLVM 交给 Bisheng，不再重新推导访存依赖或施加 LLVM 指令白名单。
+PTOAS/Bisheng 的错误会传递给调用者。下述独立的外部符号与设备镜像检查负责
+保证 helper 的打包契约。
+
+索引 gather/scatter 依赖固定的 PTOAS 0.72 或更新版本，对同一 vecscope 内
+未知访存范围的 RAW/WAR/WAW 依赖进行保守同步。该版本包含
+[PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
+PyPTO 不再为每次索引访问添加 `VV_ALL` 屏障。Caller/helper 边界与 GM 同步
+继续使用已有机制。
 
 ## 设备代码与 ABI
 
 LLVM 的 `ptr addrspace(6)`、PTO 的 `!pto.ptr<f32, ub>` 与 caller 的
 `__ubuf__ float*` 必须描述相同的 UB 地址空间和传参 ABI。Helper 编译保留
 `--cce-generic-addrspace=off`，使用 A5 vector 设备目标，生成设备对象而非 host fat
-object。LLVM 导出与 Bisheng 编译分步进行，以便链接前验证 helper；相关编译选项
+object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helper 外部符号；相关编译选项
 全部参与二进制缓存标识。
 
 运行时接收原始代码字节。本路径只提取 `.text`，因此链接后的镜像必须满足：
@@ -83,19 +90,38 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前验证 helpe
 | 属性 | 当前支持 |
 | ---- | -------- |
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
-| 作用域 | 直线寄存器操作；静态循环须先展开 |
-| 内存 | 连续 FP32 访问、64 lane、32 字节对齐的静态偏移 |
+| 作用域 | 寄存器操作和最多四层嵌套的规范硬件循环 |
+| 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；不同 Tile dtype 共用 UB 基址 |
 | 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
-Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用、动态内存偏移、一般
-helper 控制流及其他内存格式尚不支持。诊断 VMI 生成支持的 IR 范围比执行路径更广。
-扩展准入范围需要相应的编译器和硬件证据，不能放宽对未知关系的拒绝检查。
+Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流
+仍不在当前可执行前端的支持范围内。访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
+具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
+
+## Required hardware loops
+
+A5 PTO codegen 支持 `pl.reg_scope()` 内的规范 `pl.hardware_loop(stop)`，
+最多嵌套四层，不支持 loop-carried value。`start` 固定为 0，`step` 固定为 1。
+整数 stop 可以是静态或动态值。标量捕获 ABI 支持有符号和无符号的 8、16、32、64 位整数以及 index 值。
+对于非空循环，只有在静态算出的 stop 超过 65535 时才拒绝。静态求值在能够证明结果时遵循结果 dtype 的语义，
+包括窄位宽无符号整数的回绕。无法证明范围的 stop 继续放行；
+调用方需要保证计数和内存访问处于有效范围。
+运行时分支和 while 会被拒绝。
+
+指数为非负常量的整数幂（如 `n ** 2`）降低为标量乘法，不增加循环。
+标量 PTO emitter 当前不支持动态或负指数；这是算子实现限制，不是 hardware loop 的范围要求。
+
+Codegen 在 `pto.vecscope` 内生成使用 `index` 归纳变量的 `scf.for`。
+运行时 `i32` stop 作为标量参数捕获，通过 `arith.index_cast` 转换。
+资格检查和回归验证截止于生成 PTO 的边界；PyPTO 不添加硬件循环标记、不改写
+LLVM 计数器、不插入内存屏障，也不增加链接后指令校验。后续降低（lowering）、
+同步和优化由 PTOAS 负责。
 
 ## 运行完整示例
 
-在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.70 或更新版本，
+在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.72 或更新版本，
 配置匹配的 CANN/Bisheng 工具链，保持 runtime pin 检查开启。先预约空闲 A5 设备，
 再运行以下命令：
 

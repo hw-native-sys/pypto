@@ -47,6 +47,8 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/deserializer.h"
 #include "pypto/ir/serialization/serializer.h"
+#include "pypto/ir/simt.h"
+#include "pypto/ir/simt_analysis.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
@@ -115,10 +117,17 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
   for (auto item : kwargs_dict) {
     std::string key = nb::cast<std::string>(item.first);
 
+    if (key == kAttrExternalReturnParams && !nb::isinstance<nb::list>(item.second) &&
+        !nb::isinstance<nb::tuple>(item.second)) {
+      throw pypto::TypeError("external return parameters must be a list of parameter Vars");
+    }
+
     // Try to cast to common types
     // NOTE: Check DataType/MemorySpace/PipeType/CoreType/PadValue BEFORE int, and bool BEFORE int
     if (nb::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<SimtAxis>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<SimtAxis>(item.second));
     } else if (nb::isinstance<MemorySpace>(item.second)) {
       kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
     } else if (nb::isinstance<TensorLayout>(item.second)) {
@@ -173,6 +182,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       // Lists/tuples carry exactly one element type, dispatched by attr key:
       //   - kAttrArgDirections             -> vector<ArgDirection>
       //   - kAttrArgDirectionOverrides     -> vector<int32_t>
+      //   - kSimtBlockDimsAttr            -> vector<int32_t> (derived helper metadata)
       //   - kAttrManualDepEdges /
       //     kAttrCompilerManualDepEdges /
       //     kAttrArgDirOverrideVars /
@@ -181,7 +191,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       // payloads (e.g. ``manual_dep_edges=[1]``) and fail later in codegen
       // instead of raising at parse time.
       auto seq = nb::cast<nb::sequence>(item.second);
-      if (key == kAttrArgDirectionOverrides) {
+      if (key == kAttrArgDirectionOverrides || key == kSimtBlockDimsAttr) {
         std::vector<int32_t> idxs;
         for (auto elem : seq) {
           if (nb::isinstance<nb::bool_>(elem) || !nb::isinstance<nb::int_>(elem)) {
@@ -196,7 +206,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
         }
         kwargs.emplace_back(key, std::move(idxs));
       } else if (key == kAttrManualDepEdges || key == kAttrCompilerManualDepEdges ||
-                 key == kAttrArgDirOverrideVars || key == kAttrDumpVars) {
+                 key == kAttrArgDirOverrideVars || key == kAttrDumpVars || key == kAttrExternalReturnParams) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {
@@ -286,8 +296,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
             throw pypto::TypeError(
                 "Unsupported list element type for key: " + key +
                 ". A list-valued attr under an arbitrary key may hold Var (a reference) or "
-                "ArgDirection. Integer lists are accepted only for the reserved key '" +
-                std::string(kAttrArgDirectionOverrides) + "'.");
+                "ArgDirection. Integer lists are accepted only for the reserved keys '" +
+                std::string(kAttrArgDirectionOverrides) + "' and '" + kSimtBlockDimsAttr + "'.");
           }
           dirs.push_back(nb::cast<ArgDirection>(elem));
         }
@@ -517,15 +527,19 @@ void BindIR(nb::module_& m) {
       .value("min", PadValue::min, "Min value padding")
       .export_values();
 
-  // CachePolicy enum - declared GM cache-access policy for a tensor read.
-  // nb::is_arithmetic like AtomicType: the policy rides the `tile.load` "cache"
+  // CachePolicy enum - semantic GM cache-access policy for reads and writes.
+  // nb::is_arithmetic like AtomicType: the policy rides the transfer's "cache"
   // kwarg as a plain `int`, so the DSL needs `int(policy)` to work.
   nb::enum_<CachePolicy>(ir, "CachePolicy", nb::is_arithmetic(),
-                         "GM cache-access policy declared for a tensor read")
-      .value("DEFAULT", CachePolicy::kDefault, "Ordinary cached GM access")
-      .value("BYPASS", CachePolicy::kBypass,
-             "Streaming access declared to bypass the cache: asserts this tensor has no reuse "
-             "worth caching and that nothing writes those bytes while the kernel runs")
+                         "GM cache policy; supported modes depend on target and transfer direction")
+      .value("DEFAULT", CachePolicy::kDefault)
+      .value("BYPASS", CachePolicy::kBypass)
+      .value("NORMAL_FIRST_VICTIM", CachePolicy::kNormalFirstVictim)
+      .value("NORMAL_LAST_VICTIM", CachePolicy::kNormalLastVictim)
+      .value("NORMAL_PERSISTENT", CachePolicy::kNormalPersistent)
+      .value("NOT_ALLOC_KEEP", CachePolicy::kNotAllocKeep)
+      .value("NOT_ALLOC_CLEAN", CachePolicy::kNotAllocClean)
+      .value("NOT_ALLOC_DROP", CachePolicy::kNotAllocDrop)
       .export_values();
 
   // TensorView - struct for tensor view information - must be before TensorType
@@ -899,7 +913,7 @@ void BindIR(nb::module_& m) {
         result["mask"] = nb::cast(effect.mask);
         return result;
       },
-      nb::arg("call"), "Get the schema memory interval in root element coordinates");
+      nb::arg("call"), "Get load/store/gather/scatter effects; indexed intervals are unknown");
   ir.def(
       "get_reg_op_spec",
       [](const std::string& name) {
@@ -1098,7 +1112,8 @@ void BindIR(nb::module_& m) {
 
   nb::enum_<WriteChannel>(ir, "WriteChannel", "The hardware path an operator's writes travel")
       .value("Dma", WriteChannel::Dma, "MTE3 / DMA store path")
-      .value("Scalar", WriteChannel::Scalar, "Scalar D-cache write path");
+      .value("Scalar", WriteChannel::Scalar, "Scalar D-cache write path")
+      .value("Simt", WriteChannel::Simt, "SIMT lane store path");
 
   ir.def(
       "get_op_arg_effect",
@@ -1429,6 +1444,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(DataType)) {
         result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(SimtAxis)) {
+        result[key.c_str()] = AnyCast<SimtAxis>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(MemorySpace)) {
         result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(TensorLayout)) {
@@ -1773,8 +1790,8 @@ void BindIR(nb::module_& m) {
       [](const ForStmtPtr& self) {
         nb::dict result;
         for (const auto& [key, value] : self->attrs_) {
-          result[key.c_str()] = AnyToPyObject<int, bool, std::string, double, float, DataType, MemorySpace,
-                                              TensorLayout, TileLayout, PadValue>(value, key);
+          result[key.c_str()] = AnyToPyObject<int, bool, std::string, double, float, DataType, SimtAxis,
+                                              MemorySpace, TensorLayout, TileLayout, PadValue>(value, key);
         }
         return result;
       },
@@ -2012,11 +2029,16 @@ void BindIR(nb::module_& m) {
       "buffers=[...]) as __comm_d<n>:`. Synthesized by MaterializeCommDomainScopes pass; no user DSL "
       "surface.");
   comm_domain_scope_stmt_class.def(
-      nb::init<std::vector<int64_t>, std::vector<WindowBufferPtr>, std::string, const StmtPtr&,
-               const Span&>(),
+      "__init__",
+      [](CommDomainScopeStmt* self, std::vector<int64_t> devices, std::vector<WindowBufferPtr> slots,
+         std::string name_hint, const StmtPtr& body, const Span& span, std::vector<std::string> engines) {
+        new (self) CommDomainScopeStmt(std::move(devices), std::move(slots), std::move(name_hint), body, span,
+                                       std::vector<std::string>{},
+                                       std::vector<std::pair<std::string, std::any>>{}, std::move(engines));
+      },
       nb::arg("devices"), nb::arg("slots"), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
-      "Create a CommDomain scope statement. ``devices`` empty = all devices (resolved to "
-      "*range(world_size) at codegen).");
+      nb::arg("engines") = std::vector<std::string>{},
+      "Create a CommDomain scope with explicit async workspace engines.");
   BindFields<CommDomainScopeStmt>(comm_domain_scope_stmt_class);
   comm_domain_scope_stmt_class.def_prop_ro(
       "attrs",
@@ -2043,6 +2065,21 @@ void BindIR(nb::module_& m) {
       },
       nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<SeqStmts>(seq_stmts_class);
+
+  auto simt_scope_class = nb::class_<SimtScopeStmt, Stmt>(
+      ir, "SimtScopeStmt", "Transient per-thread SIMT region with implicit captures");
+  simt_scope_class.def(nb::init<std::vector<ExprPtr>, StmtPtr, Span, std::vector<VarPtr>>(),
+                       nb::arg("block_dims"), nb::arg("body"), nb::arg("span"),
+                       nb::arg("private_scalars") = std::vector<VarPtr>{});
+  BindFields<SimtScopeStmt>(simt_scope_class);
+
+  auto simt_launch_class = nb::class_<SimtLaunchStmt, Stmt>(
+      ir, "SimtLaunchStmt", "Launch a void SIMT helper and define updated storage results");
+  simt_launch_class.def(nb::init<GlobalVarPtr, std::vector<ExprPtr>, std::vector<ExprPtr>,
+                                 std::vector<VarPtr>, std::vector<int>, Span>(),
+                        nb::arg("callee"), nb::arg("block_dims"), nb::arg("args"), nb::arg("results"),
+                        nb::arg("result_param_indices"), nb::arg("span"));
+  BindFields<SimtLaunchStmt>(simt_launch_class);
 
   // EvalStmt - const shared_ptr
   auto eval_stmt_class = nb::class_<EvalStmt, Stmt>(ir, "EvalStmt", "Evaluation statement: expr");
@@ -2077,6 +2114,20 @@ void BindIR(nb::module_& m) {
       .value("Functional", FunctionIRStage::Functional, "Tensor/Tile value semantics (default)")
       .value("Buffer", FunctionIRStage::Buffer, "Explicit storage handles and destination writes");
 
+  nb::class_<SimtParamAccess>(ir, "SimtParamAccess")
+      .def_ro("reads", &SimtParamAccess::reads)
+      .def_ro("writes", &SimtParamAccess::writes);
+  nb::class_<SimtResources>(ir, "SimtResources")
+      .def_ro("max_threads", &SimtResources::max_threads)
+      .def_ro("max_regs", &SimtResources::max_regs);
+  ir.def("analyze_simt_access", &AnalyzeSimtAccess, nb::arg("function"));
+  ir.def("infer_simt_resources", &InferSimtResources, nb::arg("launch"));
+
+  nb::enum_<SimtAxis>(ir, "SimtAxis", "Compile-time SIMT query axis")
+      .value("X", SimtAxis::X)
+      .value("Y", SimtAxis::Y)
+      .value("Z", SimtAxis::Z);
+
   // FunctionType enum
   nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
       .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")
@@ -2088,6 +2139,7 @@ void BindIR(nb::module_& m) {
       .value("Spmd", FunctionType::Spmd, "SPMD data-parallel dispatch")
       .value("Inline", FunctionType::Inline, "Whole-body substitution at every call site")
       .value("Graph", FunctionType::Graph, "Recordable/replayable orchestration fragment")
+      .value("SIMT", FunctionType::SIMT, "Per-thread device helper launched inside an AIV task")
       .export_values();
 
   // Level enum — hierarchy level in the Linqu machine model
@@ -2143,6 +2195,7 @@ void BindIR(nb::module_& m) {
   // (ir.ArgDirection.InOut) to keep the two direction models cleanly separated.
 
   // IsInCoreType helper
+  ir.def("is_device_function_type", &IsDeviceFunctionType, nb::arg("func_type"));
   ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
          "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
 
@@ -2451,8 +2504,8 @@ void BindIR(nb::module_& m) {
               // Convert kwargs to Python list of (key, value) tuples
               nb::list py_kwargs_list;
               for (const auto& [key, val] : kwargs) {
-                nb::object py_val = AnyToPyObject<DataType, MemorySpace, TensorLayout, PadValue, bool, int,
-                                                  std::string, double>(val, key);
+                nb::object py_val = AnyToPyObject<DataType, SimtAxis, MemorySpace, TensorLayout, PadValue,
+                                                  bool, int, std::string, double>(val, key);
                 nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
                 py_kwargs_list.append(pair);
               }

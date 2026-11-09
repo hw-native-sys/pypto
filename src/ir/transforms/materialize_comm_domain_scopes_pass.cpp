@@ -1159,12 +1159,16 @@ void InferLocalDomains(const FunctionPtr& func, LocalWindowPlan& plan,
 class WindowIdentityRewriter : public IRMutator {
  public:
   WindowIdentityRewriter(const WindowIdentityGraph& identities,
-                         const std::unordered_map<const Function*, std::unique_ptr<LocalWindowPlan>>& plans)
-      : identities_(identities), plans_(plans) {}
+                         const std::unordered_map<const Function*, std::unique_ptr<LocalWindowPlan>>& plans,
+                         const std::vector<std::string>& engines)
+      : identities_(identities), plans_(plans), engines_(engines) {}
 
   FunctionPtr VisitFunction(const FunctionPtr& func) override {
     auto plan = plans_.find(func.get());
-    if (!identities_.FunctionNeedsRewrite(func) && (plan == plans_.end() || plan->second->domains.empty()))
+    const bool refresh_engines =
+        IsHostOrch(func) && !engines_.empty() && As<CommDomainScopeStmt>(func->body_);
+    if (!refresh_engines && !identities_.FunctionNeedsRewrite(func) &&
+        (plan == plans_.end() || plan->second->domains.empty()))
       return func;
     auto params = func->params_;
     bool changed = false;
@@ -1173,6 +1177,7 @@ class WindowIdentityRewriter : public IRMutator {
       changed |= fresh.get() != param.get();
       param = std::move(fresh);
     }
+    update_engines_ = IsHostOrch(func);
     auto body = VisitStmt(func->body_);
     auto types = identities_.RewriteReturns(func);
     for (size_t i = 0; i < types.size(); ++i) {
@@ -1184,8 +1189,10 @@ class WindowIdentityRewriter : public IRMutator {
       const auto& domains = found->second->domains;
       for (size_t i = domains.size(); i-- > 0;) {
         const auto& domain = domains[i];
-        body = std::make_shared<const CommDomainScopeStmt>(domain.desc.ToDevices(), domain.slots,
-                                                           "comm_d" + std::to_string(i), body, domain.span);
+        body = std::make_shared<const CommDomainScopeStmt>(
+            domain.desc.ToDevices(), domain.slots, "comm_d" + std::to_string(i), body, domain.span,
+            std::vector<std::string>{}, std::vector<std::pair<std::string, std::any>>{},
+            IsHostOrch(func) ? engines_ : std::vector<std::string>{});
       }
     }
     changed |= body.get() != func->body_.get();
@@ -1209,6 +1216,19 @@ class WindowIdentityRewriter : public IRMutator {
   }
 
  protected:
+  StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+    auto updated = As<CommDomainScopeStmt>(IRMutator::VisitStmt_(op));
+    if (!update_engines_ || engines_.empty()) return updated;
+    auto required = updated->engines_;
+    for (const auto& engine : engines_) {
+      if (std::find(required.begin(), required.end(), engine) == required.end()) required.push_back(engine);
+    }
+    if (required == updated->engines_) return updated;
+    auto result = MutableCopy(updated);
+    result->engines_ = std::move(required);
+    return result;
+  }
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto found = var_remap_.find(op.get());
     if (found != var_remap_.end()) return found->second;
@@ -1251,6 +1271,8 @@ class WindowIdentityRewriter : public IRMutator {
  private:
   const WindowIdentityGraph& identities_;
   const std::unordered_map<const Function*, std::unique_ptr<LocalWindowPlan>>& plans_;
+  const std::vector<std::string>& engines_;
+  bool update_engines_ = false;
 };
 }  // namespace
 
@@ -1258,6 +1280,33 @@ namespace pass {
 
 Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Conservative program-wide policy: one URMA use provisions every domain.
+    // Precise domain attribution belongs here in a future refinement, not in codegen.
+    class EngineCollector : public IRVisitor {
+     public:
+      bool uses_urma = false;
+      void Record(const OpPtr& op) {
+        // LowerL2TensorCollectives may already have replaced the registered op
+        // with a synthesized builtin function (not a registry operator).
+        if (op && (IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
+                   op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0)) {
+          uses_urma = true;
+        }
+      }
+      void VisitExpr_(const CallPtr& op) override {
+        Record(op->op_);
+        IRVisitor::VisitExpr_(op);
+      }
+      void VisitExpr_(const SubmitPtr& op) override {
+        Record(op->op_);
+        IRVisitor::VisitExpr_(op);
+      }
+    } collector;
+    for (const auto& [gv, func] : program->functions_) {
+      if (func && func->body_) collector.VisitStmt(func->body_);
+    }
+    const std::vector<std::string> engines =
+        collector.uses_urma ? std::vector<std::string>{"urma"} : std::vector<std::string>{};
     // Index adjacent child dispatches once. A CHIP Graph remains a task of a
     // CHIP entry, not a HOST dispatch target.
     std::map<std::string, FunctionPtr> chip_orchs;
@@ -1288,7 +1337,7 @@ Pass MaterializeCommDomainScopes() {
       InferLocalDomains(func, *found->second, *func->level_ == Level::HOST ? chip_orchs : host_orchs,
                         identities);
     }
-    WindowIdentityRewriter rewriter(identities, plans);
+    WindowIdentityRewriter rewriter(identities, plans, engines);
     return rewriter.VisitProgram(program);
   };
 

@@ -108,7 +108,7 @@ The flag is orthogonal to affinity (it constrains replication, not placement).
 Its only consumer is `LowerAutoVectorSplit`'s `pl.split_aiv` region placement
 stamp, which pins a region's no-duplicate calls to the AIV lane; see
 `docs/en/dev/ir/05-operators.md` and
-`docs/en/dev/passes/24-lower_auto_vector_split.md`.
+`docs/en/dev/passes/25-lower_auto_vector_split.md`.
 
 **Comm ops written outside every region are still duplicated onto both lanes,
 and nothing diagnoses it.** Putting the comm phase in a `pl.split_aiv` region is
@@ -458,7 +458,7 @@ provenance, so distinctness is the caller's obligation.
 
 On the managed CHIP/L2 rail, an operand built in the orchestration must be
 provably row-major, or `LowerL2TensorCollectives` rejects it (see the
-[pass reference](passes/41-lower_l2_tensor_collectives.md#current-limitations)
+[pass reference](passes/44-lower_l2_tensor_collectives.md#current-limitations)
 for what is proven and why). As a backstop, orchestration codegen emits one
 `is_contiguous` check per operand ahead of its `rt_submit_aiv_task`.
 The first non-contiguous operand latches `SIMPLER_ERROR_INVALID_ARGS` naming it
@@ -576,7 +576,7 @@ naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) accepts a
 compile-time `core_num`: it folds the same `B = CalAllToAllVBlocks(P, L)` at
 lowering and attaches it as the launch spec (`core_num=B`, `sync_start`) when
 `B > 1`. A runtime `core_num` is not supported on that rail yet — see
-[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md).
+[`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md).
 
 **CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
 down, in a CHIP `Orchestration` body rather than in `host_orch`. It is rewritten
@@ -585,7 +585,7 @@ template the HOST rail uses, so the wire behaviour is identical and only the
 dispatch structure differs: the collective becomes one AIV task of the caller's
 own pipeline — no per-device fan-out, no nested L2 dispatch — ordered against
 the surrounding compute by ordinary TensorMap dependencies. See
-[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md).
+[`44-lower_l2_tensor_collectives.md`](passes/44-lower_l2_tensor_collectives.md).
 
 **HOST builtin** (`LowerHostTensorCollectives`): the same 5-arg call, made
 from a `host_orch` function, lowers per-device to `builtin.tensor.all_to_all_v`
@@ -665,7 +665,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/46-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/49-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape
 `[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
@@ -789,6 +789,35 @@ while a rank-one `[NR]` signal is HOST-only. A signal shaped for ring
 `allreduce` (`[2*(NR-1), NR]`) cannot be shared with this collective on either
 path; give it its own window.
 
+### `pld.tensor.reduce_scatter`
+
+```text
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+```
+
+`target` is `[NR, SIZE]`. Each rank stages all `NR` chunks before the call; after
+it, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r`
+across every rank (Sum/Max/Min/Prod by `ReduceOp`). Signal shape `[NR, 1]`.
+
+The row is walked in UB-sized chunks of at most 16 KiB. A static, 32-byte-aligned
+`SIZE` that fits one chunk keeps the single-tile path (ready barrier, peer loop,
+post-reduce barrier, store, epilogue); anything larger, not 32-byte aligned, or
+symbolic uses the chunked path: one ready barrier, then a read-complete barrier per chunk on
+generation `2 + chunk_index`, with a ragged final chunk carried as
+`valid_shape = min(chunk_cols, SIZE - offset)`. Either way a self-clearing
+epilogue restores the signal (see
+[Barrier-signal protocol](#barrier-signal-protocol)), so one signal serves
+back-to-back calls.
+
+Chunking is what makes a large, unaligned, or symbolic `SIZE` expressible at all:
+the single-tile form allocates the whole row as one VEC tile, which overflows the
+VEC budget for a real payload and is rejected by PTOAS whenever the row's byte
+width is not 32-byte aligned. A static `SIZE` below one chunk but not 32-byte
+aligned therefore also takes the chunked path, which rounds the physical chunk
+width up to the next aligned extent and keeps the logical width in `valid_shape`.
+A symbolic `SIZE` must be runtime-bound by a kernel scalar, loop variable, or
+physical tensor-shape parameter.
+
 ### `pld.system.notify` (TNOTIFY)
 
 ```text
@@ -881,7 +910,7 @@ than a PTO tensor view.
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/50-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Distributed codegen rounds each slot's physical allocation up to 64 bytes and
@@ -891,7 +920,7 @@ slots on separate A2/A3 D-cache lines: a scalar store followed by DCCI writes
 back a whole 64-byte line and must not overwrite an adjacent signal slot's
 credits. The padding also covers 32-byte remote-transfer alignment and tails.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/51-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing
@@ -909,6 +938,9 @@ dispatches before the final `Simplify`.
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
   `test_l3_tensor_allgather_runtime_width.py` (composite allgather at a runtime
   extent: one compile exercised at three different extents),
+  `test_l3_tensor_reduce_scatter_intrinsic.py`, `test_l3_tensor_reduce_scatter_chunked.py`,
+  `test_l3_tensor_reduce_scatter_runtime_size.py` (one compile at runtime sizes
+  1001 / 12288 / 12289),
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
   `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,

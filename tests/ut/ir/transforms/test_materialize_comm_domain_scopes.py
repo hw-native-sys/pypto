@@ -202,6 +202,53 @@ def _assert_rank2_signal_type(value: ir.Expr, world_size_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("pre_materialized", [False, True])
+@pytest.mark.parametrize("uses_urma", [False, True])
+def test_program_wide_engine_requirements(uses_urma, pre_materialized):
+    """Even an uncalled function contributes engines to every host domain."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, data: pld.DistributedTensor[[16], pl.FP32]):
+            return data
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def unused(
+            self,
+            inp: pld.DistributedTensor[[4, 16], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[8, 16], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 2], pl.INT32]],
+            counts: pld.DistributedTensor[[2, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            index: pld.DistributedTensor[[2, 4], pl.INT32],
+        ) -> pld.DistributedTensor[[8, 16], pl.FP32]:
+            return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=2)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            a = pld.alloc_window_buffer(64)
+            b = pld.alloc_window_buffer(64)
+            x = pld.window(a, [16], dtype=pl.FP32)
+            y = pld.window(b, [16], dtype=pl.FP32)
+            self.chip(x, device=0)
+            self.chip(y, device=1)
+
+    functions = [f for f in Before.functions.values() if f.name != "unused"]
+    if pre_materialized:
+        initial = passes.materialize_comm_domain_scopes()(
+            ir.Program(functions, "engine_scan", ir.Span.unknown())
+        )
+        functions = list(initial.functions.values())
+    if uses_urma:
+        functions.append(_get_func(Before, "unused"))
+    program = ir.Program(functions, "engine_scan", ir.Span.unknown())
+    after = passes.materialize_comm_domain_scopes()(program)
+    scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
+    assert len(scopes) == 2
+    assert all(list(scope.engines) == (["urma"] if uses_urma else []) for scope in scopes)
+
+
 def test_single_alloc_all_devices_world_size_loop():
     """``for r in pl.range(pld.world_size())`` + ``device=r`` ⇒ kAll."""
 

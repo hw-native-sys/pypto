@@ -539,9 +539,10 @@ def test_loop_carried_returned_distributed_tensors_reuse_contexts():
             )
             _tail_data = tail[0]
             _tail_signal = tail[1]
-            return value_out
+            return value
 
-    ir.assert_structural_equal(_apply(passes.convert_to_ssa()(Before)), Expected)
+    normalized = passes.normalize_return_order()(passes.convert_to_ssa()(Before))
+    ir.assert_structural_equal(_apply(normalized), Expected)
 
 
 def test_buffer_aliasing_view_inherits_source_context():

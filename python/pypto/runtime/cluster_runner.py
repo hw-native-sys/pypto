@@ -193,6 +193,51 @@ def _node_domain_bindings(plans: list[dict[str, Any]], logical_path: str) -> lis
     return list(merged.values())
 
 
+def _entry_bindings(program, chips, plans, staging):
+    chip_bindings = {
+        path: (staging.register(chip).digest.hex(), tuple(config.get("host_tensor_indices", ())))
+        for path, (chip, _, config) in chips.items()
+    }
+    return {
+        entry["logical_path"]: {
+            "module": entry["module"],
+            "world_size": entry["local_device_count"],
+            "chips": {name: chip_bindings[path] for name, path in entry["chip_paths"].items()},
+            "sub_workers": {
+                name: path.removesuffix(".py").replace("/", ".")
+                for name, path in entry["sub_worker_paths"].items()
+            },
+            "domain_bindings": _node_domain_bindings(plans, entry["logical_path"]),
+        }
+        for entry in program.l3_entries["entries"]
+    }
+
+
+def _inner_python_registrations(prefix, programs, bindings):
+    from simpler.callable_identity import (  # noqa: PLC0415
+        build_python_import_descriptor,
+        compute_callable_hashid,
+    )
+
+    imports = {
+        (f"{prefix}.programs.p{index}.{module}", name)
+        for index, entries in enumerate(bindings)
+        for binding in entries.values()
+        for name, module in binding["sub_workers"].items()
+    }
+    if any(entry["return_copy_callable"] for program in programs for entry in program.l3_entries["entries"]):
+        imports.add((f"{prefix}.orchestration._distributed_support", "_copy_return_tensor"))
+    return [
+        {
+            "hashid": compute_callable_hashid(build_python_import_descriptor(module, name)),
+            "kind": "PYTHON_IMPORT",
+            "target_registry": "INNER_L3_WORKER",
+            "target": f"{module}:{name}",
+        }
+        for module, name in sorted(imports)
+    ]
+
+
 def _call_config_record(config: Any) -> dict[str, Any]:
     """Retain task diagnostics and every ring override across the local bridge."""
     fields = (
@@ -241,7 +286,6 @@ class ClusterWorker:
     ) -> None:
         from simpler.mpi_direct_topology import MpiDirectExecutorSpec  # noqa: PLC0415
         from simpler.startup_artifacts import StartupArtifactSpec, read_startup_artifacts  # noqa: PLC0415
-        from simpler.startup_preparation import NodeStartupHook  # noqa: PLC0415
 
         programs = list({id(program): program for program in programs}.values())
         if not programs:
@@ -259,8 +303,6 @@ class ClusterWorker:
         chip_sets = [_assemble_cluster_chips(program) for program in programs]
         if any(runtime != cc.runtime for chips in chip_sets for _, runtime, _ in chips.values()):
             raise ValueError("Every cluster CHIP dependency must use ClusterConfig.runtime")
-        digest, payload = build_cluster_session_bundle(programs)
-        prefix = "_pypto_cluster_" + digest
         self._compiled = compiled
         self._config = config
         self._states = {id(program): (index, program) for index, program in enumerate(programs)}
@@ -274,9 +316,6 @@ class ClusterWorker:
         self._data_dir.mkdir(mode=0o700)
         staging = None
         try:
-            archive = Path(self._temporary.name) / "sources.tar.gz"
-            archive.write_bytes(payload)
-            artifacts = read_startup_artifacts([StartupArtifactSpec(archive, digest, prefix).to_manifest()])
             enable_sdma = any(
                 bool(value[2].get("enable_sdma", False)) for chips in chip_sets for value in chips.values()
             )
@@ -287,26 +326,18 @@ class ClusterWorker:
                 startup_timeout_s=timeout,
                 enable_sdma=enable_sdma,
             )
-            prepared = []
+            bindings = [
+                _entry_bindings(program, chips, plan, staging)
+                for program, chips, plan in zip(programs, chip_sets, plans, strict=True)
+            ]
+            digest, payload = build_cluster_session_bundle(programs, bindings)
+            prefix = "_pypto_cluster_" + digest
+            archive = Path(self._temporary.name) / "sources.tar.gz"
+            archive.write_bytes(payload)
+            artifacts = read_startup_artifacts([StartupArtifactSpec(archive, digest, prefix).to_manifest()])
             execution = []
-            for index, (program, chips) in enumerate(zip(programs, chip_sets, strict=True)):
+            for index, program in enumerate(programs):
                 program_prefix = prefix + f".programs.p{index}"
-                prepared.append(
-                    {
-                        "module_prefix": program_prefix,
-                        "entries": program.l3_entries["entries"],
-                        "chip_digests": {
-                            path: staging.register(chip).digest.hex() for path, (chip, _, _) in chips.items()
-                        },
-                        "chip_configs": {path: value[2] for path, value in chips.items()},
-                        "domain_bindings": {
-                            record["logical_path"]: _node_domain_bindings(
-                                plans[index], record["logical_path"]
-                            )
-                            for record in program.l3_entries["entries"]
-                        },
-                    }
-                )
                 infos, _, _ = program._get_metadata()
                 execution.append(
                     {
@@ -324,7 +355,7 @@ class ClusterWorker:
                     }
                 )
             minimum = sum(
-                record["minimum_sub_workers"] for program in prepared for record in program["entries"]
+                record["minimum_sub_workers"] for program in execution for record in program["entries"]
             )
             executors = [
                 {
@@ -351,9 +382,7 @@ class ClusterWorker:
                 "max_pending_frame_bytes": 128 * 1024 * 1024,
                 "launcher_args": list(cc.mpirun_args),
             }
-            hook = NodeStartupHook(
-                prefix + ".orchestration.cluster_bootstrap:prepare_node", {"programs": prepared}
-            ).to_manifest()
+            python_registrations = _inner_python_registrations(prefix, programs, bindings)
             session = {
                 "platform": compiled.platform,
                 "runtime": cc.runtime,
@@ -369,12 +398,13 @@ class ClusterWorker:
                 typed = MpiDirectExecutorSpec.from_dict(spec)
                 records[spec["rank"]] = {
                     "startup_artifacts": artifacts,
-                    "startup_hook": hook,
-                    "inner_l3_worker": staging._inner_registry_entries_for_spec(typed),
+                    "inner_l3_worker": staging._inner_registry_entries_for_spec(typed) + python_registrations,
                 }
             records[0] = {
                 "startup_artifacts": artifacts,
-                "inner_l3_worker": records[1]["inner_l3_worker"],
+                "inner_l3_worker": [
+                    entry for entry in records[1]["inner_l3_worker"] if entry["kind"] == "CHIP_CALLABLE"
+                ],
                 "parameters": {"session": session, "data_dir": str(self._data_dir)},
             }
             self._session = _DirectSession(

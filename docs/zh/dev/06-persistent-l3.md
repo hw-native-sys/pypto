@@ -125,9 +125,11 @@ runtime/profile、窗口和对齐后的槽大小，以及 dtype、shape、stride
 静态可知。非持久执行直接按本次调用的参数分配域。prepare 会保存配置快照，
 之后修改原映射不会改变会话。共享配置不进入 JIT 编译身份。
 
-会话安装一个有界的聚合源码包，每节点使用一份规范 runtime helper 和一个
-fork 前 token pool。各程序共享真实的 R1 retained domain，以及以
-`(domain_id, generation)` 为键的 ordering 状态。槽翻译只选择实际 runtime
+会话安装一个有界的聚合源码包，其中包含一份共用的 runtime helper 和各 L3
+入口的 callable 与域绑定。Simpler 在启动时注册产物中的 callable。生成的入口
+在每次调用时绑定参数，并通过 Simpler 的共享分配接口获取中间张量和排序 token。
+同一次调用中，同域、同 worker 的任务复用 token。多个程序可以共享同一个
+以 `(domain_id, generation)` 标识的保留域。槽翻译只选择实际 runtime
 Buffer，不包装或重命名导入的全局域 view。Simpler 在导入前验证源码包摘要。
 冷 schema-4 产物保存域描述；缺少这些描述的旧产物须重新生成后才能
 显式共享。
@@ -136,10 +138,10 @@ Buffer，不包装或重命名导入的全局域 view。Simpler 在导入前验�
 runtime 控制拷贝每块最多 8 MiB。新分配不重复清零。
 `reset_persistent_windows=False` 保留 DATA、signals 和用户 epoch 的原内容。
 使用 signal/credit 的 kernel 协议须自行管理重置或 epoch 推进；上述先计算再
-TLOAD 的用例仅依赖 run fence。ordering token 的存储身份跨程序保持稳定。
+TLOAD 的用例仅依赖 run fence。
 
 正常关闭在最后一次 fence 后显式释放 retained domain。失败关闭先排空 Worker
-树，再释放域、I/O 和 fork 前状态的引用。无法确认关闭完成时保留 journals，拒绝
+树，再释放域和 I/O 的引用。无法确认关闭完成时保留 journals，拒绝
 新的 run，并允许重试 close。CLUSTER 仅支持同步 run；保留机制使用 R1 公开的
 `retain_after_run` 合同，不从私有 runtime journal 中摘除域。
 

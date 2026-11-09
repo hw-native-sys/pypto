@@ -45,7 +45,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | 指数、自然对数。`log` 的 `high_precision=True` 在 A5 上选择更慢、更高精度的 PTO 路径；A2/A3 接受该参数但 PTO-ISA 会忽略它并返回默认结果，编译时会给出告警 |
-| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径，传给 Tile 会**抛异常** —— tile 级的精度由是否传入 scratch tile 决定：`pl.tile.rsqrt(src, tmp)` |
+| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`rsqrt` 在 Tensor 和 Tile 层均默认 `high_precision=False`。Tensor 高精度由编译器分配 scratch；Tile 高精度须写 `pl.tile.rsqrt(src, tmp=tmp, high_precision=True)`（或 `pl.rsqrt(src, high_precision=True, tmp=tmp)`）。仅传 scratch 而未开启高精度会报错；A5 codegen 显式生成 `RsqrtAlgorithm::HIGH_PRECISION`。 |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | 三角函数 |
 
 ## 比较与选择
@@ -114,7 +114,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`assemble`][pypto.language.tensor.assemble] | `pl.` | 把子区域写回；也可写作 `dst[i:i+16] = src` |
 | [`reinterpret_view`][pypto.language.reinterpret_view] | `pl.` | 不搬数据的重新解释 |
 | [`set_validshape`][pypto.language.set_validshape] | `pl.` | 声明 tile 的有效区域 |
-| [`cast`][pypto.language.cast] | `pl.` | 转换 dtype —— 可能展开成多跳链，见 [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) |
+| [`cast`][pypto.language.cast] | `pl.` | 转换 dtype —— 可能展开成多跳链，见 [LegalizeTileCast](../../dev/passes/19-legalize_tile_cast.md) |
 | [`dim`][pypto.language.tensor.dim] | `pl.` | 张量的运行期维度 |
 | [`read`][pypto.language.read] [`write`][pypto.language.write] | `pl.` | 元素访问 |
 
@@ -189,7 +189,7 @@ Matmul 的 `acc_phase` 仅接受关键字传参；`matmul_acc` 保留现有 `ini
 | [`aiv_shard`][pypto.language.tile.aiv_shard] [`aic_gather`][pypto.language.tile.aic_gather] | `pl.` | 在 AIV lane 间分片 / 在 AIC 上聚回 |
 | `AUTO` | `pl.` | 由编译器选择管道参数的哨兵值 |
 
-push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。用法见 [混合 kernel 教程](../tutorials/03-mixed-kernel.md)；机制见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 与 [ExpandMixedKernel](../../dev/passes/25-expand_mixed_kernel.md)。
+push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。用法见 [混合 kernel 教程](../tutorials/03-mixed-kernel.md)；机制见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 与 [ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md)。
 
 ## 任务与依赖
 

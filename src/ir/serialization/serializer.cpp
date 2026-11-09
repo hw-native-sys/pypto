@@ -41,6 +41,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/simt.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
@@ -114,6 +115,9 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const std::vector<TypePtr>& field);
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& field);
   result_type VisitLeafField(const std::vector<int64_t>& field);
+  result_type VisitLeafField(const std::vector<int>& field) {
+    return VisitLeafField(std::vector<int64_t>(field.begin(), field.end()));
+  }
 
   // Field kind hooks
   template <typename FVisitOp>
@@ -236,6 +240,8 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(RegScopeStmt);
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(EvalStmt);
+    SERIALIZE_FIELDS(SimtLaunchStmt);
+    SERIALIZE_FIELDS(SimtScopeStmt);
     SERIALIZE_FIELDS(BreakStmt);
     SERIALIZE_FIELDS(ContinueStmt);
     SERIALIZE_FIELDS(InlineStmt);
@@ -830,6 +836,11 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       tile_layout_map["type"] = msgpack::object("TileLayout", zone_);
       tile_layout_map["value"] = msgpack::object(TileLayoutToString(layout), zone_);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(tile_layout_map, zone_)));
+    } else if (value.type() == typeid(SimtAxis)) {
+      std::map<std::string, msgpack::object> axis_map;
+      axis_map["type"] = msgpack::object("SimtAxis", zone_);
+      axis_map["value"] = msgpack::object(SimtAxisToString(AnyCast<SimtAxis>(value, key)), zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(axis_map, zone_)));
     } else if (value.type() == typeid(PadValue)) {
       auto pad = AnyCast<PadValue>(value, "serializing kwarg: " + key);
       std::map<std::string, msgpack::object> pad_map;

@@ -40,9 +40,11 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::map<const Var*, VarPtr> aliases;
   std::map<const Var*, VarPtr> references;
   bool has_control_flow = false;
+  std::vector<ForStmtPtr> loops;
 
   void VisitStmt(const StmtPtr& stmt) override {
-    has_control_flow |= As<ForStmt>(stmt) || As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    has_control_flow |= As<WhileStmt>(stmt) || As<IfStmt>(stmt);
+    if (auto loop = As<ForStmt>(stmt)) loops.push_back(loop);
     var_collectors::VarDefUseCollector::VisitStmt(stmt);
   }
 
@@ -56,17 +58,28 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitExpr_(var);
   }
   void VisitStmt_(const AssignStmtPtr& stmt) override {
-    if (auto call = As<Call>(stmt->value_); call && IsOp(call, "reg.store")) {
+    if (auto call = As<Call>(stmt->value_); call && (IsOp(call, "reg.store") || IsOp(call, "reg.scatter"))) {
       aliases.emplace(stmt->var_.get(), AsVarLike(call->args_[0]));
     }
     references.emplace(stmt->var_.get(), stmt->var_);
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) memory.push_back(call);
+    if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
+        IsOp(call, "reg.scatter")) {
+      memory.push_back(call);
+      // VMI adds the view origin when materializing an address. Its scalar
+      // dependencies live in the Tile type, so ordinary operand traversal
+      // would otherwise omit them from the helper's scalar captures.
+      const auto tile = As<TileType>(call->args_[0]->GetType());
+      if (tile && tile->tile_view_ && tile->tile_view_->start_offset) {
+        VisitExpr(tile->tile_view_->start_offset);
+      }
+    }
     IRVisitor::VisitExpr_(call);
   }
 };
+
 }  // namespace
 
 void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
@@ -79,10 +92,19 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       << "VF execution requires the PyPTO Tile memory planner";
   VFOperands operands;
   operands.VisitStmt(scope->body_);
-  // Keep the execution subset within the straight-line synchronization proof.
-  // Diagnostic codegen still supports register control flow.
+  // Preserve canonical hardware loops in the generated PTO. Backend lowering
+  // and synchronization belong to PTOAS; runtime branches are not admitted here.
   CHECK_SPAN(!operands.has_control_flow, scope->span_)
-      << "VF execution currently requires straight-line RegScope; unroll static loops before codegen";
+      << "VF execution supports straight-line RegScope or canonical hardware loops nested up to four levels";
+  if (!operands.loops.empty()) {
+    for (const auto& loop : operands.loops) {
+      const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
+      CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
+                     stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
+                 loop->span_)
+          << "VF hardware loop lowering requires canonical integer loops without loop-carried values";
+    }
+  }
 
   // Collapse SSA store versions to their existing caller view. Memoization
   // bounds chained stores to O(N log N); identity, never names, identifies views.
@@ -135,10 +157,12 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
     // Check every access, including later uses of an already captured Tile.
-    // The diagnostic VMI path accepts dynamic offsets; executable helpers
-    // require the static addresses understood by synchronization admission.
+    // Loop offsets need not be static. Preserve capture provenance, but leave
+    // loop access ranges and synchronization to the caller and PTOAS respectively.
     auto effect = ir::GetRegMemoryEffect(call);
-    CHECK_SPAN(effect.root && effect.begin, call->span_)
+    CHECK_SPAN(effect.root && (effect.begin || !operands.loops.empty() || IsOp(call, "reg.gather") ||
+                               IsOp(call, "reg.scatter")),
+               call->span_)
         << "Cannot prove register offset bounds or static VF capture address";
     auto [it, inserted] = captures.emplace(root.get(), arguments.size());
     if (inserted) {
@@ -150,8 +174,6 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
       auto origin = tile->memref_ ? ir::As<ir::ConstInt>((*tile->memref_)->byte_offset_) : nullptr;
       CHECK_SPAN(origin && origin->value_ >= 0, call->span_)
           << "Cannot prove register offset bounds or static VF capture address";
-      CHECK_SPAN(capture_tiles.empty() || tile->dtype_ == capture_tiles.front()->dtype_, call->span_)
-          << "VF shared-base captures currently require identical element types";
       origins.push_back(origin->value_);
       capture_tiles.push_back(tile);
       if (origins.back() < origins[base_index]) base_index = origins.size() - 1;
@@ -163,11 +185,13 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     // Tile. Readwrite preserves dependencies on the untouched contents without
     // claiming that masked-off lanes physically read memory. Store-version
     // aliases share this capture and accumulate its conservative effect.
-    if (IsOp(call, "reg.store")) artifact.parameter_effects[it->second] = "readwrite";
+    if (IsOp(call, "reg.store") || IsOp(call, "reg.scatter")) {
+      artifact.parameter_effects[it->second] = "readwrite";
+    }
   }
   std::vector<std::string> addresses;
   if (!capture_tiles.empty()) {
-    const auto dtype = capture_tiles.front()->dtype_;
+    const auto dtype = capture_tiles[base_index]->dtype_;
     const auto element_bytes = static_cast<int64_t>(dtype.GetByte());
     INTERNAL_CHECK_SPAN(element_bytes > 0, scope->span_)
         << "VF capture element must have a positive byte size";
@@ -179,12 +203,29 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     for (size_t i = 0; i < origins.size(); ++i) {
       const int64_t relative = origins[i] - origins[base_index];
       artifact.capture_byte_offsets.push_back(relative);
+      const auto target_dtype = capture_tiles[i]->dtype_;
+      const auto target_element = target_dtype.IsSignedInt() ? "si" + std::to_string(target_dtype.GetBit())
+                                                             : GetTypeString(target_dtype);
+      const auto target_bytes = static_cast<int64_t>(target_dtype.GetByte());
+      INTERNAL_CHECK_SPAN(target_bytes > 0, scope->span_)
+          << "VF capture element must have a positive byte size";
+      CHECK_SPAN(relative % target_bytes == 0, scope->span_)
+          << "VF capture displacement must align to its element size";
+      // Preserve one symbolic UB root for dependency analysis, while each
+      // access retains its own element width and signedness. A histogram
+      // naturally reads bytes and writes halfword accumulator bins.
       std::string address = "%arg0";
+      if (target_dtype != dtype) {
+        address = helper.NewNamedTemp("capture_typed" + std::to_string(i));
+        helper.Emit(address + " = pto.castptr %arg0 : !pto.ptr<" + element + ", ub> -> !pto.ptr<" +
+                    target_element + ", ub>");
+      }
       if (relative != 0) {
+        const auto base = address;
         address = helper.NewNamedTemp("capture" + std::to_string(i));
-        const auto offset = helper.GetOrEmitConstant(relative / element_bytes, DataType::INDEX);
-        helper.Emit(address + " = pto.addptr %arg0, " + offset + " : <" + element + ", ub> -> <" + element +
-                    ", ub>");
+        const auto offset = helper.GetOrEmitConstant(relative / target_bytes, DataType::INDEX);
+        helper.Emit(address + " = pto.addptr " + base + ", " + offset + " : <" + target_element +
+                    ", ub> -> <" + target_element + ", ub>");
       }
       addresses.push_back(address);
     }
@@ -201,10 +242,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     auto scalar = ir::As<ir::ScalarType>(var->GetType());
     CHECK_SPAN(scalar, var->span_) << "VF captures must be UB views or supported scalars";
     const auto dtype = scalar->dtype_;
-    CHECK_SPAN(dtype == DataType::INT32 || dtype == DataType::UINT32 || dtype == DataType::FP32 ||
-                   dtype == DataType::INDEX,
-               var->span_)
-        << "VF scalar capture supports i32, u32, f32 and index only";
+    CHECK_SPAN(dtype.IsInt() || dtype == DataType::FP32 || dtype == DataType::INDEX, var->span_)
+        << "VF scalar capture supports integers, f32 and index only";
     // Reserve manually spelled parameters before body emission, just as the
     // normal function emitter does. Local DSL names may also be argN/captureN.
     const auto argument_name = "arg" + std::to_string(artifact.parameter_types.size());
@@ -285,8 +324,25 @@ void PTOCodegen::EmitVFAdapter(const VFHelper& helper) {
     const auto caller = helper.parameter_indices[i];
     INTERNAL_CHECK(caller < caller_count) << "Invalid VF adapter argument mapping";
     if (helper.caller_parameter_types[caller] != helper.parameter_types[i]) {
-      stream_ << "    %ptr" << caller << " = pto.tile_buf_addr %arg" << caller << " : "
-              << helper.caller_parameter_types[caller] << " -> " << helper.parameter_types[i] << "\n";
+      if (helper.caller_parameter_types[caller].rfind("!pto.ptr<", 0) == 0) {
+        // The EmitC caller's default GM space and the native SIMT ABI's
+        // explicit GM space denote the same address, including its view origin.
+        stream_ << "    %ptr" << caller << " = pto.castptr %arg" << caller << " : "
+                << helper.caller_parameter_types[caller] << " -> " << helper.parameter_types[i] << "\n";
+        continue;
+      }
+      // Tile storage spells signed integers as signless iN. Extract that
+      // storage pointer first, then bridge the explicitly signed VMI ABI.
+      const auto& parameter_type = helper.parameter_types[i];
+      auto storage_type = parameter_type;
+      const bool signed_pointer = parameter_type.rfind("!pto.ptr<si", 0) == 0;
+      if (signed_pointer) storage_type.erase(std::string("!pto.ptr<").size(), 1);
+      stream_ << "    %" << (signed_pointer ? "storage" : "ptr") << caller << " = pto.tile_buf_addr %arg"
+              << caller << " : " << helper.caller_parameter_types[caller] << " -> " << storage_type << "\n";
+      if (signed_pointer) {
+        stream_ << "    %ptr" << caller << " = pto.castptr %storage" << caller << " : " << storage_type
+                << " -> " << parameter_type << "\n";
+      }
     }
   }
   stream_ << "    func.call @" << helper.symbol << "(";

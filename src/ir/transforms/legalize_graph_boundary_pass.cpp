@@ -99,6 +99,10 @@ constexpr size_t kMaxGraphNodes = 1024;      ///< GRAPH_MAX_NODES, common/host_b
 /// True when `type` is a scalar, i.e. a candidate boundary scalar.
 [[nodiscard]] bool IsScalarType(const TypePtr& type) { return As<ScalarType>(type) != nullptr; }
 
+[[nodiscard]] bool IsBoundaryScalarType(const TypePtr& type) {
+  return IsScalarType(type) || As<CommCtxType>(type) != nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Step A — hoisting derived boundary scalars
 // ---------------------------------------------------------------------------
@@ -137,8 +141,8 @@ struct GraphPlan {
   /// Position in the body of every hoisted and aliased variable, so the two
   /// lists can be merged back into definition order.
   std::unordered_map<const Var*, size_t> definition_index;
-  /// Scalar `alias = <name>` bindings the body rewrite deletes, alias -> target.
-  std::unordered_map<const Var*, VarPtr> scalar_aliases;
+  /// Scalar aliases the body rewrite deletes, in SSA definition order.
+  std::vector<std::pair<const Var*, VarPtr>> scalar_aliases;
 };
 
 /// Collects scalar variables a Graph body derives from its own scalar params.
@@ -152,7 +156,7 @@ class DerivedScalarCollector : public IRVisitor {
   DerivedScalarCollector(const FunctionPtr& func, ProgramPtr program)
       : func_(func), program_(std::move(program)), invariant_(func) {
     for (const auto& param : func->params_) {
-      if (IsScalarType(param->GetType())) {
+      if (IsBoundaryScalarType(param->GetType())) {
         scalar_params_.insert(param.get());
       } else {
         tensor_params_.insert(param.get());
@@ -207,8 +211,8 @@ class DerivedScalarCollector : public IRVisitor {
   /// Distinct from `passthrough()`, which also carries tensor aliases and exists
   /// to rebuild hoisted expressions at the call site. This one drives the body
   /// rewrite that deletes the copy.
-  [[nodiscard]] const std::unordered_map<const Var*, VarPtr>& scalar_alias_target() const {
-    return scalar_alias_target_;
+  [[nodiscard]] const std::vector<std::pair<const Var*, VarPtr>>& scalar_aliases() const {
+    return scalar_aliases_;
   }
 
  protected:
@@ -217,7 +221,7 @@ class DerivedScalarCollector : public IRVisitor {
     auto var = AsVarLike(op->var_);
     if (!var) return;
 
-    if (IsScalarType(var->GetType())) {
+    if (IsBoundaryScalarType(var->GetType())) {
       if (!IsDerivable(op->value_)) return;
       // A bare parameter reference is already a pass-through; only a *computed*
       // value needs hoisting.
@@ -229,9 +233,12 @@ class DerivedScalarCollector : public IRVisitor {
         passthrough_order_.emplace_back(var.get(), aliased);
         // Resolve body aliases to their boundary parameter so codegen forwards
         // its InheritableScalar wrapper without an integer conversion.
-        scalar_alias_target_[var.get()] = aliased;
+        scalar_aliases_.emplace_back(var.get(), aliased);
         return;
       }
+      // Context handles are opaque. Only a rename of an existing handle
+      // has a replay origin that Step A can preserve.
+      if (!IsScalarType(var->GetType())) return;
       derived_vars_.insert(var.get());
       definition_index_[var.get()] = next_definition_++;
       derived_.emplace_back(var, op->value_);
@@ -553,7 +560,7 @@ class DerivedScalarCollector : public IRVisitor {
   std::unordered_set<const Var*> derived_vars_;
   std::unordered_set<const Var*> passthrough_;
   std::vector<std::pair<const Var*, VarPtr>> passthrough_order_;
-  std::unordered_map<const Var*, VarPtr> scalar_alias_target_;
+  std::vector<std::pair<const Var*, VarPtr>> scalar_aliases_;
   std::unordered_map<const Var*, size_t> definition_index_;
   size_t next_definition_ = 0;
   std::vector<std::pair<VarPtr, ExprPtr>> derived_;
@@ -695,12 +702,11 @@ class HoistedValueRewriter : public IRMutator {
  public:
   explicit HoistedValueRewriter(const GraphPlan& plan) {
     for (const auto& h : plan.hoisted) replacement_[h.original.get()] = h.param;
-    // Resolved after the hoists are mapped, so an alias of a hoisted value lands
-    // on the new *parameter* rather than on a name the rewrite is about to
-    // delete. Each chain is walked to its root — `a = p; b = a;` sends both to
-    // `p` — so the result does not depend on the map's iteration order.
+    // Resolve aliases in definition order after installing every hoist.
+    // Each target is already the surviving name, or maps to it.
     for (const auto& [alias, target] : plan.scalar_aliases) {
-      replacement_[alias] = ResolveAliasRoot(target, plan);
+      auto replacement = replacement_.find(target.get());
+      replacement_.emplace(alias, replacement == replacement_.end() ? target : replacement->second);
     }
   }
 
@@ -722,27 +728,6 @@ class HoistedValueRewriter : public IRMutator {
   }
 
  private:
-  /// The surviving name for @p target: its hoisted parameter, or the end of its
-  /// alias chain.
-  ///
-  /// A chain is finite and acyclic because the body is SSA in definition order —
-  /// an alias can only name something bound before it. The step bound is a
-  /// backstop against malformed IR, not an expected exit.
-  [[nodiscard]] VarPtr ResolveAliasRoot(const VarPtr& target, const GraphPlan& plan) const {
-    VarPtr current = target;
-    for (size_t steps = 0; steps <= plan.scalar_aliases.size(); ++steps) {
-      // `replacement_` already holds every hoist, and the alias entries are
-      // added after this runs, so a hit here is always a hoisted parameter.
-      auto hoisted = replacement_.find(current.get());
-      if (hoisted != replacement_.end()) return hoisted->second;
-      auto next = plan.scalar_aliases.find(current.get());
-      if (next == plan.scalar_aliases.end()) return current;
-      current = next->second;
-    }
-    INTERNAL_CHECK(false) << "Internal error: cyclic scalar alias chain in Graph '" << plan.name << "'";
-    return current;
-  }
-
   std::unordered_map<const Var*, VarPtr> replacement_;
 };
 
@@ -914,9 +899,9 @@ class GraphNodeCounter : public IRVisitor {
       auto call = assign ? As<Call>(assign->value_) : nullptr;
       if (call && IsAllocation(call)) {
         batched_.insert(stmt.get());
-        const bool joins_batch =
-            !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
-            alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_, locally_defined);
+        const bool joins_batch = !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
+                                 alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_,
+                                                                        locally_defined, gm_pipe_consumers_);
         if (joins_batch) {
           ++batchable;
         } else {
@@ -985,6 +970,7 @@ class GraphNodeCounter : public IRVisitor {
   FunctionPtr func_;
   ProgramPtr program_;
   size_t count_ = 0;
+  alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   std::unordered_set<const Stmt*> batched_;
 };
 
@@ -1151,7 +1137,7 @@ void CheckGraphSignature(const FunctionPtr& func) {
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const auto dir = i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
-    if (IsScalarType(param->GetType())) {
+    if (IsBoundaryScalarType(param->GetType())) {
       CHECK_SPAN(dir == ParamDirection::In, param->span_)
           << "Graph function '" << func->name_ << "' declares scalar parameter '" << param->name_hint_
           << "' as " << (dir == ParamDirection::Out ? "Out" : "InOut")
@@ -1364,7 +1350,7 @@ class GraphCallSiteChecker : public IRVisitor {
   }
   plan.passthrough = collector.passthrough();
   plan.definition_index = collector.definition_index();
-  plan.scalar_aliases = collector.scalar_alias_target();
+  plan.scalar_aliases = collector.scalar_aliases();
   return plan;
 }
 

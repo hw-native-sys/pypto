@@ -76,7 +76,7 @@ for i in pl.unroll(4): ...            # no init_values here
 
 `pl.parallel` 是一个断言而非请求：你在告诉编译器这些迭代彼此独立。如果它们其实不独立，结果就是竞态。
 
-`pl.pipeline(N, stage=F)` 把循环体在每个外层迭代里复制 `F` 份，使缓冲区可以乒乓。外层循环以 `stage * step` 为步长推进，当行程数不能整除时由一个尾部派发覆盖余数。`stage` 是必填的正整数（通常 2–4）。它在 tile 层由 [LowerPipelineLoops](../../dev/passes/32-lower_pipeline_loops.md) 降级；在 `memory_planner=PTOAS` 下则由 [LowerPipelineToSlots](../../dev/passes/31-lower_pipeline_to_slots.md) 接手，改为让单份循环体轮转同一块分配的多个 slot 而不复制。
+`pl.pipeline(N, stage=F)` 把循环体在每个外层迭代里复制 `F` 份，使缓冲区可以乒乓。外层循环以 `stage * step` 为步长推进，当行程数不能整除时由一个尾部派发覆盖余数。`stage` 是必填的正整数（通常 2–4）。它在 tile 层由 [LowerPipelineLoops](../../dev/passes/33-lower_pipeline_loops.md) 降级；在 `memory_planner=PTOAS` 下则由 [LowerPipelineToSlots](../../dev/passes/32-lower_pipeline_to_slots.md) 接手，改为让单份循环体轮转同一块分配的多个 slot 而不复制。
 
 ```python
 for i in pl.pipeline(64, stage=4):
@@ -135,7 +135,7 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 
 `@pl.function(strict_ssa=True)` 会让解析器改为拒绝重绑，偶尔可用于捕捉无意的变量遮蔽。它同时会禁用 `dst[...] = src` 下标写语法糖 —— 那个糖正是靠重绑实现的，见 [编译期指令 § 下标语法糖](06-syntax.md#下标语法糖)。
 
-流水线很早就会跑 [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md)，所以非 SSA 源码是正常输入，不是兼容模式。
+流水线很早就会跑 [ConvertToSSA](../../dev/passes/05-convert_to_ssa.md)，所以非 SSA 源码是正常输入，不是兼容模式。
 
 ## 边界情况
 
@@ -166,7 +166,7 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 
 - [类型](00-types.md) —— 携带值到底是什么。
 - [作用域与放置](04-scopes.md) —— 包含这些循环的放置作用域。
-- [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) —— 本页规则的来源。
-- [UnrollLoops](../../dev/passes/02-unroll_loops.md) —— `pl.unroll` 变成什么。
-- [LowerPipelineToSlots](../../dev/passes/31-lower_pipeline_to_slots.md) —— `memory_planner=PTOAS` 下 `pl.pipeline` 变成什么。
-- [LowerPipelineLoops](../../dev/passes/32-lower_pipeline_loops.md) —— 其余情况下 `pl.pipeline` 变成什么。
+- [ConvertToSSA](../../dev/passes/05-convert_to_ssa.md) —— 本页规则的来源。
+- [UnrollLoops](../../dev/passes/03-unroll_loops.md) —— `pl.unroll` 变成什么。
+- [LowerPipelineToSlots](../../dev/passes/32-lower_pipeline_to_slots.md) —— `memory_planner=PTOAS` 下 `pl.pipeline` 变成什么。
+- [LowerPipelineLoops](../../dev/passes/33-lower_pipeline_loops.md) —— 其余情况下 `pl.pipeline` 变成什么。

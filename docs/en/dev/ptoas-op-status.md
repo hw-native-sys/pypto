@@ -102,7 +102,7 @@ maps their shape and static validity from `[N]` to `[1, N]`.
 
 A2/A3 narrowing casts use disjoint source and destination storage, following
 the shared allocation and codegen safety rule described in
-[MemoryReuse](passes/37-memory_reuse.md). Static-valid views preserve each
+[MemoryReuse](passes/40-memory_reuse.md). Static-valid views preserve each
 operand's existing storage; they do not make the cast source and destination alias.
 
 Only scratch-backed casts (or an explicit tmp on A2/A3) require static validity.

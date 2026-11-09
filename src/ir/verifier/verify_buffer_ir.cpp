@@ -20,7 +20,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -178,6 +180,18 @@ class BufferIRVisitor : public IRVisitor {
         registry.ValidateBufferCall(op);
         valid_calls_.insert(op.get());
         if (const auto* recipe = backend::FindBufferElementwiseRecipe(name)) CheckRecipeWindows(op, *recipe);
+        if (const auto* conversion = backend::FindBufferConversionRecipe(name)) {
+          for (const auto& pair : backend::BufferConversionAliasPairs(*conversion)) {
+            CheckWindowPair(op, op->args_[pair.first], op->args_[pair.second], pair.exact_allowed);
+          }
+        }
+        if (const auto* row_recipe = backend::FindBufferRowRecipe(name)) {
+          // Scratch writes must not clobber the reduction input or destination.
+          // Broadcast permits exact reuse of its matrix, never its column vector.
+          CheckWindowPair(op, op->args_[0], op->args_[2], !row_recipe->reduction);
+          CheckWindowPair(op, op->args_[1], op->args_[2], false);
+          if (row_recipe->reduction) CheckWindowPair(op, op->args_[0], op->args_[1], false);
+        }
         if (IsOp(op, "buffer.copy") && (view_handles_.count(AsVarLike(op->args_[0]).get()) ||
                                         view_handles_.count(AsVarLike(op->args_[1]).get()))) {
           CheckWindowPair(op, op->args_[0], op->args_[1], true);

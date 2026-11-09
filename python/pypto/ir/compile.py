@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
+from pypto._environment import default_output_root
 from pypto._target import (
     ExecutionMode,
     _platform_string,
@@ -29,6 +30,7 @@ from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core import log_debug as _log_debug
 from pypto.pypto_core import passes as _passes
 
 from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
@@ -356,7 +358,7 @@ def make_default_output_dir(name: str) -> str:
     # ``or`` (not get's default arg) so an empty-but-set env var
     # (``export PYPTO_PROG_BUILD_DIR=``) still falls back to build_output
     # rather than writing artifacts into the current working directory.
-    base = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
+    base = default_output_root()
     os.makedirs(base, exist_ok=True)
     # The timestamp is for humans (readable, sorts chronologically); mkdtemp's
     # random suffix is what guarantees uniqueness. A bare one-second timestamp
@@ -761,6 +763,13 @@ def _compile_to_files(  # noqa: PLR0913
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)
             prof.write_report(report_dir)
+
+    # Name the artifact root in resolved absolute form so a user at DEBUG can
+    # open the generated .pto / kernels directly. realpath matches
+    # CompiledArtifact's Path.resolve() when the output path contains symlinks.
+    # DEBUG keeps the release default (INFO) unchanged and does not alter the
+    # returned output_dir.
+    _log_debug(f"PyPTO artifacts written to {os.path.realpath(output_dir)}")
 
     return _CompilationResult(
         transformed_program, output_dir, platform, effective_backend_type, logical, aliases

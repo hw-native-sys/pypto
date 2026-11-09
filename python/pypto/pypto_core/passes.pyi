@@ -72,6 +72,9 @@ class IRProperty(Enum):
     TileStorageAllocated = ...
     RegScopeValid = ...
     HardwareLoopContractValid = ...
+    SimtValid = ...
+    SimtOutputsMaterialized = ...
+    SimtSpecialized = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -399,6 +402,15 @@ class PassPipeline:
         """Get copies of all passes in execution order."""
 
 # Factory functions
+
+def outline_simt_scopes() -> Pass:
+    """Outline per-thread regions before SSA conversion."""
+
+def specialize_simt_helpers() -> Pass:
+    """Specialize SIMT helpers by dimensions and storage ABI; pass dynamic metadata explicitly."""
+
+def materialize_simt_outputs() -> Pass:
+    """Copy writable SIMT Tile inputs into dedicated output storage; preserve GM references."""
 
 def init_mem_ref() -> Pass:
     """Create an init memref pass."""
@@ -1118,6 +1130,9 @@ __all__ = [
     "PassContext",
     "PassPipeline",
     "init_mem_ref",
+    "materialize_simt_outputs",
+    "outline_simt_scopes",
+    "specialize_simt_helpers",
     "memory_reuse",
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",

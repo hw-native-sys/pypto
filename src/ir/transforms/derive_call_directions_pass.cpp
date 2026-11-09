@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/tensor_to_tile/internal.h"
 
 namespace pypto {
 namespace ir {
@@ -190,6 +191,10 @@ class PriorWriterCollector {
       CollectCallWrittenRoots(assign->value_, result);
     } else if (auto eval = As<EvalStmt>(stmt)) {
       CollectCallWrittenRoots(eval->expr_, result);
+    } else if (auto launch = As<SimtLaunchStmt>(stmt)) {
+      for (int index : launch->result_param_indices_) {
+        if (const Var* root = ResolveAnyRoot(launch->args_[index], buffer_roots_)) result.insert(root);
+      }
     }
     // YieldStmt / ReturnStmt / BreakStmt / ContinueStmt: no writes.
     return result;
@@ -258,6 +263,9 @@ class PriorWriterCollector {
       AnalyzeCall(assign->value_, seen);
     } else if (auto eval = As<EvalStmt>(stmt)) {
       AnalyzeCall(eval->expr_, seen);
+    } else if (As<SimtLaunchStmt>(stmt)) {
+      const auto& written = PrecomputeWrittenRoots(stmt);
+      seen.insert(written.begin(), written.end());
     }
     // Other stmts (Yield/Return/Break/Continue): no Calls to analyze.
   }
@@ -562,7 +570,8 @@ Pass DeriveCallDirections() {
 
     // Phase 0: recover Group/Spmd wrapper signatures. Every later phase — and
     // every downstream consumer — reads ``callee->param_directions_`` directly.
-    ProgramPtr program = MaterializeWrapperDirections(input_program);
+    ProgramPtr program =
+        MaterializeWrapperDirections(tensor_to_tile::PropagateSimtKernelDirections(input_program));
 
     // We need a non-const handle to rewrite functions with new bodies.
     auto new_functions = program->functions_;

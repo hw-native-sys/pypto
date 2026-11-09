@@ -21,7 +21,6 @@ import json
 import os
 import runpy
 import shlex
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -94,8 +93,8 @@ def _prepare(directory: Path):
     original_wrapper = Path(kernel["source"]).read_text()
     assert "args[3]" in original_wrapper and "int32_t" in original_wrapper
     support = runpy.run_path(str(FIXTURE / "test_validation.py"))
-    ptoas = shutil.which("ptoas")
-    assert ptoas, "PTOAS must be on PATH"
+    ptoas = support["require_ptoas"]()
+    ptoas = os.path.abspath(ptoas)
     support["run"](
         directory,
         "emit-caller",

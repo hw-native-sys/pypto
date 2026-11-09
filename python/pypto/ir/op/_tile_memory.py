@@ -215,8 +215,8 @@ def load(
             and is rejected when that provably fails; with ``clamp=True`` the
             request is cut back to the source edge instead.
         span: Optional source span for debugging (auto-captured if not provided)
-        cache: ``CachePolicy`` underlying int — 0 (``kDefault``, ordinary cached
-            GM read) or 1 (``kBypass``, declared streaming read). ``None`` (the
+        cache: Semantic ``CachePolicy`` integer: DEFAULT=0, BYPASS=1, or an
+            explicit A5 policy. These are not ISA bit encodings. ``None`` (the
             default) means the caller stated no policy and omits the kwarg, so
             ordinary loads are unchanged and a scope-level declaration may still
             stamp one later. An explicit 0 is NOT the same as ``None``: it is
@@ -294,6 +294,7 @@ def store(
     st_phase: STPhase = STPhase.Unspecified,
     pre_quant: float | Expr | None = None,
     pre_relu: bool | Expr = False,
+    cache: int | None = None,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
 
@@ -321,6 +322,8 @@ def store(
         pre_relu: Apply ReLU inside the same writeback, *after* ``pre_quant`` and
             the clamp — it reproduces ``maximum(tile * pre_quant, 0)``.
 
+        cache: Optional semantic ``CachePolicy`` encoding.
+
     Returns:
         Call expression that returns the output tensor
     """
@@ -332,6 +335,8 @@ def store(
         args = [tile, offsets_tuple, output_tensor]
 
     kwargs: dict[str, Any] = {"atomic": atomic} if atomic else {}
+    if cache is not None:
+        kwargs["cache"] = cache
     if st_phase != STPhase.Unspecified:
         kwargs["st_phase"] = int(st_phase)
     kwargs.update(_fixpipe_epilogue_kwargs("tile.store", pre_quant, pre_relu))
@@ -1012,9 +1017,11 @@ def set_validshape(
     """Update valid-shape metadata of a tile without data movement.
 
     .. note::
-        The operand must not be a view (a ``pl.tile.slice`` or reshape result): a
-        view carries its valid extent in its type, so there is nothing to update.
-        Narrow at the slice with ``valid_shape=`` instead.
+        A ``pl.tile.slice`` window is supported when the result is assigned.
+        Buffer lowering rebuilds it from its original parent and offsets.
+        Relabelled-window setters remain on Tile IR. Other view operands are
+        not covered by this support: their valid extent is part of the view
+        type. Narrow at the slice with ``valid_shape=`` instead.
 
     Args:
         tile: Input tile expression (must be 2D TileType)

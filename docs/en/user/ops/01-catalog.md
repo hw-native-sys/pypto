@@ -50,7 +50,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | Exponential, natural logarithm. For `log`, `high_precision=True` selects the slower, higher-precision PTO path on A5; on A2/A3 PTO-ISA ignores it and returns the default result, which compilation warns about |
-| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `high_precision=` is tensor-only and **raises** on a Tile — at tile level precision is selected by passing the scratch tile to `pl.tile.rsqrt(src, tmp)` |
+| [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `rsqrt` defaults to `high_precision=False` at both levels. Tensor high precision allocates scratch automatically; Tile high precision requires `pl.tile.rsqrt(src, tmp=tmp, high_precision=True)` (or `pl.rsqrt(src, high_precision=True, tmp=tmp)`). Scratch without the flag is rejected. A5 codegen emits `RsqrtAlgorithm::HIGH_PRECISION`. |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | Trigonometric |
 
 ## Comparison and selection
@@ -123,7 +123,7 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 | [`assemble`][pypto.language.tensor.assemble] | `pl.` | Write a sub-region back; also written `dst[i:i+16] = src` |
 | [`reinterpret_view`][pypto.language.reinterpret_view] | `pl.` | Reinterpret without moving data |
 | [`set_validshape`][pypto.language.set_validshape] | `pl.` | Declare the meaningful region of a tile |
-| [`cast`][pypto.language.cast] | `pl.` | Convert dtype — may expand to a multi-hop chain, see [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) |
+| [`cast`][pypto.language.cast] | `pl.` | Convert dtype — may expand to a multi-hop chain, see [LegalizeTileCast](../../dev/passes/19-legalize_tile_cast.md) |
 | [`dim`][pypto.language.tensor.dim] | `pl.` | A tensor's runtime dimension |
 | [`read`][pypto.language.read] [`write`][pypto.language.write] | `pl.` | Element access |
 
@@ -204,7 +204,7 @@ The mixed-kernel surface — AIC and AIV cooperating inside one InCore function.
 Push and pop must be **paired**, and each pop must be matched by a `tfree`. The tutorial covering this is
 [Mixed kernels](../tutorials/03-mixed-kernel.md); the machine-level mechanics are in
 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) and
-[ExpandMixedKernel](../../dev/passes/25-expand_mixed_kernel.md).
+[ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md).
 
 ## Tasks and dependencies
 

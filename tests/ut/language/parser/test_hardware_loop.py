@@ -229,5 +229,23 @@ def test_required_loop_inside_register_scope(ascend_backend):
         ir.verify_hardware_loop_requirement(required, p)
 
 
+@pytest.mark.parametrize("dtype", ["INT8", "INT32", "INT64", "UINT32"])
+@pytest.mark.parametrize("ascend_backend", [backend.BackendType.Ascend950], indirect=True)
+def test_typed_hardware_loop_stop_preserves_index_induction_roundtrip(dtype, ascend_backend):
+    # The stop keeps its explicit scalar dtype, but scf.for always binds an
+    # INDEX induction variable. Printing must not change that distinction.
+    function = pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def typed_stop():
+    with pl.reg_scope():
+        for i in pl.hardware_loop(pl.const(2, pl.{dtype})):
+            pass
+""")
+    for candidate in (function, pl.parse(ir.python_print(function))):
+        loop = _loop(candidate)
+        assert loop.loop_var.type.dtype == DataType.INDEX
+        assert loop.stop.dtype == getattr(DataType, dtype)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -175,7 +175,11 @@ void BindPass(nb::module_& m) {
              "Device region storage and transfers also have nonoverlapping effective address windows")
       .value("RegScopeValid", IRProperty::RegScopeValid, "Register region ownership and schemas")
       .value("HardwareLoopContractValid", IRProperty::HardwareLoopContractValid,
-             "Required hardware loops retain Sequential intent");
+             "Required hardware loops retain Sequential intent")
+      .value("SimtValid", IRProperty::SimtValid, "Canonical SIMT helper and launch contracts")
+      .value("SimtOutputsMaterialized", IRProperty::SimtOutputsMaterialized,
+             "Writable SIMT Tiles have dedicated initialized output storage")
+      .value("SimtSpecialized", IRProperty::SimtSpecialized, "SIMT helper resources match their launches");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -416,6 +420,15 @@ void BindPass(nb::module_& m) {
       .def("get_passes", &PassPipeline::GetPasses, "Get copies of all passes in execution order");
 
   // Factory functions with snake_case names
+  passes.def("outline_simt_scopes", &pass::OutlineSimtScopes,
+             "Outline per-thread regions before SSA conversion");
+
+  passes.def("specialize_simt_helpers", &pass::SpecializeSimtHelpers,
+             "Specialize SIMT helpers by dimensions and storage ABI");
+
+  passes.def("materialize_simt_outputs", &pass::MaterializeSimtOutputs,
+             "Initialize writable SIMT Tile outputs while preserving GM reference semantics");
+
   passes.def("init_mem_ref", &pass::InitMemRef,
              "Create an init memref pass\n\n"
              "Initializes MemRef for all variables in functions.\n"

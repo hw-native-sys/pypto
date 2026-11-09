@@ -15,11 +15,13 @@ import shutil
 import subprocess
 import threading
 
+from pypto._environment import toolchain_probe_env
+
 # Oldest PTOAS release that accepts the `.pto` this PyPTO generates. It is the
 # `PTOAS_VERSION` pin in toolchain/versions.env (what CI installs), restated here
 # because an installed wheel does not ship that file; bump both in one change.
 # tests/ut/backend/test_ptoas_locate.py fails when they differ.
-PTOAS_MIN_VERSION = "v0.70"
+PTOAS_MIN_VERSION = "v0.72"
 PTOAS_RELEASES_URL = "https://github.com/hw-native-sys/PTOAS/releases"
 
 # `ptoas --version` prints e.g. "ptoas 0.61"; a dev build may append a suffix.
@@ -103,6 +105,7 @@ def check_ptoas_version(ptoas_bin: str) -> str:
         try:
             result = subprocess.run(
                 [ptoas_bin, "--version"],
+                env=toolchain_probe_env(),
                 capture_output=True,
                 text=True,
                 check=False,

@@ -239,6 +239,16 @@ class TestCommDomainScopeStmtSerialization:
         body = ir.SeqStmts([], ir.Span.unknown())
         return ir.CommDomainScopeStmt(devices, slots, "g0", body=body, span=ir.Span.unknown())
 
+    def test_engines_round_trip_and_affect_identity(self):
+        span = ir.Span.unknown()
+        body = ir.SeqStmts([], span)
+        scope = ir.CommDomainScopeStmt([0], [], "g", body=body, span=span, engines=["urma"])
+        restored = cast(ir.CommDomainScopeStmt, ir.deserialize(ir.serialize(scope)))
+        assert list(restored.engines) == ["urma"]
+        ir.assert_structural_equal(scope, restored)
+        plain = ir.CommDomainScopeStmt([0], [], "g", body=body, span=span)
+        assert not ir.structural_equal(scope, plain)
+
     def test_serialize_comm_domain_scope_subset_devices(self):
         """A subset ``devices`` list with one slot round-trips: the int64 list
         and the WindowBuffer slot survive the dispatch + reflection path."""

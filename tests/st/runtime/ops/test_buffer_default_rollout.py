@@ -348,5 +348,247 @@ def test_default_typed_arithmetic(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
+@pl.jit.incore
+def _softmax_full(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    source = pl.load(a, [0, 0], [64, 64])
+    scratch = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    maximum = pl.row_max(source, scratch)
+    shifted = pl.row_expand_sub(source, maximum)
+    exponent = pl.exp(shifted)
+    total = pl.row_sum(exponent, scratch)
+    result = pl.row_expand_div(exponent, total)
+    out = pl.store(result, [0, 0], out)
+    return pl.store(source, [64, 0], out)
+
+
+@pl.jit.incore
+def _softmax_partial(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    source = pl.load(a, [0, 0], [16, 128], valid_shape=[13, 117])
+    scratch = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    maximum = pl.row_max(source, scratch)
+    shifted = pl.row_expand_sub(source, maximum)
+    exponent = pl.exp(shifted)
+    total = pl.row_sum(exponent, scratch)
+    result = pl.row_expand_div(exponent, total)
+    out = pl.store(result, [0, 0], out)
+    return pl.store(source, [16, 0], out)
+
+
+@pl.jit
+def _softmax_core_group(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    # Match the public softmax example's outlining and lane-splitting path.
+    with pl.at(level=pl.Level.CORE_GROUP):
+        source = pl.load(a, [0, 0], [64, 64])
+        scratch = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        maximum = pl.row_max(source, scratch)
+        shifted = pl.row_expand_sub(source, maximum)
+        exponent = pl.exp(shifted)
+        total = pl.row_sum(exponent, scratch)
+        result = pl.row_expand_div(exponent, total)
+        out = pl.store(result, [0, 0], out)
+        out = pl.store(source, [64, 0], out)
+    return out
+
+
+def _softmax_entry(kernel):
+    @pl.jit
+    def entry(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(a, out)
+
+    return entry
+
+
+def _softmax_golden(tensors, valid):
+    source, output = tensors["a"], tensors["out"].clone()
+    rows, cols = valid
+    output[:rows, :cols] = torch.softmax(source[:rows, :cols], dim=-1)
+    start = source.shape[0]
+    output[start : start + rows, :cols] = source[:rows, :cols]
+    return output
+
+
+@st.cases(
+    *[
+        st.case(
+            kernel,
+            torch.randn(shape, generator=torch.Generator().manual_seed(19)) * 4,
+            torch.full((2 * shape[0], shape[1]), -777.0),
+            name=f"buffer_softmax_{name}_{planner.name.lower()}",
+            golden=lambda tensors, valid=valid: _softmax_golden(tensors, valid),
+            memory_planner=planner,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for kernel, name, shape, valid in (
+            (_softmax_entry(_softmax_full), "full", (64, 64), (64, 64)),
+            (_softmax_entry(_softmax_partial), "partial", (16, 128), (13, 117)),
+            (_softmax_core_group, "core_group", (64, 64), (64, 64)),
+        )
+        for planner in _PLANNERS
+    ]
+)
+def test_default_softmax_device_results(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+@pl.jit.incore
+def _row_vector_states(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    source = pl.load(a, [0, 0], [16, 64])
+    scratch = pl.create_tile([16, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    maximum = pl.row_max(source, scratch)
+    narrowed = pl.tile.set_validshape(maximum, 13, 1)
+    partial = pl.tile.set_validshape(source, 13, 64)
+    shifted_partial = pl.row_expand_sub(partial, narrowed)
+    out = pl.store(shifted_partial, [0, 0], out)
+    shifted = pl.row_expand_sub(source, maximum)
+    out = pl.store(shifted, [16, 0], out)
+    total = pl.row_sum(source, scratch)
+    scaled = pl.row_expand_div(source, total)
+    return pl.store(scaled, [32, 0], out)
+
+
+def _row_vector_golden(tensors):
+    source, output = tensors["a"], tensors["out"].clone()
+    maximum = torch.amax(source, dim=-1, keepdim=True)
+    output[:13] = source[:13] - maximum[:13]
+    output[16:32] = source - maximum
+    output[32:] = source / torch.sum(source, dim=-1, keepdim=True)
+    return output
+
+
+@st.cases(
+    *[
+        st.case(
+            _softmax_entry(_row_vector_states),
+            torch.randn((16, 64), generator=torch.Generator().manual_seed(37)) + 4,
+            torch.full((48, 64), -777.0),
+            name=f"buffer_row_vectors_{planner.name.lower()}",
+            golden=_row_vector_golden,
+            memory_planner=planner,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for planner in _PLANNERS
+    ]
+)
+def test_default_row_vector_states(case_run, request):
+    # A narrowed column descriptor must not change the original value's valid
+    # rows; matrix broadcasts expose the values and preserve untouched GM rows.
+    _assert_buffer_result(case_run, request)
+
+
+def _cast_select_entry(scalar, valid):
+    rows, cols = valid
+
+    @pl.jit.incore
+    def kernel(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        a_tile = pl.load(a, [0, 0], [8, 64], valid_shape=[rows, cols])
+        b_tile = pl.load(b, [0, 0], [8, 64], valid_shape=[rows, cols])
+        x = pl.cast(a_tile, pl.FP32, mode="rint")
+        y = pl.cast(b_tile, pl.FP32, mode="rint")
+        if scalar:
+            mask = pl.tile.cmps(x, 0.0, cmp_type=4)
+            scalar_scratch = pl.create_tile([1, 64], dtype=pl.FP32)
+            selected = pl.tile.sels(mask, x, scalar_scratch, -3.0)
+        else:
+            mask = pl.tile.cmp(x, y, cmp_type=4)
+            tile_scratch = pl.create_tile([1, 16], dtype=pl.UINT32)
+            selected = pl.tile.sel(mask, x, y, tile_scratch)
+        result = pl.cast(selected, pl.FP16, mode="rint")
+        out = pl.store(result, [0, 0], out)
+        out = pl.store(a_tile, [8, 0], out)
+        return pl.store(b_tile, [16, 0], out)
+
+    @pl.jit
+    def entry(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(a, b, out)
+
+    return entry
+
+
+def _cast_select_golden(tensors, scalar, valid):
+    rows, cols = valid
+    a, b = tensors["a"], tensors["b"]
+    out = tensors["out"].clone()
+    lhs, rhs = a[:rows, :cols].float(), b[:rows, :cols].float()
+    condition = lhs > (0.0 if scalar else rhs)
+    out[:rows, :cols] = torch.where(condition, lhs, -3.0 if scalar else rhs).half()
+    out[8 : 8 + rows, :cols] = a[:rows, :cols]
+    out[16 : 16 + rows, :cols] = b[:rows, :cols]
+    return out
+
+
+@st.cases(
+    *[
+        st.case(
+            _cast_select_entry(scalar, valid),
+            ((torch.arange(512).reshape(8, 64) % 17) - 8).half() / 4,
+            torch.flip(((torch.arange(512).reshape(8, 64) % 17) - 8).half() / 4, [1]),
+            torch.full((24, 64), -777.0, dtype=torch.float16),
+            name=f"buffer_cast_select_{'scalar' if scalar else 'tile'}_{valid[1]}_{planner.name.lower()}",
+            golden=lambda tensors, scalar=scalar, valid=valid: _cast_select_golden(tensors, scalar, valid),
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for scalar in (False, True)
+        for valid in ((8, 64), (7, 61))
+        for planner in _PLANNERS
+    ]
+)
+def test_default_cast_compare_select(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+def _half_rounding_entry(valid, mode):
+    rows, cols = valid
+
+    @pl.jit.incore
+    def kernel(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        source = pl.load(a, [0, 0], [8, 64], valid_shape=[rows, cols])
+        result = pl.cast(source, pl.FP16, mode=mode, saturation_mode="off")
+        return pl.store(result, [0, 0], out)
+
+    return _softmax_entry(kernel)
+
+
+def _half_rounding_data():
+    data = torch.linspace(-3, 3, 512).reshape(8, 64)
+    # Consecutive half-way values round down/up under ties-to-even. Negative
+    # values and tiny subnormals expose sign and underflow handling as well.
+    data[0, :8] = torch.tensor(
+        [1 + 2**-11, 1 + 3 * 2**-11, -1 - 2**-11, -1 - 3 * 2**-11, 2**-25, 3 * 2**-25, -(2**-25), -3 * 2**-25]
+    )
+    return data
+
+
+def _half_rounding_golden(tensors, valid):
+    rows, cols = valid
+    result = tensors["out"].clone()
+    result[:rows, :cols] = tensors["a"][:rows, :cols].half()
+    return result
+
+
+@st.cases(
+    *[
+        st.case(
+            _half_rounding_entry(valid, mode),
+            _half_rounding_data(),
+            torch.full((8, 64), -777.0, dtype=torch.float16),
+            name=f"buffer_half_rounding_{mode}_{valid[1]}_{planner.name.lower()}",
+            golden=lambda tensors, valid=valid: _half_rounding_golden(tensors, valid),
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for mode in ("none", "rint")
+        for valid in ((8, 64), (7, 61))
+        for planner in _PLANNERS
+    ]
+)
+def test_default_half_rounding(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

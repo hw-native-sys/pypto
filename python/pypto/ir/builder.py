@@ -54,6 +54,22 @@ class IRBuilder:
         self._ctx_counter = 0  # Counter for unique context IDs
 
     @contextmanager
+    def simt_scope(
+        self,
+        block_dims: Sequence[ir.Expr],
+        span: ir.Span | None = None,
+        *,
+        private_scalars: Sequence[ir.Var] = (),
+    ) -> Iterator[None]:
+        """Build a transient SIMT region; captures are resolved before SSA."""
+        span = _get_span_or_capture(span, frame_offset=2)
+        self._builder.begin_simt_scope(block_dims, span)
+        try:
+            yield
+        finally:
+            self._builder.end_simt_scope(span, private_scalars)
+
+    @contextmanager
     def reg_scope(self, span: ir.Span | None = None) -> Iterator[None]:
         """Build a register region with implicit captures and no yields."""
         # The generator starts in contextlib.__enter__, one frame beyond the
@@ -377,6 +393,7 @@ class IRBuilder:
         name_hint: str,
         span: ir.Span,
         attrs: list[tuple[str, Any]] | None = None,
+        engines: list[str] | None = None,
     ) -> Iterator["ScopeBuilder"]:
         """Build a communication scope, reading its slots when the body is complete.
 
@@ -389,6 +406,7 @@ class IRBuilder:
             name_hint: Communication-domain name.
             span: Source span of the complete scope.
             attrs: Scope metadata, read on context exit.
+            engines: Required async workspace engines.
 
         Yields:
             A builder exposing the completed scope after context exit.
@@ -398,7 +416,7 @@ class IRBuilder:
         try:
             yield builder_obj
         finally:
-            builder_obj._result = self._builder.end_scope(span, devices, slots, attrs)
+            builder_obj._result = self._builder.end_scope(span, devices, slots, attrs, engines or [])
 
     @contextmanager
     def program(self, name: str, span: ir.Span | None = None) -> Iterator["ProgramBuilder"]:

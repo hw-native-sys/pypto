@@ -10,19 +10,23 @@
  */
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -111,15 +115,18 @@ class RegionChecker : public IRVisitor {
         }
       }
     }
-    if (!collecting_ && (As<RegType>(op->var_->GetType()) || As<RegType>(op->value_->GetType())) &&
+    if (!collecting_ &&
+        (ContainsRegionValue(op->var_->GetType(), false) ||
+         ContainsRegionValue(op->value_->GetType(), false)) &&
         !structural_equal(op->var_->GetType(), op->value_->GetType())) {
       Error("Register assignment dtype/kind/lane mismatch", op->span_);
     }
     if (collecting_ && region_ && As<TileType>(op->var_->GetType())) {
       auto call = As<Call>(op->value_);
-      if (!call || call->op_->name_ != "reg.store") {
-        Error("RegScope Tile inputs must originate outside the region; only reg.store returns Tile",
-              op->span_);
+      if (!IsOp(call, "reg.store") && !IsOp(call, "reg.scatter")) {
+        Error(
+            "RegScope Tile inputs must originate outside the region; only reg.store/reg.scatter return Tile",
+            op->span_);
       }
     }
     // LHS is a definition, not a use. Only inspect the RHS here.
@@ -138,6 +145,15 @@ class RegionChecker : public IRVisitor {
         (found == owners_.end() || !region_ || found->second != region_)) {
       Error("Reg must be defined and used within the same RegScope", op->span_);
     }
+  }
+  void VisitExpr_(const TupleGetItemExprPtr& op) override {
+    // Codegen resolves projections from the SSA results of an assigned pair.
+    // A nested call has no assignment to emit or bind those results first.
+    if (collecting_ && As<RegType>(op->GetType()) && !AsVarLike(op->tuple_)) {
+      Error("Register tuple projections require a bound tuple variable; bind the paired call before indexing",
+            op->span_);
+    }
+    IRVisitor::VisitExpr_(op);
   }
   void VisitExpr_(const CallPtr& op) override {
     if (!collecting_ && op->op_->name_.rfind("reg.", 0) == 0) {
@@ -169,7 +185,7 @@ class RegionChecker : public IRVisitor {
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
-      for (const auto& var : op->return_vars_) RecordLocal(var);
+      for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
     yield_region_ = previous;
@@ -187,14 +203,46 @@ class RegionChecker : public IRVisitor {
     if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require && !op->attrs_.empty()) {
       Error("HardwareLoopPolicy.Require does not support loop attrs", op->span_);
     }
+    const auto induction_type = As<ScalarType>(op->loop_var_->GetType());
+    if (collecting_ && op->hardware_loop_policy_ == HardwareLoopPolicy::Require &&
+        (!induction_type || induction_type->dtype_ != DataType::INDEX)) {
+      Error("Hardware loop induction variable must have INDEX dtype", op->span_);
+    }
+    // Enforce target-independent hardware-loop limits during the existing IR
+    // walk. No target profile or repeated per-loop body analysis is needed.
+    const bool hardware_loop = op->hardware_loop_policy_ == HardwareLoopPolicy::Require;
+    if (hardware_loop) ++hardware_loop_depth_;
+    const bool previous_empty = empty_hardware_loop_;
+    const auto exact_stop =
+        collecting_ && !previous_empty ? arith::TryEvaluateIntConstant(op->stop_) : std::nullopt;
+    const auto start = exact_stop ? arith::TryEvaluateIntConstant(op->start_) : std::nullopt;
+    const auto step = start ? arith::TryEvaluateIntConstant(op->step_) : std::nullopt;
+    // Empty sequential ancestors suppress hardware realization requirements
+    // even when the ancestor uses Auto policy rather than Require.
+    if (exact_stop && start && step &&
+        ((*step > 0 && *start >= *exact_stop) || (*step < 0 && *start <= *exact_stop))) {
+      empty_hardware_loop_ = true;
+    }
+    if (collecting_ && hardware_loop && !previous_empty) {
+      if (!empty_hardware_loop_) {
+        if (hardware_loop_depth_ > 4) {
+          Error("HWL_DEPTH: hardware loops can nest at most four levels", op->span_);
+        }
+        if (exact_stop && *exact_stop > 65535) {
+          Error("Hardware loop stop must not exceed 65535", op->span_);
+        }
+      }
+    }
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
       owners_.emplace(op->loop_var_.get(), region_);
-      for (const auto& arg : op->iter_args_) RecordLocal(arg);
-      for (const auto& var : op->return_vars_) RecordLocal(var);
+      for (const auto& arg : op->iter_args_) RecordControlFlowValue(arg);
+      for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
+    if (hardware_loop) --hardware_loop_depth_;
+    empty_hardware_loop_ = previous_empty;
     yield_region_ = previous;
   }
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -204,8 +252,8 @@ class RegionChecker : public IRVisitor {
     const auto previous = yield_region_;
     yield_region_ = region_;
     if (collecting_) {
-      for (const auto& arg : op->iter_args_) RecordLocal(arg);
-      for (const auto& var : op->return_vars_) RecordLocal(var);
+      for (const auto& arg : op->iter_args_) RecordControlFlowValue(arg);
+      for (const auto& var : op->return_vars_) RecordControlFlowValue(var);
     }
     IRVisitor::VisitStmt_(op);
     yield_region_ = previous;
@@ -216,7 +264,20 @@ class RegionChecker : public IRVisitor {
     IRVisitor::VisitStmt_(op);
     region_ = previous;
   }
+  void VisitStmt_(const BreakStmtPtr& op) override {
+    if (collecting_ && hardware_loop_depth_ > 0) {
+      Error("BreakStmt is not supported inside hardware_loop", op->span_);
+    }
+  }
+  void VisitStmt_(const ContinueStmtPtr& op) override {
+    if (collecting_ && hardware_loop_depth_ > 0) {
+      Error("ContinueStmt is not supported inside hardware_loop", op->span_);
+    }
+  }
   void VisitStmt_(const ReturnStmtPtr& op) override {
+    if (collecting_ && region_) {
+      Error("ReturnStmt is not supported inside RegScope", op->span_);
+    }
     auto previous = region_;
     region_ = nullptr;
     IRVisitor::VisitStmt_(op);
@@ -243,7 +304,13 @@ class RegionChecker : public IRVisitor {
     return result;
   }
 
-  void RecordLocal(const VarPtr& var) {
+  void RecordControlFlowValue(const VarPtr& var) {
+    // Tuple aliases are only lowered within a straight-line block. SCF results
+    // and carries must expose individual registers, including nested tuples.
+    if (region_ && As<TupleType>(var->GetType()) && ContainsRegionValue(var->GetType(), false)) {
+      Error("Register tuples cannot cross control-flow joins or loop carries; unpack the tuple first",
+            var->span_);
+    }
     if (ContainsRegionValue(var->GetType(), true)) owners_.emplace(var.get(), region_);
   }
   template <typename T>
@@ -260,6 +327,8 @@ class RegionChecker : public IRVisitor {
   FunctionPtr function_;
   std::vector<Diagnostic>& diagnostics_;
   bool final_;
+  int hardware_loop_depth_ = 0;
+  bool empty_hardware_loop_ = false;
   bool incore_;
   bool collecting_ = true;
   bool blocked_ = false;

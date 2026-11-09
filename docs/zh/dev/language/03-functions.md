@@ -89,6 +89,27 @@ reshape 推导在记录 `TensorMeta.shape` 时，才为标量表达式建立结�
 
 `synthesized` 标记自动生成的占位符号，继续沿用既有注解覆盖及 helper 返回行为。
 
+当运行时上下界之差可证明为常量时，下标视图也保留静态宽度。例如，
+`src[base:base + 128, :]` 携带 `[128, src.shape[1]]` 元数据，因此在第二维一致时，
+可以与相同类型的 `[128, N]` 分配结果合并。JIT 将整数加减和常数乘法转换为临时表达式，
+复用 Parser 的算术分析器（arithmetic analyzer）证明宽度。每个二元操作必须有一个常量
+操作数，以触发 INDEX 类型提升。此推导无法获知标量 dtype，因此保守拒绝两个运行时
+操作数之间的运算及运行时取负。例如，`base + other:base + (other + 128)` 不能证明
+宽度为 128：下界的加法可能在 INT32 中溢出，而上界表达式会提升为 INDEX。
+宽度证明解析字面量、未被遮蔽的全局/闭包常量、constexpr 参数、当前张量元数据中的
+直接静态 shape 读取，以及函数体转换器确实替换为字面量的 shape 别名。
+直接 shape 读取也支持局部分配的张量，其维度由 Parser 折叠。
+未解析切片保留的父张量范围会标记为非精确值，不能通过后续 shape 读取、张量别名、
+分支合并或辅助函数返回值证明切片宽度。
+辅助函数声明的动态轴会将回退范围替换为绑定到实际描述符的维度。
+`width = 128` 或 `width: pl.Scalar[pl.INT32] = 128` 等局部标量赋值即使在维度
+推导中具有已知值，也仍按符号处理：它们在特化后保留为变量，而非 INDEX 字面量。
+运行时维度的样例上界不会作为证明。符号仅在同一对切片上下界内共享，
+因此其他语句中的重绑定和别名不会建立新的相等关系。未解析的调用、读取、动态除法
+和非线性乘积不会被当作可抵消的符号。无法证明的宽度保留已有的父维度回退行为，
+带 step 的切片仍不受此元数据推导支持。分支合并仍要求 shape、dtype、layout
+及动态轴身份兼容。此推导不改变切片操作及其存储生命周期。
+
 ### JIT 内联 helper 的 Tile 参数
 
 内联 helper 可以接收显式声明类型的片上 Tile：
@@ -149,7 +170,10 @@ JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选�
   以及 `dump_ptoas_passes=True`。
 - `compile_profiling=True`、活跃的 `CompileProfiler`，或通过
   `PYPTO_COMPILE_PROFILING` 启用的编译性能分析。
-- 显式指定 `save_kernels_dir`，或非空的 `PYPTO_PROG_BUILD_DIR`。
+- 显式指定 `save_kernels_dir`。
+- 显式启用 `PYPTO_EMIT_DEBUG_RUNNER` 或 `PYPTO_REBUILD_FROM_PTO`。
+  `0`、`false`、`no` 关闭此请求（忽略大小写和两端空白）；已设置为空字符串时，
+  保留启用/默认行为。
 - 显式诊断设置，或包含 instrument、验证/诊断设置不同于流水线默认值的活跃
   `PassContext`。
 
@@ -159,6 +183,10 @@ JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选�
 诊断控制不进入编译键。
 显式设置与活跃 `PassContext` 冲突时，缓存命中与首次编译都会报告相同错误。
 仅选择规划器或运行时的普通上下文仍能复用匹配的缓存产物。
+
+`PYPTO_PROG_BUILD_DIR` 只指定新建私有构建和运行目录的父目录，不请求重新编译。
+已有缓存对象保留原目录，共享产物仍位于缓存中。如果每次调用都需要生成新的、
+可供检查的输出目录，应使用 `save_kernels_dir`。
 
 ```python
 from pypto.runtime import RunConfig

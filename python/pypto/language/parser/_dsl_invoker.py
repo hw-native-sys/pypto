@@ -126,10 +126,10 @@ def _unwrap_result(value: Any) -> Any:
     if (
         isinstance(value, tuple)
         and value
-        and all(isinstance(v, (Tensor, Tile, Scalar)) for v in cast("tuple[Any, ...]", value))
+        and all(isinstance(v, (Reg, Tensor, Tile, Scalar)) for v in cast("tuple[Any, ...]", value))
     ):
         # all() proves the element type but cannot narrow; restate it for the unwrap.
-        elems = cast("tuple[Tensor | Tile | Scalar, ...]", value)
+        elems = cast("tuple[Reg | Tensor | Tile | Scalar, ...]", value)
         unwrapped = tuple(v.unwrap() for v in elems)
         common_call: ir.Expr | None = None
         for i, expr in enumerate(unwrapped):

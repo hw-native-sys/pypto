@@ -214,7 +214,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
     // AssignStmt/EvalStmt/ReturnStmt/YieldStmt we use the full subtree
     // collector because they have no nested bodies — it is equivalent to
     // walking their direct Expr fields.
-    bool is_leaf = std::dynamic_pointer_cast<const AssignStmt>(stmt) ||
+    bool is_leaf = As<SimtLaunchStmt>(stmt) || std::dynamic_pointer_cast<const AssignStmt>(stmt) ||
                    std::dynamic_pointer_cast<const EvalStmt>(stmt) ||
                    std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
                    std::dynamic_pointer_cast<const YieldStmt>(stmt);

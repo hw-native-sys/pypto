@@ -58,8 +58,8 @@ HardwareLoopQualification AnalyzeHardwareLoop(const ForStmtPtr& loop, const Hard
 std::vector<HardwareLoopQualification> AnalyzeHardwareLoops(const ProgramPtr& program,
                                                             const HardwareLoopProfile& profile);
 
-/// PR4 deliberately provides no successful evidence path. Until a backend can map
-/// a surviving loop to a final artifact, even Eligible Require fails closed.
+/// Generic backends without a final-artifact evidence path fail closed even for
+/// Eligible Require loops. A5 qualifies loops at its PTO codegen boundary.
 void VerifyHardwareLoopRequirement(const ForStmtPtr& loop, const HardwareLoopProfile& profile);
 void VerifyHardwareLoopRequirements(const ProgramPtr& program, const HardwareLoopProfile& profile);
 

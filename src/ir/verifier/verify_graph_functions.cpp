@@ -241,6 +241,8 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
                              "Graph function '" + func->name_ + "' " + message, span);
   };
 
+  // Materialized communication contexts use uint64_t scalar slots. Preserve
+  // their argument origin so replay refreshes the device context pointer.
   size_t tensor_params = 0;
   size_t scalar_params = 0;
   // `param_directions_` may be shorter than `params_` at some points in the
@@ -249,7 +251,7 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const auto dir = i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
-    if (As<ScalarType>(param->GetType()) != nullptr) {
+    if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
       if (dir != ParamDirection::In) {
         report("declares scalar parameter '" + param->name_hint_ +
                    "' as an output. A boundary scalar is passed by value and replayed from the call "
@@ -321,7 +323,7 @@ class GraphBodyChecker : public IRVisitor {
   GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics)
       : program_(std::move(program)), func_(std::move(func)), diagnostics_(diagnostics), invariant_(func_) {
     for (const auto& param : func_->params_) {
-      if (As<ScalarType>(param->GetType()) != nullptr) {
+      if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
         scalar_params_.insert(param.get());
       } else {
         tensor_params_.insert(param.get());
@@ -378,9 +380,9 @@ class GraphBodyChecker : public IRVisitor {
       auto call = assign ? As<Call>(assign->value_) : nullptr;
       if (call && IsAllocation(call)) {
         batched_.insert(stmt.get());
-        const bool joins_batch =
-            !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
-            alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_, locally_defined);
+        const bool joins_batch = !alloc_batching::IsInjectedGMPipeCreateVar(assign->var_) ||
+                                 alloc_batching::GMPipeCreateJoinsBatch(op->stmts_, i, assign->var_, program_,
+                                                                        locally_defined, gm_pipe_consumers_);
         if (joins_batch) {
           ++batchable;
         } else {
@@ -408,7 +410,7 @@ class GraphBodyChecker : public IRVisitor {
   /// through.
   void TrackTensorAlias(const AssignStmtPtr& op) {
     auto var = AsVarLike(op->var_);
-    if (!var || As<ScalarType>(var->GetType()) != nullptr) return;
+    if (!var || As<ScalarType>(var->GetType()) || As<CommCtxType>(var->GetType())) return;
     auto aliased = AsVarLike(op->value_);
     if (aliased && tensor_root_.count(aliased.get()) != 0) {
       tensor_root_.insert(var.get());
@@ -617,7 +619,7 @@ class GraphBodyChecker : public IRVisitor {
 
   void CheckScalarArgs(const std::vector<ExprPtr>& args, const Span& span) {
     for (const auto& arg : args) {
-      if (!arg || As<ScalarType>(arg->GetType()) == nullptr) continue;
+      if (!arg || (!As<ScalarType>(arg->GetType()) && !As<CommCtxType>(arg->GetType()))) continue;
       // A TaskId is topology, not a boundary scalar — see graph_replay_invariant.h.
       if (graph_replay::IsTaskIdScalar(arg->GetType())) continue;
       if (IsLiteralScalarExpr(arg)) continue;
@@ -649,6 +651,7 @@ class GraphBodyChecker : public IRVisitor {
   }
 
   ProgramPtr program_;
+  alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   FunctionPtr func_;
   std::vector<Diagnostic>& diagnostics_;
   graph_replay::ReplayInvariantSet invariant_;

@@ -117,13 +117,17 @@ set(PYPTO_SOURCES
     src/ir/memref.cpp
     src/ir/op_registry.cpp
     src/ir/program.cpp
+    src/ir/simt_analysis.cpp
     src/ir/stmt.cpp
     src/ir/type.cpp
 
     # IR - Operators
+    src/ir/op/simt_ops.cpp
+    src/ir/op/buffer_ops/conversion.cpp
     src/ir/op/buffer_ops/elementwise.cpp
     src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
+    src/ir/op/buffer_ops/row.cpp
     src/ir/op/buffer_ops/view.cpp
     src/ir/op/reg_ops/reg_ops.cpp
     src/ir/op/tile_ops/batch_matmul.cpp
@@ -233,6 +237,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/insert_mx_scale_addr_pass.cpp
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
+    src/ir/transforms/materialize_simt_outputs_pass.cpp
+    src/ir/transforms/outline_simt_scopes_pass.cpp
+    src/ir/transforms/specialize_simt_helpers_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/utils/reg_memory_analysis.cpp
     src/ir/transforms/lower_composite/lower_composite_all_to_all.cpp
@@ -266,6 +273,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/auto_tile_matmul_l0/analysis.cpp
     src/ir/transforms/auto_tile_matmul_l0/common.cpp
     src/ir/transforms/auto_tile_matmul_l0/pipeline_plan.cpp
+    src/ir/transforms/auto_tile_matmul_l0/storage_contracts.cpp
     src/ir/transforms/auto_tile_matmul_l0_pass.cpp
     src/ir/transforms/window_externalization/analysis.cpp
     src/ir/transforms/window_externalization/callee_rewrite.cpp
@@ -340,6 +348,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_acc_store_phase.cpp
     src/ir/verifier/verify_no_scalar_kernel_return.cpp
     src/ir/verifier/warning_in_param_written.cpp
+    src/ir/verifier/verify_simt.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp
@@ -398,6 +407,7 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_codegen.cpp
     src/codegen/pto/reg_codegen.cpp
     src/codegen/pto/vf_codegen.cpp
+    src/codegen/pto/simt_codegen.cpp
     src/codegen/pto/pto_buffer_codegen.cpp
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp
@@ -425,7 +435,9 @@ set(PYPTO_SOURCES
     src/backend/common/isa_macro_resources_npu.cpp
     src/backend/common/isa_macro_resources_comm.cpp
     src/backend/common/isa_macro_resources_protocol.cpp
+    src/backend/common/buffer_conversion_recipes.cpp
     src/backend/common/buffer_elementwise_recipes.cpp
+    src/backend/common/buffer_row_recipes.cpp
     src/backend/common/buffer_view_semantics.cpp
     src/backend/common/pto_ops_common.cpp
     src/backend/common/pto_ops_shared.cpp

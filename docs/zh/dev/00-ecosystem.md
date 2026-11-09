@@ -119,6 +119,9 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 编译不需要 NPU，因此仅支持真机的入口也会纳入。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
+当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。
+其他解析器保留原始参数，兼容辅助解析器和组件解析器，
+同时阻止编译完成后进入设备执行分支。
 不构建设备二进制，也不验证数值结果；
 `pypto-lib-model` 提供独立的设备冒烟测试。
 
@@ -134,7 +137,13 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 ```
 
 使用 `--platform a5` 重复测试。每个入口默认超时 1200 秒，可通过
-`--timeout` 修改。编译失败、进程失败、超时和未记录到编译均会使 job 失败。
+`--timeout` 修改。每个 PTOAS 内核编译另有默认 60 秒的超时限制。
+可将 `PYPTO_PTOAS_TIMEOUT_SECONDS` 设为正整数来覆盖该限制；非法值会报错。
+库编译 CI job 将其设为 `180`，为大型内核提供更多编译时间。
+本地使用 `export PYPTO_PTOAS_TIMEOUT_SECONDS=180` 可与 CI 保持一致。
+该设置同时适用于首次编译和调试回放 (debug replay) 中的 PTO 重新编译。
+该设置不改变入口级别的 `--timeout`。
+编译失败、进程失败、超时和未记录到编译均会使 job 失败。
 损坏或不可读的编译回执只使对应入口失败，不会中断其他入口或丢失矩阵汇总。
 若入口通过当前 Python 解释器再次运行自身脚本来分发用例，每个子进程都会进入同一仅编译适配器。
 子用例的环境、工作目录和进程隔离均保留，父进程负责汇总编译记录。

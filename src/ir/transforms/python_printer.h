@@ -131,6 +131,8 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const RegScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override;
+  void VisitStmt_(const SimtScopeStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
   void VisitStmt_(const ContinueStmtPtr& op) override;
   void VisitStmt_(const InlineStmtPtr& op) override;
