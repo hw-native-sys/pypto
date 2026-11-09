@@ -480,31 +480,48 @@ def test_single_lhs_forwarded_tuple_contract_preserves_all_slots():
     assert ir.structural_equal(consumer.params[0].type, ir.TensorType([32, 64], pl.FP32))
 
 
-def test_direct_submit_projection_argument_preserves_tensor_metadata():
+@pytest.mark.parametrize("projection", ["literal", "folded"])
+def test_direct_submit_projection_argument_preserves_tensor_metadata(projection):
     @pl.jit.graph
-    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
-        return out
+    def stage(first: pl.InOut[pl.Tensor], second: pl.InOut[pl.Tensor]):
+        return first, second
 
     @pl.jit.graph
     def consume(value: pl.Tensor):
         return value
 
-    @pl.jit
-    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
-        launch = pl.submit(stage, x, out)
-        result, done = pl.submit(consume, launch[0])
-        return result
+    if projection == "literal":
 
-    assert len(_submissions(entry.specialize(torch.empty(16, 32), torch.empty(16, 32)))) == 2
+        @pl.jit
+        def entry(selector: pl.Tensor, first: pl.InOut[pl.Tensor], second: pl.InOut[pl.Tensor]):
+            launch = pl.submit(stage, first, second)
+            result, done = pl.submit(consume, launch[1])
+            return result
+    else:
+
+        @pl.jit
+        def entry(selector: pl.Tensor, first: pl.InOut[pl.Tensor], second: pl.InOut[pl.Tensor]):
+            launch = pl.submit(stage, first, second)
+            slot = selector.shape[0]  # pyright: ignore[reportOptionalSubscript]
+            result, done = pl.submit(consume, launch[slot])
+            return result
+
+    program = entry.specialize(torch.empty(1, 32), torch.empty(8, 32), torch.empty(16, 32))
+    assert len(_submissions(program)) == 2
+    consumer = program.get_function("consume")
+    assert consumer is not None
+    assert ir.structural_equal(consumer.params[0].type, ir.TensorType([16, 32], pl.FP32))
 
 
 def test_first_omitted_output_uses_call_owned_constexpr_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
 
+    rows = 16
+
     @pl.jit.incore
     def kernel(
         x: pl.Tensor,
-        out: pl.Out[pl.Tensor[[16, _RETURN_WIDTH], pl.FP32]],
+        out: pl.Out[pl.Tensor[[rows, _RETURN_WIDTH], pl.FP32]],
         _RETURN_WIDTH: pl.constexpr,
     ):
         value = pl.load(x, [0, 0], [16, _RETURN_WIDTH])

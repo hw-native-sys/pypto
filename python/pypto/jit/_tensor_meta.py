@@ -305,6 +305,49 @@ def _dep_annotation_namespace(dep: "JITFunction", binding: Mapping[str, str]) ->
     return namespace
 
 
+def _resolve_omitted_output_annotation(
+    source: ast.expr | None, eager: Any, namespace: dict[str, Any], binding: Mapping[str, str]
+) -> Any:
+    if source is None:
+        return _arguments.resolve_annotation(eager, namespace)
+    spelling = ast.unparse(source)
+    annotation = _arguments.resolve_annotation(spelling, namespace)
+    if not isinstance(annotation, str):
+        return annotation
+    eager = _arguments.resolve_annotation(eager, namespace)
+    referenced = {node.id for node in ast.walk(source) if isinstance(node, ast.Name)}
+    if binding.keys().isdisjoint(referenced):
+        return eager
+
+    # A factory-local capture may be absent from the function's namespace.
+    # Recover its independent dimensions from the eager annotation without
+    # restoring the ambient values of call-owned constexpr parameters.
+    if isinstance(eager, _LangTensor) and eager.shape is not None:
+        rebuilt = copy.deepcopy(source)
+        if isinstance(rebuilt, ast.Subscript) and isinstance(tensor := rebuilt.slice, ast.Subscript):
+            if isinstance(tensor.slice, ast.Tuple) and tensor.slice.elts:
+                shape = tensor.slice.elts[0]
+                if isinstance(shape, (ast.List, ast.Tuple)) and len(shape.elts) == len(eager.shape):
+                    recovered = dict(namespace)
+                    for index, (axis, extent) in enumerate(zip(shape.elts, eager.shape, strict=True)):
+                        if any(isinstance(node, ast.Name) and node.id in binding for node in ast.walk(axis)):
+                            continue
+                        axis_source = ast.unparse(axis)
+                        if isinstance(_arguments.resolve_annotation(axis_source, namespace), str):
+                            name = f"_pypto_eager_dim_{index}"
+                            while name in recovered or name in referenced:
+                                name += "_"
+                            recovered[name] = extent
+                            shape.elts[index] = ast.Name(id=name, ctx=ast.Load())
+                    resolved = _arguments.resolve_annotation(ast.unparse(rebuilt), recovered)
+                    if not isinstance(resolved, str):
+                        return resolved
+
+    raise ValueError(
+        f"Cannot resolve omitted Out annotation {spelling!r} with its call-owned constexpr bindings"
+    )
+
+
 def _omitted_output_metas(
     dep: "JITFunction", call: ast.Call, binding: Mapping[str, str]
 ) -> dict[str, TensorMeta]:
@@ -321,14 +364,10 @@ def _omitted_output_metas(
     dyn_map = _ast_analysis.build_dyndim_map_for_func(dep._func, tuple(dep._param_names()))
     result: dict[str, TensorMeta] = {}
     for name in outputs:
-        source = source_annotations.get(name)
-        spelling = ast.unparse(source) if source is not None else ""
-        annotation = _arguments.resolve_annotation(spelling, namespace)
-        if isinstance(annotation, str):
-            # Annotation-only factory locals may survive only in the evaluated
-            # signature. Prefer source resolution so a call-owned constexpr
-            # overrides an ambient value captured when Python defined the function.
-            annotation = _arguments.resolve_annotation(signature.parameters[name].annotation, namespace)
+        eager = signature.parameters[name].annotation
+        annotation = _resolve_omitted_output_annotation(
+            source_annotations.get(name), eager, namespace, binding
+        )
         if (
             isinstance(annotation, _LangTensor)
             and annotation.shape is not None
@@ -2040,6 +2079,11 @@ def _shape_inexact_axes(
 class _MetadataOutputs(NamedTuple):
     submit_results: dict[str, _SubmitTupleMeta] | None = None
     return_meta: _ReturnMeta | None = None
+    static_constants: dict[tuple[int, int], int] | None = None
+
+    def record_static_constants(self, constants: dict[tuple[int, int], int]) -> None:
+        if self.static_constants is not None:
+            self.static_constants.update(constants)
 
 
 def extract_local_tensor_metas(
@@ -2060,7 +2104,8 @@ def extract_local_tensor_metas(
     The optional outputs.submit_results dictionary receives the live flat tuple slots at
     the stopping call. It shares the same binding/branch undo journal as tensor
     metadata, so argument resolution can distinguish tuple projections from
-    tensor slices without a second source walk.
+    tensor slices without a second source walk. Optional static_constants
+    exposes the same source-location folds used during that walk.
 
     Walks the body in source order, tracking the three ways a local tensor can
     be produced inside a JIT function:
@@ -2147,6 +2192,7 @@ def extract_local_tensor_metas(
     dynvar_anchors = _build_dynvar_anchor_index(seed_meta or {})
     declared_dims = _declared_dim_values(func_def, seed_meta or {})
     static_preview = _preview_static_expressions(func_def, seed_meta or {}, scope, constexpr_values)
+    outputs.record_static_constants(static_preview.constants)
     resolve_slice_int = functools.partial(
         _resolve_slice_int, scope=scope, constants=static_preview.constants, local=local
     )
@@ -2547,6 +2593,7 @@ def resolve_dep_call_metadata(
         else {}
     )
     submitted: dict[str, _SubmitTupleMeta] = {}
+    static_constants: dict[tuple[int, int], int] = {}
     scope = _StaticScope.of(caller_func, caller_constexpr)
     intermediate_metas = extract_local_tensor_metas(
         caller_func,
@@ -2557,7 +2604,7 @@ def resolve_dep_call_metadata(
         constexpr_values=caller_constexpr,
         discover_deps=discover_deps,
         visible_only=True,
-        outputs=_MetadataOutputs(submit_results=submitted),
+        outputs=_MetadataOutputs(submit_results=submitted, static_constants=static_constants),
     )
     # The extractor starts from caller_tensor_meta, then applies source-ordered
     # rebindings. Its result is therefore the authoritative state at the call.
@@ -2573,7 +2620,7 @@ def resolve_dep_call_metadata(
             projection = _submitted_projection_meta(
                 actual_nodes.get(dep_param),
                 submitted,
-                lambda node: _resolve_slice_int(node, scope, {}, all_tensor_meta),
+                lambda node: _resolve_slice_int(node, scope, static_constants, all_tensor_meta),
             )
             if projection is not None:
                 dep_tensor_meta[dep_param] = projection
