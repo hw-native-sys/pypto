@@ -241,6 +241,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(EvalStmt);
     SERIALIZE_FIELDS(SimtLaunchStmt);
+    SERIALIZE_FIELDS(SimtScopeStmt);
     SERIALIZE_FIELDS(BreakStmt);
     SERIALIZE_FIELDS(ContinueStmt);
     SERIALIZE_FIELDS(InlineStmt);

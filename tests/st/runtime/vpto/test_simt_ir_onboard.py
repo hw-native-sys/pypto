@@ -7,28 +7,23 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""P3 explicit SIMT IR through production lowering, linking and persistent A5.
-
-Approved P3 exception to the ST JIT authoring policy: this compiler acceptance
-test exercises canonical IR because SIMT JIT authoring/outlining is a separate
-milestone. It does not establish public JIT support. Migrate to that surface
-when available; see docs/en/dev/codegen/05-simt-lowering.md.
-"""
+"""Public SIMT scopes through JIT, production linking and persistent A5 execution."""
 
 import json
 import os
+import re
 import runpy
 import sys
 import tempfile
 from pathlib import Path
 
+import pypto.language as pl
 import pytest
 import torch
-from pypto import ir
+from pypto import CacheConfig
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit._artifact_manifest import BuildKind
-from pypto.language.parser import parse_program
 from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
 from pypto.runtime._artifact_sources import read_kernel_config, validate_generated_sources
 from pypto.runtime.runtime_pin import check_runtime_pin
@@ -38,88 +33,98 @@ ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/ut/backend/vpto_vf_validation"
 LENGTHS = (0, 1, 31, 32, 33, 127, 128)
 
-GM_PROGRAM = """
-@pl.program
-class Copy:
-    @pl.function(type=pl.FunctionType.SIMT)
-    def copy(self, src: pl.Tensor[[1, 128], pl.FP32],
-             dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]], n: pl.Scalar[pl.INT32]):
-        x = pl.simt.thread_idx(axis=pl.SimtAxis.X)
+
+@pl.jit.aiv
+def copy_kernel(
+    src: pl.Tensor[[1, 128], pl.FP32],
+    dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+    snapshot: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    n: pl.Scalar[pl.INT32],
+):
+    with pl.simt_scope(dims=(128, 1, 1)):
+        x = pl.simt.thread_idx(pl.simt.Axis.X)
         if x < n:
             value = pl.simt.load(src, [0, x])
             pl.simt.store(dst, [0, x], value)
+    value = pl.load(dst, [0, 0], [1, 128])
+    result = pl.store(value, [0, 0], snapshot)
+    return dst, result
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(self, src: pl.Tensor[[1, 128], pl.FP32],
-               dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
-               snapshot: pl.Out[pl.Tensor[[1, 128], pl.FP32]], n: pl.Scalar[pl.INT32]):
-        updated = pl.simt.launch(self.copy, src, dst, n, block_dims=(128, 1, 1), result_param_indices=(1,))
-        value = pl.tile.load(updated, [0, 0], [1, 128])
-        result = pl.tile.store(value, [0, 0], snapshot)
-        return updated, result
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, src: pl.Tensor[[1, 192], pl.FP32],
-             dst: pl.InOut[pl.Tensor[[1, 192], pl.FP32]],
-             snapshot: pl.InOut[pl.Tensor[[1, 192], pl.FP32]], n: pl.Scalar[pl.INT32]):
-        a = pl.tensor.slice(src, [1, 128], [0, 32])
-        b = pl.tensor.slice(dst, [1, 128], [0, 32])
-        c = pl.tensor.slice(snapshot, [1, 128], [0, 32])
-        updated, copied = self.kernel(a, b, c, n)
-        dst = pl.tensor.assemble(dst, updated, [0, 32])
-        snapshot = pl.tensor.assemble(snapshot, copied, [0, 32])
-        return dst, snapshot
-"""
+@pl.jit
+def copy_entry(
+    src: pl.Tensor[[1, 192], pl.FP32],
+    dst: pl.InOut[pl.Tensor[[1, 192], pl.FP32]],
+    snapshot: pl.InOut[pl.Tensor[[1, 192], pl.FP32]],
+    n: pl.Scalar[pl.INT32],
+):
+    a = pl.slice(src, [1, 128], [0, 32])
+    b = pl.slice(dst, [1, 128], [0, 32])
+    c = pl.slice(snapshot, [1, 128], [0, 32])
+    updated, copied = copy_kernel(a, b, c, n)
+    dst = pl.assemble(dst, updated, [0, 32])
+    snapshot = pl.assemble(snapshot, copied, [0, 32])
+    return dst, snapshot
 
-UB_PROGRAM = """
-@pl.program
-class Gather:
-    @pl.function(type=pl.FunctionType.SIMT)
-    def gather(self, src: pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec],
-               indices: pl.Tile[[4, 32], pl.INT32, pl.Mem.Vec],
-               dst: pl.InOut[pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec]], n: pl.Scalar[pl.INT32]):
-        x = pl.simt.thread_idx(axis=pl.SimtAxis.X)
-        y = pl.simt.thread_idx(axis=pl.SimtAxis.Y)
+
+@pl.jit.aiv
+def gather_kernel(
+    src: pl.Tensor[[4, 32], pl.FP32],
+    indices: pl.Tensor[[4, 32], pl.INT32],
+    old: pl.Tensor[[4, 32], pl.FP32],
+    dst: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+    snapshot: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+    n: pl.Scalar[pl.INT32],
+):
+    loaded = pl.load(src, [0, 0], [4, 32])
+    values = pl.add(loaded, 1.0)
+    offsets = pl.load(indices, [0, 0], [4, 32])
+    previous = pl.load(old, [0, 0], [4, 32])
+    saved_value = previous
+    with pl.simt_scope(dims=(32, 4, 1)):
+        x = pl.simt.thread_idx(pl.simt.Axis.X)
+        y = pl.simt.thread_idx(axis=pl.simt.Axis.Y)
         linear = y * 32 + x
         if linear < n:
-            index = pl.simt.load(indices, [y, x])
-            value = pl.simt.load(src, [index // 32, index % 32])
-            pl.simt.store(dst, [y, x], value)
+            index = pl.simt.load(offsets, [y, x])
+            value = pl.simt.load(values, [index // 32, index % 32])
+            pl.simt.store(previous, [y, x], value)
+    result = pl.store(previous, [0, 0], dst)
+    saved = pl.store(saved_value, [0, 0], snapshot)
+    return result, saved
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(self, src: pl.Tensor[[4, 32], pl.FP32], indices: pl.Tensor[[4, 32], pl.INT32],
-               old: pl.Tensor[[4, 32], pl.FP32], dst: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
-               snapshot: pl.Out[pl.Tensor[[4, 32], pl.FP32]], n: pl.Scalar[pl.INT32]):
-        loaded = pl.tile.load(src, [0, 0], [4, 32])
-        values = pl.tile.add(loaded, 1.0)
-        offsets = pl.tile.load(indices, [0, 0], [4, 32])
-        previous = pl.tile.load(old, [0, 0], [4, 32])
-        updated = pl.simt.launch(self.gather, values, offsets, previous, n,
-                                 block_dims=(32, 4, 1), result_param_indices=(2,))
-        result = pl.tile.store(updated, [0, 0], dst)
-        saved = pl.tile.store(previous, [0, 0], snapshot)
-        return result, saved
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, src: pl.Tensor[[4, 32], pl.FP32], indices: pl.Tensor[[4, 32], pl.INT32],
-             old: pl.Tensor[[4, 32], pl.FP32], dst: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
-             snapshot: pl.Out[pl.Tensor[[4, 32], pl.FP32]], n: pl.Scalar[pl.INT32]):
-        result, saved = self.kernel(src, indices, old, dst, snapshot, n)
-        return result, saved
-"""
+@pl.jit
+def gather_entry(
+    src: pl.Tensor[[4, 32], pl.FP32],
+    indices: pl.Tensor[[4, 32], pl.INT32],
+    old: pl.Tensor[[4, 32], pl.FP32],
+    dst: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+    snapshot: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+    n: pl.Scalar[pl.INT32],
+):
+    result, saved = gather_kernel(src, indices, old, dst, snapshot, n)
+    return result, saved
+
+
+def compile_scope(directory: Path, case: str) -> CompiledProgram:
+    entry = copy_entry if case == "gm" else gather_entry
+    return entry.compile(
+        config=RunConfig(
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            cache_config=CacheConfig(enabled=False),
+            save_kernels_dir=str(directory),
+            dump_passes=True,
+        ),
+    )
 
 
 def _variants(output: Path, case: str):
     pin = check_runtime_pin(checkout_root=ROOT)
     assert pin.matches and pin.installed == pin.pinned, pin
     directory = output / "original"
-    compiled = ir.compile(
-        parse_program(GM_PROGRAM if case == "gm" else UB_PROGRAM),
-        output_dir=str(directory),
-        backend_type=BackendType.Ascend950,
-        execution_mode=ExecutionMode.ONBOARD,
-        dump_passes=True,
-    )
+    compiled = compile_scope(directory, case)
     assert isinstance(compiled, CompiledProgram)
     helpers = list((directory / "vpto").rglob("*.pto"))
     assert len(helpers) == 1
@@ -131,14 +136,14 @@ def _variants(output: Path, case: str):
     native = helpers[0].read_text()
     assert "pto.simt_entry" in native and "pto.simt_launch" in native
     assert ("pto.ldg" if case == "gm" else "pto.load") in native
+    launch_targets = re.findall(r"pto\.simt_launch @([\w]+)<<<", native)
+    assert len(launch_targets) == 1
     record = runpy.run_path(str(ROOT / "examples/runtime/vf_emitc_vpto.py"))["_record_compilation"]
     with record(output) as calls:
         compiled.load()
         assert len(calls) == 1
         validation = runpy.run_path(str(FIXTURE / "simt_validation.py"))
-        validation["check_simt_launch_size"](
-            output / "compilation-1", "copy_simt_0" if case == "gm" else "gather_simt_0"
-        )
+        validation["check_simt_launch_size"](output / "compilation-1", launch_targets[0])
         caller = (output / "compilation-1/caller.cpp").read_text()
         pipes = ("PIPE_V, PIPE_MTE2",) if case == "gm" else ("PIPE_MTE2, PIPE_V", "PIPE_V, PIPE_MTE3")
         for pair in pipes:

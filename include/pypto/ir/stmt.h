@@ -394,6 +394,36 @@ class SimtLaunchStmt : public Stmt {
 
 using SimtLaunchStmtPtr = std::shared_ptr<const SimtLaunchStmt>;
 
+/// A transient per-thread region, eliminated by OutlineSimtScopes before SSA.
+/// This is deliberately not a ScopeStmt: flattening an execute-once scope must
+/// never move these thread-private computations into the enclosing AIV body.
+/// Captures are free binding identities in body_; stores implicitly redefine
+/// their captured storage in the caller once outlining creates launch results.
+class SimtScopeStmt : public Stmt {
+ public:
+  std::vector<ExprPtr> block_dims_;
+  StmtPtr body_;
+  // Outer scalar bindings reassigned privately by this execution domain. The
+  // metadata preserves capture identity through pre-SSA cloning and round trips.
+  std::vector<VarPtr> private_scalars_;
+
+  SimtScopeStmt(std::vector<ExprPtr> block_dims, StmtPtr body, Span span,
+                std::vector<VarPtr> private_scalars = {}, std::vector<std::string> leading_comments = {});
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SimtScopeStmt; }
+  [[nodiscard]] std::string TypeName() const override { return "SimtScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(
+        Stmt::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&SimtScopeStmt::block_dims_, "block_dims"),
+                        reflection::UsualField(&SimtScopeStmt::body_, "body"),
+                        reflection::UsualField(&SimtScopeStmt::private_scalars_, "private_scalars")));
+  }
+};
+
+using SimtScopeStmtPtr = std::shared_ptr<const SimtScopeStmt>;
+
 /**
  * @brief Conditional statement
  *

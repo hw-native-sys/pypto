@@ -178,7 +178,7 @@ Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析
 开启 `enable_software_pipeline=True` 后，合格的等大槽位分配可在 level3 下生成
 `alloc_multi_tile addr = <base>`；PyPTO 继续负责地址分配并预留所有槽位。
 同一开关将合格 Vec `pl.pipeline` 循环下降为 preload/main/drain，预取距离为 `stage - 1`。
-参见 [LowerPipelineToSlots](../passes/31-lower_pipeline_to_slots.md)。
+参见 [LowerPipelineToSlots](../passes/32-lower_pipeline_to_slots.md)。
 
 声明的名字自成命名空间——不会解析到恰好同名的 Python 变量。内存空间**必须**写（`TileType`
 始终要求 MemRef 与空间成对出现），且绑定到同一块分配的 tile 必须一致。未加注解的 tile 保持
@@ -190,7 +190,7 @@ Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析
 一块分配；希望编译器管理的层次则不加注解。
 
 在 `memory_planner=PTOAS` 下，编译器用的是**同一套**机制而非另一套：
-[`LowerPipelineToSlots`](../passes/31-lower_pipeline_to_slots.md) 会为合格 `pl.pipeline` 循环体中
+[`LowerPipelineToSlots`](../passes/32-lower_pipeline_to_slots.md) 会为合格 `pl.pipeline` 循环体中
 **顶层**的每个 `tile.load` 合成与上文完全一致的声明——`slots=F`、以 `iv % F` 索引——于是单份循环体
 轮转各个槽位而不被复制。你自己绑定过的 tile 不受影响；该 pass 未接手的循环仍走复制路径
 （上述拒绝规则对其依然成立）。
@@ -206,8 +206,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-参见 [InitMemRef](../passes/37-init_memref.md#声明式分配) 与
-[MemoryReuse](../passes/39-memory_reuse.md#声明式分配)。
+参见 [InitMemRef](../passes/38-init_memref.md#声明式分配) 与
+[MemoryReuse](../passes/40-memory_reuse.md#声明式分配)。
 
 ### Tile 视图 (TileView)
 

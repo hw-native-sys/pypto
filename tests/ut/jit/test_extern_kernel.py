@@ -1055,5 +1055,45 @@ def entry(output: pl.Out[pl.Tensor]):
         _specialize(module.entry, torch.empty(1, 32))
 
 
+class _LegacyExternalHook:
+    def __init__(self, function):
+        self.function = function
+
+    def __pypto_jit__(self):
+        return self.function
+
+
+def test_legacy_jit_hook_compiles_external_dependency(tmp_path, ascend_backend):
+    cpp = _write_kernel(tmp_path)
+
+    @pl.jit.extern(core_type="aiv", source=cpp)
+    def external(value: pl.Tensor, output: pl.Out[pl.Tensor]) -> pl.Tensor:
+        return output
+
+    hooked = _LegacyExternalHook(external)
+
+    @pl.jit(auto_scope=False)
+    def entry(value: pl.Tensor[[1, 32], pl.FP32], output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
+        output = hooked(value, output)
+        return output
+
+    assert entry._get_deps() == [external]
+    generated = tmp_path / "generated"
+    entry.compile(config=RunConfig(backend_type=ascend_backend, save_kernels_dir=str(generated)))
+    assert (generated / "orchestration" / "entry.cpp").is_file()
+
+
+@pytest.mark.parametrize("result", [None, object(), lambda: None])
+def test_legacy_jit_hook_rejects_non_jit_results(result):
+    hooked = _LegacyExternalHook(result)
+
+    @pl.jit
+    def entry(value: pl.Tensor):
+        return hooked(value)
+
+    with pytest.raises(TypeError, match="__pypto_jit__: expected JITFunction"):
+        entry._get_deps()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

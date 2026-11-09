@@ -859,6 +859,22 @@ void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
   --comm_domain_depth_;
 }
 
+void IRPythonPrinter::VisitStmt_(const SimtScopeStmtPtr& op) {
+  stream_ << "with " << prefix_ << ".simt_scope(dims=(";
+  for (size_t i = 0; i < op->block_dims_.size(); ++i) {
+    if (i) stream_ << ", ";
+    VisitExpr(op->block_dims_[i]);
+  }
+  stream_ << ")):\n";
+  IncreaseIndent();
+  if (auto seq = As<SeqStmts>(op->body_); seq && seq->stmts_.empty()) {
+    stream_ << GetIndent() << "pass\n";
+  } else {
+    PrintStmtBlock(op->body_);
+  }
+  DecreaseIndent();
+}
+
 void IRPythonPrinter::VisitStmt_(const SimtLaunchStmtPtr& op) {
   for (size_t i = 0; i < op->results_.size(); ++i) {
     if (i) stream_ << ", ";

@@ -1568,7 +1568,7 @@ class ASTParser:
         for item, index in zip(targets, indices):
             assert isinstance(item, ast.Name)
             previous = self.scope_manager.lookup_var(item.id)
-            if type(previous) is ir.Var and not self.scope_manager.strict_ssa:
+            if isinstance(previous, (ir.Var, ir.IterArg)) and not self.scope_manager.strict_ssa:
                 result = previous
             else:
                 result = ir.Var(item.id, args[index].type, span)

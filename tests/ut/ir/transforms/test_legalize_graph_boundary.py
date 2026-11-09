@@ -1122,7 +1122,8 @@ class TestRegionAllocationHoisting:
                 t: pl.Tile[[128, 128], pl.FP32] = pl.load(
                     a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
                 )
-                return pl.store(t, [0, 0], out)
+                written = pl.store(t, [0, 0], out)
+                return written
 
             @pl.function(type=pl.FunctionType.Graph)
             def layer(
@@ -1640,7 +1641,8 @@ class TestBoundaryLegality:
                 t: pl.Tile[[128, 128], pl.FP32] = pl.load(
                     a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
                 )
-                return pl.store(t, [0, 0], out)
+                written = pl.store(t, [0, 0], out)
+                return written
 
             @pl.function(type=pl.FunctionType.Graph)
             def layer(
@@ -1678,7 +1680,8 @@ class TestBoundaryLegality:
                 t: pl.Tile[[128, 128], pl.FP32] = pl.load(
                     a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
                 )
-                return pl.store(t, [0, 0], out)
+                written = pl.store(t, [0, 0], out)
+                return written
 
             @pl.function(type=pl.FunctionType.Graph)
             def layer(
@@ -1963,7 +1966,8 @@ class TestBoundaryLegality:
                 t: pl.Tile[[128, 128], pl.FP32] = pl.load(
                     a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec
                 )
-                return pl.store(t, [0, 0], out)
+                written = pl.store(t, [0, 0], out)
+                return written
 
             @pl.function(type=pl.FunctionType.Graph)
             def layer(

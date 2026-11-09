@@ -70,12 +70,9 @@ the callee symbol size. No instruction bytes are patched by PyPTO.
 
 ## Focused acceptance
 
-`tests/st/runtime/vpto/test_simt_ir_onboard.py` compiles canonical IR directly,
-without substituting generated sources. This compiler-facing test uses the IR
-text form because the SIMT JIT authoring surface is not yet available. This is
-an approved P3-specific exception to the ST JIT authoring policy, limited to this
-compiler acceptance test. It validates canonical IR execution, not public JIT
-support, and must migrate when SIMT JIT authoring/outlining is implemented.
+`tests/st/runtime/vpto/test_simt_ir_onboard.py` now compiles public `@pl.jit.aiv`
+functions containing `pl.simt_scope`, through `.compile()`, without replacing
+generated sources. It replaces the earlier P3 canonical-IR-only authoring exception.
 
 - GM copy covers Tensor subviews with nonzero origins, guards, inactive elements,
   and a downstream Tile load consuming the SIMT result.
@@ -84,8 +81,9 @@ support, and must migrate when SIMT JIT authoring/outlining is implemented.
 - Both check cold compilation, warm cache loading, and directory relocation.
   Seven lengths and three input variants at each stage give 126 runtime cases.
 
-These cases passed on Ascend950DT with PTOAS v0.72, CANN 9.3.0 and pinned runtime
-`31f9e72ee6832cd198b77df18c1c305e7fd83676`. Build all artifacts in the current
+The public JIT versions passed all 126 numerical checks on Ascend950DT_9581
+with PTOAS v0.72, CANN 9.3.0 and pinned runtime
+`391b2fbcd4dd053204a677662c39b6b7636e8043`. Build all artifacts in the current
 checkout and reserve a device through the host queue before running:
 
 ```bash

@@ -84,11 +84,30 @@ class OpParser:
         return self.dispatch_op(_dsl_reg, "pl.reg", name, call)
 
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
-        """Read canonical SIMT ops; inline simt_scope syntax belongs to outlining."""
+        """Parse the public and canonical SIMT operation spellings."""
+        kwargs = self.parse_op_kwargs(call)
+        args = call.args
+        if name in {"thread_idx", "block_idx", "block_dim", "grid_dim"}:
+            if len(args) == 1 and "axis" not in kwargs:
+                if (
+                    isinstance(args[0], ast.Name)
+                    and self.services.scope_manager.lookup_var(args[0].id) is not None
+                ):
+                    raise ParserSyntaxError(
+                        "SIMT coordinate queries require one typed pl.simt.Axis",
+                        span=self.services.span_tracker.get_span(call),
+                    )
+                kwargs["axis"] = self.services.expr_evaluator.eval_expr(args[0])
+                args = []
+            if args or not isinstance(kwargs.get("axis"), ir.SimtAxis):
+                raise ParserSyntaxError(
+                    "SIMT coordinate queries require one typed pl.simt.Axis",
+                    span=self.services.span_tracker.get_span(call),
+                )
         result = ir.create_op_call(
             f"simt.{name}",
-            [self.callbacks.expression(arg) for arg in call.args],
-            self.parse_op_kwargs(call),
+            [self.callbacks.expression(arg) for arg in args],
+            kwargs,
             self.services.span_tracker.get_span(call),
         )
         return self.attrs.attach_op_attrs(result, self.attrs.parse_op_attrs(call))
