@@ -86,11 +86,27 @@ def test_real_tensor_tail_use_survives_without_dead_locals():
                 dst = pl.store(value, [0], dst)
             return dst
 
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Graph, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def used(
+            self, src: pl.Tensor[[16], pl.FP32], dst: pl.Out[pl.Tensor[[16], pl.FP32]]
+        ) -> pl.Tensor[[16], pl.FP32]:
+            _unused = pl.create_tensor([16], dtype=pl.FP32)
+            value: pl.Tile[[16], pl.FP32] = pl.tile.load(src, [0], [16], [16])
+            written = pl.tile.store(value, [0], dst)
+            _store = written
+            return dst
+
+        @pl.function
+        def main(
+            self, src: pl.Tensor[[16], pl.FP32], dst: pl.InOut[pl.Tensor[[16], pl.FP32]]
+        ) -> pl.Tensor[[16], pl.FP32]:
+            written = self.used(src, dst)
+            return written
+
     after = passes.outline_graph_scopes()(passes.convert_to_ssa()(Before))
-    graph = _graph(after)
-    assert len(graph.return_types) == 1
-    assert isinstance(graph.return_types[0], ir.TensorType)
-    assert all(not p.name_hint.startswith("_unused") for p in graph.params)
+    ir.assert_structural_equal(after, Expected, enable_auto_mapping=True)
 
 
 def test_real_tile_tail_is_not_silently_dropped_or_legalized():
