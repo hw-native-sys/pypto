@@ -2114,7 +2114,12 @@ class ScopeParser:
         tid_var = self.emit_scope_task_id_placeholder(scope_attrs, span)
         exported = self.parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name, attrs=scope_attrs)
         if tid_var is not None and capture_name is not None:
-            if isinstance(previous_capture, ir.Var) and not self.services.scope_manager.strict_ssa:
+            if (
+                isinstance(previous_capture, ir.Var)
+                and isinstance(previous_capture.type, ir.ScalarType)
+                and previous_capture.type.dtype == DataType.TASK_ID
+                and not self.services.scope_manager.strict_ssa
+            ):
                 # Keep the placeholder separate from incoming dependencies. Only
                 # the completed Graph assigns the existing binding, so SSA can
                 # carry it through loops like an ordinary assignment.
@@ -2122,7 +2127,7 @@ class ScopeParser:
                 tid_var = self.callbacks.assign(capture_name, tid_var, span)
             # Bind only after parsing the recording. A same-name assignment
             # inside the body must not write through the completion placeholder.
-            self.services.scope_manager.define_var(capture_name, tid_var, span=span)
+            self.bind_dispatch_capture(capture_name, tid_var, span)
             self.dispatch.record_produced_vars(exported, tid_var)
 
     def parse_at_scope(

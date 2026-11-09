@@ -4009,8 +4009,17 @@ def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(n
     assert value.same_as(selected)
 
 
+@pytest.mark.parametrize("capture_kind", ["dispatch", "graph"])
 @pytest.mark.parametrize("write_scope", ["device", "host", "loop"])
-def test_jit_dispatch_capture_then_tensor_assignment(write_scope):
+def test_jit_dispatch_capture_then_tensor_assignment(capture_kind, write_scope):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as selected:
+            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+    """).strip("\n")
+    if capture_kind == "graph":
+        capture = 'with pl.graph("recording") as selected:\n' + textwrap.indent(
+            capture.replace(" as selected", ""), "    "
+        )
     second_dispatch = textwrap.dedent("""
         with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
             pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
@@ -4025,11 +4034,13 @@ def test_jit_dispatch_capture_then_tensor_assignment(write_scope):
             selected = a
             selected = b
             with pl.manual_scope():
-                with pl.at(level=pl.Level.CORE_GROUP) as selected:
-                    pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+                CAPTURE
                 SECOND_DISPATCH
             return selected
-    """).replace("        SECOND_DISPATCH", textwrap.indent(second_dispatch, "        "))
+    """)
+    source = source.replace("        CAPTURE", textwrap.indent(capture, "        ")).replace(
+        "        SECOND_DISPATCH", textwrap.indent(second_dispatch, "        ")
+    )
     meta = TensorMeta((128, 128), DataType.FP32)
     ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
 
