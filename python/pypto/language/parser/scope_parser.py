@@ -1996,7 +1996,7 @@ class ScopeParser:
         for name in local_task_ids:
             captured = bindings[name]
             outer = manager.lookup_var(name)
-            entry = outer if isinstance(outer, ir.Var) else None
+            entry = outer if isinstance(outer, (ir.Var, ir.ConstInt)) else None
             if (
                 isinstance(captured, ir.Var)
                 and (shadowed := self.capture_predecessor(captured, entry)) is not None
@@ -2461,18 +2461,23 @@ class ScopeParser:
         manager = self.services.scope_manager
         if self.function.jit_graph_rebinds is not None:
             previous = manager.lookup_var(name)
-            if isinstance(previous, ir.Var) and not previous.same_as(tid):
-                self.function.shadowed_capture_vars[tid.unique_id] = previous
+            if isinstance(previous, (ir.Var, ir.ConstInt)) and not previous.same_as(tid):
+                self.function.shadowed_capture_bindings[tid.unique_id] = previous
         manager.define_var(name, tid, span=span)
 
     def capture_predecessor(
-        self, capture: "ir.Var", stop_at: "ir.Var | None" = None, *, allow_task_array: bool = False
-    ) -> "ir.Var | None":
+        self,
+        capture: "ir.Var",
+        stop_at: "ir.Var | ir.ConstInt | None" = None,
+        *,
+        allow_task_array: bool = False,
+    ) -> "ir.Var | ir.ConstInt | None":
         """Find the prior typed binding, stopping at a visible outer binding if given."""
-        predecessors = self.function.shadowed_capture_vars
+        predecessors = self.function.shadowed_capture_bindings
         while (previous := predecessors.get(capture.unique_id)) is not None:
             if (
-                not is_dep_var_type(previous.type)
+                isinstance(previous, ir.ConstInt)
+                or not is_dep_var_type(previous.type)
                 or (allow_task_array and isinstance(previous.type, ir.ArrayType))
                 or (stop_at is not None and previous.same_as(stop_at))
             ):

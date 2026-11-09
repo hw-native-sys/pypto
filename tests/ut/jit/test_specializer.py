@@ -4259,6 +4259,42 @@ def test_jit_dispatch_capture_then_folded_scalar_assignment(capture_kind):
     assert value.type.dtype == DataType.INDEX
 
 
+def test_jit_dispatch_capture_then_assignment_after_graph_restores_constant():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            rows = a.shape[0]
+            with pl.manual_scope():
+                with pl.graph("recording"):
+                    rows = pl.system.task_dummy(deps=[])
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[rows]):
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                    pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[rows]):
+                    pl.store(pl.load(b, [0, 0], [64, 128]), [0, 0], b)
+                rows = b.shape[0]
+            return rows
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    assignment = runtime.body.stmts[-1]
+    returned = function.body.stmts[-1]
+    assert isinstance(assignment, ir.AssignStmt)
+    assert isinstance(assignment.value, ir.ConstInt) and assignment.value.value == 64
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert value.same_as(assignment.var)
+
+
 @pytest.mark.parametrize("recorded", [False, True])
 def test_jit_dispatch_capture_then_task_id_array_assignment(recorded):
     body = textwrap.dedent("""

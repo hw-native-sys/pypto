@@ -339,7 +339,7 @@ class ASTParser:
         self.function.func_type = func_type
         self.function.param_dim_symbols = set()
         self.function.shape_dim_aliases = {}
-        self.function.shadowed_capture_vars.clear()
+        self.function.shadowed_capture_bindings.clear()
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
