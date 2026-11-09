@@ -4222,6 +4222,35 @@ def test_jit_dispatch_capture_then_folded_scalar_assignment(capture_kind):
     assert value.type.dtype == DataType.INDEX
 
 
+def test_jit_dispatch_capture_then_task_id_array_assignment():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor]):
+            ids = pl.array.create(1, pl.TASK_ID)
+            ids = pl.array.create(1, pl.TASK_ID)
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP) as ids:
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ids]):
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                ids = pl.array.create(1, pl.TASK_ID)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ids[0]]):
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+            return a
+    """)
+    ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    (original,) = (
+        stmt.var
+        for stmt in function.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "ids_v1"
+    )
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    assert any(isinstance(stmt, ir.AssignStmt) and stmt.var.same_as(original) for stmt in runtime.body.stmts)
+
+
 def test_jit_dispatch_capture_then_rebinding_keeps_parameter_dim_immutable():
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor]):

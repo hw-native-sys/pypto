@@ -966,8 +966,9 @@ class ASTParser:
     ) -> ir.Var:
         """Assign to existing Var if possible, otherwise create a new let binding."""
         existing_var = self.scope_manager.lookup_var(var_name)
+        in_graph = self.regions.is_inside_scope(ir.ScopeKind.Graph)
 
-        if self.regions.is_inside_scope(ir.ScopeKind.Graph) and is_dep_var_type(value_expr.type):
+        if in_graph and is_dep_var_type(value_expr.type):
             graph_scope = self.scope_manager.scope_types.index("graph")
             # A recorded task ID may shadow an outer name, but must never
             # assign through the outer Var and accidentally become a live-out.
@@ -975,11 +976,15 @@ class ASTParser:
                 existing_var = None
 
         value_type = override_type or value_expr.type
+        # Only caller-side writes can recover a TaskId array from beneath a
+        # scalar capture. Recorded Graphs must keep their dependency Vars local.
+        allow_task_array = not in_graph and isinstance(value_type, ir.ArrayType)
         if (
             isinstance(existing_var, ir.Var)
             and not isinstance(value_type, ir.UnknownType)
-            and not is_dep_var_type(value_type)
-            and (previous := self.scopes.capture_predecessor(existing_var)) is not None
+            and (not is_dep_var_type(value_type) or allow_task_array)
+            and (previous := self.scopes.capture_predecessor(existing_var, allow_task_array=allow_task_array))
+            is not None
         ):
             # Resume writes to the typed Var beneath any temporary TaskIds
             # so its type checks and SSA carries still apply.

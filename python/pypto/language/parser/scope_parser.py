@@ -2465,11 +2465,17 @@ class ScopeParser:
                 self.function.shadowed_capture_vars[tid.unique_id] = previous
         manager.define_var(name, tid, span=span)
 
-    def capture_predecessor(self, capture: "ir.Var", stop_at: "ir.Var | None" = None) -> "ir.Var | None":
-        """Find the typed binding beneath a capture, stopping at a visible outer binding."""
+    def capture_predecessor(
+        self, capture: "ir.Var", stop_at: "ir.Var | None" = None, *, allow_task_array: bool = False
+    ) -> "ir.Var | None":
+        """Find the prior typed binding, stopping at a visible outer binding if given."""
         predecessors = self.function.shadowed_capture_vars
         while (previous := predecessors.get(capture.unique_id)) is not None:
-            if not is_dep_var_type(previous.type) or (stop_at is not None and previous.same_as(stop_at)):
+            if (
+                not is_dep_var_type(previous.type)
+                or (allow_task_array and isinstance(previous.type, ir.ArrayType))
+                or (stop_at is not None and previous.same_as(stop_at))
+            ):
                 return previous
             capture = previous
         return None
