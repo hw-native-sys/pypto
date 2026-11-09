@@ -3869,6 +3869,26 @@ def test_jit_graph_preserves_independent_kernel_tile_rebinding():
     assert compiled.program is not None
 
 
+def test_jit_graph_host_alias_keeps_independent_kernel_tensor_rebinding():
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        recorded: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+    ):
+        for _ in pl.range(1):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.store(pl.load(first, [0, 0], [128, 128]), [0, 0], first)
+        with pl.graph("recording"):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.store(pl.load(recorded, [0, 0], [64, 64]), [0, 0], recorded)
+            out = recorded
+        return out
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
 def test_jit_explicit_recorded_local_dependency_remains_rejected():
     """Fresh capture names must not erase an actual cross-recording TaskId read."""
 

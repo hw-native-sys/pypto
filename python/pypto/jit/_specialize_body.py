@@ -15,13 +15,15 @@ and rebinding rules stay aligned with emitted source.
 """
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any, TypeVar, cast
 
 from . import _specialize_values as values
 from ._specialize_types import DynDim, TensorMeta
 
 _BindingValue = TypeVar("_BindingValue")
+_DEVICE_SCOPES = ("at", "spmd", "cluster", "split_aiv", "simt_scope")
 
 
 def _restore_bindings(
@@ -40,31 +42,15 @@ def _scope_call_name(value: ast.expr) -> str | None:
     return None
 
 
-def _graph_body_bindings(node: ast.With) -> tuple[set[str], set[str]]:
-    """Collect recorded captures and assignments in the host orchestration."""
-    if not any(_scope_call_name(item.context_expr) == "graph" for item in node.items):
-        return set(), set()
-
-    captures: set[str] = set()
-    assignments: set[str] = set()
-    pending: list[tuple[ast.AST, bool]] = [(stmt, True) for stmt in node.body]
-    while pending:
-        inner, orchestration = pending.pop()
-        if isinstance(inner, ast.With):
-            captures.update(
-                item.optional_vars.id for item in inner.items if isinstance(item.optional_vars, ast.Name)
-            )
-            orchestration = orchestration and not any(
-                _scope_call_name(item.context_expr) in ("at", "spmd", "cluster", "split_aiv", "simt_scope")
-                for item in inner.items
-            )
-        elif isinstance(inner, ast.For) and _scope_call_name(inner.iter) == "spmd":
-            orchestration = False
-        elif orchestration and isinstance(inner, (ast.Assign, ast.AnnAssign)):
-            targets = inner.targets if isinstance(inner, ast.Assign) else [inner.target]
-            assignments.update(target.id for target in targets if isinstance(target, ast.Name))
-        pending.extend((child, orchestration) for child in ast.iter_child_nodes(inner))
-    return captures, assignments
+def _graph_local_capture_names(node: ast.With) -> set[str]:
+    return {
+        item.optional_vars.id
+        for stmt in node.body
+        for inner in ast.walk(stmt)
+        if isinstance(inner, ast.With)
+        for item in inner.items
+        if isinstance(item.optional_vars, ast.Name)
+    }
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -146,6 +132,7 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
+        self._graph_outer_bindings: frozenset[str] = frozenset()
         self._simt_depth: int = 0
         self._simt_runtime_names: set[str] = set()
         # Pre-register function parameters as "already assigned at depth 0" so
@@ -216,6 +203,25 @@ class BodyTransformer(ast.NodeTransformer):
         elif self._var_renames.get(name) == name:
             self._var_renames.pop(name)
 
+    def _can_rebind(self, name: str) -> bool:
+        # Keep incoming names in Graph orchestration so the parser can
+        # isolate TaskIds by type and keep caller-owned tensor writes.
+        return name not in self._graph_outer_bindings and self._assign_depth.get(name) == self._scope_depth
+
+    @contextmanager
+    def _graph_binding_context(self, *, graph: bool = False, device: bool = False) -> Iterator[None]:
+        previous = self._graph_outer_bindings
+        if graph:
+            self._graph_outer_bindings = frozenset(self._assign_count)
+        elif device:
+            # Kernel-local rebindings use normal alpha-renaming, even
+            # when a host statement in this recording uses the same name.
+            self._graph_outer_bindings = frozenset()
+        try:
+            yield
+        finally:
+            self._graph_outer_bindings = previous
+
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
         var_name = cast(ast.Name, node.targets[0]).id
@@ -228,7 +234,7 @@ class BodyTransformer(ast.NodeTransformer):
             # Only rename at the same scope where the variable was first defined.
             # Rebindings at a deeper scope (inside for/with) are loop-carried
             # updates — do not rename them.
-            if self._scope_depth == self._assign_depth[var_name]:
+            if self._can_rebind(var_name):
                 new_name = self._rebind(var_name)
                 self._record_tensor_meta(new_name, value_meta)
                 new_node = ast.Assign(
@@ -463,7 +469,7 @@ class BodyTransformer(ast.NodeTransformer):
         if self._simt_depth:
             self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
-            if self._scope_depth == self._assign_depth[var_name]:
+            if self._can_rebind(var_name):
                 new_name = self._rebind(var_name)
                 self._record_tensor_meta(new_name, value_meta)
                 new_node = ast.AnnAssign(
@@ -772,7 +778,7 @@ class BodyTransformer(ast.NodeTransformer):
                 for name in self._names_by_ctx(target, ast.Store):
                     if name in seen:
                         continue
-                    if name in self._assign_count and self._scope_depth == self._assign_depth.get(name, -1):
+                    if self._can_rebind(name):
                         seen.add(name)
                         (carried if name in exposed else fresh).append(name)
         return carried, fresh
@@ -834,18 +840,19 @@ class BodyTransformer(ast.NodeTransformer):
         neither bridged nor renamed.
         """
         node.iter = self.visit(node.iter)
-        self._scope_depth += 1
-        carried, fresh = self._classify_loop_locals(node.body)
-        self._scope_depth -= 1
-        # Carried names: bridge + rename so the carried value threads across.
-        bridges = self._make_bridge_assignments(carried)
-        # Fresh names: forget the same-depth sibling binding so the body's
-        # assignment is treated as a first binding (no rename, no bridge).
-        for name in fresh:
-            self._forget_rename_bookkeeping(name)
-        self._scope_depth += 1
-        node.body = self._visit_scoped_body(node.body)
-        self._scope_depth -= 1
+        with self._graph_binding_context(device=_scope_call_name(node.iter) == "spmd"):
+            self._scope_depth += 1
+            carried, fresh = self._classify_loop_locals(node.body)
+            self._scope_depth -= 1
+            # Carried names: bridge + rename so the carried value threads across.
+            bridges = self._make_bridge_assignments(carried)
+            # Fresh names: forget the same-depth sibling binding so the body's
+            # assignment is treated as a first binding (no rename, no bridge).
+            for name in fresh:
+                self._forget_rename_bookkeeping(name)
+            self._scope_depth += 1
+            node.body = self._visit_scoped_body(node.body)
+            self._scope_depth -= 1
         if bridges:
             return bridges + [node]
         return node
@@ -893,7 +900,9 @@ class BodyTransformer(ast.NodeTransformer):
 
     def visit_With(self, node: ast.With) -> ast.stmt:
         """Visit With block, incrementing scope depth for its body."""
-        graph_locals, graph_assignments = _graph_body_bindings(node)
+        scope_names = {_scope_call_name(item.context_expr) for item in node.items}
+        graph = "graph" in scope_names
+        graph_locals: set[str] = _graph_local_capture_names(node) if graph else set()
         captures: dict[str, str] = {}
         for item in node.items:
             item.context_expr = self.visit(item.context_expr)
@@ -908,7 +917,7 @@ class BodyTransformer(ast.NodeTransformer):
                     self._record_tensor_meta(captured, None)
             elif item.optional_vars is not None:
                 item.optional_vars = self.visit(item.optional_vars)
-        simt = any(_scope_call_name(item.context_expr) == "simt_scope" for item in node.items)
+        simt = "simt_scope" in scope_names
         # SIMT assignments are per-thread. Folding a local shape or renaming a
         # shadowed scalar must not change the caller's later specialization.
         # Generated-name reservations and diagnostic aliases remain global to
@@ -950,18 +959,10 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
-        # Keep incoming names for recording-side orchestration assignments
-        # so the parser can isolate TaskIds by type. Kernel temporaries still
-        # need the ordinary sibling-scope alpha-renaming rules.
-        outer_depths = {
-            name: depth
-            for name in graph_assignments
-            if (depth := self._assign_depth.get(name, -1)) > self._scope_depth
-        }
-        self._assign_depth.update(dict.fromkeys(outer_depths, self._scope_depth))
         self._scope_depth += 1
         try:
-            node.body = self._visit_scoped_body(node.body)
+            with self._graph_binding_context(graph=graph, device=not scope_names.isdisjoint(_DEVICE_SCOPES)):
+                node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
             if simt:
@@ -987,7 +988,6 @@ class BodyTransformer(ast.NodeTransformer):
                 _restore_bindings(self._assign_count, old_counts, graph_locals)
                 _restore_bindings(self._assign_depth, old_depths, graph_locals)
                 _restore_bindings(self._var_renames, old_renames, graph_locals)
-            self._assign_depth.update(outer_depths)
         # A capture binds the dispatch result, not a body-local reassignment
         # of the same spelling. Do not create another alpha version here:
         # the parser reuses the source Var and native SSA builds carries/phis.
