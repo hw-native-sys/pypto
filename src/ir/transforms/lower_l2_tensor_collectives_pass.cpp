@@ -76,6 +76,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -386,6 +387,20 @@ class ValueSourceIndex : public IRVisitor {
   }
   return is_packed ? "" : "a non-packed-stride ";
 }
+
+/// Replaces every Call subexpression with a fresh Var, binding each through
+/// ``bind`` in source order (depth first, left to right). A call-valued
+/// argument is bound before the call that contains it.
+class BindCallsToVars : public IRMutator {
+ public:
+  explicit BindCallsToVars(std::function<ExprPtr(const ExprPtr&)> bind) : bind_(std::move(bind)) {}
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
+
+ private:
+  std::function<ExprPtr(const ExprPtr&)> bind_;
+};
 
 class LowerL2TensorCollectivesMutator : public IRMutator {
  public:
@@ -837,14 +852,18 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   [[nodiscard]] ExprPtr EmitRuntimeLaunchWidth(const CallPtr& call, bool indexed, const ExprPtr& core_num,
                                                DataType dtype, int64_t nranks) {
     const Span& span = call->span_;
+    // A call-valued request (including a call nested in a compound request
+    // such as ``n + available_aiv_count()``) must be bound once: a Call under
+    // arithmetic in the assignment RHS violates LegalizeSpmdLaunches'
+    // NoNestedCalls prerequisite and is not renderable by expression codegen.
+    // Hoist every call subexpression first, then bind the now call-free
+    // request once for the width arithmetic.
     ExprPtr width = core_num;
-    // A call-valued request (e.g. ``pl.system.available_aiv_count()``) must be
-    // bound once. Splicing it into the remainder, comparison and subtraction
-    // expressions would nest a Call under arithmetic -- rejected by
-    // LegalizeSpmdLaunches' NoNestedCalls prerequisite -- and FlattenCallExpr
-    // would instead evaluate the call three times.
-    if (!As<Var>(core_num)) {
-      width = BindPrefix("a2av_width_", core_num, span);
+    if (transform_utils::ExprContainsCallLike(core_num)) {
+      width = HoistCallSubexpressions(core_num, span);
+    }
+    if (!As<Var>(width)) {
+      width = BindPrefix("a2av_width_", width, span);
     }
     if (!indexed) {
       // ``nranks`` is deducer-enforced positive, so no floored-divisor guard is
@@ -862,6 +881,15 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     auto var = std::make_shared<Var>(FreshGeneratedName(prefix), value->GetType(), span);
     pending_prefix_.push_back(std::make_shared<AssignStmt>(var, value, span));
     return var;
+  }
+
+  /// Bind every Call subexpression of a runtime ``core_num`` request to a fresh
+  /// local, in source order, and return the request with those calls replaced
+  /// by their Vars. A Var request passes through unchanged.
+  [[nodiscard]] ExprPtr HoistCallSubexpressions(const ExprPtr& request, const Span& span) {
+    BindCallsToVars hoister(
+        [this, &span](const ExprPtr& call) { return BindPrefix("a2av_width_", call, span); });
+    return hoister.VisitExpr(request);
   }
 
   /// Splice the pending prefix in front of ``stmt`` and clear it.
@@ -966,6 +994,67 @@ void CheckNoResidualCollective(const ProgramPtr& program) {
   }
 }
 
+/// Replaces the topmost ReturnStmt with @p replacement. A body has at most one
+/// ReturnStmt by the time this pass runs (`CtrlFlowTransform` makes returns
+/// function-terminal), so replacing every occurrence is equivalent.
+class ReturnStmtReplacer : public IRMutator {
+ public:
+  explicit ReturnStmtReplacer(ReturnStmtPtr replacement) : replacement_(std::move(replacement)) {}
+
+ protected:
+  StmtPtr VisitStmt_(const ReturnStmtPtr&) override { return replacement_; }
+
+ private:
+  ReturnStmtPtr replacement_;
+};
+
+/// Re-express param-writeback returns as the parameter itself.
+///
+/// Lifting a call-valued return into an assignment (needed so the launch
+/// legalizer can guard a runtime width) leaves the ReturnStmt holding an SSA
+/// Var that aliases the parameter the callee writes back. The next pass,
+/// ``LegalizeSpmdLaunches``, pre-verifies ``ReturnParamsExplicit``, which
+/// requires such a return to reference the param directly. The lifted call
+/// remains its own statement, so side effects and task edges are unchanged.
+ProgramPtr CanonicalizeParamReturns(const ProgramPtr& program) {
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions;
+  bool changed = false;
+  for (const auto& [gvar, func] : program->functions_) {
+    auto ret = func && func->body_ ? return_lineage::FindFirstReturn(func->body_) : nullptr;
+    if (!ret || !IsChipOrch(func)) {
+      functions[gvar] = func;
+      continue;
+    }
+    auto returned = return_lineage::ReturnedParamIndices(func, program);
+    std::vector<ExprPtr> values = ret->value_;
+    bool local_changed = false;
+    for (size_t i = 0; i < values.size() && i < returned.size(); ++i) {
+      const std::optional<size_t>& maybe_param = returned[i];
+      if (!maybe_param.has_value()) continue;
+      const size_t param_index = maybe_param.value();
+      if (param_index >= func->params_.size()) continue;
+      const auto& param = func->params_[param_index];
+      if (values[i] != param) {
+        values[i] = param;
+        local_changed = true;
+      }
+    }
+    if (!local_changed) {
+      functions[gvar] = func;
+      continue;
+    }
+    auto new_ret = std::make_shared<ReturnStmt>(std::move(values), ret->span_, ret->leading_comments_);
+    auto new_body = ReturnStmtReplacer(new_ret).VisitStmt(func->body_);
+    functions[gvar] =
+        std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                   new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                   func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+    changed = true;
+  }
+  if (!changed) return program;
+  return std::make_shared<Program>(std::move(functions), program->name_, program->span_);
+}
+
 ProgramPtr TransformProgram(const ProgramPtr& program) {
   std::map<std::string, FunctionPtr> kernels;
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
@@ -993,7 +1082,8 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     new_functions[gvar] = kernel;
   }
 
-  auto result = std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+  auto with_kernels = std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+  auto result = CanonicalizeParamReturns(with_kernels);
   CheckNoResidualCollective(result);
   return result;
 }
