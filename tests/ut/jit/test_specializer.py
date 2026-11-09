@@ -4221,6 +4221,45 @@ def test_jit_dispatch_capture_then_rebinding_keeps_parameter_dim_immutable():
     assert not value.same_as(parameter.type.shape[0])
 
 
+@pytest.mark.parametrize("repeat_capture", [False, True])
+def test_jit_graph_capture_preserves_outer_task_id_over_older_scalar(repeat_capture):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as ready:
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+    """).strip("\n")
+    captures = [capture, capture] if repeat_capture else [capture]
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor]):
+            ready = 0
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                with pl.graph("recording") as done:
+                    CAPTURES
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready, done]):
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                ready = 1
+            return a
+    """).replace("            CAPTURES", textwrap.indent("\n".join(captures), "            "))
+    ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    producer, consumer = (stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.InCoreScopeStmt))
+    graph = next(stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    ready, done = consumer.attrs["manual_dep_edges"]
+    assert ready.same_as(producer.attrs["task_id_var"])
+    assert done.same_as(graph.attrs["task_id_var"])
+
+    initial = function.body.stmts[0]
+    reassignment = runtime.body.stmts[-1]
+    assert isinstance(initial, ir.AssignStmt)
+    assert isinstance(reassignment, ir.AssignStmt)
+    assert reassignment.var.same_as(initial.var)
+
+
 def test_jit_explicit_recorded_local_dependency_remains_rejected():
     """Fresh capture names must not erase an actual cross-recording TaskId read."""
 

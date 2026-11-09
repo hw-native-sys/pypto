@@ -979,11 +979,11 @@ class ASTParser:
             isinstance(existing_var, ir.Var)
             and not isinstance(value_type, ir.UnknownType)
             and not is_dep_var_type(value_type)
+            and (previous := self.scopes.capture_predecessor(existing_var)) is not None
         ):
-            # A JIT dispatch can temporarily bind the emitted name to a
-            # TaskId. Resume writes to the prior Var so its type checks and
-            # SSA carries still apply.
-            existing_var = self.function.shadowed_capture_vars.get(existing_var.unique_id, existing_var)
+            # Resume writes to the typed Var beneath any temporary TaskIds
+            # so its type checks and SSA carries still apply.
+            existing_var = previous
 
         # ``n = pl.tensor.dim(x, 0)`` folded to a dyn-dim symbol (see
         # ``_fold_tensor_dim``): bind the Python name straight to the symbol. A Let

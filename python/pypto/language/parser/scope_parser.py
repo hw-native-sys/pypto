@@ -1995,11 +1995,14 @@ class ScopeParser:
         manager = self.services.scope_manager
         for name in local_task_ids:
             captured = bindings[name]
+            outer = manager.lookup_var(name)
+            entry = outer if isinstance(outer, ir.Var) else None
             if (
                 isinstance(captured, ir.Var)
-                and (shadowed := self.function.shadowed_capture_vars.get(captured.unique_id)) is not None
+                and (shadowed := self.capture_predecessor(captured, entry)) is not None
             ):
-                manager.define_var(name, shadowed)
+                if entry is None or not shadowed.same_as(entry):
+                    manager.define_var(name, shadowed)
                 continue
             if name not in aliases:
                 continue
@@ -2458,11 +2461,18 @@ class ScopeParser:
         manager = self.services.scope_manager
         if self.function.jit_graph_rebinds is not None:
             previous = manager.lookup_var(name)
-            if isinstance(previous, ir.Var):
-                previous = self.function.shadowed_capture_vars.get(previous.unique_id, previous)
-                if not is_dep_var_type(previous.type):
-                    self.function.shadowed_capture_vars[tid.unique_id] = previous
+            if isinstance(previous, ir.Var) and not previous.same_as(tid):
+                self.function.shadowed_capture_vars[tid.unique_id] = previous
         manager.define_var(name, tid, span=span)
+
+    def capture_predecessor(self, capture: "ir.Var", stop_at: "ir.Var | None" = None) -> "ir.Var | None":
+        """Find the typed binding beneath a capture, stopping at a visible outer binding."""
+        predecessors = self.function.shadowed_capture_vars
+        while (previous := predecessors.get(capture.unique_id)) is not None:
+            if not is_dep_var_type(previous.type) or (stop_at is not None and previous.same_as(stop_at)):
+                return previous
+            capture = previous
+        return None
 
     def emit_scope_task_id_placeholder(
         self, attrs: "list[tuple[str, Any]] | None", span: "ir.Span"
