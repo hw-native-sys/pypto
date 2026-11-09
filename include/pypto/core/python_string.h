@@ -10,18 +10,8 @@
  */
 
 /**
- * @file error.h
- * @brief Core error handling framework with stack trace support
- *
- * This header provides a comprehensive error handling system that captures
- * stack traces at the point of error creation. It includes a base Error class
- * and several specialized error types that mirror Python's exception hierarchy.
- *
- * Key features:
- * - Automatic stack trace capture using libbacktrace
- * - Multiple error types for different error categories
- * - Formatted stack trace output for debugging
- * - Integration with standard C++ exception mechanisms
+ * @file python_string.h
+ * @brief Python string literal quoting shared by IR printing and code generation.
  */
 
 #ifndef PYPTO_CORE_PYTHON_STRING_H_
