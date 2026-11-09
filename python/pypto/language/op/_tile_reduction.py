@@ -12,12 +12,13 @@
 from pypto.ir.op import tile_ops as _ir_ops
 from pypto.pypto_core.ir import (
     Expr,
+    TileLayout,
 )
 
 from ..typing import Scalar, Tile
 
 
-def row_max(tile: Tile, tmp_tile: Tile) -> Tile:
+def row_max(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise max reduction.
 
     Reduces the last axis with keepdim, producing output shape
@@ -27,15 +28,20 @@ def row_max(tile: Tile, tmp_tile: Tile) -> Tile:
         tile: Input tile
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
+            window's row stride (issue #3319).
 
     Returns:
         Tile wrapping the row_max operation
     """
-    call_expr = _ir_ops.row_max(tile.unwrap(), tmp_tile.unwrap())
+    call_expr = _ir_ops.row_max(tile.unwrap(), tmp_tile.unwrap(), out_layout=out_layout)
     return Tile(expr=call_expr)
 
 
-def row_sum(tile: Tile, tmp_tile: Tile) -> Tile:
+def row_sum(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise sum reduction.
 
     Reduces the last axis with keepdim, producing output shape
@@ -45,15 +51,20 @@ def row_sum(tile: Tile, tmp_tile: Tile) -> Tile:
         tile: Input tile
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
+            window's row stride (issue #3319).
 
     Returns:
         Tile wrapping the row_sum operation
     """
-    call_expr = _ir_ops.row_sum(tile.unwrap(), tmp_tile.unwrap())
+    call_expr = _ir_ops.row_sum(tile.unwrap(), tmp_tile.unwrap(), out_layout=out_layout)
     return Tile(expr=call_expr)
 
 
-def row_min(tile: Tile, tmp_tile: Tile) -> Tile:
+def row_min(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise min reduction.
 
     Reduces the last axis with keepdim, producing output shape
@@ -63,15 +74,20 @@ def row_min(tile: Tile, tmp_tile: Tile) -> Tile:
         tile: Input tile
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
+            window's row stride (issue #3319).
 
     Returns:
         Tile wrapping the row_min operation
     """
-    call_expr = _ir_ops.row_min(tile.unwrap(), tmp_tile.unwrap())
+    call_expr = _ir_ops.row_min(tile.unwrap(), tmp_tile.unwrap(), out_layout=out_layout)
     return Tile(expr=call_expr)
 
 
-def row_prod(tile: Tile, tmp_tile: Tile) -> Tile:
+def row_prod(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise product reduction.
 
     Reduces the last axis with keepdim, producing output shape
@@ -81,11 +97,16 @@ def row_prod(tile: Tile, tmp_tile: Tile) -> Tile:
         tile: Input tile
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
+            window's row stride (issue #3319).
 
     Returns:
         Tile wrapping the row_prod operation
     """
-    call_expr = _ir_ops.row_prod(tile.unwrap(), tmp_tile.unwrap())
+    call_expr = _ir_ops.row_prod(tile.unwrap(), tmp_tile.unwrap(), out_layout=out_layout)
     return Tile(expr=call_expr)
 
 

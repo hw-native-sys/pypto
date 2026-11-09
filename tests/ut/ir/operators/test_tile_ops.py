@@ -1651,6 +1651,96 @@ class TestTileReductionOps:
         with pytest.raises(ValueError, match="valid_shape rank"):
             tile.col_sum(bad)
 
+    # ------------------------------------------------------------------
+    # Issue #3319: row reductions may request a row_major result instead of
+    # the default col_major one. col_major packs the reduced column as a
+    # single contiguous vector, so pl.store treats it as one linear burst and
+    # cannot honor a destination window's row stride. row_major keeps each
+    # row's single valid result at column 0 of its own physical row (padded
+    # to one Vec alignment line), so pl.store bursts one row at a time and
+    # lands correctly in a wider destination window. The pad columns are
+    # zeroed in place (tile.fillpad_inplace) so the extra bytes that burst
+    # alongside the valid column never carry stale Vec garbage into the
+    # destination.
+    # ------------------------------------------------------------------
+
+    def test_tile_row_sum_out_layout_default_is_unchanged(self):
+        """Omitting out_layout keeps today's col_major, padding-free [rows, 1] result."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        tmp_var = self._make_row_tmp_var()
+
+        call = tile.row_sum(sliced, tmp_var)
+        assert call.op.name == "tile.row_sum"
+        assert [_const_int(d) for d in call.type.shape] == [8, 1]
+
+    def test_tile_row_sum_out_layout_row_major_pads_and_zeroes(self):
+        """out_layout=row_major pads the physical last dim and zeroes it in place."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        tmp_var = self._make_row_tmp_var()
+
+        call = tile.row_sum(sliced, tmp_var, out_layout=ir.TileLayout.row_major)
+
+        # The wrapper composes tile.row_sum with a tile.fillpad_inplace that zeroes
+        # the padding, so the returned Call is the fillpad_inplace one.
+        assert call.op.name == "tile.fillpad_inplace"
+        assert [_const_int(d) for d in call.type.shape] == [8, 8]  # 32B / 4B(FP32) = 8
+        assert call.type.tile_view is not None
+        assert call.type.tile_view.blayout == ir.TileLayout.row_major
+        assert call.type.tile_view.pad == ir.PadValue.zero
+        # The whole padded physical shape is now a defined value (real sum in
+        # column 0, zero elsewhere), so valid_shape canonicalizes away.
+        assert call.type.tile_view.valid_shape == []
+
+        inner = call.args[0]
+        assert inner.op.name == "tile.row_sum"
+        assert [_const_int(d) for d in inner.type.shape] == [8, 8]
+        assert inner.type.tile_view.blayout == ir.TileLayout.row_major
+        # Before zeroing, only column 0 (the real per-row sum) is valid.
+        assert [_const_int(d) for d in inner.type.tile_view.valid_shape] == [4, 1]
+
+    @pytest.mark.parametrize(
+        ("dtype", "expected_pad_cols"),
+        [
+            (DataType.FP32, 8),  # 32B / 4B
+            (DataType.INT32, 8),
+            (DataType.FP16, 16),  # 32B / 2B
+            (DataType.INT16, 16),
+        ],
+    )
+    def test_tile_row_sum_out_layout_row_major_pad_width_matches_dtype(self, dtype, expected_pad_cols):
+        """The row_major pad width is one 32-byte Vec line, scaled by element size."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)], dtype
+        )
+        src_var = ir.Var("src", src_type, span)
+        tmp_var = ir.Var("tmp", src_type, span)
+
+        call = tile.row_sum(src_var, tmp_var, out_layout=ir.TileLayout.row_major)
+        inner = call.args[0]
+        assert [_const_int(d) for d in inner.type.shape] == [8, expected_pad_cols]
+
+    @pytest.mark.parametrize("op", [tile.row_max, tile.row_sum, tile.row_min, tile.row_prod])
+    def test_tile_row_reduction_out_layout_row_major_supported_by_every_op(self, op):
+        """row_max/row_sum/row_min/row_prod all accept out_layout=row_major (issue #3319)."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        tmp_var = self._make_row_tmp_var()
+
+        call = op(sliced, tmp_var, out_layout=ir.TileLayout.row_major)
+        assert call.op.name == "tile.fillpad_inplace"
+        inner = call.args[0]
+        assert [_const_int(d) for d in inner.type.shape] == [8, 8]
+        assert inner.type.tile_view.blayout == ir.TileLayout.row_major
+        assert [_const_int(d) for d in inner.type.tile_view.valid_shape] == [4, 1]
+
+    def test_tile_row_sum_out_layout_rejects_non_layout_value(self):
+        """out_layout must be col_major or row_major; none_box is not a result layout."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        tmp_var = self._make_row_tmp_var()
+
+        with pytest.raises(ValueError, match="out_layout to be col_major or row_major"):
+            tile.row_sum(sliced, tmp_var, out_layout=ir.TileLayout.none_box)
+
 
 class TestTileBroadcastOps:
     """Test suite for tile-level broadcast operators."""

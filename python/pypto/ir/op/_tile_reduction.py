@@ -9,18 +9,23 @@
 
 """Tile row/column reductions and broadcasts."""
 
+from typing import Any
+
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Call,
     Expr,
+    PadValue,
     Span,
+    TileLayout,
 )
 
 from ..utils import (
     _get_span_or_capture,
     _normalize_scalar_operand,
 )
+from ._tile_memory import fillpad_inplace
 
 # ============================================================================
 # Row Broadcast Operations
@@ -337,7 +342,34 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
 # ============================================================================
 
 
-def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def _row_reduction_call(
+    op_name: str, tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None, span: Span | None
+) -> Call:
+    """Build a row-reduction Call, zeroing the row_major result's pad columns.
+
+    A ``col_major`` (default) result is already padding-free -- shape ``[M, 1]`` --
+    so it is returned as-is. A ``row_major`` result physically pads its last dim
+    to one Vec burst (see ``DeduceTileRowReductionType``), but TROWSUM only ever
+    writes column 0; columns 1..pad-1 hold whatever the Vec buffer held before.
+    ``pl.store`` later bursts the *whole* physical row into the destination
+    window, so that stale data would leak into cells the caller's window didn't
+    ask to write (issue #3319). ``tile.fillpad_inplace`` zeros exactly the
+    padding region in place (same buffer, data region untouched), making every
+    physical cell a defined value before it can reach a store.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {}
+    if out_layout is not None:
+        kwargs["out_layout"] = out_layout
+    call_expr = _ir_core.create_op_call(op_name, [tile, tmp_tile], kwargs, actual_span)
+    if out_layout == TileLayout.row_major:
+        call_expr = fillpad_inplace(call_expr, pad_value=PadValue.zero, span=actual_span)
+    return call_expr
+
+
+def row_max(
+    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+) -> Call:
     """Row-wise max reduction of a tile (reduces along the last axis, maps to TROWMAX).
 
     Reduces the last axis with keepdim, producing output shape
@@ -347,16 +379,22 @@ def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         tile: Input tile (TileType)
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
+            ``pl.store`` honors a destination window's row stride (issue #3319).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise max reduction
     """
-    actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_max", [tile, tmp_tile], {}, actual_span)
+    return _row_reduction_call("tile.row_max", tile, tmp_tile, out_layout, span)
 
 
-def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def row_sum(
+    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+) -> Call:
     """Row-wise sum reduction of a tile (reduces along the last axis, maps to TROWSUM).
 
     Reduces the last axis with keepdim, producing output shape
@@ -366,16 +404,22 @@ def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         tile: Input tile (TileType)
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
+            ``pl.store`` honors a destination window's row stride (issue #3319).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise sum reduction
     """
-    actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_sum", [tile, tmp_tile], {}, actual_span)
+    return _row_reduction_call("tile.row_sum", tile, tmp_tile, out_layout, span)
 
 
-def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def row_min(
+    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+) -> Call:
     """Row-wise min reduction (reduces along the last axis, maps to TROWMIN).
 
     Reduces the last axis with keepdim, producing output shape
@@ -385,16 +429,22 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
+            ``pl.store`` honors a destination window's row stride (issue #3319).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise min reduction (TileType, e.g. [M, 1])
     """
-    actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
+    return _row_reduction_call("tile.row_min", tile, tmp_tile, out_layout, span)
 
 
-def row_prod(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def row_prod(
+    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+) -> Call:
     """Row-wise product reduction (reduces along the last axis, maps to TROWPROD).
 
     Reduces the last axis with keepdim, producing output shape
@@ -404,13 +454,17 @@ def row_prod(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
+            ``pl.store`` honors a destination window's row stride (issue #3319).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise product reduction (TileType, e.g. [M, 1])
     """
-    actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_prod", [tile, tmp_tile], {}, actual_span)
+    return _row_reduction_call("tile.row_prod", tile, tmp_tile, out_layout, span)
 
 
 def col_sum(tile: Expr, tmp_tile: Expr | None = None, span: Span | None = None) -> Call:
