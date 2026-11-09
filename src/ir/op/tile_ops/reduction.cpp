@@ -137,6 +137,7 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
   // col_major's single valid column needs no padding. row_major's single valid
   // column is instead one TSTORE burst wide, so the physical last dim pads up
   // to a whole kVecRowAlignBytes line (e.g. 8 for FP32) regardless of valid_shape.
+  std::optional<int64_t> pad_cols;
   std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
   if (out_layout == TileLayout::row_major) {
     const int64_t elem_bytes = static_cast<int64_t>(tile_type->dtype_.GetByte());
@@ -145,21 +146,32 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
         << " requires a whole-byte element dtype for out_layout=row_major, "
            "but got "
         << tile_type->dtype_.ToString();
-    const int64_t pad_cols = (kVecRowAlignBytes + elem_bytes - 1) / elem_bytes;
-    output_shape.push_back(std::make_shared<ConstInt>(pad_cols, DataType::INDEX, Span::unknown()));
+    pad_cols = (kVecRowAlignBytes + elem_bytes - 1) / elem_bytes;
+    output_shape.push_back(std::make_shared<ConstInt>(*pad_cols, DataType::INDEX, Span::unknown()));
   } else {
     output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
   }
 
   // Inherit valid_shape from the input along the non-reduced dims so that
   // downstream codegen emits trowsum with the correct valid_row (issue #1401).
-  // The reduced (last) dim collapses to 1 in the output: the kernel bounds its loop by the
-  // source's valid_col, so it folds exactly the real cells into a single valid output cell.
-  // This is unaffected by out_layout -- only the physical padding above differs.
+  // The reduced (last) dim collapses to 1 for col_major: the kernel bounds its
+  // loop by the source's valid_col, so it folds exactly the real cells into a
+  // single valid output cell.
+  //
+  // row_major instead reports the *whole* padded width as valid. TSTORE
+  // bursts a physical row at a time regardless of what the type claims is
+  // valid, so this does not change what bytes a store physically moves --
+  // but without it, pl.store would reject writing the padded width into a
+  // destination window at all (the source's declared valid region would be
+  // narrower than the window). The real per-row sum is column 0; columns
+  // 1..pad_cols-1 are *not* currently guaranteed zero (issue #3319's
+  // remaining pad-zeroing gap, tracked separately -- a caller relying on a
+  // destination window wider than column 0 must zero-initialize it, or the
+  // trailing pad bytes may carry whatever the Vec buffer held before).
   const auto input_valid = GetValidShape(tile_type);
   CheckReductionInputNonEmpty(input_valid, op_name, args[0]->span_);
   std::vector<ExprPtr> output_valid(input_valid.begin(), input_valid.end() - 1);
-  output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+  output_valid.push_back(std::make_shared<ConstInt>(pad_cols.value_or(1), DataType::INDEX, Span::unknown()));
 
   TileView tile_view;
   tile_view.blayout = out_layout;

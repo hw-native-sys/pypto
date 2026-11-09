@@ -31,8 +31,13 @@ def row_max(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
-            window's row stride (issue #3319).
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). The real per-row max is column 0; columns 1..pad-1 are
+            **not currently guaranteed zero** -- a caller storing into a
+            destination window wider than column 0 must zero-initialize it
+            first, since TSTORE bursts the whole physical row regardless of
+            what the type claims is valid (tracked as a follow-up to #3319).
 
     Returns:
         Tile wrapping the row_max operation
@@ -54,8 +59,13 @@ def row_sum(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
-            window's row stride (issue #3319).
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). The real per-row sum is column 0; columns 1..pad-1 are
+            **not currently guaranteed zero** -- a caller storing into a
+            destination window wider than column 0 must zero-initialize it
+            first, since TSTORE bursts the whole physical row regardless of
+            what the type claims is valid (tracked as a follow-up to #3319).
 
     Returns:
         Tile wrapping the row_sum operation
@@ -77,8 +87,13 @@ def row_min(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
-            window's row stride (issue #3319).
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). The real per-row min is column 0; columns 1..pad-1 are
+            **not currently guaranteed zero** -- a caller storing into a
+            destination window wider than column 0 must zero-initialize it
+            first, since TSTORE bursts the whole physical row regardless of
+            what the type claims is valid (tracked as a follow-up to #3319).
 
     Returns:
         Tile wrapping the row_min operation
@@ -100,8 +115,13 @@ def row_prod(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32) so ``pl.store`` honors a destination
-            window's row stride (issue #3319).
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). The real per-row product is column 0; columns 1..pad-1 are
+            **not currently guaranteed zero** -- a caller storing into a
+            destination window wider than column 0 must zero-initialize it
+            first, since TSTORE bursts the whole physical row regardless of
+            what the type claims is valid (tracked as a follow-up to #3319).
 
     Returns:
         Tile wrapping the row_prod operation

@@ -113,7 +113,7 @@ from pypto.ir.utils import (
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, PadValue
+from pypto.pypto_core.ir import AtomicType, PadValue, TileLayout
 
 from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -198,6 +198,17 @@ def _reject_tmp_for_tensor(op_name: str, tmp: Any, param: str = "tmp") -> None:
             f"pl.{op_name}: Tensor inputs must not pass {param} — the scratch tile is "
             f"allocated during Tensor-to-Tile lowering"
         )
+
+
+def _reject_out_layout_for_tensor(op_name: str, out_layout: TileLayout | None) -> None:
+    """Guard the Tensor path of a row reduction against the Tile-only ``out_layout``.
+
+    ``out_layout`` controls the physical layout of a Tile-level result (issue
+    #3319); a Tensor-level result has no equivalent concept to set, so silently
+    accepting and ignoring it would be misleading rather than permissive.
+    """
+    if out_layout is not None:
+        raise TypeError(f"pl.{op_name}: Tensor inputs must not pass out_layout — it is a Tile-only concept")
 
 
 def _require_tmp_for_tile(op_name: str, tmp: object, requirement: str) -> Tile:
@@ -1393,86 +1404,104 @@ def matmul_acc(
 
 
 @overload
-def row_max(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
+def row_max(input: Tensor, tmp_tile: None = ..., *, out_layout: TileLayout | None = None) -> Tensor: ...
 @overload
-def row_max(input: Tile, tmp_tile: Tile) -> Tile: ...
-def row_max(input: object, tmp_tile: object = None) -> Tensor | Tile:
+def row_max(input: Tile, tmp_tile: Tile, *, out_layout: TileLayout | None = None) -> Tile: ...
+def row_max(input: object, tmp_tile: object = None, *, out_layout: TileLayout | None = None) -> Tensor | Tile:
     """Row-wise max reduction, dispatched by input type.
 
     For Tile inputs, ``tmp_tile`` is required and must have the same dtype and
     rank as the input, with every dimension at least as large as the input dimension.
     Tensor inputs must omit it — the scratch tile is allocated during
     Tensor-to-Tile lowering — and passing one raises.
+
+    ``out_layout`` is a Tile-only concept (issue #3319); Tensor inputs must omit
+    it. See [`pl.tile.row_max`][pypto.language.tile.row_max] for its semantics.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("row_max", tmp_tile, "tmp_tile")
+        _reject_out_layout_for_tensor("row_max", out_layout)
         return _tensor.row_max(input)
     if isinstance(input, Tile):
         tmp_tile = _require_tmp_for_tile("row_max", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
-        return _tile.row_max(input, tmp_tile)
+        return _tile.row_max(input, tmp_tile, out_layout=out_layout)
     raise TypeError(f"pl.row_max: expected Tensor or Tile, got {type(input).__name__}")
 
 
 @overload
-def row_sum(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
+def row_sum(input: Tensor, tmp_tile: None = ..., *, out_layout: TileLayout | None = None) -> Tensor: ...
 @overload
-def row_sum(input: Tile, tmp_tile: Tile) -> Tile: ...
-def row_sum(input: object, tmp_tile: object = None) -> Tensor | Tile:
+def row_sum(input: Tile, tmp_tile: Tile, *, out_layout: TileLayout | None = None) -> Tile: ...
+def row_sum(input: object, tmp_tile: object = None, *, out_layout: TileLayout | None = None) -> Tensor | Tile:
     """Row-wise sum reduction, dispatched by input type.
 
     For Tile inputs, ``tmp_tile`` is required and must have the same dtype and
     rank as the input, with every dimension at least as large as the input dimension.
     Tensor inputs must omit it — the scratch tile is allocated during
     Tensor-to-Tile lowering — and passing one raises.
+
+    ``out_layout`` is a Tile-only concept (issue #3319); Tensor inputs must omit
+    it. See [`pl.tile.row_sum`][pypto.language.tile.row_sum] for its semantics.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("row_sum", tmp_tile, "tmp_tile")
+        _reject_out_layout_for_tensor("row_sum", out_layout)
         return _tensor.row_sum(input)
     if isinstance(input, Tile):
         tmp_tile = _require_tmp_for_tile("row_sum", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
-        return _tile.row_sum(input, tmp_tile)
+        return _tile.row_sum(input, tmp_tile, out_layout=out_layout)
     raise TypeError(f"pl.row_sum: expected Tensor or Tile, got {type(input).__name__}")
 
 
 @overload
-def row_min(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
+def row_min(input: Tensor, tmp_tile: None = ..., *, out_layout: TileLayout | None = None) -> Tensor: ...
 @overload
-def row_min(input: Tile, tmp_tile: Tile) -> Tile: ...
-def row_min(input: object, tmp_tile: object = None) -> Tensor | Tile:
+def row_min(input: Tile, tmp_tile: Tile, *, out_layout: TileLayout | None = None) -> Tile: ...
+def row_min(input: object, tmp_tile: object = None, *, out_layout: TileLayout | None = None) -> Tensor | Tile:
     """Row-wise min reduction, dispatched by input type.
 
     For Tile inputs, ``tmp_tile`` is required and must have the same dtype and
     rank as the input, with every dimension at least as large as the input dimension.
     Tensor inputs must omit it — the scratch tile is allocated during
     Tensor-to-Tile lowering — and passing one raises.
+
+    ``out_layout`` is a Tile-only concept (issue #3319); Tensor inputs must omit
+    it. See [`pl.tile.row_min`][pypto.language.tile.row_min] for its semantics.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("row_min", tmp_tile, "tmp_tile")
+        _reject_out_layout_for_tensor("row_min", out_layout)
         return _tensor.row_min(input)
     if isinstance(input, Tile):
         tmp_tile = _require_tmp_for_tile("row_min", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
-        return _tile.row_min(input, tmp_tile)
+        return _tile.row_min(input, tmp_tile, out_layout=out_layout)
     raise TypeError(f"pl.row_min: expected Tensor or Tile, got {type(input).__name__}")
 
 
 @overload
-def row_prod(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
+def row_prod(input: Tensor, tmp_tile: None = ..., *, out_layout: TileLayout | None = None) -> Tensor: ...
 @overload
-def row_prod(input: Tile, tmp_tile: Tile) -> Tile: ...
-def row_prod(input: object, tmp_tile: object = None) -> Tensor | Tile:
+def row_prod(input: Tile, tmp_tile: Tile, *, out_layout: TileLayout | None = None) -> Tile: ...
+def row_prod(
+    input: object, tmp_tile: object = None, *, out_layout: TileLayout | None = None
+) -> Tensor | Tile:
     """Row-wise product reduction, dispatched by input type.
 
     For Tile inputs, ``tmp_tile`` is required and must have the same dtype and
     rank as the input, with every dimension at least as large as the input dimension.
     Tensor inputs must omit it — the scratch tile is allocated during
     Tensor-to-Tile lowering — and passing one raises.
+
+    ``out_layout`` is a Tile-only concept (issue #3319); Tensor inputs must omit
+    it. See [`pl.tile.row_prod`][pypto.language.tile.row_prod] for its semantics.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("row_prod", tmp_tile, "tmp_tile")
+        _reject_out_layout_for_tensor("row_prod", out_layout)
         return _tensor.row_prod(input)
     if isinstance(input, Tile):
         tmp_tile = _require_tmp_for_tile("row_prod", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
-        return _tile.row_prod(input, tmp_tile)
+        return _tile.row_prod(input, tmp_tile, out_layout=out_layout)
     raise TypeError(f"pl.row_prod: expected Tensor or Tile, got {type(input).__name__}")
 
 

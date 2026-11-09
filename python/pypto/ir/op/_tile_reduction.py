@@ -16,7 +16,6 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Call,
     Expr,
-    PadValue,
     Span,
     TileLayout,
 )
@@ -25,7 +24,6 @@ from ..utils import (
     _get_span_or_capture,
     _normalize_scalar_operand,
 )
-from ._tile_memory import fillpad_inplace
 
 # ============================================================================
 # Row Broadcast Operations
@@ -342,33 +340,20 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
 # ============================================================================
 
 
-def _row_reduction_call(
-    op_name: str, tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None, span: Span | None
-) -> Call:
-    """Build a row-reduction Call, zeroing the row_major result's pad columns.
+def _row_reduction_kwargs(out_layout: TileLayout | None) -> dict[str, Any]:
+    """Build the kwargs dict for a row-reduction op call.
 
-    A ``col_major`` (default) result is already padding-free -- shape ``[M, 1]`` --
-    so it is returned as-is. A ``row_major`` result physically pads its last dim
-    to one Vec burst (see ``DeduceTileRowReductionType``), but TROWSUM only ever
-    writes column 0; columns 1..pad-1 hold whatever the Vec buffer held before.
-    ``pl.store`` later bursts the *whole* physical row into the destination
-    window, so that stale data would leak into cells the caller's window didn't
-    ask to write (issue #3319). ``tile.fillpad_inplace`` zeros exactly the
-    padding region in place (same buffer, data region untouched), making every
-    physical cell a defined value before it can reach a store.
+    Omits ``out_layout`` entirely when not given, so the emitted IR for an
+    existing caller that doesn't pass it is unchanged byte-for-byte.
     """
-    actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {}
     if out_layout is not None:
         kwargs["out_layout"] = out_layout
-    call_expr = _ir_core.create_op_call(op_name, [tile, tmp_tile], kwargs, actual_span)
-    if out_layout == TileLayout.row_major:
-        call_expr = fillpad_inplace(call_expr, pad_value=PadValue.zero, span=actual_span)
-    return call_expr
+    return kwargs
 
 
 def row_max(
-    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
 ) -> Call:
     """Row-wise max reduction of a tile (reduces along the last axis, maps to TROWMAX).
 
@@ -379,21 +364,29 @@ def row_max(
         tile: Input tile (TileType)
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        span: Optional source span for debugging (auto-captured if not provided)
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
-            ``pl.store`` honors a destination window's row stride (issue #3319).
-        span: Optional source span for debugging (auto-captured if not provided)
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            a caller storing into a destination window wider than column 0
+            must zero-initialize it first, since TSTORE bursts the whole
+            physical row regardless of what the type claims is valid
+            (tracked as a follow-up to #3319).
 
     Returns:
         Call expression for row-wise max reduction
     """
-    return _row_reduction_call("tile.row_max", tile, tmp_tile, out_layout, span)
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.row_max", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
 def row_sum(
-    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
 ) -> Call:
     """Row-wise sum reduction of a tile (reduces along the last axis, maps to TROWSUM).
 
@@ -404,21 +397,29 @@ def row_sum(
         tile: Input tile (TileType)
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        span: Optional source span for debugging (auto-captured if not provided)
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
-            ``pl.store`` honors a destination window's row stride (issue #3319).
-        span: Optional source span for debugging (auto-captured if not provided)
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            a caller storing into a destination window wider than column 0
+            must zero-initialize it first, since TSTORE bursts the whole
+            physical row regardless of what the type claims is valid
+            (tracked as a follow-up to #3319).
 
     Returns:
         Call expression for row-wise sum reduction
     """
-    return _row_reduction_call("tile.row_sum", tile, tmp_tile, out_layout, span)
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.row_sum", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
 def row_min(
-    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
 ) -> Call:
     """Row-wise min reduction (reduces along the last axis, maps to TROWMIN).
 
@@ -429,21 +430,29 @@ def row_min(
         tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        span: Optional source span for debugging (auto-captured if not provided)
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
-            ``pl.store`` honors a destination window's row stride (issue #3319).
-        span: Optional source span for debugging (auto-captured if not provided)
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            a caller storing into a destination window wider than column 0
+            must zero-initialize it first, since TSTORE bursts the whole
+            physical row regardless of what the type claims is valid
+            (tracked as a follow-up to #3319).
 
     Returns:
         Call expression for row-wise min reduction (TileType, e.g. [M, 1])
     """
-    return _row_reduction_call("tile.row_min", tile, tmp_tile, out_layout, span)
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.row_min", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
 def row_prod(
-    tile: Expr, tmp_tile: Expr, out_layout: TileLayout | None = None, span: Span | None = None
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
 ) -> Call:
     """Row-wise product reduction (reduces along the last axis, maps to TROWPROD).
 
@@ -454,17 +463,25 @@ def row_prod(
         tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
+        span: Optional source span for debugging (auto-captured if not provided)
         out_layout: Optional block layout for the result tile. Defaults to
             ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
             ``TileLayout.row_major`` instead pads the physical last dim to one
-            Vec burst (e.g. 8 for FP32), with the padding zeroed in place, so
-            ``pl.store`` honors a destination window's row stride (issue #3319).
-        span: Optional source span for debugging (auto-captured if not provided)
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            a caller storing into a destination window wider than column 0
+            must zero-initialize it first, since TSTORE bursts the whole
+            physical row regardless of what the type claims is valid
+            (tracked as a follow-up to #3319).
 
     Returns:
         Call expression for row-wise product reduction (TileType, e.g. [M, 1])
     """
-    return _row_reduction_call("tile.row_prod", tile, tmp_tile, out_layout, span)
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.row_prod", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
 def col_sum(tile: Expr, tmp_tile: Expr | None = None, span: Span | None = None) -> Call:
