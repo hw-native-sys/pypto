@@ -40,6 +40,38 @@ from .storage_test_utils import without_call_memrefs
 class TestBasic:
     """Basic MemRef creation, memory space assignment, and alloc generation."""
 
+    @pytest.mark.parametrize("start, stop, scale", [(1, 3, 32), (0, 8, 1)])
+    def test_constant_normalization_preserves_unreachable_branch(self, start, stop, scale):
+        """Shape specialization can make a retained branch's scalar range empty."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, output: pl.Out[pl.Tensor[[128, 16], pl.FP32]]):
+                tile: pl.Tile[[1, 16], pl.FP32, pl.Mem.Vec] = pl.tile.full([1, 16], pl.FP32, 0.0)
+                for i in pl.range(start, stop):
+                    offset = i * scale
+                    if offset < 8:
+                        then_index = offset
+                        pl.tile.store(tile, [then_index, 0], output)
+                    else:
+                        else_index = offset
+                        pl.tile.store(tile, [else_index, 0], output)
+
+        after = passes.init_mem_ref()(Before)
+        branches = []
+
+        class Branches(ir.IRVisitor):
+            def visit_if_stmt(self, op):
+                branches.append(op)
+                super().visit_if_stmt(op)
+
+        Branches().visit_program(after)
+        # InitMemRef's constants-only simplifier must retain storage-bearing
+        # control flow while avoiding invalid bounds in its unreachable arm.
+        assert len(branches) == 1
+        assert branches[0].else_body is not None
+
     def test_simple_load_add_store(self):
         """load-add-store sequence: Vec tiles get unique MemRefs, params get DDR."""
 

@@ -10,7 +10,7 @@
 
 """Plan internal SSA results independently of the provider's Python returns.
 
-This does not rewrite user ASTs: task 34.3 applies the plan at all call sites.
+The JIT applies this plan before parsing generated call sites.
 The plan is consumed before passes reorder returns; consumers must materialize
 projections in IR rather than retain these slot numbers after transformation.
 """
@@ -47,17 +47,21 @@ def plan_call(contract: KernelContract) -> CallPlan:
             directions.append(ParamDirection.Out)
         else:
             directions.append(ParamDirection.InOut)
-    # Stable logical order, not the order in which an adapter discovered writes.
-    written = sorted(binding.parameter for binding in contract.writebacks)
+    return plan_results(tuple(directions), tuple(binding.parameter for binding in contract.public_returns))
+
+
+def plan_results(directions: tuple[ParamDirection, ...], public_parameters: tuple[int, ...]) -> CallPlan:
+    """Share result ordering with legacy extern declarations after type validation."""
+    written = [i for i, direction in enumerate(directions) if direction != ParamDirection.In]
     results = list(written)
     slots = {parameter: slot for slot, parameter in enumerate(results)}
-    for binding in contract.public_returns:
-        if binding.parameter not in slots:
-            slots[binding.parameter] = len(results)
-            results.append(binding.parameter)
+    for parameter in public_parameters:
+        if parameter not in slots:
+            slots[parameter] = len(results)
+            results.append(parameter)
     return CallPlan(
         tuple(directions),
         tuple(results),
-        tuple(slots[binding.parameter] for binding in contract.public_returns),
+        tuple(slots[parameter] for parameter in public_parameters),
         tuple((parameter, slots[parameter]) for parameter in written),
     )

@@ -13,11 +13,15 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_SIGNATURE_SYMBOLS_H_
 
 #include <cstddef>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto::ir {
 
@@ -44,6 +48,23 @@ struct SignatureSymbols {
 /// Visits each shape-expression DAG node once per phase, including shared
 /// parameter types. Does not infer bindings from returns, strides or attrs.
 SignatureSymbols ClassifySignatureSymbols(const FunctionPtr& function);
+
+/// Fold immutable tensor.dim bindings onto the signature extents they read.
+/// Also valid before SSA: parameters and multiply assigned locals are excluded.
+/// Before inline expansion, provide the callee table to count scalar writebacks.
+/// Two linear body walks count definitions and apply transitive substitutions.
+StmtPtr FoldParamDimReads(const std::vector<VarPtr>& params, const StmtPtr& body,
+                          const std::unordered_map<std::string, FunctionPtr>* functions = nullptr);
+
+/// Cache the caller's bare tensor dimension symbols once before inline expansion.
+std::unordered_set<const Var*> CollectParamDimSymbols(const std::vector<VarPtr>& params);
+
+/// Fold a cloned body using cached caller symbols and protected writeback Vars.
+/// Only the body is traversed; large caller tables are queried, never copied.
+/// Constant folding requires the caller to re-infer dependent operation types.
+StmtPtr FoldSignatureDimReads(const StmtPtr& body, const std::unordered_set<const Var*>& symbols,
+                              const std::unordered_set<const Var*>& preserved, bool fold_constants = false,
+                              const std::unordered_map<std::string, FunctionPtr>* functions = nullptr);
 
 }  // namespace pypto::ir
 

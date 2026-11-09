@@ -996,10 +996,12 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // Prove reachability before visiting either body: folding an unreachable
     // expression (e.g. x // 0 after inlining) can raise before Fold A drops it.
     // Query outside either branch's constraint context so the proof uses only
-    // facts valid at entry. Preserve the constants-only mode's control flow.
-    const bool always_true = !constants_only_ && analyzer_->CanProve(new_condition);
+    // facts valid at entry. Constants-only mode also needs this proof: entering
+    // an impossible branch can produce an empty scalar range. Keep its control
+    // flow below, but only remap its unreachable body without analyzing it.
+    const bool always_true = analyzer_->CanProve(new_condition);
     const bool always_false =
-        !constants_only_ && !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
+        !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
 
     // Snapshot var_remap_ so each branch's internal remap additions stay
     // scoped to that branch. Without this, a remap recorded inside the
@@ -1049,7 +1051,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // LiftBodyToReturnVars strips the kept branch's trailing YieldStmt and
     // remaps or materializes its return_vars so later uses remain well-defined.
     const auto selected_body = always_true ? new_then : new_else.value_or(nullptr);
-    if ((always_true || always_false) && !HasEffectfulYield(selected_body)) {
+    if (!constants_only_ && (always_true || always_false) && !HasEffectfulYield(selected_body)) {
       StmtPtr kept;
       if (always_true) {
         kept = new_then;
@@ -1065,8 +1067,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       return LiftBodyToReturnVars(kept, op->return_vars_, op.get());
     }
 
-    // An effectful yield can retain a proven IfStmt. Its dead body must still
-    // refer to the enclosing rebuilt binders, including references in types,
+    // Constants-only mode or an effectful yield can retain a proven IfStmt.
+    // Its dead body must still refer to the enclosing rebuilt binders, including types,
     // but must not run through the analyzer or fold invalid arithmetic.
     if (always_false || (always_true && new_else.has_value())) {
       UnreachableBodyRemapper remapper(baseline_remap, multi_assigned_);

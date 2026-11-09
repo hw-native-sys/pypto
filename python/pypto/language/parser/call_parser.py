@@ -12,6 +12,7 @@
 import ast
 from typing import TYPE_CHECKING, Any
 
+from pypto._function_attrs import EXTERNAL_RETURN_PARAMS_ATTR
 from pypto.language import _dump
 from pypto.pypto_core import DataType, ir
 
@@ -65,6 +66,7 @@ class CallParser:
         # object (not id()) keeps a strong reference, so there is no id-reuse
         # hazard from a collected-and-reallocated Function.
         self.derived_return_types_cache: dict[ir.Function, list[ir.Type]] = {}
+        self.external_return_indices: dict[ir.Function, tuple[int, ...]] = {}
         self.inline_return_provenance_cache: dict[
             ir.Function, tuple[tuple[ir.Expr, ...], frozenset[int], dict[int, ir.Expr]]
         ] = {}
@@ -531,6 +533,7 @@ class CallParser:
                 is_inline=bool(return_types) and func_obj.func_type == ir.FunctionType.Inline,
             )
             return_types = self.inline_argument_return_types(func_obj, args, return_types)
+            return_types = self.external_argument_return_types(func_obj, args, return_types)
         return self.make_call_with_return_type(
             gvar,
             args,
@@ -571,10 +574,34 @@ class CallParser:
             self.derived_return_types_cache[func] = cached
         return list(cached)
 
+    def external_argument_return_types(
+        self, func: ir.Function, args: list[ir.Expr], return_types: list[ir.Type]
+    ) -> list[ir.Type]:
+        """Keep explicit external aliases in the actual argument's descriptor type.
+
+        Native deduction above still validates the call. Its symbol substitution
+        can choose a local dimension alias shared by multiple arguments; a
+        writeback must retain its own argument's type to remain assignable.
+        """
+        if len(args) != len(func.params):
+            return return_types
+        if func not in self.external_return_indices:
+            parameters = {param.unique_id: index for index, param in enumerate(func.params)}
+            aliases = func.attrs.get(EXTERNAL_RETURN_PARAMS_ATTR, [])
+            self.external_return_indices[func] = tuple(
+                parameters[alias.unique_id]
+                for alias in aliases
+                if isinstance(alias, ir.Var) and alias.unique_id in parameters
+            )
+        indices = self.external_return_indices[func]
+        if len(indices) != len(return_types):
+            return return_types
+        return [args[index].type for index in indices]
+
     def inline_argument_return_types(
         self, func: ir.Function, args: list[ir.Expr], return_types: list[ir.Type]
     ) -> list[ir.Type]:
-        """Keep direct Tile returns in caller scope after native contract checking.
+        """Keep direct inline/Group parameter returns in the caller's descriptor type.
 
         Different inline operands may specialize one generic symbol differently.
         An unresolved callee symbol cannot survive in a caller's temporary type,
@@ -583,7 +610,9 @@ class CallParser:
         through immutable aliases) are required; computed values and competing
         return paths retain native inference.
         """
-        if func.func_type != ir.FunctionType.Inline or len(args) != len(func.params):
+        if func.func_type not in (ir.FunctionType.Inline, ir.FunctionType.Group) or len(args) != len(
+            func.params
+        ):
             return return_types
         cached = self.inline_return_provenance_cache.get(func)
         if cached is None:

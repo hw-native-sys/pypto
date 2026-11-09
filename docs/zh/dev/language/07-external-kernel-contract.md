@@ -1,6 +1,6 @@
 # 外部 Kernel 契约（内部 v1）
 
-本文是任务 34.1/34.2 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
+本文是任务 34.1–34.3 和 [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293) 的接口基线。
 范围是数据交接与可执行 IR 原型，不是公开 provider 注册 API，也不代表已经接入 CANNBotDSL runtime。
 
 ## 职责
@@ -15,7 +15,7 @@
 实现位于 `python/pypto/jit/external/`；bridge 协议位于
 `python/pypto/backend/external_bridge.py`。导入这些模块不会导入可选 DSL。
 内部注册与捕获已在 `registry.py` 和 `compatibility.py` 实现。
-34.3 将实现全程序规范化，34.4 将实现原生 wrapper 和运行期绑定检查。
+JIT 已实现调用规范化和签名变体；34.4 将实现原生 wrapper 和运行期绑定检查。
 
 ## Provider 发现与捕获
 
@@ -63,8 +63,9 @@ registry 使用支持 capture 的协议。
 长度未经证明的切片使用独立符号，即使元数据回退为父张量的动态维度也不例外；
 全切片保留已证明的相等关系。
 同一不精确张量元数据的重复别名共享轴符号，独立视图则不共享。
-缩短视图在回退边界之外保留独立的运行时维度身份。全切片、整形状读取和基于描述符的
-reshape 会保留这些身份，包括将派生视图传给普通 JIT 依赖的情况。
+缩短视图在回退边界之外保留独立的运行时维度身份。整形状读取和基于描述符的 reshape
+保持这些轴为动态维度，包括跨普通 JIT 依赖的情况。局部视图的描述符读取可能获得独立符号：
+parser 不一定能证明它与最初用于指定视图大小的 scalar 相等。完整下标切片保留可证明的相等关系。
 省略的 layout 规范化为 ND，不支持的常量会明确报错。旧 context 无法证明 stride 和 offset，
 因此分别保留为未约束和运行期绑定。
 
@@ -73,7 +74,7 @@ reshape 会保留这些身份，包括将派生视图传给普通 JIT 依赖的�
 builder 回调转换成 capture/prepare，再显式调用 `lower(PreparedKernel)` 生成旧 builder 结果。
 Provider 不接触实际 context、AST、globals 或 tensor 地址。这是 PR #3231 中 builder 路径的
 适配边界，不安装该 PR 的 runtime wrapper，也不让任意注册对象直接在 JIT 程序中执行。
-通用调用的自动 lowering 和真实 DSL 迁移仍属于后续任务。
+将任意注册对象连接到可执行 runtime wrapper，以及真实 DSL 迁移，仍属于后续任务。
 
 ## 请求与编译结果
 
@@ -149,7 +150,7 @@ assert plan.writeback_slots == ((1, 0), (2, 1))
 ```
 
 对公开调用 `result = stage(x, state, out)`，内部调用返回更新后的 `state` 和 `out`，仅将后者投影为
-`result`。34.3 还需要替换后续 state 使用，并跨 inline 边界传播效果。计划本身不改写 Python 源码。
+`result`。JIT 已根据计划改写后续 state 使用，并通过现有 inline/存储分析跨边界传播写入。
 运行 pass 前必须将投影落实为 IR；`NormalizeReturnOrder` 后不能继续使用旧的结果序号。
 
 IR 原型复用 `external_return_params` 中对本函数参数的引用，以及 `param_directions` 和返回类型。
@@ -215,8 +216,58 @@ runtime target 字段与 provider 记录采用相同的严格类型校验。支�
 `test_external_ir_semantics.py` 对规范化形式执行往返序列化、默认 pass pipeline 和编排代码生成：
 显式公开返回与隐藏状态写回、inline、零次/多次循环、分支、AIC/AIV/MIX，以及 view 写入到根读取的依赖。
 
-这些是 CPU 编译器检查，不能证明设备数值正确性、自动源码写回传播、重叠执行安全或完整 runtime 完成行为。
+这些是 CPU 编译器检查，不能证明设备数值正确性、重叠执行安全或完整 runtime 完成行为。
 后续接入任务及定向设备测试负责这些验证。已有 extern API 继续使用兼容路径。
 
 `test_external_registry.py` 覆盖惰性加载、匹配歧义、生命周期、不可变捕获、并发加载和
 builder 请求隔离；`test_extern_kernel.py` 中的旧钩子回归执行完整 JIT 编译。
+
+## 调用规范化与签名特化（任务 34.3）
+
+JIT 在解析与 SSA 转换前，将外部调用的公开返回值和隐藏 tensor 写回分别投影到
+现有 IR。公开返回为 void 的调用仍捕获内部更新；inline 和存储分析传播共享存储的
+写入，同时保留 helper 局部名称重绑定的语义。循环与分支中的调用留在原来的执行位置，
+零次循环和未执行分支不会调用 kernel。视图参数仅求值一次。
+
+内部 `SpecializeContext.external_contract` 接收已绑定 extern 声明的已准备契约。
+契约的公开返回参数映射必须与声明一致：调用方元数据在此交接之前已推导，
+不一致的映射会被拒绝，避免后续函数使用过期的结果元数据。
+既有 extern 从经验证的参数方向和返回别名生成同样的调用计划。部分或未知覆盖写入
+使用 `InOut`，保留输入依赖；公开结果顺序、重复别名、只读别名及 Python tuple
+返回注解保持原意，原生 ABI 参数顺序不变。所有投影在 pass 执行前成为 IR，不能在
+`NormalizeReturnOrder` 之后继续使用原始结果槽位编号。
+写回投影保留实际参数的描述符类型，包括通过局部别名读取的动态维度。
+仅有 InOut 参数且使用裸 `-> pl.Tensor` 注解的旧式 stub，以第一个 InOut 缓冲区
+作为公开结果；无返回注解的 void stub 仍只产生隐藏写回。
+
+外部调用须为独立语句，或赋值/return 的完整右值。嵌套表达式、条件、循环迭代器和
+上下文管理器头部中的外部调用会报明确错误，应先将调用结果绑定到局部变量。
+对 provider 契约，静态可识别的同根别名和视图在缺少 `AliasPermission` 时会被拒绝，
+但同一父视图坐标系中具有常量区间且可证明互不重叠的一维切片可以通过。未知坐标、
+启用 clamp 的切片、不同父视图以及 reshape 改变的坐标系仍保守处理。
+这包括 tuple/list 解包产生的别名、不可变 tuple 绑定的常量索引投影,
+以及使用关键字传入源张量的视图。
+重绑定更新别名来源；不确定的控制流合流丢弃静态证明。该检查不能证明不同输入缓冲区
+或跨 helper 的参数互不重叠，运行时 bridge 仍须在每次调用（包括缓存命中）检查这些
+情况。既有 extern 保留原有别名策略。
+
+含 extern 的调用图按 constexpr 值、tensor shape/dtype/layout 和 scalar dtype
+特化依赖及普通 helper。等价签名复用生成函数，不同签名生成不同函数。动态维度按
+相等关系规范化，不依赖符号拼写或采样边界；缩短视图的独立运行时维度保持独立。
+省略布局与显式 `ND` 保持区分：前者可继承下游声明，后者优先于下游声明。
+局部分配保留已知布局，包括显式或默认的 `ND`。
+裸 `pl.Scalar` helper/extern 参数从调用点继承类型，显式 scalar 注解保留声明类型。
+字面量、显式类型的 `pl.const`、算术、cast、维度读取及局部 scalar 参数遵循 parser 的 scalar 类型提升规则。
+分支合流仅在两条路径类型一致时保留 scalar 类型。
+传入采样参数时也会携带声明的 scalar dtype；scalar 值不会拆分缓存。
+缺失或不支持的外部参数注解会在诊断中指出函数和参数名称。
+函数和调用索引限定在单次请求内，每个调用者变体执行一次元数据遍历，支持直接传入
+组合的 slice/reshape 表达式，避免为每个调用点重新遍历前缀。
+inline helper 直接返回 extern 调用时,保留与先绑定局部变量再返回相同的结果元数据。
+直接视图参数的返回别名保留元数据，可继续传给后续 JIT 函数。同一未改变的运行时
+长度用于多个切片时共享 extent 符号；scalar 重绑定和不确定的控制流合流使该相等关系失效。
+
+`test_external_normalization.py` 从 JIT 源码验证嵌套 inline、控制流、部分写入、
+视图和重绑定的 IR/代码生成，以及签名隔离、嵌套调用和重叠别名诊断。这些是 CPU
+编译器验证，不代表设备数值正确性或安全重叠执行。任意注册对象与可执行 wrapper 的
+连接、原生 ABI 和运行时检查仍由后续任务 34.4/34.5 完成。
