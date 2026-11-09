@@ -110,5 +110,65 @@ def test_get_async_round_trips_engine():
     ir.assert_structural_equal(P, reparsed)
 
 
+def _subregion_program(op_name: str):
+    """Build a one-kernel program using the requested async op with a subregion."""
+
+    if op_name == "put_async":
+
+        @pl.program
+        class PutProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                _out = pld.tensor.put_async(
+                    dst,
+                    peer=peer,
+                    src=src,
+                    dst_offsets=[0, 0],
+                    src_offsets=[0, 0],
+                    shape=[1, 32],
+                    engine=pld.CommEngine.URMA,
+                )
+
+        return PutProgram
+
+    @pl.program
+    class GetProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            _out = pld.tensor.get_async(
+                dst,
+                peer=peer,
+                src=src,
+                dst_offsets=[0, 0],
+                src_offsets=[0, 0],
+                shape=[1, 32],
+                engine=pld.CommEngine.URMA,
+            )
+
+    return GetProgram
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_async_subregion_round_trips(op_name):
+    """The subregion form (offsets + shape) prints and reparses losslessly."""
+    program = _subregion_program(op_name)
+    call = _find_async_call(program, f"pld.tensor.{op_name}")
+    assert call.kwargs["engine"] == int(ir.CommEngine.URMA)
+    printed = str(program)
+    assert "pld.CommEngine.URMA" in printed
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

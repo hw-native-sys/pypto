@@ -277,7 +277,8 @@ inline std::vector<ExprPtr> ValidateRegionArgs(const std::vector<ExprPtr>& args,
 inline void ValidateAsyncEngine(const Kwargs& kwargs, const std::string& op_name) {
   const int engine = GetRequiredKwarg<int>(kwargs, "engine", op_name);
   CHECK(engine == static_cast<int>(CommEngine::kURMA))
-      << op_name << " supports only engine=CommEngine.URMA in V1, got " << engine;
+      << op_name << " supports only engine=CommEngine.URMA in V1; SDMA/RDMA are not available in V1, got "
+      << engine;
 }
 
 // The peer rank selects an address; a floating-point scalar must not become a
