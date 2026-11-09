@@ -153,7 +153,7 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
-        self._graph_captures: set[str] | None = None
+        self._graph_captures: dict[str, str] | None = None
         self.graph_rebinds: dict[str, str | int] = {}
         self.has_scope_capture = False
         self._simt_depth: int = 0
@@ -243,8 +243,8 @@ class BodyTransformer(ast.NodeTransformer):
         alias = self._var_renames.get(name)
         return (
             self._graph_captures is not None
-            and name in self._graph_captures
             and alias is not None
+            and self._graph_captures.get(name) == alias
             and isinstance(self.graph_rebinds.get(alias), int)
         )
 
@@ -982,8 +982,6 @@ class BodyTransformer(ast.NodeTransformer):
             if isinstance(item.optional_vars, ast.Name):
                 self.has_scope_capture = True
                 original = item.optional_vars
-                if self._graph_captures is not None:
-                    self._graph_captures.add(original.id)
                 # Use a fresh capture alias when the caller only has a
                 # folded literal, so the parser can restore that predecessor.
                 folded = self._active_shape_fold(original.id)
@@ -1000,6 +998,8 @@ class BodyTransformer(ast.NodeTransformer):
                         targets=[ast.Name(id=captured, ctx=ast.Store())], value=ast.Constant(value=folded)
                     )
                     prefix.append(ast.copy_location(assignment, node))
+                if self._graph_captures is not None:
+                    self._graph_captures[original.id] = captured
                 item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
                 captures[original.id] = captured
                 if _scope_call_name(item.context_expr) != "graph":
@@ -1059,7 +1059,7 @@ class BodyTransformer(ast.NodeTransformer):
             self._simt_depth += 1
         previous_graph = self._graph_captures
         if graph:
-            self._graph_captures = set()
+            self._graph_captures = {}
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)

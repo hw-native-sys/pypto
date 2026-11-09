@@ -4170,6 +4170,42 @@ def test_jit_graph_capture_preserves_later_shape_fold(enabled):
     assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == 64
 
 
+def test_jit_scalar_after_graph_shape_capture_keeps_loop_carry():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            with pl.graph("recording"):
+                row = a.shape[0]
+                with pl.at(level=pl.Level.CORE_GROUP) as row:
+                    pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                row = b.shape[0]
+                row = 0
+                for i in pl.range(2):
+                    row = row + 1
+                if row == 2:
+                    row = row + 1
+            return a
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    assert isinstance(graph.body, ir.SeqStmts)
+    initial = next(
+        stmt
+        for stmt in graph.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.ConstInt)
+    )
+    loop = next(stmt for stmt in graph.body.stmts if isinstance(stmt, ir.ForStmt))
+    (updated,) = ir.collect_def_vars(loop.body)
+    assert updated.same_as(initial.var)
+
+
 def test_jit_graph_capture_does_not_reuse_sibling_branch_shape():
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor], flag: pl.Scalar[pl.BOOL]):
