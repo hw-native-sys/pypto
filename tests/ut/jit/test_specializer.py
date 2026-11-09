@@ -3978,21 +3978,27 @@ def test_jit_graph_tensor_rebinding_after_same_name_task_capture_is_exported():
     assert value.same_as(selected)
 
 
-def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment():
-    @pl.jit
-    def chain(
-        a: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-        b: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
-    ):
-        selected = a
-        selected = b
-        with pl.graph("recording"):
-            with pl.at(level=pl.Level.CORE_GROUP) as selected:
-                pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+@pytest.mark.parametrize("nested", [False, True])
+def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(nested):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as selected:
+            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+    """).strip("\n")
+    if nested:
+        capture = "for i in pl.range(1):\n" + textwrap.indent(capture, "    ")
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
             selected = a
-        return selected
+            selected = b
+            with pl.graph("recording"):
+                CAPTURE
+                selected = a
+            return selected
+    """).replace("        CAPTURE", textwrap.indent(capture, "        "))
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
 
-    function = chain.specialize().get_function("chain")
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
     assert isinstance(function.body, ir.SeqStmts)
     graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))

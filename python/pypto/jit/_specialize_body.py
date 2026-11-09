@@ -225,15 +225,17 @@ class BodyTransformer(ast.NodeTransformer):
         return captured
 
     def _needs_alpha_rename(self, name: str) -> bool:
-        # A recorded capture defines a TaskId at its own lexical depth,
-        # even when its emitted name came from a caller's Tensor alias.
+        # A recorded capture can remain visible after leaving its nested
+        # scope. An assignment at that scope or an enclosing scope rebinds
+        # it. Deeper assignments keep the usual loop-carry behavior.
         capture_depth = (
             self._graph_capture_depths.get(self._var_renames.get(name, name))
             if self._graph_capture_depths is not None
             else None
         )
         return (
-            self._scope_depth in (self._assign_depth[name], capture_depth)
+            self._scope_depth == self._assign_depth[name]
+            or (capture_depth is not None and self._scope_depth <= capture_depth)
             or self._folded_graph_shape(name) is not None
         )
 
