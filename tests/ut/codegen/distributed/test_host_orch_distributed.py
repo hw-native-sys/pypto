@@ -2223,5 +2223,62 @@ def test_if_cross_branch_phi_yields_tensors() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("dtype", "expected_enum"),
+    [
+        # A window descriptor names the element type the receiving side
+        # reconstructs from, so each low-precision dtype must reach
+        # ``buffers[...].tensor(dtype=DataType.<X>)`` as its own runtime enum.
+        (pl.FP8E4M3FN, "FP8E4M3FN"),
+        (pl.FP8E5M2, "FP8E5M2"),
+        (pl.FP8E8M0, "FP8E8M0"),
+        # The runtime spells packed E2M1 ``FP4E2M1``, without PyPTO's ``X2``.
+        (pl.FP4E2M1X2, "FP4E2M1"),
+        # The runtime has no E1M2 enum, so a packed E1M2 window travels as the
+        # byte carrier ``GetRuntimeDataTypeString`` already uses for it.
+        (pl.FP4E1M2X2, "UINT8"),
+    ],
+)
+def test_low_precision_window_names_its_runtime_enum(dtype, expected_enum):
+    """A DistributedTensor window of a low-precision dtype emits a real runtime enum.
+
+    Before the FP8E5M2 runtime bump this function covered only the integer and
+    wide-float families and aborted codegen on everything else, so any
+    low-precision window was unreachable rather than mistyped.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[SIZE], dtype],
+            out: pl.Out[pl.Tensor[[SIZE], dtype]],
+            data: pld.DistributedTensor[[SIZE], dtype],
+        ) -> pl.Tensor[[SIZE], dtype]:
+            return out
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, SIZE], dtype],
+            outputs: pl.Out[pl.Tensor[[2, SIZE], dtype]],
+        ) -> pl.Tensor[[2, SIZE], dtype]:
+            data_buf = pld.alloc_window_buffer(SIZE)
+            data = pld.window(data_buf, [SIZE], dtype=dtype)
+            for r in pl.range(pld.world_size()):
+                inp_r = inputs[r]
+                out_r = outputs[r]
+                self.chip_orch(inp_r, out_r, data, device=r)
+            return outputs
+
+    code = _lower(Prog)
+    assert re.search(
+        r'__comm_d0\[\w+\]\.buffers\["data_buf"\]\.tensor\('
+        rf"shapes=\(64,\), dtype=DataType\.{expected_enum}\)",
+        code,
+    ), code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

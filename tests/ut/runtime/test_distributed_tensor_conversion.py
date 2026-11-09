@@ -56,6 +56,27 @@ def test_packed_fp4_mapped_arg_preserves_carrier_units_and_aliases():
     assert backing[4] == 0x98
 
 
+def test_e5m2_mapped_arg_reconstructs_the_declared_dtype():
+    """An E5M2 wire arg reaches a HOST callback as float8_e5m2, not raw bytes.
+
+    The byte codes below are chosen so a uint8 reconstruction would be visibly
+    wrong rather than merely differently typed: 0x3C is 1.0 and 0xC0 is -2.0, so
+    reading them as integers yields 60 and 192. Both signed zeros are included
+    because ``torch.isclose(-0.0, +0.0)`` is true, so only a bitwise check
+    distinguishes them.
+    """
+    backing = bytearray([0x3C, 0xC0, 0x38, 0x7B, 0x80, 0x00])
+    arg = SimpleNamespace(buffer=memoryview(backing), shapes=(2, 3), strides=(3, 1), dtype="DataType.FP8E5M2")
+
+    tensor = _tensor_from_continuous(arg)
+
+    assert tensor.dtype == torch.float8_e5m2
+    assert tensor.shape == (2, 3)
+    assert tensor.to(torch.float32).flatten().tolist() == [1.0, -2.0, 0.5, 57344.0, -0.0, 0.0]
+    # Byte-exact, which is what separates the two signed zeros in the last row.
+    assert tensor.view(torch.uint8).flatten().tolist() == [0x3C, 0xC0, 0x38, 0x7B, 0x80, 0x00]
+
+
 def test_legacy_data_pointer_remains_supported():
     backing = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
     arg = SimpleNamespace(data=ctypes.addressof(backing), shapes=(2, 2), dtype=_Float32())

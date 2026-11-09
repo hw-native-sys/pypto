@@ -60,6 +60,9 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
     "UINT8": (ctypes.c_uint8, torch.uint8),
     # Simpler's FP4E2M1 element is one packed x2 byte; shapes/strides use carriers.
     "FP4E2M1": (ctypes.c_uint8, torch.uint8),
+    # torch.frombuffer accepts float8_e5m2 directly, but numpy-free byte
+    # allocation still goes through c_uint8, as FLOAT16/BFLOAT16 do above.
+    "FP8E5M2": (ctypes.c_uint8, torch.float8_e5m2),
 }
 
 

@@ -105,6 +105,25 @@ finally:
 | **显式释放** | `w.free_tensor(t)`；`close()` 是兜底，不是方案 |
 | **绑定在它的 worker 上** | 不能移交给另一个 `ChipWorker` |
 
+### 低精度 host 张量 dtype
+
+Host 侧 `torch.Tensor` 实参在 wire 上由其 dtype 命名，因此运行时必须有对应的 `DataType`。
+除全部常规 dtype 外，低精度格式 `float8_e4m3fn`、`float8_e5m2`、`float8_e8m0fnu` 与
+`float4_e2m1fn_x2` 均已支持，所以可以在 host 侧用 torch 量化后直接传入。输出按 kernel 声明的
+dtype 原样返回，逐比特一致 —— 两种有符号零也各自保留，而 `torch.isclose` 是分辨不出它们的。
+
+`pl.FP4E1M2X2` 在 torch 中没有对应 dtype，因此以同等字节宽度的 `torch.uint8` 载体交换。你声明的
+shape 本就以载体字节计数，所以 `uint8` host 缓冲区持有的就是同一批字节；需要数值视图时在自己的
+代码里重解释即可。
+
+`pl.HF8` **不是**可传输的 host 张量 dtype。torch 无法命名它，运行时也没有对应的 `DataType`，
+因此运行时分配的 HF8 张量会被描述为 `DataType::UNKNOWN`。请把 HF8 值留在 core 内，或自行以
+`pl.UINT8` 承载。
+
+传输支持**不会放宽任何算子**。MX matmul 尤其仍要求 FP8E4M3FN 数据操作数：`tile.matmul_mx`、
+`tile.matmul_mx_acc`、`tile.matmul_mx_bias` 与 `tensor.matmul_mx` 会在 IR 构造阶段拒绝 E5M2 的
+lhs 或 rhs。E5M2 数据可以自由进出，但在交给 MX matmul 之前须先 cast 到 `pl.FP8E4M3FN`。
+
 ### 影响派发的 `RunConfig` 字段
 
 `RunConfig` 同时携带编译侧与运行时侧设置；编译侧那些见[上一页](00-compile.md)。派发时要紧的是：

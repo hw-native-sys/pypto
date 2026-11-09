@@ -121,6 +121,29 @@ launch. `close()` releases the registrations and any `DeviceTensor` the caller f
 | **Freed explicitly** | `w.free_tensor(t)`; `close()` auto-frees as a backstop, not as the plan |
 | **Bound to its worker** | It is not portable to another `ChipWorker` |
 
+### Low-precision host tensor dtypes
+
+A host `torch.Tensor` argument is named on the wire by its dtype, so the runtime must
+have a `DataType` for it. It has one for every ordinary dtype and for the low-precision
+formats `float8_e4m3fn`, `float8_e5m2`, `float8_e8m0fnu` and `float4_e2m1fn_x2`, so you
+can quantize on the host with torch and pass the result straight in. Outputs come back as
+the dtype your kernel declared, bit for bit — including both signed zeros, which a
+`torch.isclose` comparison cannot tell apart.
+
+`pl.FP4E1M2X2` has no torch dtype at all and is therefore exchanged as a `torch.uint8`
+carrier of the same byte width. The shape you declare already counts carrier bytes, so a
+`uint8` host buffer holds exactly the same bytes; reinterpret in your own code if you need
+the numeric view.
+
+`pl.HF8` is **not** a transferable host tensor dtype. Torch cannot name it and the runtime
+has no `DataType` for it, so a runtime-allocated HF8 tensor is described as
+`DataType::UNKNOWN`. Keep HF8 values in core, or carry them yourself as `pl.UINT8`.
+
+Transfer support does **not** widen any operator. MX matmul in particular still requires
+FP8E4M3FN data operands: `tile.matmul_mx`, `tile.matmul_mx_acc`, `tile.matmul_mx_bias`
+and `tensor.matmul_mx` reject an E5M2 lhs or rhs during IR construction. Move E5M2 data
+in and out freely, but cast to `pl.FP8E4M3FN` before an MX matmul consumes it.
+
 ### `RunConfig` fields that affect dispatch
 
 `RunConfig` carries both compile-side and runtime-side settings; the compile-side ones are
