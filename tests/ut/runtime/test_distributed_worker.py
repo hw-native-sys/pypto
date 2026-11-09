@@ -57,6 +57,7 @@ from pypto.runtime.distributed_runner import (
     _reset_dfx_dispatch_state,
     _submit_chip,
     add_chip_tensor_arg,
+    validate_host_domain_runtime,
 )
 from pypto.runtime.runner import RunConfig
 
@@ -3504,6 +3505,7 @@ def _persistent_entry(
     seen_handles: list[Any],
     *,
     buffer_nbytes: tuple[int, ...] | None = None,
+    memory_source: str | None = None,
 ):
     sizes = (window_size,) if buffer_nbytes is None else buffer_nbytes
 
@@ -3521,7 +3523,11 @@ def _persistent_entry(
     ):
         del orch, _args, config, tensors, callables, sub_ids, _keep
         assert _domain_provider is not None
+        resource_kwargs = (
+            {} if memory_source is None else {"memory_source": memory_source, "workspace_engines": ("urma",)}
+        )
         with _domain_provider(
+            **resource_kwargs,
             name="comm_d0",
             workers=[*range(world_size)],
             window_size=window_size,
@@ -3536,6 +3542,38 @@ def _persistent_entry(
 
 
 class TestPersistentDistributedWorker:
+    @pytest.mark.parametrize("reset", [False, True])
+    def test_host_domain_reuse_and_reset_policy(self, patched_setup, reset):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+
+        def worker_submit(fn):
+            orch.run(fn)
+            return _ImmediateNativeHandle()
+
+        m["worker"].submit.side_effect = worker_submit
+        handles = []
+        m["load_entry"].return_value = (_persistent_entry(256, handles, memory_source="host"), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=reset)
+        arg = _resident(rt, (16, 16))
+        try:
+            if reset:
+                with pytest.raises(ValueError, match="reset_persistent_windows=False"):
+                    rt(arg)
+                assert not orch.allocate_calls
+            else:
+                rt(arg)
+                rt(arg)
+                assert handles[0] is handles[1]
+                assert len(orch.allocate_calls) == 1
+                assert orch.allocate_calls[0]["memory_source"] == "host"
+                assert orch.allocate_calls[0]["workspace_engines"] == ("urma",)
+                assert not orch.copy_calls
+        finally:
+            rt.close()
+
     def test_window_reset_requires_persistent_mode(self):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         with pytest.raises(ValueError, match="requires persistent=True"):
@@ -4638,6 +4676,28 @@ class TestDeviceMemoryInfo:
         with pytest.raises(RuntimeError, match="query failed"):
             rt.device_memory_info(0)
         rt.close()
+
+
+def test_host_domain_runtime_capability_check():
+    class OldOrch:
+        def allocate_domain(self, *, workers, window_size):
+            raise AssertionError("validation must not allocate")
+
+    class NewOrch:
+        def allocate_domain(self, *, memory_source, workspace_engines):
+            raise AssertionError("validation must not allocate")
+
+    with pytest.raises(RuntimeError, match="#2913"):
+        validate_host_domain_runtime(OldOrch())
+    validate_host_domain_runtime(NewOrch())
+
+
+def test_persistent_domain_identity_includes_source_and_workspace():
+    base = {"workers": [0, 1], "window_size": 256, "buffers": []}
+    device = DistributedWorker._persistent_domain_spec(base)
+    host = DistributedWorker._persistent_domain_spec({**base, "memory_source": "host"})
+    urma = DistributedWorker._persistent_domain_spec({**base, "workspace_engines": ("urma",)})
+    assert len({device, host, urma}) == 3
 
 
 if __name__ == "__main__":

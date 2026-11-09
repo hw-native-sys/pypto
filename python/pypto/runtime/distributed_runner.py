@@ -63,6 +63,16 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
 }
 
 
+def validate_host_domain_runtime(orch: Any) -> None:
+    """Require Simpler's Host-source domain API before allocating any resources."""
+    parameters = inspect.signature(orch.allocate_domain).parameters
+    if not {"memory_source", "workspace_engines"}.issubset(parameters):
+        raise RuntimeError(
+            "memory_source='host' requires Simpler Host-source communication domains "
+            "(simpler PR #2913 or later); upgrade the runtime"
+        )
+
+
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
     """Resolve the retained-window reset policy.
 
@@ -2279,6 +2289,10 @@ class DistributedWorker(Worker):
             tuple(int(worker) for worker in kwargs["workers"]),
             int(kwargs["window_size"]),
             buffers,
+            str(
+                getattr(kwargs.get("memory_source", "device"), "name", kwargs.get("memory_source", "device"))
+            ).lower(),
+            tuple(sorted(kwargs.get("workspace_engines", ()))),
         )
 
     def _reset_persistent_domains(
@@ -2293,7 +2307,7 @@ class DistributedWorker(Worker):
         this callback only issues copies while Simpler holds its submit lock.
         """
         for domain_name, (spec, handle) in domains.items():
-            _workers, window_nbytes, buffer_specs = spec
+            _workers, window_nbytes, buffer_specs, *_resource_spec = spec
             for worker_id in handle.workers:
                 actual_window_size = int(handle[worker_id].actual_window_size)
                 # Physical mappings can be rounded up to the platform's allocation
@@ -2322,7 +2336,7 @@ class DistributedWorker(Worker):
     ) -> None:
         """Create zero-filled host Buffers, shared by every named buffer of the same size."""
         for domain_name, (spec, _handle) in domains.items():
-            _workers, window_nbytes, buffer_specs = spec
+            _workers, window_nbytes, buffer_specs, *_resource_spec = spec
             named_nbytes = sum(int(buffer_spec[3]) for buffer_spec in buffer_specs)
             if named_nbytes != int(window_nbytes):
                 raise RuntimeError(
@@ -2403,6 +2417,11 @@ class DistributedWorker(Worker):
                 generated_name = str(kwargs["name"])
                 program_domains = domains_by_program.setdefault(program_id, {})
                 spec = self._persistent_domain_spec(kwargs)
+                if spec[3] == "host" and self._reset_persistent_windows:
+                    raise ValueError(
+                        "Host communication domains require reset_persistent_windows=False; "
+                        "automatic H2D window reset is supported only for Device domains"
+                    )
                 existing = program_domains.get(generated_name)
                 if existing is not None and spec != existing[0]:
                     raise ValueError(

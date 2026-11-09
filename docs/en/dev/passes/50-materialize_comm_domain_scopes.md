@@ -209,3 +209,30 @@ absent definitions are outside this contract. Legacy informational
 - DSL: [`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
   [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
   [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py).
+
+## Host DDR windows
+
+`pld.alloc_window_buffer(size, memory_source="host")` selects Host DDR backing;
+`"device"` remains the default. The shape/dtype overload accepts the same keyword.
+`WindowBuffer.memory_source` preserves this property through cloning, serialization,
+and the private `window_buffer` text descriptor. Slots are grouped by both device
+coverage and memory source: Host and Device allocations never share a physical domain.
+
+Host codegen requests `AddressSpace.HOST` and `workspace_engines=("urma",)` from
+Simpler, and obtains the per-rank context with the URMA workspace. This requires
+Simpler #2913 or later and its supported same-machine A5 `tensormap_and_ringbuffer`
+configuration. Older runtimes fail before allocation; Simpler validates the platform
+and runtime combination. The current runtime submodule already provides this API.
+
+The owning rank may use its device-mapped tensor locally. Host peer windows are not
+MTE mappings: peer access requires URMA. Existing peer-MTE primitives and collectives
+are rejected when their remote operands originate from Host windows, including through
+forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
+peer MTE. Host URMA execution and Engram initialization remain separate work;
+constructing a Host domain does not provide either feature.
+
+Persistent execution includes memory source and workspace engines in domain reuse
+validation. Host domains currently require `reset_persistent_windows=False`, because
+the automatic reset path performs Device H2D copies. This option applies to the entire
+worker: any Device scratch/signal windows in the same worker must be initialized by
+the program as needed. Domain release remains owned by Simpler.

@@ -50,17 +50,21 @@ class WindowBuffer : public Var {
  public:
   VarPtr base_;                  ///< Ptr Var from the alloc op (allocation identity)
   ExprPtr size_;                 ///< Per-rank allocation size in bytes
+  std::string memory_source_;    ///< Physical backing: device (HBM) or host (DDR)
   bool load_from_host_ = false;  ///< Pre-fork H2D staging flag
   bool store_to_host_ = false;   ///< Post-task D2H staging flag
 
   WindowBuffer(VarPtr base, ExprPtr size, bool load_from_host = false, bool store_to_host = false,
-               Span span = Span::unknown())
+               Span span = Span::unknown(), std::string memory_source = "device")
       : Var(base->name_hint_, GetWindowBufferType(), std::move(span)),
         base_(std::move(base)),
         size_(std::move(size)),
+        memory_source_(std::move(memory_source)),
         load_from_host_(load_from_host),
         store_to_host_(store_to_host) {
     detail::CheckValueOperand(size_, span_, "WindowBuffer size");
+    CHECK_SPAN(memory_source_ == "device" || memory_source_ == "host", span_)
+        << "WindowBuffer memory_source must be 'device' or 'host', got " << memory_source_;
   }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::WindowBuffer; }
@@ -71,6 +75,7 @@ class WindowBuffer : public Var {
         Var::GetFieldDescriptors(),
         std::make_tuple(reflection::UsualField(&WindowBuffer::base_, "base"),
                         reflection::UsualField(&WindowBuffer::size_, "size"),
+                        reflection::UsualField(&WindowBuffer::memory_source_, "memory_source"),
                         reflection::UsualField(&WindowBuffer::load_from_host_, "load_from_host"),
                         reflection::UsualField(&WindowBuffer::store_to_host_, "store_to_host")));
   }

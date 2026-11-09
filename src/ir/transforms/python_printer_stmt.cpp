@@ -816,7 +816,9 @@ std::string IRPythonPrinter::PrintWindowBuffer(const WindowBufferPtr& window) {
   oss << prefix_ << "._dump.window_buffer(" << std::quoted(GetWindowBufferName(window))
       << ", base=" << std::quoted(GetVarName(window->base_.get())) << ", size=" << PrintSubExpr(window->size_)
       << ", load_from_host=" << (window->load_from_host_ ? "True" : "False")
-      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False") << ")";
+      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False");
+  if (window->memory_source_ != "device") oss << ", memory_source=" << std::quoted(window->memory_source_);
+  oss << ")";
   return oss.str();
 }
 

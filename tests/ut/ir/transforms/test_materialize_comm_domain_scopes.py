@@ -2288,5 +2288,55 @@ def test_signed_scope_attribute_roundtrip(value):
     assert scope.attrs["index_expr"].value == -1
 
 
+@pytest.mark.parametrize("source", ["host", "device"])
+def test_window_memory_source_roundtrip(source):
+    base = ir.Var("table", ir.PtrType(), ir.Span.unknown())
+    window = ir.WindowBuffer(base, ir.ConstInt(256, DataType.INT64, ir.Span.unknown()), memory_source=source)
+    assert window.memory_source == source
+    restored = ir.deserialize(ir.serialize(window))
+    ir.assert_structural_equal(window, restored, enable_auto_mapping=True)
+
+
+def test_host_and_device_windows_have_separate_domains():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[64], pl.FP32]) -> pld.DistributedTensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            h = pld.alloc_window_buffer([64], dtype=pl.FP32, memory_source="host")
+            d = pld.alloc_window_buffer(256)
+            h2 = pld.alloc_window_buffer(256, memory_source="host")
+            ht = pld.window(h, [64], dtype=pl.FP32)
+            dt = pld.window(d, [64], dtype=pl.FP32)
+            ht2 = pld.window(h2, [64], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip(ht, device=r)
+                self.chip(dt, device=r)
+                self.chip(ht2, device=r)
+            return ht
+
+    after = _apply(Before)
+    scope = _get_func(after, "host").body
+    assert isinstance(scope, ir.CommDomainScopeStmt)
+    assert [slot.memory_source for slot in scope.slots] == ["host", "host"]
+    assert list(scope.engines) == ["urma"]
+    assert isinstance(scope.body, ir.CommDomainScopeStmt)
+    assert [slot.memory_source for slot in scope.body.slots] == ["device"]
+    assert list(scope.body.engines) == []
+    ir.assert_structural_equal(after, passes.materialize_comm_domain_scopes()(after))
+    restored = pl.parse(ir.python_print(after))
+    ir.assert_structural_equal(after, restored)
+    assert ir.structural_hash(after) == ir.structural_hash(restored)
+
+
+@pytest.mark.parametrize("source", ["cpu", "HOST", "", 1])
+def test_invalid_window_memory_source(source):
+    with pytest.raises((ValueError, TypeError), match="memory_source"):
+        dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -346,7 +346,7 @@ class TypeResolver:
             )
         fields: dict[str, ast.expr] = dict(zip(("key", "base", "size"), node.args))
         for keyword in node.keywords:
-            if keyword.arg not in {"key", "base", "size", "load_from_host", "store_to_host"}:
+            if keyword.arg not in {"key", "base", "size", "load_from_host", "store_to_host", "memory_source"}:
                 raise ParserTypeError("Unknown window_buffer keyword", span=self._get_span(keyword))
             if keyword.arg in fields:
                 raise ParserTypeError(
@@ -413,7 +413,12 @@ class TypeResolver:
         if _is_pl_yield_call(size_node):
             raise ParserTypeError("window_buffer size cannot contain pl.yield_()", span=span)
         size = self._parse_expression(size_node)
-        window = ir.WindowBuffer(base, size, flags["load_from_host"], flags["store_to_host"], span)
+        source_node = fields.get("memory_source", ast.Constant(value="device"))
+        if not isinstance(source_node, ast.Constant) or source_node.value not in ("device", "host"):
+            raise ParserTypeError("window_buffer memory_source must be 'device' or 'host'", span=span)
+        window = ir.WindowBuffer(
+            base, size, flags["load_from_host"], flags["store_to_host"], span, source_node.value
+        )
         self._window_buffers[identifier] = (signature, window)
         return window
 

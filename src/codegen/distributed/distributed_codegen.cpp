@@ -590,10 +590,26 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     window_size_expr << "(" << slot_alloc_nbytes[i] << ")";
   }
 
+  if (op->slots_.front()->memory_source_ == "host") {
+    emitter_.EmitLine("from pypto.runtime.distributed_runner import validate_host_domain_runtime");
+    emitter_.EmitLine("validate_host_domain_runtime(orch)");
+    emitter_.EmitLine("from simpler.task_interface import AddressSpace");
+  }
   emitter_.EmitLine("with (_domain_provider or orch.allocate_domain)(");
   emitter_.IncreaseIndent();
   emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
   emitter_.EmitLine("workers=" + workers.str() + ",");
+  const auto& memory_source = op->slots_.front()->memory_source_;
+  for (const auto& slot : op->slots_) {
+    CHECK_SPAN(slot->memory_source_ == memory_source, op->span_)
+        << "CommDomain slots must have the same memory_source";
+  }
+  if (memory_source == "host") {
+    emitter_.EmitLine("memory_source=AddressSpace.HOST,");
+    INTERNAL_CHECK_SPAN(std::find(op->engines_.begin(), op->engines_.end(), "urma") != op->engines_.end(),
+                        op->span_)
+        << "Internal error: Host communication domain is missing its URMA engine requirement";
+  }
   emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
   if (!op->engines_.empty()) {
     std::ostringstream engines;
@@ -1785,6 +1801,9 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
   INTERNAL_CHECK_SPAN(window_buffer.has_value(), get_ctx->span_)
       << "pld.system.get_comm_ctx host lowering requires a window-bound DistributedTensor";
   const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(*window_buffer));
+  if ((*window_buffer)->memory_source_ == "host") {
+    return handle_var + ".device_context(" + rank_expr + ", workspace_engines=(\"urma\",))";
+  }
   return handle_var + "[" + rank_expr + "].device_ctx";
 }
 

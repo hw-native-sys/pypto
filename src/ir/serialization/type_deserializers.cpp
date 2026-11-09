@@ -1344,7 +1344,9 @@ static IRNodePtr DeserializeWindowBuffer(const msgpack::object& fields_obj, msgp
   auto size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("size"), zone));
   bool load_from_host = GET_FIELD(bool, "load_from_host");
   bool store_to_host = GET_FIELD(bool, "store_to_host");
-  return std::make_shared<WindowBuffer>(base, size, load_from_host, store_to_host, span);
+  return std::make_shared<WindowBuffer>(
+      base, size, load_from_host, store_to_host, span,
+      ctx.HasField(fields_obj, "memory_source") ? GET_FIELD(std::string, "memory_source") : "device");
 }
 
 // Deserialize MakeTuple

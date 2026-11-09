@@ -173,3 +173,25 @@ pass 运行之后：
 - DSL：[`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py)、
   [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py)、
   [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py)。
+
+## Host DDR 窗口
+
+`pld.alloc_window_buffer(size, memory_source="host")` 选择 Host DDR 存储；
+默认值仍为 `"device"`。shape/dtype 重载也接受此关键字。
+`WindowBuffer.memory_source` 在克隆、序列化和私有 `window_buffer` 文本描述符中保留。
+通信域按设备覆盖范围和内存来源共同分组：Host 与 Device 分配不共享物理通信域。
+
+Host 代码生成向 Simpler 请求 `AddressSpace.HOST` 和 `workspace_engines=("urma",)`，
+并获取带 URMA 工作区的各 rank 通信上下文。这要求 Simpler #2913 或更新版本，以及其支持的
+同机 A5 `tensormap_and_ringbuffer` 配置。旧运行时在分配前报错；平台和运行时组合由
+Simpler 校验。当前 runtime 子模块已提供此 API。
+
+所属 rank 可以通过设备映射的 tensor 进行本地访问。Host peer 窗口不是 MTE 映射，
+远端访问必须走 URMA。现有 peer-MTE 原语和集合通信在远端操作数来自 Host 窗口时会被拒绝，
+包括通过 chip/InCore 参数转发的情况。URMA 异步算子不被归类为 peer MTE。
+Host URMA 执行接入和 Engram 初始化属于后续工作，构建 Host 域并不提供这两项功能。
+
+持久执行（persistent execution）的复用校验包含内存来源和工作区引擎。
+Host 域当前要求 `reset_persistent_windows=False`，因为自动重置路径使用 Device H2D 拷贝。
+此选项作用于整个 worker：同一 worker 中的 Device scratch/signal 窗口需要程序按需初始化。
+通信域仍由 Simpler 负责释放。
