@@ -1014,24 +1014,42 @@ def test_graph_producer_tracks_tensor_identity_despite_local_task_id(dependency,
 
 
 def test_plain_graph_local_task_id_assignment_does_not_export_a_task_id():
-    source = (
-        _SCOPE_HEAD
-        + f"""
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, rc: pl.Out[{_INT32_T}]) -> {_INT32_T}:
-        with pl.manual_scope():
-            ready = pl.system.task_dummy(deps=[])
-            with pl.graph("recording") as done:
-                rc = self.gate(rc)
-                inner = pl.system.task_dummy(deps=[])
-                ready = inner
-            pl.system.task_dummy(deps=[ready, done])
-        return rc
-"""
-    )
-    program = passes.outline_graph_scopes()(passes.convert_to_ssa()(pl.parse_program(source)))
-    graph = next(f for f in program.functions.values() if f.func_type == ir.FunctionType.Graph)
-    assert all(isinstance(t, ir.TensorType) for t in graph.return_types)
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.manual_scope():
+                ready = pl.system.task_dummy(deps=[])
+                with pl.graph("recording") as done:
+                    out = pl.add(x, x)
+                    inner = pl.system.task_dummy(deps=[])
+                    ready = inner
+                    pl.system.task_dummy(deps=[ready])
+                pl.system.task_dummy(deps=[ready, done])
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Graph)
+        def recording(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.add(x, x)
+            inner = pl.system.task_dummy(deps=[])
+            recorded_ready = inner
+            pl.system.task_dummy(deps=[recorded_ready])
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.manual_scope():
+                outer_ready = pl.system.task_dummy(deps=[])
+                submission = pl.submit(self.recording, x)
+                result = submission[0]
+                completed = submission[1]
+                pl.system.task_dummy(deps=[outer_ready, completed])
+            return result
+
+    After = passes.outline_graph_scopes()(passes.convert_to_ssa()(Before))
+    ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":
