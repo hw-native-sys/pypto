@@ -336,9 +336,10 @@ def test_runtime_core_num_launch_width_is_the_admitted_width(tmp_path):
     # LegalizeSpmdLaunches owns the non-positive case; it emits the comparison
     # with the constant on the left.
     assert re.search(rf"if \(\(?0 < {re.escape(blocks)}\)", source), source
-    # The empty path preserves the result, which for this kernel is the
-    # preallocated InOut ``target`` the launch would have returned.
-    assert re.search(r"\} else \{\s*SIMPLER_SCOPE\(\) \{\s*\w+ = ext_data;\s*\}\s*\}", source), source
+    # The lowered return references the writeback param directly
+    # (ReturnParamsExplicit), so the empty path has nothing to rebind.
+    assert re.search(r"\} else \{\s*SIMPLER_SCOPE\(\) \{\s*\}\s*\}", source), source
+    assert "a2av_result_" not in source, source
     assert "rt_available_aiv_count" not in source, source
 
 

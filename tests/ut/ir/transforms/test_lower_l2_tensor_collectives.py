@@ -879,6 +879,72 @@ def test_call_valued_core_num_is_bound_once():
     passes.legalize_spmd_launches()(after)
 
 
+def _build_compound_call_valued_width():
+    """A CHIP pipeline whose ``core_num`` is arithmetic over a scalar call."""
+
+    @pl.program
+    class CompoundCallWidth:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 4], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+            return pld.tensor.all_to_all_v(
+                stage,
+                data,
+                signal,
+                counts,
+                recv,
+                core_num=n + pl.system.available_aiv_count(),
+            )
+
+    return CompoundCallWidth
+
+
+def test_compound_call_valued_core_num_hoists_the_call():
+    """``core_num = n + call()`` must bind the call out of the arithmetic.
+
+    Binding the whole ``Add`` would leave the Call nested in the assignment RHS:
+    ``LegalizeSpmdLaunches``'s ``NoNestedCalls`` prerequisite rejects it and
+    expression codegen cannot render it. Every Call subexpression is hoisted
+    first, in source order, and evaluated exactly once.
+    """
+    after = passes.lower_l2_tensor_collectives()(_build_compound_call_valued_width())
+    pipeline = _get_func(after, "chip_pipeline")
+    assert pipeline is not None
+    calls = [c.op.name for c in _collect_calls(pipeline.body)]
+    assert calls.count(_AVAILABLE_AIV_COUNT) == 1, calls
+    width = _kernel_call(after).attrs["core_num"]
+    assert isinstance(width, ir.Var), width
+    assert width.name_hint.startswith("a2av_blocks_"), width.name_hint
+
+    nested: list[ir.Call] = []
+
+    class _NoNestedCall(ir.IRVisitor):
+        def visit_binary_expr(self, op: ir.BinaryExpr) -> None:
+            nested.extend(o for o in (op.left, op.right) if isinstance(o, ir.Call))
+            super().visit_binary_expr(op)
+
+        def visit_unary_expr(self, op: ir.UnaryExpr) -> None:
+            if isinstance(op.operand, ir.Call):
+                nested.append(op.operand)
+            super().visit_unary_expr(op)
+
+        def visit_call(self, op: ir.Call) -> None:
+            nested.extend(a for a in op.args if isinstance(a, ir.Call))
+            super().visit_call(op)
+
+    _NoNestedCall().visit_stmt(pipeline.body)
+    assert not nested, [c.op.name for c in nested]
+    # End-to-end gate: the launch legalizer requires NoNestedCalls.
+    passes.legalize_spmd_launches()(after)
+
+
 def test_literal_core_num_needs_no_runtime_prelude():
     """A literal request folds ``B`` at compile time and emits no rank read.
 
@@ -1172,8 +1238,10 @@ def test_collective_in_a_manual_scope_still_lowers():
             n: pl.Scalar[pl.INDEX],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
             with pl.manual_scope():
-                out = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n)
-            return out
+                pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=n)
+            # Return the writeback param directly (ReturnParamsExplicit); the
+            # collective still writes it inside the manual scope.
+            return data
 
     after = passes.lower_l2_tensor_collectives()(InManualScope)
     pipeline = _get_func(after, "chip_pipeline")
