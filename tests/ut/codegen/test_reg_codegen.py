@@ -1253,10 +1253,6 @@ class RegisterCache:
         pto_backend._compile_pto_module(source, "register_cache", str(tmp_path), planner)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("rounding", ["R", "A", "Z"])
 @pytest.mark.parametrize("saturate", [False, True])
@@ -1281,3 +1277,7 @@ def test_fp32_to_fp8_register_conversion_preserves_compact_bytes(tmp_path, round
         source = generate(passes.init_mem_ref()(ir.Program([f.get_result()], "FP8Publish", SPAN)))
     assert "!pto.vmi.vreg<64xf8E4M3FN>" in source
     compile_review_pto(source, tmp_path)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

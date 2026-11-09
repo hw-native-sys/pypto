@@ -3544,19 +3544,103 @@ def test_constexpr_branch_discards_incompatible_dead_tile_store(mode):
     _specialized_function(ctx, source)
 
 
-def test_runtime_condition_remains_an_ir_branch():
-    tree = ast.parse("if count == 2:\n    x = 1\nelse:\n    x = 3\n")
-    transformed = BodyTransformer({}, set(), param_names=["count"]).visit(tree)
-    assert any(isinstance(node, ast.If) for node in ast.walk(transformed))
+_BRANCH_COUNT = 2
+
+
+@pl.jit
+def _runtime_branch(x: pl.Tensor[[8, 256], pl.UINT8], _BRANCH_COUNT: pl.Scalar[pl.INT32]):
+    if _BRANCH_COUNT == 2:
+        _ = x
+    return x
+
+
+def test_runtime_condition_shadows_a_global_constant():
+    source = str(_runtime_branch.specialize())
+    assert any("_BRANCH_COUNT" in line for line in source.splitlines() if line.lstrip().startswith("if "))
 
 
 @pytest.mark.parametrize("mode", [False, True])
 def test_constexpr_branch_rebinding_survives_specialization(mode):
-    source = "def select():\n    x = 1\n    if MODE:\n        x = 2\n    return x\n"
-    tree = BodyTransformer({}, set(), constexpr_values={"MODE": str(mode)}).visit(ast.parse(source))
-    namespace: dict[str, Any] = {}
-    exec(compile(ast.fix_missing_locations(tree), "<specialized>", "exec"), namespace)
-    assert namespace["select"]() == (2 if mode else 1)
+    ctx = _make_ctx(
+        "select",
+        "def select(MODE: pl.constexpr):\n    x = 1\n    if MODE:\n        x = 2\n    return x\n",
+        func_type="inline",
+        param_names=["MODE"],
+    )
+    ctx.constexpr_values = {"MODE": str(mode)}
+    source = specialize("_TestClass", [ctx])
+    assert "if " not in source
+    assert ("x = 2" in source or "x_v1 = 2" in source) == mode
+
+
+@pl.jit.inline
+def _constexpr_width_pick(
+    wide: pl.Tensor[[8, 512], pl.UINT8],
+    narrow: pl.Tensor[[8, 256], pl.UINT8],
+    MODE: pl.constexpr,
+):
+    if MODE == 2:
+        return wide
+    else:
+        return narrow
+
+
+def test_constexpr_return_type_follows_active_branch():
+    program = _constexpr_width_pick.specialize(MODE=0)
+    assert "-> pl.Tensor[[8, 256], pl.UINT8]:" in str(program)
+
+
+@pl.jit.inline
+def _constexpr_branch_helper(x: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+    if MODE:
+        return x
+    else:
+        return x
+
+
+@pl.jit
+def _constexpr_helper_caller(x: pl.Tensor[[8, 256], pl.UINT8], n: pl.Scalar[pl.INT32], MODE: pl.constexpr):
+    if MODE + 1 == 3 and n > 0:
+        _ = _constexpr_branch_helper(x, n)
+    return x
+
+
+def test_constexpr_dead_helper_is_not_bound_or_emitted():
+    program = _constexpr_helper_caller.specialize(MODE=0)
+    assert program.get_function("_constexpr_branch_helper") is None
+    with pytest.raises(TypeError, match="no compile-time value"):
+        _constexpr_helper_caller.specialize(MODE=2)
+
+
+@pl.jit
+def _constexpr_signed_caller(x: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+    if MODE < 0 and -MODE >= 0.5:
+        return _constexpr_branch_helper(x, -(-MODE))
+    else:
+        return x
+
+
+@pytest.mark.parametrize("mode", [-1, -0.5])
+def test_signed_constexpr_is_shared_by_condition_and_helper_binding(mode):
+    program = _constexpr_signed_caller.specialize(MODE=mode)
+    helper = program.get_function("_constexpr_branch_helper")
+    assert helper is not None
+    assert "if " not in str(program)
+
+
+@pl.jit
+def _constexpr_helper_variants(x: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+    if MODE == 2:
+        x = _constexpr_branch_helper(x, 2)
+    x = _constexpr_branch_helper(x, 0)
+    return _constexpr_branch_helper(x, -1)
+
+
+def test_constexpr_pruning_preserves_active_helper_call_order():
+    source = _constexpr_helper_variants.specialize(MODE=0).as_python()
+    assert source.count("def _constexpr_branch_helper") == 2
+    assert "self._constexpr_branch_helper(x)" in source
+    assert "return self._constexpr_branch_helper__2(" in source
 
 
 if __name__ == "__main__":

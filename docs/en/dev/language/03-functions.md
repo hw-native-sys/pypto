@@ -92,11 +92,13 @@ constant-tracking mechanism. Persistent reuse additionally requires the full
 
 ### Constant conditions in JIT specialization
 
-After substituting `pl.constexpr` values, JIT resolves Boolean and numeric
-literals, negations of known conditions, and comparisons between primitive
-literals before IR parsing. It parses only the selected branch, so the inactive
-branch can use different Tile shapes or dtypes. Runtime-dependent conditions
-remain IR control flow. This step does not execute Python calls.
+JIT evaluates supported constant expressions over `pl.constexpr` parameters
+and unshadowed primitive constants. These include signed literals, arithmetic,
+comparisons, and short-circuit Boolean operators. Only the selected branch
+participates in helper argument binding, return-type inference, and IR parsing.
+An inactive branch can therefore use different Tile shapes or dtypes.
+Runtime-dependent conditions remain IR control flow. Branch selection does not
+execute Python calls.
 
 ### Dynamic dimension metadata
 
