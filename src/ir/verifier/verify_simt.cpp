@@ -123,6 +123,13 @@ class SimtChecker : public IRVisitor {
     if (helper_ && !stmt->value_.empty()) Error("SIMT helpers must return void", stmt->span_);
     IRVisitor::VisitStmt_(stmt);
   }
+  void VisitStmt_(const SimtScopeStmtPtr& stmt) override {
+    if (function_->func_type_ != FunctionType::AIV || helper_ || register_scope_depth_ != 0) {
+      Error("simt_scope requires an AIV caller outside SIMT/register regions", stmt->span_);
+    }
+    // The body is a distinct execution domain. OutlineSimtScopes resolves its
+    // captures and applies this verifier to the resulting canonical helper.
+  }
   void VisitStmt_(const RegScopeStmtPtr& stmt) override {
     ++register_scope_depth_;
     IRVisitor::VisitStmt_(stmt);

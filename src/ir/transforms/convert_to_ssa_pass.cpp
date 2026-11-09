@@ -446,6 +446,7 @@ class SSAConverter {
   StmtPtr ConvertStmt(const StmtPtr& s) {
     if (!s) return s;
     auto kind = s->GetKind();
+    CHECK_SPAN(kind != ObjectKind::SimtScopeStmt, s->span_) << "Run OutlineSimtScopes before ConvertToSSA";
     if (kind == ObjectKind::AssignStmt) return ConvertAssign(As<AssignStmt>(s));
     if (kind == ObjectKind::SeqStmts) return ConvertSeq(As<SeqStmts>(s));
     if (kind == ObjectKind::ForStmt) return ConvertFor(As<ForStmt>(s));

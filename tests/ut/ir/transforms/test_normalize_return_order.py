@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
 
 
 def _run_normalize(program):
@@ -92,9 +92,9 @@ class TestNormalizeReturnOrder:
                 out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
             ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 ret: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = self.kernel(x, out_a, out_b)
-                a: pl.Tensor[[16], pl.FP32] = ret[1]
-                b: pl.Tensor[[16], pl.FP32] = ret[0]
-                return (a, b)
+                a: pl.Tensor[[16], pl.FP32] = ret[1]  # noqa: F841
+                b: pl.Tensor[[16], pl.FP32] = ret[0]  # noqa: F841
+                return (out_b, out_a)
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
@@ -155,9 +155,9 @@ class TestNormalizeReturnOrder:
                 out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
             ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 ret: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = self.kernel(x, out_a, out_b)
-                a: pl.Tensor[[16], pl.FP32] = ret[0]
-                b: pl.Tensor[[16], pl.FP32] = ret[1]
-                return (a, b)
+                a: pl.Tensor[[16], pl.FP32] = ret[0]  # noqa: F841
+                b: pl.Tensor[[16], pl.FP32] = ret[1]  # noqa: F841
+                return (out_a, out_b)
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
@@ -284,8 +284,8 @@ class TestNormalizeReturnOrder:
                 x: pl.Tensor[[16], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[16], pl.FP32]],
             ) -> pl.Tensor[[16], pl.FP32]:
-                result: pl.Tensor[[16], pl.FP32] = self.kernel(x, out_0)
-                return result
+                result: pl.Tensor[[16], pl.FP32] = self.kernel(x, out_0)  # noqa: F841
+                return out_0
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
@@ -371,10 +371,10 @@ class TestNormalizeReturnOrder:
                 ret: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = (
                     self.kernel(x, out_a, out_b, out_c)
                 )
-                c: pl.Tensor[[16], pl.FP32] = ret[2]
-                a: pl.Tensor[[16], pl.FP32] = ret[0]
-                b: pl.Tensor[[16], pl.FP32] = ret[1]
-                return (c, a, b)
+                c: pl.Tensor[[16], pl.FP32] = ret[2]  # noqa: F841
+                a: pl.Tensor[[16], pl.FP32] = ret[0]  # noqa: F841
+                b: pl.Tensor[[16], pl.FP32] = ret[1]  # noqa: F841
+                return (out_c, out_a, out_b)
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
@@ -438,9 +438,9 @@ class TestNormalizeReturnOrder:
                 ret: tuple[pl.Tensor[[4, 16], pl.FP32], pl.Tensor[[4, 16], pl.FP32]] = self.kernel(
                     x, out_a, out_b
                 )
-                a: pl.Tensor[[4, 16], pl.FP32] = ret[1]
-                b: pl.Tensor[[4, 16], pl.FP32] = ret[0]
-                return (a, b)
+                a: pl.Tensor[[4, 16], pl.FP32] = ret[1]  # noqa: F841
+                b: pl.Tensor[[4, 16], pl.FP32] = ret[0]  # noqa: F841
+                return (out_b, out_a)
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
@@ -500,9 +500,9 @@ class TestNormalizeReturnOrder:
                 b: pl.InOut[pl.Tensor[[16], pl.FP32]],
             ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 ret: tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]] = self.kernel(x, a, b)
-                ra: pl.Tensor[[16], pl.FP32] = ret[1]
-                rb: pl.Tensor[[16], pl.FP32] = ret[0]
-                return (ra, rb)
+                ra: pl.Tensor[[16], pl.FP32] = ret[1]  # noqa: F841
+                rb: pl.Tensor[[16], pl.FP32] = ret[0]  # noqa: F841
+                return (b, a)
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
@@ -601,10 +601,10 @@ class TestNormalizeReturnOrderSubmit:
                     # (b, a) tuple-unpack would instead reorder the statements
                     # (b before a), which the in-place remap does not do.
                     _submit_tmp = pl.submit(self.kernel, x, out_a, out_b)
-                    a: pl.Tensor[[out_b_rows], pl.FP32] = _submit_tmp[1]
-                    b: pl.Tensor[[16], pl.FP32] = _submit_tmp[0]
+                    a: pl.Tensor[[out_b_rows], pl.FP32] = _submit_tmp[1]  # noqa: F841
+                    b: pl.Tensor[[16], pl.FP32] = _submit_tmp[0]  # noqa: F841
                     tid: pl.Scalar[pl.TASK_ID] = _submit_tmp[2]  # noqa: F841
-                return (a, b)
+                return (out_b, out_a)
 
         After = _run_normalize_direct(Before)
         ir.assert_structural_equal(After, Expected)
@@ -612,8 +612,8 @@ class TestNormalizeReturnOrderSubmit:
     def test_submit_already_ordered_noop(self):
         """A ``pl.submit`` of a kernel whose returns already match Out-param
         order needs no permutation → Step A produces no permutation, Step B
-        never fires, and the Submit-bearing caller is left untouched. The only
-        change is the kernel's returns being canonicalized to the param Vars.
+        never fires, and caller projections stay unchanged. Kernel and caller returns
+        are canonicalized to their corresponding parameter Vars.
         """
 
         @pl.program
@@ -668,7 +668,7 @@ class TestNormalizeReturnOrderSubmit:
             ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 with pl.manual_scope():
                     (a, b), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
-                return (a, b)
+                return (out_a, out_b)
 
         After = _run_normalize_direct(Before)
         ir.assert_structural_equal(After, Expected)
@@ -1040,6 +1040,28 @@ class {{name}}:
         assert len(values) == 1
         assert values[0] is params[1]
 
+    def test_orchestration_graph_return_references_output_param(self):
+        source = """@pl.program
+class StatefulGraph:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+              out: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        return state, out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, state: pl.InOut[pl.Tensor[[64], pl.FP32]],
+              out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        updated_state, result = self.graph(state, out)
+        return result
+"""
+        before = passes.convert_to_ssa()(pl.parse_program(source))
+        values, params = self._return_values(before, "entry")
+        assert all(values[0] is not p for p in params)
+        after = _run_normalize_direct(before)
+        values, params = self._return_values(after, "entry")
+        assert values[0] is params[1]
+
     def test_graph_returns_reference_their_params(self):
         """A Graph is a callee whose returns codegen aliases, so it needs the form too.
 
@@ -1087,6 +1109,521 @@ class {{name}}:
         # Getting this backwards is exactly the #2601 mis-binding.
         assert values[0] is params[2]
         assert values[1] is params[1]
+
+
+@pytest.mark.parametrize(
+    ("op_name", "result_index"),
+    [
+        ("pld.tensor.allreduce", 0),
+        ("builtin.tensor.allreduce", 0),
+        ("builtin.tensor.allreduce_ring", 0),
+        ("pld.tensor.barrier", 0),
+        ("builtin.tensor.barrier", 0),
+        ("pld.tensor.broadcast", 0),
+        ("builtin.tensor.broadcast", 0),
+        ("pld.tensor.reduce_scatter", 0),
+        ("builtin.tensor.reduce_scatter", 0),
+        ("pld.tensor.allgather", 1),
+        ("builtin.tensor.allgather", 1),
+        ("pld.tensor.all_to_all", 1),
+        ("builtin.tensor.all_to_all", 1),
+        ("pld.tensor.all_to_all_v", 1),
+        ("builtin.tensor.all_to_all_v", 1),
+        ("pld.tensor.indexed_all_to_all_v", 1),
+    ],
+)
+def test_collective_logical_result_is_explicit_before_lowering(op_name, result_index):
+    """Preserve the same logical result storage before and after normalization.
+
+    result_index is 0 for in-place collectives and 1 when the first local
+    operand is read-only. Local/count/index metadata keeps explicit read-only
+    directions; auxiliary signal and workspace operands are not result slots.
+    """
+    from pypto.pypto_core import ir as core_ir  # noqa: PLC0415
+
+    span = ir.Span.unknown()
+
+    def tensor(name, shape, dtype=pl.FP32):
+        return ir.Var(name, ir.DistributedTensorType(shape, dtype), span)
+
+    kind = op_name.rsplit(".", 1)[-1]
+    kwargs: dict[str, int | str | DataType] = {}
+    args: list[ir.Expr]
+    if kind == "barrier":
+        args = [tensor("signal", [2], pl.INT32)]
+    elif kind in ("allreduce", "allreduce_ring"):
+        shape = [3, 2] if kind == "allreduce_ring" else [2]
+        args = [tensor("data", [2, 16]), tensor("signal", shape, pl.INT32)]
+        kwargs = {"op": int(ir.ReduceOp.Sum)}
+        if kind != "allreduce_ring":
+            kwargs["core_num"] = 1
+        if op_name == "pld.tensor.allreduce":
+            kwargs["mode"] = "mesh"
+    elif kind in ("broadcast", "reduce_scatter"):
+        args = [tensor("data", [2, 16]), tensor("signal", [2], pl.INT32)]
+        kwargs = {"root": 0} if kind == "broadcast" else {"op": int(ir.ReduceOp.Sum)}
+    elif kind in ("allgather", "all_to_all"):
+        rows = 1 if kind == "allgather" else 2
+        args = [
+            tensor("local", [rows, 16]),
+            tensor("target", [2, 16]),
+            tensor("signal", [2], pl.INT32),
+        ]
+    else:
+        args = [
+            tensor("local", [8, 16]),
+            tensor("target", [8, 16]),
+            tensor("signal", [2, 1], pl.INT32),
+            tensor("counts", [2, 1], pl.INT32),
+            tensor("received", [2, 1], pl.INT32),
+        ]
+        if kind == "indexed_all_to_all_v":
+            args.insert(5, ir.Var("indices", ir.TensorType([2, 4], pl.INT32), span))
+        args.append(ir.ConstInt(1, pl.INDEX, span))
+    if op_name.startswith("builtin."):
+        kwargs["dtype"] = pl.FP32
+        call = core_ir._create_internal_op_call(op_name, args, kwargs, span)
+        readonly = {0} if result_index == 1 else set()
+        if kind in ("all_to_all_v", "indexed_all_to_all_v"):
+            readonly.add(3)
+        if kind == "indexed_all_to_all_v":
+            readonly.add(5)
+        directions = [
+            ir.ArgDirection.Scalar
+            if isinstance(arg.type, ir.ScalarType)
+            else ir.ArgDirection.Input
+            if index in readonly
+            else ir.ArgDirection.InOut
+            for index, arg in enumerate(args)
+        ]
+        call = ir.set_call_attrs(call, {"device": 0, "arg_directions": directions})
+    else:
+        call = ir.create_op_call(op_name, args, kwargs, span)
+    params = [arg for arg in args if isinstance(arg, ir.Var)]
+    result = ir.Var("result", call.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(result, call, span), ir.ReturnStmt([result], span)], span)
+    function = ir.Function(
+        "main",
+        [(param, ir.ParamDirection.InOut) for param in params],
+        [call.type],
+        body,
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    before = ir.Program([function], "LogicalCollectiveResult", span)
+    assert ir.returned_param_indices(function, before) == [result_index]
+    after = _run_normalize_direct(before)
+    normalized = after.get_function("main")
+    assert normalized is not None
+    assert ir.returned_param_indices(normalized, after) == [result_index]
+    assert isinstance(normalized.body, ir.SeqStmts)
+    returned = normalized.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    assert returned.value[0] is normalized.params[result_index]
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.ReturnParamsExplicit)
+    assert not passes.PropertyVerifierRegistry.verify(props, after)
+
+
+@pytest.mark.parametrize("effect", ["put", "get", "notify"])
+def test_side_effect_only_distributed_ops_do_not_invent_tensor_results(effect):
+    from pypto.ir.op.distributed import system_ops, tensor_ops  # noqa: PLC0415
+
+    span = ir.Span.unknown()
+    tensor_type = ir.DistributedTensorType([2, 16], pl.FP32)
+    source = ir.Var("source", tensor_type, span)
+    target = ir.Var("target", tensor_type, span)
+    signal = ir.Var("signal", ir.DistributedTensorType([2, 1], pl.INT32), span)
+    if effect == "notify":
+        call = system_ops.notify(signal, 0, [0, 0], 1, ir.NotifyOp.Set, span=span)
+    else:
+        call = getattr(tensor_ops, effect)(target, 0, source, span=span)
+    assert isinstance(call.type, ir.UnknownType)
+    function = ir.Function(
+        "main",
+        [(param, ir.ParamDirection.InOut) for param in [source, target, signal]],
+        [],
+        ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([], span)], span),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    before = ir.Program([function], "SideEffectOnly", span)
+    assert ir.returned_param_indices(function, before) == []
+    after = _run_normalize_direct(before)
+    ir.assert_structural_equal(after, before)
+
+
+@pytest.mark.parametrize("loop_kind", ["for", "while"])
+@pytest.mark.parametrize("rebind", [False, True])
+@pytest.mark.parametrize("trip_count", [0, 2])
+def test_orchestration_loop_return_requires_preserved_buffer(loop_kind, rebind, trip_count):
+    import torch  # noqa: PLC0415
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    body = (
+        f"for i, (value,) in pl.range({trip_count}, init_values=(a,)):\n"
+        if loop_kind == "for"
+        else f"for i, value in pl.while_(init_values=(0, a)):\n            pl.cond(i < {trip_count})\n"
+    )
+    yielded = "b" if rebind else "value"
+    body += (
+        f"            value = pl.yield_({yielded})\n"
+        if loop_kind == "for"
+        else f"            i, value = pl.yield_(i + 1, {yielded})\n"
+    )
+    source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+        {body}
+        return value
+"""
+    before = passes.convert_to_ssa()(pl.parse_program(source))
+    after = _run_normalize_direct(before)
+    values = [torch.full((4,), x) for x in (1.0, 2.0)]
+    namespace = {}
+    exec(torch_codegen(after), namespace)  # noqa: S102
+    torch.testing.assert_close(namespace["main"](*values), values[1 if rebind and trip_count else 0])
+
+
+@pytest.mark.parametrize("count", [16, 128])
+def test_orchestration_chained_preserved_carries_share_lineage_cache(count):
+    statements = ["value = a"]
+    for i in range(count):
+        statements.extend(
+            [
+                f"for i{i}, (carry{i},) in pl.range(1, init_values=(value,)):",
+                f"    value = pl.yield_(carry{i})",
+            ]
+        )
+    body = "\n        ".join(statements)
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+        {body}
+        return value
+""")
+    normalized = _run_normalize_direct(passes.convert_to_ssa()(program))
+    function = normalized.get_function("main")
+    assert function is not None
+    assert ir.returned_param_indices(function, normalized) == [0]
+
+
+def test_orchestration_rebinding_mutual_carries_do_not_leak_proof_roots():
+    import torch  # noqa: PLC0415
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
+        ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+            for i, (left, right) in pl.range(3, init_values=(a, b)):
+                result_left, result_right = pl.yield_(right, left)
+            return result_left, result_right
+
+    normalized = _run_normalize_direct(passes.convert_to_ssa()(Program))
+    values = [torch.full((4,), x) for x in (1.0, 2.0)]
+    namespace = {}
+    exec(torch_codegen(normalized), namespace)  # noqa: S102
+    left, right = namespace["main"](*values)
+    torch.testing.assert_close(left, values[1])
+    torch.testing.assert_close(right, values[0])
+
+
+@pytest.mark.parametrize("count", [3, 16, 128])
+def test_orchestration_rotating_carries_keep_conditional_proofs_scoped(count):
+    import torch  # noqa: PLC0415
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    trip_count = 2 if count == 3 else 3
+    carries = [f"carry{i}" for i in range(count)]
+    results = [f"result{i}" for i in range(count)]
+    initial = ", ".join("a" if i % 2 == 0 else "b" for i in range(count))
+    returned_types = ", ".join("pl.Tensor[[4], pl.FP32]" for _ in range(count))
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> tuple[{returned_types}]:
+        for i, ({", ".join(carries)}) in pl.range({trip_count}, init_values=({initial})):
+            {", ".join(results)} = pl.yield_({", ".join(carries[1:] + carries[:1])})
+        return {", ".join(results)}
+""")
+    normalized = _run_normalize_direct(passes.convert_to_ssa()(program))
+    values = [torch.full((4,), x) for x in (1.0, 2.0)]
+    namespace = {}
+    exec(torch_codegen(normalized), namespace)  # noqa: S102
+    returned = namespace["main"](*values)
+    for i, actual in enumerate(returned):
+        torch.testing.assert_close(actual, values[((i + trip_count) % count) % 2])
+
+
+@pytest.mark.parametrize("project_tensor", [False, True])
+def test_orchestration_submit_whole_tuple_keeps_completion_handle(project_tensor):
+    returned = "result[0]" if project_tensor else "result"
+    return_type = (
+        "pl.Tensor[[64], pl.FP32]"
+        if project_tensor
+        else "pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Scalar[pl.TASK_ID]]"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> {return_type}:
+        with pl.manual_scope():
+            result = pl.submit(self.kernel, out)
+            return {returned}
+""")
+    before = passes.convert_to_ssa()(program)
+    after = _run_normalize_direct(before)
+    main = after.get_function("main")
+    assert main is not None
+    scope = ir.flatten_to_stmts(main.body)[0]
+    assert isinstance(scope, ir.RuntimeScopeStmt)
+    ret = ir.flatten_to_stmts(scope.body)[-1]
+    assert isinstance(ret, ir.ReturnStmt)
+    if project_tensor:
+        assert ret.value[0] is main.params[0]
+    else:
+        ir.assert_structural_equal(after, before)
+        assert isinstance(ret.value[0].type, ir.TupleType)
+        completion_type = ret.value[0].type.types[-1]
+        assert isinstance(completion_type, ir.ScalarType)
+        assert completion_type.dtype == pl.TASK_ID
+
+
+def test_pipeline_unrolled_store_returns_stay_in_scope(tmp_path):
+    from pypto.backend import BackendType  # noqa: PLC0415
+
+    @pl.program
+    class Program:
+        @pl.function
+        def main(
+            self, source: pl.Tensor[[4, 16], pl.FP32], out: pl.Out[pl.Tensor[[4, 4, 16], pl.FP32]]
+        ) -> pl.Tensor[[4, 4, 16], pl.FP32]:
+            flat = pl.reshape(out, [4, 64])
+            for block in pl.spmd(1, name_hint="post"):
+                for row in pl.pipeline(4, stage=2):
+                    if row < 4:
+                        tile = pl.load(source, [row, 0], [1, 16], target_memory=pl.MemorySpace.Vec)
+                        for column in pl.unroll(4):
+                            flat = pl.store(tile, [row, column * 16], flat)
+            return out
+
+    ir.compile(
+        Program,
+        backend_type=BackendType.Ascend950,
+        output_dir=str(tmp_path),
+        skip_ptoas=True,
+        dump_passes=True,
+    )
+
+
+@pytest.mark.parametrize("different_buffer", [False, True])
+def test_device_branch_returns_require_writeback_consensus(different_buffer):
+    from pypto.pypto_core import ir as core_ir  # noqa: PLC0415
+
+    tail = "second" if different_buffer else "first"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self, first: pl.InOut[pl.Tensor[[64], pl.FP32]], second: pl.InOut[pl.Tensor[[64], pl.FP32]],
+        flag: pl.Scalar[pl.BOOL],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        if flag:
+            alias = first
+            return alias
+        return {tail}
+""")
+    kernel = program.get_function("kernel")
+    assert kernel is not None
+    # Split-core branches may share one writeback buffer. Disagreeing branches
+    # must stay unknown instead of selecting the first encountered return.
+    assert core_ir.returned_param_indices(kernel, program) == ([None] if different_buffer else [0])
+
+
+def test_rejected_carries_keep_independent_shared_proofs_reusable():
+    """Rejecting N carries must not re-prove their shared N-loop prefix N times."""
+    from time import thread_time  # noqa: PLC0415
+
+    from pypto.pypto_core import ir as core_ir  # noqa: PLC0415
+
+    def make_program(count):
+        statements = ["shared = a"]
+        for i in range(count):
+            statements.extend(
+                [
+                    f"for step{i}, (kept{i},) in pl.range(1, init_values=(shared,)):",
+                    f"    shared = pl.yield_(kept{i})",
+                ]
+            )
+        prefix = "\n        ".join(statements)
+        carries = ", ".join(f"carry{i}" for i in range(count))
+        results = ", ".join(f"result{i}" for i in range(count))
+        initial = ", ".join(["a"] * count)
+        yielded = ", ".join(["merged"] * count)
+        types = ", ".join(["pl.Tensor[[4], pl.FP32]"] * count)
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32],
+             flag: pl.Scalar[pl.BOOL]) -> tuple[{types}]:
+        {prefix}
+        for outer, ({carries}) in pl.range(1, init_values=({initial})):
+            if flag:
+                merged = shared
+            else:
+                merged = b
+            {results} = pl.yield_({yielded})
+        return {results}
+""")
+        return passes.convert_to_ssa()(program)
+
+    def best_cpu_time(program, count):
+        function = program.get_function("main")
+        assert function is not None
+        best = float("inf")
+        for _ in range(3):
+            start = thread_time()
+            mapping = core_ir.returned_param_indices(function, program)
+            best = min(best, thread_time() - start)
+            assert mapping == [None] * count
+        return best
+
+    small = best_cpu_time(make_program(128), 128)
+    large = best_cpu_time(make_program(1024), 1024)
+    # Eight times the linear-sized IR allows generous CPU-timing headroom while
+    # distinguishing reuse from a quadratic traversal of the shared prefix.
+    assert large < 32 * small + 0.002, f"small={small:.6f}s, large={large:.6f}s"
+
+
+@pytest.mark.parametrize("trip_count", [1, 3])
+@pytest.mark.parametrize("flag", [False, True])
+def test_nested_carry_proofs_keep_all_observed_outer_assumptions(trip_count, flag):
+    import torch  # noqa: PLC0415
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32], flag: pl.Scalar[pl.BOOL]
+    ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+        for outer, (d, out) in pl.range({trip_count}, init_values=(a, a)):
+            for i, (x,) in pl.range(1, init_values=(a,)):
+                for j, (y,) in pl.range(1, init_values=(a,)):
+                    if flag:
+                        joined = x
+                    else:
+                        joined = d
+                    inner = pl.yield_(joined)
+                shared = pl.yield_(inner)
+            if flag:
+                final = shared
+            else:
+                final = b
+            result_d, result_out = pl.yield_(final, shared)
+        return result_d, result_out
+""")
+    before = passes.convert_to_ssa()(program)
+    after = _run_normalize_direct(before)
+    values = [torch.full((4,), value) for value in (1.0, 2.0)]
+    original, normalized = {}, {}
+    exec(torch_codegen(before), original)  # noqa: S102
+    exec(torch_codegen(after), normalized)  # noqa: S102
+    # The inner merge observes both its enclosing x and the outer d. Keeping
+    # only the deepest dependency would lose d when x discharges its own proof.
+    expected = original["main"](*values, flag)
+    actual = normalized["main"](*values, flag)
+    for result, golden in zip(actual, expected, strict=True):
+        torch.testing.assert_close(result, golden)
+
+
+def test_device_return_order_rewrites_all_return_paths():
+    def source(branch, tail):
+        return f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self, first: pl.InOut[pl.Tensor[[64], pl.FP32]], second: pl.InOut[pl.Tensor[[64], pl.FP32]],
+        flag: pl.Scalar[pl.BOOL],
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        if flag:
+            alias = second
+            return {branch}
+        return {tail}
+"""
+
+    before = pl.parse_program(source("alias, first", "second, first"))
+    expected = pl.parse_program(source("first, second", "first, second"))
+    ir.assert_structural_equal(_run_normalize_direct(before), expected)
+
+
+def test_orchestration_return_keeps_inline_tuple_producer():
+    program = pl.parse_program("""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(self, a: pl.Out[pl.Tensor[[64], pl.FP32]],
+              b: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        a = pl.tensor.assemble(a, b, [0])
+        return a, b
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Out[pl.Tensor[[64], pl.FP32]],
+             b: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        return self.graph(a, b)[0]
+""")
+    before = passes.convert_to_ssa()(program)
+    after = _run_normalize_direct(before)
+    original = before.get_function("main")
+    normalized = after.get_function("main")
+    assert original is not None and normalized is not None
+    ir.assert_structural_equal(normalized, original)
+
+
+def test_normalize_defers_reorder_for_inline_kernel_projection():
+    source = """
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, a: pl.Out[pl.Tensor[[64], pl.FP32]],
+               b: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        return b, a
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Out[pl.Tensor[[64], pl.FP32]],
+             b: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        return self.kernel(a, b)[0]
+"""
+    before = pl.parse_program(source)
+    ir.assert_structural_equal(_run_normalize_direct(before), before)
+
+    assigned = pl.parse_program(
+        source.replace("return self.kernel(a, b)[0]", "pair = self.kernel(a, b)\n        return pair[0]")
+    )
+    after = _run_normalize_direct(assigned)
+    kernel = after.get_function("kernel")
+    main = after.get_function("main")
+    assert kernel is not None and main is not None
+    assert ir.returned_param_indices(kernel, after) == [0, 1]
+    assert ir.returned_param_indices(main, after) == [1]
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ from typing import Any, cast, get_args, get_origin
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_RETURN_PARAMS_ATTR
 from pypto.language.parser.expr_evaluator import ExprEvaluator
+from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
 from pypto.language.typing.dynamic import DynVar as _LangDynVar
@@ -1755,6 +1756,60 @@ def _infer_return_type(
     return None
 
 
+def _implicit_entry_output_name(
+    func_def: ast.FunctionDef, func_type: str | None, out_params: list[str]
+) -> str | None:
+    """Name the legacy first-Out result only for a no-return CHIP entry."""
+    if func_type not in (None, "orchestration") or not out_params:
+        return None
+    if any(isinstance(node, ast.Return) for node in ast.walk(func_def)):
+        return None
+    if isinstance(func_def.returns, ast.Subscript) and _is_scalar_annotation(func_def.returns.value):
+        return None
+    return out_params[0]
+
+
+def _materialize_implicit_entry_output(
+    ctx: SpecializeContext,
+    func_def: ast.FunctionDef,
+    out_params: list[str],
+    ret_type: str | None,
+    distributed_params: set[str],
+    body: list[ast.stmt],
+) -> None:
+    """Make the legacy first-Out entry result explicit without rebinding it."""
+    implicit_out = _implicit_entry_output_name(func_def, ctx.func_type, out_params)
+    if implicit_out is None or implicit_out not in ctx.tensor_meta:
+        return
+    expected = _build_tensor_annotation(
+        ctx.tensor_meta[implicit_out], is_out=False, is_distributed=implicit_out in distributed_params
+    )
+    if ret_type != expected:
+        return
+    used_names = set(ctx.param_names) | {
+        node.id for stmt in body for node in ast.walk(stmt) if isinstance(node, ast.Name)
+    }
+    saved_base = "pypto_implicit_out"
+    saved_out = saved_base
+    suffix = 0
+    while saved_out in used_names:
+        suffix += 1
+        saved_out = f"{saved_base}{suffix}"
+    insertion_index = 1 if body and is_docstring_stmt(body[0]) else 0
+    while insertion_index < len(body) and is_pl_call(
+        getattr(body[insertion_index], "value", None), "func_attr"
+    ):
+        insertion_index += 1
+    body.insert(
+        insertion_index,
+        ast.Assign(
+            targets=[ast.Name(id=saved_out, ctx=ast.Store())],
+            value=ast.Name(id=implicit_out, ctx=ast.Load()),
+        ),
+    )
+    body.append(ast.Return(value=ast.Name(id=saved_out, ctx=ast.Load())))
+
+
 # ---------------------------------------------------------------------------
 # Annotation classifier: detect Out[], plain Tensor, Scalar params
 # ---------------------------------------------------------------------------
@@ -2355,6 +2410,8 @@ class Specializer:
             else:
                 flat_body.append(item)
 
+        _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
+
         if not flat_body:
             flat_body = [ast.Pass()]
 
@@ -2568,6 +2625,8 @@ class Specializer:
             return "@pl.function(type=pl.FunctionType.Opaque)"
         if ctx.func_type == "graph":
             return "@pl.function(type=pl.FunctionType.Graph)"
+        if ctx.func_type == "aiv":
+            return "@pl.function(type=pl.FunctionType.AIV)"
         # InCore
         if ctx.level is None:
             return "@pl.function(type=pl.FunctionType.InCore)"

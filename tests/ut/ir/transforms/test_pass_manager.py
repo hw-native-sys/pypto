@@ -25,6 +25,7 @@ TENSOR_ONLY_PASSES = [
 ]
 
 TENSOR_OPTIMIZATION_PASSES = [
+    "OutlineSimtScopes",
     "InlineFunctions",
     "UnrollLoops",
     "CtrlFlowTransform",

@@ -1,7 +1,46 @@
 # 标量 SIMT IR
 
-规范 SIMT IR 用一个无返回值的设备辅助函数和显式 launch 语句表达执行域，
-底层原语贴近 PTOAS。内联 `simt_scope` 语法及 outlining 属于独立的上层实现。
+在显式 `@pl.jit.aiv` 函数中使用 `pl.simt_scope`，让 SIMT 线程块执行标量代码。
+编译器将 region 降为下文的返回 void helper 与显式 launch 模型。
+
+## 公共编写入口
+
+```python
+import pypto.language as pl
+
+@pl.jit.aiv
+def copy_aiv(src: pl.Tensor[[1, 128], pl.FP32],
+             dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+             valid: pl.Scalar[pl.INT32]):
+    with pl.simt_scope(dims=(128, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < valid:
+            value = pl.simt.load(src, (0, tid))
+            pl.simt.store(dst, (0, tid), value)
+    return dst
+
+@pl.jit
+def copy(src: pl.Tensor[[1, 128], pl.FP32],
+         dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+         valid: pl.Scalar[pl.INT32]):
+    return copy_aiv(src, dst, valid)
+```
+
+`pl.simt.Axis` 与 `ir.SimtAxis` 是同一枚举。坐标查询必须传入类型化 axis，支持位置
+参数或 `axis=`；`lane_id()` 无参数。dims 是三个编译期正整数，描述线程维度，不分配
+元素或创建 grid；边界保护必须显式编写。GM Tensor 和 Vec/UB Tile 复用既有存储。
+初始 API 支持当前后端标量子集；lane 协作、原子和扩展数学仍属于后续里程碑。
+
+标量赋值属于线程私有绑定，包括对外层标量的遮蔽，scope 外不能读取私有值。store
+自动重新绑定外层存储句柄，每个可写捕获只产生一个结果。Tile 更新之前保存的别名
+保留旧值；Tensor 别名保持 GM 引用语义。`In` 权限通过视图传播，部分更新要求原内容
+已初始化。视图应在 region 外构造。拒绝 `as`、嵌套 region、存储分配/重新绑定、跨界
+跳转、VMI 捕获和手工资源上限。scope 可以放在外层循环及条件分支中。
+
+临时 `SimtScopeStmt` 直接继承 `Stmt`，具有 `block_dims`、`body` 字段，并通过
+`private_scalars` 标识被重新赋值的外层标量绑定。在绑定、打印、序列化和克隆过程中
+保留执行边界。[OutlineSimtScopes](../passes/01-outline_simt_scopes.md)
+在 SSA 前生成规范 helper/launch。显式命名 helper 和 `pl.simt.launch` 仍可用于规范 IR。
 
 ## 函数与 launch
 
@@ -35,7 +74,7 @@ updated_dst = pl.simt.launch(
 )
 ```
 
-文本 parser 可以读取该形式。这是 IR 往返格式；后续上层界面通过 outlining
+文本 parser 可以读取该形式。这是 IR 往返格式；上层界面通过 outlining
 推导输出映射。
 
 ## 标量操作
@@ -75,10 +114,10 @@ AIV 上，避免在不同核上重复执行。
 
 默认流水线现在会在内存规划前保留存储语义：
 
-- [MaterializeSimtOutputs](../passes/35-materialize_simt_outputs.md) 为每个
+- [MaterializeSimtOutputs](../passes/36-materialize_simt_outputs.md) 为每个
   可写 Tile 初始化独立副本。部分写入保留未触及元素，旧 Tile 值在分支和循环中
   仍可读取。
-- [SpecializeSimtHelpers](../passes/36-specialize_simt_helpers.md) 根据完整块
+- [SpecializeSimtHelpers](../passes/37-specialize_simt_helpers.md) 根据完整块
   维度、类型及布局和目标创建变体。动态元数据成为标量实参，分配地址不进入特化键。
 - GM 结果保留原 Tensor 标识。`simt.store` 使用独立于标量控制器和 DMA 存储的
   `Simt` 写通道。核函数参数方向以 InOut 传播到外层 Call 和 Submit，再由普通
@@ -108,4 +147,4 @@ Ascend950 的三个维度乘积不得超过 2,048，寄存器数量按以下规�
 规范 IR、验证、存储准备、内存规划集成、资源特化及 A5 可执行子集已实现。
 [SIMT lowering 与执行](../codegen/05-simt-lowering.md)说明 ABI、同步、支持类型
 和验收测试。独立的[原生 SIMT 探针](../codegen/04-simt-native-validation.md)
-保留此前 P0 ABI 测试。更高层的编写入口及 outlining 仍属于独立工作。
+保留此前 P0 ABI 测试。公共 scope 路径复用相同后端和 runtime 契约。

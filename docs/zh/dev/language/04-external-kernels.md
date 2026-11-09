@@ -214,3 +214,5 @@ JIT 对只有签名的单返回值声明仍使用已有的首个 `Out` 默认值
   `@pl.jit.extern` 还可以用上述单条参数 return 声明返回身份。
 - 一个 `Group` 必须全为外部 kernel 或全为 DSL kernel —— 不允许在同一 group 中混用外部
   与 DSL 成员。
+
+Provider/bridge 接口基线见[内部外部 kernel 契约](07-external-kernel-contract.md)。

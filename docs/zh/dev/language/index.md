@@ -18,3 +18,5 @@
 
 - [寄存器操作](06-register-operations.md)：P0 schema、隐式捕获、区域归属和 Builder 构造；
   VF 后端发射需要 PR3。
+
+- [内部外部 kernel 契约](07-external-kernel-contract.md)：v1 接口与 IR 语义原型。

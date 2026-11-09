@@ -140,6 +140,10 @@ std::string PTOCodegen::GenerateSimtFunction(const ir::FunctionPtr& function) {
          body.fs_.constants_section.str() + body.stream_.str() + "  }\n";
 }
 
+void PTOCodegen::VisitStmt_(const ir::SimtScopeStmtPtr& scope) {
+  CHECK_SPAN(false, scope->span_) << "Run OutlineSimtScopes before code generation";
+}
+
 void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& launch) {
   CHECK_SPAN(GetBackendHandler()->GetPtoTargetArch() == "a5", launch->span_)
       << "SIMT lowering requires the A5 backend";
