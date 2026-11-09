@@ -517,11 +517,13 @@ def test_first_omitted_output_uses_call_owned_constexpr_shape(tmp_path, monkeypa
     monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
 
     rows = 16
+    output_dtype = pl.FP32
+    output_layout = pl.ND
 
     @pl.jit.incore
     def kernel(
         x: pl.Tensor,
-        out: pl.Out[pl.Tensor[[rows, _RETURN_WIDTH], pl.FP32]],
+        out: pl.Out[pl.Tensor[[rows, _RETURN_WIDTH], output_dtype, output_layout]],
         _RETURN_WIDTH: pl.constexpr,
     ):
         value = pl.load(x, [0, 0], [16, _RETURN_WIDTH])

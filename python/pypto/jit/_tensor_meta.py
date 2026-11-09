@@ -319,33 +319,44 @@ def _resolve_omitted_output_annotation(
     if binding.keys().isdisjoint(referenced):
         return eager
 
-    # A factory-local capture may be absent from the function's namespace.
-    # Recover its independent dimensions from the eager annotation without
-    # restoring the ambient values of call-owned constexpr parameters.
-    if isinstance(eager, _LangTensor) and eager.shape is not None:
-        rebuilt = copy.deepcopy(source)
-        if isinstance(rebuilt, ast.Subscript) and isinstance(tensor := rebuilt.slice, ast.Subscript):
-            if isinstance(tensor.slice, ast.Tuple) and tensor.slice.elts:
-                shape = tensor.slice.elts[0]
-                if isinstance(shape, (ast.List, ast.Tuple)) and len(shape.elts) == len(eager.shape):
-                    recovered = dict(namespace)
-                    for index, (axis, extent) in enumerate(zip(shape.elts, eager.shape, strict=True)):
-                        if any(isinstance(node, ast.Name) and node.id in binding for node in ast.walk(axis)):
-                            continue
-                        axis_source = ast.unparse(axis)
-                        if isinstance(_arguments.resolve_annotation(axis_source, namespace), str):
-                            name = f"_pypto_eager_dim_{index}"
-                            while name in recovered or name in referenced:
-                                name += "_"
-                            recovered[name] = extent
-                            shape.elts[index] = ast.Name(id=name, ctx=ast.Load())
-                    resolved = _arguments.resolve_annotation(ast.unparse(rebuilt), recovered)
-                    if not isinstance(resolved, str):
-                        return resolved
+    def unresolved() -> ValueError:
+        return ValueError(
+            f"Cannot resolve omitted Out annotation {spelling!r} with its call-owned constexpr bindings"
+        )
 
-    raise ValueError(
-        f"Cannot resolve omitted Out annotation {spelling!r} with its call-owned constexpr bindings"
-    )
+    if not isinstance(eager, _LangTensor) or eager.shape is None or not isinstance(source, ast.Subscript):
+        raise unresolved()
+    tensor = source.slice
+    if not isinstance(tensor, ast.Subscript) or not isinstance(tensor.slice, ast.Tuple):
+        raise unresolved()
+    fields = tensor.slice.elts
+    if not 2 <= len(fields) <= 4:
+        raise unresolved()
+
+    def resolve_field(expr: ast.expr, captured: Any) -> Any:
+        # The eager object preserves factory values, including names used
+        # only in the annotation. Reevaluate just the fields owned by the call.
+        if not any(isinstance(node, ast.Name) and node.id in binding for node in ast.walk(expr)):
+            return captured
+        result = _arguments.resolve_annotation(ast.unparse(expr), namespace)
+        if isinstance(result, str):
+            raise unresolved()
+        return result
+
+    shape = fields[0]
+    if isinstance(shape, (ast.List, ast.Tuple)) and len(shape.elts) == len(eager.shape):
+        dimensions = [resolve_field(axis, value) for axis, value in zip(shape.elts, eager.shape, strict=True)]
+    else:
+        dimensions = resolve_field(shape, eager.shape)
+    captured_fields: list[Any] = [eager.dtype]
+    if len(fields) == 3:
+        captured_fields.append(eager.memref if eager.memref is not None else eager.layout)
+    elif len(fields) == 4:
+        captured_fields.extend([eager.layout, eager.memref])
+    values = [
+        resolve_field(expr, captured) for expr, captured in zip(fields[1:], captured_fields, strict=True)
+    ]
+    return _LangTensor[tuple([dimensions, *values])]
 
 
 def _omitted_output_metas(
