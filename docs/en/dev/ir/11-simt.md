@@ -1,8 +1,54 @@
 # Scalar SIMT IR
 
-The canonical SIMT IR models a void device helper and an explicit launch
-statement. Its primitives follow PTOAS. Inline `simt_scope` syntax and outlining
-are a separate layer and are not implemented by this interface.
+Use `pl.simt_scope` inside an explicit `@pl.jit.aiv` function to run scalar
+code on a SIMT thread block. The compiler lowers that region to the canonical
+void helper and explicit launch model described below.
+
+## Public authoring
+
+```python
+import pypto.language as pl
+
+@pl.jit.aiv
+def copy_aiv(src: pl.Tensor[[1, 128], pl.FP32],
+             dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+             valid: pl.Scalar[pl.INT32]):
+    with pl.simt_scope(dims=(128, 1, 1)):
+        tid = pl.simt.thread_idx(pl.simt.Axis.X)
+        if tid < valid:
+            value = pl.simt.load(src, (0, tid))
+            pl.simt.store(dst, (0, tid), value)
+    return dst
+
+@pl.jit
+def copy(src: pl.Tensor[[1, 128], pl.FP32],
+         dst: pl.InOut[pl.Tensor[[1, 128], pl.FP32]],
+         valid: pl.Scalar[pl.INT32]):
+    return copy_aiv(src, dst, valid)
+```
+
+`pl.simt.Axis` is the shared `ir.SimtAxis` enum. Coordinate queries require one
+typed axis, positional or `axis=`; `lane_id()` takes none. Dimensions are three
+positive compile-time integers. They describe threads, not an element allocation
+or grid; bounds checks remain explicit. GM Tensor and Vec/UB Tile operands use
+their existing storage. The initial API supports the backend's scalar subset;
+INT32/FP32 lane collectives are described below. Atomics and expanded math remain separate milestones.
+
+Scalar assignments are thread-private, including shadowing an outer scalar.
+A private scalar cannot be read after the scope. Stores automatically rebind the
+outer storage handle, with one result per written capture. An alias made before
+a Tile update retains the old value; Tensor aliases retain GM reference semantics.
+`In` storage stays read-only through views, and partial updates require initialized
+contents. Build views outside the region. No `as` clause, nested region, storage
+allocation/rebinding, cross-boundary jump, VMI capture or manual resource limit is
+accepted. Scopes may be placed inside outer loops and branches.
+
+The transient `SimtScopeStmt` derives directly from `Stmt`, with `block_dims` and
+`body` fields, plus `private_scalars` identifying reassigned outer scalar bindings.
+It preserves the execution boundary through binding, printing,
+serialization and cloning. [OutlineSimtScopes](../passes/01-outline_simt_scopes.md)
+runs before SSA and emits canonical helpers/launches. Explicit named helper and
+`pl.simt.launch` syntax remains available for canonical IR.
 
 ## Function and launch
 
@@ -39,7 +85,7 @@ updated_dst = pl.simt.launch(
 ```
 
 The text parser reads this spelling. It is an IR round-trip format; the higher
-level programming interface will derive output mappings during outlining.
+level programming interface derives output mappings during outlining.
 
 ## Scalar operations
 
@@ -59,6 +105,45 @@ views carry their existing strides and offsets; fractal layouts are rejected.
 Explicitly non-Vec Tile storage is rejected. GM accepts PTOAS `l1cache` policies
 `cache`/`uncache` and separate load/store `l2cache` policy sets. Cache attributes
 on UB accesses are invalid.
+
+## Warp collectives
+
+The public `pl.simt` and IR `pypto.ir.op.simt` namespaces expose:
+
+| Operation | Input → result | Meaning |
+| --------- | -------------- | ------- |
+| `vote_all`, `vote_any`, `vote_uni` | BOOL → BOOL | All true, any true, or all predicates equal |
+| `vote_ballot` | BOOL → INT32 | Bit i is set for active lane i with a true predicate |
+| `shuffle_idx(value, index, *, width=32)` | INT32/FP32 → same type | Read subgroup-relative source lane |
+| `shuffle_up`, `shuffle_down` | INT32/FP32 → same type | Read lower/higher source lane by an offset |
+| `shuffle_bfly(value, mask, *, width=32)` | INT32/FP32 → same type | Read source lane selected by local-lane XOR mask |
+| `redux_add`, `redux_min`, `redux_max` | INT32/FP32 → same type | Reduce active lanes; return the result to each active lane |
+
+The A5 warp contains 32 lanes. Participation is the current active execution
+mask at the instruction; there is no explicit participation-mask argument.
+Inactive lanes contribute nothing. These are register collectives, not memory
+fences or block barriers. Their results depend on control flow, so they must
+not be hoisted across branches or iterations that change active lanes.
+
+Shuffle widths are **16 or 32**, defaulting to 32. Width splits the warp into
+contiguous subgroups; it does not alter vote or redux participation. Lane controls
+are INT32 (Python integer literals are normalized). A shuffle source must be
+active and inside the same subgroup. Results from inactive or out-of-range
+sources are unspecified; algorithms must not rely on boundary self-copy.
+
+Ballot returns an INT32 bit carrier, so bit 31 can make its numeric value
+negative. Use bit operations to inspect it. INT32 min/max use signed comparisons;
+integer sums wrap at 32 bits. FP32 follows the target reduction order and
+special-value rules, without a promise of sequential summation or portable
+NaN/signed-zero selection. FP16, UINT32 and packed values remain unsupported
+in this initial frontend/backend subset.
+
+The native mapping is `pto.vote_*`, `pto.shuffle_*` and `pto.redux_{add,min,max}{i,f}`;
+integer min/max explicitly carry `signed`. Tests compile all forms through the
+public JIT and PTOAS LLVM export. Opt-in device acceptance lives in
+`tests/st/runtime/vpto/test_simt_collectives_onboard.py`, covering two warps,
+partial active sets, ballot bit 31, signed reductions, shuffle subgroups and
+untouched inactive outputs. Compile-only tests do not establish device execution.
 
 ## Effects and validation
 
@@ -82,10 +167,10 @@ expansion assigns SIMT launches to AIV rather than duplicating them across cores
 
 The default pipeline now preserves storage semantics before memory planning:
 
-- [MaterializeSimtOutputs](../passes/35-materialize_simt_outputs.md) initializes
+- [MaterializeSimtOutputs](../passes/36-materialize_simt_outputs.md) initializes
   a dedicated copy for each writable Tile. Partial writes preserve untouched
   elements and old Tile values remain readable across branches and loops.
-- [SpecializeSimtHelpers](../passes/36-specialize_simt_helpers.md) derives helper
+- [SpecializeSimtHelpers](../passes/37-specialize_simt_helpers.md) derives helper
   variants from full block dimensions, types/layouts, and the target. Dynamic
   metadata becomes scalar arguments; allocation addresses do not enter the key.
 - GM results retain the original tensor identity. `simt.store` uses the `Simt`
@@ -124,4 +209,4 @@ resource specialization and the A5 executable subset are implemented.
 [SIMT lowering and execution](../codegen/05-simt-lowering.md) describes its ABI,
 synchronization, supported types and acceptance tests. The independent
 [native SIMT probe](../codegen/04-simt-native-validation.md) retains the earlier
-P0 ABI fixture. Higher-level authoring and outlining remain separate work.
+P0 ABI fixture. The public scope path uses the same backend and runtime contract.

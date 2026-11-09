@@ -430,7 +430,9 @@ class TestMxScaleMemSpaces:
 
         program = passes.classify_iter_arg_carry()(
             passes.materialize_runtime_scopes()(
-                passes.derive_call_directions()(passes.convert_to_ssa()(Input))
+                passes.derive_call_directions()(
+                    passes.normalize_return_order()(passes.convert_to_ssa()(Input))
+                )
             )
         )
         orchestration = next(

@@ -81,7 +81,7 @@ python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=p
 映射为 `[1, N]`。
 
 A2/A3 窄化转换遵循分配与代码生成共享的安全规则，使用互不重叠的输入、输出存储，
-详见 [MemoryReuse](passes/39-memory_reuse.md)。静态有效范围视图保留各自操作数
+详见 [MemoryReuse](passes/40-memory_reuse.md)。静态有效范围视图保留各自操作数
 原有的存储，不会让转换的输入和输出共享同一缓冲区。
 
 只有依赖临时空间的转换（或 A2/A3 上显式传入 tmp 的转换）要求静态有效范围。

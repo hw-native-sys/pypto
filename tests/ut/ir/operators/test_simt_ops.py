@@ -6,6 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op import simt
@@ -106,6 +107,100 @@ def test_packed_fp4_storage_is_not_scalar(storage_type, dtype):
         simt.load(storage, [0])
     with pytest.raises(ValueError, match="unpacked byte-addressable"):
         simt.store(storage, [0], value)
+
+
+VOTES = ("vote_all", "vote_any", "vote_uni", "vote_ballot")
+SHUFFLES = ("shuffle_idx", "shuffle_up", "shuffle_down", "shuffle_bfly")
+REDUCTIONS = ("redux_add", "redux_min", "redux_max")
+
+
+@pytest.mark.parametrize("name", VOTES)
+def test_vote_predicate_and_round_trip(name):
+    pred = ir.Var("pred", ir.ScalarType(DataType.BOOL), SPAN)
+    call = getattr(simt, name)(pred)
+    assert call.type.dtype == (DataType.INT32 if name == "vote_ballot" else DataType.BOOL)
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    with pytest.raises(ValueError, match="BOOL predicate"):
+        getattr(simt, name)(simt.lane_id())
+
+
+@pytest.mark.parametrize("name", SHUFFLES + REDUCTIONS)
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.FP32])
+def test_numeric_collective_type_and_round_trip(name, dtype):
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    args = [value, 1] if name in SHUFFLES else [value]
+    call = getattr(simt, name)(*args)
+    assert call.type.dtype == dtype
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    assert ir.op_has_declared_arg_effects(call.op.name)
+    assert ir.get_op_arg_effect(call.op.name, 0) == ir.ArgEffect.Read
+
+
+@pytest.mark.parametrize("name", SHUFFLES + REDUCTIONS)
+@pytest.mark.parametrize("dtype", [DataType.BOOL, DataType.INDEX, DataType.UINT32, DataType.FP16])
+def test_collective_rejects_unsupported_payload(name, dtype):
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    args = [value, 1] if name in SHUFFLES else [value]
+    with pytest.raises(ValueError, match="INT32 or FP32"):
+        getattr(simt, name)(*args)
+
+
+@pytest.mark.parametrize("name", SHUFFLES)
+@pytest.mark.parametrize("width", [16, 32])
+def test_shuffle_width_and_control(name, width):
+    call = getattr(simt, name)(simt.lane_id(), 1, width=width)
+    assert call.kwargs["width"] == width
+    assert call.args[1].dtype == DataType.INT32
+    with pytest.raises(ValueError, match="INT32 lane control"):
+        getattr(simt, name)(simt.lane_id(), ir.ConstInt(1, DataType.INDEX, SPAN))
+
+
+@pytest.mark.parametrize("width", [0, 1, 8, 24, 64])
+def test_shuffle_rejects_unsupported_width(width):
+    with pytest.raises(ValueError, match="width must be 16 or 32"):
+        simt.shuffle_idx(simt.lane_id(), 0, width=width)
+
+
+@pytest.mark.parametrize("name", VOTES + SHUFFLES + REDUCTIONS)
+@pytest.mark.parametrize("arity", [0, 3])
+def test_collective_checks_arity_before_accessing_arguments(name, arity):
+    with pytest.raises(ValueError, match="requires exactly"):
+        ir.create_op_call(f"simt.{name}", [simt.lane_id()] * arity, {}, SPAN)
+
+
+@pytest.mark.parametrize("name", VOTES + SHUFFLES + REDUCTIONS)
+def test_dsl_collectives_match_ir_wrappers(name):
+    value = ir.Var("value", ir.ScalarType(DataType.BOOL if name in VOTES else DataType.FP32), SPAN)
+    args = [value, 1] if name in SHUFFLES else [value]
+    call = getattr(pl.simt, name)(*args).unwrap()
+    ir.assert_structural_equal(call, getattr(simt, name)(*args))
+
+
+@pytest.mark.parametrize("control", [-(1 << 31) - 1, 1 << 31])
+def test_shuffle_control_literal_overflow(control):
+    with pytest.raises(ValueError, match="must fit INT32"):
+        simt.shuffle_idx(simt.lane_id(), control)
+
+
+@pytest.mark.parametrize("width", [True, 16.0, "16"])
+def test_shuffle_width_requires_integer_attribute(width):
+    with pytest.raises(TypeError, match="width|type"):
+        simt.shuffle_idx(simt.lane_id(), 0, width=width)
+
+
+@pytest.mark.parametrize("control", [True, False])
+def test_shuffle_control_does_not_coerce_bool(control):
+    with pytest.raises(TypeError, match="INT32, got bool"):
+        simt.shuffle_idx(simt.lane_id(), control)
+
+
+@pytest.mark.parametrize("name", VOTES)
+@pytest.mark.parametrize("predicate", [True, False])
+def test_vote_accepts_python_bool_predicate(name, predicate):
+    call = getattr(simt, name)(predicate)
+    assert isinstance(call.args[0], ir.ConstBool)
+    assert call.args[0].value == predicate
+    ir.assert_structural_equal(call, getattr(pl.simt, name)(predicate).unwrap())
 
 
 if __name__ == "__main__":

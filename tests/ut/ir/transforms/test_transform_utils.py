@@ -354,6 +354,23 @@ class TestSubstituteExpr:
         expected = ir.Call(op, [x_new], ir.ScalarType(DataType.INT64), _span())
         ir.assert_structural_equal(result, expected)
 
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("replace", [False, True])
+    def test_call_keyword_references(self, nested, replace):
+        x, replacement = _var("x"), _var("replacement")
+        value = ir.MakeTuple([x], _span()) if nested else x
+        call = ir.Call(ir.Op("test_op"), [], {"reference": value, "scalar": 7}, {}, x.type, _span())
+        mapping = [(x if replace else _var("unrelated"), replacement)]
+        result = ir.substitute_expr(call, mapping)
+        assert isinstance(result, ir.Call)
+        ref = result.kwargs["reference"]
+        if nested:
+            ref = ref.elements[0]
+        assert ref.same_as(replacement if replace else x)
+        assert result.kwargs["scalar"] == 7
+        if not replace:
+            assert result.same_as(call)
+
     def test_call_no_change(self):
         """Call with no matching vars is returned as-is."""
         x = _var("x")

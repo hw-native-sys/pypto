@@ -184,7 +184,6 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -193,6 +192,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -207,6 +207,7 @@ namespace {
 using transform_utils::PreserveCallAttrs;
 
 using auto_tile_matmul_l0::AlignStaticExtent;
+using auto_tile_matmul_l0::AnalyzeDelayedInputHazards;
 using auto_tile_matmul_l0::AnalyzeMatmul;
 using auto_tile_matmul_l0::BuildPipelineDbCPlan;
 using auto_tile_matmul_l0::DirectDefMap;
@@ -421,10 +422,13 @@ VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int
 /// passes a bias operand here.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
                         const AssignStmtPtr& sb, const std::string& base, const Span& sp,
-                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                        const std::vector<std::pair<std::string, std::any>>& kwargs,
+                        const CallPtr& original_call) {
   auto& reg = OpRegistry::GetInstance();
   auto init_cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
-  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, kwargs, sp);
+  auto c_call = PreserveCallAttrs(
+      original_call,
+      reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, kwargs, sp));
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto body_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -440,8 +444,8 @@ StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const As
 /// operand and the emitted call ANDs it with the generated ``ko == 0``.
 StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, const AssignStmtPtr& sb,
                            const std::string& base, const Span& sp, const ExprPtr& user_init_cond,
-                           const VarPtr& ko_var,
-                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
+                           const VarPtr& ko_var, const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const CallPtr& original_call) {
   auto& reg = OpRegistry::GetInstance();
   std::vector<ExprPtr> args{ExprPtr(c_iter), sa->var_, sb->var_};
   if (user_init_cond) {
@@ -454,7 +458,7 @@ StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, co
     // introduced here.
     args.push_back(MakeAnd(user_init_cond, MakeEq(ko_var, MakeIndex(0, sp), sp), sp));
   }
-  auto c_call = reg.Create("tile.matmul_acc", args, kwargs, sp);
+  auto c_call = PreserveCallAttrs(original_call, reg.Create("tile.matmul_acc", args, kwargs, sp));
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -472,6 +476,12 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const bool is_acc = r.kind == MatmulKind::kAccumulate;
   const bool is_bias = r.kind == MatmulKind::kBias;
   auto& reg = OpRegistry::GetInstance();
+  const auto output_binding = GetTypeMemRef(r.original->var_->GetType());
+  INTERNAL_CHECK_SPAN(!output_binding || (r.m == r.M && r.n == r.N), sp)
+      << "Internal error: declared accumulator storage cannot be assigned to M/N sub-tiles";
+  CHECK_SPAN(!is_acc || !output_binding || !(*output_binding)->is_pinned_, sp)
+      << "A tile.matmul_acc result cannot declare independent accumulator storage; bind its input "
+         "accumulator instead, since accumulation writes that input in place.";
 
   INTERNAL_CHECK_SPAN(is_acc == (r.acc_init != nullptr), sp)
       << "Internal error: matmul kind and accumulator initializer disagree";
@@ -527,6 +537,29 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
       auto acc_dtype = As<TileType>(r.original->var_->GetType())->dtype_;
       auto c_init =
           BuildAccInitWithValidShape(r.m, r.n, r.valid_m, r.valid_n, acc_dtype, base + "_l0_init", sp);
+      if (output_binding) {
+        // Bind the allocation owner before its valid-shape alias. Carries and
+        // accumulating blocks then inherit this storage through the normal
+        // InitMemRef rules; copying the old whole type would lose compactness
+        // and layout refinements on the generated initializer.
+        std::unordered_map<const Var*, VarPtr> bound;
+        for (auto& stmt : c_init.stmts) {
+          const auto assign = As<AssignStmt>(stmt);
+          INTERNAL_CHECK_SPAN(assign, sp) << "Internal error: accumulator initializer is not an assignment";
+          const bool owns_storage = IsOp(As<Call>(assign->value_), "tile.create");
+          auto var = std::make_shared<Var>(
+              assign->var_->name_hint_,
+              CloneTypeWithMemRef(assign->var_->GetType(), owns_storage ? output_binding : std::nullopt),
+              assign->var_->span_);
+          auto value = transform_utils::Substitute(assign->value_, bound);
+          bound.emplace(assign->var_.get(), var);
+          stmt = std::make_shared<AssignStmt>(var, value, assign->span_);
+        }
+        const auto result = bound.find(c_init.value.get());
+        INTERNAL_CHECK_SPAN(result != bound.end(), sp)
+            << "Internal error: accumulator initializer result was not rebound";
+        c_init.value = result->second;
+      }
       for (auto& stmt : c_init.stmts) out.push_back(std::move(stmt));
       loop_init = c_init.value;
       loop_iter_type = c_init.value->GetType();
@@ -564,7 +597,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
                            base + "_l0_a" + tag, sp);
     auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
                            base + "_l0_b" + tag, sp);
-    ExprPtr call;
+    CallPtr call;
     INTERNAL_CHECK_SPAN(acc_in || !init_cond, sp)
         << "Internal error: init_cond on a straight-line block with no accumulator";
     if (acc_in) {
@@ -576,7 +609,10 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     } else {
       call = reg.Create("tile.matmul", {sa->var_, sb->var_}, block_kwargs, sp);
     }
-    auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
+    call = PreserveCallAttrs(original_call, call);
+    auto result_type =
+        !acc_in && output_binding ? CloneTypeWithMemRef(call->GetType(), output_binding) : call->GetType();
+    auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, result_type, sp);
     out.push_back(sa);
     out.push_back(sb);
     out.push_back(std::make_shared<AssignStmt>(cvar, call, sp));
@@ -599,9 +635,10 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // predicated it.  The bias path passes neither: its seed already holds the
     // first block's product, so every block here accumulates.
     const auto main_kwargs = MatmulPhaseKwargs(kwargs, main_phase);
-    StmtPtr body = (k_lo == 0 && r.kind == MatmulKind::kFresh)
-                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, main_kwargs)
-                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, main_kwargs);
+    StmtPtr body =
+        (k_lo == 0 && r.kind == MatmulKind::kFresh)
+            ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, main_kwargs, original_call)
+            : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, main_kwargs, original_call);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
     // Loop return var: an intermediate when a final block follows (named
     // distinctly so round-trip names stay unique), else the final result.
@@ -832,8 +869,8 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
   return DirectGmStoreInfo{call, blocked, rows->value_};
 }
 
-/// One-shot index over a SeqStmts' children, built lazily on the first
-/// oversized matmul and reused for the rest so M/N folding stays O(N):
+/// Direct-consumer index over one SeqStmts' children. Read counts reference
+/// the function-wide pre-rewrite census rather than rewalking every subtree:
 ///   * ``use_counts[v]`` — number of reads of ``v`` (excluding defs).
 ///   * ``store_of[v]`` — the top-level ``tile.store`` that consumes ``v``
 ///     directly or through a chain of single-use plain aliases. Includes
@@ -842,8 +879,9 @@ std::optional<DirectGmStoreInfo> AnalyzeDirectGmStore(const CallPtr& call) {
 /// foldability check needs (a matmul result is freshly defined; its uses do
 /// not change until we rewrite it).
 struct SiblingIndex {
-  std::unordered_map<const Var*, int> use_counts;
-  std::unordered_map<const Var*, int> matmul_operand_uses;  ///< reads at a matmul-operand position
+  const std::unordered_map<const Var*, int>& use_counts;
+  const std::unordered_map<const Var*, int>& matmul_operand_uses;  ///< reads at a matmul-operand position
+  const SiblingUseCounter& census;
   std::unordered_map<const Var*, const AssignStmt*> store_of;
   std::unordered_map<const Var*, const AssignStmt*> cast_of;  ///< ``cb = tile.cast(v, dtype)`` by source
   /// Single-use plain aliases leading to an indexed store. Keep links rather
@@ -851,11 +889,9 @@ struct SiblingIndex {
   std::unordered_map<const Var*, const Var*> store_alias_next;
 };
 
-SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
-  SiblingIndex idx;
-  SiblingUseCounter counter;
+SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts, const SiblingUseCounter& uses) {
+  SiblingIndex idx{uses.counts, uses.matmul_operand_uses, uses, {}, {}, {}};
   for (const auto& s : stmts) {
-    counter.VisitStmt(s);
     auto as = std::dynamic_pointer_cast<const AssignStmt>(s);
     if (!as) continue;
     auto call = As<Call>(as->value_);
@@ -870,19 +906,31 @@ SiblingIndex BuildSiblingIndex(const std::vector<StmtPtr>& stmts) {
       if (auto src = AsVarLike(call->args_[0])) idx.cast_of.emplace(src.get(), as.get());
     }
   }
-  idx.use_counts = std::move(counter.counts);
-  idx.matmul_operand_uses = std::move(counter.matmul_operand_uses);
   // The phase verifier permits a bare alias between a Final producer and its
   // store. Follow only single-use aliases in this same SeqStmts: a copy/view or
   // an additional reader still needs the original full accumulator. Reverse
-  // order propagates the store endpoint through a chain with constant work per
+  // order propagates the store endpoint through a chain with indexed work per
   // definition. The aliases are removed only after the producer/store fold wins.
   for (auto it = stmts.rbegin(); it != stmts.rend(); ++it) {
     auto assign = As<AssignStmt>(*it);
     auto source = assign ? AsVarLike(assign->value_) : nullptr;
-    if (!source || idx.use_counts[source.get()] != 1 || idx.use_counts[assign->var_.get()] != 1) continue;
+    if (!source) continue;
     auto store = idx.store_of.find(assign->var_.get());
     if (store == idx.store_of.end()) continue;
+    auto source_use = idx.use_counts.find(source.get());
+    auto alias_use = idx.use_counts.find(assign->var_.get());
+    if (source_use == idx.use_counts.end() || source_use->second != 1 || alias_use == idx.use_counts.end()) {
+      continue;
+    }
+    int alias_reads = alias_use->second;
+    const auto store_call = As<Call>(store->second->value_);
+    // DirectGmPlacer remaps only the store's actual input to each subtile.
+    // Metadata on that store may therefore follow the terminal alias, but
+    // references to earlier aliases or from retained consumers must survive.
+    if (AsVarLike(store_call->args_[0]).get() == assign->var_.get()) {
+      alias_reads -= uses.MetadataReadsOwnedBy(assign->var_.get(), store->second->var_.get());
+    }
+    if (alias_reads != 1) continue;
     idx.store_of.emplace(source.get(), store->second);
     idx.store_alias_next.emplace(source.get(), assign->var_.get());
   }
@@ -1061,59 +1109,26 @@ class MatScratchPlacer : public SubtilePlacer {
     return sv;
   }
 
+  /// A create starts fully valid, and assemble retains that target validity.
+  /// Restore the producer's logical rectangle before a chained consumer can
+  /// interpret unwritten padding as rows or reduction elements. Keep symbolic
+  /// extents intact; only a statically full window needs no metadata alias.
+  [[nodiscard]] VarPtr Finalize(std::vector<StmtPtr>& stmts, const VarPtr& scratch, const ExprPtr& valid_m,
+                                const ExprPtr& valid_n) {
+    const auto rows = As<ConstInt>(valid_m);
+    const auto cols = As<ConstInt>(valid_n);
+    if (rows && cols && rows->value_ == m_ && cols->value_ == n_) return scratch;
+    auto view = OpRegistry::GetInstance().Create("tile.set_validshape", {scratch, valid_m, valid_n}, sp_);
+    auto result = std::make_shared<Var>(base_ + "_valid", view->GetType(), sp_);
+    stmts.push_back(std::make_shared<AssignStmt>(result, view, sp_));
+    return result;
+  }
+
  private:
   int64_t m_, n_;
   DataType dtype_;
   std::string base_;
   Span sp_;
-};
-
-/// Count every syntactic Var/IterArg read in one function traversal while
-/// excluding SSA definition sites. The canonical split-K pre-phase uses this
-/// index to prove that its create and loop result have no consumers outside the
-/// matched create/loop/store chain.
-class CanonicalReadCounter : public IRVisitor {
- public:
-  std::unordered_map<const Var*, size_t> counts;
-
- protected:
-  void VisitVarLike_(const VarPtr& op) override {
-    if (op) ++counts[op.get()];
-  }
-
-  // The generic visitor follows an IterArg read through ``initValue_``.  That
-  // is useful for recursive dependency walks, but this index counts direct SSA
-  // edges: the initializer is visited once at the enclosing loop and an
-  // IterArg use in the body must not count it again.
-  void VisitExpr_(const IterArgPtr& op) override { VisitVarLike_(op); }
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (op && op->value_) VisitExpr(op->value_);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    if (op->condition_) VisitExpr(op->condition_);
-    if (op->then_body_) VisitStmt(op->then_body_);
-    if (op->else_body_.has_value() && *op->else_body_) VisitStmt(*op->else_body_);
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    if (op->start_) VisitExpr(op->start_);
-    if (op->stop_) VisitExpr(op->stop_);
-    if (op->step_) VisitExpr(op->step_);
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg && iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
-    }
-    if (op->body_) VisitStmt(op->body_);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    if (op->condition_) VisitExpr(op->condition_);
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg && iter_arg->initValue_) VisitExpr(iter_arg->initValue_);
-    }
-    if (op->body_) VisitStmt(op->body_);
-  }
 };
 
 /// Canonical frontend split-K reduction matched for loop-level M/N tiling:
@@ -1250,9 +1265,11 @@ std::optional<std::pair<AssignStmtPtr, YieldStmtPtr>> MatchSingleAssignYield(con
 /// ``hints`` is optional: when supplied, an otherwise-canonical *predicated*
 /// triplet whose ``init_cond`` is not a split-K seed test reports a PerfHint
 /// instead of silently losing loop-level M/N tiling.
-std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
-    const AssignStmtPtr& init, const ForStmtPtr& loop, const AssignStmtPtr& store,
-    const std::unordered_map<const Var*, size_t>& use_counts, std::vector<Diagnostic>* hints = nullptr) {
+std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(const AssignStmtPtr& init,
+                                                               const ForStmtPtr& loop,
+                                                               const AssignStmtPtr& store,
+                                                               const SiblingUseCounter& census,
+                                                               std::vector<Diagnostic>* hints = nullptr) {
   if (!init || !loop || !store || loop->kind_ != ForKind::Pipeline || loop->iter_args_.size() != 1 ||
       loop->return_vars_.size() != 1) {
     return std::nullopt;
@@ -1265,13 +1282,16 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
       store_call->args_[0].get() != loop->return_vars_[0].get()) {
     return std::nullopt;
   }
+  const auto& use_counts = census.counts;
   auto init_use = use_counts.find(init->var_.get());
   auto result_use = use_counts.find(loop->return_vars_[0].get());
   // True read counts exclude definitions: the create feeds exactly one IterArg
-  // initializer and the loop result feeds exactly one store. Any other read
-  // would be invalidated when the triplet is replaced.
-  if (init_use == use_counts.end() || init_use->second != 1 || result_use == use_counts.end() ||
-      result_use->second != 1) {
+  // initializer and the loop result feeds exactly one store. The retiled
+  // clone remaps seed metadata inside the loop body, and DirectGmPlacer
+  // remaps result metadata on its store. Other references remain consumers.
+  if (init_use == use_counts.end() || result_use == use_counts.end() ||
+      init_use->second - census.MetadataReadsOwnedBy(init->var_.get(), loop->return_vars_[0].get()) != 1 ||
+      result_use->second - census.MetadataReadsOwnedBy(loop->return_vars_[0].get(), store->var_.get()) != 1) {
     return std::nullopt;
   }
 
@@ -1408,9 +1428,17 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
   // Declared accumulator/operand storage and explicit buffering loops are
   // manual decisions. Rebuilding even an unchanged Mat load from its deduced
   // type would discard its declared allocation identity and slot selection.
-  // Leave these loads to ordinary K tiling, which retains their original Vars.
-  if ((init_ty && init_ty->memref_.has_value()) || lhs_ty->memref_.has_value() ||
-      rhs_ty->memref_.has_value() || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
+  // The same contract applies to branch results and carried/merged values,
+  // not only the seed. Ordinary K tiling retains full-output bindings and
+  // diagnoses a declared result that cannot fit without M/N subdivision.
+  const auto has_declared_storage = [](const VarPtr& var) {
+    const auto tile = var ? As<TileType>(var->GetType()) : nullptr;
+    return tile && tile->memref_.has_value();
+  };
+  if (has_declared_storage(init->var_) || lhs_ty->memref_.has_value() || rhs_ty->memref_.has_value() ||
+      (matmul && has_declared_storage(matmul->var_)) || has_declared_storage(matmul_acc->var_) ||
+      has_declared_storage(phi) || has_declared_storage(loop->iter_args_[0]) ||
+      has_declared_storage(loop->return_vars_[0]) || loop->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) {
     return std::nullopt;
   }
   auto init_m = init_ty && init_ty->shape_.size() == 2 ? As<ConstInt>(init_ty->shape_[0]) : nullptr;
@@ -1681,12 +1709,11 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
 }
 
 /// Rewrite every canonical create/loop/store triplet in one SeqStmts scan.
-/// ``use_counts`` is built once over the original function, so matching all
-/// nested sequences remains O(N) rather than recursively rescanning each
+/// The census is built once over the original function, so matching all
+/// nested sequences uses indexed lookups rather than recursively rescanning each
 /// subtree. A running remap preserves an earlier store's output chain in later
 /// siblings.
-StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
-                                  const std::unordered_map<const Var*, size_t>& use_counts,
+StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq, const SiblingUseCounter& census,
                                   std::vector<Diagnostic>& hints) {
   if (!seq || seq->stmts_.size() < 3) return seq;
   std::vector<StmtPtr> out;
@@ -1701,7 +1728,7 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
       auto third =
           remap.empty() ? seq->stmts_[i + 2] : transform_utils::Substitute(seq->stmts_[i + 2], remap);
       auto match = MatchCanonicalSplitKAcc(As<AssignStmt>(current), As<ForStmt>(next), As<AssignStmt>(third),
-                                           use_counts, &hints);
+                                           census, &hints);
       if (match) {
         if (auto fold = TryFoldCanonicalSplitKAcc(*match, hints)) {
           for (auto& stmt : fold->stmts) out.push_back(std::move(stmt));
@@ -1724,9 +1751,8 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
 /// their M/N output grid before dbC planning or ordinary call-level tiling.
 class CanonicalSplitKPreMutator : public IRMutator {
  public:
-  CanonicalSplitKPreMutator(const std::unordered_map<const Var*, size_t>& use_counts,
-                            std::vector<Diagnostic>& hints)
-      : use_counts_(use_counts), hints_(hints) {}
+  CanonicalSplitKPreMutator(const SiblingUseCounter& census, std::vector<Diagnostic>& hints)
+      : census_(census), hints_(hints) {}
 
  protected:
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -1737,21 +1763,21 @@ class CanonicalSplitKPreMutator : public IRMutator {
     // Under PyPTO-owned placement their K schedule is already emitted;
     // ordinary AutoTile sees Left/Right operands and cannot choose again.
     // The PTOAS compatibility route still leaves K to ordinary AutoTile.
-    auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, use_counts_, hints_));
+    auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, census_, hints_));
     INTERNAL_CHECK_SPAN(rewritten, op->span_)
         << "Internal error: canonical split-K pre-phase did not preserve SeqStmts";
     return IRMutator::VisitStmt_(rewritten);
   }
 
  private:
-  const std::unordered_map<const Var*, size_t>& use_counts_;
+  const SiblingUseCounter& census_;
   std::vector<Diagnostic>& hints_;
 };
 
 FunctionPtr RewriteCanonicalSplitKAcc(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
-  CanonicalReadCounter counter;
+  SiblingUseCounter counter;
   counter.VisitStmt(func->body_);
-  CanonicalSplitKPreMutator mutator(counter.counts, hints);
+  CanonicalSplitKPreMutator mutator(counter, hints);
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body == func->body_) return func;
   auto rewritten = MutableCopy(func);
@@ -2119,6 +2145,10 @@ std::optional<MatmulOutputConsumer> AnalyzeMatmulOutputConsumer(const AssignStmt
                             type->dtype_, result};
   if (auto store = index.store_of.find(result); store != index.store_of.end()) {
     plan.store_stmt = store->second;
+    // The sole direct store is replaced as a unit. Its metadata follows
+    // source -> sub-tile through DirectGmPlacer, so these references do not
+    // require the old full accumulator to survive. Retained calls still do.
+    plan.result_uses -= index.census.MetadataReadsOwnedBy(result, store->second->var_.get());
   }
   // Preserve the existing FIXPIPE cast-fold contract while making its consumer
   // information available before selection. This does not admit new consumers
@@ -2248,24 +2278,17 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // upside is smaller here, but the mechanism is the same.)
   const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
-  const auto valid_m = As<ConstInt>(t.output_valid_m);
-  const auto valid_n = As<ConstInt>(t.output_valid_n);
-  if (valid_m && valid_n && valid_m->value_ == t.M && valid_n->value_ == t.N) {
-    return std::make_pair(std::move(stmts), scratch);
-  }
-  // The allocation keeps its physical box, but the grid wrote only the valid
-  // rectangle. A chained matmul must not read unwritten padding as K values.
-  auto view = OpRegistry::GetInstance().Create("tile.set_validshape",
-                                               {scratch, t.output_valid_m, t.output_valid_n}, sp);
-  auto valid_scratch = std::make_shared<Var>(base + "_valid", view->GetType(), sp);
-  stmts.push_back(std::make_shared<AssignStmt>(valid_scratch, view, sp));
-  return std::make_pair(std::move(stmts), valid_scratch);
+  scratch = placer.Finalize(stmts, scratch, t.output_valid_m, t.output_valid_n);
+  return std::make_pair(std::move(stmts), scratch);
 }
 
 class AutoTileMutator : public IRMutator {
  public:
-  explicit AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan)
-      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)) {}
+  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, const SiblingUseCounter& uses,
+                  std::unordered_map<const Var*, std::string> delayed_input_hazards)
+      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)),
+        uses_(uses),
+        delayed_input_hazards_(std::move(delayed_input_hazards)) {}
 
   std::vector<Diagnostic> hints;
 
@@ -2296,7 +2319,7 @@ class AutoTileMutator : public IRMutator {
     // Build one scope-local sibling index. Besides ordinary result-use
     // classification, this proves whether a bias load is an immutable snapshot
     // we may replace with window loads at the same observation point.
-    SiblingIndex sibling_index = BuildSiblingIndex(op->stmts_);
+    SiblingIndex sibling_index = BuildSiblingIndex(op->stmts_, uses_);
     // For a direct-store fold, the generated computation moves to the original
     // consumer store. Record the first non-load statement after every position
     // so a bias reload cannot cross an intervening effect on that route.
@@ -2452,6 +2475,10 @@ class AutoTileMutator : public IRMutator {
                 VarPtr scratch = placer.Init(out);
                 VarPtr cmat = placer.PlaceAt(out, src, MakeIndex(0, cast_as->span_),
                                              MakeIndex(0, cast_as->span_), scratch, /*step=*/0);
+                const auto valid = tile_view_semantics::GetEffectiveTileView(*cb_ty).valid_shape;
+                INTERNAL_CHECK_SPAN(valid.size() == 2, cast_as->span_)
+                    << "Internal error: chained cast must have two valid extents";
+                cmat = placer.Finalize(out, cmat, valid[0], valid[1]);
                 remap[cb] = cmat;  // the consumer matmul now reads the Mat scratch
                 changed = true;
                 continue;  // drop the dead tile.cast
@@ -2483,11 +2510,26 @@ class AutoTileMutator : public IRMutator {
         const Stmt* next_effect =
             next_non_load[i] < op->stmts_.size() ? op->stmts_[next_non_load[i]].get() : nullptr;
         const auto consumer = AnalyzeMatmulOutputConsumer(assign, sibling_index, next_effect);
+        std::string full_output_reason;
+        if (GetTypeMemRef(assign->var_->GetType())) {
+          full_output_reason = "declared accumulator storage";
+        } else if (consumer && consumer->store_stmt && consumer->result_uses == 1 &&
+                   consumer->supports_output_grid) {
+          const auto call = As<Call>(assign->value_);
+          const auto lhs_type = As<TileType>(call->args_[0]->GetType());
+          const auto hazard = delayed_input_hazards_.find(assign->var_.get());
+          if (lhs_type && lhs_type->GetMemorySpace() == MemorySpace::Mat &&
+              hazard != delayed_input_hazards_.end()) {
+            full_output_reason =
+                "the input snapshot of '" + hazard->second + "' across a possible later write";
+          }
+        }
         if (auto tiling =
                 AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
                               /*output_box_alignment=*/std::nullopt, &direct_defs,
                               consumer && consumer->supports_output_grid, /*keep_output_shape=*/false,
-                              /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0)) {
+                              /*source_reduction=*/nullptr, consumer ? consumer->fixed_output_m : 0,
+                              full_output_reason.empty() ? nullptr : full_output_reason.c_str())) {
           auto emit_k_only = [&](const MatmulTiling& plan) {
             // AnalyzeMatmul skips a full M/N/K fit, so a shape-preserving plan
             // reaching this emitter must split K. Preserve the original result
@@ -2572,6 +2614,19 @@ class AutoTileMutator : public IRMutator {
                 tiling->assign->span_);
           }
           if (bias_snapshot_reaches_store) {
+            // A bias barrier rejects N-window reconstruction, not a full-N
+            // M-only fold. That candidate can reach this emitter even when
+            // supports_output_grid was false during early classification.
+            // Check the realized route as well: never defer its Mat reads
+            // past an overwrite, and never turn an unsupported route's
+            // placement hint into a snapshot error.
+            if (result_uses == 1 && store_stmt && !tiling->stage_lhs_to_mat &&
+                AnalyzeDirectGmStore(As<Call>(store_stmt->value_))) {
+              CHECK_SPAN(delayed_input_hazards_.count(assign->var_.get()) == 0, assign->span_)
+                  << "AutoTile cannot preserve the input snapshot of '" << assign->var_->name_hint_
+                  << "' in a delayed M/N store fold. Store the result before reusing its input storage, "
+                     "or use separate input slots.";
+            }
             if (auto fold = TryFoldMNTiling(*tiling, result_uses, store_stmt, hints)) {
               if (tiling->bias_load_def && tiling->n != tiling->N) {
                 retroactively_dropped.insert(tiling->bias_load_def->var_.get());
@@ -2636,16 +2691,24 @@ class AutoTileMutator : public IRMutator {
 
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
+  const SiblingUseCounter& uses_;
+  std::unordered_map<const Var*, std::string> delayed_input_hazards_;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
   if (!func || !func->body_) return func;
-  if (!IsInCoreType(func->func_type_)) return func;
+  if (!IsInCoreType(func->func_type_) || func->ir_stage_ == FunctionIRStage::Buffer) return func;
   // Canonical loop-carried split-K output tiling changes both the Acc inventory
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
   auto canonical = RewriteCanonicalSplitKAcc(func, hints);
-  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical));
+  // Read counts are immutable for each original SSA definition during the
+  // ordinary rewrite. Count once, including nested captures, then only index
+  // direct consumers in each region. Recursive per-region censuses repeatedly
+  // visited every descendant and became quadratic in nesting depth.
+  SiblingUseCounter uses;
+  uses.VisitStmt(canonical->body_);
+  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), uses, AnalyzeDelayedInputHazards(canonical));
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;

@@ -209,7 +209,7 @@ def test_cross_scope_task_id_is_hoisted_for_set_dependencies():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-        transformed = passes.derive_call_directions()(P)
+        transformed = passes.derive_call_directions()(passes.normalize_return_order()(P))
         code = _generate_orch_from_transformed_program(transformed)
 
     assert re.search(r"TaskId\s+scoped_tid_tid\s*=\s*TaskId::invalid\(\);", code), code

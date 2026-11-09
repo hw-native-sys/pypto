@@ -8845,5 +8845,34 @@ def test_added_output_rebinds_omitted_original_out_storage():
     ir.assert_structural_equal(statement.expr.type.types[0], output_type)
 
 
+@pytest.mark.parametrize("returned", ["value, alias", "alias, value", "value, value"])
+def test_computed_return_aliases_share_one_output_storage(returned):
+    """Designated local tile roots are definitions, not rebound formals."""
+    before = pl.parse_program(f"""@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32]
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        value = pl.add(x, x)
+        alias = value
+        return {returned}
+""")
+    after = passes.convert_tensor_to_tile_ops()(before)
+    stored = "alias" if returned.startswith("alias") else "value__tile"
+    expected = pl.parse_program(f"""@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32], ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]]
+    ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+        x__tile: pl.Tile[[64], pl.FP32] = pl.tile.load(x, [0], [64], [64])
+        value__tile: pl.Tile[[64], pl.FP32, pl.Mem.Vec] = pl.tile.add(x__tile, x__tile)
+        alias: pl.Tile[[64], pl.FP32, pl.Mem.Vec] = value__tile
+        ret0__store = pl.tile.store({stored}, [0], ret0__out)
+        return ret0__store, ret0__store
+""")
+    # Two logical returns share one Out parameter and one writeback.
+    ir.assert_structural_equal(after, expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

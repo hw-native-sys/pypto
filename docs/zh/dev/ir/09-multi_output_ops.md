@@ -127,7 +127,7 @@ Tensor 层的计数形状仍为 `[1, rows]`：增加 Vec 物理容量不会增�
 这些分区信息必须沿绑定和内联 tuple 投影及其消费者继续传递；若根据对齐容量误用步长八，
 就会暴露填充区并错放第二个 lane 的计数。
 分区记录、消费者验证及控制流传播详见
-[LowerAutoVectorSplit](../passes/24-lower_auto_vector_split.md)。
+[LowerAutoVectorSplit](../passes/25-lower_auto_vector_split.md)。
 
 ## 代码生成
 
@@ -167,5 +167,5 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
 - [算子系统](05-operators.md) —— 通用注册 API 与参数效应
 - [类型与示例](02-types.md) —— `TupleType` 及其余类型系统
 - [参数方向](08-param-directions.md) —— 一处未声明的写是如何丢掉它的依赖边的
-- [InitMemRef](../passes/37-init_memref.md) —— 拥有 tile 分配职责的 pass
-- [MemoryReuse](../passes/39-memory_reuse.md) —— 跨 tuple 元素的生命周期复用
+- [InitMemRef](../passes/38-init_memref.md) —— 拥有 tile 分配职责的 pass
+- [MemoryReuse](../passes/40-memory_reuse.md) —— 跨 tuple 元素的生命周期复用

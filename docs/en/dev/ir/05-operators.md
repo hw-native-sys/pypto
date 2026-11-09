@@ -335,7 +335,7 @@ yields no value — no phi is materialized on the Acc tile.
 
 A literal predicate is a `ConstBool`, whether the user wrote `init_cond=True`/`False`
 or a pass decided it — e.g. the generated `ko == 0` once
-[`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md) replicates the K-loop.
+[`LowerPipelineLoops`](../passes/33-lower_pipeline_loops.md) replicates the K-loop.
 The emitter also accepts a BOOL-typed `ConstInt`, the spelling of IR built directly
 through the bindings. Either picks an arm outright; an emitter that folded neither
 would double the MADs of every K block.
@@ -343,7 +343,7 @@ would double the MADs of every K block.
 The fold is therefore conditional on the trip count, not universal: at
 `16x512x64` the pipelined loop disappears and the emitted PTO has no `scf.if`,
 while at `16x2048x64` the main loop survives with replica indices `ko` and
-`ko + 256`. [`Simplify`](../passes/05-simplify.md#provable-comparison-in-an-operand)
+`ko + 256`. [`Simplify`](../passes/06-simplify.md#provable-comparison-in-an-operand)
 decides replica 1's predicate (`ko == -256`) false from the loop's static range and
 folds it to a `ConstBool`, while replica 0's `ko == 0` is a genuine runtime test —
 it seeds the accumulator — so exactly one `scf.if` remains.
@@ -466,7 +466,7 @@ quantization alignment and memory-planner requirements.
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first. |
 | Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
-| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/14-lower_composite_ops.md). |
+| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/15-lower_composite_ops.md). |
 
 ### Tile-only GEMV family (A2/A3)
 
@@ -533,7 +533,7 @@ Before its matching store clears the flag, a final result may only be
 forwarded through a plain SSA alias; no other operation may consume it. This
 also prevents a view or copy from hiding an unsafe accumulator reuse. A complete pair inside a branch or loop body is supported; carrying a
 pending final result across a branch, loop, or scope boundary is rejected.
-[`AutoTileMatmulL0`](../passes/19-auto_tile_matmul_l0.md) preserves this contract:
+[`AutoTileMatmulL0`](../passes/20-auto_tile_matmul_l0.md) preserves this contract:
 intermediate K blocks use `Partial`, and the last block alone uses `Final`.
 Explicit phases do not remove other automatically inserted synchronization.
 
@@ -959,3 +959,8 @@ masks derive their lane count from static group geometry.
 `load`/`store` on UB Tile or GM Tensor storage. `store` returns `VoidType` and
 belongs in `EvalStmt`. See [Scalar SIMT IR](11-simt.md) for the operation,
 launch, cache-policy, and validation contracts.
+
+Warp collectives include `vote_all/any/uni`, `vote_ballot`,
+`shuffle_idx/up/down/bfly` and `redux_add/min/max`. See the
+[collective contracts](11-simt.md#warp-collectives) for active-lane participation,
+supported types and shuffle widths.

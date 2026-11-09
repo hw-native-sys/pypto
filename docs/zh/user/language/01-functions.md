@@ -39,6 +39,7 @@ def entry(
 | 行 | 作用 |
 | -- | ---- |
 | `@pl.jit.incore` | 标记设备 kernel —— 执行面，算子住在这里 |
+| `@pl.jit.aiv` | 显式 AIV 设备核函数，供 `pl.simt_scope` 使用 |
 | `@pl.jit` | 标记芯片级入口 —— 控制面，负责派发 |
 | `add_kernel(a, b, out)` | 一次普通调用；装饰器会发现被调方并接进来 |
 | `out: pl.Out[...]` | 声明方向，编译器据此给任务定序 |
@@ -364,5 +365,5 @@ ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910)
 - [控制流](02-control-flow.md) —— 这些函数体里的循环与条件。
 - [作用域与放置](04-scopes.md) —— `pl.at` 与其余放置作用域。
 - [快速上手](../02-quickstart.md) —— 同样的装饰器在一个完整例子里的用法。
-- [InlineFunctions](../../dev/passes/01-inline_functions.md) —— `Inline` 体如何被拼接。
+- [InlineFunctions](../../dev/passes/02-inline_functions.md) —— `Inline` 体如何被拼接。
 - [集成手写 C++ Kernel](../../dev/language/04-external-kernels.md) —— 调用外部 kernel。

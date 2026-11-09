@@ -1131,6 +1131,36 @@ StmtPtr IRMutator::VisitStmt_(const ContinueStmtPtr& op) { return op; }
 
 StmtPtr IRMutator::VisitStmt_(const InlineStmtPtr& op) { return op; }
 
+StmtPtr IRMutator::VisitStmt_(const SimtScopeStmtPtr& op) {
+  auto result = MutableCopy(op);
+  bool changed = false;
+  for (auto& dim : result->block_dims_) {
+    auto mapped = VisitExpr(dim);
+    changed |= mapped != dim;
+    dim = std::move(mapped);
+  }
+  std::vector<std::pair<const Expr*, ExprPtr>> saved;
+  for (size_t i = 0; i < op->private_scalars_.size(); ++i) {
+    const auto& var = op->private_scalars_[i];
+    auto mapped = AsVarLike(VisitExpr(var));
+    CHECK(mapped) << "SIMT private scalar binding must remain a variable";
+    changed |= mapped != var;
+    result->private_scalars_[i] = mapped;
+    auto it = var_remap_.find(var.get());
+    saved.emplace_back(var.get(), it == var_remap_.end() ? nullptr : it->second);
+  }
+  result->body_ = VisitStmt(op->body_);
+  for (const auto& [var, prior] : saved) {
+    if (prior) {
+      var_remap_[var] = prior;
+    } else {
+      var_remap_.erase(var);
+    }
+  }
+  changed |= result->body_ != op->body_;
+  return changed ? result : op;
+}
+
 StmtPtr IRMutator::VisitStmt_(const SimtLaunchStmtPtr& op) {
   auto result = MutableCopy(op);
   bool changed = false;

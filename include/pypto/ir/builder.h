@@ -304,6 +304,9 @@ class IRBuilder {
   StmtPtr EndIf(const Span& end_span);
 
   /// Register region helpers use the same schema as DSL and raw op construction.
+  void BeginSimtScope(const std::vector<ExprPtr>& block_dims, const Span& span);
+  StmtPtr EndSimtScope(const Span& span, const std::vector<VarPtr>& private_scalars = {});
+
   void BeginRegScope(const Span& span);
   StmtPtr EndRegScope(const Span& span);
   VarPtr EmitReg(const std::string& name, const std::string& op_name, const std::vector<ExprPtr>& args,
@@ -595,7 +598,7 @@ class IRBuilder {
  */
 class BuildContext {
  public:
-  enum class Type { FUNCTION, FOR_LOOP, WHILE_LOOP, IF_STMT, SCOPE, PROGRAM };
+  enum class Type { FUNCTION, FOR_LOOP, WHILE_LOOP, IF_STMT, SCOPE, PROGRAM, SIMT_SCOPE };
 
   explicit BuildContext(Type type, Span span) : type_(type), begin_span_(std::move(span)) {}
   virtual ~BuildContext() = default;
@@ -764,6 +767,17 @@ class IfStmtContext : public BuildContext {
 /**
  * @brief Context for building a scope statement
  */
+class SimtScopeContext : public BuildContext {
+ public:
+  SimtScopeContext(std::vector<ExprPtr> block_dims, Span span)
+      : BuildContext(Type::SIMT_SCOPE, std::move(span)), block_dims_(std::move(block_dims)) {}
+  void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
+  [[nodiscard]] const std::vector<ExprPtr>& GetBlockDims() const { return block_dims_; }
+
+ private:
+  std::vector<ExprPtr> block_dims_;
+};
+
 class ScopeContext : public BuildContext {
  public:
   ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,

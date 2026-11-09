@@ -155,6 +155,9 @@ Pass MaterializeSimtOutputs();
 /// Specialize SIMT helpers by dimensions and storage ABI, passing dynamic metadata explicitly.
 Pass SpecializeSimtHelpers();
 
+/// Outline transient per-thread regions before inlining and SSA conversion.
+Pass OutlineSimtScopes();
+
 /**
  * @brief Create the semantic must-alias materialization pass
  *

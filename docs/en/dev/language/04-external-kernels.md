@@ -241,3 +241,5 @@ is recorded explicitly; use an explicit return to declare another result.
   parameter-return statement described above.
 - A `Group` must be all-external or all-DSL — mixing external and DSL members in
   one group is rejected.
+
+See [Internal external-kernel contract](07-external-kernel-contract.md) for the provider/bridge interface baseline.

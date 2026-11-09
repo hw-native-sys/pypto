@@ -11,10 +11,11 @@
 
 from collections.abc import Sequence
 
+from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, Expr, SimtAxis, Span
 
-from ..utils import _get_span_or_capture, _to_make_tuple
+from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
 def thread_idx(axis: SimtAxis, span: Span | None = None) -> Call:
@@ -81,3 +82,141 @@ def store(
     return _ir_core.create_op_call(
         "simt.store", [storage, _to_make_tuple(indices, span), value], kwargs, span
     )
+
+
+def _vote_call(name: str, predicate: bool | Expr, span: Span) -> Call:
+    value = _ir_core.ConstBool(predicate, span) if isinstance(predicate, bool) else predicate
+    return _ir_core.create_op_call(name, [value], {}, span)
+
+
+def vote_all(predicate: bool | Expr, span: Span | None = None) -> Call:
+    """Return whether every active lane has a true BOOL predicate.
+
+    Uses the current active lanes; this operation does not provide a memory fence.
+    """
+    return _vote_call("simt.vote_all", predicate, _get_span_or_capture(span))
+
+
+def vote_any(predicate: bool | Expr, span: Span | None = None) -> Call:
+    """Return whether any active lane has a true BOOL predicate.
+
+    Uses the current active lanes; this operation does not provide a memory fence.
+    """
+    return _vote_call("simt.vote_any", predicate, _get_span_or_capture(span))
+
+
+def vote_uni(predicate: bool | Expr, span: Span | None = None) -> Call:
+    """Return whether all active lanes agree on their BOOL predicate.
+
+    Uses the current active lanes; this operation does not provide a memory fence.
+    """
+    return _vote_call("simt.vote_uni", predicate, _get_span_or_capture(span))
+
+
+def vote_ballot(predicate: bool | Expr, span: Span | None = None) -> Call:
+    """Return an INT32 bit mask of true predicates in active lanes; bit i denotes lane i.
+
+    Uses the current active lanes; this operation does not provide a memory fence.
+    """
+    return _vote_call("simt.vote_ballot", predicate, _get_span_or_capture(span))
+
+
+def _lane_control(value: int | Expr, span: Span) -> Expr:
+    """Normalize Python integer controls without treating bool as a lane index."""
+    if isinstance(value, bool):
+        raise TypeError("SIMT lane control requires INT32, got bool")
+    return _normalize_expr(value, span, int_dtype=DataType.INT32)
+
+
+def shuffle_idx(value: Expr, index: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+    """Read an INT32 or FP32 value from a subgroup-relative lane index.
+
+    Width must be 16 or 32. The source must be an active lane inside the
+    subgroup; results for inactive or out-of-range sources are unspecified.
+    Lane controls are INT32. This operation does not provide a memory fence.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "simt.shuffle_idx",
+        [value, _lane_control(index, span)],
+        {"width": width},
+        span,
+    )
+
+
+def shuffle_up(value: Expr, offset: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+    """Read an INT32 or FP32 value from a lower lane in the subgroup.
+
+    Width must be 16 or 32. The source must be an active lane inside the
+    subgroup; results for inactive or out-of-range sources are unspecified.
+    Lane controls are INT32. This operation does not provide a memory fence.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "simt.shuffle_up",
+        [value, _lane_control(offset, span)],
+        {"width": width},
+        span,
+    )
+
+
+def shuffle_down(value: Expr, offset: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+    """Read an INT32 or FP32 value from a higher lane in the subgroup.
+
+    Width must be 16 or 32. The source must be an active lane inside the
+    subgroup; results for inactive or out-of-range sources are unspecified.
+    Lane controls are INT32. This operation does not provide a memory fence.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "simt.shuffle_down",
+        [value, _lane_control(offset, span)],
+        {"width": width},
+        span,
+    )
+
+
+def shuffle_bfly(value: Expr, mask: int | Expr, *, width: int = 32, span: Span | None = None) -> Call:
+    """Read an INT32 or FP32 value from the XOR-selected lane in the subgroup.
+
+    Width must be 16 or 32. The source must be an active lane inside the
+    subgroup; results for inactive or out-of-range sources are unspecified.
+    Lane controls are INT32. This operation does not provide a memory fence.
+    """
+    span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "simt.shuffle_bfly",
+        [value, _lane_control(mask, span)],
+        {"width": width},
+        span,
+    )
+
+
+def redux_add(value: Expr, span: Span | None = None) -> Call:
+    """Return the sum of active-lane INT32 or FP32 values to each active lane.
+
+    The result retains the input dtype. INT32 sums wrap at 32 bits.
+    FP32 reductions follow the target arithmetic order and special-value rules.
+    This operation does not provide a memory fence.
+    """
+    return _ir_core.create_op_call("simt.redux_add", [value], {}, _get_span_or_capture(span))
+
+
+def redux_min(value: Expr, span: Span | None = None) -> Call:
+    """Return the minimum of active-lane INT32 or FP32 values to each active lane.
+
+    The result retains the input dtype. INT32 comparisons are signed.
+    FP32 reductions follow the target arithmetic order and special-value rules.
+    This operation does not provide a memory fence.
+    """
+    return _ir_core.create_op_call("simt.redux_min", [value], {}, _get_span_or_capture(span))
+
+
+def redux_max(value: Expr, span: Span | None = None) -> Call:
+    """Return the maximum of active-lane INT32 or FP32 values to each active lane.
+
+    The result retains the input dtype. INT32 comparisons are signed.
+    FP32 reductions follow the target arithmetic order and special-value rules.
+    This operation does not provide a memory fence.
+    """
+    return _ir_core.create_op_call("simt.redux_max", [value], {}, _get_span_or_capture(span))

@@ -18,6 +18,7 @@ from typing import Any, cast
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 from pypto.language.optimizations import SPLIT_SLOT_NUM_DEPRECATION, CrossCoreSlot, cross_core_slot
+from pypto.language.typing import Scalar
 from pypto.pypto_core import DataType, ir
 
 from .attr_parser import AttrParser
@@ -2421,6 +2422,65 @@ class ScopeParser:
             resolved.append(var)
         return resolved
 
+    def _simt_private_scalar_bindings(self, stmt: ast.With) -> list[ir.Var]:
+        """Record outer scalar bindings that have per-thread assignments."""
+        private_scalars: list[ir.Var] = []
+        seen_bindings: set[int] = set()
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Store):
+                continue
+            binding = self.services.scope_manager.lookup_var(node.id)
+            if isinstance(binding, ir.Var) and isinstance(binding.type, ir.ScalarType):
+                if binding.unique_id not in seen_bindings:
+                    seen_bindings.add(binding.unique_id)
+                    private_scalars.append(binding)
+        return private_scalars
+
+    def parse_simt_scope(self, stmt: ast.With, call: ast.Call) -> None:
+        """Keep per-thread execution explicit until OutlineSimtScopes."""
+        span = self.services.span_tracker.get_span(stmt)
+        if self.function.func_type != ir.FunctionType.AIV:
+            raise ParserSyntaxError("simt_scope requires an explicit AIV function", span=span)
+        if "simt" in self.services.scope_manager.scope_types:
+            raise ParserSyntaxError("Nested simt_scope is not supported", span=span)
+        if self.regions.is_inside_scope(ir.ScopeKind.Reg):
+            raise ParserSyntaxError("simt_scope is not allowed inside reg_scope", span=span)
+        if call.args or len(call.keywords) != 1 or call.keywords[0].arg != "dims":
+            raise ParserSyntaxError("simt_scope requires only dims=(x, y, z)", span=span)
+        if any(
+            isinstance(node, ast.Name) and self.services.scope_manager.lookup_var(node.id) is not None
+            for node in ast.walk(call.keywords[0].value)
+        ):
+            raise ParserSyntaxError("SIMT dimensions must be compile-time integers", span=span)
+        try:
+            dims = self.services.expr_evaluator.eval_expr(call.keywords[0].value)
+        except ParserTypeError as exc:
+            raise ParserSyntaxError("SIMT dimensions must be compile-time integers", span=span) from exc
+        if not isinstance(dims, (tuple, list)):
+            raise ParserSyntaxError("SIMT dimensions must be exactly three positive integers", span=span)
+        dims = cast("list[Any] | tuple[Any, ...]", dims)
+        if len(dims) != 3:
+            raise ParserSyntaxError("SIMT dimensions must be exactly three positive integers", span=span)
+        block_dims: list[ir.Expr] = []
+        for dim in dims:
+            # Lossless IR printing spells non-index constants as pl.const(...).
+            if isinstance(dim, Scalar):
+                dim = dim.unwrap()
+            if type(dim) is int and dim > 0:
+                block_dims.append(ir.ConstInt(dim, DataType.INDEX, span))
+            elif isinstance(dim, ir.ConstInt) and dim.value > 0:
+                block_dims.append(dim)
+            else:
+                raise ParserSyntaxError("SIMT dimensions must be exactly three positive integers", span=span)
+        private_scalars = self._simt_private_scalar_bindings(stmt)
+        with self.services.builder.simt_scope(block_dims, span, private_scalars=private_scalars):
+            self.services.scope_manager.enter_scope("simt")
+            try:
+                self.callbacks.body(stmt.body)
+                self.comments.discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
+            finally:
+                self.services.scope_manager.exit_scope()
+
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
 
@@ -2478,6 +2538,10 @@ class ScopeParser:
                         "`with pl.spmd(...) as tid:` to capture the outlined dispatch's "
                         "producer TaskId.",
                     )
+
+                if func.attr == "simt_scope":
+                    self.parse_simt_scope(stmt, context_expr)
+                    return
 
                 if func.attr == "reg_scope":
                     if context_expr.args or context_expr.keywords:

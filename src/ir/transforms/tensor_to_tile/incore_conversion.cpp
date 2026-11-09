@@ -1893,13 +1893,13 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     returned_values.reserve(outputs.size());
     for (const auto& output : outputs) returned_values.push_back(output.value);
     const auto storage_body = SeqStmts::Flatten(allocations.storage_definitions, span);
-    const auto indices =
-        return_lineage::TraceExprsToParamIndices(returned_values, storage_body, roots, nullptr);
+    const auto indices = return_lineage::TraceExprsToParamIndices(returned_values, storage_body, roots,
+                                                                  nullptr, func->params_.size());
     // Storage identity alone does not require a GM parameter. Ordinary local
     // allocations, including Tensor-level updates and control-flow aliases,
     // keep their original promotion and receive one output store after lowering.
-    const auto gm_indices =
-        return_lineage::TraceExprsToParamIndices(allocations.gm_uses, storage_body, roots, nullptr);
+    const auto gm_indices = return_lineage::TraceExprsToParamIndices(allocations.gm_uses, storage_body, roots,
+                                                                     nullptr, func->params_.size());
     std::unordered_set<const Var*> gm_roots;
     for (const auto& index : gm_indices) {
       if (index && *index >= func->params_.size()) gm_roots.insert(roots[*index].get());
@@ -2003,8 +2003,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   std::vector<ExprPtr> returned_values;
   returned_values.reserve(outputs.size());
   for (const auto& output : outputs) returned_values.push_back(output.value);
-  auto storage_indices =
-      return_lineage::TraceExprsToParamIndices(returned_values, indexed_body, storage_roots, nullptr);
+  auto storage_indices = return_lineage::TraceExprsToParamIndices(returned_values, indexed_body,
+                                                                  storage_roots, nullptr, new_params.size());
   for (size_t i = 0; i < outputs.size(); ++i) outputs[i].storage_index = storage_indices[i];
 
   std::unordered_map<const Expr*, ExprPtr> stored_values;

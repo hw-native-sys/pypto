@@ -1804,6 +1804,25 @@ class JITFunction:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_jit_hook(value: object) -> JITFunction | None:
+    """Keep legacy hook discovery separate from provider compilation.
+
+    Hooks return a stable JIT object. Its ordinary extern path (or a deferred
+    builder) owns compilation; discovery does not receive a target or signature.
+    """
+    if isinstance(value, JITFunction):
+        return value
+    hook = getattr(value, "__pypto_jit__", None)
+    if hook is None:
+        return None
+    if not callable(hook):
+        raise TypeError("__pypto_jit__: expected a callable hook")
+    result = hook()
+    if not isinstance(result, JITFunction):
+        raise TypeError(f"__pypto_jit__: expected JITFunction, got {type(result).__name__}")
+    return result
+
+
 def _discover_dep_bindings(
     func: Any, caller_func_type: str = "orchestration"
 ) -> list[_call_binding.DepBinding]:
@@ -1833,14 +1852,14 @@ def _discover_dep_bindings(
 
     all_vars = func_name_lookup(func)
 
-    allowed_dep_types: set[str] = {"incore", "inline", "opaque", "extern", "graph"}
+    allowed_dep_types: set[str] = {"incore", "aiv", "inline", "opaque", "extern", "graph"}
     if caller_func_type == "host":
         allowed_dep_types.add("orchestration")
 
     deps: list[_call_binding.DepBinding] = []
     seen: set[str] = set()
     for name in called_names:
-        obj = all_vars.get(name)
+        obj = _resolve_jit_hook(all_vars.get(name))
         if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(_call_binding.DepBinding(call_name=name, dep=obj))
             seen.add(name)
@@ -2102,6 +2121,7 @@ class _JITDecorator:
 
         @pl.jit                               # entry-point (Orchestration)
         @pl.jit.host                          # entry-point (HOST Orchestrator)
+        @pl.jit.aiv                           # explicit AIV sub-function
         @pl.jit.incore                        # InCore sub-function
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
@@ -2118,6 +2138,7 @@ class _JITDecorator:
     def __init__(self) -> None:
         self.host = _SubFunctionDecorator("host", allow_level=False, allow_auto_scope=True)
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
+        self.aiv = _SubFunctionDecorator("aiv", allow_level=False)
         self.inline = _SubFunctionDecorator("inline", allow_level=False, allow_auto_scope=True)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
         self.graph = _SubFunctionDecorator("graph", allow_level=False)

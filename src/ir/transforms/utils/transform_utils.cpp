@@ -41,6 +41,24 @@ class SubstituteMutator : public IRMutator {
       var_remap_[k] = v;
     }
   }
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto rewritten = As<Call>(IRMutator::VisitExpr_(op));
+    auto kwargs = rewritten->kwargs_;
+    bool changed = false;
+    for (auto& [key, value] : kwargs) {
+      auto mapped = MapAttrExprs(value, [this](const ExprPtr& expr) { return VisitExpr(expr); });
+      if (mapped) {
+        value = std::move(*mapped);
+        changed = true;
+      }
+    }
+    if (!changed) return rewritten;
+    auto result = MutableCopy(rewritten);
+    result->kwargs_ = std::move(kwargs);
+    return result;
+  }
 };
 
 class CallLikeFinder : public IRVisitor {

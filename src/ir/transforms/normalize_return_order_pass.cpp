@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -23,10 +22,10 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -41,100 +40,19 @@ namespace {
 // Sentinel meaning "no matching parameter found".
 static constexpr int kNoParam = -1;
 
-// Build a mapping from each return value index to the parameter index it
-// corresponds to.  This replicates the analysis that was previously inlined
-// in orchestration codegen (BuildReturnToParamMapping).
-//
-// Traverses the function body (excluding the final ReturnStmt) and builds
-// var_to_out_param, a map from Var* to the parameter index of the Out/InOut
-// parameter it ultimately originates from.  Handles:
-//   - tile.store assignments:    lhs -> param index of store's output arg
-//   - Var-to-Var assignments:    lhs -> lookup(rhs) if rhs is already mapped
-//   - ForStmt iter_args:         return_var[i] -> lookup(initValue) or find_param
-//
-// For each ReturnStmt value, the var is looked up in var_to_out_param first,
-// then falls back to direct param-identity matching.
-std::vector<int> BuildReturnToParamMapping(const FunctionPtr& func) {
-  std::vector<int> mapping;
-  if (!func || !func->body_) return mapping;
-
-  auto seq = As<SeqStmts>(func->body_);
-  if (!seq || seq->stmts_.empty()) return mapping;
-  auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
-  if (!return_stmt) return mapping;
-
-  auto find_param_index = [&](const Var* v) -> int {
-    for (int pi = 0; pi < static_cast<int>(func->params_.size()); ++pi) {
-      if (func->params_[pi].get() == v) return pi;
-    }
-    return kNoParam;
-  };
-
-  // Look up v in var_to_out_param; if not found, fall back to direct param match.
-  auto lookup = [&](const std::unordered_map<const Var*, int>& m, const Var* v) -> int {
-    auto it = m.find(v);
-    return it != m.end() ? it->second : find_param_index(v);
-  };
-
-  std::unordered_map<const Var*, int> var_to_out_param;
-  for (int si = 0; si + 1 < static_cast<int>(seq->stmts_.size()); ++si) {
-    if (auto assign = As<AssignStmt>(seq->stmts_[si])) {
-      if (!assign->var_) continue;
-      if (auto call = As<Call>(assign->value_)) {
-        // tile.store(tile, offsets, out_param, ...) → lhs tracks out_param
-        if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
-          if (auto out_param = As<Var>(call->args_[2])) {
-            var_to_out_param[assign->var_.get()] = find_param_index(out_param.get());
-          }
-        }
-      } else if (auto src_var = As<Var>(assign->value_)) {
-        // Var-to-var assignment: propagate existing mapping
-        int idx = lookup(var_to_out_param, src_var.get());
-        if (idx != kNoParam) {
-          var_to_out_param[assign->var_.get()] = idx;
-        }
-      }
-    } else if (auto for_stmt = As<ForStmt>(seq->stmts_[si])) {
-      int n = std::min(static_cast<int>(for_stmt->return_vars_.size()),
-                       static_cast<int>(for_stmt->iter_args_.size()));
-      for (int ri = 0; ri < n; ++ri) {
-        const auto& iter_arg = for_stmt->iter_args_[ri];
-        if (!iter_arg || !iter_arg->initValue_ || !for_stmt->return_vars_[ri]) continue;
-        if (auto init_var = As<Var>(iter_arg->initValue_)) {
-          int idx = lookup(var_to_out_param, init_var.get());
-          if (idx != kNoParam) {
-            var_to_out_param[for_stmt->return_vars_[ri].get()] = idx;
-          }
-        }
-      }
-    }
-  }
-
-  for (const auto& ret_expr : return_stmt->value_) {
-    auto var = As<Var>(ret_expr);
-    if (!var) {
-      mapping.push_back(kNoParam);
-      continue;
-    }
-    mapping.push_back(lookup(var_to_out_param, var.get()));
-  }
-  return mapping;
-}
-
 // Rewrite tensor return values to the param Var each one writes through
 // (pointer identity). Orchestration codegen aliases call results to their
 // source args via this mapping; explicit param returns make it a lookup
 // instead of a heuristic re-derivation that can mis-bind multi-output
 // kernels (#1702, #1573, #1693). Returns nullptr when nothing changes.
-FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func, const ProgramPtr& program) {
+FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func,
+                                     const std::vector<std::optional<size_t>>& ret_to_param) {
   if (!func || !func->body_) return nullptr;
 
-  auto ret_to_param = return_lineage::ReturnedParamIndices(func, program);
   if (ret_to_param.empty()) return nullptr;
 
-  // The topmost ReturnStmt is not always the trailing statement of a
-  // top-level SeqStmts (e.g. AIV kernels keep theirs inside the split body),
-  // so rewrite it wherever it sits.
+  // The lineage map already requires consensus across device return paths.
+  // Apply that same map to every return site, including nested split bodies.
   class ReturnRewriter : public IRMutator {
    public:
     ReturnRewriter(const FunctionPtr& func, const std::vector<std::optional<size_t>>& ret_to_param)
@@ -143,7 +61,7 @@ FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func, const ProgramPtr& 
 
    protected:
     StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
-      if (done_ || op->value_.empty()) return op;
+      if (op->value_.empty()) return op;
 
       // A Group/Spmd wrapper around a multi-result kernel forwards the inner
       // call's whole tuple as ONE return value, while declaring N return
@@ -175,13 +93,12 @@ FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func, const ProgramPtr& 
           if (!AsTensorTypeLike(param->GetType())) return op;
           expanded.push_back(param);
         }
-        done_ = true;
         changed = true;
         return std::make_shared<ReturnStmt>(expanded, op->span_);
       }
 
       if (ret_to_param_.size() != op->value_.size()) return op;
-      done_ = true;
+      bool return_changed = false;
       std::vector<ExprPtr> new_values = op->value_;
       for (size_t i = 0; i < new_values.size(); ++i) {
         if (!ret_to_param_[i]) continue;
@@ -190,16 +107,16 @@ FunctionPtr CanonicalizeReturnValues(const FunctionPtr& func, const ProgramPtr& 
         if (!AsTensorTypeLike(param->GetType())) continue;
         if (new_values[i].get() == param.get()) continue;
         new_values[i] = param;
-        changed = true;
+        return_changed = true;
       }
-      if (!changed) return op;
+      if (!return_changed) return op;
+      changed = true;
       return std::make_shared<ReturnStmt>(new_values, op->span_);
     }
 
    private:
     const FunctionPtr& func_;
     const std::vector<std::optional<size_t>>& ret_to_param_;
-    bool done_ = false;
   };
 
   ReturnRewriter rewriter(func, ret_to_param);
@@ -226,9 +143,9 @@ std::vector<int> CollectOutIndices(const FunctionPtr& func) {
 // to out_indices[k].  Returns an empty vector when no reordering is needed.
 //
 // permutation[old_index] = new_index
-std::vector<int> ComputeReturnPermutation(const FunctionPtr& func) {
-  auto ret_to_param = BuildReturnToParamMapping(func);
-  if (ret_to_param.empty()) return {};
+std::vector<int> ComputeReturnPermutation(const FunctionPtr& func,
+                                          const std::vector<std::optional<size_t>>& ret_to_param) {
+  if (ret_to_param.empty() || ret_to_param.size() != func->return_types_.size()) return {};
 
   auto out_indices = CollectOutIndices(func);
   if (out_indices.empty()) return {};
@@ -248,11 +165,12 @@ std::vector<int> ComputeReturnPermutation(const FunctionPtr& func) {
   bool needs_reorder = false;
 
   for (int i = 0; i < static_cast<int>(ret_to_param.size()); ++i) {
-    if (ret_to_param[i] == kNoParam) {
+    const auto& parameter = ret_to_param[i];
+    if (!parameter) {
       permutation[i] = i;
       continue;
     }
-    auto it = param_to_out_pos.find(ret_to_param[i]);
+    auto it = param_to_out_pos.find(static_cast<int>(*parameter));
     if (it == param_to_out_pos.end()) {
       permutation[i] = i;
       continue;
@@ -289,38 +207,70 @@ std::vector<int> ComputeReturnPermutation(const FunctionPtr& func) {
 // Reorder return values and return types of an InCore function according to
 // the given permutation.  Returns a new Function with the reordered return.
 FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& permutation) {
-  auto seq = As<SeqStmts>(func->body_);
-  INTERNAL_CHECK_SPAN(seq && !seq->stmts_.empty(), func->span_)
-      << "NormalizeReturnOrder: function body has no statements";
-  auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
-  INTERNAL_CHECK_SPAN(return_stmt, seq->span_) << "NormalizeReturnOrder: function body has no ReturnStmt";
-  INTERNAL_CHECK_SPAN(permutation.size() == return_stmt->value_.size(), return_stmt->span_)
-      << "NormalizeReturnOrder: permutation size mismatch";
+  class ReturnPermuter : public IRMutator {
+   public:
+    explicit ReturnPermuter(const std::vector<int>& permutation) : permutation_(permutation) {}
 
-  std::vector<ExprPtr> new_values(return_stmt->value_.size());
-  std::vector<TypePtr> new_return_types(func->return_types_.size());
-
-  for (int i = 0; i < static_cast<int>(permutation.size()); ++i) {
-    INTERNAL_CHECK_SPAN(permutation[i] >= 0 && permutation[i] < static_cast<int>(new_values.size()),
-                        return_stmt->span_)
-        << "NormalizeReturnOrder: permutation index out of range";
-    new_values[permutation[i]] = return_stmt->value_[i];
-    if (i < static_cast<int>(func->return_types_.size()) &&
-        permutation[i] < static_cast<int>(new_return_types.size())) {
-      new_return_types[permutation[i]] = func->return_types_[i];
+   protected:
+    StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+      INTERNAL_CHECK_SPAN(permutation_.size() == op->value_.size(), op->span_)
+          << "NormalizeReturnOrder: permutation size mismatch";
+      std::vector<ExprPtr> values(op->value_.size());
+      for (size_t i = 0; i < permutation_.size(); ++i) values[permutation_[i]] = op->value_[i];
+      return std::make_shared<ReturnStmt>(values, op->span_);
     }
-  }
 
-  auto new_return = std::make_shared<ReturnStmt>(new_values, return_stmt->span_);
-  std::vector<StmtPtr> new_stmts(seq->stmts_.begin(), seq->stmts_.end() - 1);
-  new_stmts.push_back(new_return);
-  auto new_body = std::make_shared<SeqStmts>(new_stmts, seq->span_);
+   private:
+    const std::vector<int>& permutation_;
+  };
 
+  std::vector<TypePtr> return_types(permutation.size());
+  for (size_t i = 0; i < permutation.size(); ++i) return_types[permutation[i]] = func->return_types_[i];
   auto new_func = MutableCopy(func);
-  new_func->return_types_ = new_return_types;
-  new_func->body_ = new_body;
+  new_func->return_types_ = std::move(return_types);
+  new_func->body_ = ReturnPermuter(permutation).VisitStmt(func->body_);
   return new_func;
 }
+
+// Only a direct assignment in a caller visited by the remapper can
+// consume a reordered result. A public pass invocation may still contain
+// inline calls, so defer their callee's permutation while such uses remain.
+class UnremappableCallCollector : public IRVisitor {
+ public:
+  void VisitFunction(const FunctionPtr& func) override {
+    remap_assignments_ = !IsInCoreType(func->func_type_);
+    VisitStmt(func->body_);
+  }
+
+  std::unordered_set<std::string> callees;
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    const auto* saved = assignment_value_;
+    if (remap_assignments_) assignment_value_ = op->value_.get();
+    IRVisitor::VisitStmt_(op);
+    assignment_value_ = saved;
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    Record(op.get(), op->op_);
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    Record(op.get(), op->op_);
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  void Record(const Expr* value, const OpPtr& callee) {
+    if (value == assignment_value_) return;
+    if (const auto global = std::dynamic_pointer_cast<const GlobalVar>(callee)) callees.insert(global->name_);
+  }
+
+  const Expr* assignment_value_ = nullptr;
+  bool remap_assignments_ = false;
+};
 
 // Keep the physical result tuple in the callee's new order. Projections use
 // the matching permutation; whole-tuple consumers retain the old logical order.
@@ -455,28 +405,35 @@ Pass NormalizeReturnOrder() {
     std::unordered_map<std::string, std::vector<int>> permutations;
     std::vector<FunctionPtr> functions;
     bool modified = false;
+    std::optional<UnremappableCallCollector> unremappable_calls;
+    return_lineage::ScopedTraceCache return_cache;
 
     for (const auto& [gvar, func] : program->functions_) {
       const bool is_wrapper = IsWrapperType(func->func_type_);
-      // A Graph is a *callee* whose returns orchestration codegen aliases to
-      // call-site tensors, exactly like an InCore kernel or a Group/Spmd
-      // wrapper, so it needs the same explicit-param form. Its body is written
-      // ``out = core(..., out, ...); return out``, and the outliner turns that
-      // into a TupleGetItem rebind, so the return reaches codegen as an SSA
-      // rename. Left un-canonicalized, ExplicitReturnedParamIndices comes back
-      // all-nullopt, IsReturnedParamMapPrecise rejects the map, and codegen
-      // falls back to a positional heuristic that is only right when the return
-      // order happens to match the parameter order -- silently binding every
-      // result to the wrong tensor otherwise (#2601).
-      if (IsInCoreType(func->func_type_) || is_wrapper || func->func_type_ == FunctionType::Graph) {
+      // CHIP Orchestration results are consumed by HOST codegen too. Preserve
+      // their parameter identities before InitMemRef gives SSA aliases distinct
+      // allocation metadata; only InCore return positions are reordered below.
+      if (IsInCoreType(func->func_type_) || is_wrapper || func->func_type_ == FunctionType::Graph ||
+          func->func_type_ == FunctionType::Orchestration) {
         // Step A0: make every tensor return an explicit param reference.
+        const auto ret_to_param = return_lineage::ReturnedParamIndices(func, program);
         FunctionPtr current = func;
-        if (auto canonical = CanonicalizeReturnValues(current, program)) {
+        if (auto canonical = CanonicalizeReturnValues(current, ret_to_param)) {
           current = canonical;
           modified = true;
         }
         std::vector<int> perm;
-        if (IsInCoreType(current->func_type_)) perm = ComputeReturnPermutation(current);
+        // An extern's declared result order is part of its fixed ABI.
+        if (IsInCoreType(current->func_type_) && !current->HasAttr(kAttrExternalSource)) {
+          perm = ComputeReturnPermutation(current, ret_to_param);
+        }
+        if (!perm.empty()) {
+          if (!unremappable_calls) {
+            unremappable_calls.emplace();
+            for (const auto& entry : program->functions_) unremappable_calls->VisitFunction(entry.second);
+          }
+          if (unremappable_calls->callees.count(current->name_)) perm.clear();
+        }
         if (!perm.empty()) {
           auto new_func = ReorderReturns(current, perm);
           permutations[current->name_] = std::move(perm);

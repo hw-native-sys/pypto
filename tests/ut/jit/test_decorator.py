@@ -2408,6 +2408,7 @@ class TestConstantWidthSliceMetadata:
         assert metas["view"] == TensorMeta(
             shape=(expected, 32), dtype=DataType.BF16, layout=ir.TensorLayout.ND
         )
+        assert metas["view"].inexact_axes == (frozenset({0}) if extent is None else frozenset())
 
     def test_narrow_scalar_slice_branch_does_not_infer_fixed_width(self):
         @jit.inline
@@ -7677,6 +7678,82 @@ class TestRuntimeSizedLocalExtents:
         metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
         assert metas["first"].shape[0] is a_dim
         assert metas["second"].shape[0] is b_dim
+
+    def test_shortened_helper_results_preserve_runtime_extent_identity(self):
+        @jit.inline
+        def shorten_pair(src: pl.Tensor, limit: pl.Scalar[pl.INDEX]):
+            short = pl.slice(src, [limit, 16], [0, 0])
+            full = short[:]
+            return short, full
+
+        @jit.inline
+        def copy_shape(src: pl.Tensor):
+            copied = pl.reshape(src, [pl.tensor.dim(src, 0), 16])
+            return copied
+
+        def body(x, limit, other):
+            first, first_alias = shorten_pair(x, limit)
+            second, second_alias = shorten_pair(x, other)
+            first_copy = copy_shape(first)
+            second_copy = copy_shape(second)
+            return first_copy, second_copy
+
+        seed = {"x": TensorMeta(shape=(32, 16), dtype=DataType.FP32)}
+        metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
+        first = metas["first"].actual_dim(0)
+        second = metas["second"].actual_dim(0)
+        assert isinstance(first, DynDim) and first.synthesized
+        assert isinstance(second, DynDim) and second.synthesized
+        assert first is not second
+        assert metas["first_alias"].actual_dim(0) is first
+        assert metas["second_alias"].actual_dim(0) is second
+        assert metas["first_copy"].actual_dim(0) is first
+        assert metas["second_copy"].actual_dim(0) is second
+
+    @pytest.mark.parametrize("subscript", [False, True])
+    @pytest.mark.parametrize(
+        "copy_expression",
+        [
+            "pl.slice(short, short.shape, [0, 0])",
+            "pl.reshape(short, [pl.tensor.dim(short, 0), 16])",
+            "pl.reshape(short, short.shape)",
+            "short[:]",
+        ],
+    )
+    def test_shortened_view_descriptor_reaches_jit_dependency(self, subscript, copy_expression, monkeypatch):
+        @jit.incore
+        def consume(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            value = pl.load(x, [0, 0], [1, 16])
+            pl.store(value, [0, 0], out)
+            return out
+
+        def entry(
+            x: pl.Tensor[[_SLICE_ROWS_3145, 16], pl.FP32],
+            limit: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ):
+            short = pl.slice(x, [limit, 16], [0, 0])
+            copied = short[:]
+            return consume(copied, out)
+
+        get_lines = inspect.getsourcelines
+        lines, line = get_lines(entry)
+        source = "".join(lines).replace("copied = short[:]", f"copied = {copy_expression}")
+        if subscript:
+            source = source.replace("pl.slice(x, [limit, 16], [0, 0])", "x[:limit, :]")
+        monkeypatch.setattr(
+            inspect,
+            "getsourcelines",
+            lambda func: (source.splitlines(keepends=True), line) if func is entry else get_lines(func),
+        )
+        # The second operation reads the shortened descriptor, not the parent's
+        # fallback bound. Verify specialization and the complete IR pass pipeline.
+        program = jit(entry).lower()
+        kernel = program.get_function("consume")
+        assert kernel is not None
+        tensor_type = kernel.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        assert isinstance(tensor_type.shape[0], ir.Var)
 
     def test_descriptor_reshape_dep_uses_argument_descriptor(self):
         """The callee reads the reshaped argument's leading dim, rather than src's pages."""
