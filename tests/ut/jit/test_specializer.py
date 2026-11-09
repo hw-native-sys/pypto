@@ -4104,7 +4104,8 @@ def test_jit_dispatch_capture_then_scalar_assignment(capture_kind):
 
 @pytest.mark.parametrize("selected", [True, False])
 @pytest.mark.parametrize("inactive_capture", [False, True])
-def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive_capture):
+@pytest.mark.parametrize("condition", ["enabled", "mode == 0", "not (mode > 0 or mode < 0)"])
+def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive_capture, condition):
     fold = "rows = a.shape[0]"
     inactive = (
         "with pl.at(level=pl.Level.CORE_GROUP) as rows:\n"
@@ -4115,8 +4116,8 @@ def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive
     body, orelse = (fold, inactive) if selected else (inactive, fold)
     source = (
         textwrap.dedent("""
-        def f(a: pl.InOut[pl.Tensor], enabled: pl.constexpr):
-            if enabled:
+        def f(a: pl.InOut[pl.Tensor], enabled: pl.constexpr, mode: pl.constexpr):
+            if CONDITION:
                 BODY
             else:
                 ORELSE
@@ -4125,8 +4126,9 @@ def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive
         .replace("        BODY", textwrap.indent(body, "        "))
         .replace("        ORELSE", textwrap.indent(orelse, "        "))
     )
+    source = source.replace("CONDITION", condition)
     ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
-    ctx.constexpr_values = {"enabled": str(selected)}
+    ctx.constexpr_values = {"enabled": str(selected), "mode": "0" if selected else "1"}
     function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
     assert isinstance(function.body, ir.SeqStmts)

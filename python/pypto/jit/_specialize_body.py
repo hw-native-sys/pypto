@@ -18,6 +18,10 @@ import ast
 from collections.abc import Mapping
 from typing import Any, TypeVar, cast
 
+from pypto.language.parser.ast_parser import ASTParser
+from pypto.language.parser.diagnostics import ParserError
+from pypto.pypto_core import arith, ir
+
 from . import _specialize_values as values
 from ._specialize_types import DynDim, TensorMeta
 
@@ -38,6 +42,36 @@ def _scope_call_name(value: ast.expr) -> str | None:
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
         return value.func.attr
     return None
+
+
+def _constant_condition(node: ast.expr) -> bool | None:
+    """Resolve a literal-only condition using the DSL's expression semantics."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, bool) else None
+    if not isinstance(node, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+        return None
+    literal_nodes = (
+        ast.Constant,
+        ast.Compare,
+        ast.BoolOp,
+        ast.UnaryOp,
+        ast.BinOp,
+        ast.cmpop,
+        ast.boolop,
+        ast.unaryop,
+        ast.operator,
+    )
+    if not all(isinstance(child, literal_nodes) for child in ast.walk(node)):
+        return None
+
+    # Names and calls would need the actual function scope. Let the normal
+    # parser handle those conditions, and retain diagnostics for invalid DSL.
+    try:
+        condition = ASTParser("<JIT condition>", []).parse_expression(ast.fix_missing_locations(node))
+        folded = arith.Analyzer().simplify(condition)
+    except (ParserError, TypeError, ValueError, OverflowError):
+        return None
+    return folded.value if isinstance(folded, ir.ConstBool) else None
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -891,10 +925,10 @@ class BodyTransformer(ast.NodeTransformer):
         """
         node.test = self.visit(node.test)
         self._scope_depth += 1
-        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+        if (selected := _constant_condition(node.test)) is not None:
             # Keep both bodies for the parser's yield handling. Only the
             # selected body can update the surrounding specialization state.
-            if node.test.value:
+            if selected:
                 if node.orelse:
                     node.orelse = self._visit_inactive_branch(node.orelse)
                 node.body = self._visit_scoped_body(node.body)
