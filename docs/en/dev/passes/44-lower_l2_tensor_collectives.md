@@ -163,7 +163,7 @@ B = L - (L % NR) * (L >= NR)
 
 `NR` is deducer-enforced positive, so the divisor is always defined; no runtime
 context read and no floored-divisor guard is emitted. The resulting `B` is
-attached to the launch spec as computed. [`LegalizeSpmdLaunches`](44-legalize_spmd_launches.md) cannot prove a runtime `B`
+attached to the launch spec as computed. [`LegalizeSpmdLaunches`](45-legalize_spmd_launches.md) cannot prove a runtime `B`
 positive, so it emits the dispatch inside `if (B > 0)` and preserves the empty path; clamping the width to
 `max(B, 1)` would instead launch one block for a malformed call.
 
