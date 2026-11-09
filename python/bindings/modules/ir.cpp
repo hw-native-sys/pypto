@@ -2299,10 +2299,10 @@ void BindIR(nb::module_& m) {
       "the exact mirror of how MemRef carries (base, byte_offset, size) under MemRefType. "
       "Constructed by the comm-collection pass; the alloc op's LHS at parse time is a "
       "plain Var(PtrType).");
-  window_buffer_class.def(nb::init<VarPtr, ExprPtr, bool, bool, Span, std::string>(), nb::arg("base"),
-                          nb::arg("size"), nb::arg("load_from_host") = false,
+  window_buffer_class.def(nb::init<VarPtr, ExprPtr, bool, bool, Span, std::string, std::string>(),
+                          nb::arg("base"), nb::arg("size"), nb::arg("load_from_host") = false,
                           nb::arg("store_to_host") = false, nb::arg("span") = Span::unknown(),
-                          nb::arg("memory_source") = "device",
+                          nb::arg("memory_source") = "device", nb::arg("init") = "",
                           "Create a WindowBuffer wrapping the given Ptr Var. The buffer's "
                           "runtime-unique identifier flows through the inherited "
                           "Var.name_hint (taken from base.name_hint).");

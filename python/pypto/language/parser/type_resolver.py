@@ -346,7 +346,15 @@ class TypeResolver:
             )
         fields: dict[str, ast.expr] = dict(zip(("key", "base", "size"), node.args))
         for keyword in node.keywords:
-            if keyword.arg not in {"key", "base", "size", "load_from_host", "store_to_host", "memory_source"}:
+            if keyword.arg not in {
+                "key",
+                "base",
+                "size",
+                "load_from_host",
+                "store_to_host",
+                "memory_source",
+                "init",
+            }:
                 raise ParserTypeError("Unknown window_buffer keyword", span=self._get_span(keyword))
             if keyword.arg in fields:
                 raise ParserTypeError(
@@ -370,6 +378,19 @@ class TypeResolver:
                 f"Conflicting window_buffer descriptors for ID {identifier}", span=self._get_span(node)
             )
         self._window_buffer_nodes[identifier] = node
+
+    @staticmethod
+    def _resolve_window_source(fields: dict[str, ast.expr], span: ir.Span) -> tuple[str, str]:
+        """Validate physical backing and the optional runtime initialization key."""
+        source_node = fields.get("memory_source", ast.Constant(value="device"))
+        if not isinstance(source_node, ast.Constant) or source_node.value not in ("device", "host"):
+            raise ParserTypeError("window_buffer memory_source must be 'device' or 'host'", span=span)
+        init_node = fields.get("init", ast.Constant(value=""))
+        if not isinstance(init_node, ast.Constant) or not isinstance(init_node.value, str):
+            raise ParserTypeError("window_buffer init must be a string", span=span)
+        if init_node.value and source_node.value != "host":
+            raise ParserTypeError("window_buffer init requires memory_source='host'", span=span)
+        return source_node.value, init_node.value
 
     def resolve_window_buffer(self, node: ast.expr) -> ir.WindowBuffer:
         """Intern a printed window descriptor, preserving shared object identity."""
@@ -413,11 +434,15 @@ class TypeResolver:
         if _is_pl_yield_call(size_node):
             raise ParserTypeError("window_buffer size cannot contain pl.yield_()", span=span)
         size = self._parse_expression(size_node)
-        source_node = fields.get("memory_source", ast.Constant(value="device"))
-        if not isinstance(source_node, ast.Constant) or source_node.value not in ("device", "host"):
-            raise ParserTypeError("window_buffer memory_source must be 'device' or 'host'", span=span)
+        memory_source, init = self._resolve_window_source(fields, span)
         window = ir.WindowBuffer(
-            base, size, flags["load_from_host"], flags["store_to_host"], span, source_node.value
+            base,
+            size,
+            flags["load_from_host"],
+            flags["store_to_host"],
+            span,
+            memory_source,
+            init,
         )
         self._window_buffers[identifier] = (signature, window)
         return window

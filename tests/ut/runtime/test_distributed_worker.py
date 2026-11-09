@@ -19,6 +19,7 @@ domains, handle-owned input lifetimes, and complete cleanup before publication.
 import ctypes
 import gc
 import importlib.util
+import io
 import json
 import sys
 import threading
@@ -56,6 +57,7 @@ from pypto.runtime.distributed_runner import (
     _register_callables,
     _reset_dfx_dispatch_state,
     _submit_chip,
+    _submit_dispatch,
     add_chip_tensor_arg,
     validate_host_domain_runtime,
 )
@@ -2269,6 +2271,10 @@ class TestAssembleChipCallables:
         none_transfer = object()
         setattr(buffer_module, "TensorTransfer", SimpleNamespace(NONE=none_transfer))
         monkeypatch.setitem(sys.modules, "simpler.buffer", buffer_module)
+        # Inputs below are torch/DeviceTensor objects. Keep this registration
+        # unit test from importing native Simpler through the partially mocked
+        # package (which can retry an extension import after a failed import).
+        monkeypatch.setattr("pypto.runtime.distributed_runner._is_simpler_tensor", lambda tensor: False)
         tensor = torch.zeros(2)
         wire = object()
         args = MagicMock()
@@ -2523,7 +2529,7 @@ class TestDfxCounterWiring:
         worker._persistent = False
         worker._w = object()
         worker._dfx_dispatch_idx = {}
-        state = {"entry_fn": None, "chip_cids": {}, "sub_ids": {}, "device_nums": 1}
+        state = {"entry_fn": None, "chip_cids": {}, "sub_ids": {}, "device_nums": 1, "window_sources": {}}
 
         assert worker._submit_prepared_native(state, {}, None, [], []) == "handle"
         assert seen["dfx_dispatch_idx"] is worker._dfx_dispatch_idx
@@ -2559,6 +2565,7 @@ class TestDfxCounterWiring:
             "sub_ids": {},
             "device_nums": 1,
             "entry_fn": _entry,
+            "window_sources": {},
         }
 
         assert worker._submit_persistent(state, {}, None, [], []) == "handle"
@@ -3338,6 +3345,8 @@ class _PersistentDomainHandle:
         self.name = name
         self.workers = tuple(workers)
         self.contexts = {}
+        self.buffer_specs = buffers
+        self.host_data = {worker: bytearray(window_size) for worker in workers}
         for worker_id in workers:
             local_window_base = 0x10000000 + allocation_index * 0x100000 + worker_id * 0x10000
             offset = 0
@@ -3363,6 +3372,26 @@ class _PersistentDomainHandle:
         self.freed = False
         self.release_error: BaseException | None = None
         self.free_on_release = True
+
+    def buffer_range(self, name):
+        offset = 0
+        for spec in self.buffer_specs:
+            if spec.name == name:
+                return offset, spec.nbytes
+            offset += spec.nbytes
+        raise KeyError(name)
+
+    def member(self, rank):
+        data = self.host_data[self.workers[rank]]
+
+        class Mapping:
+            @property
+            def buf(self):
+                return memoryview(data)
+
+        return SimpleNamespace(
+            buffers={spec.name: SimpleNamespace(shm=Mapping()) for spec in self.buffer_specs}
+        )
 
     def __getitem__(self, worker_id: int):
         return self.contexts[worker_id]
@@ -3475,6 +3504,8 @@ class _PersistentOrch:
                 resources,
                 list(kwargs["buffers"]),
             )
+            if initializer := kwargs.get("initializer"):
+                initializer(handle)
             self.handles.append(handle)
             self.worker._live_domains[handle.name] = handle
         # Public reuse registers the domain with each run and moves its
@@ -3541,6 +3572,43 @@ def _persistent_entry(
     return entry
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+def test_window_sources_are_forwarded_only_at_runtime(patched_setup, persistent):
+    m = patched_setup
+    seen = []
+
+    def entry(*args, _window_sources, _domain_provider=None, **kwargs):
+        seen.append(_window_sources)
+
+    setattr(entry, "_window_source_keys", ("engram",))
+    m["load_entry"].return_value = (entry, None)
+    compiled = _fake_compiled([_param("a", [16, 16])], [])
+    source = io.BytesIO(b"shard")
+    files = [source]
+    m["worker"].submit.side_effect = lambda fn: (fn(MagicMock(), None, None), _ImmediateNativeHandle())[1]
+    m["submit_dispatch"].side_effect = _submit_dispatch
+    with DistributedWorker(compiled, persistent=persistent, window_sources={"engram": files}) as rt:
+        files.clear()
+        rt(_resident(rt, (16, 16)))
+    assert seen == [{"engram": (source,)}]
+    assert not source.closed
+
+
+@pytest.mark.parametrize("bindings,pattern", [({}, "Missing window_sources"), ({"typo": []}, "not used")])
+def test_window_sources_validate_before_worker_init(patched_setup, bindings, pattern):
+    m = patched_setup
+
+    def entry(*args, **kwargs):
+        pass
+
+    setattr(entry, "_window_source_keys", ("engram",) if not bindings else ())
+    m["load_entry"].return_value = (entry, None)
+    compiled = _fake_compiled([_param("a", [16, 16])], [])
+    with pytest.raises(ValueError, match=pattern):
+        DistributedWorker(compiled, window_sources=bindings)
+    m["worker"].init.assert_not_called()
+
+
 class TestPersistentDistributedWorker:
     @pytest.mark.parametrize("reset", [False, True])
     def test_host_domain_reuse_and_reset_policy(self, patched_setup, reset):
@@ -3559,20 +3627,55 @@ class TestPersistentDistributedWorker:
         rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=reset)
         arg = _resident(rt, (16, 16))
         try:
-            if reset:
-                with pytest.raises(ValueError, match="reset_persistent_windows=False"):
-                    rt(arg)
-                assert not orch.allocate_calls
-            else:
-                rt(arg)
-                rt(arg)
-                assert handles[0] is handles[1]
-                assert len(orch.allocate_calls) == 1
-                assert orch.allocate_calls[0]["memory_source"] == "host"
-                assert orch.allocate_calls[0]["workspace_engines"] == ("urma",)
-                assert not orch.copy_calls
+            rt(arg)
+            rt(arg)
+            assert handles[0] is handles[1]
+            assert len(orch.allocate_calls) == 1
+            assert orch.allocate_calls[0]["memory_source"] == "host"
+            assert orch.allocate_calls[0]["workspace_engines"] == ("urma",)
+            assert not orch.copy_calls
         finally:
             rt.close()
+
+    def test_initialized_host_reuse_preserves_table_and_resets_device(self, patched_setup):
+        from pypto.runtime.window_sources import make_window_initializer  # noqa: PLC0415
+
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
+        source = io.BytesIO(b"table")
+        device_entry = _persistent_entry(64, [])
+        loaded = []
+
+        def entry(orch, *args, _window_sources, _domain_provider, **kwargs):
+            initializer = make_window_initializer(_window_sources, (("data", "engram", 5),), 1)
+            spec = SimpleNamespace(name="data", dtype="opaque", count=5, nbytes=64)
+            with _domain_provider(
+                name="host_table",
+                workers=[1],
+                window_size=64,
+                buffers=[spec],
+                memory_source="host",
+                workspace_engines=("urma",),
+                initializer=initializer,
+            ) as domain:
+                loaded.append(domain.host_data[1][:5])
+            device_entry(orch, *args, _domain_provider=_domain_provider, **kwargs)
+
+        setattr(entry, "_window_source_keys", ("engram",))
+        m["load_entry"].return_value = (entry, None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        with DistributedWorker(compiled, persistent=True, window_sources={"engram": [source]}) as rt:
+            arg = _resident(rt, (16, 16))
+            rt(arg)
+            source.close()  # Reuse must neither validate nor read this file again.
+            rt(arg)
+            assert loaded == [b"table", b"table"]
+            assert len(orch.allocate_calls) == 2
+            assert len(orch.copy_calls) > 0
+            assert len(orch.reuse_calls) == 4
 
     def test_window_reset_requires_persistent_mode(self):
         compiled = _fake_compiled([_param("a", [16, 16])], [])

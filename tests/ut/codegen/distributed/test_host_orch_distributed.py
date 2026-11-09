@@ -2245,6 +2245,31 @@ def test_host_window_requests_urma_and_context():
     assert "validate_host_domain_runtime(orch)" in code
 
 
+@pytest.mark.parametrize("key", ["engram_l1", 'table"\\\nkey'])
+def test_host_window_initializer_is_only_a_runtime_binding(key):
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[17], pl.FP32]) -> pld.DistributedTensor[[17], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[17], pl.FP32]:
+            buf = pld.alloc_window_buffer(68, memory_source="host", init=key)
+            table = pld.window(buf, [17], dtype=pl.FP32)
+            self.chip(table, device=0)
+            return table
+
+    code = _lower(Prog)
+    namespace = {}
+    exec(compile(code, "host_init.py", "exec"), namespace)
+    assert namespace["host"]._window_source_keys == (key,)
+    assert "initializer=make_window_initializer(_window_sources," in code
+    assert '"buf",' in code
+    assert ", 68)," in code
+    assert "open(" not in code
+
+
 def test_host_peer_mte_is_rejected_through_chip_call():
     @pl.program
     class Prog:

@@ -228,11 +228,49 @@ The owning rank may use its device-mapped tensor locally. Host peer windows are 
 MTE mappings: peer access requires URMA. Existing peer-MTE primitives and collectives
 are rejected when their remote operands originate from Host windows, including through
 forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
-peer MTE. Host URMA execution and Engram initialization remain separate work;
-constructing a Host domain does not provide either feature.
+peer MTE. Host peer URMA reads remain a separate execution feature.
 
-Persistent execution includes memory source and workspace engines in domain reuse
-validation. Host domains currently require `reset_persistent_windows=False`, because
-the automatic reset path performs Device H2D copies. This option applies to the entire
-worker: any Device scratch/signal windows in the same worker must be initialized by
-the program as needed. Domain release remains owned by Simpler.
+### Runtime file initialization
+
+Declare a runtime source key with `pld.alloc_window_buffer(size, memory_source="host",
+init="engram_l1")`. Compilation records the key and logical byte count; it never opens
+or reads files. After compilation, bind one open binary file per domain rank:
+
+```python
+from contextlib import ExitStack
+from pypto.runtime import DistributedWorker
+
+compiled = program.compile(...)  # no shard files needed here
+with ExitStack() as stack:
+    shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
+    with DistributedWorker(compiled, persistent=True,
+                           window_sources={"engram_l1": shard_files}) as worker:
+        worker(...)  # creates the domain and loads the files before submitting chip tasks
+        worker(...)  # reuses the loaded Host domain
+```
+
+`init` must be a non-empty string and is supported only for Host windows. The
+`window_sources` mapping belongs to the worker (also accepted by `compiled.prepare`).
+The file sequence follows **domain rank order**, including domains covering a subset
+of workers. Missing/unused source keys and a wrong rank count raise errors.
+
+Simpler #2939 supplies the creation-time initializer. PyPTO reads each source from
+file offset zero directly into the named buffer's Host mapping, in bounded chunks,
+and restores the original file position. It copies exactly the logical byte count;
+alignment padding is untouched and trailing file bytes are ignored. A short file
+fails domain creation; all CPU memoryview exports are released so Simpler can roll
+back. No complete table-sized staging allocation is made. Files must be readable,
+seekable binary streams; the caller owns them and must keep them open until the
+first dispatch completes. Do not mutate or concurrently access these streams while
+initialization runs.
+
+Persistent reuse does not invoke the initializer, so files can be closed after the
+first successful dispatch. A newly created domain reads its files again. Without
+`persistent=True`, each dispatch creates and initializes a new domain, so keep the
+files open. Source bindings are snapshotted at worker creation; changing the original
+mapping/list does not reload a retained table. Create a new worker to load new data.
+
+Persistent execution validates memory source, workspace engines and initializer
+bindings when reusing domains. Host windows retain their contents regardless of
+`reset_persistent_windows`; Device scratch/signal buffers keep the existing reset
+policy (zero before reuse by default). Domain release remains owned by Simpler.

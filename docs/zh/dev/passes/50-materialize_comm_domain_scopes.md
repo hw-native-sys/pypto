@@ -189,9 +189,40 @@ Simpler 校验。当前 runtime 子模块已提供此 API。
 所属 rank 可以通过设备映射的 tensor 进行本地访问。Host peer 窗口不是 MTE 映射，
 远端访问必须走 URMA。现有 peer-MTE 原语和集合通信在远端操作数来自 Host 窗口时会被拒绝，
 包括通过 chip/InCore 参数转发的情况。URMA 异步算子不被归类为 peer MTE。
-Host URMA 执行接入和 Engram 初始化属于后续工作，构建 Host 域并不提供这两项功能。
+Host peer URMA 读取的执行接入仍是独立的后续工作。
 
-持久执行（persistent execution）的复用校验包含内存来源和工作区引擎。
-Host 域当前要求 `reset_persistent_windows=False`，因为自动重置路径使用 Device H2D 拷贝。
-此选项作用于整个 worker：同一 worker 中的 Device scratch/signal 窗口需要程序按需初始化。
+### 运行时文件初始化
+
+用 `pld.alloc_window_buffer(size, memory_source="host", init="engram_l1")` 声明运行时来源键。
+编译阶段仅记录键和逻辑字节数，不打开或读取文件。编译完成后，为每个域内 rank 绑定一个已打开的二进制文件：
+
+```python
+from contextlib import ExitStack
+from pypto.runtime import DistributedWorker
+
+compiled = program.compile(...)  # 此时无需 shard 文件
+with ExitStack() as stack:
+    shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
+    with DistributedWorker(compiled, persistent=True,
+                           window_sources={"engram_l1": shard_files}) as worker:
+        worker(...)  # 创建通信域、加载文件，然后提交 chip 任务
+        worker(...)  # 复用已加载的 Host 域
+```
+
+`init` 必须是非空字符串，且只支持 Host 窗口。`window_sources` 属于 worker 的运行时配置，
+也可传给 `compiled.prepare`。文件序列按**域内 rank 顺序**排列，包括只覆盖部分 worker 的域。
+缺失或未使用的来源键、错误的文件数量都会报错。
+
+PyPTO 接入 Simpler #2939 的创建时 initializer，从文件偏移零开始，分块直接读入对应命名 buffer
+的 Host 映射，并恢复文件原先的位置。只复制逻辑字节数，不改动对齐填充，忽略文件尾部多余字节。
+文件过短会使域创建失败；异常路径释放所有 CPU memoryview，允许 Simpler 回滚分配。
+不会分配另一份完整表大小的暂存空间。文件必须是可读、可定位的二进制流，由调用者管理生命周期，
+首次派发完成前须保持打开；初始化过程中不要修改或并发访问这些文件流。
+
+持久域复用不调用 initializer，首次派发成功后即可关闭文件。新建域会重新读取文件。
+未启用 `persistent=True` 时，每次派发都会创建并初始化新域，因此文件须保持打开。
+worker 创建时固定来源映射与文件列表，修改原来的字典或列表不会重新加载持久表；更新数据需创建新 worker。
+
+持久执行的复用校验包含内存来源、工作区引擎和初始化绑定。Host 窗口始终保留内容，
+不受 `reset_persistent_windows` 影响；Device scratch/signal buffer 保持原有重置策略，默认复用前清零。
 通信域仍由 Simpler 负责释放。

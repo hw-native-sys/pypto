@@ -363,7 +363,7 @@ ExprPtr IRMutator::VisitExpr_(const WindowBufferPtr& op) {
   }
   auto fresh =
       std::make_shared<const WindowBuffer>(std::move(new_base), std::move(new_size), op->load_from_host_,
-                                           op->store_to_host_, op->span_, op->memory_source_);
+                                           op->store_to_host_, op->span_, op->memory_source_, op->init_);
   var_remap_[op.get()] = fresh;
   return fresh;
 }

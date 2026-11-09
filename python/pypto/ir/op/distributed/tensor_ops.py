@@ -31,7 +31,12 @@ _ALLREDUCE_SIGNAL_MISSING = object()
 
 
 def alloc_window_buffer(
-    size: int | Expr, *, name: str, memory_source: str = "device", span: Span | None = None
+    size: int | Expr,
+    *,
+    name: str,
+    memory_source: str = "device",
+    init: str | None = None,
+    span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.alloc_window_buffer(size)`` Call.
 
@@ -44,6 +49,8 @@ def alloc_window_buffer(
             :class:`ir.Expr`).
         name: Unique buffer identifier, kwarg-only.
         memory_source: Physical backing, "device" or "host". Host requires URMA resources.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered open
+            binary files through DistributedWorker(window_sources=...) after compilation.
         span: Optional source span (auto-captured if absent).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -55,7 +62,13 @@ def alloc_window_buffer(
         raise ValueError(
             f"alloc_window_buffer memory_source must be 'device' or 'host', got {memory_source!r}"
         )
+    if init is not None and (type(init) is not str or not init):
+        raise ValueError("alloc_window_buffer init must be a non-empty string or None")
+    if init is not None and memory_source != "host":
+        raise ValueError("alloc_window_buffer init requires memory_source='host'")
     kwargs = {"name": name}
+    if init is not None:
+        kwargs["init"] = init
     if memory_source != "device":
         kwargs["memory_source"] = memory_source
     return _ir_core.create_op_call("pld.tensor.alloc_window_buffer", [size_expr], kwargs, actual_span)

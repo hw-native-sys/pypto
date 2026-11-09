@@ -787,8 +787,8 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     rec->wb = std::make_shared<const WindowBuffer>(
         rec->ptr_var, rec->size_expr,
         /*load_from_host=*/false,
-        /*store_to_host=*/false, rec->span,
-        rec->alloc_call->GetKwarg<std::string>("memory_source", "device"));
+        /*store_to_host=*/false, rec->span, rec->alloc_call->GetKwarg<std::string>("memory_source", "device"),
+        rec->alloc_call->GetKwarg<std::string>("init", ""));
   }
 
   // Phase 5: build var substitution map for every pld.tensor.window result Var,

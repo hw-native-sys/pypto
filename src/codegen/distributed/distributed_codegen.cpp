@@ -33,6 +33,7 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/core/python_string.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -275,6 +276,7 @@ void DistributedCodegen::EmitImports() {
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   declared_vars_.clear();
+  window_source_keys_.clear();
   task_args_counter_ = 0;
   current_func_ = func;
 
@@ -299,7 +301,7 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   std::ostringstream sig;
   sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size";
   if (ir::LevelToLinquLevel(func->level_.value_or(ir::Level::AIV)) >= 3) {
-    sig << ", _domain_provider=None";
+    sig << ", _domain_provider=None, _window_sources=None";
   }
   sig << "):";
   emitter_.EmitLine(sig.str());
@@ -342,6 +344,15 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   }
 
   emitter_.DecreaseIndent();
+  // Validate runtime bindings before Worker initialization without opening files
+  // during compilation or serializing process-local handles into the artifact.
+  if (!window_source_keys_.empty()) {
+    std::ostringstream keys;
+    keys << func->name_ << "._window_source_keys = (";
+    for (const auto& key : window_source_keys_) keys << QuotePythonString(key) << ",";
+    keys << ")";
+    emitter_.EmitLine(keys.str());
+  }
   emitter_.EmitLine("");
   is_worker_context_ = false;
 }
@@ -595,6 +606,19 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     emitter_.EmitLine("validate_host_domain_runtime(orch)");
     emitter_.EmitLine("from simpler.task_interface import AddressSpace");
   }
+  // One Simpler callback initializes all named slots after every rank is mapped.
+  // Keep logical extents separate from the aligned physical buffer sizes below.
+  std::ostringstream initializers;
+  for (size_t i = 0; i < op->slots_.size(); ++i) {
+    const auto& slot = op->slots_[i];
+    if (slot->init_.empty()) continue;
+    window_source_keys_.insert(slot->init_);
+    initializers << "(" << QuotePythonString(SanitizeName(slot->name_hint_)) << ", "
+                 << QuotePythonString(slot->init_) << ", " << slot_nbytes[i] << "),";
+  }
+  if (!initializers.str().empty()) {
+    emitter_.EmitLine("from pypto.runtime.window_sources import make_window_initializer");
+  }
   emitter_.EmitLine("with (_domain_provider or orch.allocate_domain)(");
   emitter_.IncreaseIndent();
   emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
@@ -609,6 +633,10 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     INTERNAL_CHECK_SPAN(std::find(op->engines_.begin(), op->engines_.end(), "urma") != op->engines_.end(),
                         op->span_)
         << "Internal error: Host communication domain is missing its URMA engine requirement";
+  }
+  if (!initializers.str().empty()) {
+    emitter_.EmitLine("initializer=make_window_initializer(_window_sources, (" + initializers.str() +
+                      "), len(" + workers.str() + ")),");
   }
   emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
   if (!op->engines_.empty()) {

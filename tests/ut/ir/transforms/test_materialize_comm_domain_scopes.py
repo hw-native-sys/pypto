@@ -2297,7 +2297,8 @@ def test_window_memory_source_roundtrip(source):
     ir.assert_structural_equal(window, restored, enable_auto_mapping=True)
 
 
-def test_host_and_device_windows_have_separate_domains():
+@pytest.mark.parametrize("init", [None, "engram_l1", 'table"\\\nkey'])
+def test_host_and_device_windows_have_separate_domains(init):
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2306,7 +2307,7 @@ def test_host_and_device_windows_have_separate_domains():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
-            h = pld.alloc_window_buffer([64], dtype=pl.FP32, memory_source="host")
+            h = pld.alloc_window_buffer([64], dtype=pl.FP32, memory_source="host", init=init)
             d = pld.alloc_window_buffer(256)
             h2 = pld.alloc_window_buffer(256, memory_source="host")
             ht = pld.window(h, [64], dtype=pl.FP32)
@@ -2323,6 +2324,10 @@ def test_host_and_device_windows_have_separate_domains():
     assert isinstance(scope, ir.CommDomainScopeStmt)
     assert [slot.memory_source for slot in scope.slots] == ["host", "host"]
     assert list(scope.engines) == ["urma"]
+    assert scope.slots[0].init == (init or "")
+    ir.assert_structural_equal(
+        scope.slots[0], ir.deserialize(ir.serialize(scope.slots[0])), enable_auto_mapping=True
+    )
     assert isinstance(scope.body, ir.CommDomainScopeStmt)
     assert [slot.memory_source for slot in scope.body.slots] == ["device"]
     assert list(scope.body.engines) == []
@@ -2336,6 +2341,12 @@ def test_host_and_device_windows_have_separate_domains():
 def test_invalid_window_memory_source(source):
     with pytest.raises((ValueError, TypeError), match="memory_source"):
         dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source)
+
+
+@pytest.mark.parametrize("init,source", [("", "host"), (3, "host"), ("table", "device")])
+def test_invalid_window_init(init, source):
+    with pytest.raises((ValueError, TypeError), match="init"):
+        dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source, init=init)
 
 
 if __name__ == "__main__":

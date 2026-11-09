@@ -205,7 +205,7 @@ class DeepCloneMutator : public IRMutator {
       return op;
     }
     auto fresh = std::make_shared<WindowBuffer>(std::move(new_base), std::move(new_size), op->load_from_host_,
-                                                op->store_to_host_, op->span_, op->memory_source_);
+                                                op->store_to_host_, op->span_, op->memory_source_, op->init_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }

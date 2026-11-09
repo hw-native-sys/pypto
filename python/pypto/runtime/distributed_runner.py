@@ -23,18 +23,19 @@ import time
 import types
 import warnings
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import numpy as np
 import torch
 
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
+from .window_sources import normalize_window_sources
 
 logger = logging.getLogger(__name__)
 
@@ -1524,6 +1525,7 @@ def _make_dispatch_orchestration(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
+    window_sources: Mapping[str, Sequence[BinaryIO]] | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1555,6 +1557,7 @@ def _make_dispatch_orchestration(
             sub_ids=sub_ids,
             _keep=keepalive,
             world_size=device_nums,
+            **({"_window_sources": window_sources} if window_sources else {}),
         )
 
     return orch_fn
@@ -1571,6 +1574,7 @@ def _submit_dispatch(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
+    window_sources: Mapping[str, Sequence[BinaryIO]] | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1582,6 +1586,7 @@ def _submit_dispatch(
         device_nums,
         keepalive,
         dfx_dispatch_idx=dfx_dispatch_idx,
+        window_sources=window_sources,
     )
     return w.submit(orch_fn)
 
@@ -1881,6 +1886,12 @@ class DistributedWorker(Worker):
     runtime-owned POSIX-shm Buffers, so their CPU-contiguous host endpoints may
     be ordinary tensors created after ``prepare``.
 
+    ``window_sources`` maps compiled Host-window ``init`` keys to open binary
+    files in domain rank order. Bind files after compilation; Simpler reads them
+    only when creating a domain. Persistent Host windows retain their contents,
+    while Device windows follow ``reset_persistent_windows``. The caller owns
+    the files and must keep them open until initialization completes.
+
     ``inherited_host_tensors`` keeps such a host range alive for the worker's
     lifetime *and* is a caller guarantee about it: listing a tensor asserts that
     its backing is visible across processes — a ``MAP_SHARED`` mapping, whether
@@ -1947,6 +1958,7 @@ class DistributedWorker(Worker):
         *,
         persistent: bool = False,
         reset_persistent_windows: bool | None = None,
+        window_sources: Mapping[str, Sequence[BinaryIO]] | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
@@ -1959,6 +1971,7 @@ class DistributedWorker(Worker):
         # attached to DeviceTensor for address-free wire TaskArgs.
         self._device_buffers: dict[tuple[int, int], Any] = {}
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
+        window_sources = normalize_window_sources(window_sources)
         reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
         inherited, self._inherited_host_spans = self._resolve_inherited_host_tensors(inherited_host_tensors)
         self._inherited_host_tensors = inherited
@@ -2042,12 +2055,18 @@ class DistributedWorker(Worker):
             # required-callback manifest is enforced per program.
             callbacks = callbacks or {}
             consumed: set[str] = set()
+            consumed_sources: set[str] = set()
             for program_index, prog in enumerate(programs):
                 self._check_compatible(prog, primary)
                 chip_callables, prog_runtime, prog_enable_sdma = _assemble_chip_callables(prog)
                 runtime_name = self._unify_runtime(runtime_name, prog_runtime)
                 enable_sdma = enable_sdma or prog_enable_sdma
                 entry_fn, alloc_fn = _load_orch_entry(prog.output_dir)
+                source_keys = set(getattr(entry_fn, "_window_source_keys", ()))
+                missing_sources = sorted(source_keys - window_sources.keys())
+                if missing_sources:
+                    raise ValueError(f"Missing window_sources for Host window init keys: {missing_sources}")
+                consumed_sources |= source_keys
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
@@ -2065,6 +2084,7 @@ class DistributedWorker(Worker):
                     base_tensor_frames.append(base_tensors)
                 self._states[prog] = {
                     "entry_fn": entry_fn,
+                    "window_sources": {key: window_sources[key] for key in source_keys},
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
                     "param_infos": tuple(prog._get_metadata()[0]),
@@ -2078,6 +2098,11 @@ class DistributedWorker(Worker):
                     )
                 loaded.append((prog, chip_callables, sub_worker_fns))
 
+            unused_sources = sorted(window_sources.keys() - consumed_sources)
+            if unused_sources:
+                raise ValueError(
+                    f"window_sources keys are not used by any prepared program: {unused_sources}"
+                )
             unconsumed = sorted(set(callbacks) - consumed)
             if unconsumed:
                 raise ValueError(f"callbacks names {unconsumed} are not sub-workers of any prepared program.")
@@ -2293,6 +2318,7 @@ class DistributedWorker(Worker):
                 getattr(kwargs.get("memory_source", "device"), "name", kwargs.get("memory_source", "device"))
             ).lower(),
             tuple(sorted(kwargs.get("workspace_engines", ()))),
+            tuple(getattr(kwargs.get("initializer"), "bindings", ())),
         )
 
     def _reset_persistent_domains(
@@ -2301,12 +2327,14 @@ class DistributedWorker(Worker):
         domains: dict[str, tuple[tuple[Any, ...], Any]],
         reset_buffers: dict[int, Any],
     ) -> None:
-        """Restore every named buffer in retained domains to its initial zero state.
+        """Restore retained Device buffers to zero while preserving Host table contents.
 
         The host Buffers are created before ``Worker.run`` and released after it;
         this callback only issues copies while Simpler holds its submit lock.
         """
         for domain_name, (spec, handle) in domains.items():
+            if spec[3] == "host":
+                continue  # Host tables retain their initialized contents across dispatches.
             _workers, window_nbytes, buffer_specs, *_resource_spec = spec
             for worker_id in handle.workers:
                 actual_window_size = int(handle[worker_id].actual_window_size)
@@ -2336,6 +2364,8 @@ class DistributedWorker(Worker):
     ) -> None:
         """Create zero-filled host Buffers, shared by every named buffer of the same size."""
         for domain_name, (spec, _handle) in domains.items():
+            if spec[3] == "host":
+                continue  # Host tables retain their initialized contents across dispatches.
             _workers, window_nbytes, buffer_specs, *_resource_spec = spec
             named_nbytes = sum(int(buffer_spec[3]) for buffer_spec in buffer_specs)
             if named_nbytes != int(window_nbytes):
@@ -2417,11 +2447,6 @@ class DistributedWorker(Worker):
                 generated_name = str(kwargs["name"])
                 program_domains = domains_by_program.setdefault(program_id, {})
                 spec = self._persistent_domain_spec(kwargs)
-                if spec[3] == "host" and self._reset_persistent_windows:
-                    raise ValueError(
-                        "Host communication domains require reset_persistent_windows=False; "
-                        "automatic H2D window reset is supported only for Device domains"
-                    )
                 existing = program_domains.get(generated_name)
                 if existing is not None and spec != existing[0]:
                     raise ValueError(
@@ -2453,6 +2478,7 @@ class DistributedWorker(Worker):
                 _keep=keepalive,
                 world_size=state["device_nums"],
                 _domain_provider=domain_provider,
+                **({"_window_sources": state["window_sources"]} if state["window_sources"] else {}),
             )
 
         try:
@@ -2492,6 +2518,7 @@ class DistributedWorker(Worker):
             state["device_nums"],
             keepalive,
             dfx_dispatch_idx=self._dfx_dispatch_idx,
+            window_sources=state["window_sources"],
         )
 
     def _submit_native_dispatch(

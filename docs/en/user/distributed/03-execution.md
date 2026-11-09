@@ -28,7 +28,7 @@ directly via `DistributedWorker(compiled)`, importable from
 
 | Method | Description |
 | ------ | ----------- |
-| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None, startup_timeout_s=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
+| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, window_sources=None, callbacks=None, sub_worker_overrides=None, startup_timeout_s=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
 | `rt(x, y, z)` | Single dispatch — coerces args, calls host_orch. |
 | `rt.run(compiled, x, y, z)` | Multi-program dispatch — selects the target program. |
 | `rt.submit(compiled, x, y, z)` | Bounded asynchronous dispatch — returns a `DistributedRunHandle`. |
@@ -327,3 +327,14 @@ model state, a host-side metric collector, a result inspector.
 - [00-model](00-model.md) — Quickstart and model vocabulary
 - [04-debugging](04-debugging.md) — Common failure patterns
 - [Getting Started](../00-getting_started.md) — Runtime setup
+
+### Host window file sources
+
+Pass `window_sources={"engram_l1": shard_files}` to `compiled.prepare()` or
+`DistributedWorker` for a window declared with `memory_source="host", init="engram_l1"`.
+Open the files **after compilation**, in domain rank order. Initialization reads each
+file from offset zero, restores its position, and copies the logical window size.
+The caller owns the files. With `persistent=True`, initialization runs once and Host
+contents survive reuse; the default Device window reset still applies.
+See [Host DDR windows](../../dev/passes/50-materialize_comm_domain_scopes.md)
+for the full lifecycle and error contract.
