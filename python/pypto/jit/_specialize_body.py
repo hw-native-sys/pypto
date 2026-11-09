@@ -1101,6 +1101,11 @@ class BodyTransformer(ast.NodeTransformer):
                 _restore_bindings(self._assign_count, old_counts, graph_locals)
                 _restore_bindings(self._assign_depth, old_depths, graph_locals)
                 _restore_bindings(self._var_renames, old_renames, graph_locals)
+                # The parser may recover a tensor written by the captured
+                # dispatch under the old spelling. Resolve later shape and
+                # dtype reads from that typed binding.
+                for name in graph_locals:
+                    self._meta.pop(self._var_renames.get(name, name), None)
         # A capture binds the dispatch result, not a body-local reassignment
         # of the same spelling. Do not create another alpha version here:
         # the parser reuses the source Var and native SSA builds carries/phis.

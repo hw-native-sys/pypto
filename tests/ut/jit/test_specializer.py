@@ -4032,6 +4032,35 @@ def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture, o
         assert assignment.value.same_as(function.params[2])
 
 
+def test_jit_graph_capture_shape_uses_tensor_written_in_device_body():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            for i in pl.range(1):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    selected = a
+                    pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            with pl.graph("recording"):
+                with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                    selected = b
+                    pl.store(pl.load(b, [0, 0], [64, 128]), [0, 0], b)
+            for i in pl.range(selected.shape[0]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(selected, [i, 0], [1, 128]), [i, 0], selected)
+            return selected
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    _, loop = (stmt for stmt in function.body.stmts if isinstance(stmt, ir.ForStmt))
+    assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == 64
+
+
 def test_jit_graph_capture_matches_restored_tensor_alias():
     source = textwrap.dedent("""
         def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
