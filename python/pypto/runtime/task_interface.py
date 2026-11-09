@@ -52,12 +52,6 @@ def device_tensor_to_chip_tensor(dt: DeviceTensor) -> ChipTensor:
     retained for low-level compatibility only; high-level public dispatch uses
     address-free ``TaskArgs`` and does not call this helper.
     """
-    # Imported here, not at module scope: ``tensor_arg`` resolves this module
-    # lazily, so a top-level import would be a cycle.
-    from .tensor_arg import is_byte_carrier_dtype  # noqa: PLC0415
-
-    if is_byte_carrier_dtype(dt.dtype):
-        return ChipTensor.make(data=dt.data_ptr, shapes=dt.shape, dtype=DataType.UINT8, child_memory=True)
     try:
         dt_enum = torch_dtype_to_datatype(dt.dtype)
     except KeyError as e:

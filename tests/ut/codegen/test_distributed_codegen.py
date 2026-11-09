@@ -368,13 +368,13 @@ class TestDistributedCodegen:
         # Generated stub must be syntactically valid Python.
         compile(module, "<sample>", "exec")
 
-    def test_sub_worker_rejects_fp8e5m2_parameter(self):
-        """A HOST SubWorker cannot receive a byte-carried FP8E5M2 tensor.
+    def test_sub_worker_accepts_fp8e5m2_parameter(self):
+        """A HOST SubWorker receives an FP8E5M2 tensor as ``torch.float8_e5m2``.
 
         The generated unpacking reads its torch dtype from the wire descriptor,
-        which names FP8E5M2 as UINT8, so the body would silently be handed byte
-        codes instead of float values. Emission must refuse rather than produce
-        a module that computes wrong numbers without erroring.
+        which now names FP8E5M2 natively, and ``_DTYPE_MAP`` in
+        ``distributed_runner`` translates it back to the torch dtype. Both ends
+        agree, so the body sees float values rather than byte codes.
         """
         from pypto.backend.pto_backend import _emit_sub_worker_module  # noqa: PLC0415
 
@@ -391,16 +391,16 @@ class TestDistributedCodegen:
 
         observe_fn = Input.get_function("observe")
         assert observe_fn is not None
-        with pytest.raises(NotImplementedError, match="FP8E5M2"):
-            _emit_sub_worker_module(observe_fn)
+        module = _emit_sub_worker_module(observe_fn)
+        assert "_tensor_from_continuous" in module
+        compile(module, "<observe>", "exec")
 
     def test_sub_worker_accepts_packed_fp4_parameter(self):
-        """The FP8E5M2 refusal must not catch FP4E1M2X2, which crosses correctly.
+        """FP4E1M2X2 crosses as a faithful UINT8 byte carrier.
 
-        Control for the guard above. FP4E1M2X2 is also named UINT8 on the wire,
-        but torch has no dtype for it at all, so UINT8 is its faithful host
-        representation rather than a lossy stand-in -- rejecting it would break
-        a path that works.
+        Torch has no dtype for packed E1M2 at all, so UINT8 is its real host
+        representation rather than a stand-in, and it needs no translation on
+        the receive side.
         """
         from pypto.backend.pto_backend import _emit_sub_worker_module  # noqa: PLC0415
 
@@ -918,11 +918,12 @@ def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
     ("dtype", "expected_enum"),
     [
         (pl.FP32, "DataType.FLOAT32"),
-        # Byte carriers: the pinned runtime enum has neither, so the window is
-        # described as UINT8 and the identical bytes cross. Before the mapping
-        # existed these aborted codegen with "Unsupported DistributedTensor
-        # dtype for simpler.DataType mapping".
-        (pl.FP8E5M2, "DataType.UINT8"),
+        # E5M2 has a native runtime enum, so the window carries its real type.
+        (pl.FP8E5M2, "DataType.FP8E5M2"),
+        # Byte carrier: the runtime enum has no E1M2, so the window is described
+        # as UINT8 and the identical bytes cross. Before the mapping existed this
+        # aborted codegen with "Unsupported DistributedTensor dtype for
+        # simpler.DataType mapping".
         (pl.FP4E1M2X2, "DataType.UINT8"),
     ],
 )

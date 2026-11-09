@@ -58,6 +58,9 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
     "INT32": (ctypes.c_int32, torch.int32),
     "INT64": (ctypes.c_int64, torch.int64),
     "UINT8": (ctypes.c_uint8, torch.uint8),
+    # A5 low-precision. E5M2 is one byte per element and torch names it, so the
+    # buffer is allocated as bytes and reinterpreted -- same shape as FP16/BF16.
+    "FP8E5M2": (ctypes.c_uint8, torch.float8_e5m2),
     # Simpler's FP4E2M1 element is one packed x2 byte; shapes/strides use carriers.
     "FP4E2M1": (ctypes.c_uint8, torch.uint8),
 }

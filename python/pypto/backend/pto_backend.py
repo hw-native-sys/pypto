@@ -2138,53 +2138,6 @@ def _materialize_builtin_next_levels(
     return result_files
 
 
-# Torch dtypes that PyPTO renames to UINT8 on the wire *and* for which torch has
-# a distinct dtype of its own. ``_tensor_from_continuous`` reads the dtype from
-# the wire descriptor alone, so for these -- and only these -- the rename is
-# unrecoverable on the receive side and the callback would silently see byte
-# codes. Packed carriers such as FP4E1M2X2 are deliberately absent: torch has no
-# dtype for them at all, so UINT8 is their faithful host representation, not a
-# lossy stand-in, and they cross this path correctly today.
-_LOSSY_WIRE_CARRIER_DTYPES = {"fp8e5m2": "float8_e5m2"}
-
-
-def _reject_lossy_carrier_params(func: _ir_core.Function) -> None:
-    """Refuse to generate a SubWorker whose unpacking would corrupt a parameter.
-
-    A generated HOST SubWorker unpacks each argument with
-    ``_tensor_from_continuous``, which selects the torch dtype from the wire
-    descriptor and never consults the declared parameter dtype. An FP8E5M2
-    parameter is named ``DataType::UINT8`` on the wire, so the callback body
-    would receive ``torch.uint8`` and read byte codes as integers -- an encoded
-    1.0 becomes 60.0, with no error anywhere. Fail at generation time instead:
-    this combination has never worked (before the byte carrier existed the
-    tensor could not cross at all), so rejecting it breaks nothing and replaces
-    silent corruption with a message that names the workaround.
-
-    Args:
-        func: The SubWorker function about to be emitted
-
-    Raises:
-        NotImplementedError: A tensor parameter uses a lossy wire carrier dtype
-    """
-    for param in func.params:
-        param_type = param.type
-        if not isinstance(param_type, _ir_core.TensorType):
-            continue
-        torch_name = _LOSSY_WIRE_CARRIER_DTYPES.get(param_type.dtype.to_string())
-        if torch_name is None:
-            continue
-        raise NotImplementedError(
-            f"SubWorker '{func.name}' parameter '{param.name_hint}' is "
-            f"{param_type.dtype.to_string().upper()}, which the runtime carries as UINT8 bytes. The "
-            f"generated receive-side unpacking derives its torch dtype from the wire descriptor "
-            f"alone, so the body would be handed a torch.uint8 tensor of raw byte codes instead of "
-            f"torch.{torch_name} values. Pass the tensor to a chip kernel, which keeps the declared "
-            f"element type, or declare this parameter as UINT8 and reinterpret it in the body with "
-            f".view(torch.{torch_name})."
-        )
-
-
 def _emit_sub_worker_module(func: _ir_core.Function) -> str:
     """Emit a self-contained SubWorker module callable as ``fn(args: MappedArgs)``.
 
@@ -2217,8 +2170,6 @@ def _emit_sub_worker_module(func: _ir_core.Function) -> str:
     body = func.body
     if not isinstance(body, _ir_core.InlineStmt):
         raise RuntimeError(f"SubWorker '{func.name}' must have an InlineStmt body, got {type(body).__name__}")
-
-    _reject_lossy_carrier_params(func)
 
     indented_body = textwrap.indent(body.body, "    ") if body.body else "    pass"
     unpack_block = (

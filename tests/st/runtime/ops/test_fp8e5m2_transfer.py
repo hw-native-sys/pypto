@@ -7,12 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 round trip of FP8E5M2 data through the runtime's UINT8 byte carrier.
+"""A5 round trip of FP8E5M2 data through the runtime.
 
-The pinned runtime has no E5M2 ``DataType``; PyPTO passes ``torch.float8_e5m2``
-host tensors as zero-copy UINT8 views while the kernel keeps its FP8E5M2 type.
-A load/store copy read at a non-zero offset must return every finite E5M2 code
-unchanged -- normals, subnormals, the 57344 maximum, and *both* signed zeros.
+The runtime names E5M2 natively, so a ``torch.float8_e5m2`` host tensor crosses
+carrying its own element type. A load/store copy read at a non-zero offset must
+return every finite E5M2 code unchanged -- normals, subnormals, the 57344
+maximum, and *both* signed zeros.
 
 The comparison is bitwise, on the raw bytes, which the signed zeros require:
 the harness default compares elementwise with ``torch.isclose``
@@ -109,7 +109,7 @@ def _compare_bytes(actual: dict[str, torch.Tensor], expected: dict[str, torch.Te
     ),
 )
 def test_e5m2_offset_copy_is_byte_exact(case_run):
-    """Every finite E5M2 byte code survives the UINT8 wire carrier unchanged."""
+    """Every finite E5M2 byte code survives the round trip unchanged."""
     case_run.assert_passed()
 
 

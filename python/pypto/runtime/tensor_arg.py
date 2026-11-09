@@ -20,9 +20,7 @@ pre-uploaded device buffers — mirroring the L2 path in
 :func:`pypto.runtime.runner._execute_compiled`.
 
 Host ``torch.Tensor`` arguments are delegated to
-``simpler_setup.torch_interop.make_tensor_arg(worker, tensor)``. Torch dtypes the
-pinned runtime has no ``DataType`` for cross as same-width UINT8 byte carriers --
-see :func:`is_byte_carrier_dtype`. Never route
+``simpler_setup.torch_interop.make_tensor_arg(worker, tensor)``. Never route
 this path through :mod:`pypto.runtime.task_interface`: its compatibility
 ``make_tensor_arg`` alias is chip-only and produces a ``ChipTensor``.
 
@@ -68,45 +66,6 @@ _PYPTO_OWNER_REF_ATTR = "_pypto_tensor_owner_ref"
 # dispatch (DP8 decode: ~142 tensors x 8 ranks), so rebuilding an identical
 # descriptor each time was pure host-side dispatch latency.
 _WIRE_TENSOR_ATTR = "_pypto_wire_tensor"
-
-
-# Torch dtypes the pinned runtime has no ``DataType`` enumerator for. The wire
-# descriptor names them as the same-width UINT8 byte carrier, so the H2D/D2H copy
-# moves the identical bytes while the kernel signature keeps the real element
-# type. ``float8_e5m2`` is the A5 low-precision case; ``codegen_base.cpp`` maps it the same
-# way for orchestration ``TensorCreateInfo`` (as it already does for FP4E1M2X2).
-_BYTE_CARRIER_TORCH_DTYPES = ("float8_e5m2",)
-
-
-def is_byte_carrier_dtype(dtype: Any) -> bool:
-    """Whether *dtype* is a torch dtype the runtime only accepts as raw bytes.
-
-    Args:
-        dtype: A ``torch.dtype``
-
-    Returns:
-        ``True`` when the wire descriptor must name ``DataType.UINT8`` for *dtype*.
-    """
-    import torch  # noqa: PLC0415
-
-    return any(getattr(torch, name, None) == dtype for name in _BYTE_CARRIER_TORCH_DTYPES)
-
-
-def runtime_host_tensor(tensor: Any) -> Any:
-    """Return *tensor* as the runtime sees it: a zero-copy UINT8 view for byte carriers.
-
-    Args:
-        tensor: A host ``torch.Tensor``
-
-    Returns:
-        *tensor* itself for a natively supported dtype, else a UINT8 view over
-        the same storage.
-    """
-    import torch  # noqa: PLC0415
-
-    if is_byte_carrier_dtype(tensor.dtype):
-        return tensor.view(torch.uint8)
-    return tensor
 
 
 def bind_tensor_arg_owner(worker: Any, owner: Any) -> None:
@@ -226,11 +185,7 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
         if cached is not None:
             return cached
         try:
-            dtype = (
-                task_interface.DataType.UINT8
-                if is_byte_carrier_dtype(arg.dtype)
-                else task_interface.torch_dtype_to_datatype(arg.dtype)
-            )
+            dtype = task_interface.torch_dtype_to_datatype(arg.dtype)
         except KeyError as e:
             raise ValueError(f"Unsupported DeviceTensor dtype: {arg.dtype}") from e
         wire = (
@@ -240,4 +195,4 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
         )
         object.__setattr__(arg, _WIRE_TENSOR_ATTR, wire)
         return wire
-    return torch_interop.make_tensor_arg(worker, runtime_host_tensor(arg))
+    return torch_interop.make_tensor_arg(worker, arg)

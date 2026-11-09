@@ -121,49 +121,37 @@ launch. `close()` releases the registrations and any `DeviceTensor` the caller f
 | **Freed explicitly** | `w.free_tensor(t)`; `close()` auto-frees as a backstop, not as the plan |
 | **Bound to its worker** | It is not portable to another `ChipWorker` |
 
-### Host tensor dtypes and the FP8E5M2 byte carrier
+### Host tensor dtypes, including FP8E5M2
 
 A host `torch.Tensor` argument is named on the wire by its dtype, so the pinned runtime
 must have a `DataType` for it. It has one for every ordinary dtype and for the MX formats
-`float8_e4m3fn`, `float8_e8m0fnu` and `float4_e2m1fn_x2` — but **not** for
-`float8_e5m2`, which the runtime omits on purpose because its MX paths were specified
-around E4M3FN plus the E8M0 scale.
-
-PyPTO carries such a tensor across as raw bytes rather than refusing it, so E5M2 data a
-framework already holds can be transferred, stored and copied without a host-side
-conversion:
+`float8_e4m3fn`, `float8_e5m2`, `float8_e8m0fnu` and `float4_e2m1fn_x2`, so each of these
+crosses carrying its own element type:
 
 | What you pass | What crosses the wire | What the kernel sees |
 | ------------- | --------------------- | -------------------- |
-| `torch.float8_e5m2` host tensor | a zero-copy `view(torch.uint8)`, named `DataType::UINT8` | `pl.FP8E5M2` |
-| `float8_e5m2` `DeviceTensor` | wire descriptor names `DataType::UINT8` | `pl.FP8E5M2` |
-| A runtime-allocated E5M2 output | `TensorCreateInfo` names `DataType::UINT8` | `pl.FP8E5M2` |
+| `torch.float8_e5m2` host tensor | the tensor itself, named `DataType::FP8E5M2` | `pl.FP8E5M2` |
+| `float8_e5m2` `DeviceTensor` | wire descriptor names `DataType::FP8E5M2` | `pl.FP8E5M2` |
+| A runtime-allocated E5M2 output | `TensorCreateInfo` names `DataType::FP8E5M2` | `pl.FP8E5M2` |
 
-The carrier is a naming substitution only: it is the same byte count and the same bytes,
-so nothing reinterprets the data and the kernel signature keeps `pl.FP8E5M2`. Quantize on
-the host (torch) and pass the result straight in; outputs come back as the dtype your
-kernel declared. `pl.FP4E1M2X2` crosses the same way, since torch cannot name it either.
-(`pl.HF8` does not: it has no runtime `DataType` arm at all, so a runtime-allocated
-HF8 tensor is named `DataType::UNKNOWN` rather than carried as bytes.)
+Quantize on the host (torch) and pass the result straight in; outputs come back as the
+dtype your kernel declared. You do not opt in, and there is nothing to configure.
 
-You do not opt in, and there is nothing to configure. The one visible consequence is that
-an E5M2 tensor is described as UINT8 in runtime-level logs and descriptors.
+A dtype torch can hold but the runtime cannot name still crosses as a **UINT8 byte
+carrier** — a naming substitution only, with the same byte count and the same bytes, so
+nothing reinterprets the data and the kernel signature keeps its declared type.
+`pl.FP4E1M2X2` crosses that way, since torch cannot name it either. (`pl.HF8` does not: it
+has no runtime `DataType` arm at all, so a runtime-allocated HF8 tensor is named
+`DataType::UNKNOWN` rather than carried as bytes.)
 
-The carrier is about **transfer and storage only — it does not widen any operator**. MX
-matmul in particular still requires E4M3FN data operands: `tile.matmul_mx`,
-`tile.matmul_mx_acc`, `tile.matmul_mx_bias` and `tensor.matmul_mx` reject an E5M2 lhs or
-rhs during IR construction, before the carrier is ever reached. Use the carrier to move
-E5M2 data in and out; cast to `pl.FP8E4M3FN` before an MX matmul consumes it.
+Transfer support **does not widen any operator**. MX matmul in particular still requires
+E4M3FN data operands: `tile.matmul_mx`, `tile.matmul_mx_acc`, `tile.matmul_mx_bias` and
+`tensor.matmul_mx` reject an E5M2 lhs or rhs during IR construction. Move E5M2 data in and
+out freely, but cast to `pl.FP8E4M3FN` before an MX matmul consumes it.
 
-One distributed signature is rejected outright: **a HOST `SubWorker` may not declare an
-`FP8E5M2` tensor parameter.** The generated receive-side unpacking picks its torch dtype
-from the wire descriptor, which names E5M2 as UINT8, so the callback body would be handed
-a `torch.uint8` tensor of raw byte codes — an encoded `1.0` would read as `60.0`, silently.
-Code generation therefore fails with `NotImplementedError` naming the parameter. Two
-supported alternatives: pass the tensor to a chip kernel, which keeps the declared element
-type; or declare the parameter `pl.UINT8` and reinterpret inside the body with
-`.view(torch.float8_e5m2)`. `pl.FP4E1M2X2` is unaffected — torch has no dtype for it at
-all, so UINT8 is its faithful host representation rather than a lossy stand-in.
+A HOST `SubWorker` **may** declare an `FP8E5M2` tensor parameter. The generated
+receive-side unpacking picks its torch dtype from the wire descriptor, which names E5M2
+natively, and hands the body a `torch.float8_e5m2` tensor.
 
 ### `RunConfig` fields that affect dispatch
 

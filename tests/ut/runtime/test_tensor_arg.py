@@ -312,8 +312,8 @@ _requires_e5m2 = pytest.mark.skipif(not _HAS_E5M2, reason="torch.float8_e5m2 is 
 
 
 @_requires_e5m2
-def test_fp8e5m2_host_tensor_crosses_as_uint8_byte_view():
-    """The runtime has no E5M2 DataType; the host tensor is passed as a zero-copy byte view."""
+def test_fp8e5m2_host_tensor_crosses_with_its_own_dtype():
+    """The runtime has a native E5M2 DataType, so the host tensor is handed over untouched."""
     host = torch.tensor([[1.0, -2.0], [0.5, 57344.0]], dtype=torch.float8_e5m2)
     sentinel = MagicMock(name="Tensor(host)")
     worker = _worker(3)
@@ -324,16 +324,15 @@ def test_fp8e5m2_host_tensor_crosses_as_uint8_byte_view():
         result = make_tensor_arg(worker, host)
 
     assert result is sentinel
+    # Identity, not just an equal view: no reinterpretation happens on this path.
+    impl.assert_called_once_with(worker, host)
     passed_worker, passed = impl.call_args.args
     assert passed_worker is worker
-    assert passed.dtype == torch.uint8
-    assert passed.shape == host.shape
-    assert passed.data_ptr() == host.data_ptr()
-    assert torch.equal(passed, host.view(torch.uint8))
+    assert passed.dtype == torch.float8_e5m2
 
 
 @_requires_e5m2
-def test_fp8e5m2_device_tensor_uses_uint8_runtime_dtype():
+def test_fp8e5m2_device_tensor_uses_native_runtime_dtype():
     buffer = _RecordingBuffer()
     dt = DeviceTensor(buffer.base, (8, 16), torch.float8_e5m2, buffer=buffer)
 
@@ -342,18 +341,7 @@ def test_fp8e5m2_device_tensor_uses_uint8_runtime_dtype():
 
     make_tensor_arg(_worker(3), dt)
 
-    assert buffer.tensor_calls == [((8, 16), task_interface.DataType.UINT8)]
-
-
-@_requires_e5m2
-def test_byte_carrier_policy_covers_only_e5m2():
-    from pypto.runtime.tensor_arg import is_byte_carrier_dtype, runtime_host_tensor  # noqa: PLC0415
-
-    assert is_byte_carrier_dtype(torch.float8_e5m2)
-    assert not is_byte_carrier_dtype(torch.float8_e4m3fn)
-    assert not is_byte_carrier_dtype(torch.float32)
-    host = torch.zeros(2, 2, dtype=torch.float32)
-    assert runtime_host_tensor(host) is host
+    assert buffer.tensor_calls == [((8, 16), task_interface.DataType.FP8E5M2)]
 
 
 @pytest.mark.parametrize("backend", ["fork", "posix"])

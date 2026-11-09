@@ -1672,14 +1672,13 @@ std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
   if (dtype == DataType::UINT32) return "UINT32";
   if (dtype == DataType::UINT64) return "UINT64";
   if (dtype == DataType::BOOL) return "BOOL";
-  // The pinned runtime enum has no FP8E5M2 and no FP4E1M2X2. Both are
-  // byte-sized carriers whose IR shape is already the physical byte extent, so
-  // a window of either is described as UINT8 and the identical bytes cross --
-  // the same substitution CodegenBase::GetRuntimeDataTypeString makes for the
-  // runtime descriptor. Without these a `pld.tensor.window(..., dtype=...)` of
-  // either dtype aborts codegen on the CHECK below, even though DeduceWindowType
-  // accepts it.
-  if (dtype == DataType::FP8E5M2) return "UINT8";
+  if (dtype == DataType::FP8E5M2) return "FP8E5M2";
+  // The runtime enum has no FP4E1M2X2. It is a byte-sized carrier whose IR shape
+  // is already the physical byte extent, so a window of it is described as UINT8
+  // and the identical bytes cross -- the same substitution
+  // CodegenBase::GetRuntimeDataTypeString makes for the runtime descriptor.
+  // Without this a `pld.tensor.window(..., dtype=FP4E1M2X2)` aborts codegen on
+  // the CHECK below, even though DeduceWindowType accepts it.
   if (dtype == DataType::FP4E1M2X2) return "UINT8";
   CHECK(false) << "Unsupported DistributedTensor dtype for simpler.DataType mapping: " << dtype.ToString();
   return "FLOAT32";

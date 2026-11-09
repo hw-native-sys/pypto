@@ -1284,8 +1284,8 @@ int main() {{
         assert "make_tensor_external(nullptr, row_ci_shapes, 2, DataType::FLOAT32)" not in code
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" not in code
 
-    def test_fp8e5m2_runtime_tensor_uses_uint8_byte_carrier(self):
-        """The runtime has no E5M2 enum, so orchestration descriptors use the UINT8 carrier."""
+    def test_fp8e5m2_runtime_tensor_uses_native_enum(self):
+        """The runtime has a native E5M2 enum, so orchestration descriptors name it directly."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
 
@@ -1317,8 +1317,8 @@ int main() {{
         transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(E5M2Program)
         code = _generate_orch_code(transformed)
 
-        assert "TensorCreateInfo row_ci(row_ci_shapes, 2, DataType::UINT8);" in code
-        assert "DataType::FP8E5M2" not in code
+        assert "TensorCreateInfo row_ci(row_ci_shapes, 2, DataType::FP8E5M2);" in code
+        assert "DataType::UINT8" not in code
 
     def test_tensor_assemble_slice_source_does_not_require_view_fast_path(self):
         """tensor.assemble should stay codegenable when the source is not a rewritten tensor.create."""
