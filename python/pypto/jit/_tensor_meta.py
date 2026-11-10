@@ -1647,6 +1647,16 @@ def _rewind_tuple_bindings(
     return values
 
 
+def _assignment_with_value(stmt: ast.stmt, value: ast.expr | None) -> ast.stmt:
+    """Use a rewritten RHS without changing the source AST seen by observers."""
+    if value is None:
+        return stmt
+    assert isinstance(stmt, (ast.Assign, ast.AnnAssign))
+    assignment = copy.copy(stmt)
+    assignment.value = value
+    return assignment
+
+
 def _walk_local_tensor_meta_stmts(
     stmts: list[ast.stmt],
     stop_at_dep: str | None,
@@ -1668,6 +1678,7 @@ def _walk_local_tensor_meta_stmts(
     work; branch entry never copies the complete binding tables.
     """
     tuple_values, before_stmt, scalar_types, selected_arms = options
+    selected_yields: dict[ast.stmt, ast.expr] = {}
     dim_undo: list[tuple[str, _DimBinding]] = []
     tensor_undo: list[tuple[str, TensorMeta | None]] = []
     scalar_types = scalar_types or ScalarTypes()
@@ -1725,13 +1736,12 @@ def _walk_local_tensor_meta_stmts(
         return False
 
     def walk_if(stmt: ast.If) -> bool:
-        selected = (
-            selected_arms.get((getattr(stmt, "lineno", -1), getattr(stmt, "col_offset", -1)))
-            if selected_arms
-            else None
-        )
-        if selected is not None:
-            return walk(stmt.body if selected else stmt.orelse)
+        if (
+            selected := selected_arms.get((getattr(stmt, "lineno", -1), getattr(stmt, "col_offset", -1)))
+        ) is not None:
+            body = stmt.body if selected else stmt.orelse
+            selected_yields.update(BodyTransformer.selected_yield_assignments(body))
+            return walk(body)
         dim_mark, tensor_mark, tuple_mark = len(dim_undo), len(tensor_undo), len(tuple_undo)
         scalar_mark = len(scalar_types.undo)
         if walk(stmt.body):
@@ -1778,7 +1788,7 @@ def _walk_local_tensor_meta_stmts(
                 dim_undo.append((name, dim_values.get(name)))
                 tensor_undo.append((name, local.get(name)))
             record_tuple_writes(stmt, names)
-            update(stmt)
+            update(_assignment_with_value(stmt, selected_yields.get(stmt)))
             for name in names:
                 if name in local:
                     collected[name] = local[name]

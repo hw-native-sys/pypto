@@ -15,7 +15,7 @@ and rebinding rules stay aligned with emitted source.
 """
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, TypeVar, cast
 
 from pypto.language.parser.ast_parser import ASTParser
@@ -938,8 +938,10 @@ class BodyTransformer(ast.NodeTransformer):
         return isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == name
 
     @classmethod
-    def _lower_if_yields(cls, statements: list[ast.stmt]) -> None:
-        """Turn the selected arm's explicit results into ordinary assignments."""
+    def selected_yield_assignments(
+        cls, statements: list[ast.stmt]
+    ) -> Iterator[tuple[ast.Assign | ast.AnnAssign, ast.expr]]:
+        """Yield the ordinary RHS for each explicit result of a selected if arm."""
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
                 value = stmt.value
@@ -949,9 +951,9 @@ class BodyTransformer(ast.NodeTransformer):
                     continue
                 target = stmt.targets[0] if isinstance(stmt, ast.Assign) else stmt.target
                 if isinstance(target, ast.Tuple) and len(target.elts) == len(value.args):
-                    stmt.value = ast.copy_location(ast.Tuple(elts=value.args, ctx=ast.Load()), value)
+                    yield stmt, ast.copy_location(ast.Tuple(elts=value.args, ctx=ast.Load()), value)
                 elif isinstance(target, ast.Name) and len(value.args) == 1:
-                    stmt.value = value.args[0]
+                    yield stmt, value.args[0]
             # These parser scopes are transparent to the enclosing if's yields.
             # Nested ifs and real loops keep ownership of their own yields.
             elif isinstance(stmt, ast.With) and any(
@@ -959,9 +961,9 @@ class BodyTransformer(ast.NodeTransformer):
                 for item in stmt.items
                 for name in ("scope", "manual_scope")
             ):
-                cls._lower_if_yields(stmt.body)
+                yield from cls.selected_yield_assignments(stmt.body)
             elif isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
-                cls._lower_if_yields(stmt.body)
+                yield from cls.selected_yield_assignments(stmt.body)
 
     def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
         """Transform a constexpr-dead branch without publishing its bindings."""
@@ -984,7 +986,8 @@ class BodyTransformer(ast.NodeTransformer):
     def _visit_literal_if(self, node: ast.If, condition: bool) -> list[ast.stmt]:
         """Emit only the live arm, binding explicit results without an IfStmt."""
         selected = node.body if condition else node.orelse
-        self._lower_if_yields(selected)
+        for assignment, value in self.selected_yield_assignments(selected):
+            assignment.value = value
         return self._visit_scoped_body(selected)
 
     def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:

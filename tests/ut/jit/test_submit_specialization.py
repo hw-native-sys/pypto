@@ -1196,9 +1196,10 @@ def test_submit_return_metadata_follows_the_selected_constexpr_branch():
     @pl.jit.graph
     def choose(x: pl.Tensor, y: pl.Tensor, second: pl.constexpr):
         if second:
-            return y
+            result = pl.yield_(y)
         else:
-            return x
+            result = pl.yield_(x)
+        return result
 
     @pl.jit.incore
     def copy_to(x: pl.Tensor, out: pl.Out[pl.Tensor]):
