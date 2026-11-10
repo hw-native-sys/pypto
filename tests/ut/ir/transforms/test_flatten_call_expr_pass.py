@@ -65,6 +65,84 @@ def test_tensor_dim_in_loop_carried_type_stays_an_expression():
     assert "__FREE_VAR" not in ir.python_print(after)
 
 
+def test_asymmetric_atomic_operands_keep_evaluation_order():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.SIMT)
+        def main(self, buf: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+            one = pl.const(1, pl.INT32)
+            two = pl.const(2, pl.INT32)
+            result = pl.simt.atomic_exch(buf, (0,), one) - (pl.simt.atomic_exch(buf, (0,), two) + one)
+            pl.simt.store(buf, (0,), result)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.SIMT)
+        def main(self, buf: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+            one = pl.const(1, pl.INT32)
+            two = pl.const(2, pl.INT32)
+            t__tmp_v0 = pl.simt.atomic_exch(buf, (0,), one)
+            t__tmp_v1 = pl.simt.atomic_exch(buf, (0,), two)
+            result = t__tmp_v0 - (t__tmp_v1 + one)
+            pl.simt.store(buf, (0,), result)
+
+    # Deeper nesting on the right must not make its exchange execute first.
+    after = passes.flatten_call_expr()(Before)
+    ir.assert_structural_equal(after, NormalizeIR(Expected))
+
+
+def test_tuple_projection_materializes_all_atomic_elements_in_order():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.SIMT)
+        def main(self, buf: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+            one = pl.const(1, pl.INT32)
+            two = pl.const(2, pl.INT32)
+            result = (pl.simt.atomic_exch(buf, (0,), one), pl.simt.atomic_exch(buf, (0,), two) + one)[0]
+            pl.simt.store(buf, (0,), result)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.SIMT)
+        def main(self, buf: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+            one = pl.const(1, pl.INT32)
+            two = pl.const(2, pl.INT32)
+            t__tmp_v0 = pl.simt.atomic_exch(buf, (0,), one)
+            t__tmp_v1 = pl.simt.atomic_exch(buf, (0,), two)
+            result = (t__tmp_v0, t__tmp_v1 + one)[0]
+            pl.simt.store(buf, (0,), result)
+
+    # Both slots are evaluated before projection, including the unselected one.
+    after = passes.flatten_call_expr()(Before)
+    ir.assert_structural_equal(after, NormalizeIR(Expected))
+    # Composite lowering may fold the projection only after calls are bound.
+    ir.assert_structural_equal(passes.lower_composite_ops()(after), passes.lower_composite_ops()(Expected))
+
+
+def test_asymmetric_range_operands_keep_evaluation_order():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.SIMT)
+        def main(self, buf: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+            one = pl.const(1, pl.INT32)
+            two = pl.const(2, pl.INT32)
+            for i in pl.range(pl.simt.atomic_exch(buf, (0,), one), pl.simt.atomic_exch(buf, (0,), two) + one):
+                pl.simt.store(buf, (0,), pl.cast(i, pl.INT32))
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.SIMT)
+        def main(self, buf: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+            one = pl.const(1, pl.INT32)
+            two = pl.const(2, pl.INT32)
+            t__tmp_v0 = pl.simt.atomic_exch(buf, (0,), one)
+            t__tmp_v1 = pl.simt.atomic_exch(buf, (0,), two)
+            for i in pl.range(t__tmp_v0, t__tmp_v1 + one):
+                pl.simt.store(buf, (0,), pl.cast(i, pl.INT32))
+
+    ir.assert_structural_equal(passes.flatten_call_expr()(Before), NormalizeIR(Expected))
+
+
 class TestFlattenCallInCallArgs:
     """Tests for flattening nested calls in call arguments."""
 

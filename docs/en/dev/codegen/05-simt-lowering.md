@@ -113,3 +113,48 @@ The collective acceptance passed all seven active-lane cases (0, 1, 15, 16,
 9.3.0 and runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. This checks all
 11 APIs with INT32/FP32 payloads and widths 16/32, including divergent
 participation and untouched inactive outputs.
+
+## Atomic and synchronization acceptance
+
+The native mapping uses `pto.atomic_add/min/max/exch/cas`, `pto.syncthreads`,
+`pto.threadfence`, and `pto.threadfence_block`. Integer min/max carry `signed`.
+Atoms use the same affine element offset calculation as scalar memory operations,
+followed by `pto.addptr`; no untyped byte-address or allocation bypass is exposed.
+All atomic targets are ReadWrite, even when the old scalar is unused. Synchronization
+calls remain ordered effects; `no_arg_writes` does not declare them pure.
+
+| Capability | Native compilation | A5 numerical coverage |
+| ---------- | ------------------ | --------------------- |
+| Five atomics × INT32/FP32 × GM/UB | All 20 combinations, consumed and discarded results | Contention, old values, failed/successful CAS, untouched elements |
+| INT32 Add/Min/Max/CAS boundaries | GM and UB | Wraparound, signed extrema, conditional replacement |
+| FP32 Add/Min/Max/CAS boundaries | GM and UB | NaNs, infinities, signed zero, bitwise CAS |
+| `syncthreads` and both fences | LLVM workitem synchronization/fence intrinsics | Four-warp UB/GM publication and consumption; subsequent MTE output |
+
+This matrix was validated on Ascend950DT_9581, PTOAS v0.72, CANN 9.3.0 and
+runtime `391b2fbcd4dd053204a677662c39b6b7636e8043`. Supported atomic locations
+are naturally aligned four-byte elements; UINT32/INT64, half/bfloat16, packed
+values, selectable ordering/scope and cross-AIV synchronization remain outside
+this frontend contract. See [API semantics and limits](../ir/11-simt.md#atomics-and-synchronization).
+The publication test uses a rendezvous; it does not establish that a fence alone
+is a synchronization protocol or promise system-wide visibility.
+
+`tests/st/runtime/vpto/test_simt_atomics_onboard.py` provides the contention and
+barrier cases (15 checks). `test_simt_atomic_edges_onboard.py` provides boundary
+cases (9 checks). Both expose opt-in `build`/`persistent` pytest variants under
+the same environment gates as the other SIMT tests, plus `--worker OUTPUT [DEVICE]`.
+The unit JIT tests compile all four entries and export native LLVM without a device.
+Structural regressions reject readonly/uninitialized atomic captures and nested
+barriers or bypassing exits. No lock-free forward-progress guarantee is tested.
+
+`tests/st/runtime/vpto/test_simt_atomic_regressions_onboard.py` additionally
+checks all five atomics at rank-3 UB coordinate `(1, 2, 7)` in a `[2, 3, 32]`
+Tile (physical element 167), untouched elements, and atomic evaluation counts
+in arithmetic, branches and while conditions. Its three A5 checks complement
+native LLVM assertions for the address and retained calls. Codegen rejects
+index counts that disagree with the post-flatten storage rank.
+
+The condition regressions include unselected atomic tuple elements before and after the selected element, and nested tuple projections. Each atomic runs twice for a one-iteration loop: once for the true condition and once for the final false condition.
+
+JIT loop induction variables shadow prior scalar aliases and folded shape values within the loop body. Loop bounds use the incoming binding, and nested-loop exit restores the enclosing binding. The A5 regression reuses a while counter as a subsequent copy-loop index to verify this distinction.
+
+`pl.while_` uses `for` syntax but binds only loop-carried values, with no induction variable. Assignment-form `pl.yield_` targets define the post-loop outputs, including zero-iteration results. Incoming aliases and folded shapes are shadowed inside the loop; an outer binding is restored only when its name is not an output of that loop. JIT and the parser share yield ownership rules: yields in nested conditionals or real loops belong to those constructs. Runtime scopes (`pl.scope` / `pl.manual_scope`) and `pl.split_aiv` are transparent wrappers. The A5 regression checks that conditional yields do not replace an outer scalar alias.

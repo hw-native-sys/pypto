@@ -69,7 +69,10 @@ class FlattenSimtTiles : public IRMutator {
 
  protected:
   ExprPtr VisitExpr_(const CallPtr& call) override {
-    if ((!IsOp(call, "simt.load") && !IsOp(call, "simt.store")) || call->args_.empty()) {
+    const auto* entry = LookupOpEntry(call->op_);
+    // All SIMT storage operations share (storage, logical indices, ...),
+    // including RMW atomics. Flatten their coordinates with the borrowed Tile.
+    if (!entry || entry->GetOpCategory() != "SimtOp" || call->args_.size() < 2) {
       return IRMutator::VisitExpr_(call);
     }
     auto tile = As<TileType>(call->args_[0]->GetType());

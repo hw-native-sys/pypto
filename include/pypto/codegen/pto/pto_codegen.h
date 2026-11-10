@@ -884,6 +884,7 @@ class PTOCodegen : public CodegenBase {
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;
+  void VisitExpr_(const ir::TupleGetItemExprPtr& op) override;
   void VisitExpr_(const ir::VarPtr& op) override;
   void VisitExpr_(const ir::IterArgPtr& op) override;
   void VisitExpr_(const ir::ConstIntPtr& op) override;

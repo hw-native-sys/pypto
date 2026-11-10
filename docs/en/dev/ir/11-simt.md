@@ -32,7 +32,7 @@ typed axis, positional or `axis=`; `lane_id()` takes none. Dimensions are three
 positive compile-time integers. They describe threads, not an element allocation
 or grid; bounds checks remain explicit. GM Tensor and Vec/UB Tile operands use
 their existing storage. The initial API supports the backend's scalar subset;
-INT32/FP32 lane collectives are described below. Atomics and expanded math remain separate milestones.
+INT32/FP32 lane collectives, atomics and synchronization are described below. Expanded math remains a separate milestone.
 
 Scalar assignments are thread-private, including shadowing an outer scalar.
 A private scalar cannot be read after the scope. Stores automatically rebind the
@@ -144,6 +144,68 @@ public JIT and PTOAS LLVM export. Opt-in device acceptance lives in
 `tests/st/runtime/vpto/test_simt_collectives_onboard.py`, covering two warps,
 partial active sets, ballot bit 31, signed reductions, shuffle subgroups and
 untouched inactive outputs. Compile-only tests do not establish device execution.
+
+## Atomics and synchronization
+
+`pl.simt.atomic_add/min/max/exch(storage, indices, value)` and
+`pl.simt.atomic_cas(storage, indices, compare, value)` return the **old scalar**.
+The same names exist in `pypto.ir.op.simt`. All operands must match the storage
+INT32/FP32 dtype. Indices use the same logical coordinates and physical strides
+as `load`/`store`; addresses must be naturally aligned to four bytes and in bounds.
+
+| Operation | INT32 | FP32 | Storage / result |
+| --------- | ----- | ---- | ---------------- |
+| `atomic_add` | 32-bit wrapping addition | Target floating addition | GM and Vec/UB; old scalar |
+| `atomic_min`, `atomic_max` | Signed comparison | Numeric operand wins over one NaN; both NaN yield NaN | GM and Vec/UB; old scalar |
+| `atomic_exch` | Replace | Replace | GM and Vec/UB; old scalar |
+| `atomic_cas` | Bitwise comparison | Bitwise comparison, including NaN payloads and signed zeros | GM and Vec/UB; old scalar |
+
+On the validated A5 target, min selects negative zero and max positive zero when
+comparing opposite signed zeros. NaN result payloads from arithmetic are not
+promised. UINT32/INT64, FP16/BF16 and packed atomics are not part of this frontend
+subset, even when PTOAS supports some of them. There is no selectable memory-order
+or scope argument: each operation uses the native address-space atomic contract.
+No acquire/release or sequential-consistency guarantee is added for other addresses.
+Optional `l2cache=` uses store cache tokens and is allowed only on GM.
+A `DistributedTensor` window is accessed as this rank's local GM slice, with
+the same physical strides, initialization requirements and read/write effects.
+These operations do not provide remote-rank atomics.
+
+An atomic is always `ReadWrite`, including Exch and an unused return value.
+Targets must already be initialized; an atomic cannot establish full initialization
+of an `Out` capture. A prior full ordinary store can initialize it. Atomic updates
+remain in the program when their old values are unused. Contending threads observe
+a serialized order for the same location, without a guaranteed thread order.
+
+```python
+@pl.jit.aiv
+def increment(counter: pl.InOut[pl.Tensor[[1], pl.INT32]]):
+    with pl.simt_scope(dims=(64, 1, 1)):
+        pl.simt.atomic_add(counter, (0,), pl.const(1, pl.INT32))
+    return counter
+```
+
+The caller initializes `counter`; one invocation adds 64.
+
+| Operation | Contract |
+| --------- | -------- |
+| `syncthreads()` | Current SIMT entry rendezvous; prior participating memory effects precede subsequent effects |
+| `threadfence()` | Native target workitem fence; orders the calling thread's memory effects |
+| `threadfence_block()` | Native block-scoped workitem fence; orders the calling thread's memory effects |
+
+These operations return void and are retained as ordered calls. Fences do not
+wait for peers. They are not a cross-AIV/global barrier, and the name `threadfence`
+does not imply CUDA device/system-scope or CPU visibility semantics.
+Use a rendezvous before reading another thread's writes; a fence alone does not
+make an unsynchronized producer/consumer protocol safe.
+
+This version conservatively requires `syncthreads` outside **all branches and
+loops**, including apparently uniform ones. It may follow a reconverged branch.
+Helpers with a barrier cannot contain early returns, break or continue. Warp votes
+cannot establish block-wide arrival. Fences may appear in divergent control flow
+because they do not rendezvous. Outer MTE/Vector → SIMT → MTE/Vector dependencies
+still use the launch's storage effects and PTOAS synchronization; these builtins
+do not replace that protocol.
 
 ## Effects and validation
 

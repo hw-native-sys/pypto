@@ -29,6 +29,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "src/ir/transforms/lower_composite/lower_composite_builder.h"
 #include "src/ir/transforms/lower_composite/lower_composite_rules.h"
+#include "src/ir/transforms/utils/call_like_presence.h"
 
 namespace pypto {
 namespace ir {
@@ -61,7 +62,9 @@ class LowerCompositeOpsMutator : public IRMutator {
     auto tuple = VisitExpr(op->tuple_);
     // Prefer composite-produced MakeTuples recorded privately — do not rely on
     // global var_remap_ for arbitrary `v = (a, b)` assignments.
-    if (auto values = ResolveCompositeTuple(tuple)) {
+    // SIMT while conditions retain nested calls until codegen. Selecting one
+    // element must not discard effects in any of the other tuple elements.
+    if (auto values = ResolveCompositeTuple(tuple); values && !call_presence_.Contains(values)) {
       INTERNAL_CHECK_SPAN(op->index_ >= 0 && static_cast<size_t>(op->index_) < values->elements_.size(),
                           op->span_)
           << "Tuple index out of range: " << op->index_;
@@ -70,7 +73,7 @@ class LowerCompositeOpsMutator : public IRMutator {
     if (tuple.get() != op->tuple_.get()) {
       return std::make_shared<TupleGetItemExpr>(tuple, op->index_, op->span_);
     }
-    return IRMutator::VisitExpr_(op);
+    return op;
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -83,7 +86,7 @@ class LowerCompositeOpsMutator : public IRMutator {
       // MakeTuple via var_remap_, also seed var_remap_ for the alias Var so
       // later projections and ConvertToSSA see a concrete tuple.
       if (assign) {
-        if (auto mt = ResolveCompositeTuple(assign->value_)) {
+        if (auto mt = ResolveCompositeTuple(assign->value_); mt && !call_presence_.Contains(mt)) {
           composite_tuples_[op->var_.get()] = mt;
           if (As<MakeTuple>(assign->value_)) {
             var_remap_[op->var_.get()] = assign->value_;
@@ -103,7 +106,7 @@ class LowerCompositeOpsMutator : public IRMutator {
 
     LoweringBuilder builder(op->var_->name_hint_, temp_counter_);
     ExprPtr result = rule(call, visited_args, builder);
-    if (auto mt = As<MakeTuple>(result)) {
+    if (auto mt = As<MakeTuple>(result); mt && !call_presence_.Contains(mt)) {
       // Record privately for TupleGetItem folding, and also seed var_remap_ so
       // SSA aliases (`alias = pair`) expand through VisitExpr_(Var) without
       // needing a global "any MakeTuple" remap.
@@ -236,6 +239,7 @@ class LowerCompositeOpsMutator : public IRMutator {
     return nullptr;
   }
 
+  transform_utils::CallLikePresence call_presence_;
   std::size_t temp_counter_ = 0;
   bool skip_managed_collectives_{false};
   /// MakeTuples produced by composite lowering rules (and their SSA aliases).

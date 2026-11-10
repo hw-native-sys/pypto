@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
-#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -81,8 +80,8 @@ SimtLaunchStmt::SimtLaunchStmt(GlobalVarPtr callee, std::vector<ExprPtr> block_d
   std::unordered_set<const Var*> definitions;
   for (size_t i = 0; i < results_.size(); ++i) {
     CHECK_SPAN(results_[i], span_) << "SIMT launch result cannot be null";
-    const auto kind = results_[i]->GetType()->GetKind();
-    CHECK_SPAN(kind == ObjectKind::TileType || kind == ObjectKind::TensorType, span_)
+    const auto& type = results_[i]->GetType();
+    CHECK_SPAN(As<TileType>(type) || AsTensorTypeLike(type), span_)
         << "SIMT launch results must be Tile or Tensor storage";
     CHECK_SPAN(definitions.insert(results_[i].get()).second, span_) << "SIMT launch results must be distinct";
     const int index = result_param_indices_[i];

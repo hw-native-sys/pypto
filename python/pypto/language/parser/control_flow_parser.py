@@ -1078,6 +1078,39 @@ class ControlFlowParser:
                 hint=f"Use an explicit boolean comparison, e.g. `{kind} x != 0:` or `{kind} x > 0:`",
             )
 
+    @classmethod
+    def iter_yield_assignments(
+        cls, stmts: list[ast.stmt]
+    ) -> Generator[ast.Assign | ast.AnnAssign, None, None]:
+        """Yield assignments owned by this construct, skipping nested if/loops.
+
+        Runtime scopes and split_aiv are transparent wrappers. Share this
+        ownership traversal with JIT rebinding so branch-local outputs cannot
+        accidentally become enclosing-loop outputs during specialization.
+        """
+        # Visit each statement once, without repeatedly copying descendant
+        # yield lists through deeply nested transparent wrappers.
+        pending = list(reversed(stmts))
+        while pending:
+            stmt = pending.pop()
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                value = stmt.value
+                if (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "yield_"
+                ):
+                    yield stmt
+            elif isinstance(stmt, ast.With) and cls.is_runtime_scope_with(stmt):
+                pending.extend(reversed(stmt.body))
+            elif (
+                isinstance(stmt, ast.For)
+                and isinstance(stmt.iter, ast.Call)
+                and isinstance(stmt.iter.func, ast.Attribute)
+                and stmt.iter.func.attr == "split_aiv"
+            ):
+                pending.extend(reversed(stmt.body))
+
     def scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, ast.expr | None]]:
         """Scan statements for yield assignments to determine output variable names and types.
 
@@ -1089,7 +1122,7 @@ class ControlFlowParser:
         """
         yield_vars: list[tuple[str, ast.expr | None]] = []
 
-        for stmt in stmts:
+        for stmt in self.iter_yield_assignments(stmts):
             # Check for annotated assignment with yield_: var: type = pl.yield_(...)
             if isinstance(stmt, ast.AnnAssign):
                 if isinstance(stmt.target, ast.Name) and isinstance(stmt.value, ast.Call):
@@ -1098,46 +1131,21 @@ class ControlFlowParser:
                         yield_vars.append((stmt.target.id, stmt.annotation))
 
             # Check for regular assignment with yield_: var = pl.yield_(...)
-            elif isinstance(stmt, ast.Assign):
-                if len(stmt.targets) == 1:
-                    target = stmt.targets[0]
-                    # Single variable assignment
-                    if isinstance(target, ast.Name) and isinstance(stmt.value, ast.Call):
-                        func = stmt.value.func
-                        if isinstance(func, ast.Attribute) and func.attr == "yield_":
-                            yield_vars.append((target.id, None))
-                    # Tuple unpacking: (a, b) = pl.yield_(...)
-                    elif isinstance(target, ast.Tuple) and isinstance(stmt.value, ast.Call):
-                        func = stmt.value.func
-                        if isinstance(func, ast.Attribute) and func.attr == "yield_":
-                            annotations = self.dump_yield_types(stmt.value, len(target.elts))
-                            for i, elt in enumerate(target.elts):
-                                if isinstance(elt, ast.Name):
-                                    yield_vars.append((elt.id, annotations[i]))
-
-            # Skip nested if statements — each nested if's yields are
-            # its own return_vars, handled by parse_if_statement when
-            # it processes that specific if node. Recursing would
-            # incorrectly count inner yields as outer return_vars.
-            elif isinstance(stmt, ast.If):
-                pass
-
-            # Descend into `with pl.scope():` blocks — they are transparent to
-            # yield association, so a trailing `var = pl.yield_(...)` inside the
-            # scope still defines the enclosing for/if return-var. These are
-            # inserted by the MaterializeRuntimeScopes pass (or written by hand).
-            elif isinstance(stmt, ast.With) and self.is_runtime_scope_with(stmt):
-                yield_vars.extend(self.scan_for_yields(stmt.body))
-
-            # The split_aiv for-syntax creates a transparent scope, not a loop.
-            # Real loops still own their yields and must not be traversed here.
-            elif (
-                isinstance(stmt, ast.For)
-                and isinstance(stmt.iter, ast.Call)
-                and isinstance(stmt.iter.func, ast.Attribute)
-                and stmt.iter.func.attr == "split_aiv"
-            ):
-                yield_vars.extend(self.scan_for_yields(stmt.body))
+            elif len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                # Single variable assignment
+                if isinstance(target, ast.Name) and isinstance(stmt.value, ast.Call):
+                    func = stmt.value.func
+                    if isinstance(func, ast.Attribute) and func.attr == "yield_":
+                        yield_vars.append((target.id, None))
+                # Tuple unpacking: (a, b) = pl.yield_(...)
+                elif isinstance(target, ast.Tuple) and isinstance(stmt.value, ast.Call):
+                    func = stmt.value.func
+                    if isinstance(func, ast.Attribute) and func.attr == "yield_":
+                        annotations = self.dump_yield_types(stmt.value, len(target.elts))
+                        for i, elt in enumerate(target.elts):
+                            if isinstance(elt, ast.Name):
+                                yield_vars.append((elt.id, annotations[i]))
 
         return yield_vars
 
