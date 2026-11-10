@@ -7945,5 +7945,50 @@ class TestRuntimeSizedLocalExtents:
         assert not dim.synthesized
 
 
+@pytest.mark.parametrize(("mode", "width"), [(True, 512), (False, 256)])
+def test_constexpr_branch_specializes_return_type(mode, width):
+    @jit.inline
+    def select(a: pl.Tensor, b: pl.Tensor, MODE: pl.constexpr):
+        if MODE:
+            return a
+        else:
+            return b
+
+    @jit
+    def entry(a: pl.Tensor[[8, 512], pl.UINT8], b: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+        result = select(a, b, MODE)
+        return result
+
+    program = entry.specialize(MODE=mode)
+    callee = program.get_function("select")
+    caller = program.get_function("entry")
+    assert callee is not None and caller is not None
+    expected = ir.TensorType([8, width], DataType.UINT8)
+    ir.assert_structural_equal(callee.return_types[0], expected)
+    assert isinstance(callee.body, ir.ReturnStmt)
+    ir.assert_structural_equal(callee.body.value[0].type, expected)
+    assert isinstance(caller.body, ir.SeqStmts)
+    returned = next(stmt for stmt in caller.body if isinstance(stmt, ir.ReturnStmt))
+    ir.assert_structural_equal(returned.value[0].type, expected)
+
+
+@pytest.mark.parametrize("mode", [True, False])
+def test_constexpr_branch_preserves_yield_binding(mode):
+    @jit
+    def entry(a: pl.Tensor[[8, 64], pl.FP32], b: pl.Tensor[[8, 64], pl.FP32], MODE: pl.constexpr):
+        if MODE:
+            result = pl.yield_(a)
+        else:
+            result = pl.yield_(b)
+        return result
+
+    fn = entry.specialize(MODE=mode).get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    branch = next(stmt for stmt in fn.body if isinstance(stmt, ir.IfStmt))
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    ir.assert_structural_equal(returned.value[0], branch.return_vars[0])
+    ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, 64], DataType.FP32))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

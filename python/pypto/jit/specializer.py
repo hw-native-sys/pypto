@@ -2363,19 +2363,17 @@ class Specializer:
                 self._external_return_params(func_def, tensor_params, out_params, ret_type),
             )
 
-        ret_type = _infer_return_type(
-            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
-        )
-        ret_ann = f" -> {ret_type}" if ret_type else ""
-
-        # Transform body
-        dep_names = set(ctx.dep_names)
         # Collect all names defined anywhere in the function to seed collision avoidance.
         all_defined = {
             node.id
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
+
+        # Transform body.  Dependency targets are resolved before visiting the
+        # body, so this lookup still sees the original AST and direct
+        # ``spmd_submit`` helper calls.
+        dep_names = set(ctx.dep_names)
         transformer = BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             constexpr_values=ctx.constexpr_values,
@@ -2410,10 +2408,27 @@ class Specializer:
             else:
                 flat_body.append(item)
 
-        _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
-
         if not flat_body:
             flat_body = [ast.Pass()]
+
+        # Infer the signature from the same branch-specialized body that will
+        # be emitted.  The original AST remains reserved for dependency
+        # discovery and call-site binding above.
+        return_def = copy.copy(func_def)
+        return_def.body = flat_body
+        # Reassigned output parameters can appear under generated aliases.
+        # Keep their original parameter type contract for return inference.
+        aliases = transformer.rename_map
+        return_meta = ctx.tensor_meta | {
+            alias: ctx.tensor_meta[name] for alias, name in aliases.items() if name in ctx.tensor_meta
+        }
+        return_distributed = distributed_params | {
+            alias for alias, name in aliases.items() if name in distributed_params
+        }
+        ret_type = _infer_return_type(return_def, return_meta, out_params, return_distributed, ctx.py_globals)
+        ret_ann = f" -> {ret_type}" if ret_type else ""
+
+        _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
 
         if any(
             isinstance(node, ast.Name) and node.id == "pld" and isinstance(node.ctx, ast.Load)

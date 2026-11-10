@@ -425,5 +425,33 @@ def test_constexpr_manual_parallel_tensor_and_taskid_merge_compiles(tmp_path, mo
     assert list(compiled.output_dir.rglob("*.pto"))
 
 
+def test_dead_direct_call_specializes_live_spmd_submit_target():
+    """Keep the A2/A3 decode pattern that seeds a submit callee with a scratch call."""
+
+    @jit.incore
+    def copy_kernel(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+        out = pl.store(pl.load(a, [0, 0], [8, 64]), [0, 0], out)
+        return out
+
+    @jit
+    def entry(a: pl.Tensor[[8, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]):
+        if False:
+            scratch = pl.create_tensor([8, 64], dtype=pl.FP32)
+            copy_kernel(a, scratch)
+        result, _ = pl.spmd_submit(
+            self.copy_kernel,  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            a,
+            out,
+            core_num=1,
+        )
+        return result
+
+    program = entry.specialize()
+    assert program.get_function("copy_kernel") is not None
+    source = program.as_python()
+    assert "pl.spmd_submit(self.copy_kernel," in source
+    assert "scratch" not in source
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

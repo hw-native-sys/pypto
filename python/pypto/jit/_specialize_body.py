@@ -818,6 +818,28 @@ class BodyTransformer(ast.NodeTransformer):
         node.orelse = self._visit_scoped_body(node.orelse)
         return node
 
+    @staticmethod
+    def _is_attribute_call(expr: ast.expr | None, name: str) -> bool:
+        return isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == name
+
+    @classmethod
+    def _has_branch_yield(cls, statements: list[ast.stmt]) -> bool:
+        for stmt in statements:
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and cls._is_attribute_call(stmt.value, "yield_"):
+                return True
+            # These parser scopes are transparent to an enclosing if's yields.
+            if isinstance(stmt, ast.With) and any(
+                cls._is_attribute_call(item.context_expr, name)
+                for item in stmt.items
+                for name in ("scope", "manual_scope")
+            ):
+                if cls._has_branch_yield(stmt.body):
+                    return True
+            if isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
+                if cls._has_branch_yield(stmt.body):
+                    return True
+        return False
+
     def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
@@ -836,9 +858,12 @@ class BodyTransformer(ast.NodeTransformer):
         node.test = self.visit(node.test)
         condition = values.literal_condition(node.test)
         if condition is not None:
-            # Prune before parsing: an inactive constexpr branch may have an
-            # intentionally incompatible Tile dtype or storage extent.
-            return self._visit_scoped_body(node.body if condition else node.orelse)
+            selected = node.body if condition else node.orelse
+            # The parser binds explicit yields through the enclosing if.
+            # Keep both arms when flattening would remove that binding.
+            if not self._has_branch_yield(selected):
+                return self._visit_scoped_body(selected)
+            node.test = ast.copy_location(ast.Constant(value=condition), node.test)
         self._scope_depth += 1
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)
