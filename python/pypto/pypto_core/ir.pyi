@@ -2361,6 +2361,16 @@ class AtomicType(enum.IntEnum):
     Add = 1
     """Atomically add the source data into the destination."""
 
+class CommEngine(enum.IntEnum):
+    """Async communication engine for ``pld.tensor.put_async`` / ``get_async``.
+
+    Stored as ``int`` in the op's ``engine`` kwarg. V1 accepts ``URMA`` only;
+    the value matches PTOAS's ``DmaEngine::URMA``.
+    """
+
+    URMA = 1
+    """A5 URMA remote transfer."""
+
 class AccPhase(enum.IntEnum):
     """Producer-side unit-flag phase for GEMV accumulator operations.
 

@@ -323,15 +323,13 @@ Pass SelectBufferIRFunctions();
  * argument slot, so a value computed inside the region has no slot and would be
  * frozen at its first-call value on every later replay, with no warning.
  *
- * Also rejects, at compile time, the boundary shapes the runtime would decline
- * to cache — an oversized or empty tensor boundary, runtime-allocated outputs,
- * a *computed* return value, nested graphs, and call sites carrying explicit
- * dependencies or a dispatch predicate. Returning a parameter is allowed:
- * `return c` for an `InOut` parameter is the DSL's spelling for writing in place
- * and lowers to an alias, so only a genuinely new value is refused —
- * `rt_submit_graph` yields a valid task id solely on a cache hit, so nothing may
- * depend on a graph call's result. Almost all of those degrade to a silent
- * non-graph fallback at runtime, which no numerical test can detect.
+ * Also rejects boundary shapes the runtime cannot record: oversized or empty
+ * tensor boundaries, runtime-allocated outputs, computed returns, nested graphs,
+ * and Graph dispatch predicates or SPMD launch specifications. Caller-supplied
+ * Out/InOut storage and parameter-alias returns are allowed. Invocation-local
+ * explicit predecessors order the outer Graph shell without entering its cached
+ * Definition; the outer completion TaskId is valid for recording and replay and
+ * covers the entire invocation. Recorded-local TaskIds cannot escape the Graph.
  *
  * @return Program-level pass
  */

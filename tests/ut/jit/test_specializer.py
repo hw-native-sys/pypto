@@ -23,6 +23,8 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import PartialCodegenError
+from pypto.ir import python_print
 from pypto.jit._specialize_body import BodyTransformer
 from pypto.jit._specialize_values import layout_str, render_free_value
 from pypto.jit.specializer import (
@@ -41,7 +43,8 @@ from pypto.jit.specializer import (
     specialize,
     tile_annotation_fingerprints,
 )
-from pypto.pypto_core import DataType, ir
+from pypto.language.parser.diagnostics import UndefinedVariableError
+from pypto.pypto_core import DataType, ir, passes
 from pypto.runtime.runner import ExecutionMode, RunConfig
 
 # ---------------------------------------------------------------------------
@@ -396,6 +399,101 @@ class TestBodyTransformer:
         )
         ast.fix_missing_locations(new_func)
         return ast.unparse(new_func)
+
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_graph_local_task_id_shadow_preserves_folded_shape(self, capture):
+        producer = (
+            "with pl.at(level=pl.Level.CORE_GROUP) as width:\n"
+            "                            pl.store(pl.load(c, [0, 0], [128, 64]), [0, 0], c)"
+            if capture
+            else "width = pl.system.task_dummy(deps=[])"
+        )
+        source = textwrap.dedent(f"""
+            def f(c: pl.InOut[pl.Tensor]):
+                width = c.shape[1]
+                with pl.manual_scope():
+                    with pl.graph("recording"):
+                        {producer}
+                        pl.system.task_dummy(deps=[width])
+                return pl.create_tensor([128, width], dtype=pl.FP32)
+        """)
+        ctx = _make_ctx(
+            "f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 64), DataType.FP32)}
+        )
+        function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+        assert function is not None
+        assert isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        (value,) = returned.value
+        result = value.type
+        assert isinstance(result, ir.TensorType)
+        assert isinstance(result.shape[1], ir.ConstInt) and result.shape[1].value == 64
+
+    def test_graph_rebind_prefers_task_id_alias_over_old_folded_shape(self):
+        source = textwrap.dedent("""
+            def f(c: pl.Tensor):
+                with pl.manual_scope():
+                    seed = pl.system.task_dummy(deps=[])
+                    for i in pl.range(1):
+                        ready = c.shape[1]
+                        ready = seed
+                    with pl.graph("recording") as done:
+                        ready = pl.system.task_dummy(deps=[])
+                        pl.system.task_dummy(deps=[ready])
+                    pl.system.task_dummy(deps=[ready, done])
+        """)
+        ctx = _make_ctx(
+            "f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 64), DataType.FP32)}
+        )
+        rendered = specialize("Before", [ctx])
+        assert "ready_v2 = pl.system.task_dummy(deps=[])" in rendered
+        assert pl.parse_program(rendered).get_function("f") is not None
+
+    def test_graph_plain_task_id_does_not_replace_outer_alias(self):
+        source = """
+            def f():
+                with pl.manual_scope():
+                    for i in pl.range(1):
+                        seed = pl.system.task_dummy(deps=[])
+                        latest = pl.system.task_dummy(deps=[])
+                        ready = seed
+                        ready = latest
+                    with pl.graph("recording") as done:
+                        ready = pl.system.task_dummy(deps=[])
+                    pl.system.task_dummy(deps=[ready, done])
+        """
+        rendered = specialize("Before", [_make_ctx("f", textwrap.dedent(source))])
+        assert "ready_v2 = pl.system.task_dummy(deps=[])" in rendered
+        assert pl.parse_program(rendered).get_function("f") is not None
+
+    @pytest.mark.parametrize(
+        "rhs",
+        ["recorded", "pl.create_tensor([64, 64], dtype=pl.FP32)", "pl.tensor.reshape(recorded, [32, 128])"],
+    )
+    def test_graph_host_tensor_assignments_can_change_shape(self, rhs):
+        source = textwrap.dedent(f"""
+            def f(first: pl.Tensor, recorded: pl.InOut[pl.Tensor]):
+                for i in pl.range(1):
+                    out = first
+                with pl.graph("recording"):
+                    out = {rhs}
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(recorded, [0, 0], [64, 64]), [0, 0], recorded)
+                return recorded
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["first", "recorded"],
+            tensor_meta={
+                "first": TensorMeta((128, 128), DataType.FP32),
+                "recorded": TensorMeta((64, 64), DataType.FP32),
+            },
+        )
+        rendered = specialize("Before", [ctx])
+        assert "out_v1 =" in rendered
+        assert pl.parse_program(rendered).get_function("f") is not None
 
     def test_bind_dynamic_removed(self):
         src = """
@@ -1509,6 +1607,40 @@ class TestVariableRebinding:
         # x_v1 is taken by user, so rebinding of x should skip to x_v2
         assert "x_v2 =" in out
         assert "x_v1 = b" in out
+
+    @pytest.mark.parametrize(
+        "context",
+        [
+            'pl.graph("layer", deps=[ready])',
+            "pl.at(level=pl.Level.CORE_GROUP, deps=[ready])",
+            "pl.spmd(1, deps=[ready])",
+        ],
+    )
+    def test_scope_capture_uses_the_existing_emitted_binding(self, context):
+        out = self._transform(f"""
+            def f(seed, latest):
+                ready = seed
+                ready = latest
+                with {context} as ready:
+                    work()
+                consume(deps=[ready])
+        """)
+        function = ast.parse(out).body[0]
+        assert isinstance(function, ast.FunctionDef)
+        assigned, scope, consumer = function.body[1:]
+        assert isinstance(assigned, ast.Assign) and isinstance(assigned.targets[0], ast.Name)
+        assert isinstance(scope, ast.With) and isinstance(scope.items[0].optional_vars, ast.Name)
+        expected = assigned.targets[0].id
+        assert scope.items[0].optional_vars.id == expected, out
+        call = scope.items[0].context_expr
+        assert isinstance(call, ast.Call)
+        deps = next(kw.value for kw in call.keywords if kw.arg == "deps")
+        assert isinstance(deps, ast.List) and isinstance(deps.elts[0], ast.Name)
+        assert deps.elts[0].id == expected, out
+        assert isinstance(consumer, ast.Expr) and isinstance(consumer.value, ast.Call)
+        deps = next(kw.value for kw in consumer.value.keywords if kw.arg == "deps")
+        assert isinstance(deps, ast.List) and isinstance(deps.elts[0], ast.Name)
+        assert deps.elts[0].id == expected, out
 
     def test_if_branch_rebind_not_renamed(self):
         """Assignments inside if branches are not alpha-renamed.
@@ -3567,6 +3699,924 @@ def test_constexpr_branch_rebinding_survives_specialization(mode, condition, tak
     namespace: dict[str, Any] = {}
     exec(compile(ast.fix_missing_locations(tree), "<specialized>", "exec"), namespace)
     assert namespace["select"]() == (2 if taken else 1)
+
+
+@pytest.mark.parametrize("iterations", [0, 4])
+def test_jit_while_graph_capture_becomes_taskid_carry(iterations):
+    """Native SSA carries completion; full codegen rejects orchestration while."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                tile = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(tile, 1.0), [0, 0], c)
+            i = 0
+            while i < iterations:
+                with pl.graph("layer", deps=[ready]) as ready:
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        tile = pl.load(c, [0, 0], [128, 128])
+                        pl.store(pl.add(tile, 1.0), [0, 0], c)
+                i = i + 1
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                tile = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(tile, 1.0), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.outline_incore_scopes()(
+            passes.outline_graph_scopes()(passes.convert_to_ssa()(chain.specialize()))
+        )
+    loops = []
+    submits = []
+
+    class Collect(ir.IRVisitor):
+        def visit_while_stmt(self, op):
+            loops.append(op)
+            super().visit_while_stmt(op)
+
+        def visit_submit(self, op):
+            submits.append(op)
+            super().visit_submit(op)
+
+    main = program.get_function("chain")
+    assert main is not None
+    Collect().visit_function(main)
+    assert len(loops) == 1
+    loop = loops[0]
+    task_carries = [
+        (i, arg)
+        for i, arg in enumerate(loop.iter_args)
+        if isinstance(arg.type, ir.ScalarType) and arg.type.dtype == DataType.TASK_ID
+    ]
+    assert len(task_carries) == 1
+    index, carry = task_carries[0]
+    graph = next(f for f in program.functions.values() if f.func_type == ir.FunctionType.Graph)
+    launch = next(s for s in submits if isinstance(s.op, ir.GlobalVar) and s.op.name == graph.name)
+    assert launch.deps[0].unique_id == carry.unique_id
+    assert submits[-1].deps[0].unique_id == loop.return_vars[index].unique_id
+    # Native SSA supports the carry, but the orchestration backend has no
+    # while emitter. Full compilation must reject it instead of dropping it.
+    with (
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+        pytest.raises(PartialCodegenError, match="While loops are not supported in orchestration"),
+    ):
+        chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+
+
+@pytest.mark.parametrize("setup_iterations,graph_iterations", [(0, 4), (1, 0), (1, 4)])
+def test_jit_independent_capture_compiles_across_empty_sibling_loops(setup_iterations, graph_iterations):
+    """A fresh nonempty capture must not require a previous loop to execute."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[seed]) as latest:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            for setup in pl.range(setup_iterations):
+                ready = seed
+                ready = latest
+            for invocation in pl.range(graph_iterations):
+                # Intentional: an empty loop must preserve the preceding TaskId binding.
+                with pl.graph("layer") as ready:  # noqa: F811
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_jit_conditional_capture_preserves_sibling_loop_carry(enabled):
+    """Conditionally captured completions carry across the surrounding loop."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            for setup in pl.range(1):
+                if enabled:
+                    ready = seed
+                else:
+                    ready = seed
+            for invocation in pl.range(4):
+                if enabled:
+                    with pl.graph("layer", deps=[ready]) as ready:
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.outline_incore_scopes()(
+            passes.outline_graph_scopes()(passes.convert_to_ssa()(chain.specialize()))
+        )
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+    if enabled:
+        loops = []
+        launches = []
+
+        class Collect(ir.IRVisitor):
+            def visit_for_stmt(self, op):
+                loops.append(op)
+                super().visit_for_stmt(op)
+
+            def visit_submit(self, op):
+                if isinstance(op.op, ir.GlobalVar) and op.op.name == "layer":
+                    launches.append(op)
+                super().visit_submit(op)
+
+        main = program.get_function("chain")
+        assert main is not None
+        Collect().visit_function(main)
+        assert len(loops) == 2 and len(launches) == 1
+        carries = [
+            arg
+            for arg in loops[1].iter_args
+            if isinstance(arg.type, ir.ScalarType) and arg.type.dtype == DataType.TASK_ID
+        ]
+        assert len(carries) == 1
+        assert launches[0].deps[0].unique_id == carries[0].unique_id
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_jit_branch_merge_preserves_last_capture_binding(enabled):
+    """A branch-local rebind must export latest, rather than its first capture."""
+
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            if enabled:
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[seed]) as ready:
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]) as latest:
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+                ready = latest
+            else:
+                ready = seed
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.convert_to_ssa()(chain.specialize())
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+    branches = []
+    scopes = []
+    aliases = {}
+    yields = []
+
+    class Collect(ir.IRVisitor):
+        def visit_if_stmt(self, op):
+            branches.append(op)
+            super().visit_if_stmt(op)
+
+        def visit_in_core_scope_stmt(self, op):
+            if "task_id_var" in op.attrs or "manual_dep_edges" in op.attrs:
+                scopes.append(op)
+            super().visit_in_core_scope_stmt(op)
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Var):
+                aliases[op.var.unique_id] = op.value
+            super().visit_assign_stmt(op)
+
+        def visit_yield_stmt(self, op):
+            yields.append(op)
+            super().visit_yield_stmt(op)
+
+    main = program.get_function("chain")
+    assert main is not None
+    Collect().visit_function(main)
+    assert len(branches) == 1
+    branch = branches[0]
+    assert scopes, python_print(program)
+    consumer_dep = scopes[-1].attrs["manual_dep_edges"][0]
+    index = next(i for i, value in enumerate(branch.return_vars) if value.unique_id == consumer_dep.unique_id)
+    assert len(scopes) == 4
+    expected_origins = (
+        (branch.then_body, scopes[2].attrs["task_id_var"]),
+        (branch.else_body, scopes[0].attrs["task_id_var"]),
+    )
+    # Resolve scalar copies at both exits: true exports latest, false exports seed.
+    for body, origin in expected_origins:
+        assert body is not None
+        yields.clear()
+        Collect().visit_stmt(body)
+        value = yields[-1].value[index]
+        while value.unique_id in aliases:
+            value = aliases[value.unique_id]
+        assert value.unique_id == origin.unique_id
+
+
+def test_jit_recorded_local_capture_name_can_be_reused():
+    """An independent capture must not read a previous Definition's local ID.
+
+    Its completion orders a consumer within each iteration; it needs no entry
+    TaskId from the previous Definition or a value exported from an empty loop.
+    """
+
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ):
+        with pl.manual_scope():
+            with pl.graph("first"):
+                with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                    pl.store(pl.load(first, [0, 0], [128, 128]), [0, 0], first)
+            for invocation in pl.range(4):
+                with pl.graph("second") as ready:
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+def test_jit_plain_recorded_local_assignment_preserves_caller_task_id():
+    @pl.jit
+    def chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+        with pl.manual_scope():
+            seed = pl.system.task_dummy(deps=[])
+            latest = pl.system.task_dummy(deps=[seed])
+            for _ in pl.range(1):
+                ready = seed
+                ready = latest
+            with pl.graph("recording") as done:
+                inner = pl.system.task_dummy(deps=[])
+                ready = inner
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                    c = pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready, done]):
+                c = pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+def test_jit_graph_preserves_independent_kernel_tile_rebinding():
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        recorded: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+    ):
+        for _ in pl.range(1):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(first, [0, 0], [128, 128])
+                pl.store(tile, [0, 0], first)
+        with pl.graph("recording"):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(recorded, [0, 0], [64, 64])
+                pl.store(tile, [0, 0], recorded)
+        return recorded
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+def test_jit_graph_host_alias_keeps_independent_kernel_tensor_rebinding():
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        recorded: pl.InOut[pl.Tensor[[64, 64], pl.FP32]],
+    ):
+        for _ in pl.range(1):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.store(pl.load(first, [0, 0], [128, 128]), [0, 0], first)
+        with pl.graph("recording"):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.store(pl.load(recorded, [0, 0], [64, 64]), [0, 0], recorded)
+            out = recorded
+        return out
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
+    assert compiled.program is not None
+
+
+@pytest.mark.parametrize("write_first", [False, True])
+def test_jit_graph_tensor_rebinding_with_same_name_task_capture_is_exported(write_first):
+    capture = (
+        "with pl.at(level=pl.Level.CORE_GROUP) as selected:\n"
+        "    pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)"
+    )
+    lines = ["selected = b", capture] if write_first else [capture, "selected = b"]
+    source = textwrap.dedent("""
+        def chain(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            with pl.graph("recording"):
+                CAPTURE
+            return selected
+    """).replace("        CAPTURE", textwrap.indent("\n".join(lines), "        "))
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("chain", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("chain")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (selected,) = (
+        var
+        for var in ir.collect_def_vars(graph.body)
+        if var.name_hint == "selected_v1" and isinstance(var.type, ir.TensorType)
+    )
+    assert value.same_as(selected)
+
+
+@pytest.mark.parametrize("repeat_capture", [False, True])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_jit_graph_capture_keeps_tensor_written_in_device_body(repeat_capture, overwrite):
+    second_capture = (
+        "        with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]) as selected:\n"
+        "            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)"
+        if repeat_capture
+        else ""
+    )
+    if overwrite:
+        second_capture += "\n        selected = c"
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor], c: pl.InOut[pl.Tensor]):
+            for i in pl.range(1):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            with pl.graph("recording"):
+                with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                    selected = pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+            SECOND_CAPTURE
+            return selected
+    """).replace("    SECOND_CAPTURE", second_capture)
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b", "c"], tensor_meta={"a": meta, "b": meta, "c": meta})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert isinstance(graph.body, ir.SeqStmts)
+    device_scope = next(stmt for stmt in graph.body.stmts if isinstance(stmt, ir.InCoreScopeStmt))
+    (selected,) = (
+        var
+        for var in ir.collect_def_vars(device_scope.body)
+        if var.name_hint == "selected_v1" and isinstance(var.type, ir.TensorType)
+    )
+    assert value.same_as(selected)
+    if overwrite:
+        assignment = graph.body.stmts[-1]
+        assert isinstance(assignment, ir.AssignStmt)
+        assert assignment.var.same_as(selected)
+        assert assignment.value.same_as(function.params[2])
+
+
+def test_jit_graph_capture_shape_uses_tensor_written_in_device_body():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            for i in pl.range(1):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    selected = a
+                    pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            with pl.graph("recording"):
+                with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                    selected = b
+                    pl.store(pl.load(b, [0, 0], [64, 128]), [0, 0], b)
+            for i in pl.range(selected.shape[0]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(selected, [i, 0], [1, 128]), [i, 0], selected)
+            return selected
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    _, loop = (stmt for stmt in function.body.stmts if isinstance(stmt, ir.ForStmt))
+    assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == 64
+
+
+def test_jit_graph_capture_matches_restored_tensor_alias():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    selected = pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.graph("first"):
+                    selected = pl.system.task_dummy(deps=[])
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.graph("second"):
+                    with pl.at(level=pl.Level.CORE_GROUP) as selected:
+                        selected = pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+                        pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+            return selected
+    """)
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    _, graph = (stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    assert isinstance(graph.body, ir.SeqStmts)
+    producer, consumer = (stmt for stmt in graph.body.stmts if isinstance(stmt, ir.InCoreScopeStmt))
+    (dependency,) = consumer.attrs["manual_dep_edges"]
+    assert dependency.same_as(producer.attrs["task_id_var"])
+    (selected,) = (var for var in ir.collect_def_vars(producer.body) if isinstance(var.type, ir.TensorType))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert value.same_as(selected)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_jit_graph_capture_does_not_reuse_incoming_tensor_alias_for_assignment(nested):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as selected:
+            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+    """).strip("\n")
+    if nested:
+        capture = "for i in pl.range(1):\n" + textwrap.indent(capture, "    ")
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            selected = a
+            selected = b
+            with pl.graph("recording"):
+                CAPTURE
+                selected = a
+            return selected
+    """).replace("        CAPTURE", textwrap.indent(capture, "        "))
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (selected,) = (var for var in ir.collect_def_vars(graph.body) if isinstance(var.type, ir.TensorType))
+    assert value.same_as(selected)
+
+
+@pytest.mark.parametrize("capture_kind", ["dispatch", "graph"])
+@pytest.mark.parametrize("write_scope", ["device", "host", "loop"])
+def test_jit_dispatch_capture_then_tensor_assignment(capture_kind, write_scope):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as selected:
+            pl.store(pl.load(b, [0, 0], [128, 128]), [0, 0], b)
+    """).strip("\n")
+    if capture_kind == "graph":
+        capture = 'with pl.graph("recording") as selected:\n' + textwrap.indent(
+            capture.replace(" as selected", ""), "    "
+        )
+    second_dispatch = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[selected]):
+            pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+    """).strip("\n")
+    if write_scope == "device":
+        second_dispatch = second_dispatch.replace("    pl.store", "    selected = pl.store")
+    else:
+        write = "selected = a" if write_scope == "host" else "for i in pl.range(1):\n    selected = a"
+        second_dispatch += "\n" + write
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            selected = a
+            selected = b
+            with pl.manual_scope():
+                CAPTURE
+                SECOND_DISPATCH
+            return selected
+    """)
+    source = source.replace("        CAPTURE", textwrap.indent(capture, "        ")).replace(
+        "        SECOND_DISPATCH", textwrap.indent(second_dispatch, "        ")
+    )
+    meta = TensorMeta((128, 128), DataType.FP32)
+    ctx = _make_ctx("f", source, param_names=["a", "b"], tensor_meta={"a": meta, "b": meta})
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (original,) = (
+        stmt.var
+        for stmt in function.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "selected_v1"
+    )
+    assert value.same_as(original)
+
+
+@pytest.mark.parametrize("capture_kind", ["dispatch", "graph"])
+def test_jit_dispatch_capture_then_scalar_assignment(capture_kind):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as index:
+            pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+    """).strip("\n")
+    if capture_kind == "graph":
+        capture = 'with pl.graph("recording") as index:\n' + textwrap.indent(
+            capture.replace(" as index", ""), "    "
+        )
+    source = textwrap.dedent("""
+        def f(c: pl.InOut[pl.Tensor]):
+            index = 1
+            index = 2
+            with pl.manual_scope():
+                CAPTURE
+                pl.system.task_dummy(deps=[index])
+                index = 3
+            return index
+    """).replace("        CAPTURE", textwrap.indent(capture, "        "))
+    ctx = _make_ctx("f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 128), DataType.FP32)})
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (original,) = (
+        stmt.var
+        for stmt in function.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "index_v1"
+    )
+    assert value.same_as(original)
+
+
+@pytest.mark.parametrize("selected", [True, False])
+@pytest.mark.parametrize("inactive_capture", [False, True])
+@pytest.mark.parametrize("condition", ["enabled", "mode == 0", "not (mode > 0 or mode < 0)"])
+def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive_capture, condition):
+    fold = "rows = a.shape[0]"
+    inactive = (
+        "with pl.at(level=pl.Level.CORE_GROUP) as rows:\n"
+        "    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)"
+        if inactive_capture
+        else "pass"
+    )
+    body, orelse = (fold, inactive) if selected else (inactive, fold)
+    source = (
+        textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], enabled: pl.constexpr, mode: pl.constexpr):
+            if CONDITION:
+                BODY
+            else:
+                ORELSE
+            return pl.create_tensor([rows, 128], dtype=pl.FP32)
+    """)
+        .replace("        BODY", textwrap.indent(body, "        "))
+        .replace("        ORELSE", textwrap.indent(orelse, "        "))
+    )
+    source = source.replace("CONDITION", condition)
+    ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
+    ctx.constexpr_values = {"enabled": str(selected), "mode": "0" if selected else "1"}
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert isinstance(value.type, ir.TensorType)
+    assert isinstance(value.type.shape[0], ir.ConstInt) and value.type.shape[0].value == 64
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_jit_graph_capture_preserves_later_shape_fold(enabled):
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor], enabled: pl.constexpr):
+            rows = a.shape[0]
+            with pl.graph("recording"):
+                if enabled:
+                    with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                rows = b.shape[0]
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(b, [0, 0], [64, 128]), [0, 0], b)
+            for i in pl.range(rows):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(b, [i, 0], [1, 128]), [i, 0], b)
+            return b
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    ctx.constexpr_values = {"enabled": str(enabled)}
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    loop = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.ForStmt))
+    assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == 64
+
+
+def test_jit_scalar_after_graph_shape_capture_keeps_loop_carry():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            with pl.graph("recording"):
+                row = a.shape[0]
+                with pl.at(level=pl.Level.CORE_GROUP) as row:
+                    pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                row = b.shape[0]
+                row = 0
+                for i in pl.range(2):
+                    row = row + 1
+                if row == 2:
+                    row = row + 1
+            return a
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    graph = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    assert isinstance(graph.body, ir.SeqStmts)
+    initial = next(
+        stmt
+        for stmt in graph.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.ConstInt)
+    )
+    loop = next(stmt for stmt in graph.body.stmts if isinstance(stmt, ir.ForStmt))
+    (updated,) = ir.collect_def_vars(loop.body)
+    assert updated.same_as(initial.var)
+
+
+def test_jit_graph_capture_does_not_reuse_sibling_branch_shape():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], flag: pl.Scalar[pl.BOOL]):
+            if flag:
+                rows = a.shape[0]
+            else:
+                with pl.graph("recording"):
+                    with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+            return a
+    """)
+    ctx = _make_ctx(
+        "f", source, param_names=["a", "flag"], tensor_meta={"a": TensorMeta((128, 128), DataType.FP32)}
+    )
+    assert pl.parse_program(specialize("Before", [ctx])).get_function("f") is not None
+
+
+@pytest.mark.parametrize("capture_kind", ["dispatch", "graph"])
+def test_jit_dispatch_capture_then_folded_scalar_assignment(capture_kind):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as rows:
+            pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+    """).strip("\n")
+    if capture_kind == "graph":
+        capture = 'with pl.graph("recording") as rows:\n' + textwrap.indent(
+            capture.replace(" as rows", ""), "    "
+        )
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            rows = a.shape[0]
+            with pl.manual_scope():
+                CAPTURE
+                pl.system.task_dummy(deps=[rows])
+                rows = b.shape[0]
+            return rows
+    """).replace("        CAPTURE", textwrap.indent(capture, "        "))
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert isinstance(value.type, ir.ScalarType)
+    assert value.type.dtype == DataType.INDEX
+
+
+def test_jit_dispatch_capture_then_assignment_after_graph_restores_constant():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
+            rows = a.shape[0]
+            with pl.manual_scope():
+                with pl.graph("recording"):
+                    rows = pl.system.task_dummy(deps=[])
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[rows]):
+                        pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                    pl.store(pl.load(a, [0, 0], [128, 128]), [0, 0], a)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[rows]):
+                    pl.store(pl.load(b, [0, 0], [64, 128]), [0, 0], b)
+                rows = b.shape[0]
+            return rows
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a", "b"],
+        tensor_meta={"a": TensorMeta((128, 128), DataType.FP32), "b": TensorMeta((64, 128), DataType.FP32)},
+    )
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    assignment = runtime.body.stmts[-1]
+    returned = function.body.stmts[-1]
+    assert isinstance(assignment, ir.AssignStmt)
+    assert isinstance(assignment.value, ir.ConstInt) and assignment.value.value == 64
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    assert value.same_as(assignment.var)
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_jit_dispatch_capture_then_task_id_array_assignment(recorded):
+    body = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as ids:
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ids]):
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+        ids = pl.array.create(1, pl.TASK_ID)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ids]):
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+    """).strip("\n")
+    if recorded:
+        body = 'with pl.graph("recording") as done:\n' + textwrap.indent(body, "    ")
+        body += "\nwith pl.at(level=pl.Level.CORE_GROUP, deps=[ids, done]):\n"
+        body += "    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)"
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor]):
+            ids = pl.array.create(1, pl.TASK_ID)
+            ids = pl.array.create(1, pl.TASK_ID)
+            with pl.manual_scope():
+                BODY
+            return a
+    """).replace("        BODY", textwrap.indent(body, "        "))
+    ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    (original,) = (
+        stmt.var
+        for stmt in function.body.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "ids_v1"
+    )
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    scope_body = runtime.body
+    if recorded:
+        graph = next(stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+        assert isinstance(graph.body, ir.SeqStmts)
+        scope_body = graph.body
+        consumer = runtime.body.stmts[-1]
+        assert isinstance(consumer, ir.InCoreScopeStmt)
+        outer_ids, done = consumer.attrs["manual_dep_edges"]
+        assert outer_ids.same_as(original)
+        assert done.same_as(graph.attrs["task_id_var"])
+    (recreated,) = (
+        stmt.var
+        for stmt in scope_body.stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ArrayType)
+    )
+    assert recreated.same_as(original) is not recorded
+    consumer = scope_body.stmts[-1]
+    assert isinstance(consumer, ir.InCoreScopeStmt)
+    (dep,) = consumer.attrs["manual_dep_edges"]
+    assert dep.same_as(recreated)
+
+
+def test_jit_dispatch_capture_then_rebinding_keeps_parameter_dim_immutable():
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor]):
+            rows = 0
+            rows = pl.tensor.dim(a, 0)
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP) as rows:
+                    pl.store(pl.load(a, [0, 0], [1, 128]), [0, 0], a)
+                rows = 1
+            return rows
+    """)
+    ctx = _make_ctx(
+        "f",
+        source,
+        param_names=["a"],
+        tensor_meta={"a": TensorMeta((DynDim("M", "M", 128), 128), DataType.FP32)},
+    )
+
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    returned = function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    (value,) = returned.value
+    (parameter,) = function.params
+    assert isinstance(parameter.type, ir.TensorType)
+    assert isinstance(value, ir.Var)
+    assert value.name_hint == "rows_v1"
+    assert not value.same_as(parameter.type.shape[0])
+
+
+@pytest.mark.parametrize("repeat_capture", [False, True])
+def test_jit_graph_capture_preserves_outer_task_id_over_older_scalar(repeat_capture):
+    capture = textwrap.dedent("""
+        with pl.at(level=pl.Level.CORE_GROUP) as ready:
+            pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+    """).strip("\n")
+    captures = [capture, capture] if repeat_capture else [capture]
+    source = textwrap.dedent("""
+        def f(a: pl.InOut[pl.Tensor]):
+            ready = 0
+            with pl.manual_scope():
+                with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                with pl.graph("recording") as done:
+                    CAPTURES
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[ready, done]):
+                    pl.store(pl.load(a, [0, 0], [64, 128]), [0, 0], a)
+                ready = 1
+            return a
+    """).replace("            CAPTURES", textwrap.indent("\n".join(captures), "            "))
+    ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((64, 128), DataType.FP32)})
+    function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+    assert function is not None
+    assert isinstance(function.body, ir.SeqStmts)
+    runtime = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.RuntimeScopeStmt))
+    assert isinstance(runtime.body, ir.SeqStmts)
+    producer, consumer = (stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.InCoreScopeStmt))
+    graph = next(stmt for stmt in runtime.body.stmts if isinstance(stmt, ir.GraphScopeStmt))
+    ready, done = consumer.attrs["manual_dep_edges"]
+    assert ready.same_as(producer.attrs["task_id_var"])
+    assert done.same_as(graph.attrs["task_id_var"])
+
+    initial = function.body.stmts[0]
+    reassignment = runtime.body.stmts[-1]
+    assert isinstance(initial, ir.AssignStmt)
+    assert isinstance(reassignment, ir.AssignStmt)
+    assert reassignment.var.same_as(initial.var)
+
+
+def test_jit_explicit_recorded_local_dependency_remains_rejected():
+    """Fresh capture names must not erase an actual cross-recording TaskId read."""
+
+    @pl.jit
+    def chain(
+        first: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+    ):
+        with pl.manual_scope():
+            with pl.graph("first"):
+                with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                    pl.store(pl.load(first, [0, 0], [128, 128]), [0, 0], first)
+            with pl.graph("second", deps=[ready]) as done:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[done]):
+                pl.store(pl.load(c, [0, 0], [128, 128]), [0, 0], c)
+        return c
+
+    with (
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+        pytest.raises(UndefinedVariableError, match="Undefined variable 'ready'"),
+    ):
+        chain.compile(config=RunConfig(backend_type=BackendType.Ascend910))
 
 
 if __name__ == "__main__":

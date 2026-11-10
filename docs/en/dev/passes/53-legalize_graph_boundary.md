@@ -28,6 +28,13 @@ The third produces correct answers that run out of memory, or merely slower, as
 the layer count grows. The last is rejected at runtime; compile-time checks
 report statically decidable problems against the source program earlier.
 
+Materialized `CommCtxType` parameters use input scalar slots containing device
+communication-context pointers. Their `InheritableScalar` origin is preserved
+when forwarded to recorded tasks, so replay refreshes the pointer for each
+invocation. Step A replaces local aliases of a context with the original
+boundary parameter. These contexts count toward the scalar boundary limit;
+unrelated pointer, tile, and tuple types remain unsupported.
+
 ## Step A — derived boundary scalars
 
 A boundary scalar carries its **parameter origin** in the runtime's
@@ -120,10 +127,10 @@ attention loop in a decoder layer is indexed that way, so rejecting it excluded
 the whole shape.
 
 `DataType::TASK_ID` operands are skipped outright rather than classified. A task
-id is never a boundary scalar — the recording captures dependency structure
-itself, and the runtime refuses any Graph submission carrying an explicit
-dependency (`explicit_dep_count() != 0`), so an id produced outside the region
-can never reach a replay. This matters because the scalar check runs over
+id is not a replay boundary scalar. Incoming predecessors belong to the outer
+Graph Submit; the recording captures only its internal dependency structure.
+The outer completion is valid on cold, in-flight and cached invocations, while
+recorded-local ids stay in the body. This matters because the scalar check runs over
 *every* call's arguments, so `seeds[0] = seed` — an `array.update_element` into a
 `pl.array` of `TASK_ID` — used to read as a task consuming a boundary scalar
 while the same id written straight into `deps=[...]` was accepted.
@@ -330,7 +337,7 @@ which decodes values directly in both supported runtimes.
 | At most 64 scalar parameters | `GRAPH_MAX_SCALAR_ARGS`. Checked after Step A, which *adds* scalar parameters, so a signature that fit before hoisting can stop fitting after |
 | No runtime-allocated boundary output | `Out` describes write-only access and is legal with caller-supplied storage. Call-site `OutputExisting` and `InOut` are supported; `ArgDirection::Output` is rejected because it requests a new allocation |
 | Scalar parameters are `In` | A boundary scalar is passed by value and replayed from the call site |
-| Returns only its own parameters | `rt_submit_graph` yields a valid task id only on a cache *hit*, so nothing can depend on a graph call's result. `return c` for an `InOut` parameter is the in-place spelling and is fine; a computed value is not |
+| Returns only its own parameters | A cached invocation skips the recording body, so its computed return values are unavailable. `return c` for an `InOut` parameter is an alias and is fine. The outer Graph completion is a separate Submit result, valid on cold and cached invocations |
 | Between 1 and 1024 launched tasks | `graph_execution_storage_layout` refuses a node count of zero as well as one over `GRAPH_MAX_NODES`. A launch in a loop counts once per iteration, not once per call site, and `system.task_dummy` counts too — it lowers to `rt_submit_dummy_task`, and `ExpandManualPhaseFence` inserts them automatically. Allocations record nodes too, counted as an *upper* bound so that passing this check means the runtime will accept the Graph. Codegen collects every eligible create in a statement list — an intervening launch does not close the batch — and packs them at most `kAllocTensorsArgs` (16) to an `alloc_tensors`. Two of its three ineligibility rules cannot fire here (a shape reading a local is already rejected as non-constant; an already-declared var cannot recur under SSA), so those creates are counted exactly. The third can — an injected GM pipe buffer leaves the shared batch when its `core_num` reads a body-local, which only the emitter's use-resolution knows — so each of those is charged its worst case of one node. The batch size and the GM-pipe predicate are shared with the emitter in `utils/alloc_batching.h` rather than restated here. Counted **after** the hoisting steps, unlike every other check in this table: Step C *removes* allocation nodes, so the pre-hoist body would reject a Graph that fits and disagree with the verifier, which re-derives the same count from the rewritten IR |
 | No allocation under a runtime loop or branch | Each records a node, so a count that varies between calls is a topology that varies |
 | Allocation shapes are compile-time constants | Recording copies the shape into the node and derives the buffer address from it; a shape reading a boundary scalar is frozen at the first call's value |
@@ -339,8 +346,9 @@ which decodes values directly in both supported runtimes.
 | No *call-varying* scalar computed inline at a task argument | Step A hoists *named* derived values; an expression written inline at the call has no name to hoist and no boundary slot, so it would be frozen at the first call's value. A replay-invariant expression is accepted — the freeze is harmless |
 | No Graph calls a Graph | The runtime cannot record a graph from inside one it is already recording |
 | Every parameter supplied at the call site | A `Submit` may normally pass a prefix and let the runtime allocate the tail `Out` params; a Graph has no such tail |
-| No explicit dependencies on the launch | The runtime rejects explicit dependencies across a Graph boundary |
+| Explicit predecessors order the outer launch | `Submit.deps_` reaches the outer Graph task; its invocation-local ids are not part of the immutable Definition or cache key |
 | No dispatch predicate on the launch | A predicate on a graph launch is neither honoured nor rejected — the runtime silently zeroes it, so the region would run unconditionally |
+| No SPMD launch specification on the Graph | `core_num` and `sync_start` configure recorded kernel launches, not the composite Graph invocation; Graph dispatch rejects them instead of silently ignoring them. |
 
 ## Position in the pipeline
 

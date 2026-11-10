@@ -1491,8 +1491,8 @@ class TestBoundaryLegality:
     def test_graph_returning_a_computed_value_is_rejected(self):
         """A return that aliases an InOut parameter is fine; a computed one is not.
 
-        ``rt_submit_graph`` yields a valid task id only on a cache hit, so a
-        graph cannot hand a computed value back to its caller.
+        A replay skips the Graph body, so its computed values cannot be
+        returned. The outer submit completion id is a separate result.
         """
 
         @pl.program

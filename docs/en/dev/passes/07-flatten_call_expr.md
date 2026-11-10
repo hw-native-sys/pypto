@@ -19,6 +19,13 @@ it into a body-local temporary would invalidate loop-carried types and outlined
 signatures. `NoNestedCalls` follows the same boundary. Outlining captures tensor
 operands referenced by these types before the parameters that depend on them.
 
+SIMT functions retain the entire `while` condition expression, including nested
+calls. PTO codegen evaluates it in the `scf.while` before region on every check,
+with loop-carried values in scope. Hoisting a vote or shuffle before the loop
+would change its evaluation frequency and can create an out-of-scope IterArg.
+`NoNestedCalls` exempts this condition only; the loop body is still flattened
+and verified normally. Other function types keep their existing handling.
+
 **Requires**: `TypeChecked`, `SSAForm` properties. These properties are automatically verified at BASIC level once produced; use a `VerificationInstrument` via `PassContext` if you need required properties to be validated before running passes.
 
 **When to use**: Typically schedule this pass after the type-checking pass and before code generation to simplify downstream analysis and code generation; this ordering is a convention rather than an automatically enforced requirement.

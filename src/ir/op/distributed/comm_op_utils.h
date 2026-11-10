@@ -268,6 +268,117 @@ inline std::vector<ExprPtr> ValidateRegionArgs(const std::vector<ExprPtr>& args,
   return transfer_shape->elements_;
 }
 
+// ============================================================================
+// Async URMA transfer contract (pld.tensor.put_async / get_async)
+// ============================================================================
+
+// The async interface accepts a single engine. Reject any other value by name;
+// a future engine must be added here deliberately rather than silently
+// downgraded.
+inline void ValidateAsyncEngine(const Kwargs& kwargs, const std::string& op_name) {
+  const int engine = GetRequiredKwarg<int>(kwargs, "engine", op_name);
+  CHECK(engine == static_cast<int>(CommEngine::kURMA))
+      << op_name << " supports only engine=CommEngine.URMA; SDMA/RDMA are not available, got " << engine;
+}
+
+// The peer rank selects an address; a floating-point scalar must not become a
+// rank coordinate. Only integer and index scalars are accepted.
+inline void ValidateAsyncPeer(const ExprPtr& peer, const std::string& op_name) {
+  auto scalar = As<ScalarType>(peer->GetType());
+  CHECK(scalar) << op_name << " peer must be a scalar (rank index), got " << peer->GetType()->TypeName();
+  CHECK(scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX)
+      << op_name << " peer must be an integer rank index, got " << peer->GetType()->TypeName();
+  if (auto rank = As<ConstInt>(peer)) {
+    CHECK_SPAN(rank->value_ >= 0, peer->span_)
+        << op_name << " peer rank must be non-negative, got " << rank->value_;
+  }
+}
+
+// Leading singleton transfer dimensions never advance their physical strides.
+// After the first dimension that may contain multiple elements, every inner
+// dimension must be full to avoid gaps. Thus [1, 2, 64] inside [2, 4, 64] is
+// contiguous, while [2, 1, 64] is not. A dynamic extent may exceed one, so only
+// statically proven singleton dimensions can be skipped.
+inline void ValidateAsyncContiguousTransfer(const std::vector<ExprPtr>& transfer_shape,
+                                            const std::vector<ExprPtr>& global_shape,
+                                            const std::string& op_name) {
+  size_t first = 0;
+  while (first < transfer_shape.size()) {
+    auto extent = As<ConstInt>(transfer_shape[first]);
+    if (!extent || extent->value_ != 1) break;
+    ++first;
+  }
+  if (first == transfer_shape.size()) return;
+  for (size_t i = first + 1; i < transfer_shape.size(); ++i) {
+    CHECK_SPAN(AreExprsEqual(transfer_shape[i], global_shape[i]), transfer_shape[i]->span_)
+        << op_name << " subregion is not contiguous: dimension " << i
+        << " must span its full extent when an outer dimension may contain multiple elements";
+  }
+}
+
+// Offsets and shape are address coordinates. ValidateRegionArgs only validates a
+// coordinate when it is a ConstInt, so a floating-point scalar would slip
+// through and become a byte address later. V1 accepts integers and index
+// scalars only.
+inline void ValidateAsyncIntegerCoordinate(const ExprPtr& expr, const std::string& op_name,
+                                           const char* role) {
+  if (As<ConstInt>(expr)) return;
+  auto scalar = As<ScalarType>(expr->GetType());
+  CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
+      << op_name << " " << role << " must be an integer or index scalar, got " << expr->GetType()->TypeName();
+}
+
+inline void ValidateAsyncIntegerRegionArgs(const std::vector<ExprPtr>& args, size_t region_arg_base,
+                                           const std::string& op_name) {
+  static constexpr const char* kRoles[3] = {"dst_offsets", "src_offsets", "shape"};
+  for (size_t k = 0; k < 3; ++k) {
+    auto tuple = As<MakeTuple>(args[region_arg_base + k]);
+    CHECK(tuple) << op_name << " " << kRoles[k] << " must be a tuple";
+    for (const auto& element : tuple->elements_) {
+      ValidateAsyncIntegerCoordinate(element, op_name, kRoles[k]);
+    }
+  }
+}
+
+// V1 transfers one dense GM range and provides no packing or staging, so an
+// endpoint view must itself be dense row-major. An empty stride is the dense
+// default; an explicit view must be ND with stride[i] == stride[i+1] *
+// shape[i+1] and stride.back() == 1.
+inline void ValidateAsyncEndpointView(const TensorTypePtr& type, const std::string& op_name,
+                                      const std::string& role) {
+  auto dist = As<DistributedTensorType>(type);
+  CHECK(dist) << op_name << " " << role << " must be a DistributedTensor (window-bound)";
+  const auto& view = dist->tensor_view_;
+  if (!view) return;
+  // An implicit (empty) stride is still layout-dependent: DN/NZ storage is not
+  // one dense row-major range, so check the layout before accepting it.
+  CHECK(view->layout == TensorLayout::ND)
+      << op_name << " " << role << " must use the row-major ND layout for a contiguous transfer";
+  if (view->stride.empty()) return;
+  const auto& shape = dist->shape_;
+  CHECK(view->stride.size() == shape.size())
+      << op_name << " " << role << " view stride rank must match the tensor rank";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    auto stride = As<ConstInt>(view->stride[i]);
+    CHECK(stride) << op_name << " " << role << " view stride must be static for a contiguous transfer";
+    if (i + 1 == shape.size()) {
+      CHECK(stride->value_ == 1) << op_name << " " << role
+                                 << " view must be dense: the innermost stride must be 1, got "
+                                 << stride->value_;
+      continue;
+    }
+    auto next_stride = As<ConstInt>(view->stride[i + 1]);
+    auto next_dim = As<ConstInt>(shape[i + 1]);
+    CHECK(next_stride && next_dim)
+        << op_name << " " << role
+        << " view must have static inner strides and extents for a contiguous transfer";
+    CHECK(stride->value_ == next_stride->value_ * next_dim->value_)
+        << op_name << " " << role << " view is not dense: stride[" << i << "]=" << stride->value_
+        << " but stride[" << (i + 1) << "]*shape[" << (i + 1)
+        << "]=" << next_stride->value_ * next_dim->value_;
+  }
+}
+
 // Bounds-check a whole-region cross-rank push (``pld.tensor.remote_store`` /
 // ``pld.tile.remote_store``): the 2-D ``push_extent`` lands at ``offsets`` in
 // the target's coordinate space, with the leading ``rank - 2`` dims occupying a

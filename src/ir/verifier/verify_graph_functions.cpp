@@ -156,13 +156,13 @@ class GraphReferenceChecker : public IRVisitor {
     CheckLaunchArity(callee, op->args_.size(), op->span_);
     CheckDirections(callee, op->GetArgDirections(), op->span_);
 
-    if (!op->deps_.empty()) {
+    // Graph replay expands a recorded sub-DAG, not one SPMD kernel launch.
+    if (op->core_num_.has_value() || op->sync_start_) {
       Report(callee, op->span_,
-             "is submitted with explicit dependencies. An explicit dependency edge makes the launch "
-             "uncacheable, so the region would silently run as ordinary tasks with no graph replay. "
-             "Order the graph against its producers through its boundary tensors instead.");
+             "is submitted with an SPMD launch specification. Graph dispatch does not support "
+             "core_num or sync_start; specify them on recorded kernels instead.");
     }
-    if (op->predicate_ != nullptr) {
+    if (op->HasPredicate()) {
       Report(callee, op->span_,
              "is submitted with a dispatch predicate. The runtime neither honours nor rejects a "
              "predicate on a graph launch — it silently zeroes it — so the region would run "
@@ -241,6 +241,8 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
                              "Graph function '" + func->name_ + "' " + message, span);
   };
 
+  // Materialized communication contexts use uint64_t scalar slots. Preserve
+  // their argument origin so replay refreshes the device context pointer.
   size_t tensor_params = 0;
   size_t scalar_params = 0;
   // `param_directions_` may be shorter than `params_` at some points in the
@@ -249,7 +251,7 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const auto dir = i < func->param_directions_.size() ? func->param_directions_[i] : ParamDirection::In;
-    if (As<ScalarType>(param->GetType()) != nullptr) {
+    if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
       if (dir != ParamDirection::In) {
         report("declares scalar parameter '" + param->name_hint_ +
                    "' as an output. A boundary scalar is passed by value and replayed from the call "
@@ -321,7 +323,7 @@ class GraphBodyChecker : public IRVisitor {
   GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics)
       : program_(std::move(program)), func_(std::move(func)), diagnostics_(diagnostics), invariant_(func_) {
     for (const auto& param : func_->params_) {
-      if (As<ScalarType>(param->GetType()) != nullptr) {
+      if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
         scalar_params_.insert(param.get());
       } else {
         tensor_params_.insert(param.get());
@@ -408,7 +410,7 @@ class GraphBodyChecker : public IRVisitor {
   /// through.
   void TrackTensorAlias(const AssignStmtPtr& op) {
     auto var = AsVarLike(op->var_);
-    if (!var || As<ScalarType>(var->GetType()) != nullptr) return;
+    if (!var || As<ScalarType>(var->GetType()) || As<CommCtxType>(var->GetType())) return;
     auto aliased = AsVarLike(op->value_);
     if (aliased && tensor_root_.count(aliased.get()) != 0) {
       tensor_root_.insert(var.get());
@@ -617,7 +619,7 @@ class GraphBodyChecker : public IRVisitor {
 
   void CheckScalarArgs(const std::vector<ExprPtr>& args, const Span& span) {
     for (const auto& arg : args) {
-      if (!arg || As<ScalarType>(arg->GetType()) == nullptr) continue;
+      if (!arg || (!As<ScalarType>(arg->GetType()) && !As<CommCtxType>(arg->GetType()))) continue;
       // A TaskId is topology, not a boundary scalar — see graph_replay_invariant.h.
       if (graph_replay::IsTaskIdScalar(arg->GetType())) continue;
       if (IsLiteralScalarExpr(arg)) continue;
@@ -674,8 +676,9 @@ void VerifyReturns(const FunctionPtr& func, const ProgramPtr& program, std::vect
     diagnostics.emplace_back(
         DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
         "Graph function '" + func->name_ +
-            "' returns a value it computed rather than one of its own parameters. A graph call's "
-            "result is a recording handle, valid only on a cache hit, so nothing can depend on it.",
+            "' returns a value it computed rather than one of its own parameters. The Graph body "
+            "is skipped on a cache hit, so its computed returns are unavailable. The outer completion id is "
+            "separate.",
         return_stmt->span_);
   }
 }

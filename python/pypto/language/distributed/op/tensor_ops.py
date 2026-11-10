@@ -48,7 +48,7 @@ from pypto.language.typing import IntLike, Ptr
 from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.ir import AtomicType, Call, Expr, ReduceOp
+from pypto.pypto_core.ir import AtomicType, Call, CommEngine, Expr, ReduceOp
 
 from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap, _unwrap_distributed_tensors
@@ -578,6 +578,105 @@ def get(
         chunk_cols=chunk_cols,
         pipeline=pipeline,
     )
+
+
+def put_async(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor,
+    dst_offsets: Sequence[IntLike] | None = None,
+    src_offsets: Sequence[IntLike] | None = None,
+    shape: Sequence[IntLike] | None = None,
+    *,
+    engine: CommEngine = CommEngine.URMA,
+) -> DistributedTensor:
+    """Asynchronously write the local ``src`` into the peer rank's ``dst`` slice.
+
+    Both ``dst`` and ``src`` must be window-bound :class:`DistributedTensor`s;
+    V1 does not register ordinary tensors or stage through UB.
+
+    Returns ``dst`` (the result aliases the destination). Returning does **not**
+    mean the transfer completed: completion is owned by the enclosing task and
+    rides the producer ``InOut`` -> consumer ``In`` dependency. The user must
+    pass ``dst`` as an ``InOut`` producer parameter and let a later task consume
+    it as ``In``.
+
+    ``engine`` is a compile-time kwarg; V1 accepts
+    :attr:`pld.CommEngine.URMA` only; other types are rejected before integer
+    conversion. A constant ``peer`` must be non-negative. Offsets and shape,
+    when supplied, must be provided together and describe a contiguous GM
+    range: skip leading singleton transfer dimensions, then require every
+    dimension after the first non-singleton to span its full extent.
+    """
+    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.put_async", dst=dst, src=src)
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.put_async dst_offsets, src_offsets, and shape must be provided together")
+    if not has_region:
+        call = _ir_tensor.put_async(dst_expr, _unwrap(peer), src_expr, engine=engine)
+    else:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        call = _ir_tensor.put_async(
+            dst_expr,
+            _unwrap(peer),
+            src_expr,
+            _normalize_intlike(dst_offsets),
+            _normalize_intlike(src_offsets),
+            _normalize_intlike(shape),
+            engine=engine,
+        )
+    return DistributedTensor(expr=call)
+
+
+def get_async(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor,
+    dst_offsets: Sequence[IntLike] | None = None,
+    src_offsets: Sequence[IntLike] | None = None,
+    shape: Sequence[IntLike] | None = None,
+    *,
+    engine: CommEngine = CommEngine.URMA,
+) -> DistributedTensor:
+    """Asynchronously read the peer rank's ``src`` slice into local ``dst``.
+
+    Both ``dst`` and ``src`` must be window-bound :class:`DistributedTensor`s;
+    V1 does not register ordinary tensors or stage through UB.
+
+    Returns ``dst`` (the result aliases the destination). Returning does **not**
+    mean the data has arrived: completion is owned by the enclosing task and
+    rides the producer ``InOut`` -> consumer ``In`` dependency. A local consumer
+    may read the fetched data only after that dependency is released.
+
+    ``engine`` is a compile-time kwarg; V1 accepts
+    :attr:`pld.CommEngine.URMA` only; other types are rejected before integer
+    conversion. A constant ``peer`` must be non-negative. Offsets and shape,
+    when supplied, must be provided together and describe a contiguous GM
+    range: skip leading singleton transfer dimensions, then require every
+    dimension after the first non-singleton to span its full extent.
+    """
+    dst_expr, src_expr = _unwrap_distributed_tensors("pld.tensor.get_async", dst=dst, src=src)
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.get_async dst_offsets, src_offsets, and shape must be provided together")
+    if not has_region:
+        call = _ir_tensor.get_async(dst_expr, _unwrap(peer), src_expr, engine=engine)
+    else:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        call = _ir_tensor.get_async(
+            dst_expr,
+            _unwrap(peer),
+            src_expr,
+            _normalize_intlike(dst_offsets),
+            _normalize_intlike(src_offsets),
+            _normalize_intlike(shape),
+            engine=engine,
+        )
+    return DistributedTensor(expr=call)
 
 
 @overload
@@ -1187,7 +1286,9 @@ __all__ = [
     "barrier",
     "broadcast",
     "get",
+    "get_async",
     "put",
+    "put_async",
     "remote_store",
     "reduce_scatter",
     "window",

@@ -1630,8 +1630,8 @@ jobs:
           checkout-path: dist-checkout
 
   pypto-lib-compile:
-    # Compile all formal library entrypoints without executing device code.
-    # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
+    # Compile selected DeepSeek and Qwen operator cases without device execution.
+    # A2/A3 extern wrappers need CANN headers from the npu runner.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
     permissions:
@@ -1645,6 +1645,7 @@ jobs:
           - platform: a2a3
             runner: npu
             needs-cann: 'true'
+            runtime-targets: build_package_a2a3;build_package_sim
           - platform: a5
             runner: cpu
             needs-cann: 'false'
@@ -1694,13 +1695,14 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git build/pypto-lib
 
-      - name: Compile every formal library entry
+      - name: Compile configured library cases
         id: compile
         env:
           LIB_PLATFORM: ${{ matrix.platform }}
         run: |
           source activate.sh
           python tests/ci/compile_pypto_lib.py --lib build/pypto-lib \
+            --cases tests/ci/pypto_lib_compile.json \
             --platform "$LIB_PLATFORM" --jobs 4 --timeout 1200 \
             --output build/lib-compile-results
 

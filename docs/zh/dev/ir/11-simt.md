@@ -29,7 +29,7 @@ def copy(src: pl.Tensor[[1, 128], pl.FP32],
 `pl.simt.Axis` 与 `ir.SimtAxis` 是同一枚举。坐标查询必须传入类型化 axis，支持位置
 参数或 `axis=`；`lane_id()` 无参数。dims 是三个编译期正整数，描述线程维度，不分配
 元素或创建 grid；边界保护必须显式编写。GM Tensor 和 Vec/UB Tile 复用既有存储。
-初始 API 支持当前后端标量子集；lane 协作、原子和扩展数学仍属于后续里程碑。
+初始 API 支持当前后端标量子集及下述 INT32/FP32 lane 协作操作；原子和扩展数学仍属于后续里程碑。
 
 标量赋值属于线程私有绑定，包括对外层标量的遮蔽，scope 外不能读取私有值。store
 自动重新绑定外层存储句柄，每个可写捕获只产生一个结果。Tile 更新之前保存的别名
@@ -94,6 +94,37 @@ Tensor 表达直接 GM 访问，没有隐式 Tile 搬运。ND/DN 视图沿用已
 偏移元数据，不支持分形布局。显式非 Vec 的 Tile 被拒绝。
 GM 接受 PTOAS 的 `l1cache="cache"/"uncache"` 以及分别验证的 load/store
 `l2cache` 策略集合；UB 不接受 cache 属性。
+
+## Warp 内协作操作
+
+公共 `pl.simt` 与 IR `pypto.ir.op.simt` 命名空间提供：
+
+| 操作 | 输入 → 结果 | 含义 |
+| ---- | ----------- | ---- |
+| `vote_all`、`vote_any`、`vote_uni` | BOOL → BOOL | 全部为真、至少一个为真、所有谓词相同 |
+| `vote_ballot` | BOOL → INT32 | 活跃 lane i 的谓词为真时置位 bit i |
+| `shuffle_idx(value, index, *, width=32)` | INT32/FP32 → 同类型 | 读取子组内相对索引指定的源 lane |
+| `shuffle_up`、`shuffle_down` | INT32/FP32 → 同类型 | 按偏移读取更低/更高的源 lane |
+| `shuffle_bfly(value, mask, *, width=32)` | INT32/FP32 → 同类型 | 读取子组内 lane 编号与 mask 异或指定的源 lane |
+| `redux_add`、`redux_min`、`redux_max` | INT32/FP32 → 同类型 | 归约活跃 lane，并将结果返回每个参与 lane |
+
+A5 warp 含 32 个 lane。参与集合是指令执行时的活跃掩码（active execution mask），
+没有显式参与掩码参数；非活跃 lane 不贡献数值。这些是寄存器协作操作，不提供内存
+fence 或 block 屏障。结果依赖控制流，不能跨改变活跃集合的分支或循环迭代提升。
+
+Shuffle 的 width 仅支持 **16 或 32**，默认为 32，将 warp 划分为连续子组；不改变
+vote/redux 的参与集合。lane 控制参数为 INT32（Python 整数字面量自动规范化）。
+源 lane 必须活跃且位于同一子组；非活跃或越界来源的结果未定义，不能依赖边界自拷贝。
+
+Ballot 返回 INT32 位载体，bit 31 可能使数值为负，应使用位运算读取。INT32 min/max
+按有符号数比较，加法按 32 位回绕。FP32 遵循目标平台的归约顺序及特殊值规则，不保证
+顺序求和或跨平台一致的 NaN/正负零选择。初始前后端子集暂不支持 FP16、UINT32 或 packed 值。
+
+原生映射为 `pto.vote_*`、`pto.shuffle_*` 和 `pto.redux_{add,min,max}{i,f}`；整数
+min/max 显式携带 `signed`。测试经公共 JIT 和 PTOAS LLVM 导出编译所有形式。
+可选设备验收位于 `tests/st/runtime/vpto/test_simt_collectives_onboard.py`，覆盖两个
+warp、部分活跃集合、ballot bit 31、有符号归约、shuffle 子组及非活跃输出保留。
+仅编译测试不代表设备执行验收通过。
 
 ## 效果与验证
 
