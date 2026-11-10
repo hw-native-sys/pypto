@@ -114,6 +114,25 @@ def test_mutator_preserves_host_staging_flags():
     assert result.store_to_host is True
 
 
+def test_window_slot_reuses_owner_body_definition_after_serialization():
+    span = Span.unknown()
+    base = _ptr("buffer")
+    size = _const(16)
+    window = WindowBuffer(base, size, True, True, span)
+    ty = ir.DistributedTensorType([_const(4)], DataType.FP32, window)
+    local = ir.Var("local", ty, span)
+    scope = ir.CommDomainScopeStmt(
+        [],
+        [window],
+        "global",
+        body=ir.SeqStmts([ir.EvalStmt(local, span)], span),
+        span=span,
+    )
+    restored = ir.deserialize(ir.serialize(scope))
+    assert restored.slots[0] is restored.body.stmts[0].expr.type.window_buffer
+    ir.assert_structural_equal(restored, scope, enable_auto_mapping=True)
+
+
 @pytest.mark.parametrize("kind", ["var", "iter_arg", "call", "submit"])
 def test_mutator_remaps_window_back_references_in_types(kind):
     """Type-only links follow replacements across leaves and both call-like kinds."""
