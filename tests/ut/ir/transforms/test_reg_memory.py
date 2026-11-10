@@ -26,11 +26,20 @@ def a5_backend():
 
 
 def memory_program(
-    *, writes=(), active=None, read_lanes=64, read_offset=0, loop_stop=None, view=False, branch_writes=None
+    *,
+    writes=(),
+    active: int | None = None,
+    read_lanes=64,
+    read_offset=0,
+    loop_stop=None,
+    view=False,
+    branch_writes=None,
+    dynamic_mask=False,
 ):
     ib = IRBuilder()
     with ib.function("memory", span=SPAN, type=ir.FunctionType.AIV) as f:
         condition = f.param("condition", ir.ScalarType(DataType.BOOL), SPAN)
+        count = f.param("count", ir.ScalarType(DataType.INDEX), SPAN) if dynamic_mask else None
         storage = ib.let("storage", tile.create([128], dtype=DataType.FP32, target_memory=ir.MemorySpace.Vec))
         target = ib.let("view", tile.slice(storage, [64], [32])) if view else storage
         with ib.reg_scope(SPAN):
@@ -42,11 +51,14 @@ def memory_program(
                 SPAN,
             )
             mask = None
-            if active is not None:
+            active_count: ir.Expr | None = count
+            if active_count is None and active is not None:
+                active_count = ir.ConstInt(active, DataType.INDEX, SPAN)
+            if active_count is not None:
                 mask = ib.emit_reg(
                     "mask",
                     "reg.active_mask",
-                    [ir.ConstInt(active, DataType.INDEX, SPAN)],
+                    [active_count],
                     {"lanes": 64},
                     SPAN,
                 )
@@ -110,6 +122,12 @@ def test_dynamic_access_passes_through_without_disabling_other_roots(dynamic_wri
             initialize(program)
     else:
         initialize(program)
+
+
+def test_dynamic_mask_store_does_not_prove_any_initialized_prefix():
+    # The runtime count can be zero, so even lane zero remains unproved.
+    with pytest.raises(ValueError, match="uninitialized"):
+        initialize(memory_program(writes=(0,), dynamic_mask=True, read_lanes=1))
 
 
 def test_fresh_tile_is_not_initialized_by_valid_shape():

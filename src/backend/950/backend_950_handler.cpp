@@ -32,8 +32,9 @@ bool Ascend950Handler::SupportsRegType(const ir::RegType& type) const {
   if (type.kind_ == ir::RegKind::MaskReg) return type.dtype_ == DataType::BOOL;
   const auto dtype = type.dtype_;
   return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32 ||
-         dtype == DataType::INT8 || dtype == DataType::UINT8 || dtype == DataType::INT16 ||
-         dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32;
+         dtype == DataType::FP8E4M3FN || dtype == DataType::INT8 || dtype == DataType::UINT8 ||
+         dtype == DataType::INT16 || dtype == DataType::UINT16 || dtype == DataType::INT32 ||
+         dtype == DataType::UINT32;
 }
 
 const Ascend950Handler& Ascend950Handler::Instance() {

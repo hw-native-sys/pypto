@@ -331,7 +331,9 @@ def test_index_capture_keeps_local_cast_inside_helper(tmp_path):
         count = f.param("count", ir.ScalarType(DataType.INDEX))
         with builder.reg_scope(SPAN):
             local = builder.let("count_i32", ir.cast(count, DataType.INT32, SPAN))
-            builder.emit_reg("x", "reg.broadcast", [local], {"lanes": 64, "dtype": DataType.INT32}, SPAN)
+            mask = builder.emit_reg("mask", "reg.active_mask", [count], {"lanes": 64}, SPAN)
+            x = builder.emit_reg("x", "reg.broadcast", [local], {"lanes": 64, "dtype": DataType.INT32}, SPAN)
+            builder.emit_reg("sum", "reg.add", [x, x, mask], span=SPAN)
     bundle = codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "IndexCapture", SPAN))
     compile_vf_bundle(bundle, tmp_path)
     assert bundle.helpers[0].parameter_types == ["index"]
@@ -340,6 +342,7 @@ def test_index_capture_keeps_local_cast_inside_helper(tmp_path):
     assert "pto.tile_buf_addr" not in bundle.caller_source
     assert "arith.index_cast" in bundle.helpers[0].source
     assert "arith.index_cast" not in bundle.caller_source
+    assert "pto.vmi.create_mask %arg0 : index" in bundle.helpers[0].source
 
 
 @pytest.mark.ptoas_compile
@@ -992,6 +995,63 @@ def test_adapter_preserves_static_view_operand_type(tmp_path, reshape):
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("mask_carry", [False, True])
+def test_hardware_loop_bundle_carries_register_values(mask_carry, tmp_path):
+    builder = IRBuilder()
+    with builder.function("carried", span=SPAN, type=ir.FunctionType.AIV) as f:
+        dst = builder.let("dst", tile.full([128], dtype=DataType.FP32, value=0))
+        index = ir.Var("iteration", ir.ScalarType(DataType.INDEX), SPAN)
+        with builder.reg_scope(SPAN):
+            value = builder.emit_reg(
+                "value", "reg.load", [dst, ir.ConstInt(0, DataType.INDEX, SPAN)], {"lanes": 64}, SPAN
+            )
+            initial = (
+                builder.emit_reg("mask", "reg.full_mask", [], {"lanes": 64}, SPAN) if mask_carry else value
+            )
+            with builder.for_loop(
+                index, 0, 19, 1, hardware_loop_policy=ir.HardwareLoopPolicy.Require
+            ) as loop:
+                carry = loop.iter_arg("carry", initial, span=SPAN)
+                result = loop.return_var("result", span=SPAN)
+                if mask_carry:
+                    updated = builder.emit_reg("updated", "reg.mask_not", [carry], span=SPAN)
+                else:
+                    updated = builder.emit_reg("updated", "reg.add", [carry, carry], span=SPAN)
+                builder.emit(ir.YieldStmt([updated], SPAN))
+            if mask_carry:
+                selected = builder.emit_reg("selected", "reg.select", [result, value, value], span=SPAN)
+                builder.emit_reg_store("out", dst, selected, span=SPAN)
+            else:
+                builder.emit_reg_store("out", dst, result, span=SPAN)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([f.get_result()], "Carried", SPAN))
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
+    loop = next(line for line in bundle.helpers[0].source.splitlines() if "scf.for" in line)
+    assert "iter_args(" in loop
+    assert ("!pto.vmi.mask<64xpred>" if mask_carry else "!pto.vmi.vreg<64xf32>") in loop
+    assert "scf.yield" in bundle.helpers[0].source
+
+
+def test_hardware_loop_bundle_rejects_scalar_carries():
+    builder = IRBuilder()
+    with builder.function("scalar_carry", span=SPAN, type=ir.FunctionType.AIV) as f:
+        with builder.reg_scope(SPAN):
+            with builder.for_loop(
+                ir.Var("iteration", ir.ScalarType(DataType.INDEX), SPAN),
+                0,
+                19,
+                1,
+                hardware_loop_policy=ir.HardwareLoopPolicy.Require,
+            ) as loop:
+                carry = loop.iter_arg("carry", ir.ConstInt(0, DataType.INDEX, SPAN), span=SPAN)
+                loop.return_var("result", span=SPAN)
+                builder.emit(ir.YieldStmt([carry], SPAN))
+    with pytest.raises(ValueError, match="register or mask loop-carried values only"):
+        codegen.PTOCodegen().generate_bundle(ir.Program([f.get_result()], "ScalarCarry", SPAN))
 
 
 if __name__ == "__main__":

@@ -1190,3 +1190,35 @@ def test_submit_specializes_an_omitted_external_output(tmp_path, explicit):
     callee = program.get_function("consumer")
     assert callee is not None
     assert ir.structural_equal(callee.params[0].type, ir.TensorType([16, 32], pl.FP32))
+
+
+def test_submit_return_metadata_follows_the_selected_constexpr_branch():
+    @pl.jit.graph
+    def choose(x: pl.Tensor, y: pl.Tensor, second: pl.constexpr):
+        if second:
+            return y
+        else:
+            return x
+
+    @pl.jit.incore
+    def copy_to(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, y: pl.Tensor, out: pl.Out[pl.Tensor]):
+        _, first = pl.submit(choose, x, y, second=False)
+        selected, second = pl.submit(choose, x, y, second=True, deps=[first])
+        value, finish = pl.submit(copy_to, selected, out, deps=[second])
+        return value
+
+    fp32 = torch.empty(16, 32)
+    bf16 = torch.empty(16, 32, dtype=torch.bfloat16)
+    program = entry.specialize(fp32, bf16, torch.empty_like(bf16))
+    first, second, _ = _submissions(program)
+    assert isinstance(first.type, ir.TupleType)
+    assert isinstance(second.type, ir.TupleType)
+    assert ir.structural_equal(first.type.types[0], ir.TensorType([16, 32], pl.FP32))
+    assert ir.structural_equal(second.type.types[0], ir.TensorType([16, 32], pl.BF16))
+    consumer = program.get_function("copy_to")
+    assert consumer is not None
+    assert ir.structural_equal(consumer.params[0].type, ir.TensorType([16, 32], pl.BF16))

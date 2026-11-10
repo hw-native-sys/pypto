@@ -2385,11 +2385,12 @@ class Specializer:
         ctx: SpecializeContext,
         out_params: list[str],
         distributed_params: set[str],
+        tensor_meta: dict[str, TensorMeta],
+        implicit_out: str | None,
     ) -> str | None:
-        implicit_out = _implicit_entry_output_name(func_def, ctx.func_type, out_params)
         ret_type = _infer_return_type(
             func_def,
-            ctx.tensor_meta,
+            tensor_meta,
             out_params,
             distributed_params,
             ctx.py_globals,
@@ -2540,17 +2541,17 @@ class Specializer:
                 all_param_names,
             )
 
-        ret_type = self._specialize_return_annotation(func_def, ctx, out_params, distributed_params)
-        ret_ann = f" -> {ret_type}" if ret_type else ""
-
-        # Transform body
-        dep_names = set(ctx.dep_names)
         # Collect all names defined anywhere in the function to seed collision avoidance.
         all_defined = {
             node.id
             for node in ast.walk(func_def)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
+
+        # Transform body.  Dependency targets are resolved before visiting the
+        # body, so this lookup still sees the original AST and direct
+        # ``spmd_submit`` helper calls.
+        dep_names = set(ctx.dep_names)
         transformer = BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             constexpr_values=ctx.constexpr_values,
@@ -2588,11 +2589,35 @@ class Specializer:
             else:
                 flat_body.append(item)
 
-        _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
-        flat_body = normalize_calls(flat_body, self._external_calls, all_param_names)
-
         if not flat_body:
             flat_body = [ast.Pass()]
+
+        # Infer the signature from the same branch-specialized body that will
+        # be emitted.  The original AST remains reserved for dependency
+        # discovery and call-site binding above.
+        return_def = copy.copy(func_def)
+        return_def.body = flat_body
+        # Reassigned output parameters can appear under generated aliases.
+        # Keep their original parameter type contract for return inference.
+        aliases = transformer.rename_map
+        return_meta = ctx.tensor_meta | {
+            alias: ctx.tensor_meta[name] for alias, name in aliases.items() if name in ctx.tensor_meta
+        }
+        return_distributed = distributed_params | {
+            alias for alias, name in aliases.items() if name in distributed_params
+        }
+        ret_type = self._specialize_return_annotation(
+            return_def,
+            ctx,
+            out_params,
+            return_distributed,
+            return_meta,
+            _implicit_entry_output_name(func_def, ctx.func_type, out_params),
+        )
+        ret_ann = f" -> {ret_type}" if ret_type else ""
+
+        _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
+        flat_body = normalize_calls(flat_body, self._external_calls, all_param_names)
 
         if any(
             isinstance(node, ast.Name) and node.id == "pld" and isinstance(node.ctx, ast.Load)
