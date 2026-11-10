@@ -141,6 +141,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitStmt_(const ir::ForStmtPtr& for_stmt) override;
 
+  void VisitStmt_(const ir::WhileStmtPtr& while_stmt) override;
+
   void VisitStmt_(const ir::RuntimeScopeStmtPtr& scope) override;
 
   void MarkArrayReturnVars(const ir::IfStmtPtr& if_stmt);

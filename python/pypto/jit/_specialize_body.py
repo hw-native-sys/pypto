@@ -16,10 +16,62 @@ and rebinding rules stay aligned with emitted source.
 
 import ast
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, TypeVar, cast
+
+from pypto.language.parser.ast_parser import ASTParser
+from pypto.language.parser.diagnostics import ParserError
+from pypto.pypto_core import arith, ir
 
 from . import _specialize_values as values
 from ._specialize_types import DynDim, TensorMeta
+
+_BindingValue = TypeVar("_BindingValue")
+
+
+def _restore_bindings(
+    current: dict[str, _BindingValue], before: dict[str, _BindingValue], names: set[str]
+) -> None:
+    for name in names:
+        if name in before:
+            current[name] = before[name]
+        else:
+            current.pop(name, None)
+
+
+def _scope_call_name(value: ast.expr) -> str | None:
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+        return value.func.attr
+    return None
+
+
+def _constant_condition(node: ast.expr) -> bool | None:
+    """Resolve a literal-only condition using the DSL's expression semantics."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, bool) else None
+    if not isinstance(node, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+        return None
+    literal_nodes = (
+        ast.Constant,
+        ast.Compare,
+        ast.BoolOp,
+        ast.UnaryOp,
+        ast.BinOp,
+        ast.cmpop,
+        ast.boolop,
+        ast.unaryop,
+        ast.operator,
+    )
+    if not all(isinstance(child, literal_nodes) for child in ast.walk(node)):
+        return None
+
+    # Names and calls would need the actual function scope. Let the normal
+    # parser handle those conditions, and retain diagnostics for invalid DSL.
+    try:
+        condition = ASTParser("<JIT condition>", []).parse_expression(ast.fix_missing_locations(node))
+        folded = arith.Analyzer().simplify(condition)
+    except (ParserError, TypeError, ValueError, OverflowError):
+        return None
+    return folded.value if isinstance(folded, ir.ConstBool) else None
 
 
 class BodyTransformer(ast.NodeTransformer):
@@ -101,6 +153,9 @@ class BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
+        self._graph_captures: dict[str, str] | None = None
+        self.graph_rebinds: dict[str, str | int] = {}
+        self.has_scope_capture = False
         self._simt_depth: int = 0
         self._simt_runtime_names: set[str] = set()
         # Pre-register function parameters as "already assigned at depth 0" so
@@ -138,6 +193,10 @@ class BodyTransformer(ast.NodeTransformer):
             count += 1
             new_name = f"{var_name}_v{count}"
         self._assign_count[var_name] = count + 1
+        if self._graph_captures is not None:
+            folded = self._active_shape_fold(var_name)
+            previous = self._var_renames.get(var_name, var_name)
+            self.graph_rebinds[new_name] = previous if folded is None else folded
         self._var_renames[var_name] = new_name
         self._alias_to_original[new_name] = var_name
         self._used_names.add(new_name)
@@ -171,6 +230,31 @@ class BodyTransformer(ast.NodeTransformer):
         elif self._var_renames.get(name) == name:
             self._var_renames.pop(name)
 
+    def _active_shape_fold(self, name: str) -> int | None:
+        # A fold from a forgotten sibling binding can still be needed after
+        # a constexpr branch, but cannot serve as this scope's predecessor.
+        if name in self._assign_count and name not in self._var_renames:
+            return self._shape_inlined.get(name)
+        return None
+
+    def _is_folded_graph_capture(self, name: str) -> bool:
+        # A capture of a folded name has an alias for the TaskId but no
+        # runtime predecessor for an assignment to reuse.
+        alias = self._var_renames.get(name)
+        return (
+            self._graph_captures is not None
+            and alias is not None
+            and self._graph_captures.get(name) == alias
+            and isinstance(self.graph_rebinds.get(alias), int)
+        )
+
+    def _needs_alpha_rename(self, name: str) -> bool:
+        # A folded name has no IR binding for the Graph body to assign to.
+        return self._scope_depth == self._assign_depth[name] or (
+            self._graph_captures is not None
+            and (self._active_shape_fold(name) is not None or self._is_folded_graph_capture(name))
+        )
+
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
         var_name = cast(ast.Name, node.targets[0]).id
@@ -183,7 +267,7 @@ class BodyTransformer(ast.NodeTransformer):
             # Only rename at the same scope where the variable was first defined.
             # Rebindings at a deeper scope (inside for/with) are loop-carried
             # updates — do not rename them.
-            if self._scope_depth == self._assign_depth[var_name]:
+            if self._needs_alpha_rename(var_name):
                 new_name = self._rebind(var_name)
                 self._record_tensor_meta(new_name, value_meta)
                 new_node = ast.Assign(
@@ -318,6 +402,8 @@ class BodyTransformer(ast.NodeTransformer):
             else:
                 # Static dim: inline constant, suppress assignment
                 self._record_first_assign(tgt.id)
+                if self._is_folded_graph_capture(tgt.id):
+                    self._var_renames.pop(tgt.id)
                 self._shape_inlined[tgt.id] = dim
         return stmts
 
@@ -372,9 +458,12 @@ class BodyTransformer(ast.NodeTransformer):
         if (
             len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
-            # An active alias takes precedence in visit_Name. Emit a normal
-            # scalar assignment below so the new shape value replaces it.
-            and node.targets[0].id not in self._var_renames
+            # An active alias normally needs a scalar write. A capture
+            # backed by a folded shape has no scalar Var to update.
+            and (
+                node.targets[0].id not in self._var_renames
+                or self._is_folded_graph_capture(node.targets[0].id)
+            )
             and not (self._simt_depth and node.targets[0].id in self._simt_runtime_names)
             and isinstance(node.value, ast.Subscript)
             and isinstance(node.value.value, ast.Attribute)
@@ -389,6 +478,7 @@ class BodyTransformer(ast.NodeTransformer):
             dim_idx = node.value.slice.value
             dim = self._meta[param_name].shape[dim_idx]
             if not isinstance(dim, DynDim):
+                self._var_renames.pop(node.targets[0].id, None)
                 self._shape_inlined[node.targets[0].id] = dim
                 self._record_first_assign(node.targets[0].id)
                 return None
@@ -418,7 +508,7 @@ class BodyTransformer(ast.NodeTransformer):
         if self._simt_depth:
             self._shape_inlined.pop(var_name, None)
         if var_name in self._assign_count:
-            if self._scope_depth == self._assign_depth[var_name]:
+            if self._needs_alpha_rename(var_name):
                 new_name = self._rebind(var_name)
                 self._record_tensor_meta(new_name, value_meta)
                 new_node = ast.AnnAssign(
@@ -818,6 +908,24 @@ class BodyTransformer(ast.NodeTransformer):
         node.orelse = self._visit_scoped_body(node.orelse)
         return node
 
+    def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        """Transform a constexpr-dead branch without publishing its bindings."""
+        state = (
+            self._meta.copy(),
+            self._shape_inlined.copy(),
+            self._assign_count.copy(),
+            self._assign_depth.copy(),
+            self._var_renames.copy(),
+        )
+        graph_captures = self._graph_captures
+        if graph_captures is not None:
+            self._graph_captures = graph_captures.copy()
+        try:
+            return self._visit_scoped_body(statements)
+        finally:
+            self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
+            self._graph_captures = graph_captures
+
     def visit_If(self, node: ast.If) -> ast.stmt:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
@@ -835,6 +943,25 @@ class BodyTransformer(ast.NodeTransformer):
         """
         node.test = self.visit(node.test)
         self._scope_depth += 1
+        selected = _constant_condition(node.test)
+        if selected is not None and any(
+            isinstance(item, ast.withitem) and isinstance(item.optional_vars, ast.Name)
+            for stmt in (*node.body, *node.orelse)
+            for item in ast.walk(stmt)
+        ):
+            # Keep both bodies for the parser's yield handling. Isolate the
+            # inactive capture so it cannot overwrite the live binding.
+            if selected:
+                if node.orelse:
+                    node.orelse = self._visit_inactive_branch(node.orelse)
+                node.body = self._visit_scoped_body(node.body)
+            else:
+                node.body = self._visit_inactive_branch(node.body)
+                if node.orelse:
+                    node.orelse = self._visit_scoped_body(node.orelse)
+            self._scope_depth -= 1
+            return node
+
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)
         if node.orelse:
@@ -846,21 +973,55 @@ class BodyTransformer(ast.NodeTransformer):
         self._scope_depth -= 1
         return node
 
-    def visit_With(self, node: ast.With) -> ast.stmt:
+    def _visit_with_captures(self, node: ast.With) -> tuple[dict[str, str], list[ast.stmt]]:
+        """Rewrite capture names and materialize folded host predecessors."""
+        captures: dict[str, str] = {}
+        prefix: list[ast.stmt] = []
+        for item in node.items:
+            item.context_expr = self.visit(item.context_expr)
+            if isinstance(item.optional_vars, ast.Name):
+                self.has_scope_capture = True
+                original = item.optional_vars
+                # Use a fresh capture alias when the caller only has a
+                # folded literal, so the parser can restore that predecessor.
+                folded = self._active_shape_fold(original.id)
+                captured = (
+                    self._rebind(original.id)
+                    if self._graph_captures is not None and folded is not None
+                    else self._var_renames.get(original.id, original.id)
+                )
+                # An outer dispatch may be followed by a write to this scalar.
+                # Materialize the folded predecessor so the parser can restore
+                # it when the temporary TaskId binding is overwritten.
+                if self._graph_captures is None and folded is not None:
+                    assignment = ast.Assign(
+                        targets=[ast.Name(id=captured, ctx=ast.Store())], value=ast.Constant(value=folded)
+                    )
+                    prefix.append(ast.copy_location(assignment, node))
+                if self._graph_captures is not None:
+                    self._graph_captures[original.id] = captured
+                item.optional_vars = ast.copy_location(ast.Name(id=captured, ctx=ast.Store()), original)
+                captures[original.id] = captured
+                if _scope_call_name(item.context_expr) != "graph":
+                    self._var_renames[original.id] = captured
+                    self._shape_inlined.pop(original.id, None)
+                    self._record_tensor_meta(captured, None)
+            elif item.optional_vars is not None:
+                item.optional_vars = self.visit(item.optional_vars)
+        return captures, prefix
+
+    def visit_With(self, node: ast.With) -> ast.stmt | list[ast.stmt]:
         """Visit With block, incrementing scope depth for its body."""
-        node.items = [self.visit(item) for item in node.items]
-        simt = any(
-            isinstance(item.context_expr, ast.Call)
-            and isinstance(item.context_expr.func, ast.Attribute)
-            and item.context_expr.func.attr == "simt_scope"
-            for item in node.items
-        )
+        scope_names = {_scope_call_name(item.context_expr) for item in node.items}
+        graph = "graph" in scope_names
+        captures, capture_prefix = self._visit_with_captures(node)
+        simt = "simt_scope" in scope_names
         # SIMT assignments are per-thread. Folding a local shape or renaming a
         # shadowed scalar must not change the caller's later specialization.
         # Generated-name reservations and diagnostic aliases remain global to
         # this function so distinct regions never reuse a generated name.
         state = None
-        if simt:
+        if simt or graph:
             state = (
                 self._meta.copy(),
                 self._shape_inlined.copy(),
@@ -869,6 +1030,7 @@ class BodyTransformer(ast.NodeTransformer):
                 self._var_renames.copy(),
                 self._simt_runtime_names,
             )
+        if simt:
             self._simt_runtime_names = set()
             pending: list[tuple[ast.AST, bool]] = [(stmt, False) for stmt in node.body]
             while pending:
@@ -895,14 +1057,19 @@ class BodyTransformer(ast.NodeTransformer):
                     prefix.append(ast.fix_missing_locations(ast.copy_location(assignment, node)))
             node.body = prefix + node.body
             self._simt_depth += 1
+        previous_graph = self._graph_captures
+        if graph:
+            self._graph_captures = {}
         self._scope_depth += 1
         try:
             node.body = self._visit_scoped_body(node.body)
         finally:
             self._scope_depth -= 1
+            graph_locals = self._graph_captures if graph else None
+            self._graph_captures = previous_graph
             if simt:
                 self._simt_depth -= 1
-            if state is not None:
+            if state is not None and simt:
                 (
                     self._meta,
                     self._shape_inlined,
@@ -911,4 +1078,39 @@ class BodyTransformer(ast.NodeTransformer):
                     self._var_renames,
                     self._simt_runtime_names,
                 ) = state
-        return node
+            elif state is not None and graph_locals:
+                old_meta, old_shapes, old_counts, old_depths, old_renames, _ = state
+                # Keep a new shape fold or a later alpha-renamed live-out.
+                # The parser handles any alpha-renamed local TaskIds.
+                graph_locals = {
+                    name
+                    for name in graph_locals
+                    if self._active_shape_fold(name) is None
+                    and (
+                        (current := self._var_renames.get(name, name)) == old_renames.get(name, name)
+                        or current not in self.graph_rebinds
+                    )
+                }
+                meta_names = (
+                    graph_locals
+                    | {old_renames.get(name, name) for name in graph_locals}
+                    | {self._var_renames.get(name, name) for name in graph_locals}
+                )
+                _restore_bindings(self._meta, old_meta, meta_names)
+                _restore_bindings(self._shape_inlined, old_shapes, graph_locals)
+                _restore_bindings(self._assign_count, old_counts, graph_locals)
+                _restore_bindings(self._assign_depth, old_depths, graph_locals)
+                _restore_bindings(self._var_renames, old_renames, graph_locals)
+                # The parser may recover a tensor written by the captured
+                # dispatch under the old spelling. Resolve later shape and
+                # dtype reads from that typed binding.
+                for name in graph_locals:
+                    self._meta.pop(self._var_renames.get(name, name), None)
+        # A capture binds the dispatch result, not a body-local reassignment
+        # of the same spelling. Do not create another alpha version here:
+        # the parser reuses the source Var and native SSA builds carries/phis.
+        for original, captured in captures.items():
+            self._var_renames[original] = captured
+            self._shape_inlined.pop(original, None)
+            self._record_tensor_meta(captured, None)
+        return [*capture_prefix, node] if capture_prefix else node
