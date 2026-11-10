@@ -1395,6 +1395,9 @@ class Call(Expr):
 
         - ``"arg_directions"`` -> ``list[ArgDirection]`` (use the
           :attr:`arg_directions` shortcut for typed access).
+        - ``"worker"`` -> ``Expr``: logical immediate-child selector.
+          Legacy ``"device"`` attrs normalize to ``"worker"`` with the same
+          expression identity; supplying both raises ValueError.
         """
 
     kwargs: Final[Mapping[str, Any]]
@@ -1485,7 +1488,10 @@ class Call(Expr):
             args: List of argument expressions
             kwargs: Keyword arguments (metadata)
             attrs: Compiler-internal node metadata. Reserved keys:
-                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``;
+                ``"worker"`` -> ``Expr`` (logical child selector).
+                Legacy ``"device"`` attrs normalize to ``"worker"``;
+                competing placement attrs raise ValueError.
             type: Explicit result type
             span: Source location
         """
@@ -1603,7 +1609,10 @@ class Submit(Expr):
             deps: TaskId dependency expressions
             kwargs: Keyword arguments (metadata)
             attrs: Compiler-internal node metadata. Reserved keys:
-                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``;
+                ``"worker"`` -> ``Expr`` (logical child selector).
+                Legacy ``"device"`` attrs normalize to ``"worker"``;
+                competing placement attrs raise ValueError.
             type: Explicit result type
             span: Source location
             core_num: SPMD block count Expr (``pl.spmd_submit``); ``None`` for a
@@ -3338,6 +3347,12 @@ def is_op_registered(op_name: str) -> bool:
     Returns:
         True if the operator is registered, False otherwise
     """
+
+def _distributed_op_context_error(
+    op: Op, level: Level | None, role: Role | None, in_device_scope: bool
+) -> str:
+    """Return a resolved distributed operation's context error, or an empty string."""
+    ...
 
 def get_op(op_name: str) -> Op:
     """Get an operator instance by name.

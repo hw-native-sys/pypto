@@ -28,6 +28,7 @@ from pypto.pypto_core import ir
 from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
 from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
+from .dispatch_semantics import validate_placement_callee
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 from .parser_state import JIT_GRAPH_REBINDS_ATTR
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
@@ -1227,6 +1228,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # can use return type information from earlier functions
             functions: list[ir.Function] = []
             gvar_to_func: dict[ir.GlobalVar, ir.Function] = {}
+            pending_placements: list[tuple[ir.Level | None, ir.GlobalVar, ir.Span]] = []
             external_functions: dict[str, ir.Function] = {}
 
             # Pre-scan: collect reserve_buffer metadata from all functions so that
@@ -1359,6 +1361,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     ) from e
 
                 functions.append(ir_func)
+                pending_placements.extend(parser.bindings.pending_placements)
                 # Update gvar_to_func map so subsequent functions can use this function's return type
                 gvar = global_vars[ir_func.name]
                 gvar_to_func[gvar] = ir_func
@@ -1374,6 +1377,9 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                             hint="External functions must have unique names; rename one of the functions",
                         )
                     external_functions[ext_name] = ext_func
+
+            for caller_level, target, span in pending_placements:
+                validate_placement_callee(caller_level, gvar_to_func[target], span)
 
             # Combine internal and external functions
             all_functions = functions + list(external_functions.values())

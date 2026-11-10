@@ -999,7 +999,7 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   // every emitted orchestrator's signature (see EmitFunction / EmitEntryFunction).
   // The runner fills it with len(DistributedConfig.device_ids) — present for
   // comm-less programs too, so this lowering is uniform.
-  if (ir::IsOp(op, "pld.system.world_size")) {
+  if (ir::IsOp(op, "pld.system.world_size") || ir::IsOp(op, "pld.system.num_workers")) {
     current_expr_value_ = "world_size";
     return;
   }

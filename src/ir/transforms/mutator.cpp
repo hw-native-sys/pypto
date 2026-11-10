@@ -411,7 +411,7 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   // must agree: anything the visitor reports as a live reference has to be
   // rewritten here, or substitution leaves the attr pointing at the pre-mutation
   // Var — e.g. the P==1 unroll folding ``r`` -> ``0`` rewrites the slice
-  // subscripts but leaves ``device=r`` dangling to the now-undefined loop var,
+  // subscripts but leaves ``worker=r`` dangling to the now-undefined loop var,
   // and codegen emits an unbound index. A key-gated remap could not keep that
   // promise for an attr key nobody thought to enumerate.
   for (const auto& [k, v] : op->attrs_) {
@@ -508,7 +508,7 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
   // Remapped by stored type, matching ``IRVisitor::VisitExpr_(SubmitPtr)``.
   // Previously this arm listed three keys while the Call arm listed a different
   // set plus ``IsExprValuedCallAttr``, so an Expr-valued attr such as
-  // ``kAttrDevice`` was rewritten on a Call but left stale on a Submit.
+  // the legacy device-placement attr was rewritten on a Call but left stale on a Submit.
   for (const auto& [k, v] : op->attrs_) {
     auto remapped = MapAttrExprs(v, [this](const ExprPtr& e) { return ExprFunctor<ExprPtr>::VisitExpr(e); });
     if (remapped.has_value()) {
