@@ -602,7 +602,8 @@ def test_explicit_graph_dependency_chain(test_config, graph_runtime, enabled):
     With the guard disabled, only the seed and final consumer run (two).
     """
     c = torch.zeros((128, 128), dtype=torch.float32)
-    explicit_graph_dependency_chain(c, enabled, config=test_config)
+    compiled = explicit_graph_dependency_chain.compile(c, enabled, config=test_config)
+    compiled(c, config=test_config)
     torch.testing.assert_close(c, torch.full_like(c, 10.0 if enabled else 2.0))
 
 
@@ -630,7 +631,8 @@ def zero_trip_graph_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
 def test_zero_trip_graph_capture_keeps_latest_dependency(test_config, graph_runtime):
     """An unexecuted capture preserves the second producer's completion."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    zero_trip_graph_capture_chain(c, config=test_config)
+    compiled = zero_trip_graph_capture_chain.compile(c, config=test_config)
+    compiled(c, config=test_config)
     torch.testing.assert_close(c, torch.full_like(c, 3.0))
 
 
@@ -656,7 +658,8 @@ def branch_local_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], enab
 def test_branch_local_capture_keeps_last_dependency(test_config, graph_runtime, enabled):
     """The merged TaskId orders the final consumer after the last enabled task."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    branch_local_capture_chain(c, enabled, config=test_config)
+    compiled = branch_local_capture_chain.compile(c, enabled, config=test_config)
+    compiled(c, config=test_config)
     # Manual scope makes the final explicit edge responsible for ordering.
     torch.testing.assert_close(c, torch.full_like(c, 1111.0 if enabled else 1001.0))
 
@@ -684,7 +687,8 @@ def recording_shadow_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
 def test_recorded_local_shadow_keeps_outer_completion(test_config, graph_runtime):
     """Local shadowing cannot replace the caller's whole-invocation completion."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    recording_shadow_capture_chain(c, config=test_config)
+    compiled = recording_shadow_capture_chain.compile(c, config=test_config)
+    compiled(c, config=test_config)
     # Two first-Graph tasks, four second invocations, then the consumer: 2+8+10.
     torch.testing.assert_close(c, torch.full_like(c, 20.0))
 
@@ -708,7 +712,8 @@ def recording_direct_alias_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
 def test_recorded_direct_alias_keeps_outer_completion(test_config, graph_runtime):
     """The local alias orders an inner task; the outer name orders the whole Graph."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    recording_direct_alias_chain(c, config=test_config)
+    compiled = recording_direct_alias_chain.compile(c, config=test_config)
+    compiled(c, config=test_config)
     torch.testing.assert_close(c, torch.full_like(c, 1111.0))
 
 
