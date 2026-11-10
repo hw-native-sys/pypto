@@ -59,6 +59,13 @@ inline constexpr size_t kAllocTensorsArgs = 16;
   }
   if (auto un = As<UnaryExpr>(expr)) return ExprRefsAnyOf(un->operand_, vars);
   if (auto cast_expr = As<Cast>(expr)) return ExprRefsAnyOf(cast_expr->operand_, vars);
+  // Late metadata expressions may contain dim(local_tensor, axis). The call
+  // remains nested in a physical extent, but still depends on its operands.
+  if (auto call = As<Call>(expr)) {
+    for (const auto& arg : call->args_) {
+      if (ExprRefsAnyOf(arg, vars)) return true;
+    }
+  }
   return false;
 }
 

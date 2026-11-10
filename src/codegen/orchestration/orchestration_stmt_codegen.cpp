@@ -46,7 +46,7 @@ namespace codegen {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 OrchestrationStmtCodegen::OrchestrationStmtCodegen(
-    const ProgramPtr& prog, KernelRegistrations* registrations,
+    const ProgramPtr& prog, KernelRegistrations* registrations, const std::vector<VarPtr>& params,
     std::unordered_map<const Var*, std::string> param_to_emit_name, std::set<std::string> param_name_set,
     std::map<std::string, int> param_name_to_orch_index,
     std::unordered_map<std::string, std::string> dist_param_to_ctx_param)
@@ -57,6 +57,12 @@ OrchestrationStmtCodegen::OrchestrationStmtCodegen(
       param_name_to_orch_index_(std::move(param_name_to_orch_index)),
       dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
   declared_var_names_ = param_name_set_;
+  const auto first_tensor = std::find_if(params.begin(), params.end(), [](const VarPtr& param) {
+    return AsTensorTypeLike(param->GetType()) != nullptr;
+  });
+  if (first_tensor != params.end()) {
+    tensor_phi_param_name_ = emit_name_map_.at(first_tensor->get());
+  }
   // Function ``Scalar[TASK_ID]`` parameters (and lineage aliases seeded into
   // ``emit_name_map_`` before construction) are live for the whole body.
   // Register them in the TaskId binding maps / live-emit set so
@@ -196,6 +202,31 @@ std::string OrchestrationStmtCodegen::GenerateExprString(const ExprPtr& expr) co
     graph_scalar_value_reads_.insert(slot);
     return "from_u64<" + scalar_type->dtype_.ToCTypeString() + ">(_pypto_graph_config.scalar_" +
            std::to_string(slot) + ")";
+  }
+  // Tensor extents can retain nested dim calls after tile-to-buffer lowering.
+  // Use the same physical-shape semantics as the standalone tensor.dim emitter.
+  if (auto call = As<Call>(expr); call && IsOp(call, "tensor.dim")) {
+    INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_)
+        << "Internal error: tensor.dim expected 2 arguments";
+    auto tensor_type = As<TensorType>(call->args_[0]->GetType());
+    auto axis_const = As<ConstInt>(call->args_[1]);
+    INTERNAL_CHECK_SPAN(tensor_type && axis_const, call->span_)
+        << "Internal error: tensor.dim requires a tensor and constant axis";
+    int64_t axis = axis_const->value_;
+    const int64_t rank = static_cast<int64_t>(tensor_type->shape_.size());
+    if (axis < 0) axis += rank;
+    INTERNAL_CHECK_SPAN(axis >= 0 && axis < rank, call->span_)
+        << "Internal error: tensor.dim axis out of range";
+    if (auto dim = As<ConstInt>(tensor_type->shape_[axis])) {
+      return std::to_string(dim->value_);
+    }
+    const std::string tensor_name = TryGetVarName(call->args_[0]);
+    CHECK_SPAN(!tensor_name.empty(), call->span_)
+        << "tensor.dim: cannot resolve tensor name from first argument";
+    const std::string dim_expr = GetTensorShapeDim(tensor_name, axis);
+    CHECK_SPAN(!dim_expr.empty(), call->span_)
+        << "tensor.dim: GetTensorShapeDim not supported for '" << tensor_name << "' in this codegen context";
+    return dim_expr;
   }
   return CodegenBase::GenerateExprString(expr);
 }

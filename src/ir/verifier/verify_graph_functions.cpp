@@ -25,6 +25,7 @@
  * detector.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -320,8 +321,13 @@ void VerifySignature(const FunctionPtr& func, std::vector<Diagnostic>& diagnosti
 /// disagreed with the pass would reject IR the pass just produced.
 class GraphBodyChecker : public IRVisitor {
  public:
-  GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics)
-      : program_(std::move(program)), func_(std::move(func)), diagnostics_(diagnostics), invariant_(func_) {
+  GraphBodyChecker(ProgramPtr program, FunctionPtr func, std::vector<Diagnostic>& diagnostics,
+                   const std::unordered_set<const Var*>& fixed_scalars)
+      : program_(std::move(program)),
+        func_(std::move(func)),
+        diagnostics_(diagnostics),
+        invariant_(func_),
+        topology_invariant_(func_, fixed_scalars) {
     for (const auto& param : func_->params_) {
       if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
         scalar_params_.insert(param.get());
@@ -331,9 +337,12 @@ class GraphBodyChecker : public IRVisitor {
       }
     }
     invariant_.Collect(func_->body_);
+    topology_invariant_.SeedBoundaryDimensionSymbols(func_);
+    topology_invariant_.Collect(func_->body_);
   }
 
-  [[nodiscard]] size_t count() const { return count_; }
+  [[nodiscard]] size_t min_count() const { return counts_.first; }
+  [[nodiscard]] size_t count() const { return counts_.second; }
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
@@ -342,7 +351,7 @@ class GraphBodyChecker : public IRVisitor {
     CheckLaunchSpec(alloc_batching::EffectiveCoreNum(op, Callee(op->op_)), op->span_);
     CheckBoundaryView(op);
     if (!IsTaskLaunch(op)) return;
-    count_ = SatAdd(count_, 1);
+    AddNodes(1, 1);
     CheckArity(op->op_, op->args_.size(), /*is_submit=*/false, op->span_);
     CheckScalarArgs(op->args_, op->span_);
   }
@@ -355,7 +364,7 @@ class GraphBodyChecker : public IRVisitor {
       if (callee) submit_core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
     }
     CheckLaunchSpec(submit_core_num, op->span_);
-    count_ = SatAdd(count_, 1);
+    AddNodes(1, 1);
     CheckArity(op->op_, op->args_.size(), /*is_submit=*/true, op->span_);
     CheckScalarArgs(op->args_, op->span_);
   }
@@ -386,7 +395,7 @@ class GraphBodyChecker : public IRVisitor {
         if (joins_batch) {
           ++batchable;
         } else {
-          count_ = SatAdd(count_, 1);
+          AddNodes(1, 1);
           locally_defined.insert(assign->var_.get());
         }
       } else if (assign && assign->var_) {
@@ -394,7 +403,8 @@ class GraphBodyChecker : public IRVisitor {
       }
       VisitStmt(stmt);
     }
-    count_ = SatAdd(count_, alloc_batching::BatchedAllocationNodes(batchable));
+    const size_t nodes = alloc_batching::BatchedAllocationNodes(batchable);
+    AddNodes(nodes, nodes);
   }
 
   /// An allocation outside any statement list — a loop body that is a single
@@ -457,34 +467,50 @@ class GraphBodyChecker : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     TrackTensorAlias(op);
+    // Even a fixed parameter must be forwarded directly. A surviving value
+    // copy has no argument slot, and legalization is responsible for erasing it.
+    auto source = AsVarLike(op->value_);
+    if (source && scalar_params_.count(source.get()) != 0 &&
+        !graph_replay::IsTaskIdScalar(source->GetType())) {
+      Report("copies a boundary scalar to a local with no argument slot. Forward the parameter directly.",
+             op->span_);
+    }
     auto call = As<Call>(op->value_);
-    if (call && IsAllocation(call) && batched_.count(op.get()) == 0) count_ = SatAdd(count_, 1);
+    if (call && IsAllocation(call) && batched_.count(op.get()) == 0) AddNodes(1, 1);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    const size_t per_iteration = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
-    if (per_iteration == 0) return;
+    const auto [minimum, maximum] = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
+    if (maximum == 0) return;
     auto trips = StaticTripCount(op);
     if (!trips.has_value()) {
       Report("launches tasks inside a loop whose trip count is not a compile-time constant.", op->span_);
       return;
     }
-    count_ = SatAdd(count_, SatMul(per_iteration, *trips));
+    AddNodes(SatMul(minimum, *trips), SatMul(maximum, *trips));
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    if (CountSubtree([&] { IRVisitor::VisitStmt_(op); }) != 0) {
+    if (CountSubtree([&] { IRVisitor::VisitStmt_(op); }).second != 0) {
       Report("launches tasks inside a while loop, whose iteration count is a runtime value.", op->span_);
     }
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    if (CountSubtree([&] { IRVisitor::VisitStmt_(op); }) != 0) {
+    VisitExpr(op->condition_);
+    const auto then_nodes = CountSubtree([&] { VisitStmt(op->then_body_); });
+    const auto else_nodes =
+        op->else_body_ ? CountSubtree([&] { VisitStmt(*op->else_body_); }) : std::pair<size_t, size_t>{};
+    const size_t maximum = std::max(then_nodes.second, else_nodes.second);
+    for (const auto& var : op->return_vars_) VisitExpr(var);
+    if (maximum != 0 && !topology_invariant_.IsInvariant(op->condition_)) {
       Report(
           "launches tasks inside a conditional, so the recorded topology depends on the branch "
           "the first call happened to take.",
           op->span_);
+      return;
     }
+    AddNodes(std::min(then_nodes.first, else_nodes.first), maximum);
   }
 
  private:
@@ -631,7 +657,7 @@ class GraphBodyChecker : public IRVisitor {
       if (var && scalar_params_.count(var.get()) != 0) continue;
       // No slot, but nothing to patch either: replay recomputes this value
       // identically, so the copy frozen into the recording is the right one.
-      if (invariant_.IsInvariant(arg)) continue;
+      if (topology_invariant_.IsInvariant(arg)) continue;
       Report(
           "passes a scalar to a task that has no argument slot and can differ between calls, so the "
           "runtime would freeze the first call's value into the recording.",
@@ -639,15 +665,17 @@ class GraphBodyChecker : public IRVisitor {
     }
   }
 
-  /// Run @p walk with a fresh accumulator and return what it counted.
+  void AddNodes(size_t minimum, size_t maximum) {
+    counts_.first = SatAdd(counts_.first, minimum);
+    counts_.second = SatAdd(counts_.second, maximum);
+  }
+
+  /// Run @p walk with a fresh accumulator and return its node bounds.
   template <typename F>
-  size_t CountSubtree(F&& walk) {
-    const size_t saved = count_;
-    count_ = 0;
+  std::pair<size_t, size_t> CountSubtree(F&& walk) {
+    const auto saved = std::exchange(counts_, {});
     walk();
-    const size_t subtree = count_;
-    count_ = saved;
-    return subtree;
+    return std::exchange(counts_, saved);
   }
 
   ProgramPtr program_;
@@ -655,6 +683,7 @@ class GraphBodyChecker : public IRVisitor {
   FunctionPtr func_;
   std::vector<Diagnostic>& diagnostics_;
   graph_replay::ReplayInvariantSet invariant_;
+  graph_replay::ReplayInvariantSet topology_invariant_;
   std::unordered_set<const Var*> scalar_params_;
   std::unordered_set<const Var*> tensor_params_;
   /// Tensor vars that derive from a boundary parameter, directly or by alias.
@@ -662,7 +691,7 @@ class GraphBodyChecker : public IRVisitor {
   /// Tuple-valued call/submit results, so `TupleGetItemExpr` can resolve back
   /// to the callee argument each element writes through.
   std::unordered_map<const Var*, CallPtr> tuple_result_;
-  size_t count_ = 0;
+  std::pair<size_t, size_t> counts_{};
   std::unordered_set<const Stmt*> batched_;
 };
 
@@ -689,19 +718,23 @@ class GraphBoundaryLegalizedPropertyVerifierImpl : public PropertyVerifier {
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    const auto fixed_scalars = graph_replay::ReplayInvariantSet::IndexFixedScalarsFromCallSites(program);
     for (const auto& [gv, func] : program->functions_) {
       if (!func) continue;
       if (func->func_type_ == FunctionType::Graph) {
         VerifySignature(func, diagnostics);
         if (func->body_) {
           VerifyReturns(func, program, diagnostics);
-          GraphBodyChecker body_checker(program, func, diagnostics);
+          const auto& topology_scalars =
+              graph_replay::ReplayInvariantSet::FixedScalarsForGraph(fixed_scalars, func);
+          GraphBodyChecker body_checker(program, func, diagnostics, topology_scalars);
           body_checker.VisitStmt(func->body_);
-          if (body_checker.count() == 0) {
-            diagnostics.emplace_back(DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
-                                     "Graph function '" + func->name_ +
-                                         "' launches no tasks; the runtime refuses a node count of zero.",
-                                     func->span_);
+          if (body_checker.min_count() == 0) {
+            diagnostics.emplace_back(
+                DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
+                "Graph function '" + func->name_ +
+                    "' launches no tasks on at least one path; the runtime refuses a node count of zero.",
+                func->span_);
           }
           if (body_checker.count() > kMaxGraphNodes) {
             diagnostics.emplace_back(

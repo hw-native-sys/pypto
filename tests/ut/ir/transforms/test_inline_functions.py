@@ -19,11 +19,14 @@ as long as the LHS↔RHS Var mapping is consistent throughout)."""
 
 import pypto
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import backend, codegen, ir, passes
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.pypto_core import passes as core_passes
 from pypto.runtime import RunConfig
+
+_TENSOR_DIM = ir.get_op("tensor.dim").name
 
 
 class TestInlineFunctionsBasic:
@@ -4513,6 +4516,153 @@ class TestInlineFunctionsSubmitCallSite:
 
 
 class TestInlineFunctionsDynamicShapes:
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_distributed_dimension_read_uses_actual_extent(self, dynamic):
+        """A generic Tensor helper may receive a DistributedTensor at its call site."""
+        rows = pl.dynamic("ROWS") if dynamic else 32
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def read_rows(self, x: pl.Tensor[[rows, 4], pl.FP32]):
+                count = pl.tensor.dim(x, 0)
+                return count
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pld.DistributedTensor[[rows, 4], pl.FP32]):
+                return self.read_rows(x)
+
+        after = passes.inline_functions()(Before)
+        caller = after.get_function("main")
+        assert caller is not None
+        tensor_type = caller.params[0].type
+        assert isinstance(tensor_type, ir.DistributedTensorType)
+        returns = []
+
+        class Returns(ir.IRVisitor):
+            def visit_return_stmt(self, op):
+                returns.extend(op.value)
+                super().visit_return_stmt(op)
+
+        Returns().visit_stmt(caller.body)
+        assert len(returns) == 1
+        ir.assert_structural_equal(returns[0], tensor_type.shape[0])
+
+    def test_dimension_read_preserves_scalar_output_assignment(self):
+        """A dim-read LHS may be the caller's scalar Out slot, not a local alias."""
+        rows = pl.dynamic("ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def read_rows(self, x: pl.Tensor[[rows, 4], pl.FP32], count: pl.Out[pl.Scalar[pl.INDEX]]):
+                count = pl.tensor.dim(x, 0)
+                return count
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[rows, 4], pl.FP32]):
+                count = 7
+                self.read_rows(x, count)
+                return count
+
+        after = passes.inline_functions()(Before)
+        assignments = []
+
+        class Assignments(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                if op.var.name_hint == "count":
+                    assignments.append(op)
+                super().visit_assign_stmt(op)
+
+        Assignments().visit_program(after)
+        assert len(assignments) == 2
+        assert isinstance(assignments[1].value, ir.Call)
+        assert assignments[1].value.op.name == _TENSOR_DIM
+        passes.convert_to_ssa()(after)
+
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_dimension_read_preserves_nested_scalar_writeback(self, dynamic):
+        """A callee's Out write is a second definition even before it is inlined."""
+        rows = pl.dynamic("ROWS") if dynamic else 32
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def set_count(self, count: pl.Out[pl.Scalar[pl.INDEX]]):
+                count = 7
+                return count
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[rows, 4], pl.FP32]):
+                count = pl.tensor.dim(x, 0)
+                self.set_count(count)
+                return count
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[rows, 4], pl.FP32]):
+                return self.helper(x)
+
+        after = passes.inline_functions()(Before)
+        assignments = []
+
+        class Assignments(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                assignments.append(op)
+                super().visit_assign_stmt(op)
+
+        Assignments().visit_program(after)
+        reads = [a for a in assignments if isinstance(a.value, ir.Call) and a.value.op.name == _TENSOR_DIM]
+        writes = [a for a in assignments if isinstance(a.value, ir.ConstInt) and a.value.value == 7]
+        assert len(reads) == len(writes) == 1
+        assert reads[0].var.unique_id == writes[0].var.unique_id
+        caller = after.get_function("main")
+        assert caller is not None
+        tensor_type = caller.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        if dynamic:
+            dimension = tensor_type.shape[0]
+            assert isinstance(dimension, ir.Var)
+            assert dimension.unique_id != writes[0].var.unique_id
+        passes.convert_to_ssa()(after)
+
+    def test_dimension_read_preserves_rebound_local(self):
+        """Folding a mutable scalar must not turn its second write into a dimension write."""
+        rows = pl.dynamic("ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def count_rows(self, x: pl.Tensor[[rows, 4], pl.FP32]):
+                count = pl.tensor.dim(x, 0)
+                count = count + 1
+                return count
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[rows, 4], pl.FP32]):
+                return self.count_rows(x)
+
+        after = passes.inline_functions()(Before)
+        caller = after.get_function("main")
+        assert caller is not None
+        tensor_type = caller.params[0].type
+        assert isinstance(tensor_type, ir.TensorType)
+        dimension = tensor_type.shape[0]
+        assert isinstance(dimension, ir.Var)
+        assigned = set()
+        dim_reads = []
+
+        class Assignments(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                assigned.add(op.var.unique_id)
+                if isinstance(op.value, ir.Call) and op.value.op.name == _TENSOR_DIM:
+                    dim_reads.append(op.value)
+                super().visit_assign_stmt(op)
+
+        Assignments().visit_program(after)
+        assert dimension.unique_id not in assigned
+        assert dim_reads
+        passes.convert_to_ssa()(after)
+
     def test_specialized_result_reaches_next_inline_call(self):
         """The next inline call must receive its argument's refined view metadata."""
         rows = pl.dynamic("FORMAL_ROWS")

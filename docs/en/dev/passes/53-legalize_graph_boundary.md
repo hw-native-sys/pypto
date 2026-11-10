@@ -71,6 +71,11 @@ through those two base classes and treats everything else as a leaf.
 New parameters are **appended**, not prepended: `CoreTaskArgs` requires every
 tensor argument to precede every scalar one.
 
+Hoisting a scalar out of a conditional also moves its evaluation before the guard.
+A branch-local integer division or remainder that would require hoisting is rejected
+unless its divisor is a literal other than zero or minus one. Compute the guarded
+value at the call site or move the conditional outside the Graph.
+
 ### A bare rename is deleted, not accepted
 
 `n = batch` computes nothing, so there is nothing to hoist — but leaving it alone
@@ -115,11 +120,28 @@ value:
 | ---- | ------------------------ |
 | a literal | trivially |
 | the induction variable of a **constant-trip** loop | recording walks the loop once and bakes each iteration's literal into that iteration's own node; constant bounds mean every later call walks the identical sequence |
-| `tensor.dim` of a boundary tensor parameter, with a literal axis | `graph_boundary_matches` compares each boundary tensor's `ndims`, `shapes` and `strides` against the recorded `GraphBoundarySignature` and rejects a submission on any mismatch, so a boundary shape cannot change within one recording |
+| `tensor.dim` of a boundary tensor parameter, with a literal axis | `GraphBoundaryMatchInfo` records each boundary tensor's `ndims`, `shapes` and `strides` and a submission must match the recorded layout, so a boundary shape cannot change within one recording |
 
-**Scalar parameters are deliberately excluded from the invariant set.** The
-runtime patches a boundary scalar's slot on every call — which is exactly what
-makes one a legal *task argument* and an illegal *frozen view offset*.
+A literal-axis `tensor.dim` may also read a `tensor.slice`, `tensor.reshape` or
+`tensor.view` chain rooted in a boundary tensor. This requires every metadata
+operand (including offsets and optional valid-shape operands) and every physical
+result extent to be replay-invariant. It proves a shape fact only; address
+hoisting, effects and allocation lifetime still have independent checks.
+
+A literal-axis read of a local tensor allocation is invariant when that
+physical extent is invariant. A frontend shape tuple must match the result
+tensor type. Normalized zero-argument allocations use the result type directly.
+Bare aliases preserve facts for matching extents. Backend-injected pipe
+allocations are excluded.
+
+**Scalar parameters are mutable by default.** A topology argument qualifies
+only when every call or submit derives it from literals and the exact tensor
+descriptors passed at that site. The boundary matcher fixes descriptor
+layouts. Generated orchestration also puts any boundary scalar read by the
+Graph body into its Config. Different scalar values at different sites
+therefore select different recordings. Caller loop indices, tensor data and
+runtime scalar parameters do not supply the provenance proof. Legalization
+and verification derive the facts independently from their current program.
 
 This is what admits a tiled kernel at all. A slab offset `i * TILE` cannot be
 hoisted: the value does not exist at the call site. Every projection, MLP and
@@ -338,7 +360,7 @@ which decodes values directly in both supported runtimes.
 | No runtime-allocated boundary output | `Out` describes write-only access and is legal with caller-supplied storage. Call-site `OutputExisting` and `InOut` are supported; `ArgDirection::Output` is rejected because it requests a new allocation |
 | Scalar parameters are `In` | A boundary scalar is passed by value and replayed from the call site |
 | Returns only its own parameters | A cached invocation skips the recording body, so its computed return values are unavailable. `return c` for an `InOut` parameter is an alias and is fine. The outer Graph completion is a separate Submit result, valid on cold and cached invocations |
-| Between 1 and 1024 launched tasks | `graph_execution_storage_layout` refuses a node count of zero as well as one over `GRAPH_MAX_NODES`. A launch in a loop counts once per iteration, not once per call site, and `system.task_dummy` counts too — it lowers to `rt_submit_dummy_task`, and `ExpandManualPhaseFence` inserts them automatically. Allocations record nodes too, counted as an *upper* bound so that passing this check means the runtime will accept the Graph. Codegen collects every eligible create in a statement list — an intervening launch does not close the batch — and packs them at most `kAllocTensorsArgs` (16) to an `alloc_tensors`. Two of its three ineligibility rules cannot fire here (a shape reading a local is already rejected as non-constant; an already-declared var cannot recur under SSA), so those creates are counted exactly. The third can — an injected GM pipe buffer leaves the shared batch when its `core_num` reads a body-local, which only the emitter's use-resolution knows — so each of those is charged its worst case of one node. The batch size and the GM-pipe predicate are shared with the emitter in `utils/alloc_batching.h` rather than restated here. Counted **after** the hoisting steps, unlike every other check in this table: Step C *removes* allocation nodes, so the pre-hoist body would reject a Graph that fits and disagree with the verifier, which re-derives the same count from the rewritten IR |
+| Between 1 and 1024 recorded nodes on every path | `graph_execution_storage_layout` refuses a node count of zero as well as one over `GRAPH_MAX_NODES`. For an eligible conditional, the smaller arm supplies the lower bound and the larger arm supplies the upper bound. A launch in a loop counts once per iteration, not once per call site, and `system.task_dummy` counts too — it lowers to `rt_submit_dummy_task`, and `ExpandManualPhaseFence` inserts them automatically. Allocations record nodes too. Codegen collects every eligible create in a statement list — an intervening launch does not close the batch — and packs them at most `kAllocTensorsArgs` (16) to an `alloc_tensors`. Two of its three ineligibility rules cannot fire here (a shape reading a local is already rejected as non-constant; an already-declared var cannot recur under SSA), so those creates are counted exactly. The third can — an injected GM pipe buffer leaves the shared batch when its `core_num` reads a body-local, which only the emitter's use-resolution knows — so each of those is charged its worst case of one node. The batch size and the GM-pipe predicate are shared with the emitter in `utils/alloc_batching.h` rather than restated here. Counted **after** the hoisting steps, unlike every other check in this table: Step C *removes* allocation nodes, so the pre-hoist body would reject a Graph that fits and disagree with the verifier, which re-derives the same count from the rewritten IR |
 | No allocation under a runtime loop or branch | Each records a node, so a count that varies between calls is a topology that varies |
 | Allocation shapes are compile-time constants | Recording copies the shape into the node and derives the buffer address from it; a shape reading a boundary scalar is frozen at the first call's value |
 | No `tensor.full` in the region | Orchestration codegen has no lowering for it and rejects it as a misplaced tensor op |

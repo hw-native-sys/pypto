@@ -132,7 +132,8 @@ def entry(a: pl.Tensor, y: pl.Out[pl.Tensor], z: pl.Out[pl.Tensor]):
 包括每个输出特化后的形状和数据类型。仅靠类型无法确定重排或部分输出的身份。
 若 stub 通过单条 return 语句列出参数名，则按返回顺序对这些参数校验注解，
 也支持只读别名（见下文）。不兼容的声明会在特化时报错。多个返回值应使用 Python `tuple[...]`（或
-`typing.Tuple[...]`）。`pl.Tuple[...]` 表示单个元组值（tuple-valued result），无法映射到
+`typing.Tuple[...]`）。单元素声明（如 `tuple[pl.Tensor[[16, 32], pl.FP32]]`）
+返回一个扁平 Tensor 值，可直接传给后续 kernel。`pl.Tuple[...]` 表示单个元组值（tuple-valued result），无法映射到
 各个张量输出缓冲区，因此 extern 不支持这种返回类型。
 显式 `tuple[()]`（或 `typing.Tuple[()]`）声明零个返回结果，对于仅签名 stub，仅在没有
 `pl.Out`/`pl.InOut` 参数时有效。显式 `return ()` 即使存在输出参数也可声明零个别名。
