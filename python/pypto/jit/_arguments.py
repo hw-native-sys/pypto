@@ -240,9 +240,18 @@ def _resolve_tensor_annotation_fields(
         raise ValueError("Cannot recover call-owned fields of an incomplete Tensor annotation")
 
     def resolve_field(expr: ast.expr, captured: Any) -> Any:
-        if binding.keys().isdisjoint(_annotation_names(expr)):
+        names = _annotation_names(expr)
+        if binding.keys().isdisjoint(names):
             return captured
         spelling = ast.unparse(expr)
+        # An eagerly evaluated field preserves its value, not the individual
+        # factory locals used to compute it. Re-evaluating a mixed expression
+        # can silently use a different global with the same name.
+        if names - binding.keys():
+            raise ValueError(
+                f"Annotation field {spelling!r} mixes call-owned and definition-owned names; "
+                "compute the field at the call site and pass its value as a constexpr"
+            )
         result = resolve_annotation(spelling, namespace)
         if isinstance(result, str):
             raise ValueError(f"Cannot resolve call-owned annotation field {spelling!r}")

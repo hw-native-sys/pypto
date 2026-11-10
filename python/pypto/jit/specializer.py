@@ -65,7 +65,6 @@ from pypto.pypto_core.ir import TensorLayout
 
 from . import _specialize_values as values
 from ._call_syntax import dependency_call
-from ._call_syntax import writeback_return_operand as _writeback_return_operand
 from ._source import _UNBOUND, cache_in_snapshot, function_namespace
 from ._specialize_body import BodyTransformer
 from ._specialize_types import DynDim, ShapeDim, TensorMeta
@@ -1634,18 +1633,11 @@ def _infer_expression_return_type(  # noqa: PLR0913
     tensor_meta: Mapping[str, TensorMeta],
     py_globals: Mapping[str, Any],
     constexpr_values: Mapping[str, str] | None,
-    value: ast.expr,
-    distributed_params: set[str],
     eager_annotation: Any,
     *,
     emit_declared_contract: bool,
 ) -> str | None:
-    """Emit a resolved contract or a proven writeback result."""
-    target = _writeback_return_operand(value) if isinstance(value, ast.Call) else None
-    if isinstance(target, ast.Name) and target.id in tensor_meta:
-        return _build_tensor_annotation(
-            tensor_meta[target.id], is_out=False, is_distributed=target.id in distributed_params
-        )
+    """Emit a resolved declaration when Submit needs an explicit contract."""
     if not emit_declared_contract:
         return None
     if isinstance(eager_annotation, _LangTensor) or _tuple_annotation_elements(eager_annotation) is not None:
@@ -1670,8 +1662,6 @@ def _infer_expression_return_type(  # noqa: PLR0913
     # still contains their names is not a contract the generated module can use.
     if rendered is not None and _annotation_names(ast.parse(rendered, mode="eval").body) <= known_names:
         return rendered
-    # Opaque calls keep ordinary-call inference. Native Submit remains governed
-    # by declared returns; only JIT-generated, proven writebacks get a contract.
     return None
 
 
@@ -1812,8 +1802,6 @@ def _infer_return_type(  # noqa: PLR0913
                 tensor_meta,
                 py_globals or {},
                 constexpr_values,
-                value,
-                dist_set,
                 eager_annotation,
                 emit_declared_contract=True,
             )
@@ -1850,15 +1838,11 @@ def _infer_return_type(  # noqa: PLR0913
         and (isinstance(return_node.value, ast.Call) or emit_expression_contract)
         and not (isinstance(return_node.value, ast.Name) and return_node.value.id in tensor_meta)
     ):
-        # Keep flat tuple contracts and infer exact known writebacks before
-        # emitting the JIT function. Native Submit parsing is unchanged.
         return _infer_expression_return_type(
             func_def.returns,
             tensor_meta,
             py_globals or {},
             constexpr_values,
-            return_node.value,
-            dist_set,
             eager_annotation,
             emit_declared_contract=emit_expression_contract,
         )

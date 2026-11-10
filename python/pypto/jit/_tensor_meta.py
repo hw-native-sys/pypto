@@ -2425,7 +2425,7 @@ def extract_local_tensor_metas(
         if whole is not None:
             if len(whole) != len(src_meta.shape):
                 return None
-            return TensorMeta(shape=whole, dtype=src_meta.dtype, layout=src_meta.layout)
+            return replace(src_meta, shape=whole, inexact_axes=frozenset(), runtime_dims={})
         if not isinstance(shape_node, (ast.List, ast.Tuple)) or len(shape_node.elts) != len(src_meta.shape):
             return None
         dims: list[ShapeDim] = []

@@ -28,6 +28,7 @@ from pypto.runtime.runner import ExecutionMode, RunConfig
 # The callee constexpr must take precedence over this module shape constant.
 _RETURN_WIDTH = 64
 _FACTORY_ROWS = 64
+_CAPTURE_WIDTH = 4
 
 
 def _submissions(program: ir.Program) -> list[ir.Submit]:
@@ -615,6 +616,26 @@ def test_omitted_output_uses_eager_factory_capture_even_when_global_resolves():
     assert ir.structural_equal(kernel_ir.params[1].type, ir.TensorType([16, 32], pl.FP32))
 
 
+def test_omitted_output_does_not_guess_a_mixed_factory_and_constexpr_axis():
+    _FACTORY_ROWS = 16
+
+    @pl.jit.incore
+    def kernel(
+        x: pl.Tensor,
+        out: pl.Out[pl.Tensor[[_FACTORY_ROWS * _CAPTURE_WIDTH, 32], pl.FP32]],
+        _CAPTURE_WIDTH: pl.constexpr,
+    ):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        result, _ = pl.submit(kernel, x, _CAPTURE_WIDTH=2)
+        return result
+
+    with pytest.raises(ValueError, match="mixes call-owned and definition-owned names"):
+        entry.specialize(torch.empty(16, 32))
+
+
 def test_factory_annotation_changes_the_compiler_source_key():
     def factory(rows):
         @pl.jit.incore
@@ -833,3 +854,34 @@ def test_submitted_store_returns_actual_destination_not_first_out(keyword_store,
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_ordinary_jit_store_uses_rebound_destination():
+    @pl.jit.incore
+    def kernel(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        out = pl.slice(out, [16, 32], [0, 0])
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(x, out)
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(32, 64))
+    kernel_ir = program.get_function("kernel")
+    assert kernel_ir is not None
+    # Ordinary calls retain parser inference instead of publishing the
+    # parameter's stale shape as a declared return contract.
+    assert not kernel_ir.return_types
+
+
+def test_whole_shape_slice_preserves_distributed_kind():
+    @pl.jit.incore
+    def kernel(window: pld.DistributedTensor):
+        return pl.slice(window, window.shape, [0, 0])  # pyright: ignore[reportArgumentType]
+
+    metadata = _tensor_meta.TensorMeta(shape=(16, 32), dtype=pl.FP32, is_distributed=True)
+    result = _tensor_meta.specialized_return_metas(
+        kernel, {"window": metadata}, {}, discover_deps=_discover_dep_bindings
+    )
+    assert result is not None
+    assert result[0] is not None and result[0].is_distributed
