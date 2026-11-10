@@ -279,6 +279,7 @@ def test_program_preserves_high_rank_logical_nz_metadata(tmp_path, shape):
             return
 
     compiled = ir_compile(NzEntry, output_dir=str(tmp_path), skip_ptoas=True)
+    assert isinstance(compiled, CompiledProgram)
     metadata = compiled._artifact.metadata
     assert metadata is not None
     assert metadata.parameters[0].shape == shape
