@@ -9,7 +9,11 @@
 # pylint: disable=unused-argument
 """Code generation module for converting IR to PTO assembly (PTOCodegen)."""
 
+from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
+
+def data_type_to_mlir(dtype: DataType) -> str:
+    """Return the PTO MLIR spelling of an element data type."""
 
 class VFHelper:
     """No-Bridge VF/SIMT helper and adapter with ordered storage effects."""
@@ -55,7 +59,11 @@ class PTOCodegen:
         """Create a new PTO code generator."""
 
     def generate_bundle(
-        self, program: Program, emit_tile_addr: bool = True, emit_source_loc: bool = True
+        self,
+        program: Program,
+        emit_tile_addr: bool = True,
+        emit_source_loc: bool = True,
+        uses_urma: bool = False,
     ) -> PTOCodegenBundle:
         """Generate an EmitC caller and separate typed-VMI helpers for A5/AIV."""
 
@@ -64,6 +72,7 @@ class PTOCodegen:
         program: Program,
         emit_tile_addr: bool = True,
         emit_source_loc: bool = True,
+        uses_urma: bool = False,
     ) -> str:
         """Generate PTO assembly from PyPTO IR Program.
 
@@ -77,6 +86,9 @@ class PTOCodegen:
                 with an MLIR ``loc("file":line:col)`` taken from the IR ``Span``,
                 so ptoas diagnostics name the user's source instead of a line in
                 the generated ``.pto``. When False, emit no locations.
+
+            uses_urma: Whether the enclosing communication domains require URMA.
+                The backend forwards this before splitting host IR into kernels.
 
         Returns:
             PTO assembly code string (.pto format) with instructions like tmul, tadd, FOR/ENDFOR, etc.
@@ -208,6 +220,7 @@ def collect_tensor_shape_dyn_vars(func: Function) -> list[Var]:
     """Return ordered trailing shape arguments, excluding explicit scalar parameters."""
 
 __all__ = [
+    "data_type_to_mlir",
     "PTOCodegen",
     "BuiltinNextLevelSpec",
     "DistributedCodegen",

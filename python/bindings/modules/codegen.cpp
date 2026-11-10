@@ -20,6 +20,7 @@
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 
 namespace nb = nanobind;
 
@@ -34,6 +35,9 @@ void BindCodegen(nb::module_& m) {
   // Create a new 'codegen' submodule
   nb::module_ codegen_module =
       m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
+
+  codegen_module.def("data_type_to_mlir", &DataTypeToMLIR, nb::arg("dtype"),
+                     "Return the PTO MLIR spelling of an element data type.");
 
   nb::class_<VFHelper>(codegen_module, "VFHelper")
       .def_ro("kind", &VFHelper::kind)
@@ -57,10 +61,10 @@ void BindCodegen(nb::module_& m) {
       "annotations.")
       .def(nb::init<>(), "Create a PTO code generator (backend is always PTO)")
       .def("generate_bundle", &PTOCodegen::GenerateBundle, nb::arg("program"),
-           nb::arg("emit_tile_addr") = true, nb::arg("emit_source_loc") = true,
+           nb::arg("emit_tile_addr") = true, nb::arg("emit_source_loc") = true, nb::arg("uses_urma") = false,
            "Generate an EmitC caller and separate typed-VMI helpers for A5/AIV execution.")
       .def("generate", &PTOCodegen::Generate, nb::arg("program"), nb::arg("emit_tile_addr") = true,
-           nb::arg("emit_source_loc") = true,
+           nb::arg("emit_source_loc") = true, nb::arg("uses_urma") = false,
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
            "instructions like tmul, tadd, FOR/ENDFOR, etc. When emit_tile_addr=False, pto.alloc_tile omits "
            "the "

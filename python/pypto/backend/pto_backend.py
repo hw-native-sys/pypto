@@ -876,7 +876,6 @@ _SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
 _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
 _URMA_PUT_ASYNC_OP = _ir_core.get_op("pld.tensor.put_async").name
 _URMA_GET_ASYNC_OP = _ir_core.get_op("pld.tensor.get_async").name
-_URMA_TRANSFER_OPS = frozenset({_URMA_PUT_ASYNC_OP, _URMA_GET_ASYNC_OP})
 _TILE_LOAD_OP = _ir_core.get_op("tile.load").name
 
 
@@ -928,30 +927,23 @@ def _uses_deferred_completion(func: _ir_core.Function) -> bool:
     return _function_uses_ops(func, _DEFERRED_COMPLETION_OPS)
 
 
-# pypto DataType -> (PTOAS dtype suffix, C++ element type). The suffix must match
-# DataTypeToMLIR in pto_type_utils.cpp: codegen uses the same suffix for the
-# private helper declaration, so the C++ wrapper name and the emitted func.call
-# stay in sync.
-_URMA_DTYPE_MAP: dict[_DataType, tuple[str, str]] = {
-    _DataType.FP32: ("f32", "float"),
-    _DataType.FP16: ("f16", "half"),
-    _DataType.BF16: ("bf16", "bfloat16_t"),
-    _DataType.INT32: ("i32", "int32_t"),
-    _DataType.UINT32: ("ui32", "uint32_t"),
-    _DataType.INT64: ("i64", "int64_t"),
-    _DataType.UINT64: ("ui64", "uint64_t"),
-    _DataType.INT16: ("i16", "int16_t"),
-    _DataType.UINT16: ("ui16", "uint16_t"),
-    _DataType.INT8: ("i8", "int8_t"),
-    _DataType.UINT8: ("ui8", "uint8_t"),
-    _DataType.FP8E4M3FN: ("f8E4M3FN", "float8_e4m3_t"),
-    _DataType.FP8E5M2: ("f8E5M2", "float8_e5m2_t"),
-}
+def _uses_urma(program: _ir_core.Program) -> bool:
+    """Read the materialized domains' engine requirements before splitting IR."""
 
+    class _DomainFinder(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.uses_urma = False
 
-def _uses_urma_transfer(func: _ir_core.Function) -> bool:
-    """Return whether the wrapper must expose the URMA async transfer adapter."""
-    return _function_uses_ops(func, _URMA_TRANSFER_OPS)
+        def visit_stmt(self, stmt: _ir_core.Stmt) -> None:
+            if isinstance(stmt, _ir_core.CommDomainScopeStmt):
+                self.uses_urma |= "urma" in stmt.engines
+            super().visit_stmt(stmt)
+
+    finder = _DomainFinder()
+    for func in program.functions.values():
+        finder.visit_stmt(func.body)
+    return finder.uses_urma
 
 
 def _collect_urma_transfer_dtypes(func: _ir_core.Function) -> set[tuple[bool, _DataType]]:
@@ -991,14 +983,11 @@ def _generate_urma_transfer_adapter(func: _ir_core.Function) -> str:
 
     wrappers: list[str] = []
     for is_put, dtype in sorted(pairs, key=lambda item: (not item[0], str(item[1]))):
-        mapped = _URMA_DTYPE_MAP.get(dtype)
-        if mapped is None:
+        suffix = _codegen_core.data_type_to_mlir(dtype)
+        if suffix.startswith("!pto.") or suffix in {"index", "i1"}:
             op = "put" if is_put else "get"
-            raise RuntimeError(
-                f"pld.tensor.{op}_async has no URMA adapter for dtype {dtype}; "
-                "add it to _URMA_DTYPE_MAP and the PTOAS helper declaration"
-            )
-        suffix, cpp_type = mapped
+            raise ValueError(f"pld.tensor.{op}_async does not support element type {suffix!r}")
+        cpp_type = dtype.to_c_type_string()
         op = "put" if is_put else "get"
         k_put = "true" if is_put else "false"
         wrappers.append(
@@ -1269,7 +1258,7 @@ def _generate_kernel_header(
     uses_sdma: bool | None = None,
     uses_l2_cache_offset: bool | None = None,
     uses_deferred_completion: bool | None = None,
-    uses_urma_transfer: bool | None = None,
+    uses_urma_transfer: bool = False,
 ) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
     fixed_subblock_id = _get_fixed_subblock_id(func)
@@ -1300,8 +1289,6 @@ def _generate_kernel_header(
         uses_l2_cache_offset = _uses_l2_cache_offset(func)
     if uses_deferred_completion is None:
         uses_deferred_completion = _uses_deferred_completion(func)
-    if uses_urma_transfer is None:
-        uses_urma_transfer = _uses_urma_transfer(func)
     needs_intrinsic = uses_spmd or uses_subblock or uses_sdma or uses_l2_cache_offset
     spmd_override = '#include "intrinsic.h"\n' if needs_intrinsic else ""
     deferred_completion_include = _DEFERRED_COMPLETION_INCLUDE if uses_deferred_completion else ""
@@ -1321,6 +1308,7 @@ def _generate_kernel_wrapper(
     ptoas_code: str,
     *,
     group_uses_spmd: bool = False,
+    uses_urma: bool = False,
 ) -> str:
     """Generate a complete kernel wrapper file for one InCore function.
 
@@ -1335,7 +1323,7 @@ def _generate_kernel_wrapper(
     func_uses_sdma = _uses_sdma_workspace(func)
     func_uses_l2_cache_offset = _uses_l2_cache_offset(func)
     func_uses_deferred_completion = _uses_deferred_completion(func)
-    func_uses_urma_transfer = _uses_urma_transfer(func)
+    urma_transfer_adapter = _generate_urma_transfer_adapter(func) if uses_urma else ""
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     ptoas_body, fifo_uses_subblock = _forward_runtime_lane_to_split_fifo_calls(func, ptoas_body)
     wrapper_uses_subblock = func_uses_subblock or fifo_uses_subblock
@@ -1346,7 +1334,7 @@ def _generate_kernel_wrapper(
         uses_sdma=func_uses_sdma,
         uses_l2_cache_offset=func_uses_l2_cache_offset,
         uses_deferred_completion=func_uses_deferred_completion,
-        uses_urma_transfer=func_uses_urma_transfer,
+        uses_urma_transfer=bool(urma_transfer_adapter),
     )
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
 
@@ -1416,7 +1404,7 @@ def _generate_kernel_wrapper(
     # alias offset, and the synthetic i32 identity params in canonical order
     # (block_idx, block_num, subblock_idx). Mirror that exact order here.
     call_args_list = list(var_names)
-    if func_uses_deferred_completion or func_uses_urma_transfer:
+    if func_uses_deferred_completion or uses_urma:
         call_args_list.append("args")
     if func_uses_sdma:
         call_args_list.append("__pypto_sdma_workspace")
@@ -1452,7 +1440,6 @@ def _generate_kernel_wrapper(
     )
 
     deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
-    urma_transfer_adapter = _generate_urma_transfer_adapter(func) if func_uses_urma_transfer else ""
     return (
         f"{header}\n{deferred_completion_adapter}{urma_transfer_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
@@ -1864,6 +1851,7 @@ def _emit_single_function_output(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    uses_urma: bool = False,
 ) -> None:
     """Emit output files for one InCore function."""
     suffix = "pto" if skip_ptoas else "cpp"
@@ -1888,7 +1876,7 @@ def _emit_single_function_output(
             object_bytes = object_file.read()
         _emit_vpto_object(result_files, _get_kernel_output_path(func, "o"), object_bytes, output_dir)
     else:
-        result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
+        result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp, uses_urma=uses_urma)
 
 
 def _emit_group_output(
@@ -1900,6 +1888,7 @@ def _emit_group_output(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    uses_urma: bool = False,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
     if skip_ptoas:
@@ -1925,7 +1914,7 @@ def _emit_group_output(
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
-            func, ptoas_cpp, group_uses_spmd=group_uses_spmd
+            func, ptoas_cpp, group_uses_spmd=group_uses_spmd, uses_urma=uses_urma
         )
 
 
@@ -1971,6 +1960,7 @@ class _CodegenUnit:
     is_group: bool
     stage_record: StageRecord  # profiling record (started in Phase 1)
     helpers: tuple[_codegen_core.VFHelper, ...] = ()
+    uses_urma: bool = False
 
 
 @dataclass
@@ -2049,6 +2039,7 @@ def _emit_unit(
                 skip_ptoas,
                 memory_planner,
                 dump_ptoas_passes,
+                uses_urma=unit.uses_urma,
             )
         else:
             _emit_single_function_output(
@@ -2059,6 +2050,7 @@ def _emit_unit(
                 skip_ptoas,
                 memory_planner,
                 dump_ptoas_passes,
+                uses_urma=unit.uses_urma,
             )
         ptoas_record.end = time.perf_counter()
         return _EmitResult(name=unit.name, files=local_files, ptoas_record=ptoas_record)
@@ -2272,6 +2264,9 @@ def _generate_with_distributed(
       sub_workers/{name}.py             — each SubWorker callable
     """
     result_files: dict[str, str] = {}
+    # Match the pass's conservative program-wide policy. Keep this requirement
+    # when host domain scopes are dropped from the per-chip programs.
+    uses_urma = _uses_urma(transformed_program)
 
     # 1. L3 HOST orchestrator → orchestration/host_orch.py
     cg = _codegen_core.DistributedCodegen()
@@ -2293,6 +2288,7 @@ def _generate_with_distributed(
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
                 runtime=runtime,
+                uses_urma=uses_urma,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2545,14 +2541,17 @@ def _generate_pto_bundle(
     memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool,
     is_group: bool = False,
+    uses_urma: bool = False,
 ) -> tuple[str, tuple[_codegen_core.VFHelper, ...]]:
     """Retain combined diagnostic output; execution consumes structured artifacts."""
     generator = _codegen_core.PTOCodegen()
     emit_tile_addr = memory_planner != _passes.MemoryPlanner.PTOAS
     if skip_ptoas:
-        return generator.generate(program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc), ()
+        return generator.generate(
+            program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc, uses_urma=uses_urma
+        ), ()
     bundle = generator.generate_bundle(
-        program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+        program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc, uses_urma=uses_urma
     )
     if bundle.helpers:
         if is_group:
@@ -2596,6 +2595,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    uses_urma: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2682,10 +2682,15 @@ def _generate_single_chip(
                 memory_planner=memory_planner,
                 emit_source_loc=emit_source_loc,
                 is_group=True,
+                uses_urma=uses_urma,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
-            units.append(_CodegenUnit(group_name, pto_code, members, is_group=True, stage_record=stage))
+            units.append(
+                _CodegenUnit(
+                    group_name, pto_code, members, is_group=True, stage_record=stage, uses_urma=uses_urma
+                )
+            )
         except Exception as e:
             func_names = ", ".join(m.name for m in members)
             logger.error("Failed to compile group '%s' [%s]: %s", group_name, func_names, e)
@@ -2716,11 +2721,20 @@ def _generate_single_chip(
                 skip_ptoas=skip_ptoas,
                 memory_planner=memory_planner,
                 emit_source_loc=emit_source_loc,
+                uses_urma=uses_urma,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
             units.append(
-                _CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage, helpers=helpers)
+                _CodegenUnit(
+                    func.name,
+                    pto_code,
+                    [func],
+                    is_group=False,
+                    stage_record=stage,
+                    helpers=helpers,
+                    uses_urma=uses_urma,
+                )
             )
         except Exception as e:
             logger.error("Failed to compile function '%s': %s", func.name, e)
