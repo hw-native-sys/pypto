@@ -1676,7 +1676,7 @@ def _infer_expression_return_type(  # noqa: PLR0913
 
 
 def _infer_tuple_return_type(  # noqa: PLR0913
-    return_elts: list[ast.expr],
+    return_elts: Sequence[ast.expr | None],
     annotation: ast.expr | None,
     tensor_meta: dict[str, TensorMeta],
     dist_set: set[str],
@@ -1797,10 +1797,34 @@ def _infer_return_type(  # noqa: PLR0913
     if return_node is None and emit_expression_contract:
         return None
 
-    if return_node is not None and isinstance(return_node.value, ast.Tuple):
-        return _infer_tuple_return_type(
-            return_node.value.elts, func_def.returns, tensor_meta, dist_set, py_globals or {}, return_metas
-        )
+    if return_node is not None and return_node.value is not None:
+        value = return_node.value
+        annotation = func_def.returns
+        if emit_expression_contract and (
+            isinstance(eager_annotation, _LangTuple)
+            or (
+                isinstance(annotation, ast.Subscript)
+                and _eval_annotation(ast.unparse(annotation.value), py_globals or {}) is _LangTuple
+            )
+        ):
+            return _infer_expression_return_type(
+                annotation,
+                tensor_meta,
+                py_globals or {},
+                constexpr_values,
+                value,
+                dist_set,
+                eager_annotation,
+                emit_declared_contract=True,
+            )
+        if isinstance(value, ast.Tuple):
+            return _infer_tuple_return_type(
+                value.elts, annotation, tensor_meta, dist_set, py_globals or {}, return_metas
+            )
+        if return_metas and len(return_metas) > 1:
+            return _infer_tuple_return_type(
+                [None] * len(return_metas), annotation, tensor_meta, dist_set, py_globals or {}, return_metas
+            )
 
     # A TASK_ID (or another explicit Scalar) has no TensorMeta entry. Preserve
     # its declared type for any scalar expression so an inline helper can

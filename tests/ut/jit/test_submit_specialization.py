@@ -162,8 +162,9 @@ def test_submit_preserves_returned_store_expression(named):
     assert len(_submissions(entry.specialize(torch.empty(16, 32), torch.empty(16, 32)))) == 1
 
 
-def test_submitted_graph_metadata_follows_return_order():
-    @pl.jit.graph
+@pytest.mark.parametrize("kind", ["graph", "incore"])
+def test_submitted_metadata_follows_return_order(kind):
+    @getattr(pl.jit, kind)
     def reorder(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
         return b, a
 
@@ -510,9 +511,7 @@ def test_single_lhs_forwarded_tuple_contract_preserves_all_slots():
         return a, b
 
     @pl.jit.graph
-    def forward(
-        a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]
-    ) -> tuple[pl.Tensor[[16, 32], pl.FP32], pl.Tensor[[32, 64], pl.FP32]]:
+    def forward(a: pl.InOut[pl.Tensor], b: pl.InOut[pl.Tensor]):
         return pair(a, b)
 
     @pl.jit.graph

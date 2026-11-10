@@ -3248,8 +3248,8 @@ class TestWindowLocalMetadata:
             _window_local_body, seed_meta={}, discover_deps=_discover_dep_bindings
         )
         # Shape from the 2nd positional arg, dtype from the ``dtype=`` keyword.
-        assert metas["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
-        assert metas["signal"] == TensorMeta(shape=(1, 1), dtype=DataType.INT32)
+        assert metas["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32, is_distributed=True)
+        assert metas["signal"] == TensorMeta(shape=(1, 1), dtype=DataType.INT32, is_distributed=True)
 
     def test_window_missing_dtype_untracked(self):
         def body(buf):
@@ -3396,7 +3396,7 @@ class TestPldTensorRebindPreservesMetadata:
             "win": TensorMeta(shape=(64, 64), dtype=DataType.FP16),
         }
         metas = extract_local_tensor_metas(body, seed_meta=seed, discover_deps=_discover_dep_bindings)
-        assert metas["win"] == TensorMeta(shape=(128, 128), dtype=DataType.FP32)
+        assert metas["win"] == TensorMeta(shape=(128, 128), dtype=DataType.FP32, is_distributed=True)
 
     def test_pl_tensor_slice_three_segment_form_gets_metadata(self):
         """``pl.tensor.slice(...)`` is real, already-shipping DSL syntax
@@ -3618,7 +3618,7 @@ class TestDtypeOperandResolution:
         metas = extract_local_tensor_metas(
             _window_dtype_constant_body, seed_meta={}, discover_deps=_discover_dep_bindings
         )
-        assert metas["win"] == TensorMeta(shape=(1, 256), dtype=DataType.INT32)
+        assert metas["win"] == TensorMeta(shape=(1, 256), dtype=DataType.INT32, is_distributed=True)
 
     def test_create_tensor_dtype_closure_constant(self):
         acc_dtype = pl.BF16
@@ -3731,7 +3731,7 @@ class TestShapeOperandResolution:
         )
         assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP16)
         assert metas["flat"] == TensorMeta(shape=(32,), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
-        assert metas["win"] == TensorMeta(shape=(4, 8), dtype=DataType.INT32)
+        assert metas["win"] == TensorMeta(shape=(4, 8), dtype=DataType.INT32, is_distributed=True)
 
     def test_local_shadowing_extent_constant_is_runtime(self):
         metas = extract_local_tensor_metas(

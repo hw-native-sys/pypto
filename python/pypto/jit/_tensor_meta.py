@@ -41,6 +41,7 @@ from .specializer import (
     _implicit_entry_output_name,
     _LangDynVar,
     _LangTensor,
+    _LangTuple,
     func_name_lookup,
 )
 
@@ -325,15 +326,12 @@ def _omitted_output_metas(
     return result
 
 
-def _declared_return_count(dep: "JITFunction", binding: Mapping[str, str]) -> int | None:
-    annotation = _arguments.resolve_annotation(
-        inspect.signature(dep._func).return_annotation, _dep_annotation_namespace(dep, binding)
-    )
+def _declared_return_count(annotation: Any) -> int | None:
     # A Python tuple annotation declares flat function results. pl.Tuple is a
     # single tuple-valued result, not a list to flatten into Submit slots.
     if get_origin(annotation) is tuple:
         return len(get_args(annotation))
-    if isinstance(annotation, _LangTensor):
+    if isinstance(annotation, (_LangTensor, _LangTuple)):
         return 1
     return None
 
@@ -1230,24 +1228,29 @@ def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None, stop_at_call: ast.Call
 
 
 def _submitted_value_metas(
-    call: ast.Call, dep_name: str, binding: str, deps: _DepScan, local: Mapping[str, TensorMeta]
+    call: ast.Call, dep_name: str, deps: _DepScan, local: Mapping[str, TensorMeta]
 ) -> _SubmitTupleMeta:
     """Describe the callee values in the parser's flat Submit tuple."""
     dep = deps.funcs.get(dep_name)
-    if dep is not None and dep._func_type != "extern":
+    if dep is None:
+        return ()
+    annotation = _arguments.resolve_annotation(
+        inspect.signature(dep._func).return_annotation,
+        _dep_annotation_namespace(dep, _call_site_constexpr(dep, call, deps)),
+    )
+    # pl.Tuple describes one non-tensor result, unlike a flat Python tuple
+    # of results. The caller's trailing TaskId must stay in the next slot.
+    if isinstance(annotation, _LangTuple):
+        return (None,)
+    if dep._func_type != "extern":
         results = _dep_result_metas(call, dep_name, deps, local, arity=None, submitted=True)
         if results is not None:
             return results.metas
-    # Only signature-only callees use their output ABI as a result fallback.
-    declared = _declared_return_count(dep, _call_site_constexpr(dep, call, deps)) if dep is not None else None
+    declared = _declared_return_count(annotation)
     count = (
-        declared
-        if declared is not None
-        else len(deps.io[dep_name][1])
-        if dep and dep._func_type == "extern"
-        else 0
+        declared if declared is not None else len(deps.io[dep_name][1]) if dep._func_type == "extern" else 0
     )
-    names = [f"{binding}_value_{index}" for index in range(count)]
+    names = [f"_submit_value_{index}" for index in range(count)]
     if not names:
         return ()
     target: ast.expr = (
@@ -1289,19 +1292,22 @@ def _update_submit_result_meta(
         or call_view.func.id not in deps.io
     ):
         return False
-    # A submit returns (callee_result, TaskId). Only the first element can
-    # carry Tensor metadata into the next dependent submission.
+    # Every target spelling binds the same ordered slots. Only the last
+    # one is the Submit's own TaskId and never acquires tensor metadata.
+    values = _submitted_value_metas(call_view, call_view.func.id, deps, local)
     for target in targets:
         if isinstance(target, ast.Name):
-            values = _submitted_value_metas(call_view, call_view.func.id, target.id, deps, local)
             deps.submit_results[target.id] = (*values, None)
             local.pop(target.id, None)
         elif isinstance(target, ast.Tuple) and len(target.elts) == 2:
             result_target, task_target = target.elts
-            result = _dep_out_metas_or_return(call_view, call_view.func.id, result_target, deps, local)
-            _apply_dep_return(local, result)
-            for name in _target_names(task_target):
+            names = _target_names(result_target)
+            for name in (*names, *_target_names(task_target)):
                 local.pop(name, None)
+            if len(names) == len(values):
+                for name, meta in zip(names, values, strict=True):
+                    if meta is not None:
+                        local[name] = meta
     return True
 
 
