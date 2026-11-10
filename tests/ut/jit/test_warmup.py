@@ -19,7 +19,7 @@ import pytest
 import torch
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.ir.distributed_compiled_program import DistributedCompiledProgram
-from pypto.runtime import RunConfig
+from pypto.runtime import RunConfig, cluster_runner, distributed_runner
 
 
 @pytest.fixture
@@ -201,6 +201,38 @@ def test_distributed_warmup_prepares_all_children(kernel, assembly, tmp_path, mo
     assert kernel.warmup() is compiled
     assert [path.name for path, _, _ in assembly] == ["left", "right"]
     assert all(platform == "a2a3" for _, platform, _ in assembly)
+
+
+def test_cluster_warmup_uses_recursive_assembly_without_execution(kernel, assembly, monkeypatch):
+    # Only the dispatch route is under test: no IR, launch configuration, or
+    # filesystem artifact is needed when compilation and assembly are mocked.
+    compiled = object.__new__(DistributedCompiledProgram)
+    compiled._entry_kind = "cluster"
+    compiled._l3_entries = {"entries": []}
+    monkeypatch.setattr(kernel, "compile", lambda *args, **kwargs: compiled)
+    events = []
+    require_ready = compiled._require_artifact_ready
+
+    def check_ready():
+        require_ready()
+        events.append("ready")
+
+    def assemble_cluster(program):
+        assert program is compiled
+        assert events == ["ready"]
+        events.append("assembled")
+        return {}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("cluster warmup must not use HOST assembly or initialize a worker")
+
+    monkeypatch.setattr(compiled, "_require_artifact_ready", check_ready)
+    monkeypatch.setattr(cluster_runner, "_assemble_cluster_chips", assemble_cluster)
+    monkeypatch.setattr(cluster_runner, "Worker", forbidden)
+    monkeypatch.setattr(distributed_runner, "_assemble_chip_callables", forbidden)
+    assert kernel.warmup() is compiled
+    assert events == ["ready", "assembled"]
+    assert assembly == []
 
 
 def test_distributed_warmup_rejects_empty_build(kernel, assembly, tmp_path, monkeypatch):

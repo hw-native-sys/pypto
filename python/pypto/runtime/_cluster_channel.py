@@ -24,8 +24,9 @@ import socket
 import struct
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -68,7 +69,7 @@ def recv_record(stream: socket.socket) -> dict[str, Any]:
     result = json.loads(_read_exact(stream, size))
     if not isinstance(result, dict):
         raise ValueError("Direct controller record must be an object")
-    return result
+    return cast(dict[str, Any], result)
 
 
 def accept_session(listener: socket.socket, authkey: bytes, timeout: float) -> socket.socket:
@@ -95,8 +96,8 @@ def accept_session(listener: socket.socket, authkey: bytes, timeout: float) -> s
         raise
 
 
-def connect_session(address: Any, authkey: bytes, timeout: float) -> socket.socket:
-    """Connect a rank-0 engine to its caller without placing keys in argv."""
+def connect_session(address: Any, authkey: bytes | str, timeout: float) -> socket.socket:
+    """Connect using raw authkey bytes or their hex encoding, without keys in argv."""
     host, port = address
     if isinstance(authkey, str):
         authkey = bytes.fromhex(authkey)
@@ -117,6 +118,15 @@ def connect_session(address: Any, authkey: bytes, timeout: float) -> socket.sock
         raise
 
 
+@dataclass
+class _Backing:
+    storage: Any  # Keep the caller's UntypedStorage alive until publication finishes.
+    mapping: mmap.mmap
+    path: Path  # Owned staging file; unlinked when the invocation is closed.
+    # Half-open byte offsets from storage base.
+    spans: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]])
+
+
 class PackedValues:
     """Own local mapped backing until a run fence or confirmed launcher exit.
 
@@ -127,7 +137,7 @@ class PackedValues:
 
     def __init__(self, values: list[Any], writable: list[int], directory: Path) -> None:
         self.directory = Path(directory)
-        self._backings: list[tuple[Any, Any, Path, int, list[tuple[int, int]]]] = []
+        self._backings: list[_Backing] = []
         self._record: dict[str, Any] = {"storages": [], "values": []}
         self._closed = False
         if any(
@@ -141,7 +151,7 @@ class PackedValues:
         try:
             for index, value in enumerate(values):
                 if not isinstance(value, torch.Tensor):
-                    scalar = value.value if isinstance(value, ctypes._SimpleCData) else value
+                    scalar: Any = cast(Any, value).value if isinstance(value, ctypes._SimpleCData) else value
                     if scalar is not None and type(scalar) not in (bool, int, float):
                         raise ValueError("Cluster scalar argument must be a plain numeric value")
                     self._record["values"].append(
@@ -169,7 +179,7 @@ class PackedValues:
                         raise
                     finally:
                         os.close(descriptor)
-                    self._backings.append((storage, backing, path, key[1], []))
+                    self._backings.append(_Backing(storage, backing, path))
                     self._record["storages"].append({"name": name, "nbytes": key[1]})
                     seen[key] = storage_index
                 offset = value.storage_offset()
@@ -187,7 +197,7 @@ class PackedValues:
                 )
                 if index in writable_set:
                     begin = value.data_ptr() - key[0]
-                    self._backings[storage_index][4].append(
+                    self._backings[storage_index].spans.append(
                         (begin, begin + value.numel() * value.element_size())
                     )
         except BaseException:
@@ -202,18 +212,23 @@ class PackedValues:
         """Publish declared outputs only after the controller reports success."""
         if self._closed:
             raise RuntimeError("Direct invocation storage is closed")
-        for storage, backing, _path, _size, spans in self._backings:
-            source = ctypes.addressof(ctypes.c_ubyte.from_buffer(backing))
-            for begin, end in spans:
-                ctypes.memmove(storage.data_ptr() + begin, source + begin, end - begin)
+        for backing in self._backings:
+            # Hold the export while copying, then release it before close() can unmap.
+            buffer = ctypes.c_ubyte.from_buffer(backing.mapping)
+            try:
+                source = ctypes.addressof(buffer)
+                for begin, end in backing.spans:
+                    ctypes.memmove(backing.storage.data_ptr() + begin, source + begin, end - begin)
+            finally:
+                del buffer
 
     def close(self) -> None:
         """Release mappings after a successful run or a proved session drain."""
         if self._closed:
             return
-        for _storage, backing, path, _size, _spans in self._backings:
-            backing.close()
-            path.unlink(missing_ok=True)
+        for backing in self._backings:
+            backing.mapping.close()
+            backing.path.unlink(missing_ok=True)
         self._backings.clear()
         self._closed = True
 
@@ -240,22 +255,28 @@ def _mapped_value(record: dict[str, Any], roots: list[torch.Tensor]) -> Any:
         raise ValueError("Invalid direct argument kind")
     index = record["storage"]
     dtype = getattr(torch, record["dtype"], None)
-    shape, strides, offset = record["shape"], record["strides"], record["offset"]
+    shape: Any = record["shape"]
+    strides: Any = record["strides"]
+    offset = record["offset"]
     if (
         type(index) is not int
         or not 0 <= index < len(roots)
         or not isinstance(dtype, torch.dtype)
         or not isinstance(shape, list)
         or not isinstance(strides, list)
-        or len(shape) != len(strides)
-        or len(shape) > 64
-        or any(type(x) is not int or x <= 0 for x in shape)
-        or any(type(x) is not int or x < 0 for x in strides)
+        or len(cast(list[Any], shape)) != len(cast(list[Any], strides))
+        or len(cast(list[Any], shape)) > 64
+        or any(type(x) is not int or x <= 0 for x in cast(list[Any], shape))
+        or any(type(x) is not int or x < 0 for x in cast(list[Any], strides))
         or type(offset) is not int
         or offset < 0
     ):
         raise ValueError("Invalid direct tensor view")
+    shape = cast(list[int], shape)
+    strides = cast(list[int], strides)
     itemsize = torch.tensor([], dtype=dtype).element_size()
+    # Shape, strides and offset count dtype elements; the uint8 root counts bytes.
+    # Convert the one-past-last element to bytes before checking the backing bound.
     end = offset + 1 + sum((dim - 1) * stride for dim, stride in zip(shape, strides, strict=True))
     root = roots[index]
     if end * itemsize > root.numel():

@@ -10,16 +10,29 @@
 """Caller-side direct session staging and bounded control protocol."""
 
 import errno
+import importlib.util
 import json
 import socket
 import struct
+import sys
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import torch
-from pypto.runtime import _cluster_channel as channel
+
+# The receiver imports this portable file without PyPTO or its native extension.
+_spec = importlib.util.spec_from_file_location(
+    "portable_cluster_channel", Path(__file__).parents[3] / "python/pypto/runtime/_cluster_channel.py"
+)
+assert _spec is not None and _spec.loader is not None
+channel = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = channel
+_spec.loader.exec_module(channel)
 
 
 @pytest.mark.parametrize("value", [float("inf"), -float("inf"), float("nan"), -0.0])
@@ -43,6 +56,8 @@ def test_direct_staging_preserves_storage_aliases_offsets_and_write_ranges(tmp_p
             assert values[1].storage_offset() == 8
             assert values[2:] == [7, True]
             assert torch.equal(values[0], first)
+            # Only output is writable. first[:4] is outside it; the overlap at
+            # backing[8:12] must publish with output, and nothing publishes early.
             values[0][:4].fill_(-999)
             values[1].add_(100)
         assert torch.equal(backing, torch.arange(16, dtype=torch.float32))
@@ -94,6 +109,44 @@ def test_direct_record_protocol_is_bounded_and_preserves_plain_values():
         right.close()
 
 
+@pytest.mark.parametrize("invalid", ["symlink", "size"])
+def test_direct_mapping_rejects_symlinks_and_wrong_storage_sizes(tmp_path, invalid):
+    with channel.PackedValues([torch.ones(4)], [], tmp_path) as packed:
+        request = packed.request()
+        record = request["storages"][0]
+        if invalid == "symlink":
+            (tmp_path / "storage-link.bin").symlink_to(tmp_path / record["name"])
+            record["name"] = "storage-link.bin"
+            error, message = OSError, "Too many levels"
+        else:
+            record["nbytes"] += 1
+            error, message = ValueError, "size does not match"
+        with pytest.raises(error, match=message):
+            with channel.map_values(request, tmp_path):
+                pass
+
+
+@pytest.mark.parametrize("payload", [b"", b"[]", b"null", b"1"])
+def test_direct_record_rejects_empty_and_non_object_payloads(payload):
+    left, right = socket.socketpair()
+    try:
+        left.sendall(struct.pack("!I", len(payload)) + payload)
+        with pytest.raises(ValueError, match="limit|object"):
+            channel.recv_record(right)
+    finally:
+        left.close()
+        right.close()
+
+
+def test_direct_accept_rejects_nonlocal_peer():
+    stream, listener = Mock(), Mock()
+    listener.accept.return_value = (stream, ("192.0.2.1", 12345))
+    with pytest.raises(ValueError, match="local peer"):
+        channel.accept_session(listener, b"key", 1.0)
+    stream.close.assert_called_once()
+    stream.sendall.assert_not_called()
+
+
 def test_direct_controller_channel_rejects_wrong_session_authentication():
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -110,14 +163,15 @@ def test_direct_controller_channel_rejects_wrong_session_authentication():
         listener.close()
 
 
-def test_direct_authenticated_channel_does_not_apply_startup_timeout_to_runs():
+@pytest.mark.parametrize("authkey", [b"key", b"key".hex()])
+def test_direct_authenticated_channel_does_not_apply_startup_timeout_to_runs(authkey):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             server = pool.submit(channel.accept_session, listener, b"key", 2.0)
-            client = channel.connect_session(listener.getsockname(), b"key", 2.0)
+            client = channel.connect_session(listener.getsockname(), authkey, 2.0)
             accepted = server.result(timeout=3)
             try:
                 assert client.gettimeout() is None
@@ -215,7 +269,7 @@ def test_authentication_timeout_covers_the_whole_exchange(monkeypatch):
 
     monkeypatch.setattr(time, "monotonic", lambda: now)
     with pytest.raises(TimeoutError):
-        channel.accept_session(Listener(), b"key", 1.0)
+        channel.accept_session(cast(socket.socket, Listener()), b"key", 1.0)
 
 
 def test_staging_writes_the_payload_before_mapping(tmp_path, monkeypatch):
@@ -230,3 +284,7 @@ def test_staging_writes_the_payload_before_mapping(tmp_path, monkeypatch):
     monkeypatch.setattr(channel.mmap, "mmap", check_payload)
     with channel.PackedValues([torch.tensor([1, 2, 3], dtype=torch.uint8)], [], tmp_path):
         pass
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
