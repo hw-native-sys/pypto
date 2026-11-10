@@ -174,14 +174,17 @@ def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
 def arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[int]:
     """*arg_shape* in the parameter's own terms, ready to compare with ``info.shape``.
 
-    An NZ parameter is compiled to the blocked rank-5 shape the backend
-    addresses, while its caller allocates and passes the logical one — the same
-    bytes under two spellings. Comparing them means blocking the caller's shape
-    with the rule the compiler used. Every other parameter is already in its
-    caller's terms, and a shape that does not block at all (an odd row count,
-    say) is left alone so it is reported as the mismatch it is.
+    Original NZ metadata can retain the caller's logical rank-2/3/4 shape;
+    compare it directly. Blocked rank-5 metadata instead describes the backend
+    view, so the caller's logical shape must be blocked with the compiler's
+    rule before comparison. A shape that does not block at all (an odd row
+    count, say) is left alone so it is reported as the mismatch it is.
     """
     if info.layout != "NZ":
+        return list(arg_shape)
+    # Layout describes storage, not the compilation stage of the metadata.
+    # Logical signatures must bypass both blocking and the blocked-batch guard.
+    if info.shape is not None and len(info.shape) < 5:
         return list(arg_shape)
     # A dynamic blocked batch can only come from logical [B, R, C]: the NZ
     # pass rejects dynamic leading extents at rank > 3. Entry code reads B

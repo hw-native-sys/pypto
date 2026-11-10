@@ -1711,7 +1711,12 @@ def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_p
 
 
 @pytest.mark.parametrize(
-    "dtype,torch_dtype,c0", [(DataType.INT8, torch.int8, 32), (DataType.FP16, torch.float16, 16)]
+    "dtype,torch_dtype,c0",
+    [
+        (DataType.INT8, torch.int8, 32),
+        (DataType.FP16, torch.float16, 16),
+        (DataType.FP8E4M3FN, torch.float8_e4m3fn, 32),
+    ],
 )
 def test_nz_device_tensor_shape_and_sidecar_round_trip(dtype, torch_dtype, c0):
     """Logical resident shapes remain valid after serializing blocked metadata."""
@@ -1755,12 +1760,63 @@ def test_dynamic_batch_nz_validation_requires_logical_rank_three(stacked, reload
         validate((8, 512, 512))
 
 
-def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path):
+@pytest.mark.parametrize(
+    ("declared", "actual"),
+    [
+        ((5120, 1280), (5120, 1280)),
+        ((-1, 256, 512), (3, 256, 512)),
+        ((2, 3, 256, 512), (2, 3, 256, 512)),
+    ],
+)
+@pytest.mark.parametrize("reload_metadata", [False, True])
+def test_logical_nz_device_tensor_validation(declared, actual, reload_metadata):
+    """Original NZ signatures must compare shapes before backend blocking."""
+    info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.FP8E4M3FN, "NZ")
+    if reload_metadata:
+        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
+    arg = DeviceTensor(0x1000, actual, torch.float8_e4m3fn)
+    assert _validate_device_tensor(arg, info) is None
+    # Exercise the actual binding path too; no descriptor address is dereferenced.
+    coerced, return_style = _coerce_args((arg,), [info], [], [], caller_name="NZ program")
+    assert coerced == [arg]
+    assert not return_style
+    with pytest.raises(TypeError, match="expects shape"):
+        _validate_device_tensor(
+            DeviceTensor(0x1000, (*actual[:-1], actual[-1] // 2), torch.float8_e4m3fn), info
+        )
+    with pytest.raises(TypeError, match="expects rank"):
+        _validate_device_tensor(DeviceTensor(0x1000, (actual[-1],), torch.float8_e4m3fn), info)
+    with pytest.raises(TypeError, match="expects dtype"):
+        _validate_device_tensor(DeviceTensor(0x1000, actual, torch.int8), info)
+
+
+@pytest.mark.parametrize("declared", [(-1, 256, 512), (2, 256, 512), (2, 3, 256, 512)])
+@pytest.mark.parametrize("reload_metadata", [False, True])
+def test_logical_nz_stacked_tensor_validation(declared, reload_metadata):
+    """Stacked resident tensors use the same logical parameter contract."""
+    info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.INT8, "NZ")
+    if reload_metadata:
+        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
+
+    def validate(shape, dtype=torch.int8):
+        shards = [DeviceTensor(0x1000 + i * 0x100000, shape[1:], dtype) for i in range(shape[0])]
+        return _validate_stacked_tensor(StackedDeviceTensor(shards, shape, list(range(shape[0]))), info)
+
+    actual = (2, *declared[1:])
+    assert validate(actual) is None
+    with pytest.raises(TypeError, match="expects shape"):
+        validate((*actual[:-1], actual[-1] // 2))
+    with pytest.raises(TypeError, match="expects rank"):
+        validate((2, actual[-1]))
+    with pytest.raises(TypeError, match="expects dtype"):
+        validate(actual, torch.float16)
+
+
+@pytest.mark.parametrize("declared", [[2, 4, 256, 512], [8, 16, 16, 16, 32]])
+def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path, declared):
     """Live and reloaded artifacts retain the NZ layout needed by argument binding."""
     span = ir.Span.unknown()
-    tensor_type = ir.TensorType(
-        [8, 16, 16, 16, 32], DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ)
-    )
+    tensor_type = ir.TensorType(declared, DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ))
     param = ir.Var("w", tensor_type, span)
     func = ir.Function("main", [param], [], ir.ReturnStmt([], span), span, ir.FunctionType.Orchestration)
     live = CompiledProgram(ir.Program([func], "Nz", span), str(tmp_path), platform="a2a3sim")
@@ -1809,8 +1865,9 @@ def test_fp4e1m2_return_allocation_uses_raw_carrier_bytes():
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-def test_packed_fp4_compiled_host_args_validate_carrier_shape_and_dtype(dtype):
-    info = _ParamInfo("packed", ir.ParamDirection.In, [-1, 32], dtype)
+@pytest.mark.parametrize("layout", [None, "NZ"])
+def test_packed_fp4_compiled_host_args_validate_carrier_shape_and_dtype(dtype, layout):
+    info = _ParamInfo("packed", ir.ParamDirection.In, [-1, 32], dtype, layout)
 
     def bind(value):
         return _coerce_args((value,), [info], [], [], caller_name="packed artifact")
