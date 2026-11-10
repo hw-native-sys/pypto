@@ -237,7 +237,8 @@ def test_kernel_rejects_hbg_host_data_access_but_program_compiles(tmp_path):
             )
 
 
-def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path):
+@pytest.mark.parametrize("pre_lowered", [False, True])
+def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path, pre_lowered):
     from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
     from pypto.ir.compile import _compile_artifact  # noqa: PLC0415
 
@@ -257,15 +258,56 @@ def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path):
                 pl.store(acc, [0, 0], c)
             return c
 
+    # A compilation input may already carry the blocked signature. Re-running
+    # compilation must neither call it logical nor block it a second time.
+    source = passes.block_nz_tensor_views()(NzMatmul) if pre_lowered else NzMatmul
     kernel = _compile_artifact(
-        NzMatmul, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
+        source, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
     )
     assert isinstance(kernel, CompiledArtifact) and kernel.metadata is not None
-    assert kernel.metadata.parameters[0].shape == (64, 128)
+    assert kernel.metadata.parameters[0].shape == ((1, 8, 4, 16, 16) if pre_lowered else (64, 128))
     assert kernel.metadata.lowered_parameters[0].shape == (1, 8, 4, 16, 16)
-    assert kernel.metadata.parameters[0].shape_is_lowered is False
+    assert kernel.metadata.parameters[0].shape_is_lowered is pre_lowered
     assert kernel.metadata.lowered_parameters[0].shape_is_lowered is True
     assert kernel.metadata.return_aliases == (2,)
+
+
+@pytest.mark.parametrize("pre_lowered", [False, True])
+@pytest.mark.parametrize("multi_entry", [False, True])
+def test_program_preserves_input_nz_lowering_state(tmp_path, pre_lowered, multi_entry):
+    from pypto import ir  # noqa: PLC0415
+
+    @pl.program
+    class NzEntries:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def first(self, weight: pl.Tensor[[64, 128], pl.FP16, pl.NZ]):
+            return
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def second(self, weight: pl.Tensor[[64, 128], pl.FP16, pl.NZ]):
+            return
+
+    source = NzEntries
+    if not multi_entry:
+        source = ir.Program(
+            [func for func in source.functions.values() if func.name != "second"],
+            source.name,
+            source.span,
+        )
+    if pre_lowered:
+        source = passes.block_nz_tensor_views()(source)
+    compiled = ir_compile(source, output_dir=str(tmp_path), skip_ptoas=True)
+    assert isinstance(compiled, CompiledProgram)
+    entries = [compiled["first"], compiled["second"]] if multi_entry else [compiled]
+    for entry in entries:
+        for program in (entry, CompiledProgram.from_dir(entry.output_dir)):
+            infos, _, _ = program._get_metadata()
+            assert infos[0].shape_is_lowered is pre_lowered
+            assert infos[0].shape == ((1, 8, 4, 16, 16) if pre_lowered else (64, 128))
+            # The caller still describes logical dimensions when the input IR
+            # has passed BlockNzTensorViews, including multi-entry artifacts.
+            arg = DeviceTensor(0x1000, (64, 128), torch.float16)
+            assert _validate_device_tensor(arg, infos[0]) is None
 
 
 @pytest.mark.parametrize("shape", [(2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32)])

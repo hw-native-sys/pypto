@@ -41,12 +41,14 @@ kernel 要求单芯片、单入口、显式提供 Out/InOut buffer，
 HBG Host Tensor 数据读写被拒绝，设备 submit predicate 保留原语义；program 编译
 仍支持原有分配及 Host 控制流程。
 
-metadata 区分逻辑调用签名 `params` 与 assembly 签名 `lowered_params`，均使用
-`ParamInfo`。PROGRAM 参数绑定和输出分配使用 lowering 前的原始 `params`，
+metadata 区分编译输入签名 `params` 与 assembly 签名 `lowered_params`，均使用
+`ParamInfo`。PROGRAM 参数绑定和输出分配使用编译输入的原始 `params`，
 从产物恢复以及选择多 orchestration 子入口时也保持这一行为；`lowered_params`
 仍用于 assembly ABI 校验。Torch 按逻辑 shape 校验。
-NZ 元数据记录 `shape_is_lowered`：原始签名为 `false`，lowering 后为 `true`。
-驻留张量和堆叠张量按原始 shape 直接比较，包括逻辑 rank 五及更高维度。
+NZ 元数据记录 `shape_is_lowered`：逻辑签名为 `false`，lowering 后为 `true`。
+编译输入已经是 pass 处理后的 IR 时，函数的 `nz_tensor_views_blocked` 标记使
+`params` 保留已 lowering 的阶段信息，多 orchestration 子入口也遵循此规则。
+驻留张量和堆叠张量按逻辑 shape 直接比较，包括逻辑 rank 五及更高维度。
 lowering 后的元数据需要先将调用者的 shape 分块再比较；这个计算不会重新排列存储。
 该标记在元数据重新加载后保持不变。没有标记的旧记录保留原有约定：小于五维按逻辑
 shape 比较，更高维度采用分块转换。旧版高维逻辑 NZ 产物需要重新编译以记录明确的阶段信息。

@@ -103,7 +103,9 @@ def validate_lowered_signature(logical: Sequence[ParamInfo], lowered: Sequence[P
         if (before.name, before.direction, before.dtype) != (after.name, after.direction, after.dtype):
             raise ValueError(f"Lowering changed external parameter {before.name!r}")
         expected = before.shape
-        if before.layout == "NZ" and before.shape is not None:
+        # Post-pass compilation inputs already describe the assembly shape;
+        # only a logical NZ signature needs blocking for this comparison.
+        if before.layout == "NZ" and before.shape is not None and before.shape_is_lowered is not True:
             dtype = _to_torch_dtype(before.dtype)
             if dtype is None:
                 raise ValueError(f"Unsupported NZ dtype for {before.name!r}: {before.dtype}")
@@ -128,11 +130,11 @@ def analyze_contract(
     if type(contract) is not ArtifactExecutionMode:
         raise TypeError(f"Expected ArtifactExecutionMode, got {contract!r}")
     if contract is ArtifactExecutionMode.KERNEL:
-        logical, _, _ = _extract_func_param_infos(entry_function(program), shape_is_lowered=False)
+        logical, _, _ = _extract_func_param_infos(entry_function(program))
         return logical, validate_kernel_program(program, logical)
     try:
         entry = entry_function(program)
-        logical, _, _ = _extract_func_param_infos(entry, shape_is_lowered=False)
+        logical, _, _ = _extract_func_param_infos(entry)
         return logical, return_aliases(program, entry)
     except (ValueError, TypeError):
         return None, None

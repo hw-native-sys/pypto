@@ -54,14 +54,17 @@ HBG host tensor data reads/writes are rejected; device submit
 predicates retain their existing semantics. Program compilation keeps its
 allocation and host-control behavior.
 
-Metadata distinguishes `params` (logical caller signature) from `lowered_params`
+Metadata distinguishes `params` (compilation input signature) from `lowered_params`
 (assembly signature); both use `ParamInfo`. PROGRAM argument binding and output
-allocation use the original, pre-lowering `params`, including after reloading
+allocation use the original input `params`, including after reloading
 an artifact and when selecting a multi-orchestration child. `lowered_params`
 remains available for assembly ABI validation. Torch validates logical shapes.
-NZ metadata records `shape_is_lowered`: `false` for the original signature,
-`true` after lowering. Resident and stacked tensor validation compares original
-shapes directly, including logical rank five or higher. Lowered metadata requires
+NZ metadata records `shape_is_lowered`: `false` for a logical signature,
+`true` after lowering. When compilation starts from post-pass IR, the function's
+`nz_tensor_views_blocked` marker preserves its already-lowered provenance in
+`params`, including multi-orchestration children. Resident and stacked tensor
+validation compares logical shapes directly, including logical rank five or higher.
+Lowered metadata requires
 blocking the caller's shape before comparison; this calculation does not repack
 storage. The marker survives metadata reloads. Legacy records without it retain
 the previous convention: ranks below five are logical, higher ranks use blocking.

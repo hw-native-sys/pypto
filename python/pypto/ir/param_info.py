@@ -386,6 +386,11 @@ def _extract_func_param_infos(
     """
     param_infos: list[_ParamInfo] = []
     output_indices: list[int] = []
+    if shape_is_lowered is None:
+        # Compilation may start from post-pass IR (e.g. kernel.lower()). Use
+        # the pass's idempotence marker: rank five alone is also a valid
+        # logical shape and cannot establish whether blocking has happened.
+        shape_is_lowered = "nz_tensor_views_blocked" in func.attrs
 
     for i, (param, direction) in enumerate(zip(func.params, func.param_directions, strict=True)):
         param_type = param.type

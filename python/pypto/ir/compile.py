@@ -510,7 +510,7 @@ def compile(  # noqa: PLR0913
             original = program.get_function(name)
             lowered_entry = lowered_program.get_function(name)
             assert original is not None and lowered_entry is not None
-            child_logical, _, _ = _extract_func_param_infos(original, shape_is_lowered=False)
+            child_logical, _, _ = _extract_func_param_infos(original)
             child_lowered, _, returns = _extract_func_param_infos(lowered_entry, shape_is_lowered=True)
             child_lowered = external_parameter_names(child_logical, child_lowered)
             metadata = ArtifactMetadata(
