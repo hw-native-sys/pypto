@@ -75,6 +75,8 @@ def harness(progress, monkeypatch, event):
             return {"id": 200 + len(writes)}
         if path.endswith("/runs/50"):
             return copy.deepcopy(run)
+        if "/runs/50/attempts/" in path:
+            return {**copy.deepcopy(run), "run_attempt": event["workflow_run"]["run_attempt"]}
         if path.endswith("/workflows/ci.yml"):
             return {"id": 99}
         if path.endswith("/pulls/123"):
@@ -195,6 +197,7 @@ def test_progress_workflow_is_isolated_from_test_code():
     assert job["runs-on"] == "ubuntu-latest"
     assert job["permissions"]["checks"] == "write"
     assert job["permissions"]["statuses"] == "read"
+    assert "display_title" not in job["if"]
     assert job["concurrency"]["cancel-in-progress"] is False
     checkout = job["steps"][0]["with"]
     assert checkout["ref"] == "${{ github.workflow_sha }}"
@@ -300,6 +303,21 @@ def test_completion_reconciles_jobs_across_write_budget(progress, monkeypatch, e
     progress.monitor(REPO, event)
     assert waits == [60]
     assert len(writes) == 2
+
+
+@pytest.mark.parametrize("title", [None, "", "CI"])
+def test_progress_resolves_static_or_missing_webhook_title(progress, event, harness, title):
+    run, _, jobs, writes, _ = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    if title is None:
+        event["workflow_run"].pop("display_title")
+    else:
+        event["workflow_run"]["display_title"] = title
+    progress.monitor(REPO, event)
+    assert len(writes) == 1
+    assert writes[0][1]["head_sha"] == HEAD
+    assert writes[0][1]["conclusion"] == "success"
 
 
 if __name__ == "__main__":

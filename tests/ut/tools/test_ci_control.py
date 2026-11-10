@@ -33,6 +33,7 @@ def control(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("CI_ROUTED_EVENT", raising=False)
     monkeypatch.setenv("CI_ROUTED_HEAD", HEAD)
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("Unexpected subprocess"))
     return module
@@ -327,7 +328,7 @@ def publication(control, monkeypatch, pr):
         elif path.endswith("/actions/runs/50"):
             return run
         elif path.endswith("/workflows/ci.yml"):
-            return {"id": 99}
+            return {"id": 99, "path": control.WORKFLOW}
         elif path.endswith("/pulls/123"):
             return pr
         elif "event=workflow_dispatch" in path:
@@ -924,6 +925,12 @@ def test_full_rerun_concurrency_is_scoped_to_original_request():
     route_job = publisher["jobs"]["route"]
     assert "concurrency" not in route_job
     assert "github.event.workflow_run.head_branch == 'main'" in route_job["if"]
+    assert "display_title" not in route_job["if"]
+    assert route_job["permissions"]["actions"] == "read"
+    assert publisher[True]["workflow_dispatch"]["inputs"]["run_id"]["required"] is True
+    assert publisher["jobs"]["publish"]["steps"][-1]["env"]["CI_ROUTED_EVENT"] == (
+        "${{ needs.route.outputs.event }}"
+    )
     assert route_job["steps"][0]["with"]["ref"] == "${{ github.workflow_sha }}"
     assert route_job["steps"][1]["run"] == "python .github/scripts/ci_control.py route"
     assert publisher["jobs"]["publish"]["needs"] == "route"
@@ -1114,14 +1121,23 @@ def test_verified_event_routes_all_attempts_and_bases_to_same_head(
 ):
     output_file = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
-    monkeypatch.setattr(control, "api", lambda *args: pytest.fail("Routing uses only event provenance"))
+
+    def lookup(path):
+        assert path == (
+            f"repos/{REPO}/actions/runs/50/attempts/{publication_event['workflow_run']['run_attempt']}"
+        )
+        return copy.deepcopy(publication_event["workflow_run"])
+
+    monkeypatch.setattr(control, "api", lookup)
     publication_event["action"] = action
     control.route(REPO, publication_event)
     publication_event["workflow_run"].update(
         run_attempt=2, display_title=f"CI full PR #123 @{HEAD} base:{'d' * 40}"
     )
     control.route(REPO, publication_event)
-    assert output_file.read_text() == f"key=123-{HEAD}\n" * 2
+    lines = output_file.read_text().splitlines()
+    assert lines[::2] == [f"key=123-{HEAD}"] * 2
+    assert all(json.loads(line.removeprefix("event="))["workflow_run"]["id"] == 50 for line in lines[1::2])
 
 
 @pytest.mark.parametrize("action", ["requested", "in_progress", "completed"])
@@ -1167,7 +1183,6 @@ def test_live_lookup_failure_invalidates_event_success(
         (("workflow_run", "event"), "pull_request"),
         (("workflow_run", "repository", "full_name"), "unrelated/repo"),
         (("workflow_run", "head_repository", "id"), 2),
-        (("workflow_run", "display_title"), "Unrelated run"),
         (("workflow_run", "run_attempt"), 0),
         (("workflow_run", "run_number"), "8"),
         (("workflow_run", "workflow_id"), None),
@@ -1628,6 +1643,208 @@ def test_every_downstream_job_explicitly_tolerates_skipped_lint_ancestors():
         assert "needs.changes.result == 'success'" in condition, name
         if "toolchain" in job["needs"]:
             assert "needs.toolchain.result == 'success'" in condition, name
+
+
+@pytest.mark.parametrize("title", [None, "", "CI", f"CI full PR #456 @{'d' * 40} base:{BASE}"])
+def test_router_resolves_webhook_title_from_exact_api_attempt(
+    control, monkeypatch, publication, publication_event, tmp_path, title
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    source = publication_event["workflow_run"]
+    actual = copy.deepcopy(source)
+    if title is None:
+        source.pop("display_title")
+    else:
+        source["display_title"] = title
+
+    def api(path):
+        assert path == f"repos/{REPO}/actions/runs/50/attempts/1"
+        return actual
+
+    monkeypatch.setattr(control, "api", api)
+    control.route(REPO, publication_event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    routed = json.loads(outputs["event"])
+    assert routed["workflow_run"]["display_title"] == actual["display_title"]
+    assert control.verified_event_run(REPO, routed)["run_attempt"] == 1
+
+
+@pytest.mark.parametrize("field", ["id", "workflow_id", "run_number", "run_attempt"])
+def test_router_rejects_api_identity_mismatch(control, monkeypatch, publication_event, tmp_path, field):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    actual = copy.deepcopy(publication_event["workflow_run"])
+    actual[field] += 1
+    monkeypatch.setattr(control, "api", lambda path: actual)
+    with pytest.raises(control.UntrustedRunError):
+        control.route(REPO, publication_event)
+    assert not target.exists()
+
+
+def test_router_ignores_manual_main_ci_without_pr_inputs(control, monkeypatch, publication_event, tmp_path):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    actual = {**publication_event["workflow_run"], "display_title": "CI workflow_dispatch main"}
+    monkeypatch.setattr(control, "api", lambda path: actual)
+    control.route(REPO, publication_event)
+    assert not target.exists()
+
+
+def test_reconciliation_publishes_existing_result_without_dispatching(
+    control, monkeypatch, publication, tmp_path
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    event = {"inputs": {"run_id": "50"}}
+    control.route(REPO, event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+    control.publish(REPO, event)
+    assert len(publication[3]) == 1
+    path, payload = publication[3][0]
+    assert path == f"repos/{REPO}/statuses/{HEAD}"
+    assert payload["state"] == "success"
+    assert payload["target_url"].endswith("/runs/50/attempts/2")
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/main", ""])
+def test_reconciliation_requires_main(control, monkeypatch, ref):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", ref)
+    with pytest.raises(control.UntrustedRunError, match="must run from main"):
+        control.route(REPO, {"inputs": {"run_id": "50"}})
+
+
+@pytest.mark.parametrize("run_id", ["", "0", "-1", "1/attempts/2", "1\n", 50])
+def test_reconciliation_rejects_invalid_run_id(control, monkeypatch, run_id):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    with pytest.raises(ValueError, match="positive workflow run ID"):
+        control.route(REPO, {"inputs": {"run_id": run_id}})
+
+
+def test_routed_identity_invalidates_result_on_api_failure(control, monkeypatch, publication, tmp_path):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    event = {"inputs": {"run_id": "50"}}
+    control.route(REPO, event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+
+    def unavailable(path, payload=None):
+        if payload is not None:
+            publication[3].append((path, payload))
+            return None
+        assert path.endswith("/actions/runs/50")
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    control.publish(REPO, event)
+    assert publication[3][0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize("action", ["in_progress", "completed"])
+def test_failed_route_reaches_failure_only_publisher(
+    control, monkeypatch, publication, publication_event, tmp_path, action
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    publication_event["action"] = action
+    publication_event["workflow_run"]["run_attempt"] = 2
+    reads = []
+
+    def api(path, payload=None):
+        if payload is not None:
+            publication[3].append((path, payload))
+            return None
+        reads.append(path)
+        assert path == f"repos/{REPO}/actions/runs/50/attempts/2"
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", api)
+    control.route(REPO, publication_event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    assert json.loads(outputs["event"])["routing_failed"] is True
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+    control.publish(REPO, publication_event)
+    assert len(reads) == 1, "A failed route cannot be upgraded to success by a later lookup"
+    assert len(publication[3]) == 1
+    path, payload = publication[3][0]
+    assert path == f"repos/{REPO}/statuses/{HEAD}"
+    assert payload["state"] == "failure"
+    assert payload["target_url"].endswith("/runs/50/attempts/2")
+
+
+@pytest.mark.parametrize("newer", ["run", "attempt", "unbound"])
+def test_failed_route_preserves_newer_status_owner(
+    control, monkeypatch, publication, publication_event, tmp_path, newer
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    candidate = copy.deepcopy(publication[0])
+    if newer == "run":
+        candidate.update(id=51, run_number=9)
+    status = {
+        "context": "ci/full",
+        "state": "success",
+        "target_url": f"https://github.com/{REPO}/actions/runs/{candidate['id']}/attempts/2",
+    }
+    if newer == "unbound":
+        status.update(
+            state="pending",
+            description="Full CI requested; waiting for dispatch",
+            target_url=f"https://github.com/{REPO}/pull/123",
+        )
+
+    def api(path, payload=None):
+        assert payload is None, "A delayed failure-only route must preserve the newer writer"
+        if path == f"repos/{REPO}/actions/runs/50/attempts/1":
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        expected = "51" if newer == "run" else "50/attempts/2"
+        assert path == f"repos/{REPO}/actions/runs/{expected}"
+        return candidate
+
+    monkeypatch.setattr(control, "api", api)
+    monkeypatch.setattr(control, "pages", lambda *args: [status])
+    control.route(REPO, publication_event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+    control.publish(REPO, publication_event)
+
+
+@pytest.mark.parametrize("title", [None, "", "CI"])
+def test_failed_route_cannot_invent_pr_identity(control, monkeypatch, publication_event, tmp_path, title):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    if title is None:
+        publication_event["workflow_run"].pop("display_title")
+    else:
+        publication_event["workflow_run"]["display_title"] = title
+
+    def unavailable(path):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(control.UntrustedRunError):
+        control.route(REPO, publication_event)
+    assert not target.exists()
+
+
+def test_progress_resolution_keeps_api_failure_for_retry(control, monkeypatch, publication_event):
+    def unavailable(path):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        control.resolved_event(REPO, publication_event)
 
 
 if __name__ == "__main__":

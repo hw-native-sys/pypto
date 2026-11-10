@@ -119,11 +119,23 @@ job confirms all applicable tests passed. Skipped, missing, failed or cancelled
 required tests cannot satisfy it. The publisher runs on a fresh GitHub-hosted
 runner, reads GitHub metadata, and never executes PR code or downloads artifacts.
 Before joining the status writer concurrency group, the router validates the
-event's main branch, workflow identity, repository and full-run title. Unrelated
+event's main branch, workflow identity and repository, then reads its exact run
+attempt through REST to resolve the full-run title. Webhook display titles are
+not used as job-level filters. The router passes the validated identity to the
+writer, which re-reads live state before publishing. Unrelated
 runs cannot displace a pending publisher. Commands and publishers use the same
 `queue: max` concurrency group, so older events cannot replace an already queued
 completion writer. GitHub permits 100 waiting jobs per group; excess arrivals are
 cancelled, and a cancelled command or completion publisher must be retried.
+
+If tests passed but `ci/full` remains pending because publication was missed,
+run **Actions → CI Full Status → Run workflow** on `main`, supplying the existing
+full workflow run ID as `run_id`. This only reconciles metadata; it does not
+dispatch tests or use a device runner. It uses the same PR/head/base checks and
+writer queue, preserves newer requests, and cannot turn an obsolete or failed
+run green. This recovery entry becomes available after the updated workflow is
+merged into main.
+
 Test jobs do not hold status-write or Actions-write tokens. The entire `CI`
 workflow declares `cache-mode: read`: GitHub's cache service prevents cache
 writes, including direct API calls from PR code. Hosted wheel sharing uses
@@ -136,6 +148,11 @@ Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
 revision is preserved; the finalizer combines successful dependencies from the
 previous attempt with rerun results. If only the finalizer is missing, rerun that
 job too. The status publisher handles rerun events and ignores superseded requests.
+If the router's run lookup fails but the event's origin and full PR title can
+still be verified, it queues a failure-only update so an old green gate cannot
+survive that lookup failure. This path preserves verified newer writers and
+cannot grant success from event data. Events without a verifiable PR identity
+are rejected; per-job progress retains its API retry behavior.
 If publication finds that the PR has moved to another head, closed, or changed
 its target, it invalidates the original tested head unless a verified newer request owns its
 status. Resetting or reopening the PR cannot revive an old green rerun result.

@@ -470,7 +470,7 @@ def aggregate(needs: dict[str, Any]) -> None:
     report("All required full CI jobs passed. Wheel warm-up jobs are advisory.")
 
 
-def verified_event_run(repo: str, event: dict[str, Any]) -> dict[str, Any]:
+def verified_event_run(repo: str, event: dict[str, Any], *, require_title: bool = True) -> dict[str, Any]:
     """Validate event provenance for routing or invalidation, never to pass a gate."""
     try:
         run, workflow, repository = event["workflow_run"], event["workflow"], event["repository"]
@@ -485,7 +485,7 @@ def verified_event_run(repo: str, event: dict[str, Any]) -> dict[str, Any]:
             or run["repository"]["full_name"] != repo
             or run["repository"]["id"] != repository["id"]
             or run["head_repository"]["id"] != repository["id"]
-            or not FULL_TITLE.fullmatch(run["display_title"])
+            or (require_title and not FULL_TITLE.fullmatch(run.get("display_title", "")))
             or any(
                 type(run[key]) is not int or run[key] <= 0
                 for key in ("id", "workflow_id", "run_number", "run_attempt")
@@ -499,23 +499,113 @@ def verified_event_run(repo: str, event: dict[str, Any]) -> dict[str, Any]:
     return run
 
 
+def resolved_event(
+    repo: str, event: dict[str, Any], *, allow_failure_route: bool = False
+) -> dict[str, Any] | None:
+    """Resolve routing metadata from REST, not the webhook's display title."""
+    routing_failed = False
+    if "workflow_run" not in event:
+        if (
+            os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or os.environ.get("GITHUB_REF") != "refs/heads/main"
+        ):
+            raise UntrustedRunError("Status reconciliation must run from main")
+        run_id = (event.get("inputs") or {}).get("run_id", "")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[1-9][0-9]*", run_id):
+            raise ValueError("Expected a positive workflow run ID")
+        run = api(f"repos/{repo}/actions/runs/{run_id}")
+        if run["id"] != int(run_id):
+            raise UntrustedRunError("Unexpected reconciliation run ID")
+        workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+        event = {
+            "action": "completed",
+            "repository": run["repository"],
+            "workflow": workflow,
+            "workflow_run": run,
+        }
+        verified_event_run(repo, event)
+    else:
+        source = verified_event_run(repo, event, require_title=False)
+        # Resolve the event's exact attempt. A delayed event must not select a
+        # later attempt for progress; the status writer separately reads live state.
+        try:
+            run = api(f"repos/{repo}/actions/runs/{source['id']}/attempts/{source['run_attempt']}")
+        except subprocess.CalledProcessError:
+            if not allow_failure_route:
+                raise
+            # Event provenance and a complete PR title can identify which old
+            # gate to invalidate, but can never establish a successful result.
+            run = verified_event_run(repo, event)
+            routing_failed = True
+            report("Run lookup failed; routing the verified event for failure-only publication.")
+        resolved = {**event, "workflow_run": run}
+        verified_event_run(repo, resolved, require_title=False)
+        for key in ("id", "workflow_id", "run_number", "run_attempt", "head_sha"):
+            if run.get(key) != source.get(key):
+                raise UntrustedRunError(f"Workflow event and API disagree on {key}")
+        if not FULL_TITLE.fullmatch(run.get("display_title", "")):
+            report("Ignoring a main CI run without PR full inputs.")
+            return None
+        event = resolved
+    # Pass only routing identity between trusted jobs. Do not carry commit
+    # messages or other bulky repository content in Actions job outputs.
+    repository = {key: run["repository"][key] for key in ("id", "full_name")}
+    identity = {
+        key: run[key]
+        for key in (
+            "id",
+            "workflow_id",
+            "run_number",
+            "run_attempt",
+            "path",
+            "event",
+            "head_branch",
+            "display_title",
+        )
+    }
+    identity.update(repository=repository, head_repository={"id": run["head_repository"]["id"]})
+    return {
+        "action": event["action"],
+        "repository": repository,
+        "workflow": {key: event["workflow"][key] for key in ("id", "path")},
+        "workflow_run": identity,
+        "routing_failed": routing_failed,
+    }
+
+
 def route(repo: str, event: dict[str, Any]) -> None:
     """Reject unrelated events before they can join the status writer queue."""
+    routed = resolved_event(repo, event, allow_failure_route=True)
+    if routed is None:
+        return
+    event = routed
     run = verified_event_run(repo, event)
     match = FULL_TITLE.fullmatch(run["display_title"])
     assert match is not None  # Already validated along with workflow identity.
-    output({"key": f"{match[1]}-{match[2]}"})
+    output({"key": f"{match[1]}-{match[2]}", "event": json.dumps(event)})
+
+
+def publication_run(repo: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Read the live attempt, or return verified identity that can only invalidate."""
+    if routed := os.environ.get("CI_ROUTED_EVENT"):
+        # Produced by the read-only router on a separate trusted runner. This
+        # also preserves failure invalidation when the live API is unavailable.
+        event = json.loads(routed)
+        verified_event_run(repo, event)
+        if event.get("routing_failed") is True:
+            # Retain the failed event's attempt for newer-writer protection. A
+            # delayed failed route cannot invalidate a later successful attempt.
+            return event["workflow_run"], True
+    # Success requires the live attempt: a delayed completion event may describe
+    # a previous successful attempt while a native rerun is already in progress.
+    try:
+        return api(f"repos/{repo}/actions/runs/{int(event['workflow_run']['id'])}"), False
+    except (ValueError, subprocess.CalledProcessError):
+        return verified_event_run(repo, event), True
 
 
 def publish(repo: str, event: dict[str, Any]) -> None:
-    # Success requires the live attempt: a delayed completion event may describe
-    # a previous successful attempt while a native rerun is already in progress.
-    live_lookup_failed = False
-    try:
-        run = api(f"repos/{repo}/actions/runs/{int(event['workflow_run']['id'])}")
-    except (ValueError, subprocess.CalledProcessError):
-        run = verified_event_run(repo, event)
-        live_lookup_failed = True
+    run, lookup_failed = publication_run(repo, event)
     match = FULL_TITLE.fullmatch(run.get("display_title", ""))
     if not match or run["event"] != "workflow_dispatch":
         return
@@ -531,7 +621,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
     # Lookup failures and obsolete PR revisions invalidate old green statuses;
     # untrusted workflow origins never write.
     try:
-        if live_lookup_failed:
+        if lookup_failed:
             raise ValueError("Cannot read the live CI attempt; event data cannot prove success")
         workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
         if run["workflow_id"] != workflow["id"]:

@@ -94,10 +94,8 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
 
 
 def monitor(repo: str, event: dict[str, Any]) -> None:
-    source = control.verified_event_run(repo, event)
-    match = control.FULL_TITLE.fullmatch(source["display_title"])
-    assert match is not None
-    number, head = int(match[1]), match[2]
+    source = control.verified_event_run(repo, event, require_title=False)
+    resolved = False
     deadline = time.monotonic() + MONITOR_SECONDS
     checks = None
     workflow = None
@@ -109,6 +107,16 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
             if max_writes == 0:
                 time.sleep(min(delay, max(0, deadline - time.monotonic())))
                 continue
+            if not resolved:
+                routed = control.resolved_event(repo, event)
+                if routed is None:
+                    return
+                event = routed
+                source = event["workflow_run"]
+                resolved = True
+            match = control.FULL_TITLE.fullmatch(source["display_title"])
+            assert match is not None
+            number, head = int(match[1]), match[2]
             run = control.api(f"repos/{repo}/actions/runs/{source['id']}")
             control.verified_event_run(repo, {**event, "workflow_run": run})
             # A delayed event may belong to an old attempt. Never project it onto a
