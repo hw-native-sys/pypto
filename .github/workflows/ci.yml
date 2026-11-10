@@ -2505,7 +2505,7 @@ jobs:
           task-submit --device auto --device-num 4 --timeout 3900 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
               tests/st/distributed/test_l3_urma_async.py \
-              -v --platform=a5 --device=\$TASK_DEVICE \
+              -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
               --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/urma-junit.xml"
 
       - name: Upload A5 URMA logs

@@ -1257,9 +1257,16 @@ class TestL3UrmaAsync:
         outputs = _run_single_output(test_config, device_ids, n_ranks, _build_dynamic_subregion)
 
         expected = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+        # Every rank's own row is written locally in full; peer rows only carry
+        # the half-row slice that rank transferred at its runtime column offset.
+        for r in range(n_ranks):
+            expected[r, r, :] = torch.arange(SIZE, dtype=torch.float32) + r * 1000
         for d in range(n_ranks):
-            for j in range(HALF):
-                expected[:, d, d + j] = d * 1000 + d + j
+            for r in range(n_ranks):
+                if r == d:
+                    continue
+                for j in range(HALF):
+                    expected[r, d, d + j] = d * 1000 + d + j
         assert torch.allclose(outputs, expected), (
             f"dynamic subregion mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
