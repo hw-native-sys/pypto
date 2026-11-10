@@ -304,7 +304,7 @@ def _omitted_output_metas(
     signature = inspect.signature(dep._func)
     source_annotations = {arg.arg: arg.annotation for arg in definition.args.args}
     namespace = _dep_annotation_namespace(dep, binding)
-    dyn_map = _ast_analysis.build_dyndim_map_for_func(dep._func, tuple(dep._param_names()))
+    dyn_map = _ast_analysis.build_dyndim_map_for_func(dep._func, tuple(outputs), include_annotations=False)
     result: dict[str, TensorMeta] = {}
     for name in outputs:
         eager = signature.parameters[name].annotation
@@ -2879,6 +2879,10 @@ def resolve_dep_call_metadata(
 
     scope = _StaticScope.of(caller_func, caller_constexpr)
     binding: dict[str, str] = {}
+    # Caller storage can acquire declared or propagated descriptor axes.
+    # An omitted Out is instead allocated from its already-specialized type.
+    _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
+    _overlay_dep_declared_layouts(dep, dep_tensor_meta)
     if call_node is not None:
         constexpr_params = _arguments.constexpr_params(dep._func)
         if constexpr_params:
@@ -2894,8 +2898,6 @@ def resolve_dep_call_metadata(
         dep_tensor_meta.update(_omitted_output_metas(dep, call_node, binding))
 
     _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta, binding)
-    _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
-    _overlay_dep_declared_layouts(dep, dep_tensor_meta)
 
     return dep_tensor_meta, dep_scalar_dtypes
 

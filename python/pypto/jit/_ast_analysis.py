@@ -120,6 +120,8 @@ def _collect_bind_dynamic_bindings(
 def build_dyndim_map_for_func(
     func: Any,
     param_names: tuple[str, ...],
+    *,
+    include_annotations: bool = True,
 ) -> dict[str, dict[int, DynDim]]:
     """For each tensor param of ``func``, return ``dim_idx → DynDim``.
 
@@ -152,6 +154,10 @@ def build_dyndim_map_for_func(
     for (p, i), dv_name in bd_bindings.items():
         out.setdefault(p, {})[i] = DynDim(name=dv_name, literal=_literal_for(dv_name), static_bound=0)
 
+    # A call-resolved annotation supplies its own axes. Keep only independent
+    # body declarations when the definition-time annotation is superseded.
+    if not include_annotations:
+        return out
     # annotation source fills dims not covered by bind_dynamic
     for key, dv_name in ann_bindings.items():
         p, idx_str = key.rsplit("__", 1)

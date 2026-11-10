@@ -1223,3 +1223,31 @@ def test_submit_return_metadata_follows_the_selected_constexpr_branch():
     consumer = program.get_function("copy_to")
     assert consumer is not None
     assert ir.structural_equal(consumer.params[0].type, ir.TensorType([16, 32], pl.BF16))
+
+
+def test_omitted_output_uses_dynamic_axes_from_the_call_resolved_shape():
+    rows = pl.dynamic("omitted_rows")
+    shape = [rows, 32]
+
+    @pl.jit.incore
+    def producer(
+        x: pl.Tensor[[rows, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[shape, pl.FP32]],
+        shape: pl.constexpr,
+    ):
+        value = pl.load(x, [0, 0], shape)
+        return pl.store(value, [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor[[rows, 32], pl.FP32]):
+        result, done = pl.submit(producer, x, shape=[8, 32])
+        return result
+
+    program = entry.specialize(torch.empty(16, 32))
+    producer_fn = program.get_function("producer")
+    assert producer_fn is not None
+    expected = ir.TensorType([8, 32], pl.FP32)
+    assert ir.structural_equal(producer_fn.params[1].type, expected)
+    (launch,) = _submissions(program)
+    assert isinstance(launch.type, ir.TupleType)
+    assert ir.structural_equal(launch.type.types[0], expected)
