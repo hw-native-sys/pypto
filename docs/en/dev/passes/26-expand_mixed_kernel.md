@@ -2,6 +2,13 @@
 
 Expands mixed InCore functions into separate AIC (Cube) + AIV (Vector) kernels wrapped in a Group function. Non-mixed InCore functions get their FunctionType converted to AIC or AIV.
 
+## Explicit splitting and unsplit communication
+
+Mixed function-level AUTO splitting is no longer supported, including direct
+calls to this pass that skip `LowerAutoVectorSplit`. Use `pl.split_aiv` with
+explicit shard/gather and per-lane computation. Ordinary unsplit mixed kernels
+retain full-width implicit cross-core communication and backend-specific replay.
+
 ## Overview
 
 After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may contain both Cube ops (`tile.matmul`, `tile.gemv`, etc.) and Vector ops (`tile.add`, `tile.exp`, etc.). Some ops like `tile.load`, `tile.store`, `tile.move`, and `tile.reshape` are classified as Cube or Vector based on the MemorySpace of their tile operands. Functions containing ops from both sides are **mixed InCore functions**. Hardware requires Cube and Vector operations to run on separate core types, so this pass splits them into:
@@ -289,8 +296,7 @@ with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4)]):
 
 # Or on the pl.at form, alongside an independent split mode:
 with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
-                          pl.cross_core_slot(slot_num=16)]):
+           optimizations=[pl.cross_core_slot(slot_num=16)]):
     ...
 ```
 
@@ -520,9 +526,9 @@ relate — that is how the consumer finds lane 1's band inside the FIFO slot:
 `BoundaryTransportSplitCode` reads the lane extents `eL = clamp(V - L*S, 0, S)`
 off the FULL-width tile — the shard's operand (Cube→Vector) or the gather's result
 (Vector→Cube). `S` is the partition stride: the tile's physical half, or the
-balanced `lane_stride=S` attr when
-[LowerAutoVectorSplit](25-lower_auto_vector_split.md) rebalanced a ragged
-boundary. So an odd split axis (an odd physical box, an odd valid extent inside
+explicit `lane_stride=S` metadata in supported low-level IR. This pass and
+`LowerAutoVectorSplit` do not infer a new partition for a ragged body.
+So an odd split axis (an odd physical box, an odd valid extent inside
 an even one, or a rebalanced odd valid region) takes the odd code, an empty
 lane 1 keeps the even one, and a ragged extent pto-isa cannot place — only
 reachable on the box partition — is rejected with the extents that would work.

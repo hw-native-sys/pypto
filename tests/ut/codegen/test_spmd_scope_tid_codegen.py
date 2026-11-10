@@ -76,7 +76,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -240,7 +240,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -301,7 +301,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -350,7 +350,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -411,7 +411,6 @@ class TestSpmdScopeTaskIdCodegen:
                 bias: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
                 left = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
                 right = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
                 product = pl.matmul(
@@ -501,7 +500,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -689,7 +688,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],

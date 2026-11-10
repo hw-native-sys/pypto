@@ -2,6 +2,12 @@
 
 将混合 InCore 函数展开为独立的 AIC（Cube）+ AIV（Vector）内核，并包装在 Group 函数中。非混合 InCore 函数的 FunctionType 会被转换为 AIC 或 AIV。
 
+## 显式分片与未拆分通信
+
+mixed 函数级 AUTO 拆半已移除，包括跳过 `LowerAutoVectorSplit` 直接调用本 pass
+的情况。请使用 `pl.split_aiv`、显式 shard/gather 和用户编写的每 lane 计算。
+普通未拆分 mix 保留全幅隐式跨核通信及 backend 所需的握手重放。
+
 ## 概述
 
 在 `OutlineIncoreScopes` 和 `ConvertTensorToTileOps` 之后，InCore 函数可能同时包含 Cube 操作（`tile.matmul`、`tile.gemv` 等）和 Vector 操作（`tile.add`、`tile.exp` 等）。部分操作如 `tile.load`、`tile.store`、`tile.move`、`tile.reshape` 根据其 tile 操作数的 MemorySpace 被分类为 Cube 或 Vector。包含两侧操作的函数是**混合 InCore 函数**。硬件要求 Cube 和 Vector 操作在不同的核心类型上运行，因此该 Pass 将它们拆分为：
@@ -245,8 +251,7 @@ with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4)]):
 
 # 也支持 pl.at 形式，并可与彼此独立的 split 模式组合：
 with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
-                          pl.cross_core_slot(slot_num=16)]):
+           optimizations=[pl.cross_core_slot(slot_num=16)]):
     ...
 ```
 
@@ -441,9 +446,9 @@ AIV lane 的*运行时* extent 之间的关系——消费侧正是靠它在 FIF
 
 `BoundaryTransportSplitCode` 从**全宽** tile 上读取 lane extent
 `eL = clamp(V - L*S, 0, S)`——shard 取其操作数（Cube→Vector），gather 取其结果
-（Vector→Cube）。`S` 是分区步长：默认为该 tile 的物理 half；当
-[LowerAutoVectorSplit](25-lower_auto_vector_split.md) 对 ragged 边界做了均分时，则取算子上
-`lane_stride=S` 属性。因此奇数切分轴（奇数物理 box、偶数 box 内的奇数 valid extent，或均分
+（Vector→Cube）。`S` 是分区步长：默认取物理 half，或受支持的低层 IR 中显式
+提供的 `lane_stride=S`。本 pass 与 `LowerAutoVectorSplit` 不再为 ragged body 自动推导
+新的分区。因此奇数切分轴（奇数物理 box、偶数 box 内的奇数 valid extent，或均分
 后的奇数 valid 区域）会取奇数 code；lane 1 为空时保持偶数 code；pto-isa 无法摆放的 ragged
 extent（只可能出现在 box 分区上）则被拒绝，并给出可行的取值。两侧 lane 的函数体用相同输入执行同一推导，因此 AIC 与 AIV 侧永远一致。
 Vector→Cube 的 gather 没有奇数形态（pto-isa 的向量侧 producer 按 lane 1 自身的 extent

@@ -42,10 +42,12 @@ class V2CUDProgram:
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
-            a_plus_b = pl.add(a, b)
-            sub = pl.sub(a, b)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                a_half = a[lane * 16 : lane * 16 + 16, :]
+                b_half = b[lane * 16 : lane * 16 + 16, :]
+                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+                sub = pl.aic_gather(pl.sub(a_half, b_half))
             out = pl.matmul(a_plus_b, sub)
             output = pl.assemble(output, out, [0, 0])
         return output
@@ -62,10 +64,12 @@ class V2CLRProgram:
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
-            a_plus_b = pl.add(a, b)
-            sub = pl.sub(a, b)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                a_half = a[:, lane * 16 : lane * 16 + 16]
+                b_half = b[:, lane * 16 : lane * 16 + 16]
+                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+                sub = pl.aic_gather(pl.sub(a_half, b_half))
             out = pl.matmul(a_plus_b, sub)
             output = pl.assemble(output, out, [0, 0])
         return output
@@ -99,14 +103,17 @@ class C2VLRProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
             for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+                acc = pl.matmul(a, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    half = pl.aiv_shard(acc)
+                    col = n0 + lane * (N_BLOCK // 2)
+                    c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [0, col])
         return c
 
 
@@ -121,14 +128,17 @@ class C2VUDProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+                acc = pl.matmul(a, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    half = pl.aiv_shard(acc)
+                    row = lane * (M // 2)
+                    c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [row, n0])
         return c
 
 
@@ -162,15 +172,20 @@ class BiDirectUDProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
         ):
             for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                a_add = pl.add(a, 1.0)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    a_half = a[lane * (M // 2) : lane * (M // 2) + M // 2, :]
+                    a_add = pl.aic_gather(pl.add(a_half, 1.0))
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+                acc = pl.matmul(a_add, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    half = pl.aiv_shard(acc)
+                    row = lane * (M // 2)
+                    c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [row, n0])
         return c
 
 
@@ -185,15 +200,20 @@ class BiDirectLRProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
         ):
             for nb in pl.range(0, N_BLOCKS):
                 n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                a_add = pl.add(a, 1.0)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    a_half = a[:, lane * (K // 2) : lane * (K // 2) + K // 2]
+                    a_add = pl.aic_gather(pl.add(a_half, 1.0))
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
+                acc = pl.matmul(a_add, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    half = pl.aiv_shard(acc)
+                    col = n0 + lane * (N_BLOCK // 2)
+                    c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [0, col])
         return c
 
 
@@ -324,10 +344,12 @@ _SCENARIOS = [
 ]
 
 
+# Source-level torch emission has no region interpreter. Explicit split cases
+# are exercised through lowering by the Default-pipeline golden tests below.
 @pytest.mark.parametrize(
     ("_name", "program", "builder", "arg_order", "out_name", "golden_fn"),
-    _SCENARIOS,
-    ids=[s[0] for s in _SCENARIOS],
+    [case for case in _SCENARIOS if case[0].endswith("nosplit")],
+    ids=[s[0] for s in _SCENARIOS if s[0].endswith("nosplit")],
 )
 def test_cross_core_codegen_vs_golden(
     _name: str,
@@ -763,23 +785,12 @@ def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
 
 
 # ---------------------------------------------------------------------------
-# LowerAutoVectorSplit auto-split golden correctness (RFC #1300 convergence).
-#
-# LowerAutoVectorSplit is the live auto-split lowering path: it converts an AUTO
-# ``pl.split`` mixed InCore function into the explicit ``split_aiv`` form BEFORE
-# ExpandMixedKernel, so the op-driven boundary arm folds tile.aiv_shard /
-# tile.aic_gather into split-stamped tpush/tpop. After it runs, SplitVectorKernel
-# only stamps attrs (its split_aiv arm).
-#
-# These tests pin functional correctness on REAL ``pl.split`` kernels (cube->vector,
-# vector->cube, and bidirectional; UP_DOWN and LEFT_RIGHT): each runs the full
-# Default pipeline and asserts the codegen'd kernel matches its torch golden. A
-# regression in the lowering (e.g. a divergent tpop TileView or a mis-positioned
-# get_subblock_idx binding) surfaces as a numerical mismatch here.
+# Explicit split numerical coverage through the Default pipeline. Cube/vector
+# boundaries and per-lane addresses are authored in the test programs above.
 # ---------------------------------------------------------------------------
 
 
-def _run_split_auto_golden(
+def _run_explicit_split_golden(
     program: _ir.Program,
     tensors: dict[str, torch.Tensor],
     arg_order: list[str],
@@ -803,11 +814,11 @@ def _run_split_auto_golden(
     result = ns["main"](*args)
     actual = tensors[out_name]
     assert torch.allclose(actual, expected, rtol=5e-2, atol=5e-2), (
-        f"auto-split golden mismatch: max abs diff = {(expected - actual).abs().max().item():.6e}"
+        f"explicit-split golden mismatch: max abs diff = {(expected - actual).abs().max().item():.6e}"
     )
     if isinstance(result, torch.Tensor):
         assert torch.allclose(result, expected, rtol=5e-2, atol=5e-2), (
-            f"auto-split returned tensor max abs diff = {(expected - result).abs().max().item():.6e}"
+            f"explicit-split returned tensor max abs diff = {(expected - result).abs().max().item():.6e}"
         )
 
 
@@ -826,7 +837,7 @@ _SPLIT_PARITY_SCENARIOS = [
     _SPLIT_PARITY_SCENARIOS,
     ids=[s[0] for s in _SPLIT_PARITY_SCENARIOS],
 )
-def test_lower_auto_vector_split_golden(
+def test_explicit_split_golden(
     _name: str,
     program: _ir.Program,
     builder,
@@ -834,20 +845,13 @@ def test_lower_auto_vector_split_golden(
     out_name: str,
     golden_fn,
 ):
-    """LowerAutoVectorSplit golden correctness on a real ``pl.split`` kernel.
-
-    Runs the full Default pipeline — in which LowerAutoVectorSplit is the live
-    auto-split lowering path (LowerAutoVectorSplit -> ExpandMixedKernel ->
-    SplitVectorKernel attr-stamping) — and asserts the lowered kernel codegens and
-    matches its torch golden (``torch.allclose``). Covers cube->vector,
-    vector->cube, and bidirectional boundaries under both UP_DOWN and LEFT_RIGHT.
-    """
+    """Explicit C->V, V->C and bidirectional kernels match torch in both modes."""
     torch.manual_seed(42)
     base_tensors = builder()
     golden_tensors = {k: v.clone() for k, v in base_tensors.items()}
     expected = golden_fn(golden_tensors)
     codegen_tensors = {k: v.clone() for k, v in base_tensors.items()}
-    _run_split_auto_golden(program, codegen_tensors, arg_order, out_name, expected)
+    _run_explicit_split_golden(program, codegen_tensors, arg_order, out_name, expected)
 
 
 @pytest.mark.parametrize("mode", [pl.SplitMode.UP_DOWN, pl.SplitMode.LEFT_RIGHT])
@@ -938,6 +942,18 @@ def test_split_singleton_broadcast_golden(mode, manual):
                     out = pl.assemble(out, y, [0, 0])
                 return out
 
+    if not manual:
+        # The former whole-function AUTO authoring surface now reports a
+        # migration error instead of synthesizing a shard and rewriting offsets.
+        reset_for_testing()
+        set_backend_type(BackendType.Ascend910B)
+        try:
+            with pytest.raises(ValueError, match="Implicit AIV splitting is no longer supported"):
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Auto)
+        finally:
+            reset_for_testing()
+        return
+
     torch.manual_seed(42)
     tensors = {
         "a": torch.randn(rows, inner, dtype=torch.float16),
@@ -946,9 +962,7 @@ def test_split_singleton_broadcast_golden(mode, manual):
         "out": torch.zeros(rows, cols),
     }
     expected = (tensors["a"].float() @ tensors["b"].float()) * tensors["scale"]
-    _run_split_aiv_default_and_check(
-        Manual if manual else Auto, tensors, ["a", "b", "scale", "out"], "broadcast", expected
-    )
+    _run_split_aiv_default_and_check(Manual, tensors, ["a", "b", "scale", "out"], "broadcast", expected)
 
 
 if __name__ == "__main__":

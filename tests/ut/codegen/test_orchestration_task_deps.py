@@ -1074,7 +1074,7 @@ def test_spmd_submit_group_emits_mixed_kernels_and_launch_spec():
 
     @pl.program
     class P:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
         def kernel(
             self,
             a: pl.Tensor[[64, 64], pl.FP32],
@@ -1087,9 +1087,11 @@ def test_spmd_submit_group_emits_mixed_kernels_and_launch_spec():
             tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
             tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
             tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
-            tile_bias = pl.load(bias, [0, 0], [64, 64])
-            tile_out = pl.add(tile_mm, tile_bias)
-            out = pl.store(tile_out, [0, 0], out)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                half = pl.aiv_shard(tile_mm)
+                tile_bias = pl.load(bias, [lane * 32, 0], [32, 64])
+                tile_out = pl.add(half, tile_bias)
+                out = pl.store(tile_out, [lane * 32, 0], out)
             return out
 
         @pl.function(type=pl.FunctionType.Orchestration)

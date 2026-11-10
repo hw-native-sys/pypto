@@ -3726,7 +3726,6 @@ class TestTopDownRetargeter:
                 for region_index in pl.spmd(
                     8,
                     optimizations=[
-                        pl.split(pl.SplitMode.UP_DOWN),
                         pl.cross_core_slot(slot_num=4),
                     ],
                 ):
@@ -3737,18 +3736,24 @@ class TestTopDownRetargeter:
                         u_tile = pl.tensor.slice(up_weight, [64, 64], [0, feature])
                         gate = pl.tensor.matmul(a_tile, g_tile, out_dtype=pl.FP32)
                         up = pl.tensor.matmul(a_tile, u_tile, out_dtype=pl.FP32)
-                        sigmoid = pl.tensor.recip(pl.tensor.adds(pl.tensor.exp(pl.tensor.neg(gate)), 1.0))
-                        activation = pl.tensor.cast(
-                            pl.tensor.mul(pl.tensor.mul(gate, sigmoid), up),
-                            target_type=pl.BF16,
-                            mode="round",
-                        )
+                        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                            gate_half = pl.aiv_shard(gate)
+                            up_half = pl.aiv_shard(up)
+                            sigmoid = pl.tensor.recip(
+                                pl.tensor.adds(pl.tensor.exp(pl.tensor.neg(gate_half)), 1.0)
+                            )
+                            activation = pl.tensor.cast(
+                                pl.tensor.mul(pl.tensor.mul(gate_half, sigmoid), up_half),
+                                target_type=pl.BF16,
+                                mode="round",
+                            )
+                            gathered_activation = pl.aic_gather(activation)
                         d_tile = pl.tensor.slice(down_weight, [64, 64], [feature, 0])
                         if feature == 0:
-                            first = pl.tensor.matmul(activation, d_tile, out_dtype=pl.FP32)
+                            first = pl.tensor.matmul(gathered_activation, d_tile, out_dtype=pl.FP32)
                             next_acc = pl.yield_(first)
                         else:
-                            later = pl.tensor.matmul_acc(acc, activation, d_tile)
+                            later = pl.tensor.matmul_acc(acc, gathered_activation, d_tile)
                             next_acc = pl.yield_(later)
                         tile = pl.yield_(next_acc)
                     output = pl.tensor.assemble(output, tile, [region_index * 16, 0])
@@ -3793,9 +3798,20 @@ class TestTopDownRetargeter:
         )
         acc_handle = next(iter(acc_handles))
         first_partials = [line for line in pto.splitlines() if "pto.tmatmul " in line]
-        assert any(re.search(rf"outs\({re.escape(acc_handle)}(?:\s|:)", line) for line in first_partials), (
-            f"{planner}: first partial must initialize the handle consumed by tmatmul.acc ({acc_handle}):\n{pto}"
-        )
+        first_handles = {
+            match.group(1) for line in first_partials if (match := re.search(r"outs\((%[A-Za-z0-9_]+)", line))
+        }
+        # Address-planned IR may retain distinct views of the same Acc storage
+        # across the first-iteration branch. PTOAS-planned IR has no addresses
+        # yet, so it must use the persistent handle itself.
+        if planner == passes.MemoryPlanner.PTOAS:
+            assert acc_handle in first_handles
+        else:
+            allocations = dict(re.findall(r"(%[A-Za-z0-9_]+) = pto\.alloc_tile addr = (%[A-Za-z0-9_]+)", pto))
+            assert acc_handle in allocations
+            assert any(allocations.get(handle) == allocations[acc_handle] for handle in first_handles), (
+                f"{planner}: the first partial must initialize the accumulator storage:\n{pto}"
+            )
 
     def test_pipelined_kloop_accumulator_coalesces_to_one_acc_buffer(self):
         """A stage-2 pipelined K-loop matmul (as AutoTileMatmulL0 emits) whose

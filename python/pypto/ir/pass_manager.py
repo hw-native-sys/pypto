@@ -215,12 +215,9 @@ class PassManager:
             passes.infer_tile_memory_space,
             passes.insert_mx_scale_addr,
             passes.resolve_backend_op_layouts,
-            # RFC #1300: convert AUTO pl.split mixed InCore functions into the explicit
-            # split_aiv form (aiv_shard/aic_gather + halved vector sub-region) so
-            # ExpandMixedKernel folds them into split-stamped tpush/tpop uniformly. This
-            # is the live auto-split lowering path; after it runs every split function
-            # reaches SplitVectorKernel already split_aiv-marked, so SplitVectorKernel
-            # only stamps attrs. Runs immediately before ExpandMixedKernel.
+            # Preserve explicit AIV regions and localize boundary valid extents.
+            # This compatibility-named pass rejects mixed function-level AUTO
+            # splitting; compute shapes and addresses are authored per lane.
             passes.lower_auto_vector_split,
             passes.expand_mixed_kernel,
             passes.inject_gm_pipe_buffer,

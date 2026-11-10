@@ -733,29 +733,23 @@ Pass SplitVectorKernel() {
         continue;
       }
 
-      // split_aiv kernels arrive here already in the explicit form: either
-      // hand-written, or produced by LowerAutoVectorSplit from an AUTO pl.split
-      // mixed InCore function. Their tile.aiv_shard / tile.aic_gather have been
-      // folded into split-stamped tpush/tpop pairs (via ExpandMixedKernel's
-      // boundary machinery) and they carry already-halved compute tiles. This is
-      // the SOLE split path through SplitVectorKernel: just stamp split +
-      // dual_aiv_dispatch and pass the body through unchanged. The former per-op
-      // halving driver was deleted — after LowerAutoVectorSplit runs, every split
-      // function reaches here split_aiv-marked, so re-halving here would
-      // double-halve the (already-half) body.
+      // Explicit regions arrive with authored per-lane computation and lowered
+      // shard/gather transport. Only stamp dispatch metadata: halving again
+      // would corrupt the explicit shapes and addresses. Standalone kernels
+      // without this marker use the separate transformation below.
       if ((func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC) &&
           func->HasAttr(kAttrSplitAiv) && func->GetAttr<bool>(kAttrSplitAiv, false)) {
         auto explicit_mode = func->GetSplitMode();
         auto new_func = MutableCopy(func);
         if (explicit_mode.has_value() && explicit_mode.value() != SplitMode::None) {
           // Single-mode split_aiv: a function-level "split" attr survives (a
-          // hand-written kernel, an AUTO function converged by LowerAutoVectorSplit,
+          // hand-written kernel
           // or a single-mode explicit region). Stamp split + dual_aiv_dispatch.
           new_func->attrs_ =
               WithSplitAttrs(func, explicit_mode.value(), func->func_type_ == FunctionType::AIV);
         } else {
           // Multi-mode explicit split_aiv: the per-region modes were lowered and
-          // erased by LowerAutoVectorSplit (pass 23); no single function-level mode
+          // consumed by ExpandMixedKernel; no single function-level mode
           // survives. The authoritative per-op "split" ints already sit on the
           // tpop/tpush pairs, so only the mode-agnostic dual_aiv_dispatch bool needs
           // stamping here (all RequiresDualAivDispatch consults).

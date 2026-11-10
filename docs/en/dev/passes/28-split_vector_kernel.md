@@ -1,33 +1,16 @@
 # SplitVectorKernel Pass
 
-After the staged convergence refactor, `SplitVectorKernel` has two narrow jobs;
-it **no longer halves any function body**:
+Explicit `split_aiv` kernels arrive with authored per-lane computation and
+lowered `tpush/tpop` boundaries. This pass stamps dispatch attributes without
+halving their bodies. `LowerAutoVectorSplit` no longer generates AUTO shards.
 
-1. **`split_aiv` attribute stamping** — the SOLE split path through this pass.
-   A `split_aiv` kernel (hand-authored, or produced upstream by
-   [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md)) has already lowered
-   its explicit `tile.aiv_shard` / `tile.aic_gather` into split-stamped
-   `tpush`/`tpop` (folded by `ExpandMixedKernel`) and carries already-halved
-   compute tiles plus its own `tile.get_subblock_idx()`. This pass leaves the
-   body untouched and only stamps `split` (+ `dual_aiv_dispatch` for AIV
-   functions) on the function attrs.
+Standalone AIV/AIC functions with split metadata still use
+`ProcessStandaloneSplitFunction` and the shared `split_axis::ProcessStmts`
+shape/offset transformation. This separate path is not mixed-kernel AUTO splitting.
 
-2. **No-split dual-AIV dispatch** — on Ascend910 (any backend whose
-   `BackendHandler::RequiresNoSplitDualAivDispatch()` returns `true`), when
-   `ExpandMixedKernel` decides a mixed kernel cannot be split it tags the AIV
-   function `dual_aiv_dispatch=True`. This pass wraps the body in a per-lane
-   `if subblock_idx == 0 ... else` replay so AIC↔AIV cross-core handshakes stay
-   balanced even though only lane 0 does real compute.
-
-> **Historical note.** This pass used to drive per-op AIV halving
-> (`ProcessFunction` / `ResolveSplitMode` / `CrossCoreSplitCollector`). That
-> driver was deleted once `LowerAutoVectorSplit` became the live auto-split
-> lowering path: after it runs, every split function reaches this pass already
-> `split_aiv`-marked, so re-halving here would double-halve the already-half
-> body. The halving machinery itself (shape halving, offset localization,
-> `tile.slice` arg-halving, reduce-on-split-axis rejection, loop tracking) now
-> lives in `split_axis_utils`, called by `LowerAutoVectorSplit` — see that
-> pass's doc for the per-op rewrite rules.
+For unsplit mixed kernels, backend-required dual-AIV replay retains the existing
+cross-core handshake behavior: lane 0 computes, while lane 1 replays the necessary
+protocol with empty valid extents.
 
 Lane-1 `IfStmt` tile results retain the original join's layout and padding
 metadata with zero valid shape, and subsequent uses reference those rebuilt
@@ -69,34 +52,18 @@ this pass certifies it via the attr-stamping arm). Source:
 `include/pypto/ir/transforms/pass_properties.h`,
 `include/pypto/ir/transforms/ir_property.h`.
 
-### Function-attribute invariant on exit
+### Dispatch contract
 
-The pass treats `attrs["dual_aiv_dispatch"]` as the single source of truth for
-the dual-AIV dispatch decision and maintains:
-
-```text
-split_aiv function with non-None split mode  ⇒  attrs["dual_aiv_dispatch"] == true (AIV)
-```
-
-`split_aiv` functions without a function-level split mode are an
-`INTERNAL_CHECK` failure (`OutlineIncoreScopes` / `LowerAutoVectorSplit` must
-co-propagate `split` with `split_aiv`). Orchestration codegen
-(`RequiresDualAivDispatch` in `src/codegen/orchestration/orchestration_codegen.cpp`)
-reads only this attribute and never re-derives from `SplitMode`.
-
-## Dispatch
+A `split_aiv` AIV function always receives `dual_aiv_dispatch=True`, including
+NONE and multi-mode regions without a single function-level split mode. A
+uniform non-NONE mode is retained when present. Per-transfer split modes on the
+pipe operations remain authoritative.
 
 ```text
-for each function:
-  if (AIV or AIC) and attrs["split_aiv"]:
-      # SOLE split path — stamp attrs, pass body through unchanged.
-      assert function-level split mode is set and non-None  (INTERNAL_CHECK)
-      attrs = WithSplitAttrs(func, mode, is_aiv)            # split (+ dual_aiv_dispatch for AIV)
-  elif RequiresNoSplitDualAivSync(func):
-      # Ascend910 no-split dual-AIV dispatch (orthogonal path).
-      ProcessNoSplitDualAivFunction(func)
-  else:
-      pass through unchanged
+explicit split_aiv AIV/AIC -> stamp attrs, preserve body
+standalone AIV/AIC with split metadata -> lower standalone split body
+unsplit AIV requiring dual dispatch -> build lane-1 handshake replay
+other functions -> unchanged
 ```
 
 ## Algorithm — no-split dual-AIV dispatch
@@ -153,10 +120,10 @@ racing garbage rows into subblock 0's slot. The detection lever is
 
 ## Examples
 
-### Example 1 — split_aiv attribute stamping (the sole split path)
+### Example 1 — split_aiv attribute stamping (explicit dispatch)
 
 A `split_aiv` AIC/AIV pair arrives already in explicit per-lane form (halved
-`[8, 128]` compute tiles, one hand/`LowerAutoVectorSplit`-written
+`[8, 128]` compute tiles, one author-written
 `get_subblock_idx`). The pass stamps attrs and leaves the body untouched.
 
 ```python

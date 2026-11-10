@@ -4625,7 +4625,6 @@ class TestTileMoveAccAddressInvariant:
                 out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
                     name_hint="gate_up_pipeline_acc",
                 ):
                     x0 = pl.slice(x, [BATCH, K_CHUNK], [0, 0])
@@ -4645,7 +4644,9 @@ class TestTileMoveAccAddressInvariant:
                         )
                     # Consume gate (to Vec) before the up pipeline so up reuses
                     # gate's freed Acc buffer — the condition that exposed #1352.
-                    gate_fp32 = pl.add(gate_acc, 0.0)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        gate_half = pl.aiv_shard(gate_acc)
+                        gate_fp32 = pl.add(gate_half, 0.0)
                     up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
                     up_acc = pl.matmul_acc(up_acc, x1, wu1)
                     for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
@@ -4655,8 +4656,10 @@ class TestTileMoveAccAddressInvariant:
                             pl.slice(x, [BATCH, K_CHUNK], [0, k0]),
                             pl.slice(wu, [K_CHUNK, N], [k0, 0]),
                         )
-                    combined = pl.mul(gate_fp32, up_acc)
-                    out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [0, 0])
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        up_half = pl.aiv_shard(up_acc)
+                        combined = pl.mul(gate_fp32, up_half)
+                        out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [lane * (BATCH // 2), 0])
                 out = pl.assemble(out, out_tile, [0, 0])
                 return out
 

@@ -34,7 +34,7 @@ often still are underneath: fused in name, sequential in execution.
 
 ## Step 1: one scope, split
 
-Put both operations in one scope and mark it split:
+Put cube work and explicitly sharded vector work in one scope:
 
 ```python
 import pypto.language as pl
@@ -50,11 +50,14 @@ def mixed(
 ):
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
+        optimizations=[pl.cross_core_slot(slot_num=1)],
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
-        out[:] = pl.add(acc, bias)        # vector (AIV)
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            half = pl.aiv_shard(acc)
+            row = lane * 64
+            out[row:row + 64, :] = pl.add(half, bias[row:row + 64, :])
     return out
 
 torch.manual_seed(0)
@@ -66,15 +69,14 @@ mixed(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 ```
 
-`pl.split(mode)` marks the scope as mixed, and the mode names the axis along which the
-**vector** sub-region is halved. The cube sub-region stays full-sized: the split shards the
-vector work across the two AIV lanes, and the compiler inserts the cross-core transfers
-(`aiv_shard` at cube→vector boundaries, `aic_gather` on the way back) that carry results
-between the units. Overlap comes from cube and vector running concurrently, not from each
-taking half of one tile.
+`pl.split_aiv(mode=...)` binds the AIV lane and supplies the boundary mode.
+`pl.aiv_shard(acc)` explicitly partitions the cube result. The author writes
+each lane's bias slice and output offset; the compiler does not halve the body.
+The cube computation stays full-sized. Mixed function-level `pl.split` AUTO
+splitting is no longer supported.
 
-| Mode | Halves the vector sub-region along |
-| ---- | ---------------------------------- |
+| Mode | Explicit boundary axis |
+| ---- | ---------------------- |
 | `pl.SplitMode.UP_DOWN` | Rows (height) |
 | `pl.SplitMode.LEFT_RIGHT` | Columns (width) |
 | `pl.SplitMode.NONE` | No split |
@@ -114,7 +116,7 @@ Changing this example back to two slots fails during allocation:
 ```python
 with pl.at(
     level=pl.Level.CORE_GROUP,
-    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
+    optimizations=[pl.cross_core_slot(slot_num=2)],
     name_hint="mixed",
 ):
 ```
@@ -130,40 +132,22 @@ tile that crosses the cube/vector boundary
 Two levers when that happens: shrink the tile, or shorten the ring. Pick the largest depth
 that fits.
 
-## Step 3: what the compiler inserted
+## Step 3: transport lowering
 
-`pl.split` is the automatic path. Underneath, the cross-core dataflow is explicit
-operators, and you can write them yourself:
+The compiler lowers explicit `aiv_shard`/`aic_gather` to pipe setup,
+`tpush`/`tpop`, and the matching `tfree`. Region mode selects the split axis;
+`NONE` transfers without changing shape. Users need not handwrite pipe pairing
+when using these explicit boundary operators.
 
-| Operator | Role |
-| -------- | ---- |
-| `pl.aic_initialize_pipe` / `pl.aiv_initialize_pipe` | Set up the pipe |
-| `pl.tpush_to_aiv` / `pl.tpush_to_aic` | Push a tile to the peer core |
-| `pl.tpop_from_aic` / `pl.tpop_from_aiv` | Pop a tile the peer pushed |
-| `pl.tfree_to_aic` / `pl.tfree_to_aiv` | Release the popped slot back to the producer |
-| `pl.aiv_shard` / `pl.aic_gather` | Shard across AIV lanes, gather back on AIC |
-| `pl.split_aiv(n, mode=...)` | The explicit region form of the split |
+A manually authored low-level pipe must pair every push with a pop and every
+pop with a free. A boundary orders the value it carries; user-managed GM sharing
+and once-only side effects still need the ordering and lane ownership described
+in [Scopes and Placement](../language/04-scopes.md).
 
-**Every push must be paired with a pop, and every pop with a `tfree`.** A missing `tfree`
-does not error — it leaks a ring slot, and the producer stalls once the ring fills.
-
-**The explicit form also makes cross-lane ordering yours.** A boundary operator orders only
-the value it carries. Nothing orders a cube-lane write against a vector-lane read of the
-same GM buffer. Publish and fence the producer's writes, place a
-cross-core `pl.system.syncall` between those phases, then invalidate the consumer's cache
-before it reads; the barrier alone only synchronizes arrival. Use the soft form when the
-launch may have partial occupancy, and use whole-GM cache maintenance when the buffer may
-span multiple cache lines. The `pl.split` path above does not need this sequence — the
-compiler inserts the transfers, and the result is checked against torch. See
-[Scopes and Placement](../language/04-scopes.md) for the rules.
-
-Reach for the explicit form when `pl.split` cannot express the shape: per-lane addressing,
-a gather that only one lane can compute, or a region that mixes split and unsplit work.
-`tests/st/codegen/dsl/test_split_aiv_gather_row_codegen.py` is a worked example.
-Otherwise stay on `pl.split` — it inserts the same operators and gets the pairing right.
-
-For the machine-level contract see [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md);
-for what the pass does, [ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md).
+Ordinary unsplit mixed kernels retain their existing full-width implicit
+communication. This change removes implicit halving, not that transport path.
+See [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) and
+[ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md).
 
 ## Edge Cases
 
@@ -175,9 +159,9 @@ for what the pass does, [ExpandMixedKernel](../../dev/passes/26-expand_mixed_ker
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
 | **`Vec buffer usage ... exceeds platform limit`** | The ring plus the tiles overrun the on-chip budget | Lower `pl.cross_core_slot(slot_num=N)`, or shrink the crossing tile |
-| **No speedup from `pl.split`** | One side dominates, so halving cannot overlap anything | Check the work is genuinely cube-then-vector |
+| **No speedup from explicit splitting** | One side dominates, so halving cannot overlap anything | Check the work is genuinely cube-then-vector |
 | **The producer stalls after a while** | A popped slot was never `tfree`d | Match every pop with a `tfree` |
-| **Split rejected on a scope** | The body mixes split and plain full-width vector ops | Use the explicit `pl.split_aiv` region form |
+| **Implicit AIV splitting is no longer supported** | Legacy function-level AUTO split | Use `pl.split_aiv`, explicit shard/gather, and per-lane shapes and offsets |
 
 ## The same shape in a real model
 

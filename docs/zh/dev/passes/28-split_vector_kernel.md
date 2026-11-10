@@ -1,27 +1,13 @@
 # SplitVectorKernel Pass
 
-经过分阶段收敛重构后，`SplitVectorKernel` 只剩两项窄职责，**不再折半任何函数体**：
+显式 `split_aiv` kernel 已包含用户编写的每 lane 计算和降低后的 `tpush/tpop`
+边界。本 pass 仅标记 dispatch 属性，不再次拆半。`LowerAutoVectorSplit` 不再生成 AUTO 分片。
 
-1. **`split_aiv` 属性打标** —— 本 pass 唯一的拆分路径。`split_aiv` 核（手写，或由上游
-   [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) 产生）已经把其显式
-   `tile.aiv_shard` / `tile.aic_gather` 下降为带拆分标记的 `tpush`/`tpop`（由
-   `ExpandMixedKernel` 折叠），并携带已折半的计算 tile 与自己的
-   `tile.get_subblock_idx()`。本 pass 不动函数体，只在函数属性上打 `split`（对 AIV
-   函数另加 `dual_aiv_dispatch`）。
+携带 split 元数据的独立 AIV/AIC 函数仍使用 `ProcessStandaloneSplitFunction`
+和共享 `split_axis::ProcessStmts` 改写尺寸与偏移；这条路径不属于 mix AUTO 拆半。
 
-2. **无拆分双 AIV 派发** —— 在 Ascend910（任何
-   `BackendHandler::RequiresNoSplitDualAivDispatch()` 返回 `true` 的后端）上，当
-   `ExpandMixedKernel` 判断混合核不可拆分时，会给 AIV 函数打 `dual_aiv_dispatch=True`。
-   本 pass 据此把函数体包装为按 lane 的 `if subblock_idx == 0 ... else` 重放，使
-   AIC↔AIV 跨核握手在两条 lane 上仍对称（即使只有 lane 0 做真实计算）。
-
-> **历史说明。** 本 pass 曾驱动逐算子 AIV 折半（`ProcessFunction` /
-> `ResolveSplitMode` / `CrossCoreSplitCollector`）。该驱动在
-> `LowerAutoVectorSplit` 成为在用自动拆分下降路径后被删除：在其运行后，每个拆分函数
-> 到达本 pass 时都已带 `split_aiv` 标记，此处再折半会把已折半的函数体二次折半。折半
-> 机制本身（形状折半、偏移本地化、`tile.slice` 参数折半、拒绝拆分轴归约、循环跟踪）
-> 现位于 `split_axis_utils`，由 `LowerAutoVectorSplit` 调用——逐算子改写规则见该 pass
-> 文档。
+未拆分 mix 保留 backend 所需的双 AIV 握手重放：lane 0 计算，lane 1 使用空有效尺寸
+执行必要通信协议。
 
 Lane-1 的 `IfStmt` tile 结果保留原合流结果的布局和填充元数据，并将有效形状设为零；
 后续使用引用重建后的结果变量。分支 tile 可以具有不同的填充元数据，
@@ -59,32 +45,17 @@ per-lane 形态（由上游 `LowerAutoVectorSplit` + `ExpandMixedKernel` 达成�
 属性打标分支予以确认）。来源：`include/pypto/ir/transforms/pass_properties.h`、
 `include/pypto/ir/transforms/ir_property.h`。
 
-### 退出时的函数属性不变式
+### 分派契约
 
-本 pass 以 `attrs["dual_aiv_dispatch"]` 作为双 AIV 派发决策的唯一来源，并维护：
-
-```text
-带非 None 拆分模式的 split_aiv 函数  ⇒  attrs["dual_aiv_dispatch"] == true（AIV）
-```
-
-带 `split_aiv` 但无函数级拆分模式的函数是 `INTERNAL_CHECK` 失败
-（`OutlineIncoreScopes` / `LowerAutoVectorSplit` 必须把 `split` 与 `split_aiv`
-一同传播）。编排 codegen（`src/codegen/orchestration/orchestration_codegen.cpp` 中的
-`RequiresDualAivDispatch`）只读该属性，绝不从 `SplitMode` 重新推导。
-
-## 分派
+带 `split_aiv` 标记的 AIV 函数始终获得 `dual_aiv_dispatch=True`，包括没有统一
+函数级 split mode 的 NONE 和多模式区域。存在统一非 NONE 模式时予以保留；
+通信算子上逐次传输的 split mode 仍是权威数据。
 
 ```text
-对每个函数：
-  if (AIV 或 AIC) and attrs["split_aiv"]:
-      # 唯一拆分路径 —— 打属性，函数体原样透传。
-      assert 函数级拆分模式已设且非 None  (INTERNAL_CHECK)
-      attrs = WithSplitAttrs(func, mode, is_aiv)            # split（AIV 另加 dual_aiv_dispatch）
-  elif RequiresNoSplitDualAivSync(func):
-      # Ascend910 无拆分双 AIV 派发（正交路径）。
-      ProcessNoSplitDualAivFunction(func)
-  else:
-      原样透传
+explicit split_aiv AIV/AIC -> stamp attrs, preserve body
+standalone AIV/AIC with split metadata -> lower standalone split body
+unsplit AIV requiring dual dispatch -> build lane-1 handshake replay
+other functions -> unchanged
 ```
 
 ## 算法 —— 无拆分双 AIV 派发
@@ -131,7 +102,7 @@ lane 1 重放将其 tile `valid_shape` 置零以不产生可见写入，但其�
 
 ## 示例
 
-### 示例 1 —— split_aiv 属性打标（唯一拆分路径）
+### 示例 1 —— split_aiv 属性打标
 
 一对 `split_aiv` AIC/AIV 函数已为显式 per-lane 形态（折半的 `[8, 128]` 计算 tile，
 一个 手写/`LowerAutoVectorSplit` 写入的 `get_subblock_idx`）。本 pass 打属性，函数体
@@ -233,7 +204,7 @@ passes.def("split_vector_kernel", &pass::SplitVectorKernel, ...);
 
 ## 相关
 
-- [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) —— 在用自动拆分下降路径；
+- [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) —— 显式区域降低路径；
   产生本 pass 打标的 `split_aiv` 函数。逐算子向量折半规则位于该处及
   `split_axis_utils`。
 - [`ExpandMixedKernel`](26-expand_mixed_kernel.md) —— AIC/AIV 函数与

@@ -84,9 +84,12 @@ class V2CUDProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
-            a_plus_b = pl.add(a, b)
-            sub = pl.sub(a, b)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                a_half = a[lane * 16 : lane * 16 + 16, :]
+                b_half = b[lane * 16 : lane * 16 + 16, :]
+                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+                sub = pl.aic_gather(pl.sub(a_half, b_half))
             out = pl.matmul(a_plus_b, sub)
             output = pl.assemble(output, out, [0, 0])
         return output
@@ -131,9 +134,12 @@ class V2CLRProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
-            a_plus_b = pl.add(a, b)
-            sub = pl.sub(a, b)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                a_half = a[:, lane * 16 : lane * 16 + 16]
+                b_half = b[:, lane * 16 : lane * 16 + 16]
+                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+                sub = pl.aic_gather(pl.sub(a_half, b_half))
             out = pl.matmul(a_plus_b, sub)
             output = pl.assemble(output, out, [0, 0])
         return output
@@ -225,15 +231,19 @@ class C2VLRProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
+        with pl.at(level=pl.Level.CORE_GROUP):
             for cb in pl.range(0, N_BLOCKS // 4):
                 for ci in pl.range(0, 4):
                     nb = cb * 4 + ci
                     n0 = nb * N_BLOCK
-                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                     b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                    c = pl.assemble(c, c_next, [0, n0])
+                    acc = pl.matmul(a, b_chunk)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        half = pl.aiv_shard(acc)
+                        col = n0 + lane * (N_BLOCK // 2)
+                        c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                        c_next = pl.add(c_prev, half)
+                        c = pl.assemble(c, c_next, [0, col])
         return c
 
 
@@ -277,15 +287,19 @@ class C2VUDProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+        with pl.at(level=pl.Level.CORE_GROUP):
             for cb in pl.range(0, N_BLOCKS // 4):
                 for ci in pl.range(0, 4):
                     nb = cb * 4 + ci
                     n0 = nb * N_BLOCK
-                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                     b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                    c = pl.assemble(c, c_next, [0, n0])
+                    acc = pl.matmul(a, b_chunk)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        half = pl.aiv_shard(acc)
+                        row = lane * (M // 2)
+                        c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                        c_next = pl.add(c_prev, half)
+                        c = pl.assemble(c, c_next, [row, n0])
         return c
 
 
@@ -380,16 +394,22 @@ class BiDirectUDProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+        with pl.at(level=pl.Level.CORE_GROUP):
             for cb in pl.range(0, N_BLOCKS // 4):
                 for ci in pl.range(0, 4):
                     nb = cb * 4 + ci
                     n0 = nb * N_BLOCK
-                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                    a_add = pl.add(a, 1.0)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        a_half = a[lane * (M // 2) : lane * (M // 2) + M // 2, :]
+                        a_add = pl.aic_gather(pl.add(a_half, 1.0))
                     b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                    c = pl.assemble(c, c_next, [0, n0])
+                    acc = pl.matmul(a_add, b_chunk)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        half = pl.aiv_shard(acc)
+                        row = lane * (M // 2)
+                        c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                        c_next = pl.add(c_prev, half)
+                        c = pl.assemble(c, c_next, [row, n0])
         return c
 
 
@@ -432,16 +452,22 @@ class BiDirectLRProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
+        with pl.at(level=pl.Level.CORE_GROUP):
             for cb in pl.range(0, N_BLOCKS // 4):
                 for ci in pl.range(0, 4):
                     nb = cb * 4 + ci
                     n0 = nb * N_BLOCK
-                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                    a_add = pl.add(a, 1.0)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        a_half = a[:, lane * (K // 2) : lane * (K // 2) + K // 2]
+                        a_add = pl.aic_gather(pl.add(a_half, 1.0))
                     b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                    c = pl.assemble(c, c_next, [0, n0])
+                    acc = pl.matmul(a_add, b_chunk)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        half = pl.aiv_shard(acc)
+                        col = n0 + lane * (N_BLOCK // 2)
+                        c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                        c_next = pl.add(c_prev, half)
+                        c = pl.assemble(c, c_next, [0, col])
         return c
 
 

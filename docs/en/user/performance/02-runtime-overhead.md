@@ -47,24 +47,26 @@ def fresh(rows=ROWS):
 tasks: the cube task finishes, writes GM, and the vector task is dispatched to read it
 back.
 
-**How:** one `pl.at` scope carrying both, with a split mode telling the compiler how to
-divide the vector half across the two AIVs that share a cube:
+**How:** one `pl.at` scope carrying both, with explicit shards and per-lane addresses for the two AIVs that share a cube:
 
 ```python
 with pl.at(
     level=pl.Level.CORE_GROUP,
-    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
+    optimizations=[pl.cross_core_slot(slot_num=2)],
 ):
     acc = pl.matmul(a, b, out_dtype=pl.FP32)   # cube (AIC)
-    out[:] = pl.add(acc, bias)                 # vector (AIV)
+    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+        half = pl.aiv_shard(acc)
+        row = lane * HALF_ROWS
+        out[row:row + HALF_ROWS, :] = pl.add(half, bias[row:row + HALF_ROWS, :])
 ```
 
 `examples/advanced/03_mixed_kernel.py` runs this in three modes, and
 [the tutorial](../tutorials/03-mixed-kernel.md) walks through it.
 
-**Cost:** `pl.split` halves only the **vector** sub-region; the cube side stays full-size,
+**Cost:** Explicit sharding partitions the **vector** work; the cube side stays full-size,
 so the vector buffers shrink but the cube buffers do not. And the cross-core ring that
-carries the intermediate between engines is real memory: it defaults to **8 slots**, which
+carries the intermediate between engines is real memory: it defaults to **2 slots**, which
 for a large intermediate is far more than the vector budget can spare. `slot_num=` is
 usually not optional — the compiler tells you at compile time when the default does not
 fit.

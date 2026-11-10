@@ -76,7 +76,7 @@ class FusedMatmulScatterProgram:
         cache: pl.InOut[pl.Tensor[[B * CACHE, H], pl.BF16]],
     ) -> pl.Tensor[[B * CACHE, H], pl.BF16]:
         kv_final = pl.create_tensor([B, H], dtype=pl.FP32)
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
+        with pl.at(level=pl.Level.CORE_GROUP):
             kv_final[:, :] = pl.matmul(x, w, out_dtype=pl.FP32)  # cube matmul, whole-tile store
             for b in pl.range(B):  # per-row scatter to distinct cache rows
                 cache[b * CACHE : b * CACHE + 1, :] = pl.cast(

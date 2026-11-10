@@ -84,18 +84,15 @@ Two optional keywords shape that outlined kernel:
 
 | Keyword | Meaning |
 | ------- | ------- |
-| `optimizations=[pl.split(mode)]` | Cross-core split mode for the outlined kernel |
 | `optimizations=[pl.cross_core_slot(slot_num=N)]` | Ring depth of the automatic cross-core pipeline |
 | `name_hint="..."` | Name for the outlined function |
 
 Entries in `optimizations=` must be written inline at the call site — the parser reads the
-AST, so a list built up in a variable is not accepted. `pl.split` and `pl.cross_core_slot`
-are orthogonal and combine freely: one splits the work, the other sizes the channel.
+AST, so a list built up in a variable is not accepted. `pl.cross_core_slot` sizes the channel; explicit `pl.split_aiv` regions inside the scope describe per-lane work.
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
-                          pl.cross_core_slot(slot_num=4)]):
+           optimizations=[pl.cross_core_slot(slot_num=4)]):
     ...
 ```
 
@@ -160,8 +157,10 @@ the tutorials chapter covers end to end.
 
 | `mode=` | Each lane gets |
 | ------- | -------------- |
-| `pl.SplitMode.UP_DOWN` / `LEFT_RIGHT` | Half of every tile (rows / cols) — data-parallel |
+| `pl.SplitMode.UP_DOWN` / `LEFT_RIGHT` | Explicit shard/gather splits/joins rows or columns; author the body per lane |
 | `pl.SplitMode.NONE` | The **full** body; you dispatch disjoint work via `aiv_id` — task-parallel |
+
+The region never implicitly halves compute tiles or rewrites load/store offsets, even without a crossing. Use the lane ID to author disjoint slices and output addresses.
 
 **Opening one region changes the rules for the whole function.** The regions then own
 every placement decision for vector work, so vector compute has to live inside a region:

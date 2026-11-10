@@ -1227,7 +1227,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
     Reproduces the gate_up_silu pattern from the Qwen3-32B decode kernel that
     triggered the bug: two independent accumulators (gate_acc, up_acc) are built
-    inside a ``pl.at(CORE_GROUP, optimizations=[pl.split(UP_DOWN)])`` scope, each following the
+    inside a ``pl.at(CORE_GROUP, explicit shard boundaries)`` scope, each following the
     prolog-then-pipeline pattern::
 
         gate_acc = pl.matmul(x_chunk_0, wg_0, out_dtype=pl.FP32)
@@ -1343,7 +1343,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
                 out: pl.Out[pl.Tensor[[BATCH, N], pl.BF16]],
             ) -> pl.Tensor[[BATCH, N], pl.BF16]:
                 # Mirror the exact gate_up_silu structure from qwen3_32b:
-                # split=UP_DOWN triggers the AIC/AIV split that causes
+                # Explicit UP_DOWN boundaries trigger the AIC/AIV split that causes
                 # MemoryReuse to run on the AIC function, where the two
                 # concurrent same-shape accumulators expose the MemRef-base
                 # mismatch that triggers the acc→acc pto.tmov bug (#1352).
@@ -1360,7 +1360,6 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
                     name_hint="gate_up_pipeline_acc",
                 ):
                     # Prolog: unrolled first two K_CHUNK slices
@@ -1400,7 +1399,9 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
                     # pl.add(gate_acc, 0.0) that forces the tpush between the
                     # two pipelines.  gate_fp32 is a Vec FP32 tile that
                     # correctly captures gate_final at this point.
-                    gate_fp32 = pl.add(gate_acc, 0.0)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        gate_half = pl.aiv_shard(gate_acc)
+                        gate_fp32 = pl.add(gate_half, 0.0)
 
                     # Up projection — independent pipeline loop, same shape.
                     # AIC overwrites the shared Acc buffer with up values here;
@@ -1416,9 +1417,11 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
                     # gate_fp32 × up_acc (FP32 tmul, supported on A2/A3).
                     # up_acc's tpush happens after the up pipeline, reading
                     # the shared Acc buffer = up_final ✓.
-                    combined = pl.mul(gate_fp32, up_acc)
-                    combined_bf16 = pl.cast(combined, pl.BF16)
-                    out_tile = pl.assemble(out_tile, combined_bf16, [0, 0])
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        up_half = pl.aiv_shard(up_acc)
+                        combined = pl.mul(gate_fp32, up_half)
+                        combined_bf16 = pl.cast(combined, pl.BF16)
+                        out_tile = pl.assemble(out_tile, combined_bf16, [lane * (BATCH // 2), 0])
 
                 out = pl.assemble(out, out_tile, [0, 0])
                 return out

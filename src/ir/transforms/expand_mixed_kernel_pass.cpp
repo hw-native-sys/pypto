@@ -734,7 +734,7 @@ void CheckOpDrivenBoundaryOperands(const std::vector<StmtPtr>& stmts,
 std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0, int lane_stride = 0) {
   std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split)}};
   // The partition stride only rides along when a ragged boundary was rebalanced
-  // (see split_axis::ResolveLaneStride). PTO codegen ignores it — it prints only
+  // (when supplied explicitly). PTO codegen ignores it — it prints only
   // id and split — but the torch reference runtime needs it to cut the two lanes
   // where the compiler did.
   if (lane_stride > 0) {
@@ -2110,6 +2110,15 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       }
     }
   }
+
+  // Custom pipelines may call this pass without LowerAutoVectorSplit. Do not
+  // let retired mixed AUTO metadata reach the standalone AIV/AIC halving path.
+  const auto split_mode = func->GetSplitMode();
+  CHECK_SPAN(had_regions || func->GetAttr<bool>(kAttrSplitAiv, false) || !split_mode ||
+                 *split_mode == SplitMode::None,
+             func->span_)
+      << "Implicit AIV splitting is no longer supported in mixed kernel '" << func->name_
+      << "'. Use pl.split_aiv with explicit pl.aiv_shard / pl.aic_gather and per-lane offsets.";
 
   const bool needs_dual_aiv_dispatch =
       PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&
