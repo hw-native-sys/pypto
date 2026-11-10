@@ -136,12 +136,16 @@ def test_owners_live_until_retirement_and_closures_are_released(eager_env, prepa
     env.runs[0].complete = True
     assert ticket.done()
     gc.collect()
-    assert owner() is None and ticket._callback is None and ticket._owners == ()
+    assert owner() is None and ticket.submission is None and ticket._owners == ()
     env.state.close()
 
 
-def test_partial_enqueue_failure_keeps_callback_until_explicit_close(eager_env, prepared, monkeypatch):
+@pytest.mark.parametrize("consumed", [False, True])
+def test_partial_enqueue_failure_cancels_or_tracks_consumed_submission(
+    eager_env, prepared, monkeypatch, consumed
+):
     env = eager_env
+    env.queued = not consumed
     native_enqueue = env.native.enqueue
 
     def enqueue_then_fail(*args):
@@ -151,40 +155,144 @@ def test_partial_enqueue_failure_keeps_callback_until_explicit_close(eager_env, 
     monkeypatch.setattr(env.native, "enqueue", enqueue_then_fail)
     with pytest.raises(RuntimeError, match="after queue admission"):
         _invoke(env, prepared)
-    assert not env.runs and env.queue
-    ticket = env.state._submissions[0]
-    assert ticket._callback is not None and ticket._owners
-    assert not any(buffer.closed for buffer in env.buffers)
+    if consumed:
+        ticket = env.state._submissions[0]
+        assert ticket._owners and not ticket.submission.safe_to_release
+    else:
+        assert not env.state._submissions
+        assert all(buffer.closed for buffer in env.buffers)
     env.state.close()
-    assert env.events.index("synchronize") < env.events.index("wait") < env.events.index("source.close")
-    assert ticket._callback is None and not ticket._owners
+    env.run_queue()  # A cancelled token may still be held by the queue.
+    assert len(env.runs) == int(consumed)
+    assert all(buffer.closed for buffer in env.buffers)
 
 
-@pytest.mark.parametrize("failure", ["enqueue", "submit", "context", "stream"])
-def test_submission_failure_retains_owners_and_original_error(eager_env, prepared, failure):
+@pytest.mark.parametrize("failure", ["enqueue", "stream", "prepare"])
+def test_prelaunch_failure_releases_sources_and_preserves_error(eager_env, prepared, monkeypatch, failure):
     env = eager_env
-    error = ValueError("test submission failure")
+    error = ValueError("test preparation failure")
     if failure == "enqueue":
         env.enqueue_error = error
-        with pytest.raises(ValueError) as caught:
-            _invoke(env, prepared)
-        assert caught.value is error
+    elif failure == "stream":
+        env.rts_stream = 0
     else:
-        if failure == "stream":
-            env.rts_stream = 0
+
+        def fail(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(env.workers[0], "prepare_submission", fail)
+    with pytest.raises(ValueError) as caught:
         _invoke(env, prepared)
-        if failure == "submit":
-            env.submit_error = error
-        elif failure == "context":
-            env.context += 1
-        with pytest.raises((RuntimeError, ValueError)):
-            env.run_queue()
+    if failure != "stream":
+        assert caught.value is error
+    assert not env.state._submissions and not env.runs
+    assert all(b.closed for b in env.buffers)
+    env.state.close()
+
+
+def test_unknown_native_failure_retains_owners_and_original_error(eager_env, prepared):
+    env = eager_env
+    _invoke(env, prepared)
+    error = env.submit_error = ValueError("native submit failed")
+    env.run_queue()
     ticket = env.state._submissions[0]
-    assert ticket._owners and not any(b.closed for b in env.buffers)
-    with pytest.raises((RuntimeError, ValueError)):
+    with pytest.raises(ValueError) as caught:
         env.state.close()
-    assert env.state.state is KernelState.FAILED
-    assert "close" not in env.events and not any(b.closed for b in env.buffers)
+    assert caught.value is error
+    assert ticket._owners and not any(b.closed for b in env.buffers)
+    assert env.state.state is KernelState.FAILED and "close" not in env.events
+
+
+def test_failed_queue_cancels_discarded_submissions(eager_env, prepared):
+    env = eager_env
+    _invoke(env, prepared)
+    _invoke(env, prepared)
+    first, discarded = env.state._submissions
+    error = env.submit_error = ValueError("native submit failed")
+    env.run_queue()
+    assert not discarded.submission.consumed and not env.queue
+    # The first call has a proven safe failure; its successor was never submitted.
+    first.submission.safe = True
+    with pytest.raises(ValueError) as caught:
+        env.state.close()
+    assert caught.value is error
+    assert first.retired and discarded.retired
+    assert not env.state._submissions
+    assert all(b.closed for b in env.buffers)
+    assert env.state.state is KernelState.CLOSED
+
+
+@pytest.mark.parametrize("boundary", ["done", "close"])
+def test_safely_retired_failure_releases_owners_and_reports_error(eager_env, prepared, boundary):
+    env = eager_env
+    _invoke(env, prepared)
+    env.run_queue()
+    ticket = env.state._submissions[0]
+    error = ticket.submission.error = ValueError("retired failure")
+    ticket.submission.safe = True
+    with pytest.raises(ValueError) as caught:
+        ticket.done() if boundary == "done" else env.state.close()
+    assert caught.value is error
+    assert ticket.retired and not ticket._owners
+    assert all(b.closed for b in env.buffers)
+    env.state.close()
+    assert env.state.state is KernelState.CLOSED
+
+
+def test_cancel_cleanup_failure_keeps_ticket(eager_env, prepared, monkeypatch):
+    env = eager_env
+    error = RuntimeError("enqueue failed")
+
+    def enqueue(*args):
+        args[-1].cancel_error = RuntimeError("cancel cleanup failed")
+        raise error
+
+    monkeypatch.setattr(env.native, "enqueue", enqueue)
+    with pytest.raises(RuntimeError) as caught:
+        _invoke(env, prepared)
+    assert caught.value is error
+    ticket = env.state._submissions[0]
+    assert ticket.submission.cancelled and ticket._owners
+    assert not any(b.closed for b in env.buffers)
+    with pytest.raises(RuntimeError, match="cancel cleanup"):
+        env.state.close()
+
+
+def test_cancel_error_with_cleanup_proof_releases_owners(eager_env, prepared, monkeypatch):
+    env = eager_env
+    error = RuntimeError("enqueue failed")
+
+    def enqueue(*args):
+        submission = args[-1]
+
+        def cancel():
+            submission.safe = True
+            raise ValueError("cancel observation failed after retirement")
+
+        submission.cancel = cancel
+        raise error
+
+    monkeypatch.setattr(env.native, "enqueue", enqueue)
+    with pytest.raises(RuntimeError) as caught:
+        _invoke(env, prepared)
+    assert caught.value is error
+    assert not env.state._submissions
+    assert all(b.closed for b in env.buffers)
+    env.state.close()
+
+
+def test_done_observation_timeout_is_nonblocking_and_retains_owners(eager_env, prepared):
+    env = eager_env
+    _invoke(env, prepared)
+    env.run_queue()
+    env.runs[0].complete = True
+    env.runs[0].wait_error = TimeoutError("observation not ready")
+    ticket = env.state._submissions[0]
+    assert not ticket.done() and ticket._owners
+    assert "synchronize" not in env.events
+    env.runs[0].wait_error = None
+    assert ticket.done()
+    env.state.close()
 
 
 @pytest.mark.parametrize("failure", ["wait", "source"])

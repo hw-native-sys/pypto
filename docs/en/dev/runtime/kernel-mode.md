@@ -101,7 +101,7 @@ The internal `runtime/kernel` package groups code by ownership:
 - `context.py`: process state, concurrent registration reuse and pending-ticket cleanup.
 - `owner.py`: the lifecycle owner thread.
 - `callable.py`: shared artifact identity and context-bound registration records.
-- `pending.py`: callback result publication and per-call resource retention.
+- `pending.py`: prepared native submission and per-call resource retention.
 - `arguments.py`: session-owned storage registrations and per-call TaskArgs leases.
 
 The session is a lifecycle adapter, not a separate execution engine. Simpler owns
@@ -127,7 +127,7 @@ The runtime submodule follows upstream's Simpler pin
 `31f9e72ee6832cd198b77df18c1c305e7fd83676`. The existing `check_runtime_pin`
 policy remains authoritative for the installed native binding, including its
 missing-identity and explicit-skip rules. A separate availability check requires
-public borrowed init, caller-stream submit, Buffer/TaskArgs, RunHandle and
+public borrowed init, caller-stream preparation, Buffer/TaskArgs, PreparedSubmission and
 `flush_diagnostics` interfaces. It never consults the obsolete kernel supported
 bit or private Worker slots. Interface checks and UT do not establish device
 execution correctness.
@@ -160,14 +160,14 @@ identity because their directories can be overwritten. No new digest is defined.
 Concurrent preparations share success or failure. Busy
 registry and capacity errors propagate without drains, waits or eviction.
 
-Pending tickets retain the registration and per-call owners before enqueue. A
-callback adapter publishes its `RunHandle` to the ticket without taking
-manager locks. Ordinary admission only polls completed tickets. An unpublished
-callback is incomplete; a true `RunHandle.done` still requires `wait()` to retire
-native resources before borrowed sources are released. Explicit drain/shutdown
-may synchronize the framework queue, then retire runs and release sources before
-closing the Worker. A failed callback, retirement or source release retains the
-ticket and Worker; cleanup does not assume device quiescence.
+Pending tickets retain registration and per-call owners before preparation and
+enqueue. `Worker.prepare_submission` snapshots arguments and returns a
+`PreparedSubmission`; queue execution uses its native reference. Ordinary
+admission polls `done` and uses `wait(timeout=0)` for bounded retirement.
+`safe_to_release` is the cleanup proof, including after errors. Unknown completion,
+observation timeouts and failed source release retain owners for retry. Explicit
+drain/shutdown may synchronize the retained framework stream and wait for retirement.
+Safely retired failures release resources while preserving the original error.
 
 The optional `_torch_npu` extension supplies lifecycle/context and NZ storage
 queries, allocator protection and the Torch queue bridge. Build it with
@@ -223,26 +223,30 @@ to close the source and evict its cached imports. Failed release retains the lea
 arguments use INPUT/OUTPUT_EXISTING/INOUT and explicit NONE transfers. Typed
 ctypes scalars use public `TaskArgs.add_scalar`; no implicit H2D occurs.
 
-A Python pending ticket owns BorrowedArguments, the Torch stream, callback,
-configuration, Worker and callable before `RunOpApiV2` can enqueue.
-The native `enqueue` function validates the context, records allocator streams
-and captures the native stream; it creates no native ticket or Tensor owners.
-Before queue admission it sets torch_npu's process-wide `g_used_aclop` flag,
-which enables GIL release during subsequent queue drains in the supported 2.6/2.10
-versions. The flag remains set for the process lifetime. It also releases the
-caller GIL during queue admission. Its callback acquires the GIL
-and calls public
-Python `Worker.submit(..., caller_stream=...)`, then publishes the RunHandle.
-It never calls synchronous `Worker.run`, private native submit or a slot API.
-Native queue state contains no owning Python references; pending owners and
-callback closures are released under the GIL only after successful retirement.
+A Python pending ticket owns BorrowedArguments, the Torch stream, configuration,
+Worker and callable before preparation or `RunOpApiV2` enqueue. The caller obtains
+the raw stream through `stream(false)` without draining the host queue, then calls
+`Worker.prepare_submission(..., caller_stream=..., keepalive=...)`. Preparation
+snapshots arguments/configuration and reserves owners without launching or waiting
+for lane capacity.
 
-Outer JIT return, callback submission and device completion are distinct. Normal
-enqueue and incomplete-ticket polling never drain, synchronize or wait for a
-callback/run. A completed run still requires `wait()` retirement before releasing
-sources. Explicit shutdown may synchronize the retained Torch stream and wait for runs. Simpler
-submit itself can wait for capacity or a predecessor. Submission/retirement
-failures preserve owners when completion is unknown.
+The native adapter reads `PreparedSubmission.native_handle` with the GIL and
+retains a `NativeSubmissionRef`. Queue callbacks call its C++ `submit()` directly;
+submission, error recording and native reference destruction do not enter Python.
+The adapter releases the caller GIL during queue admission and does not use
+`g_used_aclop`. Native failures return nonzero to Torch, which discards later queued consumers and
+reports failure at synchronization. Explicit drain/close cancels those discarded
+submissions; the prepared ticket retains the original execution error.
+Build the adapter and Simpler together: the header comes from the installed
+`simpler_setup.environment.PROJECT_ROOT / "src/common/worker"`, including wheel
+assets. The capsule is a same-build interface, not a separately versioned ABI.
+
+Outer JIT return, native submission and device completion remain distinct.
+Ordinary calls never drain the host queue. A done ticket still requires bounded
+`wait` observation and a true `safe_to_release` before external owners are released.
+If enqueue raises, attempt cancellation; cancellation alone is not cleanup proof.
+Already-consumed or unsafe tickets remain tracked. Explicit shutdown waits for
+remaining work. Simpler submission retains its existing capacity backpressure.
 
 Unit tests use real initialization state transitions, JIT passes/codegen, shared
 artifact publication/restoration and binary validation, with external compiler
@@ -422,7 +426,8 @@ imports with optional runtime dependencies forbidden.
 non-default streams, offset views and noncontiguous-input rejection. It skips
 when a real NPU is unavailable or the selected platform is a simulator. It also
 checks GIL-held queue drains (`stream.query()` and `empty_cache()`) in fresh
-subprocesses with the native adapter. Those regressions use Python callbacks
+subprocesses with the native adapter. A test-only native capsule gates the callback until a native thread releases it;
+a separate bounded wait holds the GIL throughout. These isolate queue/GIL behavior
 without launching a PyPTO device kernel.
 
 `tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
@@ -432,7 +437,7 @@ test-only dispatcher/compiler integration without a real kernel executor.
 `tests/st/runtime/kernel/test_torch_eager.py` adds numerical eager execution STs
 for a single call, eight dependent calls, and alternating Torch NPU/PyPTO calls.
 Each scenario runs on default and non-default streams with both supported
-runtimes, in a fresh interpreter to isolate process execution modes. CI uses a
+runtimes and task queue modes 0/1, in a fresh interpreter to isolate process execution modes. CI uses a
 separate pytest invocation so the parent has not initialized the device. Outputs are
 checked against CPU references after one final stream synchronization; no
 synchronization separates the dependent or interleaved calls. NaN-initialized
@@ -442,7 +447,7 @@ output buffers and changing runtime scalars detect missing or stale writes.
 python -m pytest tests/st/runtime/kernel/test_torch_eager.py --platform=a2a3 --device=0 -v
 ```
 
-The 12 execution cases require a real NPU, `torch_npu`, and the optional
+The 24 execution cases require a real NPU, `torch_npu`, and the optional
 `pypto._torch_npu` adapter. They skip when these prerequisites are absent or
 `--codegen-only` is selected. Two separate codegen smoke cases compile the test
 kernel for both runtimes without claiming to validate device execution. A green

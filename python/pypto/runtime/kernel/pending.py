@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Ownership of a queued callback, its published RunHandle and external sources."""
+"""Python owner retention around Simpler's GIL-free prepared submissions."""
 
 import threading
 from collections.abc import Callable
@@ -17,12 +17,10 @@ from .callable import KernelRegistration
 
 
 class PendingTicket:
-    """Retain resources before enqueue and retire them only after RunHandle.wait.
+    """Retain external owners until Simpler proves safe retirement.
 
-    The queue adapter calls publish/fail from its callback. Those methods
-    never acquire process admission or lifecycle locks, so close can await the
-    callback without preventing it from publishing. ``release`` closes borrowed
-    sources after run retirement and must support retry after a partial failure.
+    Register this ticket before preparation. An enqueue exception can occur
+    after native consumption starts; cancellation alone is not a cleanup proof.
     """
 
     def __init__(
@@ -35,82 +33,95 @@ class PendingTicket:
         owners: tuple[Any, ...],
     ) -> None:
         self.registration = registration
+        self.submission: Any = None
         self._enqueue: Callable[[PendingTicket], None] | None = enqueue
         self._synchronize: Callable[[], None] | None = synchronize
         self._release: Callable[[], None] | None = release
         self._owners = owners
-        self._callback: Any = None
-        self._published = threading.Event()
-        self._publish_lock = threading.Lock()
         self._retire_lock = threading.Lock()
-        self._run: Any = None
-        self._error: BaseException | None = None
         self._enqueued = False
-        self._retired = False
+        self.retired = False
 
     def enqueue(self) -> None:
         if self._enqueued:
             raise RuntimeError("Kernel ticket can only be enqueued once")
         self._enqueued = True
         assert self._enqueue is not None
-        self._enqueue(self)
+        try:
+            self._enqueue(self)
+        except BaseException as error:
+            try:
+                self._cancel()
+            except BaseException as cleanup_error:
+                raise error from cleanup_error
+            raise
 
-    def retain_callback(self, callback: Any) -> None:
-        """Own the Python callback before the native queue borrows its pointer."""
-        self._callback = callback
+    def _cancel(self) -> None:
+        try:
+            if self.submission is not None:
+                # False means already consumed/cancelled. Cancellation may
+                # also raise after establishing safe retirement.
+                self.submission.cancel()
+        finally:
+            self._release_if_safe()
 
-    def publish(self, run: Any) -> None:
-        with self._publish_lock:
-            if self._published.is_set():
-                raise RuntimeError("Kernel callback already published its result")
-            self._run = run
-            self._published.set()
+    def _release_if_safe(self) -> None:
+        if self.retired or (self.submission is not None and not self.submission.safe_to_release):
+            return
+        assert self._release is not None
+        self._release()
+        self._owners = ()
+        self._enqueue = None
+        self._synchronize = None
+        self._release = None
+        self.submission = None
+        self.retired = True
 
-    def fail(self, error: BaseException) -> None:
-        with self._publish_lock:
-            if self._published.is_set():
-                raise RuntimeError("Kernel callback already published its result")
-            self._error = error
-            self._published.set()
-
-    def _check_error(self) -> None:
-        if self._error is not None:
-            raise self._error
+    def _retire(self, timeout: float | None = None) -> None:
+        with self._retire_lock:
+            if self.retired:
+                return
+            try:
+                if self.submission is not None:
+                    self.submission.wait(timeout=timeout)
+            except BaseException as error:
+                try:
+                    self._release_if_safe()
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
+                raise
+            self._release_if_safe()
 
     def done(self) -> bool:
-        if self._retired:
+        if self.retired:
             return True
-        if not self._published.is_set():
+        if self.submission is None or not self.submission.done:
             return False
-        self._check_error()
-        if not self._run.done:
+        try:
+            # Physical completion need not make observation/cleanup nonblocking.
+            self._retire(timeout=0)
+        except TimeoutError:
+            if self.retired:
+                raise
             return False
-        self._retire()
-        return True
-
-    def _retire(self) -> None:
-        with self._retire_lock:
-            if self._retired:
-                return
-            self._run.wait()  # done alone does not retire native run resources.
-            assert self._release is not None
-            self._release()
-            self._owners = ()
-            self._callback = None
-            # Closures also own frames/arguments. Drop them under the GIL only
-            # after successful retirement; failures keep all owners retryable.
-            self._enqueue = None
-            self._synchronize = None
-            self._release = None
-            self._retired = True
+        return self.retired
 
     def wait(self) -> None:
-        if not self._published.is_set():
-            # Explicit shutdown/drain may flush the framework host queue.
-            # Ordinary admission only calls done and never synchronizes.
+        if self.retired:
+            return
+        if self.submission is not None and not self.submission.done:
             assert self._synchronize is not None
-            self._synchronize()
-            if not self._published.is_set():
-                raise RuntimeError("Kernel callback did not publish a RunHandle; owners retained")
-        self._check_error()
+            try:
+                self._synchronize()
+            except BaseException as error:
+                # A failed native callback makes Torch discard later callbacks.
+                # Their unconsumed tokens must be cancelled before waiting.
+                try:
+                    self._cancel()
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
+                self._retire()  # Already-consumed work still needs a cleanup proof.
+                raise
         self._retire()
+        if not self.retired:
+            raise RuntimeError("Kernel submission cleanup is incomplete; owners retained")

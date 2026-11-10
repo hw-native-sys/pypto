@@ -78,7 +78,7 @@ callable 注册及 eager 提交；公开算子注册和 DFX 窗口留待后续�
 - `context.py`：进程状态、并发注册复用和 pending ticket 清理。
 - `owner.py`：生命周期 owner 线程。
 - `callable.py`：共享 artifact 身份及绑定上下文的注册记录。
-- `pending.py`：callback 结果发布及单次调用的资源保留。
+- `pending.py`：原生提交准备及单次调用的资源保留。
 - `arguments.py`：会话拥有的 storage 注册及单次 TaskArgs 租用。
 
 session 是生命周期适配层，不是独立执行引擎。Simpler 负责 callable 注册和执行，
@@ -98,7 +98,7 @@ Worker 的最小 1024 字节要求，不包含借用的 Tensor 存储。
 runtime submodule 跟随 upstream 的 Simpler revision
 `31f9e72ee6832cd198b77df18c1c305e7fd83676`。实际 native binding 的身份仍由既有
 `check_runtime_pin` 检查，包括身份缺失和显式跳过规则。能力检查要求公开 borrowed init、
-caller-stream submit、Buffer/TaskArgs、RunHandle 和 `flush_diagnostics` 接口；
+caller-stream prepare、Buffer/TaskArgs、PreparedSubmission 和 `flush_diagnostics` 接口；
 不查询旧 kernel supported bit 或私有 slot。接口检查和 UT 不构成设备执行正确性验证。
 
 进程管理器持有一个 Worker 和非零 context-generation token，状态包括 UNINITIALIZED、
@@ -122,12 +122,12 @@ Simpler 管理 runtime binaries、slot 和 native 清理。注册复用 `Compile
 不定义新散列。并发 prepare 共享成功或失败；registry busy 和容量
 错误原样传播，不新增 drain、wait 或自动淘汰。
 
-pending ticket 在入队前持有 registration 和每次调用的资源。callback adapter
-向 ticket 发布 RunHandle，无需获取管理器锁。普通调用只轮询完成的 ticket；尚未执行的
-callback 视为未完成。`RunHandle.done` 为真后仍调用 `wait()` 完成 native 退休清理，
-随后才释放借用 source。显式 drain/shutdown 可同步框架队列，按 run 退休、source 释放、
-Worker 关闭的顺序清理。callback、退休或 source 释放失败均保留 ticket 和 Worker，
-不假定设备已静止。
+pending ticket 在准备和入队前持有 registration 和每次调用的资源。
+`Worker.prepare_submission` 快照参数并返回 `PreparedSubmission`，队列通过原生引用执行提交。
+普通调用轮询 `done`，用 `wait(timeout=0)` 有界观察退休状态。`safe_to_release`
+是资源清理证明，失败路径也遵循此契约。完成状态未知、观察超时或 source 释放失败时保留
+所有者供重试；显式 drain/shutdown 可同步保留的框架 stream 并等待退休。
+安全退休的失败释放资源，同时保留并上报原始异常。
 
 可选 `_torch_npu` 扩展提供生命周期/context、NZ storage 查询、allocator 保护及 Torch 队列桥接。用匹配的
 Torch、torch_npu、CANN 头文件及库，通过 `-DPYPTO_BUILD_TORCH_NPU=ON` 构建；
@@ -174,20 +174,24 @@ storage 按基址和完整容量通过 `Buffer.wrap(..., location=worker.device_
 INOUT 和显式 NONE transfer，Scalar 通过带类型的 ctypes 值传给公开
 `TaskArgs.add_scalar`，不隐式执行 H2D。
 
-`RunOpApiV2` 入队前，Python pending ticket 已持有 BorrowedArguments、Torch stream、
-callback、配置、Worker 和 callable。native `enqueue` 函数校验 context、记录 allocator
-stream 并捕获 native stream，不再创建 native ticket 或持有 Tensor 引用。
-入队前设置 torch_npu 的进程级 `g_used_aclop` 标志，让支持的 2.6/2.10
-版本在后续队列排空时释放 GIL；该标志保持到进程结束。
-入队期间也释放调用线程的 GIL；callback 获取
-GIL 后调用公开 Python `Worker.submit(..., caller_stream=...)`，再发布 RunHandle。
-不使用同步 `Worker.run`、私有 native submit 或 slot API。native 队列状态不拥有
-Python 引用；pending owners 和 callback closure 仅在退休成功后、持有 GIL 时释放。
+Python pending ticket 在准备和 `RunOpApiV2` 入队前持有 BorrowedArguments、Torch stream、
+配置、Worker 和 callable。调用线程通过 `stream(false)` 获取原生 stream，不排空 host 队列，
+随后调用 `Worker.prepare_submission(..., caller_stream=..., keepalive=...)`。
+准备阶段快照参数和配置、保留所有者，不启动设备计算或等待执行通道容量。
 
-外层 JIT 返回、callback 提交返回、设备完成是三个不同阶段。普通 enqueue 和未完成
-ticket 轮询不会 drain、synchronize 或等待 callback/run。已完成的 run 仍需 `wait()`
-退休后才释放 source；显式 shutdown 可以同步保留的 Torch stream 并等待 run。Simpler submit 自身
-可能等待容量或前驱。提交或退休失败、完成状态未知时保留所有者。
+原生 adapter 在持有 GIL 时读取 `PreparedSubmission.native_handle` 并保留
+`NativeSubmissionRef`。队列回调直接调用 C++ `submit()`；提交、错误记录和原生引用析构均
+不进入 Python。入队期间释放调用线程的 GIL，不使用 `g_used_aclop`。
+原生失败向 Torch 返回非零状态，使后续排队的消费者被丢弃，并在同步时报告错误。
+显式 drain/close 取消这些未执行的提交；prepared ticket 保留原始执行错误。
+adapter 与 Simpler 必须一同构建：头文件从已安装包的
+`simpler_setup.environment.PROJECT_ROOT / "src/common/worker"` 获取，也支持 wheel assets。
+capsule 是同构建接口，不提供独立版本化 ABI。
+
+外层 JIT 返回、原生提交和设备完成是不同阶段。普通调用不排空 host 队列；done ticket
+仍需有界 `wait` 观察及 `safe_to_release` 证明才能释放外部所有者。入队抛异常时尝试取消，
+但取消本身不代表清理完成；已消费或清理未完成的 ticket 继续跟踪。显式 shutdown 等待剩余工作，
+Simpler 提交保留原有容量背压。
 
 UT 使用真实初始化状态转换、JIT passes/codegen、公共产物发布/恢复及二进制校验，
 仅模拟外部编译器输出和 native/framework 边界。UT 不证明可选 adapter 真实编译、
@@ -331,7 +335,8 @@ PyPTO 自身行为与已安装的框架插件。查找器的负向测试确保 C
 offset view 和非连续输入拒绝行为。没有真实 NPU 或所选平台为模拟器时跳过。
 这些测试包含 metadata 验证，以及使用 native adapter 的子进程队列回归测试：
 验证持有 GIL 的 `stream.query()` 和 `empty_cache()` 能完成队列排空。
-队列回归只执行 Python callback，不启动 PyPTO 设备 kernel。
+队列回归使用测试专用原生 capsule，将回调阻塞到原生线程释放 gate；另外通过有界等待
+持续持有 GIL，验证回调仍能前进。这些测试隔离队列/GIL 行为，不启动 PyPTO 设备 kernel。
 
 `tests/ut/torch/test_registration.py` 覆盖 schema mutation/alias 契约、Fake/Meta
 与符号输入、隔离导入、重复定义，以及不依赖真实 kernel executor 的测试内
@@ -339,7 +344,7 @@ dispatcher/compiler 集成。
 
 `tests/st/runtime/kernel/test_torch_eager.py` 新增 eager 数值执行 ST，覆盖单次调用、
 八次具有数据依赖的连续调用，以及 Torch NPU/PyPTO 交错调用。三种场景均覆盖默认和
-非默认 stream、两种受支持的 runtime，并在独立解释器中执行以隔离进程执行模式。
+非默认 stream、两种受支持的 runtime 和 task queue 模式 0/1，并在独立解释器中执行以隔离进程执行模式。
 CI 使用单独的 pytest 步骤，确保父进程尚未初始化设备。
 所有结果在最后一次 stream 同步后与 CPU 参考值比较，连续调用和交错调用之间不插入
 同步。输出缓冲区预填 NaN，并改变运行时 scalar，以检测漏写和过期参数。
@@ -348,7 +353,7 @@ CI 使用单独的 pytest 步骤，确保父进程尚未初始化设备。
 python -m pytest tests/st/runtime/kernel/test_torch_eager.py --platform=a2a3 --device=0 -v
 ```
 
-12 个执行用例需要真实 NPU、`torch_npu` 和可选 `pypto._torch_npu` adapter；缺少
+24 个执行用例需要真实 NPU、`torch_npu` 和可选 `pypto._torch_npu` adapter；缺少
 这些依赖或指定 `--codegen-only` 时跳过。另有两个 codegen 冒烟用例，分别为两种
 runtime 完整编译测试 kernel，但不验证设备执行。执行用例被跳过时，CI 通过不能
 证明 eager 数值执行正确。

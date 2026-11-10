@@ -123,10 +123,11 @@ def eager_npu(test_config):
     return test_config.device_id
 
 
+@pytest.mark.parametrize("task_queue", ["0", "1"])
 @pytest.mark.parametrize("runtime", list(_RUNTIME_KINDS))
 @pytest.mark.parametrize("stream_kind", ["default", "nondefault"])
 @pytest.mark.parametrize("case", list(_CASES))
-def test_torch_eager_execution(eager_npu, runtime, stream_kind, case):
+def test_torch_eager_execution(eager_npu, runtime, stream_kind, case, task_queue):
     # exec a fresh interpreter rather than fork an already initialized runtime.
     script = (
         "import runpy, sys; "
@@ -148,7 +149,7 @@ def test_torch_eager_execution(eager_npu, runtime, stream_kind, case):
             **os.environ,
             # Preserve paths supplied by the ST harness, including the runtime submodule.
             "PYTHONPATH": os.pathsep.join(sys.path),
-            "TASK_QUEUE_ENABLE": "1",
+            "TASK_QUEUE_ENABLE": task_queue,
             "ASCEND_LAUNCH_BLOCKING": "0",
             "PYTHONOPTIMIZE": "0",  # Keep child assertions enabled outside pytest's rewriting.
         },

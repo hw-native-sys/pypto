@@ -253,8 +253,15 @@ class _ProcessKernelState:
             self.require_registration(registration)
             self._worker.check_context()
             try:
-                self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+                pending: list[Any] = []
+                for ticket in self._submissions:
+                    if not ticket.done():
+                        pending.append(ticket)
+                self._submissions = pending
             except BaseException as exc:
+                self._submissions = [
+                    ticket for ticket in self._submissions if not getattr(ticket, "retired", False)
+                ]
                 self._fail_admission(exc)
                 raise RuntimeError("Kernel Worker failed after an earlier asynchronous launch error") from exc
             ticket = prepare(self._worker)
@@ -262,20 +269,35 @@ class _ProcessKernelState:
             try:
                 ticket.enqueue()
             except BaseException as exc:
+                if getattr(ticket, "retired", False):
+                    self._submissions.remove(ticket)
                 self._fail_admission(exc)
                 raise
 
+    def _wait_submissions(self) -> None:
+        pending: list[Any] = []
+        error = None
+        for ticket in self._submissions:
+            try:
+                self._worker.wait(ticket)
+            except BaseException as exc:
+                if not getattr(ticket, "retired", False):
+                    pending.append(ticket)
+                if error is None:
+                    error = exc
+        self._submissions = pending
+        if error is not None:
+            raise error
+
     def drain(self) -> None:
-        """Wait for admitted eager work; failed tickets remain owned for diagnosis."""
+        """Observe all admitted work, retaining only tickets without safe retirement."""
         self._check_pid()
         with self._submission_lock:
             try:
-                for ticket in self._submissions:
-                    self._worker.wait(ticket)
+                self._wait_submissions()
             except BaseException as exc:
                 self._fail_admission(exc)
                 raise
-            self._submissions.clear()
 
     def close(self) -> None:
         """Stop admission, join in-flight operations and finalize on the native owner."""
@@ -303,10 +325,13 @@ class _ProcessKernelState:
                 self._condition.wait()
         try:
             with self._submission_lock:
-                for ticket in self._submissions:
-                    # wait retires the RunHandle before releasing external sources.
-                    # Failure retains every ticket and prevents Worker teardown.
-                    self._worker.wait(ticket)
+                retirement_error = None
+                try:
+                    self._wait_submissions()
+                except BaseException as exc:
+                    if self._submissions:
+                        raise
+                    retirement_error = exc
                 if self._worker is not None:
                     self._worker.close()
                 self._submissions.clear()
@@ -325,6 +350,9 @@ class _ProcessKernelState:
             self.state = KernelState.CLOSED
             self._closing_thread = None
             self._condition.notify_all()
+
+        if retirement_error is not None:
+            raise retirement_error
 
     def retain_shutdown_failure(self, error: BaseException) -> None:
         """Stop admission without touching device resources after unsafe teardown."""

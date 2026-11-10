@@ -53,7 +53,7 @@ def public_runtime(monkeypatch):
         def unregister(self, handle):
             raise AssertionError("no eager slot eviction")
 
-        def submit(self, target, args=None, config=None, *, caller_stream=None):
+        def prepare_submission(self, target, args=None, config=None, *, caller_stream=None, keepalive=()):
             raise AssertionError("lifecycle does not submit")
 
         def flush_diagnostics(self):
@@ -70,6 +70,13 @@ def public_runtime(monkeypatch):
 
         def wait(self):
             pass
+
+    class PreparedSubmission(RunHandle):
+        native_handle = property(lambda self: None)
+        safe_to_release = property(lambda self: True)
+
+        def cancel(self):
+            return True
 
     class Buffer:
         @classmethod
@@ -93,6 +100,7 @@ def public_runtime(monkeypatch):
         TaskArgs=TaskArgs,
         Tensor=object,
         RunHandle=RunHandle,
+        PreparedSubmission=PreparedSubmission,
         events=events,
         handles=handles,
     )
@@ -181,7 +189,7 @@ def test_capability_guard_rejects_missing_public_contract(public_runtime, monkey
     if missing == "init_keyword":
         monkeypatch.setattr(api.Worker, "init", lambda self: None)
     elif missing == "submit_keyword":
-        monkeypatch.setattr(api.Worker, "submit", lambda self: None)
+        monkeypatch.setattr(api.Worker, "prepare_submission", lambda self: None)
     elif missing == "register":
         monkeypatch.delattr(api.Worker, "register")
     elif missing == "done":
