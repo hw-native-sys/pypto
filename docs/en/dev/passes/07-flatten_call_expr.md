@@ -30,6 +30,14 @@ and verified normally. Other function types keep their existing handling.
 
 **When to use**: Typically schedule this pass after the type-checking pass and before code generation to simplify downstream analysis and code generation; this ordering is a convention rather than an automatically enforced requirement.
 
+Operands are visited and materialized **left to right** before visiting the next
+operand, including binary operands, loop bounds, and tuple elements. For example,
+`f() - (g() + 1)` must execute `f()` before `g()`. Tuple construction evaluates
+**every** element before projection: `(f(), value)[1]` still executes `f()`.
+Extracting those calls before `LowerCompositeOps` folds tuple projections keeps
+unselected atomic updates observable. Tuple-returning `Call` and `Submit`
+expressions are also bound before projection.
+
 ## API
 
 | C++ | Python | Level |

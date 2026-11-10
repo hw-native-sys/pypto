@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[4]
 def regression_kernel(
     src: pl.Tensor[[2, 3, 32], pl.INT32],
     dst: pl.InOut[pl.Tensor[[2, 3, 32], pl.INT32]],
-    buf: pl.InOut[pl.Tensor[[6], pl.INT32]],
-    old: pl.InOut[pl.Tensor[[6], pl.INT32]],
+    buf: pl.InOut[pl.Tensor[[10], pl.INT32]],
+    old: pl.InOut[pl.Tensor[[10], pl.INT32]],
 ):
     tile = pl.load(src, (0, 0, 0), (2, 3, 32))
     with pl.simt_scope(dims=(1, 1, 1)):
@@ -53,6 +53,16 @@ def regression_kernel(
             pl.simt.atomic_add(buf, (4,), one)
         discarded = pl.simt.atomic_add(buf, (5,), one) * pl.const(0, pl.INT32)
         pl.simt.store(old, (5,), delta + discarded)
+        # Asymmetric nesting must exchange 1 before 2: old values are 0 and 1,
+        # leaving buf[6] == 2 and delta == 0 - (1 + 1) == -2.
+        two = pl.const(2, pl.INT32)
+        ordered = pl.simt.atomic_exch(buf, (6,), one) - (pl.simt.atomic_exch(buf, (6,), two) + one)
+        pl.simt.store(old, (6,), ordered)
+        # Projection still evaluates unselected slots, in tuple element order.
+        pl.simt.store(old, (7,), (pl.simt.atomic_exch(buf, (7,), one), two)[1])
+        pl.simt.store(old, (8,), (one, pl.simt.atomic_exch(buf, (8,), two))[0])
+        projected = (pl.simt.atomic_exch(buf, (9,), one), pl.simt.atomic_exch(buf, (9,), two) + one)[0]
+        pl.simt.store(old, (9,), projected)
         # Copy the complete Tile through scalar addressing so the regression
         # checks untouched elements without requiring an ND tile.store path.
         for i in pl.range(192):
@@ -65,8 +75,8 @@ def regression_kernel(
 def regression_entry(
     src: pl.Tensor[[2, 3, 32], pl.INT32],
     dst: pl.InOut[pl.Tensor[[2, 3, 32], pl.INT32]],
-    buf: pl.InOut[pl.Tensor[[6], pl.INT32]],
-    old: pl.InOut[pl.Tensor[[6], pl.INT32]],
+    buf: pl.InOut[pl.Tensor[[10], pl.INT32]],
+    old: pl.InOut[pl.Tensor[[10], pl.INT32]],
 ):
     return regression_kernel(src, dst, buf, old)
 
@@ -96,14 +106,16 @@ def acceptance(output: Path, device: int | None):
             src = torch.full((2, 3, 32), -777, dtype=torch.int32)
             src[1, 2, 7] = 10
             dst = torch.full_like(src, -999)
-            buf = torch.zeros(6, dtype=torch.int32)
-            old = torch.full((6,), -777, dtype=torch.int32)
+            buf = torch.zeros(10, dtype=torch.int32)
+            old = torch.full((10,), -777, dtype=torch.int32)
             kernel(src, dst, buf, old)
             expected = src.clone()
             expected[1, 2, 7] = 20
             torch.testing.assert_close(dst, expected, rtol=0, atol=0)
-            torch.testing.assert_close(old, torch.tensor([10, 11, 5, 9, 7, -1], dtype=torch.int32))
-            torch.testing.assert_close(buf, torch.tensor([2, 3, 2, 1, 1, 1], dtype=torch.int32))
+            torch.testing.assert_close(
+                old, torch.tensor([10, 11, 5, 9, 7, -1, -2, 2, 1, 0], dtype=torch.int32)
+            )
+            torch.testing.assert_close(buf, torch.tensor([2, 3, 2, 1, 1, 1, 2, 1, 2, 2], dtype=torch.int32))
             checks = 3
     (output / "result.json").write_text(json.dumps({"checks": checks}))
 

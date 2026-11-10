@@ -11,6 +11,7 @@
 
 import ast
 import json
+import re
 import runpy
 import subprocess
 from pathlib import Path
@@ -656,5 +657,14 @@ def test_atomic_nd_address_and_nested_calls_native(tmp_path, pytestconfig):
         assert "i64 167" in llvm
         assert "i64 34" not in llvm
         assert llvm.count("call i32 @llvm.hivm.atom.ADD.") == 8
+        # Include unselected tuple elements and verify order, not just count.
+        exchanges = [line for line in llvm.splitlines() if "call i32 @llvm.hivm.atom.EXCH." in line]
+        assert len(exchanges) == 7
+        values = []
+        for line in exchanges:
+            match = re.search(r", i32 (\d+)[,)]", line)
+            assert match is not None, line
+            values.append(int(match.group(1)))
+        assert values == [7, 1, 2, 1, 2, 1, 2]
     finally:
         backend.reset_for_testing()

@@ -80,6 +80,8 @@ class FlattenCallExprMutator : public IRMutator {
   ExprPtr VisitExpr_(const IterArgPtr& op) override { return op; }
   ExprPtr VisitExpr_(const CallPtr& op) override;
   ExprPtr VisitExpr_(const SubmitPtr& op) override;
+  ExprPtr VisitExpr_(const MakeTuplePtr& op) override;
+  ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override;
   ExprPtr VisitExpr_(const AddPtr& op) override;
   ExprPtr VisitExpr_(const SubPtr& op) override;
   ExprPtr VisitExpr_(const MulPtr& op) override;
@@ -198,16 +200,10 @@ class FlattenCallExprMutator : public IRMutator {
    */
   template <typename BinaryExprType>
   ExprPtr ProcessBinaryExpr(const std::shared_ptr<const BinaryExprType>& op) {
-    auto new_left = VisitExpr(op->left_);
-    auto new_right = VisitExpr(op->right_);
-
-    // Extract calls from operands
-    if (As<Call>(new_left)) {
-      new_left = ExtractCallToTemp(new_left);
-    }
-    if (As<Call>(new_right)) {
-      new_right = ExtractCallToTemp(new_right);
-    }
+    // Finish evaluating the left operand before descending into the right.
+    // Otherwise f() - (g() + 1) queues g before f, reversing atomic effects.
+    auto new_left = ExtractCallToTemp(VisitExpr(op->left_));
+    auto new_right = ExtractCallToTemp(VisitExpr(op->right_));
 
     bool changed = (new_left.get() != op->left_.get()) || (new_right.get() != op->right_.get());
     if (changed) {
@@ -301,20 +297,11 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const IfStmtPtr& op) {
 StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
   // Note: Don't clear pending_stmts_, preserve previous state
 
-  auto new_start = VisitExpr(op->start_);
-  auto new_stop = VisitExpr(op->stop_);
-  auto new_step = VisitExpr(op->step_);
-
-  // Extract calls from range
-  if (As<Call>(new_start)) {
-    new_start = ExtractCallToTemp(new_start);
-  }
-  if (As<Call>(new_stop)) {
-    new_stop = ExtractCallToTemp(new_stop);
-  }
-  if (As<Call>(new_step)) {
-    new_step = ExtractCallToTemp(new_step);
-  }
+  // Range operands have the same left-to-right evaluation contract as binary
+  // operands, including calls nested more deeply in a later bound.
+  auto new_start = ExtractCallToTemp(VisitExpr(op->start_));
+  auto new_stop = ExtractCallToTemp(VisitExpr(op->stop_));
+  auto new_step = ExtractCallToTemp(VisitExpr(op->step_));
 
   // Flatten the body through FlattenScopeBody. It saves/restores the range's
   // own pending stmts for the parent SeqStmts, and — when the body is a single
@@ -484,6 +471,30 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const RuntimeScopeStmtPtr& op) {
 }
 
 // Expression visitors implementation
+
+ExprPtr FlattenCallExprMutator::VisitExpr_(const MakeTuplePtr& op) {
+  std::vector<ExprPtr> elements;
+  elements.reserve(op->elements_.size());
+  bool changed = false;
+  for (const auto& element : op->elements_) {
+    // Tuple construction eagerly evaluates every element, even if a later
+    // projection selects another slot. Materialize calls before visiting the
+    // next element so folding that projection cannot drop or reorder effects.
+    auto visited = ExtractCallToTemp(VisitExpr(element));
+    changed |= visited.get() != element.get();
+    elements.push_back(std::move(visited));
+  }
+  if (!changed) return op;
+  return std::make_shared<MakeTuple>(std::move(elements), op->span_);
+}
+
+ExprPtr FlattenCallExprMutator::VisitExpr_(const TupleGetItemExprPtr& op) {
+  // A tuple-returning Call/Submit must also be evaluated at this position,
+  // rather than remaining nested until a later consumer visits the tuple.
+  auto tuple = ExtractCallToTemp(VisitExpr(op->tuple_));
+  if (tuple.get() == op->tuple_.get()) return op;
+  return std::make_shared<TupleGetItemExpr>(tuple, op->index_, op->span_);
+}
 
 ExprPtr FlattenCallExprMutator::VisitExpr_(const CallPtr& op) {
   std::vector<ExprPtr> new_args;
