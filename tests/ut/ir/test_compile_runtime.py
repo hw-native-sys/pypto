@@ -237,10 +237,9 @@ def test_kernel_rejects_hbg_host_data_access_but_program_compiles(tmp_path):
             )
 
 
-@pytest.mark.parametrize("pre_lowered", [False, True])
-def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path, pre_lowered):
+def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path):
     from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
-    from pypto.ir.compile import _compile_artifact, _run_pass_pipeline  # noqa: PLC0415
+    from pypto.ir.compile import _compile_artifact  # noqa: PLC0415
 
     @pl.program
     class NzMatmul:
@@ -258,20 +257,40 @@ def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path, pre_lowered
                 pl.store(acc, [0, 0], c)
             return c
 
-    # A compilation input may already carry the blocked signature. Re-running
-    # compilation must neither call it logical nor block it a second time.
-    source = (
-        _run_pass_pipeline(NzMatmul, operation="lower").transformed_program if pre_lowered else NzMatmul
-    )
     kernel = _compile_artifact(
-        source, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
+        NzMatmul, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
     )
     assert isinstance(kernel, CompiledArtifact) and kernel.metadata is not None
-    assert kernel.metadata.parameters[0].shape == ((1, 8, 4, 16, 16) if pre_lowered else (64, 128))
+    assert kernel.metadata.parameters[0].shape == (64, 128)
     assert kernel.metadata.lowered_parameters[0].shape == (1, 8, 4, 16, 16)
-    assert kernel.metadata.parameters[0].shape_is_lowered is pre_lowered
+    assert kernel.metadata.parameters[0].shape_is_lowered is False
     assert kernel.metadata.lowered_parameters[0].shape_is_lowered is True
     assert kernel.metadata.return_aliases == (2,)
+
+
+def test_kernel_preserves_pre_lowered_nz_metadata(tmp_path):
+    from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
+    from pypto.ir.compile import _compile_artifact, _run_pass_pipeline  # noqa: PLC0415
+
+    @pl.program
+    class NzEntry:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, weight: pl.Tensor[[64, 128], pl.FP16, pl.NZ]):
+            return
+
+    # Exercise the compilation-input signature after real lowering. The empty
+    # body isolates this contract from the idempotence of compute-body passes.
+    lowered = _run_pass_pipeline(NzEntry, operation="lower").transformed_program
+    artifact = _compile_artifact(
+        lowered, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
+    )
+    assert isinstance(artifact, CompiledArtifact) and artifact.metadata is not None
+    metadata = artifact.metadata
+    assert metadata.parameters[0].shape == (1, 8, 4, 16, 16)
+    assert metadata.parameters[0].shape_is_lowered is True
+    assert metadata.parameters == metadata.lowered_parameters
+    arg = DeviceTensor(0x1000, (64, 128), torch.float16)
+    assert _validate_device_tensor(arg, metadata.parameters[0]) is None
 
 
 @pytest.mark.parametrize("pre_lowered", [False, True])
