@@ -85,6 +85,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   };
 
   explicit OrchestrationStmtCodegen(const ir::ProgramPtr& prog, KernelRegistrations* registrations,
+                                    const std::vector<ir::VarPtr>& params,
                                     std::unordered_map<const ir::Var*, std::string> param_to_emit_name,
                                     std::set<std::string> param_name_set,
                                     std::map<std::string, int> param_name_to_orch_index,
@@ -575,6 +576,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
+  std::string tensor_phi_param_name_;
   CodeEmitter emitter_;
   CodeEmitter* active_emitter_ = &emitter_;
   std::string current_result_var_;

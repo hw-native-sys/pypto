@@ -12,10 +12,14 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_GRAPH_REPLAY_INVARIANT_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_GRAPH_REPLAY_INVARIANT_H_
 
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -28,7 +32,7 @@ namespace graph_replay {
 /// A TaskId is never a boundary scalar, so it is exempt from every
 /// boundary-scalar rule. The recording captures the dependency structure
 /// itself — an edge is a node index, not a value to patch — and
-/// `graph_boundary_matches` refuses outright any call carrying an explicit
+/// `graph_begin_inner` refuses any call carrying an explicit
 /// dependency (`args.explicit_dep_count() != 0`), so an id produced outside the
 /// region can never reach a replay in the first place.
 [[nodiscard]] bool IsTaskIdScalar(const TypePtr& type);
@@ -43,10 +47,9 @@ namespace graph_replay {
 /// | hoistable | can the call site recompute this? | moving a value out of the region |
 /// | replay-invariant | is this the same on every call? | letting a value stay frozen |
 ///
-/// Every hoistable value is replay-invariant; the converse fails, and each value
-/// in the gap is one the pass used to reject even though the runtime would have
-/// been happy with it. A frozen value is only wrong when it can *differ* between
-/// calls, so replay-invariance is the property the runtime actually needs.
+/// A derivable scalar may be hoisted and refreshed per call. A value from
+/// a constant-trip loop can stay frozen even though the caller cannot derive
+/// it. The two analyses keep those cases separate.
 ///
 /// Three seeds, each with its own reason for being constant across replays:
 ///
@@ -56,50 +59,77 @@ namespace graph_replay {
 ///   constant bounds mean every later call walks the identical sequence. This is
 ///   also the only thing a tiled kernel's slab offset can be — `i * TILE` cannot
 ///   be hoisted, because the value does not exist at the call site at all;
-/// * **`tensor.dim` of a boundary tensor parameter**. `graph_boundary_matches`
-///   compares each boundary tensor's `ndims`, `shapes` and `strides` against the
-///   recorded `GraphBoundarySignature` and declines the cached graph on any
-///   mismatch, so within one recording a boundary shape cannot change.
+/// * **`tensor.dim` of a boundary tensor parameter**. The runtime matches
+///   its rank, shape and strides against the recorded GraphBoundaryMatchInfo,
+///   so within one recording the boundary shape cannot change.
 ///
+/// Metadata-only slice/reshape/view chains inherit the shape fact only after
+/// their source, shape/offset operands and result extents are invariant.
 /// Closed under scalar arithmetic and over names bound to an invariant value.
 ///
-/// **Scalar parameters are deliberately excluded.** The runtime patches a
-/// boundary scalar's slot on every call, which is exactly what makes one a legal
-/// *task argument* and an illegal *frozen view offset*. Admitting them here
-/// would turn the distinction this class exists to draw back into the one it
-/// replaces.
+/// Scalar parameters are mutable by default. The runtime patches a boundary
+/// scalar's slot on every call, which is exactly what makes one a legal
+/// task argument and an illegal frozen view offset. Call-site metadata proofs
+/// seed topology checks separately. Values consumed by graph-body codegen
+/// are also part of the GraphConfig key.
 class ReplayInvariantSet {
  public:
   /// @param graph_func the Graph function whose body will be collected; its
   ///        tensor parameters seed the `tensor.dim` rule.
-  explicit ReplayInvariantSet(const FunctionPtr& graph_func);
+  // Extra scalar seeds are compiler-internal proofs retained across hoisting.
+  // Only actual scalar parameters in this identity set qualify; callers must
+  // prove their original defining expressions invariant before rewriting.
+  explicit ReplayInvariantSet(const FunctionPtr& graph_func,
+                              const std::unordered_set<const Var*>& proven_fixed_scalar_params = {});
+
+  /// Seed only free shape symbols actually bound from selected boundary descriptors.
+  /// Scalar parameters and local definitions shadow descriptor symbols by emitted name.
+  void SeedBoundaryDimensionSymbols(const FunctionPtr& func);
 
   /// Collect the invariant names bound in @p body.
   ///
   /// One forward walk. The body is SSA in definition order, so a name is always
   /// classified before anything that reads it — the same property Step A's own
   /// collector relies on.
-  void Collect(const StmtPtr& body);
+  void Collect(const StmtPtr& body, bool include_constant_trip_indices = true);
 
   /// True when @p expr evaluates to the same value on every replay.
   [[nodiscard]] bool IsInvariant(const ExprPtr& expr) const;
 
-  /// True when @p call is `tensor.dim(<boundary tensor>, <literal axis>)`.
+  /// True for `tensor.dim` of a boundary tensor or a proven metadata-only
+  /// view of one, with a literal axis.
   ///
   /// Exposed so `IsInvariant` can treat such a call as a leaf rather than
   /// rejecting it with every other call; a shape read written inline in an
   /// argument reaches the checker without ever being bound to a name.
   [[nodiscard]] bool IsBoundaryDimRead(const CallPtr& call) const;
 
+  /// Re-prove scalar origins from every current Graph Call/Submit.
+  /// Only actual tensor arguments at each site seed shape metadata. GraphConfig
+  /// distinguishes the resulting scalar values used by the Graph body.
+  using FixedScalarIndex = std::unordered_map<const Function*, std::unordered_set<const Var*>>;
+  [[nodiscard]] static FixedScalarIndex IndexFixedScalarsFromCallSites(const ProgramPtr& program);
+  [[nodiscard]] static const std::unordered_set<const Var*>& FixedScalarsForGraph(
+      const FixedScalarIndex& index, const FunctionPtr& graph);
+
  private:
-  /// Record a tensor name that aliases a boundary parameter, directly or
-  /// through an earlier alias.
+  /// Record a bare alias or a metadata-only view with a proven invariant
+  /// source, complete operand list and result shape.
   void TrackTensorAlias(const AssignStmtPtr& op);
 
-  /// Tensor parameters, plus every bare alias of one.
-  std::unordered_set<const Var*> boundary_tensors_;
-  /// Names bound to a replay-invariant value, plus constant-trip loop vars.
-  std::unordered_set<const Var*> invariant_;
+  // The empty set is a locally proven invariant. Nonempty sets record the
+  // exact tensor arguments a caller must forward in a Graph's layout key.
+  // A disengaged optional is unknown.
+  using Roots = std::vector<const Var*>;
+  using Proof = std::optional<Roots>;
+
+  [[nodiscard]] Proof ProveExpr(const ExprPtr& expr) const;
+  [[nodiscard]] Proof ProveDimRead(const CallPtr& call) const;
+
+  /// Physical extent facts only: never descriptor, address or tensor data facts.
+  std::unordered_map<const Var*, std::vector<Proof>> fixed_local_axes_;
+  std::unordered_map<const Var*, Roots> boundary_tensors_;
+  std::unordered_map<const Var*, Roots> invariant_;
 };
 
 }  // namespace graph_replay

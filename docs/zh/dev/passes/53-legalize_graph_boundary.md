@@ -59,6 +59,10 @@ self.layer(cur, wq_view(i), i, i * 5120)     # 算术搬到了这里
 
 新形参是**追加**而不是前置的：`CoreTaskArgs` 要求所有张量实参排在所有标量实参之前。
 
+将分支内标量外提会使表达式在条件判断前求值。如果需要外提分支内的整数除法或取余，
+除数必须是非零且不等于负一的字面量。可以在调用点保留条件保护后计算该值，
+或将整个条件移到 Graph 外。
+
 ### 纯重命名会被删除，而不是被接受
 
 `n = batch` 没有计算，因此无需外提，但保留它会生成 `int64_t n = batch;`。
@@ -97,10 +101,21 @@ g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 | ---- | ---------------- |
 | 字面量 | 平凡成立 |
 | **常量迭代次数**循环的归纳变量 | 录制会把循环走一遍，把每次迭代的字面量烙进那次迭代自己的节点；边界是常量，意味着后续每次调用都走出完全相同的序列 |
-| 对边界张量形参取的 `tensor.dim`（轴为字面量） | `graph_boundary_matches` 会把每个边界张量的 `ndims`、`shapes`、`strides` 与录制下来的 `GraphBoundarySignature` 比对，任一不符即拒绝该缓存图，所以在同一份录制内边界形状不可能改变 |
+| 对边界张量形参取的 `tensor.dim`（轴为字面量） | `GraphBoundaryMatchInfo` 记录每个边界张量的 `ndims`、`shapes`、`strides` 提交时必须匹配录制的布局，所以在同一份录制内边界形状不可能改变 |
 
-**标量形参被刻意排除在不变集合之外。** runtime 每次调用都会 patch 边界标量的槽位 ——
-这恰恰是它作为*任务实参*合法、而作为*被冻结的 view 偏移*非法的原因。
+字面量轴的 `tensor.dim` 也可读取源自边界张量的 `tensor.slice`、`tensor.reshape` 或
+`tensor.view` 链。前提是全部元数据操作数（含偏移和可选 valid-shape）及物理结果维度
+都已证明回放不变。这只证明形状事实；地址外提、副作用和分配生命周期仍需独立检查。
+
+当局部张量分配的某个物理维度不变时，对该维度使用字面量轴的读取也不变。
+前端形状元组必须与结果张量类型一致。规范化后的零参数分配直接使用结果类型。
+裸别名保留对应长度的事实。后端注入的 pipe 分配不适用此规则。
+
+**标量形参默认可变。** 只有每个调用或派发点都传入由字面量及该点实际传递的张量
+描述符推导出的实参，Graph 拓扑才能依赖该形参。边界匹配固定描述符布局。生成的编排
+还将 Graph 函数体读取的边界标量纳入 Config，因此不同调用点的不同标量值会选择
+不同录制。调用方的循环归纳变量、张量数据和运行时标量形参不提供此来源证明。
+合法化 pass 和验证器分别从各自当前的程序重新推导这些事实。
 
 正是这一点才让分块 kernel 得以通过。分片偏移 `i * TILE` 无法外提：这个值在调用点
 根本不存在。而 decoder layer 里的每个 projection、MLP 和 attention 循环都是这样索引
@@ -282,7 +297,7 @@ runtime 中都能直接按类型解码数值。
 | 不允许 runtime 分配边界输出 | `Out` 描述只写访问，调用方提供存储时合法。调用方向（call-site direction）支持 `OutputExisting` 和 `InOut`；拒绝请求新分配的 `ArgDirection::Output` |
 | 标量形参必须是 `In` | 边界标量按值传入、由调用点回放 |
 | 只能返回自己的形参 | 缓存调用跳过录制函数体，计算返回值因而不可用；`return c`（`c` 为 `InOut` 形参）是合法的别名。外层 Graph 完成号是独立的 Submit 结果，首次和缓存调用均有效 |
-| 被拉起的任务数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点，按**上界**计——通过这项检查即意味着 runtime 会接受该 Graph。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述。与本表其他检查不同，这一项在外提步骤**之后**才计数：Step C 会*移除*分配节点，按外提前的函数体计会拒掉本来放得下的 Graph，也会与 verifier 不一致——后者是从改写后的 IR 重新推导同一个计数的 |
+| 每条路径录制的节点数在 1..1024 之间 | `graph_execution_storage_layout` 既拒绝 0 个节点，也拒绝超过 `GRAPH_MAX_NODES` 的。对允许的条件分支，较小的分支给出下界，较大的分支给出上界。循环内的 launch 按迭代次数计入而非按词法调用点计 1；`system.task_dummy` 也计入——它 lower 成 `rt_submit_dummy_task`，且 `ExpandManualPhaseFence` 会自动插入。分配同样会记节点。codegen 会收集一个语句列表里所有符合条件的 create（中间夹着 launch 不会打断批次），再按每次 `alloc_tensors` 最多 `kAllocTensorsArgs`（16）个打包。它的三条不合格规则里有两条在这里不可能触发（shape 读局部变量已被按非常量拒绝；SSA 下不可能出现已声明的 var），这些 create 是**精确**计数的。第三条可能触发——被注入的 GM pipe buffer 在其 `core_num` 读到 body-local 时会离开共享批次，而这只有 emitter 的 use-resolution 才知道——所以这类按最坏情况各计 1 个节点。批量大小和 GM-pipe 判定与 emitter 共用 `utils/alloc_batching.h`，而非各自重述。与本表其他检查不同，这一项在外提步骤**之后**才计数：Step C 会*移除*分配节点，按外提前的函数体计会拒掉本来放得下的 Graph，也会与 verifier 不一致——后者是从改写后的 IR 重新推导同一个计数的 |
 | 运行时循环 / 分支内不得有分配 | 每次分配都记一个节点，所以数量随调用变化就是拓扑随调用变化 |
 | 分配的 shape 必须是编译期常量 | 录制会把 shape 抄进节点并据此推出缓冲区地址；读取边界标量的 shape 会被冻结在首次调用的值上 |
 | 区域内不得有 `tensor.full` | orchestration codegen 没有它的 lowering，会按 misplaced tensor op 拒绝 |
