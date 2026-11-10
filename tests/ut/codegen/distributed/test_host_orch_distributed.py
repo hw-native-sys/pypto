@@ -2246,7 +2246,7 @@ def test_host_window_requests_urma_and_context():
     assert "validate_host_domain_runtime" not in code
 
 
-@pytest.mark.parametrize("key", ["engram_l1", 'table"\\\nkey'])
+@pytest.mark.parametrize("key", ["engram_l1", 'table"\\\nkey', "table_\u8868_\x01\x7f"])
 def test_host_window_initializer_is_only_a_runtime_binding(key):
     @pl.program
     class Prog:
@@ -2342,6 +2342,64 @@ def test_host_collective_rejects_peer_mte_before_builtin_lowering():
 
     with pytest.raises(ValueError, match="Host communication windows require URMA"):
         _lower_host_collectives(Prog)
+
+
+@pytest.mark.parametrize("indexed", [False, True], ids=["all_to_all_v", "indexed_all_to_all_v"])
+@pytest.mark.parametrize("host_operand", ["input", "target", "signal", "send_counts", "recv_counts"])
+def test_l2_collective_checks_host_peer_access_after_builtin_lowering(indexed, host_operand):
+    """Builtin stubs hide peer accesses, including a plain-Tensor send_counts formal."""
+    input_source = "host" if host_operand == "input" else "device"
+    target_source = "host" if host_operand == "target" else "device"
+    signal_source = "host" if host_operand == "signal" else "device"
+    counts_source = "host" if host_operand == "send_counts" else "device"
+    recv_source = "host" if host_operand == "recv_counts" else "device"
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            inp: pld.DistributedTensor[[8, 64], pl.FP32],
+            target: pl.InOut[pld.DistributedTensor[[8, 64], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            counts: pld.DistributedTensor[[2, 1], pl.INT32],
+            recv: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            index: pl.Tensor[[2, 4], pl.INT32],
+        ) -> pld.DistributedTensor[[8, 64], pl.FP32]:
+            if indexed:
+                result = pld.tensor.indexed_all_to_all_v(inp, target, signal, counts, recv, index, core_num=1)
+            else:
+                result = pld.tensor.all_to_all_v(inp, target, signal, counts, recv, core_num=1)
+            return result
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, index: pl.Tensor[[2, 4], pl.INT32]):
+            input_buf = pld.alloc_window_buffer(2048, memory_source=input_source)
+            target_buf = pld.alloc_window_buffer(2048, memory_source=target_source)
+            signal_buf = pld.alloc_window_buffer(8, memory_source=signal_source)
+            counts_buf = pld.alloc_window_buffer(8, memory_source=counts_source)
+            recv_buf = pld.alloc_window_buffer(8, memory_source=recv_source)
+            for rank in pl.range(2):
+                inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
+                target = pld.window(target_buf, [8, 64], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [2, 1], dtype=pl.INT32)
+                counts = pld.window(counts_buf, [2, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [2, 1], dtype=pl.INT32)
+                self.chip(inp, target, signal, counts, recv, index, device=rank)
+
+    # Fold the captured variant selector, then reproduce the production ordering:
+    # L2 collectives become builtins before domains and context are materialized.
+    program = passes.simplify()(Prog)
+    program = passes.normalize_return_order()(program)
+    program = passes.lower_l2_tensor_collectives()(program)
+    if host_operand in {"target", "signal", "send_counts"}:
+        with pytest.raises(ValueError, match="Host communication windows require URMA.*__builtin_"):
+            _lower(program)
+    else:
+        # Local-only Host input/recv_counts must not be rejected with peer operands.
+        code = _lower(program)
+        compile(code, "host_l2_collective.py", "exec")
+        assert code.count("memory_source=AddressSpace.HOST") == 1
 
 
 if __name__ == "__main__":

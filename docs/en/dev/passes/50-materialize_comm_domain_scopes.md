@@ -231,6 +231,12 @@ are rejected when their remote operands originate from Host windows, including t
 forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
 peer MTE. Host peer URMA reads remain a separate execution feature.
 
+The check also covers CHIP `all_to_all_v` and `indexed_all_to_all_v` after builtin
+lowering: `target` supplies the peer-mapped context, and `signal` / `send_counts`
+are accessed directly on peers. These operands cannot use Host windows, including
+`send_counts` whose synthesized formal is a plain Tensor. Local-only `input` and
+`recv_counts` may use Host windows.
+
 ### Runtime source initialization
 
 Declare a runtime source key with `pld.alloc_window_buffer(size, memory_source="host",

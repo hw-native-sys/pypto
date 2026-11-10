@@ -192,6 +192,11 @@ Simpler 校验。当前 runtime 子模块已提供此 API。
 包括通过 chip/InCore 参数转发的情况。URMA 异步算子不被归类为 peer MTE。
 Host peer URMA 读取的执行接入仍是独立的后续工作。
 
+检查也覆盖 builtin lowering 后的 CHIP `all_to_all_v` 和 `indexed_all_to_all_v`：
+`target` 提供带 peer 映射的通信上下文，`signal` / `send_counts` 会被直接远端访问。
+这些操作数不能使用 Host 窗口；即使 `send_counts` 的合成形参是普通 Tensor，也会检查其来源。
+只做本地访问的 `input` 和 `recv_counts` 可以使用 Host 窗口。
+
 ### 运行时来源初始化
 
 用 `pld.alloc_window_buffer(size, memory_source="host", init="engram_l1")` 声明运行时来源键。

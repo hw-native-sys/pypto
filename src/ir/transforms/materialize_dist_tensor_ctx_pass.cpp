@@ -761,11 +761,32 @@ class HostPeerAccessChecker : public IRVisitor {
     return ctx.get();
   }
 
+  void CheckBuiltinPeerAccess(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
+    const auto template_dir = callee->GetAttr<std::string>(kAttrBuiltinTemplateDir);
+    if (template_dir.empty()) return;
+    const auto& registry = OpRegistry::GetInstance();
+    if (template_dir != registry.GetEntry("builtin.tensor.all_to_all_v").GetTemplateDir() &&
+        template_dir != registry.GetEntry("pld.tensor.indexed_all_to_all_v").GetTemplateDir()) {
+      return;
+    }
+    // LowerL2TensorCollectives replaces these ops with return-only IR stubs.
+    // Both templates access peer signal/count memory directly, even though the
+    // indexed variant transfers payloads over URMA. Target supplies their ctx,
+    // which must also have peer-MTE mappings. Input/recv_counts are local-only.
+    // Inspect actual send_counts (arg 3): its canonical formal is plain Tensor,
+    // so distributed-parameter forwarding alone loses its Host provenance.
+    for (size_t index = 1; index <= 3 && index < args.size(); ++index) {
+      if (auto source = Resolve(args[index])) peer_uses_.emplace(source, callee->name_);
+    }
+  }
+
   void CheckCall(const OpPtr& op, const std::vector<ExprPtr>& args) {
     if (auto global = As<GlobalVar>(op)) {
       auto callee = program_->GetFunction(global->name_);
+      if (!callee) return;
+      CheckBuiltinPeerAccess(callee, args);
       auto plan = plans_.find(global->name_);
-      if (!callee || plan == plans_.end()) return;
+      if (plan == plans_.end()) return;
       for (size_t index : plan->second.dist_param_indices) {
         if (index >= args.size()) continue;
         if (auto source = Resolve(args[index])) {
@@ -779,13 +800,15 @@ class HostPeerAccessChecker : public IRVisitor {
         IsOp(op, "pld.system.get_comm_ctx") || IsOp(op, "pld.system.rank") || IsOp(op, "pld.system.nranks") ||
         IsOp(op, "pld.system.world_size") || IsOp(op, "pld.system.wait") ||
         IsOp(op, "pld.system.defer_wait") || IsOp(op, "pld.tensor.put_async") ||
-        IsOp(op, "pld.tensor.get_async"))
+        IsOp(op, "pld.tensor.get_async")) {
       return;
+    }
     std::optional<size_t> remote_arg;
     if (IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) remote_arg = 2;
     if (IsOp(op, "pld.tensor.put") || IsOp(op, "pld.tile.put") || IsOp(op, "pld.tile.remote_load") ||
-        IsOp(op, "pld.system.notify"))
+        IsOp(op, "pld.system.notify")) {
       remote_arg = 0;
+    }
     if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) remote_arg = 1;
     for (size_t i = 0; i < args.size(); ++i) {
       if (remote_arg && i != *remote_arg) continue;

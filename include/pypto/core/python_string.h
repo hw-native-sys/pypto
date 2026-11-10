@@ -25,14 +25,15 @@ namespace pypto {
 inline std::string QuotePythonString(const std::string& value) {
   constexpr char kHex[] = "0123456789abcdef";
   std::string out = "\"";
-  for (unsigned char c : value) {
+  for (char c : value) {
+    const auto byte = static_cast<unsigned char>(c);
     if (c == '"' || c == '\\') {
       out += '\\';
       out += c;
-    } else if (c < 32 || c == 127) {
+    } else if (byte < 32 || byte == 127) {
       out += "\\x";
-      out += kHex[c >> 4];
-      out += kHex[c & 0xf];
+      out += kHex[byte >> 4];
+      out += kHex[byte & 0xf];
     } else {
       out += c;
     }
