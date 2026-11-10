@@ -1041,9 +1041,13 @@ def _tensor_expr_meta(
     if isinstance(expr, ast.Call):
         target_name = f"return_l{expr.lineno}_c{expr.col_offset}"
         if isinstance(expr.func, ast.Name) and expr.func.id in deps.io:
-            target = ast.Name(id=target_name, ctx=ast.Store())
-            result = _dep_out_metas_or_return(expr, expr.func.id, target, deps, local)
-            return result.metas.get(target_name)
+            dep = deps.funcs[expr.func.id]
+            if dep._func_type == "extern":
+                target = ast.Name(id=target_name, ctx=ast.Store())
+                result = _dep_out_metas_or_return(expr, expr.func.id, target, deps, local)
+                return result.metas.get(target_name)
+            summary = _dep_result_metas(expr, expr.func.id, deps, local, arity=None, submitted=True)
+            return summary.metas[0] if summary is not None and len(summary.metas) == 1 else None
         if isinstance(expr.func, ast.Attribute):
             meta, _ = _builtin_call_meta(expr, target_name, pl_attr_handlers, qualified_call_handlers)
             return meta
@@ -1459,8 +1463,16 @@ def _update_local_tensor_meta(
             if resolve_expr is not None
             else _subscript_meta(value, local, resolve_int, return_meta, deps, resolve_dim)
         )
-    elif isinstance(value, ast.Name) and has_named_target:
-        meta = local.get(value.id)
+    elif has_named_target and (
+        isinstance(value, ast.Name)
+        or (
+            resolve_expr is not None
+            and items is None
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+        )
+    ):
+        meta = resolve_expr(value) if resolve_expr is not None else local.get(cast(ast.Name, value).id)
     elif isinstance(value, ast.Call) and items is None:
         fn = value.func
         if isinstance(fn, ast.Attribute) and has_named_target:

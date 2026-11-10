@@ -50,7 +50,7 @@ from typing import Any, cast, get_args, get_origin
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_RETURN_PARAMS_ATTR
 from pypto.language.parser.expr_evaluator import ExprEvaluator
-from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR
+from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
 from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
@@ -1805,13 +1805,22 @@ def _infer_return_type(  # noqa: PLR0913
                 eager_annotation,
                 emit_declared_contract=True,
             )
+        if return_metas and (
+            all(meta is not None for meta in return_metas)
+            or any(
+                isinstance(dim, DynDim) and dim.synthesized
+                for meta in return_metas
+                if meta is not None
+                for dim in meta.shape
+            )
+        ):
+            # Ask the parser for the actual returned IR types. Metadata is
+            # sufficient for call planning but cannot express body dimensions
+            # as a source-level signature without losing their provenance.
+            return None
         if isinstance(value, ast.Tuple):
             return _infer_tuple_return_type(
                 value.elts, annotation, tensor_meta, dist_set, py_globals or {}, return_metas
-            )
-        if return_metas and len(return_metas) > 1:
-            return _infer_tuple_return_type(
-                [None] * len(return_metas), annotation, tensor_meta, dist_set, py_globals or {}, return_metas
             )
 
     # A TASK_ID (or another explicit Scalar) has no TensorMeta entry. Preserve
@@ -1824,10 +1833,6 @@ def _infer_return_type(  # noqa: PLR0913
         and _is_scalar_annotation(func_def.returns.value)
     ):
         return ast.unparse(_fold_const_names(func_def.returns, py_globals or {}))
-
-    if return_node is not None and return_metas and len(return_metas) == 1 and return_metas[0] is not None:
-        result = return_metas[0]
-        return _build_tensor_annotation(result, is_out=False, is_distributed=result.is_distributed)
 
     # `return f(...)`: the result type depends on f's declared return types,
     # which we don't have here. Emit no annotation rather than wrongly assuming
@@ -2184,6 +2189,7 @@ class Specializer:
         # Accumulated alias→original map across all specialized functions.
         self._rename_map: dict[str, str] = {}
         self._graph_rebinds: dict[str, dict[str, str | int] | None] = {}
+        self._submit_return_arities: dict[str, int] = {}
         # Param order per function — lets the body transformer rewrite
         # ``self.<dep>(a, out=out)`` keyword args into all-positional form
         # (the parser rejects keyword args on inter-function calls).
@@ -2272,6 +2278,8 @@ class Specializer:
         }
         if graph_rebinds:
             lines.append(f"    {JIT_GRAPH_REBINDS_ATTR} = {graph_rebinds!r}")
+        if self._submit_return_arities:
+            lines.append(f"    {JIT_SUBMIT_RETURNS_ATTR} = {self._submit_return_arities!r}")
         lines.extend(body_lines)
 
         src = "\n".join(lines)
@@ -2336,6 +2344,28 @@ class Specializer:
                     orig_col + ctx.orig_col_offset,
                 )
         return out
+
+    def _specialize_return_annotation(
+        self,
+        func_def: ast.FunctionDef,
+        ctx: SpecializeContext,
+        out_params: list[str],
+        distributed_params: set[str],
+    ) -> str | None:
+        ret_type = _infer_return_type(
+            func_def,
+            ctx.tensor_meta,
+            out_params,
+            distributed_params,
+            ctx.py_globals,
+            ctx.constexpr_values,
+            eager_annotation=ctx.eager_return_annotation,
+            emit_expression_contract=ctx.requires_return_contract,
+            return_metas=ctx.return_metas,
+        )
+        if ret_type is None and ctx.requires_return_contract and ctx.return_metas:
+            self._submit_return_arities[ctx.func_name] = len(ctx.return_metas)
+        return ret_type
 
     def _specialize_function(self, ctx: SpecializeContext) -> list[str]:
         """Generate lines for a single @pl.function method."""
@@ -2483,17 +2513,7 @@ class Specializer:
                 self._external_return_params(func_def, tensor_params, out_params, ret_type),
             )
 
-        ret_type = _infer_return_type(
-            func_def,
-            ctx.tensor_meta,
-            out_params,
-            distributed_params,
-            ctx.py_globals,
-            ctx.constexpr_values,
-            eager_annotation=ctx.eager_return_annotation,
-            emit_expression_contract=ctx.requires_return_contract,
-            return_metas=ctx.return_metas,
-        )
+        ret_type = self._specialize_return_annotation(func_def, ctx, out_params, distributed_params)
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # Transform body

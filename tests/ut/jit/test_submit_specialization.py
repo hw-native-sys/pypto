@@ -925,3 +925,70 @@ def test_supplied_input_validates_call_owned_packed_dtype():
 
     with pytest.raises(TypeError, match="pass the declared FP4 format"):
         entry.specialize(torch.empty(32, 32), torch.empty(32, 32))
+
+
+@pytest.mark.parametrize("via_alias", [False, True])
+def test_submitted_forward_uses_actual_incore_result(via_alias):
+    @pl.jit.incore
+    def choose(a: pl.InOut[pl.Tensor], b: pl.Tensor):
+        return b
+
+    if via_alias:
+
+        @pl.jit.graph
+        def relay(a: pl.InOut[pl.Tensor], b: pl.Tensor):
+            result = choose(a, b)
+            return result
+    else:
+
+        @pl.jit.graph
+        def relay(a: pl.InOut[pl.Tensor], b: pl.Tensor):
+            return choose(a, b)
+
+    @pl.jit.graph
+    def consume(value: pl.Tensor):
+        return value
+
+    @pl.jit
+    def entry(a: pl.InOut[pl.Tensor], b: pl.Tensor):
+        value, done = pl.submit(relay, a, b)
+        result, _ = pl.submit(consume, value)
+        return result
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(32, 64))
+    submit, _ = _submissions(program)
+    assert isinstance(submit.type, ir.TupleType)
+    expected = ir.TensorType([32, 64], pl.FP32)
+    assert ir.structural_equal(submit.type.types[0], expected)
+    consumer = program.get_function("consume")
+    assert consumer is not None
+    assert ir.structural_equal(consumer.params[0].type, expected)
+
+
+def test_submitted_dynamic_reshape_preserves_body_shape_expression():
+    rows = pl.dynamic("submit_reshape_rows")
+
+    @pl.jit.incore
+    def flatten(x: pl.Tensor[[rows, 32], pl.FP32]):
+        height = pl.tensor.dim(x, 0)
+        flat = pl.reshape(x, [height * 32])
+        return flat
+
+    @pl.jit
+    def entry(x: pl.Tensor[[rows, 32], pl.FP32]):
+        flat, done = pl.submit(flatten, x)
+        return flat
+
+    program = entry.specialize(torch.empty(16, 32))
+    (submit,) = _submissions(program)
+    assert isinstance(submit.type, ir.TupleType)
+    result_type = submit.type.types[0]
+    assert isinstance(result_type, ir.TensorType)
+    (result_dim,) = result_type.shape
+    assert isinstance(result_dim, ir.Mul)
+    caller = program.get_function("entry")
+    assert caller is not None and isinstance(caller.params[0].type, ir.TensorType)
+    (caller_rows, _) = caller.params[0].type.shape
+    assert isinstance(caller_rows, ir.Var)
+    assert isinstance(result_dim.left, ir.Var) and result_dim.left.unique_id == caller_rows.unique_id
+    assert isinstance(result_dim.right, ir.ConstInt) and result_dim.right.value == 32

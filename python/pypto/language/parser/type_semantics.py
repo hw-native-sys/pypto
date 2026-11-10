@@ -326,6 +326,50 @@ class ShapeDimAliasExpander(ir.IRMutator):
         return op
 
 
+class ParameterReturnDims(ShapeDimAliasExpander):
+    """Anchor direct descriptor reads to the corresponding signature extents."""
+
+    def __init__(self, params: Sequence[ir.Var], aliases: dict[int, ir.Call]) -> None:
+        super().__init__(aliases)
+        self.params = {param.unique_id for param in params}
+
+    def visit_var(self, op: ir.Var) -> ir.Expr:
+        value = super().visit_var(op)
+        return self.visit_call(value) if isinstance(value, ir.Call) else value
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        if op.op.name != ir.get_op("tensor.dim").name or len(op.args) != 2:
+            return op
+        tensor, axis = op.args
+        if (
+            isinstance(tensor, ir.Var)
+            and tensor.unique_id in self.params
+            and isinstance(tensor.type, ir.TensorType)
+            and isinstance(axis, ir.ConstInt)
+            and -len(tensor.type.shape) <= axis.value < len(tensor.type.shape)
+        ):
+            return tensor.type.shape[axis.value]
+        return op
+
+    def return_type(self, typ: ir.Type) -> ir.Type:
+        if isinstance(typ, ir.TupleType):
+            return ir.TupleType([self.return_type(element) for element in typ.types])
+        if not isinstance(typ, ir.TensorType):
+            return typ
+        shape = [self.visit_expr(dim) for dim in typ.shape]
+        view = typ.tensor_view
+        if view is not None:
+            view = ir.TensorView(
+                [self.visit_expr(dim) for dim in view.stride],
+                view.layout,
+                [self.visit_expr(dim) for dim in view.valid_shape],
+                view.pad,
+            )
+        if isinstance(typ, ir.DistributedTensorType):
+            return ir.DistributedTensorType(shape, typ.dtype, typ.memref, view, typ.window_buffer)
+        return ir.TensorType(shape, typ.dtype, typ.memref, view)
+
+
 def tensor_types_differ_only_by_valid_shape(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     """Allow pre-SSA rebinding to refine only an ordinary tensor's valid region.
 
