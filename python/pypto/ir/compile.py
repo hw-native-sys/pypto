@@ -40,8 +40,58 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .compiled_artifact import CompiledArtifact
     from .compiled_program import CompiledProgram
-    from .distributed_compiled_program import DistributedCompiledProgram
+    from .distributed_compiled_program import ClusterConfig, DistributedCompiledProgram
     from .param_info import ParamInfo
+
+
+def _highest_orchestration_level(program: _ir_core.Program) -> _ir_core.Level | None:
+    """Find actual orchestration metadata, including scopes not yet outlined.
+
+    This is independent of the entry function's declared type: an Opaque entry
+    may contain a higher hierarchy scope. Sub-worker metadata is not dispatch
+    orchestration and must not raise the program's orchestration level.
+    """
+
+    class OrchestrationLevels(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.highest: _ir_core.Level | None = None
+            self.pending_scope_bodies: list[_ir_core.Stmt] = []
+
+        def record(self, level: _ir_core.Level | None, role: _ir_core.Role | None) -> None:
+            if level is None or role == _ir_core.Role.SubWorker:
+                return
+            if self.highest is None or _ir_core.level_to_linqu_level(level) > _ir_core.level_to_linqu_level(
+                self.highest
+            ):
+                self.highest = level
+
+        def visit_function(self, func: _ir_core.Function) -> None:
+            self.record(func.level, func.role)
+            super().visit_function(func)
+
+        def visit_hierarchy_scope_stmt(self, op: _ir_core.HierarchyScopeStmt) -> None:
+            self.record(op.level, op.role)
+            # Drain after this callback returns: nanobind suppresses reentrant
+            # overrides of the same method, so super() recursion here would
+            # silently miss a hierarchy scope nested inside another one.
+            self.pending_scope_bodies.append(op.body)
+
+    visitor = OrchestrationLevels()
+    visitor.visit_program(program)
+    while visitor.pending_scope_bodies:
+        visitor.visit_stmt(visitor.pending_scope_bodies.pop())
+    return visitor.highest
+
+
+def _check_supported_orchestration_level(level: _ir_core.Level | None) -> None:
+    """Compile CLUSTER_0 artifacts; higher cluster levels have no defined contract."""
+    if level is not None and _ir_core.level_to_linqu_level(level) > 4:
+        raise NotImplementedError(
+            f"Higher cluster orchestration compilation is not supported "
+            f"(received {level.name}): only POD/CLUSTER_0 (L4) artifacts are defined. "
+            "Specialization, parsing and serialization remain available."
+        )
 
 
 def _write_files(files: dict[str, str], output_dir: str) -> None:
@@ -337,6 +387,7 @@ def compile(  # noqa: PLR0913
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
     distributed_config: Any = None,
+    cluster_config: "ClusterConfig | None" = None,
     analyze_auto_scopes_for_deps: bool = False,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
@@ -462,6 +513,14 @@ def compile(  # noqa: PLR0913
     from .compiled_program import CompiledProgram  # noqa: PLC0415
     from .param_info import _extract_func_param_infos  # noqa: PLC0415
 
+    highest_level = _highest_orchestration_level(program)
+    if cluster_config is not None:
+        if distributed_config is not None:
+            raise ValueError("cluster_config and distributed_config cannot both be supplied")
+        if highest_level is None or _ir_core.level_to_linqu_level(highest_level) < 4:
+            raise ValueError("cluster_config requires POD/CLUSTER_0 (L4) or higher orchestration")
+    _check_supported_orchestration_level(highest_level)
+
     if platform is not None:
         _warn_deprecated_platform("ir.compile")
     result = _compile_to_files(
@@ -495,12 +554,17 @@ def compile(  # noqa: PLR0913
             DistributedConfig,
         )
 
+        highest_postpass = _highest_orchestration_level(lowered_program)
+        is_cluster = highest_postpass is not None and _ir_core.level_to_linqu_level(highest_postpass) >= 4
+        if not is_cluster and distributed_config is None:
+            distributed_config = DistributedConfig()
         return DistributedCompiledProgram(
             lowered_program,
             result.output_dir,
             backend_type=result.backend_type,
             platform=result.platform,
-            distributed_config=DistributedConfig() if distributed_config is None else distributed_config,
+            distributed_config=distributed_config,
+            cluster_config=cluster_config,
         )
 
     names = multi_chip_orch_names(lowered_program)

@@ -114,12 +114,40 @@ def write_chip_binaries(
     (directory / BINARY_MANIFEST).write_bytes(encode_manifest(record))
 
 
-def chip_directories(directory: Path, kind: BuildKind) -> dict[str, Path]:
+def _require_supported_directory(
+    directory: Path, validated_entry_kind: str | None = None
+) -> dict[str, Any] | None:
+    """Separate parent artifact readiness from the still-gated L4 execution path."""
+    if validated_entry_kind in {"host", "chip"}:
+        return None
+    if (directory / "distributed_meta.json").is_file():
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        compiled = DistributedCompiledProgram.from_dir(directory)
+        compiled._require_artifact_ready()
+        return compiled.l3_entries
+    if validated_entry_kind == "cluster":
+        raise ValueError(f"Cluster artifact requires distributed_meta.json: {directory}")
+    return None
+
+
+def chip_directories(
+    directory: Path, kind: BuildKind, *, _validated_entry_kind: str | None = None
+) -> dict[str, Path]:
     """Enumerate all supported chip sub-builds without executing configuration."""
+    entries = _require_supported_directory(directory, _validated_entry_kind)
     if kind is BuildKind.SINGLE_CHIP:
         if not (directory / "kernel_config.py").is_file():
             raise ValueError(f"Single-chip artifact lacks kernel_config.py: {directory}")
         return {".": directory}
+    if entries is not None:
+        result: dict[str, Path] = {}
+        for entry in entries["entries"]:
+            for path in entry["chip_paths"].values():
+                result[path] = _relative_file(directory, f"{path}/kernel_config.py").parent
+        if not result:
+            raise ValueError(f"Cluster artifact l3_entries has no chip builds: {directory}")
+        return dict(sorted(result.items()))
     children = directory / "next_levels"
     result: dict[str, Path] = {}
     for child in sorted(children.iterdir()):
@@ -136,6 +164,7 @@ def chip_directories(directory: Path, kind: BuildKind) -> dict[str, Path]:
 
 def prepare_prebuilt(directory: Path, platform: str, kind: BuildKind) -> None:
     """Finish every chip binary without constructing a device or executing kernels."""
+    _require_supported_directory(directory)
     from .device_runner import _compile_and_assemble  # noqa: PLC0415
 
     chips = chip_directories(directory, kind)
@@ -227,6 +256,7 @@ def ready_spec(directory: Path, generated: ArtifactSpec, *, metadata_only: bool 
         generated.build_kind,
         tuple(sorted(required)),
         generated.execution_capabilities,
+        generated.entry_kind,
     )
 
 
@@ -335,9 +365,10 @@ def read_prebuilt(
     kind: BuildKind,
     *,
     _validated_files: dict[Path, dict[str, Any]] | None = None,
+    _validated_entry_kind: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Read and validate every child before any callable can be assembled."""
-    chips = chip_directories(directory, kind)
+    chips = chip_directories(directory, kind, _validated_entry_kind=_validated_entry_kind)
     if kind is BuildKind.DISTRIBUTED:
         parent = _read_json(directory)
         if (
@@ -372,6 +403,7 @@ def load_prebuilt(
     kind: BuildKind,
     *,
     _validated_files: dict[Path, dict[str, Any]] | None = None,
+    _validated_entry_kind: str | None = None,
 ) -> dict[str, tuple[Any, str, dict[str, Any]]]:
     """Assemble validated bytes without compiler resolution, locks, or filesystem writes.
 
@@ -379,7 +411,15 @@ def load_prebuilt(
     expected key. Its verified inventory can be reused for immutable published
     files. Without it, this helper hashes binaries (including private fallback).
     """
-    records = read_prebuilt(directory, platform, kind, _validated_files=_validated_files)
+    # The artifact adapter has already restored and checked this entry contract.
+    # Reuse it alongside the validated file inventory, without another sidecar read.
+    records = read_prebuilt(
+        directory,
+        platform,
+        kind,
+        _validated_files=_validated_files,
+        _validated_entry_kind=_validated_entry_kind,
+    )
     # Installed READY loading needs native constructors, not Worker setup.
     native = _native_callable_interface()
     ArgDirection = native.ArgDirection

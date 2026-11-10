@@ -26,7 +26,7 @@ Layering (mirrors the ``pl.<ns>.<op>`` stack):
 """
 
 from . import system_ops, tensor_ops, tile_ops
-from .system_ops import get_comm_ctx, nranks, rank, world_size
+from .system_ops import get_comm_ctx, nranks, num_workers, rank, world_size
 from .tensor_ops import (
     allgather,
     alloc_window_buffer,
@@ -52,6 +52,7 @@ __all__ = [
     "get_async",
     "get_comm_ctx",
     "nranks",
+    "num_workers",
     "put",
     "put_async",
     "rank",

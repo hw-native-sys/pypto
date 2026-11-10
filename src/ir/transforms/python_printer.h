@@ -385,7 +385,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // Render one ``attrs={...}`` value as a parseable Python DSL expression. This
   // is the generic round-trip "safety net": every Call/Submit attr that has no
-  // bespoke kwarg surface (deps=/device=/dumps=) and is not emitted by a
+  // bespoke kwarg surface (deps=/worker=/dumps=) and is not emitted by a
   // dedicated emitter (dump_vars/arg_directions) is rendered here, so print ->
   // parse never silently drops an attr. Dispatches on the ``std::any`` value
   // type and FAILS LOUD (INTERNAL_CHECK_SPAN) on a type it cannot represent in
