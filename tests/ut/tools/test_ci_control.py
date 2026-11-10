@@ -125,7 +125,7 @@ def test_rollout_preserves_legacy_and_main_runs(control, monkeypatch, tmp_path, 
     monkeypatch.setenv("GITHUB_SHA", MERGE)
     monkeypatch.setenv("CI_COMMENT_TIERS_ENABLED", enabled)
     control.prepare(REPO, {})
-    assert target.read_text() == f"full={expected}\ncheckout_sha={MERGE}\n"
+    assert target.read_text() == f"full={expected}\ncheckout_sha={MERGE}\nreuse_lint=false\n"
 
 
 @pytest.mark.parametrize("parents", [[BASE, HEAD], [HEAD, BASE], [BASE, "d" * 40]])
@@ -148,6 +148,8 @@ def test_changed_pr_rejected_before_checkout(control, pr):
 @pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "MEMBER", "OWNER"])
 def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, pr, failure, association):
     event["comment"]["author_association"] = association
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
+    monkeypatch.setattr(control, "already_passed", lambda *args: False)
     writes = []
     gate = {"state": "success"}
 
@@ -509,7 +511,7 @@ def test_workflow_wiring_covers_every_full_job(control):
     assert set(jobs["full-result"]["needs"]) == set(jobs) - {"full-result"}
     assert set(jobs["full-result"]["needs"]) == control.REQUIRED | control.OPTIONAL | set(control.CONDITIONAL)
     for name, job in jobs.items():
-        if name not in {"changes", "toolchain", "pre-commit", "clang-tidy", "full-result"}:
+        if name not in {"changes", "toolchain", "pre-commit", "clang-tidy", "lint-gate", "full-result"}:
             assert "needs.changes.outputs.full == 'true'" in job["if"]
         for step in job.get("steps", []):
             if step.get("uses", "").startswith("actions/checkout@"):
@@ -573,10 +575,11 @@ def test_prepare_full_pins_merge_not_main(control, monkeypatch, tmp_path, pr):
         return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
 
     monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
     control.prepare(
         REPO, {"inputs": {"pr_number": "123", "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE}}
     )
-    assert target.read_text() == f"full=true\ncheckout_sha={MERGE}\n"
+    assert target.read_text() == f"full=true\ncheckout_sha={MERGE}\nreuse_lint=true\n"
 
 
 def test_manual_full_on_untrusted_branch_is_rejected(control, monkeypatch):
@@ -634,6 +637,8 @@ def test_new_request_on_another_base_supersedes_old_run(control, publication):
 @pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending", "completed"])
 @pytest.mark.parametrize("branch", ["main", "feature", "release-tag"])
 def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch, event, pr, status, branch):
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
+    monkeypatch.setattr(control, "already_passed", lambda *args: False)
     queries = []
     writes = []
 
@@ -1376,6 +1381,200 @@ def test_duplicate_scan_propagates_api_failure(control, monkeypatch):
     monkeypatch.setattr(control, "api", unavailable)
     with pytest.raises(subprocess.CalledProcessError):
         control.unfinished_request_exists(REPO, "Full request", point, point)
+
+
+@pytest.fixture
+def lint_run(control, monkeypatch, pr):
+    run = {
+        "id": 40,
+        "run_number": 4,
+        "run_attempt": 1,
+        "display_title": f"CI lint PR #123 @{HEAD} base:{BASE}",
+        "event": "pull_request",
+        "path": control.WORKFLOW,
+        "workflow_id": 99,
+        "head_sha": HEAD,
+        "repository": {"full_name": REPO},
+        "head_repository": {"id": 2},
+    }
+    jobs = [
+        {"name": name, "status": "completed", "conclusion": "success"}
+        for name in ("changes", "pre-commit", "clang-tidy")
+    ]
+    runs = [run]
+    files = [{"filename": "docs/en/dev/index.md"}]
+
+    def api(path, payload=None):
+        assert payload is None, "Lint reuse cannot write to GitHub"
+        assert path == f"repos/{REPO}/actions/workflows/ci.yml"
+        return {"id": 99}
+
+    def pages(path, key=None):
+        if path == f"repos/{REPO}/actions/workflows/ci.yml/runs?event=pull_request&head_sha={HEAD}":
+            return runs
+        if path == f"repos/{REPO}/actions/runs/40/jobs?filter=latest":
+            return jobs
+        assert path == f"repos/{REPO}/pulls/123/files"
+        return files
+
+    monkeypatch.setattr(control, "api", api)
+    monkeypatch.setattr(control, "pages", pages)
+    return run, runs, jobs, files
+
+
+def test_lint_reuse_accepts_matching_revision(control, pr, lint_run):
+    assert control.matching_lint_run(REPO, pr)["id"] == 40
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("display_title", f"CI lint PR #123 @{HEAD} base:{'d' * 40}"),
+        ("display_title", f"CI lint PR #124 @{HEAD} base:{BASE}"),
+        ("event", "push"),
+        ("path", ".github/workflows/other.yml"),
+        ("workflow_id", 100),
+        ("head_sha", "d" * 40),
+        ("head_repository", {"id": 3}),
+        ("repository", {"full_name": "other/repo"}),
+    ],
+)
+def test_lint_reuse_rejects_unrelated_runs(control, pr, lint_run, field, value):
+    lint_run[0][field] = value
+    with pytest.raises(ValueError, match="No matching PR lint run"):
+        control.matching_lint_run(REPO, pr)
+
+
+@pytest.mark.parametrize("name", ["changes", "pre-commit", "clang-tidy"])
+@pytest.mark.parametrize("result", ["failure", "cancelled", "timed_out", "in_progress", "missing"])
+def test_lint_reuse_requires_complete_success(control, pr, lint_run, name, result):
+    jobs = lint_run[2]
+    job = next(job for job in jobs if job["name"] == name)
+    if result == "missing":
+        jobs.remove(job)
+    elif result == "in_progress":
+        job["status"] = result
+    else:
+        job["conclusion"] = result
+    with pytest.raises(ValueError, match="PR lint job"):
+        control.matching_lint_run(REPO, pr)
+
+
+def test_lint_reuse_does_not_fall_back_to_old_green(control, pr, lint_run):
+    lint_run[1].append({**lint_run[0], "run_number": 3, "id": 39})
+    lint_run[2][1]["conclusion"] = "failure"
+    with pytest.raises(ValueError, match="pre-commit did not pass"):
+        control.matching_lint_run(REPO, pr)
+
+
+@pytest.mark.parametrize(
+    "files,accepted",
+    [
+        ([{"filename": "README.md"}, {"filename": "mkdocs.yml"}], True),
+        ([{"filename": "docs/new.md", "previous_filename": "src/deleted.cpp"}], False),
+        ([{"filename": "docs/new.md", "previous_filename": "docs/old.md"}], True),
+        ([{"filename": "python/changed.py"}], False),
+        ([], False),
+        ([{"filename": "docs/page.md"}] * 3000, False),
+    ],
+)
+def test_lint_reuse_skipped_clang_requires_docs_only(control, pr, lint_run, files, accepted):
+    lint_run[2][2]["conclusion"] = "skipped"
+    lint_run[3][:] = files
+    if accepted:
+        assert control.matching_lint_run(REPO, pr)["id"] == 40
+    else:
+        with pytest.raises(ValueError, match="clang-tidy did not pass"):
+            control.matching_lint_run(REPO, pr)
+
+
+def test_comment_does_not_reset_successful_full(control, monkeypatch, pr, event):
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+    monkeypatch.setattr(control, "already_passed", lambda *args: True)
+    monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes for an already green revision"))
+    control.dispatch(REPO, event)
+
+
+def test_comment_with_failed_lint_never_writes(control, monkeypatch, pr, event):
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+    monkeypatch.setattr(control, "already_passed", lambda *args: False)
+
+    def fail(*args):
+        raise ValueError("PR lint job pre-commit did not pass")
+
+    monkeypatch.setattr(control, "matching_lint_run", fail)
+    monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes before lint passes"))
+    with pytest.raises(ValueError, match="did not pass"):
+        control.dispatch(REPO, event)
+
+
+@pytest.mark.parametrize("case", ["green", "changed-base", "failed", "rerunning", "untrusted", "cancelled"])
+def test_already_green_requires_verified_full_revision(control, monkeypatch, pr, publication, case):
+    run, jobs, _, _ = publication
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda path, key: jobs
+        if key == "jobs"
+        else [
+            {
+                "context": "ci/full",
+                "state": "success",
+                "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/2",
+            }
+        ],
+    )
+    if case == "changed-base":
+        pr["base"]["sha"] = "d" * 40
+    elif case == "failed":
+        jobs[0]["conclusion"] = "failure"
+    elif case == "rerunning":
+        run["run_attempt"] = 3
+    elif case == "untrusted":
+        run["head_branch"] = "feature"
+    elif case == "cancelled":
+        run["conclusion"] = "cancelled"
+    assert control.already_passed(REPO, pr) == (case == "green")
+
+
+def test_downstream_gate_cannot_be_skipped(control, needs):
+    needs["lint-gate"]["result"] = "skipped"
+    with pytest.raises(ValueError, match="lint-gate"):
+        control.aggregate(needs)
+
+
+def test_full_workflow_reuses_lint_without_running_it():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    assert "reuse_lint != 'true'" in jobs["pre-commit"]["if"]
+    assert "reuse_lint != 'true'" in jobs["clang-tidy"]["if"]
+    for name in ("unit-tests", "system-tests", "system-tests-direct", "prebuild-wheels-github"):
+        assert "lint-gate" in jobs[name]["needs"]
+        assert "pre-commit" not in jobs[name]["needs"]
+        assert "clang-tidy" not in jobs[name]["needs"]
+
+
+@pytest.mark.parametrize(
+    "reuse,docs,pre,clang,accepted",
+    [
+        ("true", "false", "skipped", "skipped", True),
+        ("true", "false", "success", "skipped", False),
+        ("true", "false", "skipped", "failure", False),
+        ("false", "false", "success", "success", True),
+        ("false", "true", "success", "skipped", True),
+        ("false", "false", "success", "skipped", False),
+        ("false", "true", "failure", "skipped", False),
+        ("false", "false", "success", "failure", False),
+    ],
+)
+def test_lint_gate_shell_rejects_unjustified_skips(reuse, docs, pre, clang, accepted):
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    result = subprocess.run(
+        ["bash", "-e", "-c", jobs["lint-gate"]["steps"][0]["run"]],
+        check=False,
+        env={**os.environ, "REUSE_LINT": reuse, "DOCS_ONLY": docs, "PRE_COMMIT": pre, "CLANG_TIDY": clang},
+        capture_output=True,
+    )
+    assert (result.returncode == 0) == accepted
 
 
 if __name__ == "__main__":

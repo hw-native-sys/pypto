@@ -39,7 +39,7 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 ## Comment-triggered full CI
 
 After rollout, PR creation and updates run `changes`, `toolchain`, `pre-commit`
-and `clang-tidy`. The separate `Docs / build` check also runs. Documentation-only
+and `clang-tidy`, followed by a lightweight `lint-gate`. The separate `Docs / build` check also runs. Documentation-only
 PRs retain the automatic `clang-tidy` exemption. No device tests or wheel builds
 start automatically for PRs.
 
@@ -68,7 +68,9 @@ branch and dispatches `CI` from trusted `main`. It fixes the PR head, base and t
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 A conflicting PR, or one whose merge is still being computed, must be resolved
 or retried. The command's Actions summary records acceptance or rejection.
-An identical request already queued/running is not dispatched again. Comment
+An identical request already queued/running is not dispatched again. A verified
+successful full result for the same head and base also makes the comment a no-op,
+so another commenter cannot reset a green gate. Comment
 access allows users to request device tests; it does not grant repository write
 or merge permission, and duplicate detection is not a general rate limit.
 After PR and revision checks, the command writes `ci/full=pending`
@@ -83,13 +85,31 @@ clear it. Retry `/ci full`; if a run was accepted despite a lost response, wait 
 that run to finish before retrying. Publishers preserve the bound newer run even
 when run-history searches have not yet indexed it.
 
-Full includes lint, wheel warm-up, unit, example, codegen, system, distributed,
+The comment opens the downstream test stage after `pre-commit` and `clang-tidy`
+have passed in the latest matching automatic PR run. Matching includes the PR
+number, head SHA, base SHA, workflow identity and fork identity. A docs-only PR
+may reuse a skipped `clang-tidy` after its changed paths are verified. Missing,
+running or failed lint rejects the request; it does not reserve a runner while
+waiting. Pushes or base changes require matching lint again.
+
+The downstream run skips both lint jobs. A lightweight gate verifies their
+reuse before tests start; revision checks and toolchain preparation still run.
+Full includes the reused lint result, wheel warm-up, unit, example, codegen, system, distributed,
 pypto-lib and A5/simulator tests. Core tests execute even for documentation-only
 PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
 when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
+
+The PR keeps its original lint checks and displays each downstream job as
+`full / <job name>`, including matrix legs and links to job logs. `CI Full Progress`
+reads GitHub metadata on a GitHub-hosted runner and refreshes these checks every
+30 seconds, without executing PR code or giving test jobs write tokens. No
+monitor runs while waiting for a comment. Each live monitor is bounded to five
+hours; a separate completion event reconciles final results even after a monitor
+failure or timeout. Progress checks are informational: require `ci/full` for
+merge, not every `full / ...` check (some tests are conditional or advisory).
 
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
 updated by `CI Full Status`.
@@ -125,8 +145,8 @@ creation-time ranges at GitHub’s search limit. Moving between unfinished statu
 cannot hide an existing request from that scan.
 A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances
-before result publication, the old-base result fails and requires `/ci full`
-again. This check is made at publication time; an already published success
+before result publication, the old-base result fails. Update the PR branch,
+wait for matching lint and post `/ci full` again. This check is made at publication time; an already published success
 is not automatically invalidated by a later main push. Requiring an up-to-date
 branch at merge time is a separate ruleset policy, unchanged by this PR.
 Changed-path classification compares the pinned base and head SHAs, so later
@@ -157,7 +177,9 @@ Unset or false preserves existing automatic full CI while the required checks
 are migrated. No GitHub App secret, public webhook endpoint or service update
 is needed.
 
-1. Merge the workflows and helper onto `main`, leaving the switch unset.
+1. Merge the workflows and helpers onto `main`, leaving the switch unset.
+   Update the test PR branch to include this version and let its automatic lint
+   finish. Older runs without the PR/head/base lint title cannot be reused.
 2. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
    **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm
    external commenters can trigger full, invalid PRs cannot launch it, and

@@ -31,8 +31,7 @@ UNFINISHED = ("queued", "in_progress", "requested", "waiting", "pending")
 REQUIRED = {
     "changes",
     "toolchain",
-    "pre-commit",
-    "clang-tidy",
+    "lint-gate",
     "unit-tests",
     "examples-tests",
     "codegen-tests",
@@ -44,7 +43,7 @@ REQUIRED = {
     "onboard-tests-a5",
     "system-tests-a5sim",
 }
-OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github"}
+OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
 CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
 
 
@@ -52,11 +51,11 @@ class UntrustedRunError(ValueError):
     """Reject unrelated runs without granting them permission to write statuses."""
 
 
-def api(path: str, payload: dict[str, Any] | None = None) -> Any:
+def api(path: str, payload: dict[str, Any] | None = None, *, method: str = "POST") -> Any:
     """Use gh's token handling and pass JSON through stdin, never the shell."""
     command = ["gh", "api", "-H", "X-GitHub-Api-Version: 2022-11-28", path]
     if payload is not None:
-        command += ["--method", "POST", "--input", "-"]
+        command += ["--method", method, "--input", "-"]
     result = subprocess.run(
         command,
         input=json.dumps(payload) if payload is not None else None,
@@ -238,6 +237,92 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
     return False
 
 
+def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
+    """Reuse only the latest automatic run for this exact PR/head/base snapshot."""
+    head, base = pr["head"]["sha"], pr["base"]["sha"]
+    title = f"CI lint PR #{pr['number']} @{head} base:{base}"
+    workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+    runs = pages(
+        f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request&head_sha={head}", "workflow_runs"
+    )
+    candidates = [
+        run
+        for run in runs
+        if run.get("display_title") == title
+        and run.get("event") == "pull_request"
+        and run.get("path") == WORKFLOW
+        and run.get("workflow_id") == workflow["id"]
+        and run.get("head_sha") == head
+        and run.get("repository", {}).get("full_name") == repo
+        and run.get("head_repository", {}).get("id") == pr["head"]["repo"]["id"]
+    ]
+    if not candidates:
+        raise ValueError("No matching PR lint run; update the PR branch and wait for lint before /ci full")
+    run = max(candidates, key=lambda item: item["run_number"])
+    # The jobs endpoint with filter=latest includes successful jobs retained by a
+    # failed-jobs rerun. Never fall back to an older green run after a newer failure.
+    jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+    for name in ("changes", "pre-commit", "clang-tidy"):
+        selected = [job for job in jobs if job["name"] == name]
+        if len(selected) != 1 or selected[0]["status"] != "completed":
+            raise ValueError(f"PR lint job {name} is missing or still running; wait before /ci full")
+        result = selected[0]["conclusion"]
+        if name == "clang-tidy" and result == "skipped":
+            files = pages(f"repos/{repo}/pulls/{pr['number']}/files")
+            # Match the workflow's docs-only exemption, including rename sources.
+            # The PR files API caps at 3,000; never accept truncated classification.
+            paths = [
+                value
+                for file in files
+                for value in (file["filename"], file.get("previous_filename"))
+                if value
+            ]
+            if (
+                files
+                and len(files) < 3000
+                and all(
+                    path.startswith("docs/") or path.endswith(".md") or path == "mkdocs.yml" for path in paths
+                )
+            ):
+                continue
+        if result != "success":
+            raise ValueError(f"PR lint job {name} did not pass; fix or rerun lint before /ci full")
+    report(f"Reusing lint from https://github.com/{repo}/actions/runs/{run['id']}")
+    return run
+
+
+def already_passed(repo: str, pr: dict[str, Any]) -> bool:
+    """Repeated comments cannot reset a verified green gate for the same revision."""
+    statuses = pages(f"repos/{repo}/commits/{pr['head']['sha']}/status", "statuses")
+    status = next((item for item in statuses if item["context"] == "ci/full"), {})
+    target = re.fullmatch(
+        rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+        status.get("target_url") or "",
+    )
+    if status.get("state") != "success" or not target:
+        return False
+    run = api(f"repos/{repo}/actions/runs/{target[1]}")
+    expected = f"CI full PR #{pr['number']} @{pr['head']['sha']} base:{pr['base']['sha']}"
+    if (
+        run.get("display_title") != expected
+        or run.get("event") != "workflow_dispatch"
+        or run.get("head_branch") != "main"
+        or run.get("path") != WORKFLOW
+        or run.get("repository", {}).get("full_name") != repo
+        or run.get("head_repository", {}).get("id") != pr["base"]["repo"]["id"]
+        or run.get("run_attempt") != int(target[2])
+        or run.get("status") != "completed"
+        or run.get("conclusion") == "cancelled"
+    ):
+        return False
+    workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+    if run.get("workflow_id") != workflow["id"]:
+        return False
+    jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
+    finalizers = [job for job in jobs if job["name"] == "full-result"]
+    return len(finalizers) == 1 and finalizers[0]["conclusion"] == "success"
+
+
 def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
     if (
         event.get("action") != "created"
@@ -272,6 +357,12 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
     if os.environ.get("CI_ROUTED_HEAD") != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
+    if already_passed(repo, pr):
+        report("Full CI already passed for this PR revision; keeping the successful gate.")
+        return
+    matching_lint_run(repo, pr)
+    # Metadata reads can overlap a push; revalidate before writing or dispatching.
+    verify_merge(repo, pull(repo, number), head, base, merge)
     title = f"CI full PR #{number} @{head} base:{base}"
     # A full request cannot predate its PR. Fix the upper bound for pagination;
     # never filter by mutable run status, which can move between queries.
@@ -336,10 +427,11 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             raise ValueError("Expected a positive PR number")
         pr = pull(repo, int(number))
         verify_merge(repo, pr, inputs["head_sha"], inputs["base_sha"], inputs["merge_sha"])
+        matching_lint_run(repo, pr)
         checkout = inputs["merge_sha"]
     elif any(inputs.get(key) for key in ("head_sha", "base_sha", "merge_sha")):
         raise ValueError("PR revision inputs require pr_number")
-    output({"full": str(full).lower(), "checkout_sha": checkout})
+    output({"full": str(full).lower(), "checkout_sha": checkout, "reuse_lint": str(bool(number)).lower()})
 
 
 def aggregate(needs: dict[str, Any]) -> None:
