@@ -680,7 +680,8 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Register the module-level URMA async transfer adapter.
    *
-   * PR-5 calls this when it emits a helper call. The symbol is dtype-suffixed
+   * ``pld.tensor.put_async`` / ``get_async`` lowering calls this when it emits
+   * a helper call. The symbol is dtype-suffixed
    * (``pypto_urma_put_async_f32`` / ``pypto_urma_get_async_f32``) because the
    * external helper takes typed base pointers. The declaration is emitted once
    * at module scope and implemented by the generated C++ kernel wrapper.
