@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from importlib import resources
 
@@ -2247,7 +2248,11 @@ def test_host_window_requests_urma_and_context():
 
 
 @pytest.mark.parametrize("key", ["engram_l1", 'table"\\\nkey', "table_\u8868_\x01\x7f"])
-def test_host_window_initializer_is_only_a_runtime_binding(key):
+def test_host_window_initializer_is_only_a_runtime_binding(key, monkeypatch):
+    # Reproduce the compiler-only CI environment even when Simpler is installed.
+    monkeypatch.setitem(sys.modules, "simpler", None)
+    monkeypatch.setitem(sys.modules, "simpler.task_interface", None)
+
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2262,9 +2267,16 @@ def test_host_window_initializer_is_only_a_runtime_binding(key):
             return table
 
     code = _lower(Prog)
-    namespace = {}
-    exec(compile(code, "host_init.py", "exec"), namespace)
-    assert namespace["host"]._window_source_keys == (key,)
+    compile(code, "host_init.py", "exec")
+    # Decode the emitted metadata without executing module imports: codegen UTs
+    # must work without Simpler installed, including for escaped source keys.
+    source_keys = [
+        ast.literal_eval(stmt.value)
+        for stmt in ast.parse(code).body
+        if isinstance(stmt, ast.Assign)
+        and any(ast.unparse(target) == "host._window_source_keys" for target in stmt.targets)
+    ]
+    assert source_keys == [(key,)]
     assert "initializer=make_window_initializer(_window_sources," in code
     assert '"buf",' in code
     assert ", 68)," in code
