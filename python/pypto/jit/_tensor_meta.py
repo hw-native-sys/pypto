@@ -1719,7 +1719,7 @@ def _preview_static_expressions(
         return None
 
     class Preview(BodyTransformer):
-        def _visit_literal_if(self, node: ast.If, condition: bool) -> ast.If | list[ast.stmt]:
+        def _visit_literal_if(self, node: ast.If, condition: bool) -> list[ast.stmt]:
             if summarize_return and hasattr(node, "lineno") and hasattr(node, "col_offset"):
                 selected_arms[node.lineno, node.col_offset] = condition
             return super()._visit_literal_if(node, condition)

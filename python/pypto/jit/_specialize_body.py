@@ -913,22 +913,30 @@ class BodyTransformer(ast.NodeTransformer):
         return isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == name
 
     @classmethod
-    def _has_branch_yield(cls, statements: list[ast.stmt]) -> bool:
+    def _lower_if_yields(cls, statements: list[ast.stmt]) -> None:
+        """Turn the selected arm's explicit results into ordinary assignments."""
         for stmt in statements:
-            if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and cls._is_attribute_call(stmt.value, "yield_"):
-                return True
-            # These parser scopes are transparent to an enclosing if's yields.
-            if isinstance(stmt, ast.With) and any(
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                value = stmt.value
+                if not isinstance(value, ast.Call) or not cls._is_attribute_call(value, "yield_"):
+                    continue
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) != 1:
+                    continue
+                target = stmt.targets[0] if isinstance(stmt, ast.Assign) else stmt.target
+                if isinstance(target, ast.Tuple) and len(target.elts) == len(value.args):
+                    stmt.value = ast.copy_location(ast.Tuple(elts=value.args, ctx=ast.Load()), value)
+                elif isinstance(target, ast.Name) and len(value.args) == 1:
+                    stmt.value = value.args[0]
+            # These parser scopes are transparent to the enclosing if's yields.
+            # Nested ifs and real loops keep ownership of their own yields.
+            elif isinstance(stmt, ast.With) and any(
                 cls._is_attribute_call(item.context_expr, name)
                 for item in stmt.items
                 for name in ("scope", "manual_scope")
             ):
-                if cls._has_branch_yield(stmt.body):
-                    return True
-            if isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
-                if cls._has_branch_yield(stmt.body):
-                    return True
-        return False
+                cls._lower_if_yields(stmt.body)
+            elif isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
+                cls._lower_if_yields(stmt.body)
 
     def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
         """Transform a constexpr-dead branch without publishing its bindings."""
@@ -948,22 +956,11 @@ class BodyTransformer(ast.NodeTransformer):
             self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
             self._graph_captures = graph_captures
 
-    def _visit_literal_if(self, node: ast.If, condition: bool) -> ast.If | list[ast.stmt]:
-        """Emit only the live arm, keeping the parser's explicit yield binding."""
+    def _visit_literal_if(self, node: ast.If, condition: bool) -> list[ast.stmt]:
+        """Emit only the live arm, binding explicit results without an IfStmt."""
         selected = node.body if condition else node.orelse
-        if not self._has_branch_yield(selected):
-            return self._visit_scoped_body(selected)
-        node.test = ast.copy_location(ast.Constant(value=condition), node.test)
-        self._scope_depth += 1
-        try:
-            selected = self._visit_scoped_body(selected)
-        finally:
-            self._scope_depth -= 1
-        # The parser binds the selected yield through the If. A Pass in the
-        # dead arm keeps the shape and dtype of dead yields out of that binding.
-        inactive: list[ast.stmt] = [ast.copy_location(ast.Pass(), node)]
-        node.body, node.orelse = (selected, inactive) if condition else (inactive, selected)
-        return node
+        self._lower_if_yields(selected)
+        return self._visit_scoped_body(selected)
 
     def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.

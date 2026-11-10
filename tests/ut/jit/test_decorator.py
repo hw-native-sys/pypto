@@ -8008,12 +8008,14 @@ def test_constexpr_branch_preserves_yield_binding(mode):
             result = pl.yield_(b)
         return result
 
-    fn = entry.specialize(MODE=mode).get_function("entry")
+    program = entry.specialize(MODE=mode)
+    PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    fn = program.get_function("entry")
     assert fn is not None and isinstance(fn.body, ir.SeqStmts)
-    branch = next(stmt for stmt in fn.body if isinstance(stmt, ir.IfStmt))
     returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
-    ir.assert_structural_equal(returned.value[0], branch.return_vars[0])
-    ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, 64], DataType.FP32))
+    binding = next(stmt for stmt in fn.body if isinstance(stmt, ir.AssignStmt))
+    assert returned.value[0] is binding.var
+    assert binding.value is fn.params[0 if mode else 1]
 
 
 @pytest.mark.parametrize(
@@ -8029,15 +8031,35 @@ def test_constexpr_branch_prunes_inactive_yield_type(mode, width, dtype):
         return result
 
     program = entry.specialize(MODE=mode)
-    fn = program.get_function("entry")
-    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
-    branch = next(stmt for stmt in fn.body if isinstance(stmt, ir.IfStmt))
-    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
-    ir.assert_structural_equal(returned.value[0], branch.return_vars[0])
-    ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, width], dtype))
     properties = passes.IRPropertySet()
     properties.insert(passes.IRProperty.TypeChecked)
     assert not passes.PropertyVerifierRegistry.verify(properties, program)
+    PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    fn = program.get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, width], dtype))
+
+
+@pytest.mark.parametrize("mode", [True, False])
+def test_constexpr_branch_preserves_multiple_yield_results(mode):
+    @jit
+    def entry(a: pl.Tensor[[8, 64], pl.FP32], b: pl.Tensor[[8, 128], pl.FP32], MODE: pl.constexpr):
+        if MODE:
+            first, second = pl.yield_(a, b)
+        else:
+            with pl.scope(mode=pl.ScopeMode.MANUAL):
+                first, second = pl.yield_(b, a)
+        return first, second
+
+    program = entry.specialize(MODE=mode)
+    PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    fn = program.get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    widths = [64, 128] if mode else [128, 64]
+    for value, width in zip(returned.value, widths, strict=True):
+        ir.assert_structural_equal(value.type, ir.TensorType([8, width], DataType.FP32))
 
 
 if __name__ == "__main__":

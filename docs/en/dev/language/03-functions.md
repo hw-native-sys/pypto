@@ -95,10 +95,10 @@ constant-tracking mechanism. Persistent reuse additionally requires the full
 After substituting `pl.constexpr` values, JIT resolves Boolean and numeric
 literals, negations of known conditions, and comparisons between primitive
 literals before IR parsing. It parses only the selected branch, so the inactive
-branch can use different Tile shapes or dtypes. An explicit `pl.yield_` keeps
-its result binding from the selected arm, and a helper's selected return types
-also reach downstream helper specialization. Runtime-dependent conditions
-remain IR control flow. This step does not execute Python calls.
+branch can use different Tile shapes or dtypes. An explicit `pl.yield_` in
+the selected arm becomes an ordinary result binding, and a helper's selected
+return types also reach downstream helper specialization. Runtime-dependent
+conditions remain IR control flow. This step does not execute Python calls.
 
 ### Dynamic dimension metadata
 
