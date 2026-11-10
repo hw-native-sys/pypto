@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -42,6 +43,8 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -60,8 +63,26 @@ constexpr const char kCommDomainHandlePrefix[] = "__";
 
 bool IsClusterLevel(const ir::FunctionPtr& func) { return func && func->level_ == ir::Level::CLUSTER_0; }
 
+// Embedded entry/builtin aliases are module globals used inside the real HOST
 // body. Reserve them against local bindings too, including dimensions that
 // occur only in tensor types, so Python cannot resolve an alias as a local.
+class EmbeddedNameCollector : public ir::IRVisitor {
+ public:
+  explicit EmbeddedNameCollector(const DistributedCodegen& codegen) : codegen_(codegen) {}
+
+  std::set<std::string> names;
+
+ protected:
+  void VisitVarLike_(const ir::VarPtr& var) override {
+    if (!names.insert(codegen_.SanitizeName(var->name_hint_)).second) return;
+    if (const auto tensor = ir::AsTensorTypeLike(var->GetType())) {
+      for (const auto& dim : tensor->shape_) VisitExpr(dim);
+    }
+  }
+
+ private:
+  const DistributedCodegen& codegen_;
+};
 
 const hierarchy::LevelHandler& FormattingHandlerForFunction(const ir::FunctionPtr& func) {
   const auto level = func ? func->level_.value_or(ir::Level::AIV) : ir::Level::AIV;
@@ -99,6 +120,64 @@ std::string StaticTensorShape(const ir::TensorTypePtr& tensor, const ir::Span& s
   return shape + ")";
 }
 
+std::string EmbeddedFormalShape(const ir::TensorTypePtr& tensor, const DistributedCodegen& codegen,
+                                const ir::Span& span) {
+  std::string shape = "(";
+  for (const auto& dim : tensor->shape_) {
+    if (const auto constant = ir::As<ir::ConstInt>(dim)) {
+      CHECK_SPAN(constant->value_ >= 0, span) << "Embedded formal shape must be nonnegative";
+      shape += std::to_string(constant->value_);
+    } else if (const auto var = ir::As<ir::Var>(dim)) {
+      shape += "(\"var\", \"" + codegen.SanitizeName(var->name_hint_) + "\")";
+    } else {
+      const auto mul = ir::As<ir::Mul>(dim);
+      auto mul_var = mul ? ir::As<ir::Var>(mul->left_) : nullptr;
+      auto factor = mul ? ir::As<ir::ConstInt>(mul->right_) : nullptr;
+      if (mul && !mul_var) {
+        mul_var = ir::As<ir::Var>(mul->right_);
+        factor = ir::As<ir::ConstInt>(mul->left_);
+      }
+      CHECK_SPAN(mul_var && factor && factor->value_ > 0, span)
+          << "Embedded dynamic formal shape supports a variable or variable times a positive constant";
+      shape += "(\"mul\", (\"var\", \"" + codegen.SanitizeName(mul_var->name_hint_) + "\"), " +
+               std::to_string(factor->value_) + ")";
+    }
+    shape += ", ";
+  }
+  return shape + ")";
+}
+
+bool IsDistributedMetadata(const ir::TypePtr& type) {
+  if (ir::As<ir::DistributedTensorType>(type) || ir::As<ir::CommCtxType>(type)) return true;
+  const auto tuple = ir::As<ir::TupleType>(type);
+  return tuple && std::all_of(tuple->types_.begin(), tuple->types_.end(), IsDistributedMetadata);
+}
+
+bool IsWholeWindowSlot(const ir::DistributedTensorTypePtr& type) {
+  const auto& memref = *type->memref_;
+  const auto offset = ir::As<ir::ConstInt>(memref->byte_offset_);
+  const auto slot_size = ir::As<ir::ConstInt>((*type->window_buffer_)->size_);
+  if (!offset || offset->value_ != 0 || !slot_size || slot_size->value_ <= 0) return false;
+  const auto& view = type->tensor_view_;
+  if (view && (view->layout != ir::TensorLayout::ND || !view->valid_shape.empty() ||
+               view->pad != ir::PadValue::null ||
+               (!view->stride.empty() && view->stride.size() != type->shape_.size())))
+    return false;
+  uint64_t elements = 1;
+  for (size_t i = type->shape_.size(); i-- > 0;) {
+    const auto extent = ir::As<ir::ConstInt>(type->shape_[i]);
+    if (!extent || extent->value_ <= 0) return false;
+    if (view && !view->stride.empty()) {
+      const auto stride = ir::As<ir::ConstInt>(view->stride[i]);
+      if (!stride || stride->value_ < 0 || static_cast<uint64_t>(stride->value_) != elements) return false;
+    }
+    const auto count = static_cast<uint64_t>(extent->value_);
+    if (elements > std::numeric_limits<uint64_t>::max() / count) return false;
+    elements *= count;
+  }
+  const auto bytes = ir::storage_size::StaticStorageBytes(elements, type->dtype_);
+  return bytes && *bytes == static_cast<uint64_t>(slot_size->value_) && *bytes == memref->size_;
+}
 }  // namespace
 
 // ========================================================================
@@ -106,6 +185,16 @@ std::string StaticTensorShape(const ir::TensorTypePtr& tensor, const ir::Span& s
 // ========================================================================
 
 std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
+  return GenerateImpl(program, false, std::nullopt);
+}
+
+std::string DistributedCodegen::GenerateEmbedded(const ir::ProgramPtr& program,
+                                                 const std::optional<std::string>& entry_name) {
+  return GenerateImpl(program, true, entry_name);
+}
+
+std::string DistributedCodegen::GenerateImpl(const ir::ProgramPtr& program, bool embedded,
+                                             const std::optional<std::string>& entry_name) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
   // Verify the full lowered hierarchy before selecting a body. A HOST-only
   // fragment can strand windows whose owning scope lives in its CLUSTER caller.
@@ -114,9 +203,20 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   // program. RAII clears the cache on normal return and exception unwinding.
   ir::return_lineage::ScopedTraceCache return_cache(/*require_terminal_returns=*/true);
 
+  embedded_mode_ = embedded;
+  embedded_entry_alias_.clear();
+  embedded_support_alias_.clear();
+  embedded_layout_alias_.clear();
   return_plans_.clear();
   prepared_return_tensors_.clear();
-
+  embedded_windows_.clear();
+  embedded_window_handles_.clear();
+  embedded_ctx_scalars_.clear();
+  embedded_ctx_aliases_.clear();
+  embedded_domain_workers_.clear();
+  embedded_dynamic_domain_workers_.clear();
+  embedded_same_domain_groups_.clear();
+  embedded_local_tokens_.clear();
   program_ = program;
   emitter_.Clear();
   workers_.clear();
@@ -143,7 +243,17 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   // Select the entry before imports: CLUSTER modules must not accidentally
   // import HOST-only CHIP argument-routing helpers.
   ir::FunctionPtr best_orch;
-  if (!orchestrators_.empty()) {
+  if (embedded_mode_) {
+    best_orch = SelectEmbeddedEntry(entry_name);
+    EmbeddedNameCollector collector(*this);
+    collector.VisitFunction(best_orch);
+    for (const auto& [name, func] : all_funcs_) collector.names.insert(SanitizeName(name));
+    embedded_entry_alias_ = ir::auto_name::ReserveUniqueName("_pypto_embedded_entry", collector.names);
+    embedded_support_alias_ = ir::auto_name::ReserveUniqueName("_pypto_embedded_support", collector.names);
+    embedded_layout_alias_ = ir::auto_name::ReserveUniqueName("_pypto_embedded_layout_type", collector.names);
+    CollectEmbeddedWindowBindings(best_orch);
+    CollectHostOrchVarDefs(best_orch);
+  } else if (!orchestrators_.empty()) {
     best_orch = orchestrators_.begin()->second;
     int best_level = 0;
     for (const auto& [name, func] : orchestrators_) {
@@ -170,7 +280,14 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
         ir::LevelToLinquLevel(*best_orch->level_) >= 3;  // NOLINT(bugprone-unchecked-optional-access)
     if (is_host_orch) {
       CollectHostOrchHoistableAllocs(best_orch);
-
+      if (embedded_mode_) {
+        for (const auto* assign : hoisted_allocs_) {
+          const auto tensor = ir::As<ir::TensorType>(assign->var_->GetType());
+          CHECK_SPAN(tensor, assign->span_) << "Embedded prepared allocation must be an ordinary tensor";
+          StaticTensorShape(tensor, assign->span_);
+          prepared_return_tensors_[SanitizeName(assign->var_->name_hint_)] = tensor;
+        }
+      }
       if (IsClusterLevel(best_orch)) {
         // Remote buffer control must finish before any task is submitted.
         // Collect the implicit return-target names while emitting the native
@@ -189,7 +306,9 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
     } else {
       EmitFunction(best_orch);
     }
-
+    // A direct function alias would appear as a second marked runtime entry.
+    if (embedded_mode_) emitter_.EmitLine(embedded_entry_alias_ + " = (" + best_orch->name_ + ",)");
+    if (embedded_mode_) EmitEmbeddedLayout(best_orch);
     EmitEntryMarker(best_orch->name_);
   } else if (entry_func_) {
     EmitEntryFunction();
@@ -197,6 +316,27 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   }
 
   return emitter_.GetCode();
+}
+
+ir::FunctionPtr DistributedCodegen::SelectEmbeddedEntry(const std::optional<std::string>& entry_name) const {
+  if (entry_name.has_value()) {
+    const auto it = all_funcs_.find(*entry_name);
+    CHECK(it != all_funcs_.end()) << "Embedded entry '" << *entry_name
+                                  << "' must name a HOST Orchestrator; function not found";
+    const auto& func = it->second;
+    CHECK_SPAN(func->level_ == ir::Level::HOST && func->role_ == ir::Role::Orchestrator, func->span_)
+        << "Embedded entry '" << *entry_name << "' must name a HOST Orchestrator";
+    return func;
+  }
+
+  ir::FunctionPtr selected;
+  for (const auto& [name, func] : orchestrators_) {
+    if (func->level_ != ir::Level::HOST) continue;
+    CHECK(!selected) << "Ambiguous embedded HOST Orchestrator selection; provide entry_name";
+    selected = func;
+  }
+  CHECK(selected) << "Embedded generation requires a HOST Orchestrator";
+  return selected;
 }
 
 ir::CommDomainScopeStmtPtr DistributedCodegen::ScopeForWindowBuffer(const ir::WindowBufferPtr& wb) const {
@@ -241,7 +381,83 @@ void DistributedCodegen::RecordBuiltinNextLevel(const ir::CallPtr& call, const s
 }
 
 std::string DistributedCodegen::GetCommDomainHandleVar(const ir::WindowBufferPtr& wb) const {
+  if (embedded_mode_) {
+    const auto found = embedded_window_handles_.find(wb.get());
+    if (found != embedded_window_handles_.end()) return found->second;
+  }
   return HandleVarForScope(ScopeForWindowBuffer(wb));
+}
+
+void DistributedCodegen::CollectEmbeddedWindowBindings(const ir::FunctionPtr& func) {
+  std::vector<size_t> windows;
+  size_t scalar = 0;
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    const auto& param = func->params_[i];
+    if (ir::As<ir::DistributedTensorType>(param->GetType())) windows.push_back(i);
+    if (ir::As<ir::CommCtxType>(param->GetType())) {
+      embedded_ctx_scalars_[SanitizeName(param->name_hint_)] = scalar++;
+    } else if (ir::As<ir::ScalarType>(param->GetType())) {
+      ++scalar;
+    }
+  }
+  const size_t first_ctx = func->params_.size() - windows.size();
+  for (size_t i = 0; i < windows.size(); ++i) {
+    const auto& ctx = func->params_[first_ctx + i];
+    CHECK_SPAN(ir::As<ir::CommCtxType>(ctx->GetType()), ctx->span_)
+        << "Embedded windows require the final materialized CommCtx suffix";
+    const auto& param = func->params_[windows[i]];
+    const auto type = ir::As<ir::DistributedTensorType>(param->GetType());
+    CHECK_SPAN(type->window_buffer_.has_value(), param->span_)
+        << "Embedded window requires its owning buffer";
+    const std::string name = SanitizeName(ctx->name_hint_);
+    const size_t index = embedded_ctx_scalars_.at(name);
+    embedded_windows_.push_back({windows[i], first_ctx + i, index, param});
+    const auto* wb = type->window_buffer_->get();
+    const auto [found, inserted] = embedded_window_handles_.emplace(wb, name);
+    if (!inserted) {
+      embedded_same_domain_groups_.push_back({embedded_ctx_scalars_.at(found->second), index});
+    }
+  }
+}
+
+void DistributedCodegen::EmitDomainOrderingTokens(const std::vector<std::string>& handles,
+                                                  const std::string& rank, const std::string& task_args,
+                                                  bool require_same_domain) {
+  if (handles.empty()) return;
+  if (!embedded_mode_) {
+    for (const auto& handle : handles) {
+      emitter_.EmitLine(task_args + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + handle +
+                        "_ord\"][" + rank + "]), TensorArgType.INOUT)");
+    }
+    return;
+  }
+  CHECK_SPAN(!rank.empty(), current_func_->span_)
+      << "Embedded communication dispatch requires an explicit worker selector";
+  const bool constant =
+      std::all_of(rank.begin(), rank.end(), [](unsigned char c) { return std::isdigit(c); });
+  std::string arguments = "(";
+  std::vector<size_t> group;
+  for (const auto& handle : handles) {
+    arguments += handle + ", ";
+    const auto ctx = embedded_ctx_scalars_.find(handle);
+    if (ctx == embedded_ctx_scalars_.end()) continue;
+    group.push_back(ctx->second);
+    auto& workers = embedded_domain_workers_[ctx->second];
+    if (constant)
+      workers.insert(std::stoll(rank));
+    else
+      embedded_dynamic_domain_workers_.insert(ctx->second);
+  }
+  arguments += ")";
+  CHECK_SPAN(!require_same_domain || handles.size() <= 1 || group.size() == handles.size(),
+             current_func_->span_)
+      << "Embedded builtin window arguments must share one local or inherited domain";
+  if (require_same_domain && group.size() > 1) embedded_same_domain_groups_.push_back(group);
+  if (require_same_domain) emitter_.EmitLine("_frame.require_same_domain(" + arguments + ")");
+  const std::string token = task_args + "_ordering_token";
+  emitter_.EmitLine("for " + token + " in _frame.ordering_tokens(" + arguments + ", " + rank + "):");
+  emitter_.EmitLine("    " + task_args + ".add_tensor(make_tensor_arg(orch._worker, " + token +
+                    "), TensorArgType.INOUT)");
 }
 
 // ========================================================================
@@ -307,6 +523,18 @@ std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() c
 // ========================================================================
 
 void DistributedCodegen::EmitImports(const ir::FunctionPtr& entry) {
+  if (embedded_mode_) {
+    emitter_.EmitLine("import torch");
+    emitter_.EmitLine(
+        "from simpler.task_interface import "
+        "CallConfig, CommBufferSpec, DataType, TaskArgs, TensorArgType");
+    emitter_.EmitLine("from . import _distributed_support as " + embedded_support_alias_);
+    emitter_.EmitLine("make_tensor_arg = " + embedded_support_alias_ + ".make_tensor_arg");
+    emitter_.EmitLine("add_chip_tensor_arg = " + embedded_support_alias_ + ".add_chip_tensor_arg");
+    emitter_.EmitLine("_submit_chip = " + embedded_support_alias_ + "._submit_chip");
+    emitter_.EmitLine("from types import MappingProxyType as " + embedded_layout_alias_);
+    return;
+  }
   // Module imports precede function emission, so current_func_ is not set yet.
   for (const auto& line : FormattingHandlerForFunction(entry).GetImports()) {
     emitter_.EmitLine(line);
@@ -360,6 +588,103 @@ const std::vector<DistributedCodegen::ReturnPosition>& DistributedCodegen::GetRe
   return return_plans_.emplace(func.get(), std::move(plan)).first->second;
 }
 
+void DistributedCodegen::EmitEmbeddedLayout(const ir::FunctionPtr& entry) {
+  // These immutable records describe independent dense pools, never the IR
+  // formal index interpreted as a wire slot. C3c can persist this plain data
+  // without importing a compiler on the receiving node.
+  std::vector<std::string> tensor_slots, scalar_slots, window_slots, implicit_outputs, requirements;
+  size_t tensor_index = 0, scalar_index = 0;
+  for (size_t i = 0; i < entry->params_.size(); ++i) {
+    const auto& param = entry->params_[i];
+    const auto type = param->GetType();
+    const std::string prefix = "(" + std::to_string(i) + ", \"" + SanitizeName(param->name_hint_) + "\", ";
+    if (ir::As<ir::DistributedTensorType>(type)) continue;
+    if (ir::As<ir::CommCtxType>(type)) {
+      scalar_slots.push_back(prefix + std::to_string(scalar_index++) + ", \"comm_ctx\"),");
+      continue;
+    }
+    if (const auto tensor = ir::As<ir::TensorType>(type)) {
+      const std::string shape = EmbeddedFormalShape(tensor, *this, param->span_);
+      const auto direction =
+          i < entry->param_directions_.size() ? entry->param_directions_[i] : ir::ParamDirection::In;
+      const std::string direction_name = direction == ir::ParamDirection::Out     ? "Out"
+                                         : direction == ir::ParamDirection::InOut ? "InOut"
+                                                                                  : "In";
+      tensor_slots.push_back(prefix + std::to_string(tensor_index++) + ", \"" + tensor->dtype_.ToString() +
+                             "\", \"" + direction_name + "\", " + shape + "),");
+    } else if (const auto scalar = ir::As<ir::ScalarType>(type)) {
+      const auto& dtype = scalar->dtype_;
+      CHECK_SPAN(dtype == DataType::BOOL || dtype == DataType::INDEX || dtype == DataType::FP32 ||
+                     ((dtype.IsSignedInt() || dtype.IsUnsignedInt()) && dtype.GetBit() >= 8),
+                 param->span_)
+          << "Unsupported embedded scalar dtype '" << dtype.ToString() << "'";
+      scalar_slots.push_back(prefix + std::to_string(scalar_index++) + ", \"" + dtype.ToString() + "\"),");
+    } else {
+      CHECK_SPAN(false, param->span_) << "Unsupported embedded formal type '" << type->TypeName() << "'";
+    }
+  }
+  for (const auto& binding : embedded_windows_) {
+    const auto type = ir::As<ir::DistributedTensorType>(binding.param->GetType());
+    const auto direction = entry->param_directions_[binding.formal];
+    const std::string direction_name = direction == ir::ParamDirection::Out     ? "Out"
+                                       : direction == ir::ParamDirection::InOut ? "InOut"
+                                                                                : "In";
+    window_slots.push_back(
+        "(" + std::to_string(binding.formal) + ", \"" + SanitizeName(binding.param->name_hint_) + "\", " +
+        std::to_string(binding.ctx_formal) + ", " + std::to_string(binding.ctx_scalar) + ", \"" +
+        SanitizeName((*type->window_buffer_)->name_hint_) + "\", \"" + type->dtype_.ToString() + "\", \"" +
+        direction_name + "\", " + StaticTensorShape(type, binding.param->span_) + "),");
+  }
+  auto indices = [](const auto& values) {
+    std::string result = "(";
+    for (const auto value : values) result += std::to_string(value) + ", ";
+    return result + ")";
+  };
+  for (const auto& [scalar, workers] : embedded_domain_workers_) {
+    const std::string selected = embedded_dynamic_domain_workers_.count(scalar) ? "None" : indices(workers);
+    requirements.push_back("(\"domain_dispatch\", " + std::to_string(scalar) + ", " + selected + "),");
+  }
+  for (const auto& group : embedded_same_domain_groups_) {
+    requirements.push_back("(\"same_domain\", " + indices(group) + "),");
+  }
+  for (const auto& [key, workers] : embedded_local_tokens_) {
+    requirements.push_back("(\"local_domain_tokens\", \"" + key + "\", " + indices(workers) + "),");
+  }
+  const auto& plan = GetReturnPlan(entry);
+  for (size_t i = 0; i < plan.size(); ++i) {
+    if (const auto tensor = ir::As<ir::TensorType>(plan[i].type); tensor && !plan[i].output_param) {
+      implicit_outputs.push_back("(" + std::to_string(i) + ", " + std::to_string(tensor_index++) + ", \"" +
+                                 tensor->dtype_.ToString() + "\", " +
+                                 StaticTensorShape(tensor, entry->span_) + "),");
+    } else {
+      CHECK_SPAN(!ir::As<ir::TupleType>(plan[i].type), entry->span_)
+          << "Embedded tensor returns must use flat return positions";
+    }
+  }
+  if (!implicit_outputs.empty()) requirements.push_back("(\"return_copy_subworker\", 1),");
+  for (const auto& [name, tensor] : prepared_return_tensors_) {
+    requirements.push_back("(\"tensor_storage\", \"" + name + "\", \"" + tensor->dtype_.ToString() + "\", " +
+                           StaticTensorShape(tensor, entry->span_) + "),");
+  }
+  emitter_.EmitLine(entry->name_ + "._pypto_embedded_layout = " + embedded_layout_alias_ + "({");
+  emitter_.IncreaseIndent();
+  emitter_.EmitLine("\"version\": 2,");
+  auto emit_slots = [&](const std::string& name, const std::vector<std::string>& slots) {
+    emitter_.EmitLine("\"" + name + "\": (");
+    emitter_.IncreaseIndent();
+    for (const auto& slot : slots) emitter_.EmitLine(slot);
+    emitter_.DecreaseIndent();
+    emitter_.EmitLine("),");
+  };
+  emit_slots("tensor_slots", tensor_slots);
+  emit_slots("scalar_slots", scalar_slots);
+  emit_slots("window_slots", window_slots);
+  emit_slots("implicit_outputs", implicit_outputs);
+  emit_slots("invocation_requirements", requirements);
+  emitter_.DecreaseIndent();
+  emitter_.EmitLine("})");
+}
+
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   declared_vars_.clear();
   task_args_counter_ = 0;
@@ -384,15 +709,26 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   // receives node topology; its immediate-child query is bound below.
   std::ostringstream sig;
   sig << "def " << func->name_;
-  sig << "(orch, _args, config, *";
-  const bool accepts_domain_provider = ir::LevelToLinquLevel(func->level_.value_or(ir::Level::AIV)) >= 3;
-  for (const auto& keyword :
-       FormattingHandlerForFunction(func).GetEntryKeywordParams(accepts_domain_provider)) {
-    sig << ", " << keyword;
+  if (embedded_mode_) {
+    sig << "(orch, args, config";
+  } else {
+    sig << "(orch, _args, config, *";
+    const bool accepts_domain_provider = ir::LevelToLinquLevel(func->level_.value_or(ir::Level::AIV)) >= 3;
+    for (const auto& keyword :
+         FormattingHandlerForFunction(func).GetEntryKeywordParams(accepts_domain_provider)) {
+      sig << ", " << keyword;
+    }
   }
   sig << "):";
   emitter_.EmitLine(sig.str());
   emitter_.IncreaseIndent();
+
+  if (embedded_mode_) {
+    emitter_.EmitLine("_frame, callables, sub_ids, world_size = " + embedded_support_alias_ +
+                      "._bind_embedded_invocation(" + embedded_entry_alias_ + "[0], orch, args)");
+    emitter_.EmitLine("tensors = _frame.tensors");
+    emitter_.EmitLine("_domain_provider = None");
+  }
 
   if (IsClusterLevel(func)) {
     // Nodes, their actual runtime worker IDs, and each node's device count are
@@ -463,6 +799,21 @@ class HostOrchVarDefCollector : public ir::IRVisitor {
 
 // Enter outer carries before walking nested loops, then validate backedges
 // before publishing post-loop aliases. This runs before dispatch/layout scans.
+class EmbeddedContextAliasCollector : public ir::IRVisitor {
+ public:
+  std::function<void(const ir::ForStmtPtr&, bool)> loop;
+  std::function<void(const ir::IfStmtPtr&)> branch;
+
+  void VisitStmt_(const ir::ForStmtPtr& op) override {
+    loop(op, false);
+    IRVisitor::VisitStmt_(op);
+    loop(op, true);
+  }
+  void VisitStmt_(const ir::IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    branch(op);
+  }
+};
 
 }  // namespace
 
@@ -470,6 +821,60 @@ void DistributedCodegen::CollectHostOrchVarDefs(const ir::FunctionPtr& func) {
   host_orch_var_defs_.clear();
   if (!func->body_) return;
   HostOrchVarDefCollector collector(host_orch_var_defs_);
+  collector.VisitStmt(func->body_);
+  if (embedded_mode_) CollectEmbeddedContextAliases(func);
+}
+
+void DistributedCodegen::CollectEmbeddedContextAliases(const ir::FunctionPtr& func) {
+  embedded_ctx_aliases_.clear();
+  auto same_origin = [&](const ir::ExprPtr& left, const ir::ExprPtr& right, const ir::Span& span) {
+    const auto lhs = ResolveEmbeddedContextOrigin(left, span);
+    const auto rhs = ResolveEmbeddedContextOrigin(right, span);
+    if (lhs.get() == rhs.get()) return true;
+    const auto lquery = ir::As<ir::Call>(lhs);
+    const auto rquery = ir::As<ir::Call>(rhs);
+    if (!lquery || !rquery) return false;
+    // Separate queries of the same owned window have the same origin. A
+    // received explicit ctx remains distinct even if a caller used that query.
+    const auto ltype = ir::As<ir::DistributedTensorType>(lquery->args_[0]->GetType());
+    const auto rtype = ir::As<ir::DistributedTensorType>(rquery->args_[0]->GetType());
+    return (*ltype->window_buffer_).get() == (*rtype->window_buffer_).get();
+  };
+  EmbeddedContextAliasCollector collector;
+  collector.loop = [&](const ir::ForStmtPtr& op, bool after_body) {
+    const auto yld = ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(op->body_));
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& carry = op->iter_args_[i];
+      if (!ir::As<ir::CommCtxType>(carry->GetType())) continue;
+      if (!after_body) {
+        // Provisional substitution is private to this proof walk. Every
+        // backedge must retain the exact init origin before emission begins.
+        embedded_ctx_aliases_[carry.get()] = carry->initValue_;
+      } else {
+        INTERNAL_CHECK_SPAN(yld && i < yld->value_.size() && i < op->return_vars_.size(), op->span_)
+            << "Internal error: embedded CommCtx carry requires matching yield/result positions";
+        CHECK_SPAN(same_origin(carry->initValue_, yld->value_[i], op->span_), op->span_)
+            << "Embedded CommCtx carry must preserve its exact formal or query origin on every backedge";
+        embedded_ctx_aliases_[op->return_vars_[i].get()] = carry->initValue_;
+      }
+    }
+  };
+  collector.branch = [&](const ir::IfStmtPtr& op) {
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (!ir::As<ir::CommCtxType>(op->return_vars_[i]->GetType())) continue;
+      const auto lhs =
+          ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(op->then_body_));
+      const auto rhs =
+          op->else_body_
+              ? ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(*op->else_body_))
+              : nullptr;
+      INTERNAL_CHECK_SPAN(lhs && rhs && i < lhs->value_.size() && i < rhs->value_.size(), op->span_)
+          << "Internal error: embedded CommCtx phi requires matching branch yield positions";
+      CHECK_SPAN(same_origin(lhs->value_[i], rhs->value_[i], op->span_), op->span_)
+          << "Embedded CommCtx phi must preserve one exact formal or query origin on both branches";
+      embedded_ctx_aliases_[op->return_vars_[i].get()] = lhs->value_[i];
+    }
+  };
   collector.VisitStmt(func->body_);
 }
 
@@ -604,8 +1009,9 @@ void DistributedCodegen::EmitHostOrchDynamicDimBindings(const ir::FunctionPtr& f
 
   for (const ir::Var* key : dyn_var_order) {
     const DimSource& src = dyn_var_best.at(key);
-    const std::string shape_access =
-        "tensors[\"" + src.param_name + "\"]." + ("shape[") + std::to_string(src.dim_idx) + "]";
+    const std::string shape_access = "tensors[\"" + src.param_name + "\"]." +
+                                     (embedded_mode_ ? "shapes[" : "shape[") + std::to_string(src.dim_idx) +
+                                     "]";
     const std::string value_expr = InvertShapeDimForVar(src.expr, src.var, shape_access);
     // Surface a non-invertible dynamic dim as a documented user-facing
     // limitation (mirrors the device-side ValueError), rather than silently
@@ -724,7 +1130,14 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   // inside the body to the correct handle var. Pop on exit so a sibling
   // scope's body never sees this one.
   comm_domain_stack_.push_back(op);
-
+  if (embedded_mode_) {
+    embedded_local_tokens_[handle_var + "_ord"] = op->devices_;
+    std::string names = "(";
+    for (const auto& slot : op->slots_) names += "\"" + SanitizeName(slot->name_hint_) + "\", ";
+    names += ")";
+    emitter_.EmitLine("_frame.bind_local_domain(" + handle_var + ", \"" + handle_var + "_ord\", " + names +
+                      ")");
+  }
   if (op->body_) {
     VisitStmt(op->body_);
   }
@@ -831,6 +1244,14 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
 
   // DT/ctx tuple construction, aliases and projections carry IR provenance,
   // not Python values. Calls still run below so their dispatch is retained.
+  if (embedded_mode_ && IsDistributedMetadata(op->var_->GetType()) &&
+      (ir::AsVarLike(op->value_) || ir::As<ir::MakeTuple>(op->value_) ||
+       ir::As<ir::TupleGetItemExpr>(op->value_))) {
+    declared_vars_.insert(var_name);
+    current_target_var_ = "";
+    current_expr_value_ = "";
+    return;
+  }
 
   // Handle TupleGetItemExpr: `out_rms = tuple_tmp[i]` produced by multi-return
   // function call unpacking.  Resolve each element to its actual Out/InOut
@@ -948,6 +1369,25 @@ void DistributedCodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
   }
 }
 
+void DistributedCodegen::VisitStmt_(const ir::ReturnStmtPtr& op) {
+  // Ordinary HOST returns retain their established output-side-effect ABI.
+  if (!embedded_mode_) return;
+  const auto& plan = GetReturnPlan(current_func_);
+  for (size_t i = 0; i < plan.size(); ++i) {
+    if (!ir::As<ir::TensorType>(plan[i].type) || plan[i].output_param) continue;
+    CHECK_SPAN(i < op->value_.size() && ir::AsVarLike(op->value_[i]), op->span_)
+        << "Embedded tensor returns require flat tensor values";
+    const std::string source = GetExprAsCode(op->value_[i]);
+    const std::string args = NextTaskArgsVar();
+    emitter_.EmitLine(args + " = TaskArgs()");
+    emitter_.EmitLine(args + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + source +
+                      "\"]), TensorArgType.INPUT)");
+    emitter_.EmitLine(args + ".add_tensor(make_tensor_arg(orch._worker, _frame.implicit_outputs[" +
+                      std::to_string(i) + "]), TensorArgType.OUTPUT_EXISTING)");
+    emitter_.EmitLine("orch.submit_sub(_frame.return_copy_callable, " + args + ")");
+  }
+}
+
 void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
 
@@ -966,7 +1406,7 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   std::string step = current_expr_value_;
   current_expr_value_ = "";
 
-  const bool live_carries = IsClusterLevel(current_func_);
+  const bool live_carries = IsClusterLevel(current_func_) || embedded_mode_;
   ir::YieldStmtPtr loop_yield;
   // Keep the established standalone HOST source unchanged. Live carries name
   // their current Python values rather than the generic visitor's initValue_.
@@ -990,7 +1430,9 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
     }
     for (const auto& iter_arg : op->iter_args_) {
       declared_vars_.insert(SanitizeName(iter_arg->name_hint_));
-      if (ir::As<ir::DistributedTensorType>(iter_arg->GetType())) continue;
+      if (ir::As<ir::DistributedTensorType>(iter_arg->GetType()) ||
+          (embedded_mode_ && IsDistributedMetadata(iter_arg->GetType())))
+        continue;
       emitter_.EmitLine(carry_ref(iter_arg) + " = " + value_ref(iter_arg->initValue_));
     }
   }
@@ -1011,7 +1453,9 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
     std::string targets, values;
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       const auto& iter_arg = op->iter_args_[i];
-      if (ir::As<ir::DistributedTensorType>(iter_arg->GetType())) continue;
+      if (ir::As<ir::DistributedTensorType>(iter_arg->GetType()) ||
+          (embedded_mode_ && IsDistributedMetadata(iter_arg->GetType())))
+        continue;
       if (!targets.empty()) {
         targets += ", ";
         values += ", ";
@@ -1029,7 +1473,9 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& result = op->return_vars_[i];
       declared_vars_.insert(SanitizeName(result->name_hint_));
-      if (ir::As<ir::DistributedTensorType>(result->GetType())) continue;
+      if (ir::As<ir::DistributedTensorType>(result->GetType()) ||
+          (embedded_mode_ && IsDistributedMetadata(result->GetType())))
+        continue;
       // Carries are initialized before the loop, so a zero-trip result is its
       // initial value, while a completed loop exposes the final backedge value.
       emitter_.EmitLine(carry_ref(result) + " = " + carry_ref(op->iter_args_[i]));
@@ -1057,7 +1503,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     if (!yld) return;
     for (size_t i = 0; i < op->return_vars_.size() && i < yld->value_.size(); ++i) {
       // Metadata retains its original IR position but owns no Python slot.
-
+      if (embedded_mode_ && IsDistributedMetadata(op->return_vars_[i]->GetType())) continue;
       VisitExpr(yld->value_[i]);
       const std::string val = current_expr_value_;
       current_expr_value_ = "";
@@ -1073,7 +1519,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
 
   emitter_.EmitLine("if " + condition + ":");
   emitter_.IncreaseIndent();
-
+  if (embedded_mode_) emitter_.EmitLine("pass");
   VisitStmt(op->then_body_);
   emit_yields(op->then_body_);
   emitter_.DecreaseIndent();
@@ -1081,7 +1527,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   if (op->else_body_.has_value()) {
     emitter_.EmitLine("else:");
     emitter_.IncreaseIndent();
-
+    if (embedded_mode_) emitter_.EmitLine("pass");
     VisitStmt(*op->else_body_);
     emit_yields(*op->else_body_);
     emitter_.DecreaseIndent();
@@ -1174,7 +1620,8 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   auto registered = DistributedOpRegistry::GetInstance().Get(op->op_->name_);
   // These private descriptor handlers must leave ordinary HOST's established
   // unsupported-op diagnostic below unchanged.
-  if (registered) {
+  const bool embedded_shape_view = ir::IsOp(op, "tensor.view") || ir::IsOp(op, "tensor.reshape");
+  if (registered && (embedded_mode_ || !embedded_shape_view)) {
     current_expr_value_ = (*registered)(op, *this);
     return;
   }
@@ -1226,7 +1673,7 @@ void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
 }
 
 void DistributedCodegen::VisitExpr_(const ir::IterArgPtr& op) {
-  if (IsClusterLevel(current_func_)) {
+  if (IsClusterLevel(current_func_) || embedded_mode_) {
     // This also preserves the live outer carry when a nested loop's initial
     // value references it. The base visitor would follow initValue_ instead.
     current_expr_value_ = SanitizeName(op->name_hint_);
@@ -1258,7 +1705,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
                                           const ir::SubmitPtr& submit) {
   bool is_sub = IsSubWorker(callee);
   const bool is_cluster = IsClusterLevel(current_func_);
-  const bool use_return_plan = is_cluster;
+  const bool use_return_plan = is_cluster || embedded_mode_;
   const auto& handler = FormattingHandlerForFunction(current_func_);
   std::string ta_var = "_ta_" + std::to_string(task_args_counter_++);
 
@@ -1324,6 +1771,13 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // WAW edge to the lexically-innermost scope would then chain the dispatch into a domain it
   // does not actually touch while leaving the domain it *does* touch unordered.
   std::vector<ir::CommDomainScopeStmtPtr> comm_arg_scopes;
+  std::vector<std::string> embedded_arg_handles;
+  auto record_handle = [&](const std::string& handle) {
+    if (std::find(embedded_arg_handles.begin(), embedded_arg_handles.end(), handle) ==
+        embedded_arg_handles.end()) {
+      embedded_arg_handles.push_back(handle);
+    }
+  };
 
   // Build TaskArgs from callee's parameter directions
   emitter_.EmitLine(ta_var + " = TaskArgs()");
@@ -1338,6 +1792,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
 
   for (size_t i = 0; i < call->args_.size(); ++i) {
     if (ir::IsA<ir::CommCtxType>(call->args_[i]->GetType())) {
+      if (embedded_mode_) record_handle(EmbeddedCommCtxHandle(call->args_[i], call->span_));
       scalar_lines.push_back(ta_var + ".add_scalar(" +
                              ResolveCommCtxArg(call->args_[i], rank_expr, call->span_) + ")");
       continue;
@@ -1367,16 +1822,25 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
       std::string handle_var;
-      const auto owning_scope = ScopeForWindowBuffer(window_buffer);
-      if (std::none_of(
-              comm_arg_scopes.begin(), comm_arg_scopes.end(),
-              [&](const ir::CommDomainScopeStmtPtr& seen) { return seen.get() == owning_scope.get(); })) {
-        comm_arg_scopes.push_back(owning_scope);
+      if (embedded_mode_) {
+        handle_var = GetCommDomainHandleVar(window_buffer);
+        record_handle(handle_var);
+      } else {
+        const auto owning_scope = ScopeForWindowBuffer(window_buffer);
+        if (std::none_of(
+                comm_arg_scopes.begin(), comm_arg_scopes.end(),
+                [&](const ir::CommDomainScopeStmtPtr& seen) { return seen.get() == owning_scope.get(); })) {
+          comm_arg_scopes.push_back(owning_scope);
+        }
+        handle_var = HandleVarForScope(owning_scope);
       }
-      handle_var = HandleVarForScope(owning_scope);
-      const std::string view_args = "shapes=" + shape + ", dtype=" + dtype_enum;
+      const std::string view_args = embedded_mode_ ? EmbeddedWindowViewArgs(dist_type, call->span_)
+                                                   : "shapes=" + shape + ", dtype=" + dtype_enum;
       const std::string window_tensor =
-          handle_var + "[" + rank_expr + "].buffers[\"" + name + "\"].tensor(" + view_args + ")";
+          embedded_mode_
+              ? "_frame.window_tensor(" + handle_var + ", " + rank_expr + ", \"" + name + "\", " + view_args +
+                    ")"
+              : handle_var + "[" + rank_expr + "].buffers[\"" + name + "\"].tensor(" + view_args + ")";
       emitter_.EmitLine(ta_var + ".add_tensor(" + window_tensor + ", " + tag + ")");
       continue;
     }
@@ -1414,7 +1878,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
                                             << ": " << call->args_[i]->GetType()->TypeName();
   }
 
-  // Direct CLUSTER uses the prepared return ABI.
+  // Direct CLUSTER and embedded HOST use the prepared return ABI.
   // Ordinary HOST follows the callee's return lineage.
   std::string target = current_target_var_;
   std::vector<std::pair<size_t, size_t>> mapped_tensor_params;
@@ -1440,7 +1904,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       const std::string base = target.empty() ? ta_var + "_return" : target;
       const std::string name = plan.size() == 1 && !submit ? base : base + "_ret_" + std::to_string(i);
       return_tensors[i] = name;
-      if (is_cluster) {
+      if (embedded_mode_ || is_cluster) {
         StaticTensorShape(tensor, call->span_);
         prepared_return_tensors_[name] = tensor;
       } else {
@@ -1567,7 +2031,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // expected_arg_count`, so an extra arg is accepted and the generated
   // orchestration entry simply does not index it. That is what keeps this fix
   // host-side only — no chip .cpp regeneration, no `expected_arg_count` change.
-  if (!is_sub && !rank_expr.empty()) {
+  if (embedded_mode_) {
+    EmitDomainOrderingTokens(embedded_arg_handles, rank_expr, ta_var);
+  } else if (!is_sub && !rank_expr.empty()) {
     for (const auto& scope : comm_arg_scopes) {
       const std::string ord_key = HandleVarForScope(scope) + "_ord";
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + ord_key + "\"][" +
@@ -1607,7 +2073,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         emitter_.EmitLine(ta_var + ".add_dep_wait(" + dep + ")");
       }
     }
-    emitter_.EmitLine("_keep.append(" + ta_var + ")");
+    if (!embedded_mode_) emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
     const std::string submit_expr = is_cluster ? "orch.submit_next_level(callables[\"" + callee->name_ +
                                                      "\"][" + rank_expr + "], " + ta_var +
@@ -2032,6 +2498,10 @@ std::string DistributedCodegen::ResolveRankExpr(const ir::CallPtr& call) const {
 
 std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const std::string& rank_expr,
                                                   const ir::Span& span) const {
+  if (embedded_mode_) {
+    CHECK_SPAN(!rank_expr.empty(), span) << "Embedded CommCtx dispatch requires an explicit worker selector";
+    return EmbeddedCommCtxHandle(arg, span) + "[" + rank_expr + "].device_ctx";
+  }
   ir::ExprPtr cur = arg;
   std::unordered_set<const ir::Var*> visited;
   while (auto var = ir::As<ir::Var>(cur)) {
@@ -2062,6 +2532,112 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
       << "pld.system.get_comm_ctx host lowering requires a window-bound DistributedTensor";
   const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(*window_buffer));
   return FormattingHandlerForFunction(current_func_).FormatCommCtxValue(handle_var, rank_expr);
+}
+
+ir::ExprPtr DistributedCodegen::ResolveEmbeddedContextOrigin(const ir::ExprPtr& arg,
+                                                             const ir::Span& span) const {
+  ir::ExprPtr current = arg;
+  std::unordered_set<const ir::Expr*> visited;
+  std::vector<int> projections;
+  while (current && visited.insert(current.get()).second) {
+    const auto alias = embedded_ctx_aliases_.find(current.get());
+    if (alias != embedded_ctx_aliases_.end()) {
+      current = alias->second;
+      continue;
+    }
+    if (const auto var = ir::As<ir::Var>(current)) {
+      const auto definition = host_orch_var_defs_.find(var.get());
+      if (definition == host_orch_var_defs_.end()) {
+        const std::string name = SanitizeName(var->name_hint_);
+        CHECK_SPAN(projections.empty() && embedded_ctx_scalars_.count(name), span)
+            << "Unbound embedded CommCtx formal";
+        return current;
+      }
+      current = definition->second;
+      continue;
+    }
+    if (const auto projection = ir::As<ir::TupleGetItemExpr>(current)) {
+      projections.push_back(projection->index_);
+      current = projection->tuple_;
+      continue;
+    }
+    if (const auto tuple = ir::As<ir::MakeTuple>(current); tuple && !projections.empty()) {
+      const int index = projections.back();
+      projections.pop_back();
+      CHECK_SPAN(index >= 0 && static_cast<size_t>(index) < tuple->elements_.size(), span)
+          << "Embedded CommCtx tuple projection is out of bounds";
+      current = tuple->elements_[static_cast<size_t>(index)];
+      continue;
+    }
+    break;
+  }
+  const auto query = ir::As<ir::Call>(current);
+  INTERNAL_CHECK_SPAN(
+      projections.empty() && query && ir::IsOp(query, "pld.system.get_comm_ctx") && query->args_.size() == 1,
+      span)
+      << "Embedded CommCtx must be a received formal or a window context query";
+  const auto type = ir::As<ir::DistributedTensorType>(query->args_[0]->GetType());
+  CHECK_SPAN(type && type->window_buffer_.has_value(), span)
+      << "Embedded CommCtx query requires an owned window";
+  return current;
+}
+
+std::string DistributedCodegen::EmbeddedCommCtxHandle(const ir::ExprPtr& arg, const ir::Span& span) const {
+  const auto origin = ResolveEmbeddedContextOrigin(arg, span);
+  if (const auto formal = ir::As<ir::Var>(origin)) return SanitizeName(formal->name_hint_);
+  const auto query = ir::As<ir::Call>(origin);
+  const auto type = ir::As<ir::DistributedTensorType>(query->args_[0]->GetType());
+  return GetCommDomainHandleVar(*type->window_buffer_);
+}
+
+std::string DistributedCodegen::EmbeddedWindowViewArgs(const ir::DistributedTensorTypePtr& type,
+                                                       const ir::Span& span) {
+  INTERNAL_CHECK_SPAN(embedded_mode_ && type->window_buffer_, span)
+      << "Embedded window descriptor requires its owning slot";
+  std::string result =
+      "shapes=" + FormatShapeTuple(type->shape_) + ", dtype=DataType." + DataTypeToSimplerEnum(type->dtype_);
+  if (type->tensor_view_) {
+    const auto& view = *type->tensor_view_;
+    CHECK_SPAN(
+        view.layout == ir::TensorLayout::ND && view.valid_shape.empty() && view.pad == ir::PadValue::null,
+        span)
+        << "Embedded distributed window views require full-valid ND geometry without padding";
+    if (!view.stride.empty()) {
+      CHECK_SPAN(view.stride.size() == type->shape_.size(), span)
+          << "Embedded distributed window stride rank must match its shape";
+      for (const auto& stride : view.stride) {
+        const auto constant = ir::As<ir::ConstInt>(stride);
+        CHECK_SPAN(constant && constant->value_ >= 0, span)
+            << "Embedded distributed window views require constant nonnegative element strides";
+      }
+      result += ", strides=" + FormatShapeTuple(view.stride);
+    }
+  }
+  if (type->memref_) {
+    const auto& memref = *type->memref_;
+    const bool from_slot = memref->base_.get() == (*type->window_buffer_)->base_.get();
+    // A received window formal uses a function-local base for the named slot.
+    // Recognize that base independently of the slot's runtime capacity.
+    const bool from_formal =
+        !from_slot &&
+        std::any_of(embedded_windows_.begin(), embedded_windows_.end(), [&](const auto& binding) {
+          const auto formal = ir::As<ir::DistributedTensorType>(binding.param->GetType());
+          if (formal->window_buffer_ != type->window_buffer_ || !formal->memref_) return false;
+          const auto& origin = *formal->memref_;
+          const auto offset = ir::As<ir::ConstInt>(origin->byte_offset_);
+          return origin->base_ == memref->base_ && offset && offset->value_ == 0;
+        });
+    CHECK_SPAN(from_slot || from_formal || IsWholeWindowSlot(type), span)
+        << "Embedded distributed window MemRef origin is not the named WindowBuffer slot; "
+           "function-local allocation offsets cannot be interpreted as slot-relative geometry";
+    const auto offset = ir::As<ir::ConstInt>(memref->byte_offset_);
+    CHECK_SPAN(offset && offset->value_ >= 0, span)
+        << "Embedded distributed window views require a constant nonnegative slot-relative byte offset";
+    // The named Buffer already describes its physical slot. This offset is in
+    // bytes relative to that slot, not elements or a second domain-slot offset.
+    result += ", byte_offset=" + std::to_string(offset->value_);
+  }
+  return result;
 }
 
 std::string DistributedCodegen::FormatShapeTuple(const std::vector<ir::ExprPtr>& shape) {

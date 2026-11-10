@@ -1602,6 +1602,13 @@ def test_backend_materializes_broadcast_next_level_files(tmp_path):
         kernel_snippet="kRoot = 0",
     )
 
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    embedded = codegen.DistributedCodegen()._generate_embedded(program, entry_name="host_orch")
+    assert embedded.count(".add_tensor(_frame.window_tensor(") >= 2
+    assert ".buffers[" not in embedded
+
 
 def test_backend_materializes_reduce_scatter_next_level_files(tmp_path):
     @pl.program
