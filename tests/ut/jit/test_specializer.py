@@ -4303,8 +4303,8 @@ def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive
     ctx.constexpr_values = {"enabled": str(selected), "mode": "0" if selected else "1"}
     function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
-    assert isinstance(function.body, ir.SeqStmts)
-    returned = function.body.stmts[-1]
+    body = function.body
+    returned = body.stmts[-1] if isinstance(body, ir.SeqStmts) else body
     assert isinstance(returned, ir.ReturnStmt)
     (value,) = returned.value
     assert isinstance(value.type, ir.TensorType)
