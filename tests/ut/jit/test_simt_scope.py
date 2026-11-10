@@ -633,10 +633,26 @@ def test_atomic_nd_address_and_nested_calls_native(tmp_path, pytestconfig):
         helpers = list((tmp_path / "vpto").rglob("*.pto"))
         assert len(helpers) == 1
         text = helpers[0].read_text()
-        assert text.count("pto.atomic_add ") == 8
+        assert text.count("pto.atomic_add ") == 12
         # The while condition must still perform an atomic on each evaluation.
-        condition = text[text.index("scf.while") : text.index("scf.condition")]
-        assert "pto.atomic_add " in condition
+        conditions = re.findall(r"scf\.while.*?scf\.condition", text, re.DOTALL)
+        assert [condition.count("pto.atomic_add ") for condition in conditions] == [
+            1,
+            1,
+            1,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+        # Reusing the prior while counter must bind the copy loop's induction
+        # variable, not a stale scalar alias from before the for statement.
+        copy_loop = re.search(r"scf\.for (%\w+) =.*?\n(.*?)\n    }", text, re.DOTALL)
+        assert copy_loop is not None
+        assert f"{copy_loop.group(1)}, %c96_index" in copy_loop.group(2)
         result = subprocess.run(
             [
                 binary,
@@ -656,7 +672,7 @@ def test_atomic_nd_address_and_nested_calls_native(tmp_path, pytestconfig):
         llvm = (tmp_path / "regression.ll").read_text()
         assert "i64 167" in llvm
         assert "i64 34" not in llvm
-        assert llvm.count("call i32 @llvm.hivm.atom.ADD.") == 8
+        assert llvm.count("call i32 @llvm.hivm.atom.ADD.") == 12
         # Include unselected tuple elements and verify order, not just count.
         exchanges = [line for line in llvm.splitlines() if "call i32 @llvm.hivm.atom.EXCH." in line]
         assert len(exchanges) == 7

@@ -52,6 +52,7 @@
 #include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/utils/call_like_presence.h"
 
 namespace pypto {
 namespace ir {
@@ -552,42 +553,6 @@ class UnreachableBodyRemapper : public IRMutator {
   const std::unordered_set<const Var*>& multi_assigned_;
 };
 
-// Calls have no purity contract. Cache occurrence information over immutable
-// expression nodes so guarding each nested arithmetic node remains O(N), rather
-// than rescanning its entire subtree. Owning keys prevent address reuse after
-// a rewritten temporary expression is destroyed. The cache lives for one pass
-// invocation; Var/IterArg uses do not re-evaluate their types or initializers.
-class CallLikePresence : public IRVisitor {
- public:
-  bool Contains(const ExprPtr& expr) {
-    found_ = false;
-    VisitExpr(expr);
-    return found_;
-  }
-
-  void VisitExpr(const ExprPtr& expr) override {
-    if (!expr) return;
-    if (auto it = cache_.find(expr); it != cache_.end()) {
-      found_ |= it->second;
-      return;
-    }
-    const bool enclosing = found_;
-    found_ = false;
-    IRVisitor::VisitExpr(expr);
-    cache_.emplace(expr, found_);
-    found_ |= enclosing;
-  }
-
- protected:
-  void VisitExpr_(const CallPtr&) override { found_ = true; }
-  void VisitExpr_(const SubmitPtr&) override { found_ = true; }
-  void VisitVarLike_(const VarPtr&) override {}
-
- private:
-  bool found_ = false;
-  std::unordered_map<ExprPtr, bool> cache_;
-};
-
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
   SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned,
@@ -1040,8 +1005,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // Calls remain observable even when the surrounding predicate is constant.
     const bool has_calls = call_presence_.Contains(new_condition);
     const bool always_true = !has_calls && analyzer_->CanProve(new_condition);
-    const bool always_false = !has_calls && !always_true &&
-                              analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
+    const bool always_false =
+        !has_calls && !always_true && analyzer_->CanProve(MakeNot(new_condition, new_condition->span_));
 
     // Snapshot var_remap_ so each branch's internal remap additions stay
     // scoped to that branch. Without this, a remap recorded inside the
@@ -1723,7 +1688,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// above any real nest of *provably* one-trip pure loops (a handful at most),
   /// so no kernel in the pipeline reaches it.
   static constexpr int kMaxNestedSingleTripFolds = 16;
-  CallLikePresence call_presence_;
+  transform_utils::CallLikePresence call_presence_;
 };
 
 FunctionPtr TransformSimplify(const FunctionPtr& func, bool constants_only) {

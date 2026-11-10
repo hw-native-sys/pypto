@@ -88,6 +88,8 @@ On Ascend950, the public quant data and scale may feed `matmul_mx` in the same I
 
 The mutator records composite-produced `MakeTuple`s (and SSA aliases of those tuples) in a private `composite_tuples_` map so `TupleGetItem` projections fold without abusing global `var_remap_` for arbitrary `v = (a, b)` assignments. The internal `tile.tquant_mx_raw` / `tile.tmov_x2zz` ops are not registered as composite rules, preserving pass idempotency.
 
+Tuple projections are folded only when the tuple contains no evaluated `Call` or `Submit`. Effectful tuples are also excluded from alias substitution, so selecting a slot cannot drop or duplicate effects. In SIMT while conditions, call extraction deliberately leaves expressions in place; scalar codegen evaluates every tuple element from left to right on each condition check, including the final false check, before selecting the saved result. A shared node cache keeps call-presence checks linear.
+
 ## Algorithm (`tile.select` rule)
 
 `tile.select(cond, on_true, on_false)` is the scratch-free selection surface; `tile.sel` / `tile.sels` remain the 1:1 PTO forms where the caller owns the scratch buffer.

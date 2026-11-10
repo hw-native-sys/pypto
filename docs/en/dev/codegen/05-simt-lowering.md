@@ -152,3 +152,9 @@ Tile (physical element 167), untouched elements, and atomic evaluation counts
 in arithmetic, branches and while conditions. Its three A5 checks complement
 native LLVM assertions for the address and retained calls. Codegen rejects
 index counts that disagree with the post-flatten storage rank.
+
+The condition regressions include unselected atomic tuple elements before and after the selected element, and nested tuple projections. Each atomic runs twice for a one-iteration loop: once for the true condition and once for the final false condition.
+
+JIT loop induction variables shadow prior scalar aliases and folded shape values within the loop body. Loop bounds use the incoming binding, and nested-loop exit restores the enclosing binding. The A5 regression reuses a while counter as a subsequent copy-loop index to verify this distinction.
+
+`pl.while_` uses `for` syntax but binds only loop-carried values, with no induction variable. Assignment-form `pl.yield_` targets define the post-loop outputs, including zero-iteration results. Incoming aliases and folded shapes are shadowed inside the loop; an outer binding is restored only when its name is not an output of that loop. JIT and the parser share yield ownership rules: yields in nested conditionals or real loops belong to those constructs. Runtime scopes (`pl.scope` / `pl.manual_scope`) and `pl.split_aiv` are transparent wrappers. The A5 regression checks that conditional yields do not replace an outer scalar alias.

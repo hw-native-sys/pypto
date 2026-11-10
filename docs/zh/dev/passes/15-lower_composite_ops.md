@@ -81,6 +81,8 @@ Builder 累积中间语句，提供基本 tile 操作和结构化控制流
 
 mutator 把本 Pass 产出的 `MakeTuple`（及其 SSA alias）记入私有 `composite_tuples_`，再折叠 `TupleGetItem`，避免滥用全局 `var_remap_` 去 inline 任意 `v = (a, b)`。内部 `tile.tquant_mx_raw` / `tile.tmov_x2zz` 不注册为组合规则，Pass 仍然幂等。
 
+只有 tuple 中不包含需要求值的 `Call` 或 `Submit` 时才折叠投影。带有副作用的 tuple 也不会用于别名替换，避免选择元素时丢失或重复执行副作用。SIMT while 条件的调用提取会保留原表达式；标量 codegen 在每次条件检查（含最后一次为假的检查）中按从左到右的顺序求值全部元素，再选择已保存的结果。共享节点缓存保证调用存在性检查保持线性复杂度。
+
 ## 算法（`tile.select` 规则）
 
 `tile.select(cond, on_true, on_false)` 是免 scratch 的选择接口；`tile.sel` / `tile.sels` 仍是与 PTO 指令 1:1 对应、由调用方自行管理 scratch 的形式。

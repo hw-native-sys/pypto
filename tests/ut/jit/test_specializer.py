@@ -1694,6 +1694,119 @@ class TestVariableRebinding:
         # Final read uses the latest alias
         assert "y = x_v1" in out
 
+    def test_for_induction_shadows_scalar_alias_and_restores_it(self):
+        out = self._transform("""
+            def f(seed):
+                i = seed
+                i = i + 1
+                for i in range(i):
+                    before_inner(i)
+                    for i in range(i):
+                        inner(i)
+                    after_inner(i)
+                after_outer(i)
+        """)
+        assert "for i in range(i_v1):" in out
+        assert "for i in range(i):" in out
+        assert "before_inner(i)" in out
+        assert "inner(i)" in out
+        assert "after_inner(i)" in out
+        assert "after_outer(i_v1)" in out
+
+    def test_for_induction_shadows_folded_shape_and_restores_it(self):
+        out = self._transform(
+            """
+            def f(src):
+                i = src.shape[0]
+                for i in range(i):
+                    consume(i)
+                after(i)
+            """,
+            tensor_meta={"src": TensorMeta(shape=(8, 32), dtype=DataType.FP32)},
+        )
+        assert "for i in range(8):" in out
+        assert "consume(i)" in out
+        assert "after(8)" in out
+
+    @pytest.mark.parametrize("setup", ["", "x = 99; x = x + 1", "x = src.shape[0]"])
+    def test_explicit_while_publishes_yield_binding(self, setup):
+        source = f"""
+            def f(src):
+                {setup}
+                for (x,) in pl.while_(init_values=(0,)):
+                    pl.cond(x < 3)
+                    x = pl.yield_(x + 1)
+                consume(x)
+        """
+        out = self._transform(source, tensor_meta={"src": TensorMeta((8, 32), DataType.FP32)})
+        assert "pl.cond(x < 3)" in out
+        assert "x = pl.yield_(x + 1)" in out
+        assert "consume(x)" in out
+
+    def test_explicit_while_distinct_yield_restores_folded_outer_binding(self):
+        out = self._transform(
+            """
+            def f(src):
+                x = src.shape[0]
+                for (x,) in pl.while_(init_values=(0,)):
+                    pl.cond(x < 3)
+                    result = pl.yield_(x + 1)
+                consume(result, x)
+            """,
+            tensor_meta={"src": TensorMeta((8, 32), DataType.FP32)},
+        )
+        assert "pl.cond(x < 3)" in out
+        assert "result = pl.yield_(x + 1)" in out
+        assert "consume(result, 8)" in out
+
+    def test_conditional_yields_do_not_publish_enclosing_while_carry(self):
+        out = self._transform("""
+            def f():
+                x = 99
+                x = x + 1
+                for (x,) in pl.while_(init_values=(0,)):
+                    pl.cond(x < 3)
+                    if x < 1:
+                        x = pl.yield_(x + 1)
+                    else:
+                        x = pl.yield_(x + 2)
+                    result = pl.yield_(x)
+                consume(x, result)
+        """)
+        # Branch outputs update the carry inside the loop; only result escapes.
+        # Restoring the original spelling x here would read 99 instead of 100.
+        assert "consume(x_v1, result)" in out
+
+    @pytest.mark.parametrize(
+        ("wrapper", "transparent"),
+        [
+            ("if condition:", False),
+            ("for i in pl.range(2):", False),
+            ("while condition:", False),
+            ("with pl.at(pl.Level.CORE_GROUP):", False),
+            ("with pl.scope():", True),
+            ("with pl.manual_scope():", True),
+            ("for i in pl.split_aiv(2):", True),
+        ],
+    )
+    def test_loop_yield_ownership_boundaries(self, wrapper, transparent):
+        source = f"{wrapper}\n    nested = pl.yield_(1)\nresult = pl.yield_(2)"
+        names = BodyTransformer._loop_yield_targets(ast.parse(source).body)
+        assert names == ({"nested", "result"} if transparent else {"result"})
+
+    def test_nested_loop_yield_does_not_publish_outer_induction(self):
+        out = self._transform("""
+            def f(seed):
+                x = seed
+                x = x + 1
+                for x in pl.range(2):
+                    for (x,) in pl.while_(init_values=(0,)):
+                        pl.cond(x < 3)
+                        x = pl.yield_(x + 1)
+                consume(x)
+        """)
+        assert "consume(x_v1)" in out
+
     def test_parallel_for_simple_rebind(self):
         """Two sibling for loops, each a *fresh* (non-loop-carried) local of the
         same name, are left untouched.
@@ -3698,8 +3811,9 @@ def test_runtime_condition_remains_an_ir_branch():
         (-1, "+1 == MODE", False),
     ],
 )
-def test_constexpr_branch_rebinding_survives_specialization(mode, condition, taken):
-    source = f"def select():\n    x = 1\n    if {condition}:\n        x = 2\n    return x\n"
+@pytest.mark.parametrize("target", ["x", "x: int"])
+def test_constexpr_branch_rebinding_survives_specialization(mode, condition, taken, target):
+    source = f"def select():\n    x = 1\n    if {condition}:\n        {target} = 2\n    return x\n"
     tree = BodyTransformer({}, set(), constexpr_values={"MODE": str(mode)}).visit(ast.parse(source))
     assert not any(isinstance(node, ast.If) for node in ast.walk(tree))
     namespace: dict[str, Any] = {}

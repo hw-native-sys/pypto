@@ -98,6 +98,53 @@ def test_simplify_preserves_nested_atomic_occurrences(expression):
     assert len(collect_calls(simplified, "simt.atomic_add")) == count
 
 
+@pytest.mark.parametrize("effect_position", [0, 1])
+@pytest.mark.parametrize("via_alias", [False, True])
+@pytest.mark.parametrize("call_kind", ["call", "submit"])
+def test_composite_lowering_preserves_tuple_effects(effect_position, via_alias, call_kind):
+    # Calls and submits both lack a purity contract. Even an unselected tuple
+    # slot must be evaluated once; alias propagation must not inline it again.
+    one = ir.ConstInt(1, DataType.INT32, SPAN)
+    effect = (
+        ir.Call(ir.GlobalVar("effect"), [], ir.ScalarType(DataType.INT32), SPAN)
+        if call_kind == "call"
+        else ir.Submit(ir.GlobalVar("effect"), [], [], ir.TupleType([ir.ScalarType(DataType.TASK_ID)]), SPAN)
+    )
+    elements: list[ir.Expr] = [one, one]
+    elements[effect_position] = effect
+    pair = ir.MakeTuple(elements, SPAN)
+    statements = []
+    value: ir.Expr = pair
+    if via_alias:
+        alias = ir.Var("alias", pair.type, SPAN)
+        statements.append(ir.AssignStmt(alias, pair, SPAN))
+        value = alias
+    projected = ir.TupleGetItemExpr(value, 1 - effect_position, SPAN)
+    result = ir.Var("result", projected.type, SPAN)
+    statements.append(ir.AssignStmt(result, projected, SPAN))
+    body = ir.SeqStmts(statements, SPAN) if len(statements) > 1 else statements[0]
+    function = ir.Function("helper", [], [], body, SPAN)
+    program = ir.Program([function], "TupleEffects", SPAN)
+    # This isolated pre-normalization IR fragment includes a nested Submit,
+    # which the public DSL requires binding directly. Keep property verification
+    # and structural comparison without round-tripping through that syntax.
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        lowered = passes.lower_composite_ops()(program)
+    ir.assert_structural_equal(lowered, program)
+
+
+def test_composite_lowering_retains_while_condition_tuple_atomic():
+    storage = ir.Var("storage", ir.TensorType([1], DataType.INT32), SPAN)
+    one = ir.ConstInt(1, DataType.INT32, SPAN)
+    pair = ir.MakeTuple([simt.atomic_add(storage, [0], one), ir.ConstBool(False, SPAN)], SPAN)
+    loop = ir.WhileStmt(ir.TupleGetItemExpr(pair, 1, SPAN), [], ir.SeqStmts([], SPAN), [], SPAN)
+    function = ir.Function(
+        "helper", [(storage, ir.ParamDirection.InOut)], [], loop, SPAN, ir.FunctionType.SIMT
+    )
+    program = ir.Program([function], "TupleWhile", SPAN)
+    ir.assert_structural_equal(passes.lower_composite_ops()(program), program)
+
+
 def test_simplify_does_not_reuse_effectful_branch_constraints():
     storage = ir.Var("storage", ir.TensorType([1], DataType.INT32), SPAN)
     one = ir.ConstInt(1, DataType.INT32, SPAN)

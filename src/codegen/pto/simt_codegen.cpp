@@ -93,6 +93,43 @@ class ScalarSubsetChecker : public IRVisitor {
 };
 }  // namespace
 
+void PTOCodegen::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
+  if (!inside_simt_function_) {
+    ir::IRVisitor::VisitExpr_(op);
+    return;
+  }
+  // FlattenCallExpr leaves SIMT while conditions in place. Evaluate the tuple
+  // eagerly inside scf.while's before region, including the final false check.
+  // Retain emitted SSA values so selecting an earlier slot never repeats its
+  // effects after later slots. Each occurrence is visited once, left to right.
+  struct EvaluatedValue {
+    std::string scalar;
+    std::vector<EvaluatedValue> elements;
+  };
+  auto evaluate = [this](auto&& self, const ir::ExprPtr& expr) -> EvaluatedValue {
+    if (auto tuple = ir::As<ir::MakeTuple>(expr)) {
+      EvaluatedValue value;
+      value.elements.reserve(tuple->elements_.size());
+      for (const auto& element : tuple->elements_) {
+        value.elements.push_back(self(self, element));
+      }
+      return value;
+    }
+    if (auto item = ir::As<ir::TupleGetItemExpr>(expr)) {
+      auto tuple = self(self, item->tuple_);
+      INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < tuple.elements.size(),
+                          item->span_)
+          << "SIMT tuple projection requires a resolved tuple with a valid index";
+      return std::move(tuple.elements[static_cast<size_t>(item->index_)]);
+    }
+    INTERNAL_CHECK_SPAN(!ir::IsA<ir::TupleType>(expr->GetType()), expr->span_)
+        << "SIMT tuple operands must be resolved before scalar codegen";
+    VisitExpr(expr);
+    return {fs_.current_expr_value, {}};
+  };
+  fs_.current_expr_value = evaluate(evaluate, op).scalar;
+}
+
 std::string PTOCodegen::SimtParameterType(const ir::TypePtr& type) {
   if (auto scalar = ir::As<ir::ScalarType>(type)) {
     CheckScalar(scalar->dtype_, ir::Span::unknown());
