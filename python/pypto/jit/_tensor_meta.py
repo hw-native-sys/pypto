@@ -235,23 +235,6 @@ def _returned_element_name(value: ast.expr) -> str:
     return target.id if isinstance(target, ast.Name) else ""
 
 
-def _return_element_names(func_def: ast.FunctionDef) -> list[str]:
-    """Return the names a function's first value-carrying ``return`` hands back.
-
-    ``return a, b`` → ``["a", "b"]``; ``return a`` → ``["a"]``. An element that
-    is a known store expression follows its named destination. Other non-Name
-    expressions (opaque calls, subscripts, literals) yield ``""`` so the
-    positional alignment with the caller's targets survives — the empty name
-    simply resolves to no meta.
-    """
-    for node in ast.walk(func_def):
-        if not (isinstance(node, ast.Return) and node.value is not None):
-            continue
-        elts = node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]
-        return [_returned_element_name(element) for element in elts]
-    return []
-
-
 @dataclass
 class _ReturnMeta:
     """Track local tuple metadata and, when requested, one return site."""
@@ -387,9 +370,9 @@ def _dep_out_metas(
             output_metas[out_param] = local[caller_arg]
     dep = deps.funcs.get(dep_name)
     if dep is not None:
-        output_metas.update(_omitted_output_metas(dep, call, _call_site_constexpr(dep, call, deps)))
-        # A returned Out buffer must retain the callee's declared packed format.
-        _validate_dep_packed_fp4_dtypes(dep, output_metas)
+        binding = _call_site_constexpr(dep, call, deps)
+        output_metas.update(_omitted_output_metas(dep, call, binding))
+        _validate_dep_packed_fp4_dtypes(dep, output_metas, binding)
     return {
         vname: output_metas[out_param]
         for vname, out_param in zip(names, out_params, strict=True)
@@ -464,11 +447,13 @@ def _dep_result_metas(
     deps: _DepScan,
     local: Mapping[str, TensorMeta],
     arity: int | None,
+    *,
+    submitted: bool = False,
 ) -> _DepResults | None:
     """Read a dependency's results in return order, independent of caller target syntax.
 
-    An unknown arity requests a tuple result. The same local metadata walk
-    resolves both a literal multi-result return and a returned tuple variable.
+    An unknown arity requests a tuple result for ordinary calls. A Submit
+    needs every result, including an empty result list for a void callee.
     """
     dep = deps.funcs.get(dep_name)
     if dep is None:
@@ -502,7 +487,9 @@ def _dep_result_metas(
         summary = summaries.values[key]
     else:
         cycles = summaries.cycles
-        summary = _summarize_dep_results(dep, deps, seed_meta, constexpr, track_returns)
+        summary = _summarize_dep_results(
+            dep, seed_meta, constexpr, deps.discover_deps, track_returns=track_returns, analysis=deps.analysis
+        )
         # A result affected by a recursion cutoff is specific to its active
         # call stack. Cache only completed, context-independent summaries.
         if summaries.cycles == cycles:
@@ -510,17 +497,19 @@ def _dep_result_metas(
     if summary is None:
         return None
     count = len(summary.metas)
-    if (arity is None and count < 2) or (arity is not None and count != arity):
+    if (arity is None and count < 2 and not submitted) or (arity is not None and count != arity):
         return None
     return _instantiate_dep_results(summary, call, deps.owner, seed_meta)
 
 
 def _summarize_dep_results(
     dep: "JITFunction",
-    deps: _DepScan,
     seed_meta: dict[str, TensorMeta],
-    constexpr: dict[str, str],
+    constexpr: Mapping[str, str],
+    discover_deps: _call_binding.DiscoverDeps,
+    *,
     track_returns: bool,
+    analysis: _DepAnalysis | None = None,
 ) -> _DepResults | None:
     """Walk the callee once for one set of input metadata and constexpr values."""
     try:
@@ -529,17 +518,17 @@ def _summarize_dep_results(
         return None
     site = _return_site(func_def)
     if site is None or site.value is None:
-        return None
+        return None if dep._func_type == "extern" else _DepResults((), frozenset())
     elements = site.value.elts if isinstance(site.value, ast.Tuple) else [site.value]
     return_meta = _ReturnMeta(site, elements) if track_returns else None
-    _validate_dep_packed_fp4_dtypes(dep, seed_meta)
+    _validate_dep_packed_fp4_dtypes(dep, seed_meta, constexpr)
     callee_metas = extract_local_tensor_metas(
         dep._func,
         seed_meta=seed_meta,
         caller_func_type=dep._func_type,
-        dep_analysis=deps.analysis,
+        dep_analysis=analysis,
         constexpr_values=constexpr,
-        discover_deps=deps.discover_deps,
+        discover_deps=discover_deps,
         visible_only=True,
         outputs=_MetadataOutputs(return_meta=return_meta),
     )
@@ -559,6 +548,17 @@ def _summarize_dep_results(
         tuple(metas),
         frozenset(index for index in stale_positions if metas[index] is None),
     )
+
+
+def specialized_return_metas(
+    dep: "JITFunction",
+    seed_meta: dict[str, TensorMeta],
+    constexpr_values: Mapping[str, str],
+    discover_deps: _call_binding.DiscoverDeps,
+) -> _TupleMeta | None:
+    """Read result metadata at the return using this variant's parameter metadata."""
+    summary = _summarize_dep_results(dep, seed_meta, constexpr_values, discover_deps, track_returns=True)
+    return summary.metas if summary is not None else None
 
 
 def _instantiate_dep_results(
@@ -1220,19 +1220,18 @@ def _submitted_value_metas(
 ) -> _SubmitTupleMeta:
     """Describe the callee values in the parser's flat Submit tuple."""
     dep = deps.funcs.get(dep_name)
-    returned: list[str] = []
-    if dep is not None:
-        try:
-            returned = _return_element_names(_ast_analysis.get_func_def(dep._func))
-        except OSError:
-            pass
-    outputs = deps.io[dep_name][1]
+    if dep is not None and dep._func_type != "extern":
+        results = _dep_result_metas(call, dep_name, deps, local, arity=None, submitted=True)
+        if results is not None:
+            return results.metas
+    # Only signature-only callees use their output ABI as a result fallback.
     declared = _declared_return_count(dep, _call_site_constexpr(dep, call, deps)) if dep is not None else None
     count = (
         declared
         if declared is not None
-        else len(returned)
-        or (len(outputs) if dep is not None and dep._func_type == "extern" else int(bool(outputs)))
+        else len(deps.io[dep_name][1])
+        if dep and dep._func_type == "extern"
+        else 0
     )
     names = [f"{binding}_value_{index}" for index in range(count)]
     if not names:
@@ -2639,8 +2638,8 @@ def resolve_dep_call_metadata(
         dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}
         dep_scalar_dtypes = {n: caller_scalar_dtypes[n] for n in dep_param_names if n in caller_scalar_dtypes}
 
+    binding: dict[str, str] = {}
     if call_node is not None:
-        binding: dict[str, str] = {}
         constexpr_params = _arguments.constexpr_params(dep._func)
         if constexpr_params:
             binding = _call_binding.resolve_call_site_constexpr(
@@ -2654,16 +2653,33 @@ def resolve_dep_call_metadata(
             )
         dep_tensor_meta.update(_omitted_output_metas(dep, call_node, binding))
 
-    _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta)
+    _validate_dep_packed_fp4_dtypes(dep, dep_tensor_meta, binding)
     _overlay_dep_declared_dyn_dims(dep_dyn_map, dep_tensor_meta)
     _overlay_dep_declared_layouts(dep, dep_tensor_meta)
 
     return dep_tensor_meta, dep_scalar_dtypes
 
 
-def _validate_dep_packed_fp4_dtypes(dep: "JITFunction", dep_tensor_meta: dict[str, TensorMeta]) -> None:
-    """Require dependency arguments to preserve their declared packed FP4 format."""
-    for dep_param, dtype in _arguments.param_dtypes(dep._func).items():
+def _validate_dep_packed_fp4_dtypes(
+    dep: "JITFunction", dep_tensor_meta: dict[str, TensorMeta], binding: Mapping[str, str]
+) -> None:
+    """Require dependency arguments to preserve the packed format for this call."""
+    if binding:
+        namespace = _dep_annotation_namespace(dep, binding)
+        parameters = inspect.signature(dep._func).parameters
+        dtypes = {}
+        for arg in _ast_analysis.get_func_def(dep._func).args.args:
+            if arg.arg not in dep_tensor_meta:
+                continue
+            annotation = _arguments.resolve_call_annotation(
+                arg.annotation, parameters[arg.arg].annotation, namespace, binding
+            )
+            dtype = getattr(annotation, "dtype", None)
+            if isinstance(dtype, DataType) and dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
+                dtypes[arg.arg] = dtype
+    else:
+        dtypes = _arguments.param_dtypes(dep._func)
+    for dep_param, dtype in dtypes.items():
         meta = dep_tensor_meta.get(dep_param)
         if meta is None or meta.dtype == dtype:
             continue

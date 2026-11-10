@@ -1801,6 +1801,13 @@ class JITFunction:
                     external_dual_aiv_dispatch=dep._external_dual_aiv_dispatch,
                     external_include_dirs=dep._external_include_dirs,
                     requires_return_contract=key in plan.submitted,
+                    return_metas=(
+                        _tensor_meta.specialized_return_metas(
+                            dep, dep_meta, plan.binding[key], _discover_dep_bindings
+                        )
+                        if key in plan.submitted and dep._func_type != "extern"
+                        else None
+                    ),
                 )
             )
         contexts.reverse()

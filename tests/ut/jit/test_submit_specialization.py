@@ -139,11 +139,20 @@ def test_submit_keeps_keyword_constexpr_after_omitted_output():
     assert [len(s.args) for s in submitted] == [2, 1]
 
 
-def test_submit_preserves_returned_store_expression():
+@pytest.mark.parametrize("named", [False, True])
+def test_submit_preserves_returned_store_expression(named):
     @pl.jit.incore
-    def kernel(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[16, 32], pl.FP32]:
+    def direct(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[16, 32], pl.FP32]:
         value = pl.load(x, [0, 0], [16, 32])
         return pl.store(value, [0, 0], out)
+
+    @pl.jit.incore
+    def via_local(x: pl.Tensor, out: pl.InOut[pl.Tensor]) -> pl.Tensor[[16, 32], pl.FP32]:
+        value = pl.load(x, [0, 0], [16, 32])
+        stored = pl.store(value, [0, 0], out)
+        return stored
+
+    kernel = via_local if named else direct
 
     @pl.jit
     def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
@@ -387,11 +396,11 @@ def test_submitted_incore_wrapper_keeps_declared_return_arity():
         result, done = pl.submit(kernel, x, first)
         return result
 
-    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    program = entry.specialize(torch.empty(32, 64), torch.empty(32, 64))
     assert len(_submissions(program)) == 1
     kernel_ir = program.get_function("kernel")
     assert kernel_ir is not None
-    assert ir.structural_equal(kernel_ir.return_types[0], ir.TensorType([16, 32], pl.FP32))
+    assert ir.structural_equal(kernel_ir.return_types[0], ir.TensorType([32, 64], pl.FP32))
 
 
 def test_graph_call_expression_retains_single_output_metadata():
@@ -697,6 +706,50 @@ def test_submit_tuple_metadata_joins_zero_trip_loop_path():
         outputs=_tensor_meta._MetadataOutputs(return_meta=returned),
     )
     assert returned.metas[site.value] is None
+
+
+def test_void_inout_submit_returns_only_task_id():
+    @pl.jit.incore
+    def kernel(state: pl.InOut[pl.Tensor]):
+        value = pl.load(state, [0, 0], [16, 32])
+        pl.store(value, [0, 0], state)
+
+    @pl.jit.inline
+    def forward(state: pl.Tensor, tid: pl.Scalar[pl.TASK_ID]) -> tuple[pl.Tensor, pl.Scalar[pl.TASK_ID]]:
+        return state, tid
+
+    @pl.jit
+    def entry(state: pl.InOut[pl.Tensor]):
+        launch = pl.submit(kernel, state)
+        result, done = forward(state, launch[0])
+        _next_launch = pl.submit(kernel, result, deps=[done])
+        return result
+
+    launches = _submissions(entry.specialize(torch.empty(16, 32)))
+    assert len(launches) == 2
+    for launch in launches:
+        assert isinstance(launch.type, ir.TupleType)
+        assert len(launch.type.types) == 1
+        assert ir.structural_equal(launch.type.types[0], ir.ScalarType(pl.TASK_ID))
+
+
+def test_omitted_output_uses_call_owned_packed_dtype():
+    format_override = pl.FP4E2M1X2
+
+    @pl.jit.incore
+    def kernel(
+        x: pl.Tensor, out: pl.Out[pl.Tensor[[16, 32], format_override]], format_override: pl.constexpr
+    ):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor):
+        result, _ = pl.submit(kernel, x, format_override=pl.FP32)
+        return result
+
+    (launch,) = _submissions(entry.specialize(torch.empty(16, 32)))
+    assert isinstance(launch.type, ir.TupleType)
+    assert ir.structural_equal(launch.type.types[0], ir.TensorType([16, 32], pl.FP32))
 
 
 def test_submit_task_id_projection_is_not_inferred_as_a_tensor():
