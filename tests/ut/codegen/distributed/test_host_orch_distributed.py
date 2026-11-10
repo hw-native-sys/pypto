@@ -39,7 +39,9 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from contextlib import nullcontext
 from importlib import resources
+from types import SimpleNamespace
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -2304,3 +2306,151 @@ def test_if_cross_branch_phi_yields_tensors() -> None:
     assert not re.search(r"boundary__ssa_v\d+\s*=.*\w+__ssa", then_block), (
         "Then-branch must not contain bare Python tensor assignments:\n" + code
     )
+
+
+class _C3aTaskArgs:
+    """Record the generated wire layout, enforcing Simpler's tensor-first ABI."""
+
+    def __init__(self):
+        self.tensors = []
+        self.scalars = []
+        self.deps = []
+
+    def add_tensor(self, tensor, tag):
+        assert not self.scalars, "Generated code added a tensor after a scalar"
+        self.tensors.append((tensor, tag))
+
+    def add_scalar(self, value):
+        self.scalars.append(value)
+
+    def add_dep_wait(self, handle):
+        self.deps.append(handle)
+
+
+def _c3a_execute(code, tensors, *, nodes=(7, 13), node_sizes=(3, 3), retain=False, provider=False, repeats=1):
+    """Execute the actual generated body without importing a device runtime.
+
+    Only imports are removed. All function bodies, markers and dispatch logic
+    come from native codegen; the real late passes ran before this helper.
+    """
+    module = ast.parse(code)
+    module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    calls, routes, domains = [], [], []
+    bindings = [object() for _ in nodes]
+    config = object()
+
+    def io_arg(binding, tensor, tag):
+        routed = (binding, tensor, tag)
+        routes.append(routed)
+        return routed
+
+    def submit(handle, args, cfg, *, worker):
+        assert cfg is config
+        task = object()
+        calls.append(SimpleNamespace(handle=handle, args=args, worker=worker, task=task))
+        return task
+
+    def allocate(**kwargs):
+        domains.append(kwargs)
+        return nullcontext(SimpleNamespace(domain_id=907))
+
+    tags = SimpleNamespace(INPUT="input", OUTPUT="output", OUTPUT_EXISTING="existing", INOUT="inout")
+    namespace = {
+        "TaskArgs": _C3aTaskArgs,
+        "TensorArgType": tags,
+        "CommBufferSpec": SimpleNamespace,
+        "_io_arg": io_arg,
+    }
+    exec(compile(module, "<c3a-generated-cluster>", "exec"), namespace)
+    entries = [value for value in namespace.values() if getattr(value, "_pypto_distributed_entry", False)]
+    assert len(entries) == 1
+    orch = SimpleNamespace(submit_next_level=submit, allocate_global_domain=allocate)
+    # A supplied provider must be used instead of the ordinary allocator.
+    if provider:
+        orch.allocate_global_domain = None
+    kwargs = {"_domain_provider": allocate} if provider else {}
+    keep = []
+    for _ in range(repeats):
+        entries[0](
+            orch,
+            None,
+            config,
+            tensors=tensors,
+            callables={"node": [101 + 2 * i for i in range(len(nodes))]},
+            nodes=list(nodes),
+            node_sizes=list(node_sizes),
+            node_bindings=bindings,
+            _keep=keep,
+            _retain=retain,
+            **kwargs,
+        )
+    assert keep == [call.args for call in calls]
+    return SimpleNamespace(calls=calls, routes=routes, domains=domains, bindings=bindings)
+
+
+@pytest.mark.parametrize("subset", [False, True], ids=["full", "subset"])
+@pytest.mark.parametrize("provider", [False, True], ids=["allocator", "provider"])
+def test_c3a_global_domain_omits_window_wire_tensors_and_preserves_alignment(subset, provider):
+    launch = (
+        "        out = self.node(out, count, tiny, wide, worker=0)\n"
+        "        out = self.node(out, count, tiny, wide, worker=2)\n"
+        if subset
+        else "        for w in pl.range(pld.num_workers()):\n"
+        "            out = self.node(out, count, tiny, wide, worker=w)\n"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, tiny: pld.DistributedTensor[[3], pl.UINT8], wide: pld.DistributedTensor[[129], pl.UINT8]):
+        return tiny
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def node(
+        self, out: pl.Out[pl.Tensor[[3], pl.UINT8]], count: pl.Scalar[pl.INT32],
+        tiny: pld.DistributedTensor[[3], pl.UINT8], wide: pld.DistributedTensor[[129], pl.UINT8],
+    ) -> pl.Tensor[[3], pl.UINT8]:
+        self.chip(tiny, wide, worker=0)
+        return out
+    @pl.function(level=pl.Level.CLUSTER_0, role=pl.Role.Orchestrator)
+    def cluster(self, out: pl.Out[pl.Tensor[[3], pl.UINT8]], count: pl.Scalar[pl.INT32]):
+        tiny_buf = pld.alloc_window_buffer(3)
+        wide_buf = pld.alloc_window_buffer(129)
+        tiny = pld.window(tiny_buf, [3], dtype=pl.UINT8)
+        wide = pld.window(wide_buf, [129], dtype=pl.UINT8)
+{launch}        return out
+""")
+    code = _lower(program, convert_to_ssa=True)
+    assert "members=" in code and "workers=" not in code, code
+    assert ".domain_id" in code and ".device_ctx" not in code, code
+    assert ".buffers[" not in code, code
+    assert "_ord" not in code, code
+    assert not re.search(r'tensors\["(?:tiny|wide)(?:__ssa_v\d+)?"\]', code), code
+    out = object()
+    result = _c3a_execute(
+        code,
+        {"out__ssa_v0": out, "count__ssa_v0": -5},
+        nodes=(7, 13, 21),
+        node_sizes=(2, 2, 2),
+        retain=True,
+        provider=provider,
+    )
+    ranks = [0, 2] if subset else [0, 1, 2]
+    assert len(result.domains) == 1
+    domain = result.domains[0]
+    assert domain["members"] == [((7, 13, 21)[rank], device) for rank in ranks for device in range(2)]
+    assert domain["retain_after_run"] is True
+    # Preserve the current 64-byte physical slot alignment, without exposing
+    # padding as the logical buffer count.
+    assert domain["window_size"] == 256
+    assert [(buffer.count, buffer.nbytes) for buffer in domain["buffers"]] == [(3, 64), (129, 192)]
+    assert [(call.handle, call.worker) for call in result.calls] == [
+        (101 + 2 * rank, (7, 13, 21)[rank]) for rank in ranks
+    ]
+    for call in result.calls:
+        assert len(call.args.tensors) == 1
+        assert call.args.tensors[0][1] == "existing"
+        assert call.args.scalars == [-5, 907, 907]
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -391,6 +391,9 @@ set(PYPTO_SOURCES
     src/ir/serialization/type_deserializers.cpp
     src/ir/serialization/type_registry.cpp
 
+    # Hierarchy formatting policy
+    src/hierarchy/level_handler.cpp
+
     # Codegen
     src/codegen/code_emitter.cpp
     src/codegen/codegen_preconditions.cpp

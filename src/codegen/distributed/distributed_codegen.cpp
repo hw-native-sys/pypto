@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <memory>
@@ -33,6 +34,7 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/hierarchy/level_handler.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -56,6 +58,22 @@ namespace codegen {
 namespace {
 constexpr const char kCommDomainHandlePrefix[] = "__";
 
+bool IsClusterLevel(const ir::FunctionPtr& func) { return func && func->level_ == ir::Level::CLUSTER_0; }
+
+// body. Reserve them against local bindings too, including dimensions that
+// occur only in tensor types, so Python cannot resolve an alias as a local.
+
+const hierarchy::LevelHandler& FormattingHandlerForFunction(const ir::FunctionPtr& func) {
+  const auto level = func ? func->level_.value_or(ir::Level::AIV) : ir::Level::AIV;
+  const auto* handler = hierarchy::GetLevelHandler(level);
+  // DistributedCodegen historically emits HOST templates even for standalone
+  // CHIP entries and unregistered higher levels. Preserve that output here;
+  // this fallback is formatting compatibility, not capability authorization.
+  // Resolve per consumer rather than caching across nested function emission.
+  if (!handler) handler = hierarchy::GetLevelHandler(ir::Level::HOST);
+  return *handler;
+}
+
 std::string HandleVarForScope(const ir::CommDomainScopeStmtPtr& scope) {
   return std::string(kCommDomainHandlePrefix) + scope->name_hint_;
 }
@@ -70,6 +88,17 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
   return result;
 }
 
+std::string StaticTensorShape(const ir::TensorTypePtr& tensor, const ir::Span& span) {
+  std::string shape = "(";
+  for (const auto& dim : tensor->shape_) {
+    const auto constant = ir::As<ir::ConstInt>(dim);
+    CHECK_SPAN(constant && constant->value_ >= 0, span)
+        << "Prepared return tensor storage requires constant nonnegative shapes";
+    shape += std::to_string(constant->value_) + ", ";
+  }
+  return shape + ")";
+}
+
 }  // namespace
 
 // ========================================================================
@@ -78,10 +107,15 @@ std::string BuiltinEntrySymbol(const std::string& variant) {
 
 std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
+  // Verify the full lowered hierarchy before selecting a body. A HOST-only
+  // fragment can strand windows whose owning scope lives in its CLUSTER caller.
   VerifyDistributedCodegenPreconditions(program);
   // Share recursive HOST return maps across all CHIP entries in this immutable
   // program. RAII clears the cache on normal return and exception unwinding.
   ir::return_lineage::ScopedTraceCache return_cache(/*require_terminal_returns=*/true);
+
+  return_plans_.clear();
+  prepared_return_tensors_.clear();
 
   program_ = program;
   emitter_.Clear();
@@ -106,14 +140,11 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   CHECK(!workers_.empty() || !orchestrators_.empty())
       << "Program has no distributed functions (no functions with level/role metadata)";
 
-  EmitImports();
-  emitter_.EmitLine("");
-
-  // Emit the highest-level orchestrator as the entry function.
-  // In an L3 program, this is the HOST Orchestrator.
+  // Select the entry before imports: CLUSTER modules must not accidentally
+  // import HOST-only CHIP argument-routing helpers.
+  ir::FunctionPtr best_orch;
   if (!orchestrators_.empty()) {
-    // Use the orchestrator with the highest level as the entry
-    ir::FunctionPtr best_orch = orchestrators_.begin()->second;
+    best_orch = orchestrators_.begin()->second;
     int best_level = 0;
     for (const auto& [name, func] : orchestrators_) {
       if (func->level_.has_value()) {
@@ -124,6 +155,13 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
         }
       }
     }
+  }
+  EmitImports(best_orch);
+  emitter_.EmitLine("");
+
+  // Emit the highest-level orchestrator as the entry function.
+  // In an L3 program, this is the HOST Orchestrator.
+  if (best_orch) {
     // HOST-or-above orchestrator (Linqu level >= 3): split tensor.create
     // allocations into a pre-init `_alloc_intermediates(tensors)` function so
     // the simpler runtime can establish POSIX shared memory before fork.
@@ -132,14 +170,26 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
         ir::LevelToLinquLevel(*best_orch->level_) >= 3;  // NOLINT(bugprone-unchecked-optional-access)
     if (is_host_orch) {
       CollectHostOrchHoistableAllocs(best_orch);
-      EmitAllocIntermediatesFunction(best_orch);
-      host_orch_body_after_hoist_ = true;
-      EmitFunction(best_orch);
-      host_orch_body_after_hoist_ = false;
+
+      if (IsClusterLevel(best_orch)) {
+        // Remote buffer control must finish before any task is submitted.
+        // Collect the implicit return-target names while emitting the native
+        // root, then materialize them in its separate storage allocator.
+        host_orch_body_after_hoist_ = true;
+        EmitFunction(best_orch);
+        host_orch_body_after_hoist_ = false;
+        EmitAllocIntermediatesFunction(best_orch);
+      } else {
+        EmitAllocIntermediatesFunction(best_orch);
+        host_orch_body_after_hoist_ = true;
+        EmitFunction(best_orch);
+        host_orch_body_after_hoist_ = false;
+      }
       hoisted_allocs_.clear();
     } else {
       EmitFunction(best_orch);
     }
+
     EmitEntryMarker(best_orch->name_);
   } else if (entry_func_) {
     EmitEntryFunction();
@@ -256,21 +306,58 @@ std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() c
 // Code structure emission
 // ========================================================================
 
-void DistributedCodegen::EmitImports() {
-  emitter_.EmitLine("import torch");
-  // ``DataType`` is used when a comm-domain Buffer constructs its address-free
-  // wire Tensor view.
-  // ``CommBufferSpec`` is the spec list passed to ``orch.allocate_domain``
-  // inside host_orch when the program declares at least one comm domain;
-  // harmless to import for comm-less L3 programs.
-  emitter_.EmitLine(
-      "from simpler.task_interface import "
-      "CallConfig, CommBufferSpec, DataType, TaskArgs, TensorArgType");
-  emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
-  // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
-  // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
-  // namespacing half is a no-op when DFX is off.
-  emitter_.EmitLine("from pypto.runtime.distributed_runner import add_chip_tensor_arg, _submit_chip");
+void DistributedCodegen::EmitImports(const ir::FunctionPtr& entry) {
+  // Module imports precede function emission, so current_func_ is not set yet.
+  for (const auto& line : FormattingHandlerForFunction(entry).GetImports()) {
+    emitter_.EmitLine(line);
+  }
+}
+
+const std::vector<DistributedCodegen::ReturnPosition>& DistributedCodegen::GetReturnPlan(
+    const ir::FunctionPtr& func) {
+  const auto cached = return_plans_.find(func.get());
+  if (cached != return_plans_.end()) return cached->second;
+  std::vector<ir::TypePtr> effective_types = func->return_types_;
+  if (effective_types.empty()) {
+    // Annotation-free DSL calls derive one result type per ReturnStmt operand,
+    // as in the parser and window-identity analysis. A packed Tuple stays one
+    // position; these analysis-only types never mutate the Function signature.
+    if (const auto returned = ir::return_lineage::FindFirstReturn(func->body_)) {
+      for (const auto& value : returned->value_) effective_types.push_back(value->GetType());
+    }
+  }
+  std::vector<std::optional<size_t>> lineage;
+  if (std::any_of(effective_types.begin(), effective_types.end(),
+                  [](const auto& type) { return ir::As<ir::TensorType>(type) != nullptr; })) {
+    if (ir::IsInCoreType(func->func_type_) || ir::IsWrapperType(func->func_type_) ||
+        func->func_type_ == ir::FunctionType::Graph) {
+      // NormalizeReturnOrder/ReturnParamsExplicit cover these types. Their
+      // canonical return operands are authoritative; never re-derive lineage.
+      lineage = ir::return_lineage::ExplicitReturnedParamIndices(func);
+    } else {
+      CHECK_SPAN(
+          func->func_type_ == ir::FunctionType::Opaque || func->func_type_ == ir::FunctionType::Orchestration,
+          func->span_)
+          << "Unsupported distributed return-plan function type";
+      // The actual pass/verifier exclude hierarchy Opaque and Orchestration
+      // functions. Their SSA Out aliases still require the existing lineage walk.
+      lineage = ir::return_lineage::ReturnedParamIndices(func, program_);
+    }
+  }
+  std::vector<ReturnPosition> plan;
+  for (size_t i = 0; i < effective_types.size(); ++i) {
+    std::optional<size_t> output_param;
+    if (ir::As<ir::TensorType>(effective_types[i]) && i < lineage.size() && lineage[i]) {
+      const size_t index = *lineage[i];
+      if (index < func->param_directions_.size() &&
+          (func->param_directions_[index] == ir::ParamDirection::Out ||
+           func->param_directions_[index] == ir::ParamDirection::InOut)) {
+        output_param = index;
+      }
+    }
+    plan.push_back({effective_types[i], output_param});
+  }
+  return return_plans_.emplace(func.get(), std::move(plan)).first->second;
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
@@ -293,17 +380,28 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
     return;
   }
 
-  // ``world_size`` is always present in the signature; the runner fills it
-  // with ``len(DistributedConfig.device_ids)``. ``pld.system.world_size()``
-  // lowers to a bare reference to this kwarg.
+  // HOST retains world_size=len(DistributedConfig.device_ids). CLUSTER instead
+  // receives node topology; its immediate-child query is bound below.
   std::ostringstream sig;
-  sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size";
-  if (ir::LevelToLinquLevel(func->level_.value_or(ir::Level::AIV)) >= 3) {
-    sig << ", _domain_provider=None";
+  sig << "def " << func->name_;
+  sig << "(orch, _args, config, *";
+  const bool accepts_domain_provider = ir::LevelToLinquLevel(func->level_.value_or(ir::Level::AIV)) >= 3;
+  for (const auto& keyword :
+       FormattingHandlerForFunction(func).GetEntryKeywordParams(accepts_domain_provider)) {
+    sig << ", " << keyword;
   }
   sig << "):";
   emitter_.EmitLine(sig.str());
   emitter_.IncreaseIndent();
+
+  if (IsClusterLevel(func)) {
+    // Nodes, their actual runtime worker IDs, and each node's device count are
+    // separate quantities. Never reuse HOST's world_size for this query.
+    emitter_.EmitLine("num_workers = len(nodes)");
+    // Implicit comm-less placement is local to this invocation, so repeated
+    // runs and independent modules start from the same topology position.
+    emitter_.EmitLine("_next_node = 0");
+  }
 
   // Register parameter names and emit local bindings for scalar-like params.
   // All orchestrator parameters live in the tensors dict; tensor params are
@@ -362,6 +460,9 @@ class HostOrchVarDefCollector : public ir::IRVisitor {
  private:
   std::unordered_map<const ir::Var*, ir::ExprPtr>& defs_;
 };
+
+// Enter outer carries before walking nested loops, then validate backedges
+// before publishing post-loop aliases. This runs before dispatch/layout scans.
 
 }  // namespace
 
@@ -504,7 +605,7 @@ void DistributedCodegen::EmitHostOrchDynamicDimBindings(const ir::FunctionPtr& f
   for (const ir::Var* key : dyn_var_order) {
     const DimSource& src = dyn_var_best.at(key);
     const std::string shape_access =
-        "tensors[\"" + src.param_name + "\"].shape[" + std::to_string(src.dim_idx) + "]";
+        "tensors[\"" + src.param_name + "\"]." + ("shape[") + std::to_string(src.dim_idx) + "]";
     const std::string value_expr = InvertShapeDimForVar(src.expr, src.var, shape_access);
     // Surface a non-invertible dynamic dim as a documented user-facing
     // limitation (mirrors the device-side ValueError), rather than silently
@@ -539,19 +640,10 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   const std::string handle_var = HandleVarForScope(op);
   const std::string& domain_name = op->name_hint_;
 
-  // workers: literal list of worker indices into DistributedConfig.device_ids.
-  // Empty devices_ in the IR means "all" — resolved at runtime via world_size.
-  std::ostringstream workers;
-  workers << "[";
-  if (op->devices_.empty()) {
-    workers << "*range(world_size)";
-  } else {
-    for (size_t i = 0; i < op->devices_.size(); ++i) {
-      if (i > 0) workers << ", ";
-      workers << op->devices_[i];
-    }
-  }
-  workers << "]";
+  const auto& handler = FormattingHandlerForFunction(current_func_);
+  // Membership indexes the immediate children: HOST devices or CLUSTER nodes.
+  // An empty IR list denotes all runtime children rather than an empty domain.
+  const std::string workers = handler.FormatDomainMembership(op->devices_);
 
   // Lower each slot's size_ expression to a Python string. Constant sizes
   // become int literals; dynamic sizes (e.g. `pld.world_size() * 4`) lower
@@ -590,12 +682,13 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     window_size_expr << "(" << slot_alloc_nbytes[i] << ")";
   }
 
-  emitter_.EmitLine("with (_domain_provider or orch.allocate_domain)(");
+  emitter_.EmitLine("with " + handler.GetDomainAllocator() + "(");
   emitter_.IncreaseIndent();
   emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
-  emitter_.EmitLine("workers=" + workers.str() + ",");
+  const bool is_cluster = IsClusterLevel(current_func_);
+  emitter_.EmitLine(std::string(is_cluster ? "members=" : "workers=") + workers + ",");
   emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
-  if (!op->engines_.empty()) {
+  if (!is_cluster && !op->engines_.empty()) {
     std::ostringstream engines;
     engines << "workspace_engines=(";
     for (const auto& engine : op->engines_) engines << std::quoted(engine) << ",";
@@ -616,20 +709,22 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   }
   emitter_.DecreaseIndent();
   emitter_.EmitLine("],");
+  if (is_cluster) emitter_.EmitLine("retain_after_run=_retain,");
   emitter_.DecreaseIndent();
   emitter_.EmitLine(") as " + handle_var + ":");
   emitter_.IncreaseIndent();
 
-  // The per-rank comm ordering token for this scope is allocated in
+  // HOST's per-rank comm ordering token for this scope is allocated in
   // ``_alloc_intermediates`` (see EmitAllocIntermediates), NOT here: it must
   // exist as a POSIX shared mapping BEFORE ``w.init()`` forks the chip
   // children, or the children cannot see it and staging the arg fails with
-  // "Failed to stage tensor N to device".
+  // "Failed to stage tensor N to device". CLUSTER omits this CHIP-only token.
 
   // Push this scope so EmitCallToWorker can resolve DistributedTensor args
   // inside the body to the correct handle var. Pop on exit so a sibling
   // scope's body never sees this one.
   comm_domain_stack_.push_back(op);
+
   if (op->body_) {
     VisitStmt(op->body_);
   }
@@ -733,6 +828,9 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
     declared_vars_.insert(var_name);
     return;
   }
+
+  // DT/ctx tuple construction, aliases and projections carry IR provenance,
+  // not Python values. Calls still run below so their dispatch is retained.
 
   // Handle TupleGetItemExpr: `out_rms = tuple_tmp[i]` produced by multi-return
   // function call unpacking.  Resolve each element to its actual Out/InOut
@@ -850,11 +948,6 @@ void DistributedCodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
   }
 }
 
-void DistributedCodegen::VisitStmt_(const ir::ReturnStmtPtr& /* op */) {
-  // L3 orchestrator functions return via output tensor side effects.
-  // No Python return statement is generated.
-}
-
 void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
 
@@ -873,16 +966,75 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   std::string step = current_expr_value_;
   current_expr_value_ = "";
 
+  const bool live_carries = IsClusterLevel(current_func_);
+  ir::YieldStmtPtr loop_yield;
+  // Keep the established standalone HOST source unchanged. Live carries name
+  // their current Python values rather than the generic visitor's initValue_.
+  // Window aliases have no Python tensor slot; retain original IR indexes when
+  // omitting them so other yields and return variables cannot shift positions.
+  auto carry_ref = [&](const ir::VarPtr& var) {
+    const std::string name = SanitizeName(var->name_hint_);
+    return ir::AsTensorTypeLike(var->GetType()) ? "tensors[\"" + name + "\"]" : name;
+  };
+  auto value_ref = [&](const ir::ExprPtr& value) {
+    const std::string expression = GetExprAsCode(value);
+    return ir::AsTensorTypeLike(value->GetType()) ? "tensors[\"" + expression + "\"]" : expression;
+  };
+  if (live_carries) {
+    INTERNAL_CHECK_SPAN(op->iter_args_.size() == op->return_vars_.size(), op->span_)
+        << "Internal error: CLUSTER ForStmt requires one return variable per IterArg";
+    if (!op->iter_args_.empty()) {
+      loop_yield = ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(op->body_));
+      INTERNAL_CHECK_SPAN(loop_yield && loop_yield->value_.size() == op->iter_args_.size(), op->span_)
+          << "Internal error: CLUSTER ForStmt requires one trailing yield value per IterArg";
+    }
+    for (const auto& iter_arg : op->iter_args_) {
+      declared_vars_.insert(SanitizeName(iter_arg->name_hint_));
+      if (ir::As<ir::DistributedTensorType>(iter_arg->GetType())) continue;
+      emitter_.EmitLine(carry_ref(iter_arg) + " = " + value_ref(iter_arg->initValue_));
+    }
+  }
+
   emitter_.EmitLine("for " + loop_var + " in range(" + start + ", " + stop + ", " + step + "):");
   emitter_.IncreaseIndent();
 
+  // Window aliases and other metadata-only statements may emit no Python.
+  // Keep live-carry suites valid even when every statement is suppressed.
+  if (live_carries) emitter_.EmitLine("pass");
   if (op->body_) {
     VisitStmt(op->body_);
-  } else {
+  } else if (!live_carries) {
     emitter_.EmitLine("pass");
   }
 
+  if (live_carries && loop_yield) {
+    std::string targets, values;
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& iter_arg = op->iter_args_[i];
+      if (ir::As<ir::DistributedTensorType>(iter_arg->GetType())) continue;
+      if (!targets.empty()) {
+        targets += ", ";
+        values += ", ";
+      }
+      targets += carry_ref(iter_arg);
+      values += value_ref(loop_yield->value_[i]);
+    }
+    // Python parallel assignment evaluates all RHS values first. Sequential
+    // updates would corrupt swaps or other cross-dependent carried values.
+    if (!targets.empty()) emitter_.EmitLine(targets + " = " + values);
+  }
   emitter_.DecreaseIndent();
+
+  if (live_carries) {
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& result = op->return_vars_[i];
+      declared_vars_.insert(SanitizeName(result->name_hint_));
+      if (ir::As<ir::DistributedTensorType>(result->GetType())) continue;
+      // Carries are initialized before the loop, so a zero-trip result is its
+      // initial value, while a completed loop exposes the final backedge value.
+      emitter_.EmitLine(carry_ref(result) + " = " + carry_ref(op->iter_args_[i]));
+    }
+  }
 }
 
 void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
@@ -904,6 +1056,8 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     const auto yld = ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(body));
     if (!yld) return;
     for (size_t i = 0; i < op->return_vars_.size() && i < yld->value_.size(); ++i) {
+      // Metadata retains its original IR position but owns no Python slot.
+
       VisitExpr(yld->value_[i]);
       const std::string val = current_expr_value_;
       current_expr_value_ = "";
@@ -919,6 +1073,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
 
   emitter_.EmitLine("if " + condition + ":");
   emitter_.IncreaseIndent();
+
   VisitStmt(op->then_body_);
   emit_yields(op->then_body_);
   emitter_.DecreaseIndent();
@@ -926,6 +1081,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   if (op->else_body_.has_value()) {
     emitter_.EmitLine("else:");
     emitter_.IncreaseIndent();
+
     VisitStmt(*op->else_body_);
     emit_yields(*op->else_body_);
     emitter_.DecreaseIndent();
@@ -995,11 +1151,17 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
     return;
   }
 
-  // ``pld.system.world_size()`` lowers to the ``world_size`` kwarg bound in
-  // every emitted orchestrator's signature (see EmitFunction / EmitEntryFunction).
-  // The runner fills it with len(DistributedConfig.device_ids) — present for
-  // comm-less programs too, so this lowering is uniform.
+  // HOST's queries both use the local device count, including comm-less
+  // programs. CLUSTER only permits num_workers(), using its node count.
   if (ir::IsOp(op, "pld.system.world_size") || ir::IsOp(op, "pld.system.num_workers")) {
+    if (ir::IsOp(op, "pld.system.num_workers") && IsClusterLevel(current_func_)) {
+      current_expr_value_ = "num_workers";
+      return;
+    }
+    // Keep world_size HOST-only; it never denotes a CLUSTER node count or
+    // the rank count of a global communication domain.
+    CHECK_SPAN(current_func_ && current_func_->level_ == ir::Level::HOST, op->span_)
+        << op->op_->name_ << " requires HOST code generation";
     current_expr_value_ = "world_size";
     return;
   }
@@ -1010,6 +1172,8 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   // return either the RHS Python expression or the empty string to signal
   // "already emitted, drop the wrapping AssignStmt line".
   auto registered = DistributedOpRegistry::GetInstance().Get(op->op_->name_);
+  // These private descriptor handlers must leave ordinary HOST's established
+  // unsupported-op diagnostic below unchanged.
   if (registered) {
     current_expr_value_ = (*registered)(op, *this);
     return;
@@ -1061,6 +1225,16 @@ void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
   current_expr_value_ = SanitizeName(op->name_hint_);
 }
 
+void DistributedCodegen::VisitExpr_(const ir::IterArgPtr& op) {
+  if (IsClusterLevel(current_func_)) {
+    // This also preserves the live outer carry when a nested loop's initial
+    // value references it. The base visitor would follow initValue_ instead.
+    current_expr_value_ = SanitizeName(op->name_hint_);
+  } else {
+    ir::IRVisitor::VisitExpr_(op);
+  }
+}
+
 void DistributedCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstInt";
   current_expr_value_ = std::to_string(op->value_);
@@ -1083,8 +1257,15 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee,
                                           const ir::SubmitPtr& submit) {
   bool is_sub = IsSubWorker(callee);
+  const bool is_cluster = IsClusterLevel(current_func_);
+  const bool use_return_plan = is_cluster;
+  const auto& handler = FormattingHandlerForFunction(current_func_);
   std::string ta_var = "_ta_" + std::to_string(task_args_counter_++);
 
+  // The CLUSTER entry receives per-node handles and routing bindings, not
+  // HOST's local sub_ids or its fork-shared tensor conversion helpers.
+  CHECK_SPAN(!is_cluster || !is_sub, call->span_)
+      << "CLUSTER_0 same-level SubWorker dispatch is not supported; dispatch to a HOST Orchestrator instead";
   CHECK_SPAN(!submit || !is_sub, call->span_)
       << "pl.submit(...) in distributed HOST orchestration only supports next-level CHIP dispatches; "
          "submit same-level SubWorker calls directly instead";
@@ -1109,18 +1290,29 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // (it would alias element 0 to just the first Out param). Orchestration
   // codegen does not model this shape either and no pass flattens it, so reject
   // it here with an actionable message instead of mis-aliasing.
-  CHECK_SPAN(!submit || callee->return_types_.size() != 1 ||
-                 !std::dynamic_pointer_cast<const ir::TupleType>(callee->return_types_.front()),
-             call->span_)
+  const std::vector<ReturnPosition> no_returns;
+  const auto& plan = use_return_plan ? GetReturnPlan(callee) : no_returns;
+  const bool nested_return = use_return_plan ? plan.size() == 1 && ir::As<ir::TupleType>(plan.front().type)
+                                             : callee->return_types_.size() == 1 &&
+                                                   ir::As<ir::TupleType>(callee->return_types_.front());
+  CHECK_SPAN(!submit || !nested_return, call->span_)
       << "Distributed HOST pl.submit(...) does not support a callee declaring a nested "
          "`-> pl.Tuple[...]` return; declare it as `-> tuple[...]` so each result is its own "
          "return value";
 
-  // ``device=`` attr (set by N3 parser) is the single source of truth for
+  // ``worker=`` attr (set by N3 parser) is the single source of truth for
   // both the per-rank ``__comm_d0[<r>]`` subscript (used by DistributedTensor
   // arg emit) and the trailing ``worker=<r>`` kwarg on ``submit_next_level``.
-  // Empty string means no ``device=`` was set — comm-less L3 dispatch path.
+  // Empty string means no ``worker=`` was set — comm-less L3 dispatch path.
   std::string rank_expr = ResolveRankExpr(call);
+  if (is_cluster && rank_expr.empty()) {
+    // Resolve once: tensor routing, the per-node callable and the actual
+    // worker ID must all select the same logical child. Explicit selection
+    // does not advance this implicit-only round-robin sequence.
+    rank_expr = ta_var + "_rank";
+    emitter_.EmitLine(rank_expr + " = _next_node % num_workers");
+    emitter_.EmitLine("_next_node += 1");
+  }
 
   // Every comm domain whose window buffers this dispatch references, in first-reference
   // order and deduplicated. One ordering token is appended per domain below.
@@ -1151,19 +1343,19 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       continue;
     }
 
-    VisitExpr(call->args_[i]);
-    std::string arg_str = current_expr_value_;
-    current_expr_value_ = "";
-
     // DistributedTensorType formals derive an address-free wire Tensor from
     // the owning comm-domain Buffer. ``As<DistributedTensorType>`` is strict
     // ObjectKind match, so plain TensorType falls through to the worker-aware
     // make_tensor_arg path.
     if (auto dist_type = ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) {
+      // DistributedTensorType is also tensor-shaped, so omit a node's window
+      // formal before the ordinary TensorType path can allocate a wire slot.
+      // Its paired ctx scalar identifies the domain for the receiving entry.
+      if (!handler.MaterializesWindowTensor()) continue;
       ++tensor_index;
       INTERNAL_CHECK_SPAN(!rank_expr.empty(), call->span_)
-          << "Call passing DistributedTensor args must carry device= attr "
-             "(N3 parser writes attrs[\"device\"] on chip-orch dispatch sites)";
+          << "Call passing DistributedTensor args must carry worker= attr "
+             "(N3 parser writes attrs[\"worker\"] on chip-orch dispatch sites)";
       INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
           << "DistributedTensorType arg must have window_buffer_ populated by N4 pass";
       const auto& window_buffer = dist_type->window_buffer_.value();
@@ -1174,17 +1366,24 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
+      std::string handle_var;
       const auto owning_scope = ScopeForWindowBuffer(window_buffer);
       if (std::none_of(
               comm_arg_scopes.begin(), comm_arg_scopes.end(),
               [&](const ir::CommDomainScopeStmtPtr& seen) { return seen.get() == owning_scope.get(); })) {
         comm_arg_scopes.push_back(owning_scope);
       }
-      const std::string handle_var = HandleVarForScope(owning_scope);
-      emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
-                        "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
+      handle_var = HandleVarForScope(owning_scope);
+      const std::string view_args = "shapes=" + shape + ", dtype=" + dtype_enum;
+      const std::string window_tensor =
+          handle_var + "[" + rank_expr + "].buffers[\"" + name + "\"].tensor(" + view_args + ")";
+      emitter_.EmitLine(ta_var + ".add_tensor(" + window_tensor + ", " + tag + ")");
       continue;
     }
+
+    VisitExpr(call->args_[i]);
+    std::string arg_str = current_expr_value_;
+    current_expr_value_ = "";
 
     // Plain TensorType formal — existing path.
     if (std::dynamic_pointer_cast<const ir::TensorType>(call->args_[i]->GetType())) {
@@ -1196,9 +1395,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str +
                           "\"]), " + tag + ")");
       } else {
-        emitter_.EmitLine("add_chip_tensor_arg(" + ta_var + ", orch._worker, tensors[\"" + arg_str + "\"], " +
-                          tag + ", callables, \"" + callee->name_ + "\", " + std::to_string(tensor_index) +
-                          ")");
+        emitter_.EmitLine(handler.FormatHostTensorAppend({ta_var, "tensors[\"" + arg_str + "\"]", tag,
+                                                          is_cluster ? rank_expr : "orch._worker",
+                                                          callee->name_, tensor_index}));
       }
       ++tensor_index;
       continue;
@@ -1215,109 +1414,149 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
                                             << ": " << call->args_[i]->GetType()->TypeName();
   }
 
-  // If this call has an assignment target (return value) but the callee already
-  // has Out/InOut parameters, the output is already covered by those params.
-  // Only add the target as OUTPUT_EXISTING if the callee has no explicit Out
-  // params. In the no-Out-param branch ``tensors[target]`` may not yet exist
-  // (it's only seeded from input parameter names in the runtime), so allocate
-  // a fresh shared-memory tensor for it before emitting ``add_tensor``.
+  // Direct CLUSTER uses the prepared return ABI.
+  // Ordinary HOST follows the callee's return lineage.
   std::string target = current_target_var_;
-  // Parameter direction describes write effects, not which values are returned.
-  // A stateful CHIP entry may mutate KV/cache arguments without returning them,
-  // and its declared results may be reordered or repeat the same parameter.
-  // HOST codegen accepts both normalized and raw typed callees. Trace their
-  // return lineage conservatively rather than inferring normalization from type.
-  // Memoize per callee so repeated HOST calls do not rescan a large CHIP body.
   std::vector<std::pair<size_t, size_t>> mapped_tensor_params;
-  CHECK_SPAN(target.empty() || is_sub || submit || !ir::As<ir::ScalarType>(call->GetType()), call->span_)
-      << "Distributed HOST cannot consume a scalar returned by a CHIP dispatch; use an explicit output "
-         "tensor";
-  const auto& declared_results = callee->return_types_;
-  // Plain Call already carries the parser's effective type when the callee
-  // has no annotation. Use it to bind the result instead of dropping it.
-  const auto inferred_result = declared_results.empty() && !submit ? call->GetType() : nullptr;
-  const auto nested_tuple =
-      ir::As<ir::TupleType>(declared_results.size() == 1 ? declared_results.front() : inferred_result);
-  const size_t result_count = nested_tuple
-                                  ? nested_tuple->types_.size()
-                                  : (ir::AsTensorTypeLike(inferred_result) ? 1 : declared_results.size());
-  const bool has_writable_param =
-      std::any_of(callee->param_directions_.begin(), callee->param_directions_.end(), [](auto direction) {
-        return direction == ir::ParamDirection::Out || direction == ir::ParamDirection::InOut;
-      });
-  if (!target.empty() && result_count != 0) {
-    auto [mapping_it, inserted] = returned_param_indices_.try_emplace(callee.get());
-    if (inserted) {
-      // HOST codegen also accepts raw typed callees. FunctionType alone is
-      // not evidence of SSA/ReturnParamsExplicit: guard formal rebinding in
-      // the shared analysis, then cache its result for repeated HOST calls.
-      const auto ret = nested_tuple ? ir::return_lineage::FindFirstReturn(callee->body_) : nullptr;
-      const bool project_tuple =
-          ret && ret->value_.size() == 1 && ir::As<ir::TupleType>(ret->value_[0]->GetType());
-      mapping_it->second = project_tuple
-                               ? ir::return_lineage::ReturnedTupleElementParamIndices(callee, program_)
-                               : ir::return_lineage::ReturnedParamIndices(callee, program_);
-    }
-    const auto& returned_params = mapping_it->second;
-    bool has_unknown_tensor_result = false;
-    for (size_t result = 0; result < result_count; ++result) {
-      const auto& type = nested_tuple ? nested_tuple->types_[result]
-                                      : (inferred_result ? inferred_result : declared_results[result]);
-      if (!ir::AsTensorTypeLike(type)) continue;
-      if (result >= returned_params.size()) {
-        has_unknown_tensor_result = true;
+  bool tuple_result = false;
+  std::vector<std::string> return_tensors;
+  if (use_return_plan) {
+    return_tensors.resize(plan.size());
+    for (size_t i = 0; i < plan.size(); ++i) {
+      if (ir::As<ir::ScalarType>(plan[i].type)) {
+        CHECK_SPAN(target.empty(), call->span_)
+            << "Distributed scalar return transport is not supported; leave the return value unused";
         continue;
       }
-      const auto& parameter = returned_params[result];
-      if (!parameter.has_value()) {
-        has_unknown_tensor_result = true;
+      if (ir::As<ir::DistributedTensorType>(plan[i].type)) continue;
+      const auto tensor = ir::As<ir::TensorType>(plan[i].type);
+      CHECK_SPAN(tensor, call->span_) << "Distributed tensor returns must use flat return positions";
+      if (plan[i].output_param) {
+        const size_t param = *plan[i].output_param;
+        INTERNAL_CHECK_SPAN(param < call->args_.size(), call->span_) << "Missing returned output argument";
+        return_tensors[i] = GetExprAsCode(call->args_[param]);
         continue;
       }
-      const size_t index = *parameter;
-      INTERNAL_CHECK_SPAN(index < callee->params_.size(), call->span_)
-          << "Distributed HOST returned parameter index is out of range";
-      mapped_tensor_params.emplace_back(result, index);
-    }
-    if (has_unknown_tensor_result) {
-      CHECK_SPAN(mapped_tensor_params.empty(), call->span_)
-          << "Distributed HOST mixed known and unresolved tensor returns require explicit output parameters "
-             "in '"
-          << callee->name_ << "'";
-      // SubWorkers retain their task-argument ABI. A CHIP return with an
-      // explicit but unknown source cannot use the implicit output slot:
-      // the generated CHIP entry would never write to that extra argument.
-      CHECK_SPAN(is_sub || (returned_params.empty() && has_writable_param), call->span_)
-          << "Distributed HOST cannot bind unresolved explicit tensor returns in '" << callee->name_
-          << "'; return caller-supplied tensor parameters with fixed identities";
-    }
-  }
-  const bool explicit_tensor_returns = !mapped_tensor_params.empty();
-  if (is_sub && !target.empty() && !declared_results.empty() && !has_writable_param &&
-      !explicit_tensor_returns) {
-    // Allocate a shared-memory tensor for the return value if absent.
-    // share_memory_() is required for fork-based distributed visibility.
-    auto ret_type = std::dynamic_pointer_cast<const ir::TensorType>(callee->return_types_.front());
-    INTERNAL_CHECK(ret_type) << "Distributed callee return must be TensorType";
-    std::string shape = "(";
-    for (size_t i = 0; i < ret_type->shape_.size(); ++i) {
-      if (i > 0) shape += ", ";
-      const auto& dim = ret_type->shape_[i];
-      if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
-        shape += std::to_string(const_int->value_);
-      } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
-        shape += SanitizeName(var->name_hint_);
+      const std::string base = target.empty() ? ta_var + "_return" : target;
+      const std::string name = plan.size() == 1 && !submit ? base : base + "_ret_" + std::to_string(i);
+      return_tensors[i] = name;
+      if (is_cluster) {
+        StaticTensorShape(tensor, call->span_);
+        prepared_return_tensors_[name] = tensor;
       } else {
-        CHECK(false) << "Distributed callee return shape dim " << i << " must be ConstInt or Var";
+        emitter_.EmitLine("if \"" + name + "\" not in tensors:");
+        emitter_.EmitLine("    tensors[\"" + name + "\"] = torch.zeros(" + FormatShapeTuple(tensor->shape_) +
+                          ", dtype=torch." + DataTypeToPythonDType(tensor->dtype_) + ").share_memory_()");
+      }
+      if (is_sub) {
+        emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + name +
+                          "\"]), TensorArgType.OUTPUT_EXISTING)");
+      } else {
+        emitter_.EmitLine(handler.FormatHostTensorAppend(
+            {ta_var, "tensors[\"" + name + "\"]", "TensorArgType.OUTPUT_EXISTING",
+             is_cluster ? rank_expr : "orch._worker", callee->name_, tensor_index}));
+      }
+      ++tensor_index;
+    }
+  } else {
+    // Parameter direction describes write effects, not which values are returned.
+    // A stateful CHIP entry may mutate KV/cache arguments without returning them,
+    // and its declared results may be reordered or repeat the same parameter.
+    // HOST codegen accepts both normalized and raw typed callees. Trace their
+    // return lineage conservatively rather than inferring normalization from type.
+    // Memoize per callee so repeated HOST calls do not rescan a large CHIP body.
+    CHECK_SPAN(target.empty() || is_sub || submit || !ir::As<ir::ScalarType>(call->GetType()), call->span_)
+        << "Distributed HOST cannot consume a scalar returned by a CHIP dispatch; use an explicit output "
+           "tensor";
+    const auto& declared_results = callee->return_types_;
+    // Plain Call already carries the parser's effective type when the callee
+    // has no annotation. Use it to bind the result instead of dropping it.
+    const auto inferred_result = declared_results.empty() && !submit ? call->GetType() : nullptr;
+    const auto nested_tuple =
+        ir::As<ir::TupleType>(declared_results.size() == 1 ? declared_results.front() : inferred_result);
+    const size_t result_count = nested_tuple
+                                    ? nested_tuple->types_.size()
+                                    : (ir::AsTensorTypeLike(inferred_result) ? 1 : declared_results.size());
+    tuple_result = submit || nested_tuple || result_count > 1;
+    const bool has_writable_param =
+        std::any_of(callee->param_directions_.begin(), callee->param_directions_.end(), [](auto direction) {
+          return direction == ir::ParamDirection::Out || direction == ir::ParamDirection::InOut;
+        });
+    if (!target.empty() && result_count != 0) {
+      auto [mapping_it, inserted] = returned_param_indices_.try_emplace(callee.get());
+      if (inserted) {
+        // HOST codegen also accepts raw typed callees. FunctionType alone is
+        // not evidence of SSA/ReturnParamsExplicit: guard formal rebinding in
+        // the shared analysis, then cache its result for repeated HOST calls.
+        const auto ret = nested_tuple ? ir::return_lineage::FindFirstReturn(callee->body_) : nullptr;
+        const bool project_tuple =
+            ret && ret->value_.size() == 1 && ir::As<ir::TupleType>(ret->value_[0]->GetType());
+        mapping_it->second = project_tuple
+                                 ? ir::return_lineage::ReturnedTupleElementParamIndices(callee, program_)
+                                 : ir::return_lineage::ReturnedParamIndices(callee, program_);
+      }
+      const auto& returned_params = mapping_it->second;
+      bool has_unknown_tensor_result = false;
+      for (size_t result = 0; result < result_count; ++result) {
+        const auto& type = nested_tuple ? nested_tuple->types_[result]
+                                        : (inferred_result ? inferred_result : declared_results[result]);
+        if (!ir::AsTensorTypeLike(type)) continue;
+        if (result >= returned_params.size()) {
+          has_unknown_tensor_result = true;
+          continue;
+        }
+        const auto& parameter = returned_params[result];
+        if (!parameter.has_value()) {
+          has_unknown_tensor_result = true;
+          continue;
+        }
+        const size_t index = *parameter;
+        INTERNAL_CHECK_SPAN(index < callee->params_.size(), call->span_)
+            << "Distributed HOST returned parameter index is out of range";
+        mapped_tensor_params.emplace_back(result, index);
+      }
+      if (has_unknown_tensor_result) {
+        CHECK_SPAN(mapped_tensor_params.empty(), call->span_)
+            << "Distributed HOST mixed known and unresolved tensor returns require explicit output "
+               "parameters "
+               "in '"
+            << callee->name_ << "'";
+        // SubWorkers retain their task-argument ABI. A CHIP return with an
+        // explicit but unknown source cannot use the implicit output slot:
+        // the generated CHIP entry would never write to that extra argument.
+        CHECK_SPAN(is_sub || (returned_params.empty() && has_writable_param), call->span_)
+            << "Distributed HOST cannot bind unresolved explicit tensor returns in '" << callee->name_
+            << "'; return caller-supplied tensor parameters with fixed identities";
       }
     }
-    if (ret_type->shape_.size() == 1) shape += ",";
-    shape += ")";
-    const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
-    emitter_.EmitLine("if \"" + target + "\" not in tensors:");
-    emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
-                      torch_dtype + ").share_memory_()");
-    emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
-                      "\"]), TensorArgType.OUTPUT_EXISTING)");
+    const bool explicit_tensor_returns = !mapped_tensor_params.empty();
+    if (is_sub && !target.empty() && !declared_results.empty() && !has_writable_param &&
+        !explicit_tensor_returns) {
+      // Allocate a shared-memory tensor for the return value if absent.
+      // share_memory_() is required for fork-based distributed visibility.
+      auto ret_type = std::dynamic_pointer_cast<const ir::TensorType>(callee->return_types_.front());
+      INTERNAL_CHECK(ret_type) << "Distributed callee return must be TensorType";
+      std::string shape = "(";
+      for (size_t i = 0; i < ret_type->shape_.size(); ++i) {
+        if (i > 0) shape += ", ";
+        const auto& dim = ret_type->shape_[i];
+        if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
+          shape += std::to_string(const_int->value_);
+        } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
+          shape += SanitizeName(var->name_hint_);
+        } else {
+          CHECK(false) << "Distributed callee return shape dim " << i << " must be ConstInt or Var";
+        }
+      }
+      if (ret_type->shape_.size() == 1) shape += ",";
+      shape += ")";
+      const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
+      emitter_.EmitLine("if \"" + target + "\" not in tensors:");
+      emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
+                        torch_dtype + ").share_memory_()");
+      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + target +
+                        "\"]), TensorArgType.OUTPUT_EXISTING)");
+    }
   }
 
   // Append the per-rank comm ordering token as the LAST TENSOR — after every
@@ -1345,9 +1584,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     emitter_.EmitLine("orch.submit_sub(sub_ids[\"" + callee->name_ + "\"], " + ta_var + ")");
   } else {
     // CHIP Worker: dispatch via ``_submit_chip`` (wraps orch.submit_next_level).
-    // N7: thread the dispatch ``device=`` attr (N3 parser) into the simpler
+    // N7: thread the dispatch ``worker=`` attr (N3 parser) into the simpler
     // runtime's ``worker=`` kwarg. A rank-pinned dispatch passes its rank; a
-    // comm-less dispatch (empty rank_expr, no ``device=``) passes ``None``,
+    // comm-less dispatch (empty rank_expr, no ``worker=``) passes ``None``,
     // which ``_submit_chip`` resolves to a concrete chip at dispatch time —
     // simpler no longer accepts an unconstrained target (simpler #1436). The
     // chip count is only known at run time, so the choice cannot be baked here.
@@ -1370,8 +1609,11 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     }
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
-    const std::string submit_expr = "_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var +
-                                    ", config, " + worker_arg + ")";
+    const std::string submit_expr = is_cluster ? "orch.submit_next_level(callables[\"" + callee->name_ +
+                                                     "\"][" + rank_expr + "], " + ta_var +
+                                                     ", config, worker=nodes[" + rank_expr + "])"
+                                               : "_submit_chip(orch, callables[\"" + callee->name_ + "\"], " +
+                                                     ta_var + ", config, " + worker_arg + ")";
     if (submit) {
       // The producer TaskId is the LAST element of the Submit's own return
       // tuple (the parser builds ``TupleType([*callee returns, Scalar[TASK_ID]])``).
@@ -1393,11 +1635,10 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     }
   }
 
-  if (explicit_tensor_returns) {
+  if (!mapped_tensor_params.empty()) {
     INTERNAL_CHECK_SPAN(call->args_.size() == callee->params_.size(), call->span_)
         << "Internal error: distributed HOST explicit return mapping requires every callee argument for '"
         << callee->name_ << "'";
-    const bool tuple_result = submit || nested_tuple || result_count > 1;
     for (const auto& [result, index] : mapped_tensor_params) {
       const auto& arg = call->args_[index];
       INTERNAL_CHECK_SPAN(ir::AsTensorTypeLike(arg->GetType()), call->span_)
@@ -1423,7 +1664,18 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // If this call has an assignment target (return value), alias it to the OUT
   // parameter tensor.  In simpler's runtime model, the callee writes in-place
   // to the OUT parameter, so the return value is the same tensor.
-  if (!target.empty() && !callee->return_types_.empty()) {
+  if (use_return_plan && !target.empty()) {
+    const bool tuple_return = submit != nullptr || return_tensors.size() > 1;
+    for (size_t i = 0; i < return_tensors.size(); ++i) {
+      const auto& name = return_tensors[i];
+      if (name.empty()) continue;
+      if (tuple_return) {
+        tuple_element_tensors_[std::make_pair(target, static_cast<int>(i))] = name;
+      } else if (name != target) {
+        emitter_.EmitLine("tensors[\"" + target + "\"] = tensors[\"" + name + "\"]");
+      }
+    }
+  } else if (!target.empty() && !callee->return_types_.empty()) {
     // Tuple return is expressed in two ways in the IR:
     //   1. pl.Tuple[T1, T2] → return_types_ = [TupleType(T1, T2)]  (single entry)
     //   2. tuple[T1, T2]    → return_types_ = [T1, T2]             (flat entries)
@@ -1510,7 +1762,12 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
   for (size_t i = 0; i < result_type->shape_.size(); ++i) {
     if (i > 0) shape += ", ";
     const auto& dim = result_type->shape_[i];
-    if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
+    if (IsClusterLevel(current_func_)) {
+      // The parent allocation helper runs before the entry's scalar aliases.
+      // Reuse communication-size lowering to resolve direct child-count queries
+      // and their SSA aliases without a second shape dependency mechanism.
+      shape += GetCommSlotSizeAsCode(dim);
+    } else if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
       shape += std::to_string(const_int->value_);
     } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
       // Dynamic shape: reference the parameter name in the generated Python.
@@ -1648,8 +1905,17 @@ void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& h
   // to 1 so an older caller still loads. It sizes the per-rank comm ordering
   // tokens below, which cannot be sized at codegen time when a domain's worker
   // list is `*range(world_size)`.
-  emitter_.EmitLine("def _alloc_intermediates(tensors, world_size=1):");
+  const bool is_cluster = IsClusterLevel(host_orch);
+  emitter_.EmitLine(is_cluster ? "def _alloc_intermediates(tensors, *, nodes):"
+                               : "def _alloc_intermediates(tensors, world_size=1):");
   emitter_.IncreaseIndent();
+  if (is_cluster) {
+    current_func_ = host_orch;
+    // Allocation statements are emitted before the entry function. Collect
+    // their scalar definitions now so shape-query aliases can be resolved here.
+    CollectHostOrchVarDefs(host_orch);
+    emitter_.EmitLine("num_workers = len(nodes)");
+  }
 
   // Per-rank comm ordering tokens, one per comm domain scope.
   //
@@ -1677,27 +1943,37 @@ void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& h
   // ALL ranks into one order, not each rank into its own -- and a program whose ranks must be
   // in flight together, such as a barrier, cannot make progress under that.
   std::vector<ir::CommDomainScopeStmtPtr> comm_scopes;
-  if (host_orch) CollectCommDomainScopes(host_orch->body_, &comm_scopes);
+  // CHIP ordering tensors belong to HOST dispatch. A CLUSTER wire task carries
+  // only business tensors and domain IDs, never a local CHIP token.
+  if (host_orch && !IsClusterLevel(host_orch)) CollectCommDomainScopes(host_orch->body_, &comm_scopes);
   for (const auto& scope : comm_scopes) {
     emitter_.EmitLine("tensors[\"" + HandleVarForScope(scope) +
                       "_ord\"] = [torch.zeros((1,), dtype=torch.int32).share_memory_() "
                       "for _ in range(max(world_size, 1))]");
   }
 
-  if (hoisted_allocs_.empty() && comm_scopes.empty()) {
+  if (hoisted_allocs_.empty() && comm_scopes.empty() && (!is_cluster || prepared_return_tensors_.empty())) {
     emitter_.EmitLine("pass");
   } else if (!hoisted_allocs_.empty()) {
     // Walk top-level statements in original order; emit only hoisted allocs.
     // Falls through the normal AssignStmt → Call → EmitTensorCreate path.
     // host_orch_body_after_hoist_ is FALSE here so EmitTensorCreate runs
-    // unchanged. The subsequent EmitFunction(host_orch) call resets visitor
-    // state (declared_vars_, current_func_, ...), so no save/restore needed.
+    // unchanged. HOST emits this helper before its entry; CLUSTER emits it
+    // after collecting all return-target storage names from the native root.
     current_func_ = host_orch;
     for (const auto& stmt : TopLevelStmts(UnwrapLeadingCommDomainScopes(host_orch->body_))) {
       auto assign = std::dynamic_pointer_cast<const ir::AssignStmt>(stmt);
       if (assign && hoisted_allocs_.count(assign.get())) {
         VisitStmt(stmt);
       }
+    }
+  }
+  if (is_cluster) {
+    for (const auto& [name, tensor] : prepared_return_tensors_) {
+      emitter_.EmitLine("if \"" + name + "\" not in tensors:");
+      emitter_.EmitLine("    tensors[\"" + name + "\"] = torch.zeros(" +
+                        StaticTensorShape(tensor, host_orch->span_) + ", dtype=torch." +
+                        DataTypeToPythonDType(tensor->dtype_) + ").share_memory_()");
     }
   }
   emitter_.DecreaseIndent();
@@ -1739,18 +2015,18 @@ std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
 }
 
 std::string DistributedCodegen::ResolveRankExpr(const ir::CallPtr& call) const {
-  if (!call->HasAttr(ir::kAttrDevice)) return "";
-  auto dev = call->GetAttr<ir::ExprPtr>(ir::kAttrDevice, nullptr);
-  INTERNAL_CHECK_SPAN(dev != nullptr, call->span_) << "device= attr must hold a non-null ExprPtr";
+  if (!call->HasAttr(ir::kAttrWorker)) return "";
+  auto dev = call->GetAttr<ir::ExprPtr>(ir::kAttrWorker, nullptr);
+  INTERNAL_CHECK_SPAN(dev != nullptr, call->span_) << "worker= attr must hold a non-null ExprPtr";
   if (auto ci = std::dynamic_pointer_cast<const ir::ConstInt>(dev)) {
-    CHECK(ci->value_ >= 0) << "device= ConstInt must be non-negative rank index, got " << ci->value_;
+    CHECK(ci->value_ >= 0) << "worker= ConstInt must be non-negative rank index, got " << ci->value_;
     return std::to_string(ci->value_);
   }
   if (auto v = std::dynamic_pointer_cast<const ir::Var>(dev)) {
     return SanitizeName(v->name_hint_);
   }
   INTERNAL_CHECK_SPAN(false, call->span_)
-      << "device= attr must be ConstInt or Var (N3 parser invariant), got " << dev->TypeName();
+      << "worker= attr must be ConstInt or Var (N3 parser invariant), got " << dev->TypeName();
   return "";
 }
 
@@ -1775,7 +2051,7 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
       << "CommCtx call arg must be produced by pld.system.get_comm_ctx or be an explicit CommCtx Var";
   INTERNAL_CHECK_SPAN(!rank_expr.empty(), span)
       << "Call passing a get_comm_ctx-derived CommCtx arg must carry "
-         "device= attr so host codegen can select the per-rank device_ctx";
+         "worker= attr so host codegen can select the per-rank device_ctx";
   INTERNAL_CHECK_SPAN(get_ctx->args_.size() == 1, get_ctx->span_)
       << "pld.system.get_comm_ctx expects exactly one DistributedTensor arg";
   auto dist_type = ir::As<ir::DistributedTensorType>(get_ctx->args_[0]->GetType());
@@ -1785,7 +2061,7 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
   INTERNAL_CHECK_SPAN(window_buffer.has_value(), get_ctx->span_)
       << "pld.system.get_comm_ctx host lowering requires a window-bound DistributedTensor";
   const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(*window_buffer));
-  return handle_var + "[" + rank_expr + "].device_ctx";
+  return FormattingHandlerForFunction(current_func_).FormatCommCtxValue(handle_var, rank_expr);
 }
 
 std::string DistributedCodegen::FormatShapeTuple(const std::vector<ir::ExprPtr>& shape) {
