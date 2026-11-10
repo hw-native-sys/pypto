@@ -233,41 +233,69 @@ def resolve_call_annotation(
     return _resolve_tensor_annotation_fields(eager, fields, namespace, binding)
 
 
+def _resolve_eager_field(
+    expr: ast.expr, captured: Any, namespace: Mapping[str, Any], binding: Mapping[str, str]
+) -> Any:
+    names = _annotation_names(expr)
+    if binding.keys().isdisjoint(names):
+        return captured
+    spelling = ast.unparse(expr)
+    # An eagerly evaluated field preserves its value, not the individual
+    # factory locals used to compute it. Re-evaluating a mixed expression
+    # can silently use a different global with the same name.
+    if names - binding.keys():
+        raise ValueError(
+            f"Annotation field {spelling!r} mixes call-owned and definition-owned names; "
+            "compute the field at the call site and pass its value as a constexpr"
+        )
+    result = resolve_annotation(spelling, namespace)
+    if isinstance(result, str):
+        raise ValueError(f"Cannot resolve call-owned annotation field {spelling!r}")
+    return result
+
+
+def resolve_call_tensor_dtype(
+    source: ast.expr | None, eager: Any, namespace: Mapping[str, Any], binding: Mapping[str, str]
+) -> Any:
+    """Read the declared dtype without interpreting the shape of a supplied tensor."""
+    if isinstance(source, ast.Constant) and isinstance(source.value, str):
+        source = ast.parse(source.value, mode="eval").body
+    if source is not None:
+        original = _unwrap_direction_annotation(_normalize_extern_return_calls(source, namespace), namespace)
+        if isinstance(original, ast.Subscript) and isinstance(original.slice, ast.Tuple):
+            constructor = resolve_annotation(ast.unparse(original.value), namespace)
+            if isinstance(constructor, type) and issubclass(constructor, _LangTensor):
+                if len(original.slice.elts) >= 2:
+                    dtype = original.slice.elts[1]
+                    if isinstance(eager, _LangTensor):
+                        return _resolve_eager_field(dtype, eager.dtype, namespace, binding)
+                    return resolve_annotation(ast.unparse(dtype), namespace)
+    return getattr(resolve_annotation(eager, namespace), "dtype", None)
+
+
 def _resolve_tensor_annotation_fields(
     eager: Any, fields: list[ast.expr], namespace: Mapping[str, Any], binding: Mapping[str, str]
 ) -> Any:
     if eager.shape is None or not 2 <= len(fields) <= 4:
         raise ValueError("Cannot recover call-owned fields of an incomplete Tensor annotation")
 
-    def resolve_field(expr: ast.expr, captured: Any) -> Any:
-        names = _annotation_names(expr)
-        if binding.keys().isdisjoint(names):
-            return captured
-        spelling = ast.unparse(expr)
-        # An eagerly evaluated field preserves its value, not the individual
-        # factory locals used to compute it. Re-evaluating a mixed expression
-        # can silently use a different global with the same name.
-        if names - binding.keys():
-            raise ValueError(
-                f"Annotation field {spelling!r} mixes call-owned and definition-owned names; "
-                "compute the field at the call site and pass its value as a constexpr"
-            )
-        result = resolve_annotation(spelling, namespace)
-        if isinstance(result, str):
-            raise ValueError(f"Cannot resolve call-owned annotation field {spelling!r}")
-        return result
-
     shape = fields[0]
     if isinstance(shape, (ast.List, ast.Tuple)) and len(shape.elts) == len(eager.shape):
-        dimensions = [resolve_field(axis, value) for axis, value in zip(shape.elts, eager.shape, strict=True)]
+        dimensions = [
+            _resolve_eager_field(axis, value, namespace, binding)
+            for axis, value in zip(shape.elts, eager.shape, strict=True)
+        ]
     else:
-        dimensions = resolve_field(shape, eager.shape)
+        dimensions = _resolve_eager_field(shape, eager.shape, namespace, binding)
     captured = [eager.dtype]
     if len(fields) == 3:
         captured.append(eager.memref if eager.memref is not None else eager.layout)
     elif len(fields) == 4:
         captured.extend([eager.layout, eager.memref])
-    values = [resolve_field(expr, value) for expr, value in zip(fields[1:], captured, strict=True)]
+    values = [
+        _resolve_eager_field(expr, value, namespace, binding)
+        for expr, value in zip(fields[1:], captured, strict=True)
+    ]
     return cast("Any", type(eager))[tuple([dimensions, *values])]
 
 

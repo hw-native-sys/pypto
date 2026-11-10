@@ -29,6 +29,7 @@ from pypto.runtime.runner import ExecutionMode, RunConfig
 _RETURN_WIDTH = 64
 _FACTORY_ROWS = 64
 _CAPTURE_WIDTH = 4
+_MODULE_BLOCK = 16
 
 
 def _submissions(program: ir.Program) -> list[ir.Submit]:
@@ -885,3 +886,42 @@ def test_whole_shape_slice_preserves_distributed_kind():
     )
     assert result is not None
     assert result[0] is not None and result[0].is_distributed
+
+
+def test_supplied_input_shape_does_not_participate_in_dtype_validation():
+    @pl.jit.incore
+    def kernel(
+        x: pl.Tensor[[_MODULE_BLOCK * _CAPTURE_WIDTH, 32], pl.FP32],
+        out: pl.InOut[pl.Tensor],
+        _CAPTURE_WIDTH: pl.constexpr,
+    ):
+        return pl.store(pl.load(x, [0, 0], [_MODULE_BLOCK * _CAPTURE_WIDTH, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(x, out, _CAPTURE_WIDTH=2)
+
+    program = entry.specialize(torch.empty(32, 32), torch.empty(32, 32))
+    callee = program.get_function("kernel")
+    assert callee is not None
+    assert ir.structural_equal(callee.params[0].type, ir.TensorType([32, 32], pl.FP32))
+
+
+def test_supplied_input_validates_call_owned_packed_dtype():
+    format_override = pl.FP32
+
+    @pl.jit.incore
+    def kernel(
+        x: pl.Tensor[[_MODULE_BLOCK * _CAPTURE_WIDTH, 32], format_override],
+        out: pl.InOut[pl.Tensor],
+        _CAPTURE_WIDTH: pl.constexpr,
+        format_override: pl.constexpr,
+    ):
+        return pl.store(pl.load(x, [0, 0], [_MODULE_BLOCK * _CAPTURE_WIDTH, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(x, out, _CAPTURE_WIDTH=2, format_override=pl.FP4E2M1X2)
+
+    with pytest.raises(TypeError, match="pass the declared FP4 format"):
+        entry.specialize(torch.empty(32, 32), torch.empty(32, 32))

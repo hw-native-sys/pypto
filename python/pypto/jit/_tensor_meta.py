@@ -2692,10 +2692,9 @@ def _validate_dep_packed_fp4_dtypes(
         for arg in _ast_analysis.get_func_def(dep._func).args.args:
             if arg.arg not in dep_tensor_meta:
                 continue
-            annotation = _arguments.resolve_call_annotation(
+            dtype = _arguments.resolve_call_tensor_dtype(
                 arg.annotation, parameters[arg.arg].annotation, namespace, binding
             )
-            dtype = getattr(annotation, "dtype", None)
             if isinstance(dtype, DataType) and dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
                 dtypes[arg.arg] = dtype
     else:
