@@ -320,6 +320,40 @@ def test_convert_rejects_unapproved_pairs_and_attributes(src, dst, attrs):
         call("convert", [vec(dtype=src)], dtype=dst, **attrs)
 
 
+@pytest.mark.parametrize("name", ["reduce_sum", "reduce_max", "reduce_min"])
+@pytest.mark.parametrize(("group_size", "groups"), [(8, 8), (16, 4), (32, 2), (64, 1)])
+def test_grouped_reduction_result_lane_count(name, group_size, groups):
+    # The result carries one lane per group; codegen turns that into PTOAS
+    # `group = <count>`, which is the group COUNT and not its width.
+    kwargs = {"group_size": group_size}
+    if name == "reduce_sum":
+        kwargs["reassoc"] = True
+    result = reg_type(call(name, [vec(), mask()], **kwargs))
+    assert result.lanes == groups
+    assert result.dtype == DataType.FP32
+
+
+@pytest.mark.parametrize("group_size", [0, -8, 4, 24, 128])
+def test_grouped_reduction_rejects_unexecutable_group_geometry(group_size):
+    # 4 asks for 16 groups, beyond the 1/2/4/8 A5 can lay out; 24 and 128 do
+    # not divide 64 lanes; 0 and -8 are not group widths at all.
+    with pytest.raises(ValueError):
+        call("reduce_max", [vec(), mask()], group_size=group_size)
+
+
+def test_group_broadcast_expands_group_slots():
+    groups = vec(lanes=2)
+    assert reg_type(call("group_broadcast", [groups], lanes=64)).lanes == 64
+
+
+@pytest.mark.parametrize(("source_lanes", "lanes"), [(2, 63), (3, 64), (16, 64)])
+def test_group_broadcast_rejects_mismatched_geometry(source_lanes, lanes):
+    # The group count must divide the result width, and must itself be an
+    # executable group count: 3 and 16 are neither.
+    with pytest.raises(ValueError):
+        call("group_broadcast", [vec(lanes=source_lanes)], lanes=lanes)
+
+
 def test_effect_snapshot_view_root_mask_and_unknown_interval():
     base = ir.Var("base", ir.PtrType(), SPAN)
     memref = ir.MemRef(base, 64, 1024, SPAN)
