@@ -10,6 +10,7 @@
 
 import copy
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,7 @@ def harness(progress, monkeypatch, event):
     monkeypatch.setattr(progress.control, "api", api)
     monkeypatch.setattr(progress.control, "pages", pages)
     monkeypatch.setattr(progress.control, "newer_status_exists", lambda *args: False)
+    monkeypatch.setattr(progress, "poll_budget", lambda *args: (60, 50))
     monkeypatch.setattr(progress.time, "sleep", lambda *args: pytest.fail("Unexpected polling wait"))
     return run, pr, jobs, writes, checks
 
@@ -99,7 +101,7 @@ def test_progress_follows_jobs_and_does_not_duplicate_unchanged_checks(progress,
     transitions = iter(["in_progress", "in_progress", "completed"])
 
     def advance(seconds):
-        assert seconds == 30
+        assert seconds == 60
         jobs[0]["status"] = next(transitions)
         if jobs[0]["status"] == "completed":
             jobs[0]["conclusion"] = "success"
@@ -183,7 +185,7 @@ def test_monitor_window_is_bounded(progress, monkeypatch, event, harness):
     clock = iter([0, progress.MONITOR_SECONDS])
     monkeypatch.setattr(progress.time, "monotonic", lambda: next(clock))
     progress.monitor(REPO, event)
-    assert len(harness[3]) == 1
+    assert len(harness[3]) == 0
 
 
 def test_progress_workflow_is_isolated_from_test_code():
@@ -224,6 +226,65 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
     assert {payload["name"] for _, payload, _ in writes} == {"full / unit-tests", "full / system-tests"}
     assert all(payload["conclusion"] == "success" for _, payload, _ in writes)
     assert all(payload["external_id"].startswith("ci-full:50:2:") for _, payload, _ in writes)
+
+
+@pytest.mark.parametrize("active", [1, 2, 10])
+def test_poll_budget_scales_with_concurrent_monitors(progress, monkeypatch, active):
+    monkeypatch.setattr(progress.time, "time", lambda: 0)
+
+    def api(path):
+        if path == "rate_limit":
+            return {"resources": {"core": {"remaining": 1000, "reset": 3600}}}
+        assert "ci-full-progress.yml/runs?status=in_progress" in path
+        return {"total_count": active}
+
+    monkeypatch.setattr(progress.control, "api", api)
+    interval, writes = progress.poll_budget(REPO, 1)
+    assert active * 7 * 3600 / interval <= progress.POLL_REQUESTS_PER_HOUR
+    assert 0 < writes <= 50
+
+
+def test_poll_budget_reserves_capacity_for_gate_writer(progress, monkeypatch):
+    def api(path):
+        assert path == "rate_limit", "No workflow requests while quota is reserved"
+        return {"resources": {"core": {"remaining": 200, "reset": 3600}}}
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.time, "time", lambda: 0)
+    assert progress.poll_budget(REPO, 1) == (3601, 0)
+
+
+def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event, harness):
+    real_api = progress.control.api
+    failed = False
+    waits = []
+    harness[0]["status"] = "completed"
+
+    def api(path, *args, **kwargs):
+        nonlocal failed
+        if path.endswith("/runs/50") and not failed:
+            failed = True
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        return real_api(path, *args, **kwargs)
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    progress.monitor(REPO, event)
+    assert waits == [60]
+    assert harness[3]
+
+
+def test_completion_reconciles_jobs_across_write_budget(progress, monkeypatch, event, harness):
+    run, _, jobs, writes, _ = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    jobs.append({"id": 102, "name": "unit-tests", "status": "completed", "conclusion": "success"})
+    monkeypatch.setattr(progress, "poll_budget", lambda *args: (60, 1))
+    waits = []
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    progress.monitor(REPO, event)
+    assert waits == [60]
+    assert len(writes) == 2
 
 
 if __name__ == "__main__":

@@ -1603,5 +1603,18 @@ def test_effective_jobs_preserves_successful_dependencies(control, monkeypatch):
     assert {job["name"]: job["id"] for job in jobs} == {"pre-commit": 1, "clang-tidy": 3}
 
 
+def test_every_downstream_job_explicitly_tolerates_skipped_lint_ancestors():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    for name, job in jobs.items():
+        if name == "full-result" or "lint-gate" not in job.get("needs", []):
+            continue
+        condition = job["if"]
+        assert "!cancelled()" in condition, name
+        assert "needs.lint-gate.result == 'success'" in condition, name
+        assert "needs.changes.result == 'success'" in condition, name
+        if "toolchain" in job["needs"]:
+            assert "needs.toolchain.result == 'success'" in condition, name
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v", f"--confcutdir={Path(__file__).parent}"]))

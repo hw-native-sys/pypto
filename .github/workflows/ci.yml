@@ -521,7 +521,13 @@ jobs:
     # EXT_SUFFIX), so the two legs cannot collide even if they somehow shared a
     # cache root: they write different slots.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     strategy:
@@ -603,7 +609,12 @@ jobs:
     # pinned version. simpler resolves its own pto-isa from
     # runtime/pto_isa.pin at build time, and no ptoas is installed.
     needs: [changes, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # `packages: read` is not decoration. Declaring a `permissions:` block at
     # all narrows GITHUB_TOKEN to exactly what it lists, and pulling the job
     # container is an authenticated ghcr.io read — so `contents: read` alone
@@ -775,9 +786,10 @@ jobs:
     # job did before the prebuild existed.
     needs: [changes, lint-gate, prebuild-wheels-github]
     if: >-
-      needs.changes.outputs.full == 'true' &&
-      !cancelled()
-      && needs.lint-gate.result == 'success'
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.changes.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -862,7 +874,13 @@ jobs:
     # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
     # blocks run inside examples-tests, against the code it changed.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_changed == 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_changed == 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, cpu]
@@ -916,7 +934,13 @@ jobs:
     # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
     # instead of rebuilding in an ephemeral container on every PR.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1036,7 +1060,13 @@ jobs:
     # clang-tidy, so it must not start until that pool's lint job is green.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, lint-gate, toolchain]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
@@ -1131,7 +1161,13 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1271,7 +1307,13 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1500,7 +1542,13 @@ jobs:
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1653,7 +1701,13 @@ jobs:
     # Compile selected DeepSeek and Qwen operator cases without device execution.
     # A2/A3 extern wrappers need CANN headers from the npu runner.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
@@ -1754,7 +1808,13 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1957,6 +2017,10 @@ jobs:
     # Lint gate + docs-only gate, as every other device job here.
     needs: [changes, toolchain, lint-gate]
     if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
       needs.changes.outputs.full == 'true' &&
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.ptoas_version_changed == 'true'
@@ -2273,7 +2337,13 @@ jobs:
     # Lint gate (see the lint-gate job) — never claim an NPU slot for a tree that
     # doesn't lint. Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, lint-gate]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -2460,11 +2530,12 @@ jobs:
     # to use.
     needs: [changes, toolchain, lint-gate, prebuild-wheels-github]
     if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
       needs.changes.outputs.full == 'true' &&
-      !cancelled()
-      && needs.changes.outputs.docs_only != 'true'
-      && needs.lint-gate.result == 'success'
-      && needs.toolchain.result == 'success'
+      needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin

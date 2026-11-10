@@ -104,9 +104,10 @@ jobs build locally if necessary; every applicable test must succeed.
 
 The PR keeps its original lint checks and displays each downstream job as
 `full / <job name>`, including matrix legs and links to job logs. `CI Full Progress`
-reads GitHub metadata on a GitHub-hosted runner and refreshes these checks every
-30 seconds, without executing PR code or giving test jobs write tokens. No
-monitor runs while waiting for a comment. Each live monitor is bounded to five
+reads GitHub metadata on a GitHub-hosted runner and refreshes these checks roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
+monitor runs while waiting for a comment. Polling slows down with concurrent
+monitors and the shared API budget, reserving 200 requests for gate writers and
+other automation; transient API errors use bounded backoff. Each live monitor is bounded to five
 hours; a separate completion event reconciles final results even after a monitor
 failure or timeout. Progress checks are informational: require `ci/full` for
 merge, not every `full / ...` check (some tests are conditional or advisory).
