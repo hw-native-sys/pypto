@@ -1711,8 +1711,8 @@ class ScopeParser:
                 hint=split_aiv_hint,
             )
         # Placement check, like the nested-region one above: an enclosing InCore
-        # scope that declares its own optimizations=[pl.split(...)] already picked
-        # the AUTO split mechanism, which this region would silently override.
+        # scope declaring optimizations=[pl.split(...)] carries legacy split
+        # metadata that conflicts with the mode derived from this region.
         self.regions.reject_user_split_with_split_aiv_region(stmt, split_aiv_hint)
         if not isinstance(stmt.target, ast.Name):
             raise ParserSyntaxError(

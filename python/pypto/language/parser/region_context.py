@@ -94,11 +94,10 @@ class RegionContext:
     def reject_user_split_with_split_aiv_region(self, stmt: ast.For, hint: str) -> None:
         """Reject ``pl.split_aiv`` inside an InCore scope declaring ``pl.split(...)``.
 
-        A function-level AUTO split (``optimizations=[pl.split(MODE)]``) and
-        explicit ``pl.split_aiv`` regions are mutually exclusive AIV-split
-        mechanisms: downstream lowering takes the per-region path and would
-        silently drop the function-level split. **Any** ``pl.split(...)`` is
-        rejected, ``pl.SplitMode.NONE`` included (RFC #1820) — NONE carries no
+        Legacy function-level split metadata (``optimizations=[pl.split(MODE)]``)
+        cannot coexist with explicit ``pl.split_aiv`` regions: region lowering
+        derives function metadata and would silently drop the user annotation.
+        **Any** ``pl.split(...)`` is rejected, ``pl.SplitMode.NONE`` included (RFC #1820) — NONE carries no
         split of its own, but writing it still reads as "auto and manual split
         mixed on one scope", and the cross-core slot count that once forced the
         NONE spelling now has its own orthogonal ``pl.cross_core_slot(slot_num=N)``

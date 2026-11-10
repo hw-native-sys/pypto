@@ -2086,17 +2086,17 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // (ExpandMixedKernel copies it to both lanes; SplitVectorKernel reads it to
   // bypass its automatic per-op halving). Also stamp a coarse representative
   // ``split`` mode from the region node — but only when the scope itself
-  // carries no AUTO cross-core transfer split (``incore->split_``), which has
-  // a separate meaning. The authoritative per-region mode is ``node->split_``
-  // (consumed at pass 23).
+  // carries no legacy function-level split (``incore->split_``), which would
+  // conflict with the derived metadata. The authoritative per-region mode is
+  // ``node->split_`` and is consumed by ExpandMixedKernel.
   auto append_split_aiv_attr = [&](SplitMode incore_split) {
     SplitAivModeSummaryFinder finder;
     finder.VisitStmt(scope_body);
     if (!finder.found) return;
-    // A function-level AUTO split (optimizations=[pl.split(mode)], carried as the
-    // scope's own split_) and explicit pl.split_aiv region(s) are mutually
-    // exclusive AIV-split mechanisms. Downstream lowering takes the per-region
-    // path and would silently drop the function-level split, so reject the
+    // A legacy function-level split (optimizations=[pl.split(mode)], carried as
+    // the scope's own split_) cannot coexist with explicit pl.split_aiv regions.
+    // Region lowering derives the function metadata and would silently drop the
+    // user's function-level split, so reject the
     // combination HERE — the scope's user split (incore_split) and the regions
     // are both visible only at outline time; post-outline they merge
     // indistinguishably into the function's split / split_aiv attrs (a single

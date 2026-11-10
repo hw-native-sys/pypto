@@ -275,7 +275,7 @@ struct OpArgEffectSpec {
 /**
  * @brief Arguments that carry no lane-indexed data
  *
- * Automatic AIV vector splitting (`LowerAutoVectorSplit`) halves an op's RESULT
+ * Standalone AIV vector splitting (`SplitVectorKernel`) halves an op's RESULT
  * to the per-lane extent and relies on every tile operand being lane-local
  * already. An operand that is still full width normally means nothing sharded
  * it, and the two lanes would read the same rows.
@@ -863,11 +863,11 @@ class OpRegistryEntry {
   /// ISA. Ops that are pinned to one lane by set_core_affinity() need no flag:
   /// they are never duplicated in the first place.
   ///
-  /// The consumer is LowerAutoVectorSplit's `pl.split_aiv` region placement
-  /// stamp: it pins exactly the no-duplicate calls inside a region to the AIV
-  /// lane, so they are not copied onto the cube lane by ExpandMixedKernel. No
-  /// verifier rejects anything on this axis — see the "NOT CHECKED,
-  /// DELIBERATELY" note in verify_aiv_split.cpp.
+  /// ExpandMixedKernel pins core-agnostic no-duplicate calls inside a
+  /// `pl.split_aiv` region to the AIV lane, so they are not copied onto the
+  /// cube lane. Software-pipeline analysis also treats these calls as
+  /// non-replicable. No verifier rejects calls solely on this axis — see the
+  /// "NOT CHECKED, DELIBERATELY" note in verify_aiv_split.cpp.
   ///
   /// Do NOT use it for an op whose presence on the cube lane is load-bearing:
   /// pinning `pld.system.wait` to AIV would let the matmul race past the peer

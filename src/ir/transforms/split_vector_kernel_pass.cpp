@@ -66,18 +66,12 @@ bool RequiresNoSplitDualAivSync(const FunctionPtr& func) {
 // ---------------------------------------------------------------------------
 // Standalone (non-split_aiv) split lowering.
 //
-// The auto-split pipeline (pl.split mixed InCore -> LowerAutoVectorSplit ->
-// ExpandMixedKernel) reaches this pass with each split function already
-// ``split_aiv``-marked and pre-halved (handled by the split_aiv branch below).
-// But hand-written *standalone* AIV/AIC kernels — separate functions whose
-// cross-core split is signalled either by an explicit function ``split`` attr
-// or by a ``split=N`` kwarg on their tpush/tpop pipe ops — never pass through
-// LowerAutoVectorSplit (it is InCore-only) and arrive here at full shape. They
-// still need the per-lane halving + get_subblock_idx injection. This is the
-// dedicated path for them; it reuses the shared ``split_axis`` halving driver
-// (the same machinery LowerAutoVectorSplit calls), so the produced per-lane
-// body is identical. It runs ONLY for functions that are NOT ``split_aiv``
-// marked, so it can never double-halve an already-lowered auto-split function.
+// Explicit regions reach this pass with authored per-lane shapes and a
+// ``split_aiv`` marker, so their bodies pass through unchanged. Standalone
+// AIV/AIC kernels without that marker still need per-lane halving and AIV
+// subblock-index injection when their function attr or pipe ops request a split.
+// This dedicated path uses the shared ``split_axis`` halving driver only for
+// those standalone functions.
 // ---------------------------------------------------------------------------
 
 bool IsCrossCoreSplitOp(const OpPtr& op) {
@@ -616,9 +610,8 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
 // Halve a standalone (non-split_aiv) AIV/AIC function in place along the split
 // axis: inject get_subblock_idx (AIV only), route every leaf statement through
 // the shared split_axis halving driver, re-localize offsets via the final
-// Substitute, and stamp split (+ dual_aiv_dispatch for AIV). Mirrors the
-// auto-split LowerFunction path but consumes a body that already carries
-// explicit tpush/tpop boundaries (no tile.move -> aiv_shard rewrite needed).
+// Substitute, and stamp split (+ dual_aiv_dispatch for AIV). The body already
+// carries explicit tpush/tpop boundaries; no shard/gather synthesis is needed.
 FunctionPtr ProcessStandaloneSplitFunction(const FunctionPtr& func, SplitMode mode) {
   if (mode == SplitMode::None) return func;
   int split_dim = SplitDimension(mode);
@@ -771,8 +764,8 @@ Pass SplitVectorKernel() {
       // functions whose cross-core split is signalled by an explicit function
       // "split" attr or by a split=N kwarg on their pipe ops. These never pass
       // through LowerAutoVectorSplit (InCore-only) and arrive un-halved, so they
-      // need the per-lane halving here. Guarded by NOT split_aiv (above), so a
-      // pre-halved auto-split function can never reach this branch.
+      // need the per-lane halving here. Explicit split_aiv bodies were handled
+      // above and cannot reach this branch.
       if (func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC) {
         auto standalone_mode = ResolveSplitMode(func);
         if (standalone_mode.has_value() && standalone_mode.value() != SplitMode::None) {

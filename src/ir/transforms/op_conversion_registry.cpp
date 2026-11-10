@@ -2992,8 +2992,8 @@ void OpConversionRegistry::RegisterDistributedOps() {
 // ============================================================================
 // High-level (@pl.jit / pl.spmd) author-facing shard / gather emitted inside a
 // ``for aiv_id in pl.split_aiv(...)`` region. Each lowers 1:1 to its tile op
-// (tile.aiv_shard / tile.aic_gather) so the result is byte-identical to what the
-// AUTO ``pl.split`` path produces via LowerAutoVectorSplit (pass 23).
+// (tile.aiv_shard / tile.aic_gather). LowerAutoVectorSplit prepares their explicit
+// boundary valid extents, then ExpandMixedKernel lowers them to cross-core pipes.
 //
 // Boundary memory space. The tile-level split deducer (DeduceSplitReshape)
 // intentionally leaves it null (returns a TileType with a null memref / null
@@ -3002,19 +3002,17 @@ void OpConversionRegistry::RegisterDistributedOps() {
 // the tile op declares via set_output_memory (cross_core.cpp): Vec for the C->V
 // aiv_shard (AIV pops into UB), Mat for the V->C aic_gather (AIC pops into L1).
 // So this converter attaches nothing of its own — it just asserts the space
-// arrived. LowerAutoVectorSplit builds its boundary ops through the same Create,
-// which is what keeps the two paths from drifting apart; this converter used to
-// hard-code Vec for both directions, which made the gather's declared type
-// disagree with the Mat tpop ExpandMixedKernel actually emits.
+// arrived. The gather must retain Mat to match the V->C tpop emitted by
+// ExpandMixedKernel; assigning Vec to both directions would violate that contract.
 //
 // No InputSpaceReq. The realistic (region-only) operand is an on-chip tile — a
-// cube (Mat/Acc) matmul result for aiv_shard, a Vec vector-compute result for
+// cube Acc matmul result for aiv_shard, a Vec vector-compute result for
 // aic_gather — already lowered to a TileType earlier in this same pass, so it
 // reaches the converter tile-typed and passes straight into the tile op (the tile
 // deducer accepts any 2D TileType regardless of memory space). aiv_shard / gather
 // ARE the cross-core transfer, so no tile.load should be synthesized; adding a Vec
 // InputSpaceReq would inject a spurious Vec load and force a cube input to Vec,
-// diverging from the AUTO oracle's Mat-tile input. Distributed operands were
+// violating the Acc-to-Vec boundary contract. Distributed operands were
 // rejected upstream (parser + tensor deducer), so only a plain TileType arrives.
 void OpConversionRegistry::RegisterCrossCoreOps() {
   auto convert = [](const std::string& tile_op) -> ConversionFunc {
@@ -3029,9 +3027,7 @@ void OpConversionRegistry::RegisterCrossCoreOps() {
       // split-axis extent.
       // The boundary memory needs no re-attachment here: the split deducer leaves
       // the space null, and Create fills it from the tile op's set_output_memory
-      // declaration (Vec for the shard, Mat for the gather). LowerAutoVectorSplit
-      // builds its aiv_shard / aic_gather through the same Create, so both paths
-      // read one declaration and cannot drift apart.
+      // declaration (Vec for the shard, Mat for the gather).
       auto call = op_reg.Create(tile_op, args, kwargs, span);
       auto tt = As<TileType>(call->GetType());
       INTERNAL_CHECK_SPAN(tt && tt->memory_space_.has_value(), span)
