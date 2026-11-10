@@ -28,7 +28,13 @@ def _program(case):
     if case == "guarded_view":
         calls = "            slab = pl.tensor.slice(profile, [16, 16], [128 // (width - 8), 0])\n" + calls
     if case == "overflow":
-        calls = "            for i in pl.range(600):\n                self.touch(out)\n"
+        calls = "            for i in pl.range(1100):\n                self.touch(out)\n"
+    fallback = calls
+    if case == "one_arm":
+        fallback = "            pass\n"
+    if case == "guarded_reshape":
+        condition = "width == 16"
+        calls = "            slab = pl.tensor.view(profile, [8, 32])\n" + calls
     source = f"""
 N = pl.dynamic("TOPOLOGY_ROWS")
 K = pl.dynamic("EXTERNAL_ROWS")
@@ -46,7 +52,7 @@ class P:
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         if {condition}:
 {calls}        else:
-{calls}        return out
+{fallback}        return out
 """
     if case == "no_caller":
         return pl.parse_program(source)
@@ -64,6 +70,8 @@ class P:
         "all_metadata": "pl.tensor.dim(profile, 0)",
         "loop_index": "i",
         "overflow": "pl.tensor.dim(profile, 0)",
+        "one_arm": "pl.tensor.dim(profile, 0)",
+        "guarded_reshape": "pl.tensor.dim(profile, 0)",
     }[case]
     prelude = (
         "        local = pl.create_tensor([runtime, 16], dtype=pl.FP32)\n" if case == "local_tensor" else ""
@@ -363,6 +371,24 @@ def test_graph_hoisting_does_not_speculate_guarded_integer_division(case):
         pytest.raises(ValueError, match="guarded integer division"),
     ):
         passes.legalize_graph_boundary()(_lower(_program(case)))
+
+
+def test_graph_rejects_a_recording_path_with_no_nodes():
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        normalized = _lower(_program("one_arm"))
+        assert any("launches no tasks" in d.message for d in _diagnostics(normalized))
+        with pytest.raises(ValueError, match="launches no tasks"):
+            passes.legalize_graph_boundary()(normalized)
+
+
+def test_graph_keeps_shaped_view_inside_its_guard():
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        normalized = _lower(_program("guarded_reshape"))
+        legalized = passes.legalize_graph_boundary()(normalized)
+        assert _diagnostics(legalized) == []
+        graph = legalized.get_function("layer")
+        assert graph is not None
+        assert "tensor.view" in str(graph)
 
 
 if __name__ == "__main__":

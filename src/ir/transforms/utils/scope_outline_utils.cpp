@@ -2689,7 +2689,7 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
         if (!call) {
           AddEdge(op->value_, op->var_);
         } else if (!call->args_.empty() && (IsOp(call, "tensor.slice") || IsOp(call, "tensor.view") ||
-                                            IsOp(call, "tensor.reshape"))) {
+                                            IsOp(call, "tensor.reshape") || IsOp(call, "tensor.transpose"))) {
           AddEdge(call->args_.front(), op->var_);
         } else if (auto index = ResultAliasedArgIndex(call)) {
           AddEdge(call->args_[*index], op->var_);

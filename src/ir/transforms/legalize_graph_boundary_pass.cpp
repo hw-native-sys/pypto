@@ -405,7 +405,10 @@ class DerivedScalarCollector : public IRVisitor {
     }
     // A view *of* an in-place view cannot be hoisted however derivable its own
     // operands are: its source has no name at the call site either.
-    const bool hoistable = all_derivable && in_place_views_.count(source.get()) == 0;
+    // A shaped tensor.view lowers to reshape, which checks the source
+    // element count. Keep that check inside its guard, even for literal shapes.
+    const bool guarded_reshape = in_conditional_ && IsOp(call, "tensor.view") && call->args_.size() > 1;
+    const bool hoistable = all_derivable && !guarded_reshape && in_place_views_.count(source.get()) == 0;
     CHECK_SPAN(hoistable || all_invariant, call->span_)
         << "Graph function '" << func_->name_ << "' derives '" << var->name_hint_
         << "' from boundary tensor '" << source->name_hint_
@@ -928,17 +931,18 @@ class GraphNodeCounter : public IRVisitor {
     invariant_.Collect(func_->body_);
   }
 
-  [[nodiscard]] size_t count() const { return count_; }
+  [[nodiscard]] size_t min_count() const { return counts_.first; }
+  [[nodiscard]] size_t count() const { return counts_.second; }
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
-    if (IsTaskLaunch(op)) count_ = SatAdd(count_, 1);
+    if (IsTaskLaunch(op)) AddNodes(1, 1);
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
     IRVisitor::VisitExpr_(op);
-    count_ = SatAdd(count_, 1);
+    AddNodes(1, 1);
   }
 
   /// Charges the allocations in a statement list the nodes codegen will emit.
@@ -967,7 +971,7 @@ class GraphNodeCounter : public IRVisitor {
         if (joins_batch) {
           ++batchable;
         } else {
-          count_ = SatAdd(count_, 1);
+          AddNodes(1, 1);
           locally_defined.insert(assign->var_.get());
         }
       } else if (assign && assign->var_) {
@@ -975,7 +979,8 @@ class GraphNodeCounter : public IRVisitor {
       }
       VisitStmt(stmt);
     }
-    count_ = SatAdd(count_, alloc_batching::BatchedAllocationNodes(batchable));
+    const size_t nodes = alloc_batching::BatchedAllocationNodes(batchable);
+    AddNodes(nodes, nodes);
   }
 
   /// An allocation outside any statement list — a loop body that is a single
@@ -983,12 +988,12 @@ class GraphNodeCounter : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     IRVisitor::VisitStmt_(op);
     auto call = As<Call>(op->value_);
-    if (call && IsAllocation(call) && batched_.count(op.get()) == 0) count_ = SatAdd(count_, 1);
+    if (call && IsAllocation(call) && batched_.count(op.get()) == 0) AddNodes(1, 1);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    const size_t per_iteration = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
-    if (per_iteration == 0) return;
+    const auto [minimum, maximum] = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
+    if (maximum == 0) return;
     auto trips = StaticTripCount(op);
     CHECK_SPAN(trips.has_value(), op->span_)
         << "Graph function '" << func_->name_
@@ -996,12 +1001,12 @@ class GraphNodeCounter : public IRVisitor {
            "recorded graph fixes the task topology on the first call and replays it unchanged, so a "
            "launch count that can differ between calls would silently replay the first call's "
            "topology. Give the loop constant bounds, or move it outside the Graph function.";
-    count_ = SatAdd(count_, SatMul(per_iteration, *trips));
+    AddNodes(SatMul(minimum, *trips), SatMul(maximum, *trips));
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    const size_t launched = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
-    CHECK_SPAN(launched == 0, op->span_)
+    const auto launched = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
+    CHECK_SPAN(launched.second == 0, op->span_)
         << "Graph function '" << func_->name_
         << "' launches tasks inside a while loop. Its iteration count is a runtime value, so the "
            "recorded topology would be whatever the first call happened to produce. Move the loop "
@@ -1009,32 +1014,38 @@ class GraphNodeCounter : public IRVisitor {
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    const size_t launched = CountSubtree([&] { IRVisitor::VisitStmt_(op); });
-    CHECK_SPAN(launched == 0 || invariant_.IsInvariant(op->condition_), op->span_)
+    VisitExpr(op->condition_);
+    const auto then_nodes = CountSubtree([&] { VisitStmt(op->then_body_); });
+    const auto else_nodes =
+        op->else_body_ ? CountSubtree([&] { VisitStmt(*op->else_body_); }) : std::pair<size_t, size_t>{};
+    const size_t maximum = std::max(then_nodes.second, else_nodes.second);
+    for (const auto& var : op->return_vars_) VisitExpr(var);
+    CHECK_SPAN(maximum == 0 || invariant_.IsInvariant(op->condition_), op->span_)
         << "Graph function '" << func_->name_
         << "' launches tasks inside a conditional. Which branch ran on the first call is baked into "
            "the recording and replayed for every later call, so the condition would stop having any "
            "effect. Hoist the branch to the call site and give each arm its own Graph function.";
-    // Sum both arms conservatively; a fixed condition selects at most this many.
-    count_ = SatAdd(count_, launched);
+    AddNodes(std::min(then_nodes.first, else_nodes.first), maximum);
   }
 
  private:
-  /// Run @p walk with a fresh accumulator and return what it counted.
+  void AddNodes(size_t minimum, size_t maximum) {
+    counts_.first = SatAdd(counts_.first, minimum);
+    counts_.second = SatAdd(counts_.second, maximum);
+  }
+
+  /// Run @p walk with a fresh accumulator and return its node bounds.
   template <typename F>
-  size_t CountSubtree(F&& walk) {
-    const size_t saved = count_;
-    count_ = 0;
+  std::pair<size_t, size_t> CountSubtree(F&& walk) {
+    const auto saved = std::exchange(counts_, {});
     walk();
-    const size_t subtree = count_;
-    count_ = saved;
-    return subtree;
+    return std::exchange(counts_, saved);
   }
 
   FunctionPtr func_;
   ProgramPtr program_;
   graph_replay::ReplayInvariantSet invariant_;
-  size_t count_ = 0;
+  std::pair<size_t, size_t> counts_{};
   alloc_batching::GMPipeConsumerIndex gm_pipe_consumers_;
   std::unordered_set<const Stmt*> batched_;
 };
@@ -1861,9 +1872,10 @@ class ReturnOnlyPhiRewriter : public IRMutator {
       // and `span_` through unchanged.
       GraphNodeCounter counter(func, result, fixed);
       counter.VisitStmt(func->body_);
-      CHECK_SPAN(counter.count() >= 1, func->span_)
+      CHECK_SPAN(counter.min_count() >= 1, func->span_)
           << "Graph function '" << func->name_
-          << "' launches no tasks. `graph_execution_storage_layout` refuses a node count of zero, so "
+          << "' launches no tasks on at least one path. `graph_execution_storage_layout` refuses a node "
+             "count of zero, so "
              "the region would never be cached; call it directly instead of marking it a Graph.";
       CHECK_SPAN(counter.count() <= kMaxGraphNodes, func->span_)
           << "Graph function '" << func->name_ << "' launches " << counter.count()

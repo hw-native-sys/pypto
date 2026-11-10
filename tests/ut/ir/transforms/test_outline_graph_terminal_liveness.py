@@ -256,6 +256,24 @@ def test_terminal_graph_preserves_write_to_captured_tensor_through_alias():
     assert not graph.return_types
 
 
+def test_terminal_graph_preserves_captured_write_through_transpose():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def write(self, src: pl.Tensor[[16, 32], pl.FP32], out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]):
+            pl.store(pl.load(src, [0, 0], [16, 32]), [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, src: pl.Tensor[[16, 32], pl.FP32], dst: pl.InOut[pl.Tensor[[32, 16], pl.FP32]]):
+            with pl.graph("terminal"):
+                target = pl.tensor.transpose(dst, 0, 1)
+                self.write(src, target)
+
+    graph = _graph(passes.outline_graph_scopes()(passes.convert_to_ssa()(Before)))
+    directions = {p.name_hint: d for p, d in zip(graph.params, graph.param_directions, strict=True)}
+    assert next(d for n, d in directions.items() if n.startswith("dst")) != ir.ParamDirection.In
+
+
 @pytest.mark.parametrize("case", ["loop", "if", "view_if", "tuple_if"])
 def test_terminal_graph_keeps_writes_through_control_flow_aliases(case):
     body = {
