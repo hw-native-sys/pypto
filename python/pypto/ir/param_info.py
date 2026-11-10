@@ -209,6 +209,22 @@ def arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[in
 _Arg = TypeVar("_Arg")
 
 
+def collect_output_values(
+    args: Sequence[_Arg], output_indices: Sequence[int], *, return_style: bool
+) -> _Arg | tuple[_Arg, ...] | None:
+    """Collect pure-Out parameters in metadata order after a dispatch.
+
+    This is the Python execution ABI, not an interpretation of ReturnStmt.
+    InOut parameters are caller-supplied and absent from output_indices. Both
+    live and reloaded artifacts use the same convention; in-place calls return
+    None, and a single output is unwrapped.
+    """
+    if not return_style:
+        return None
+    outputs = tuple(args[i] for i in output_indices)
+    return outputs[0] if len(outputs) == 1 else outputs
+
+
 def bind_complete_args(
     args: Sequence[_Arg], param_infos: Sequence[_ParamInfo], *, caller_name: str
 ) -> list[_Arg]:

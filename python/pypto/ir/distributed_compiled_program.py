@@ -56,7 +56,7 @@ from .compiled_program import (
     _to_torch_dtype,
     _write_debug_runner,
 )
-from .param_info import bind_complete_args
+from .param_info import bind_complete_args, collect_output_values
 
 # The sidecar filename itself lives beside its L2 counterpart in
 # ``_artifact_metadata`` (both feed the build-kind marker table there) and is
@@ -526,10 +526,7 @@ class DistributedCompiledProgram:
 
         _execute_distributed(self, coerced, config)
 
-        if not return_style:
-            return None
-        outputs = [coerced[i] for i in output_indices]
-        return outputs[0] if len(outputs) == 1 else tuple(outputs)
+        return collect_output_values(coerced, output_indices, return_style=return_style)
 
     def prepare(
         self,

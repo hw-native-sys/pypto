@@ -856,5 +856,29 @@ class TestParamDirectionRoundTrip:
         ir.assert_structural_equal(original, reparsed)
 
 
+@pytest.mark.parametrize("is_submit", [False, True])
+@pytest.mark.parametrize("shape", ["void", "single", "multiple", "nested"])
+def test_call_result_type_preserves_declared_positions(shape, is_submit):
+    """A tuple-valued result must remain one slot when TaskId is appended."""
+    tensor = ir.TensorType([16], DataType.FP32)
+    scalar = ir.ScalarType(DataType.INT32)
+    nested = ir.TupleType([tensor, scalar])
+    declared = {"void": [], "single": [tensor], "multiple": [tensor, scalar], "nested": [nested]}[shape]
+    result = ir.make_call_result_type(declared, is_submit=is_submit)
+    if is_submit:
+        assert isinstance(result, ir.TupleType)
+        assert len(result.types) == len(declared) + 1
+        task_id_type = result.types[-1]
+        assert isinstance(task_id_type, ir.ScalarType)
+        assert task_id_type.dtype == DataType.TASK_ID
+        for actual, expected in zip(result.types[:-1], declared, strict=True):
+            ir.assert_structural_equal(actual, expected)
+    elif not declared:
+        assert isinstance(result, ir.UnknownType)
+    else:
+        ir.assert_structural_equal(result, declared[0] if len(declared) == 1 else ir.TupleType(declared))
+    assert len(declared) == {"void": 0, "single": 1, "multiple": 2, "nested": 1}[shape]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

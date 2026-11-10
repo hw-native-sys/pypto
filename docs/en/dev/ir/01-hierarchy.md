@@ -532,6 +532,22 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `role_` | optional[Role] | Hierarchy role (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration/Graph; see below) |
 | `attrs_` | list[(str, Any)] | Ordered free-form metadata, exposed as `UsualField` (participates in structural traversal) |
 
+### Call result types
+
+`ir.make_call_result_type(return_types, is_submit=False)` (C++:
+`MakeCallResultType`) packs declared return positions without inferring types
+or flattening tuple-valued results. Parser and lowering passes share it.
+
+| Declared results | Call type | Submit type |
+| ---------------- | --------- | ----------- |
+| `[]` | `UnknownType` | `Tuple[TaskId]` |
+| `[T]` | `T` | `Tuple[T, TaskId]` |
+| `[T1, T2]` | `Tuple[T1, T2]` | `Tuple[T1, T2, TaskId]` |
+| `[Tuple[T1, T2]]` | `Tuple[T1, T2]` | `Tuple[Tuple[T1, T2], TaskId]` |
+
+TaskId belongs to the launch; packing never modifies the callee signature.
+Return-type inference and symbolic shape substitution happen before packing.
+
 ### Function body representation
 
 `FunctionIRStage` is a typed, reflected field independent of `FunctionType`,

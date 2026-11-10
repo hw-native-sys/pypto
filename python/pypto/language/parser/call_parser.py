@@ -713,12 +713,7 @@ class CallParser:
                 (e.g. ``arg_direction_overrides``, ``dummy_task``). Merged into
                 the call's attrs without overwriting a dedicated value.
         """
-        if not return_types:
-            return_type: ir.Type = ir.UnknownType()
-        elif len(return_types) == 1:
-            return_type = return_types[0]
-        else:
-            return_type = ir.TupleType(return_types)
+        return_type = ir.make_call_result_type(return_types, is_submit=augment_task_id)
 
         attrs: dict[str, Any] | None = None
         # Build the attrs dict from the dedicated params. Order is no longer
@@ -752,7 +747,6 @@ class CallParser:
             # manual_dep_edges. The return type is still the flat
             # Tuple{*<kernel results>, TaskId} so tuple projection of the
             # producer TaskId continues to work the same way as before.
-            return_type = ir.TupleType([*return_types, ir.ScalarType(DataType.TASK_ID)])
             deps_list: list[ir.Expr] = list(user_dep_vars) if user_dep_vars else []
             # deps live only on Submit::deps_; attrs never carries
             # manual_dep_edges (ManualDepsOnSubmitOnly invariant).

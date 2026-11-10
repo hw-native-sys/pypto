@@ -2617,6 +2617,9 @@ void BindIR(nb::module_& m) {
          "Trace each return to its external parameter.");
 
   // Cross-function call return type deduction
+  ir.def("make_call_result_type", &MakeCallResultType, nb::arg("return_types"), nb::arg("is_submit") = false,
+         "Pack declared results into a Call or Submit type without flattening nested tuples.");
+
   ir.def("deduce_call_return_type", &DeduceCallReturnType, nb::arg("callee_params"), nb::arg("args"),
          nb::arg("return_types"), nb::arg("is_inline") = false,
          "Deduce return types for a cross-function call by substituting "
