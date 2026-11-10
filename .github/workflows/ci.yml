@@ -2429,6 +2429,90 @@ jobs:
         with:
           checkout-path: a5-checkout
 
+  onboard-tests-a5-distributed:
+    # A5 (Ascend950) multi-card on-board coverage for the asynchronous URMA
+    # acceptance suite. The async transfer path has no simulator backend: the
+    # generated helper includes backend/urma/urma_completion_kernel.h, which
+    # exists only for A5 silicon, so this is the only lane that can execute
+    # put_async/get_async end to end. `--device-num 4` borrows four cards from
+    # the npu-a5 pool for the whole pytest run so the P=4 cases select; the
+    # suite skips a rank count it was not lent, and $TASK_DEVICE is the lent
+    # set passed to --device.
+    #
+    # The suite is @pytest.mark.platforms("a5"), so --platform=a5 selects it and
+    # deselects every other platform variant. Its cases check URMA PUT/GET
+    # values, repeated transfers, mixed compute and source lifetime, and the
+    # consumer-not-released-before-completion ordering; a red run is the
+    # acceptance signal this job exists for.
+    #
+    # Lint gate (see the pre-commit job) — never claim NPU slots for a tree
+    # that doesn't lint. Full-CI gate: like every other device job, this lane
+    # only runs when the dispatcher selected the full tier, so a normal PR
+    # push cannot monopolise four A5 cards.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.full == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, npu-a5]
+    defaults:
+      run:
+        working-directory: a5-dist-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/a5-dist-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: a5-dist-checkout
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
+          needs-device: 'true'
+          pip-cache-name: pip-a5-dist
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5;build_package_sim
+          # The runner's systemd PTO2_RING_* environment breaks HCCL; the A5
+          # URMA path still uses the PTO2 task/ring machinery.
+          unset-ring: 'true'
+          toolchain: bundle
+
+      - name: urma-async-tests-a5
+        timeout-minutes: 70
+        # One task-submit card session wraps the pytest run. The client waits up
+        # to 65m for queueing plus execution; --max-time caps device execution
+        # at 45m. Keep five minutes above the client so a timeout can report
+        # and clean up before the runner cancels the step.
+        run: |
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          # No --forked: the suite runs one platform, and the JIT compile path
+          # leaves a child that pytest-forked waits on past its timeout.
+          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 3900 --max-time 2700 \
+            --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
+              tests/st/distributed/test_l3_urma_async.py \
+              -v --platform=a5 --device=\$TASK_DEVICE"
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: a5-dist-checkout
+
   system-tests-a5sim:
     permissions:
       contents: read
@@ -2588,6 +2672,7 @@ jobs:
       - docs-examples
       - examples-tests
       - onboard-tests-a5
+      - onboard-tests-a5-distributed
       - prebuild-wheels
       - prebuild-wheels-github
       - pypto-lib-compile
