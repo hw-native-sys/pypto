@@ -606,9 +606,12 @@ std::optional<int64_t> StaticPositiveTripCount(const ForStmtPtr& op) {
   return (*stop - *start + *step - 1) / *step;
 }
 
+using ReturnedParamIndexCache = std::unordered_map<const Function*, std::vector<std::optional<size_t>>>;
+
 class StorageRootAnalysis : public IRVisitor {
  public:
-  explicit StorageRootAnalysis(ProgramPtr program) : program_(std::move(program)) {}
+  StorageRootAnalysis(ProgramPtr program, ReturnedParamIndexCache& returned_param_indices)
+      : program_(std::move(program)), returned_param_indices_(returned_param_indices) {}
 
   void Initialize(const std::vector<VarPtr>& params) {
     for (const auto& param : params) {
@@ -883,8 +886,7 @@ class StorageRootAnalysis : public IRVisitor {
   std::unordered_map<const Var*, MemRefPtr> root_memrefs_;
   std::unordered_map<const Var*, std::vector<StorageLocation>> tuple_locations_;
   std::unordered_set<const Var*> unsupported_locations_;
-  // The Program is immutable for this analysis; one structural lookup per callee.
-  mutable std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_param_indices_;
+  ReturnedParamIndexCache& returned_param_indices_;
 
   std::vector<StorageLocation> CollectReturnedLocations(const CallPtr& call,
                                                         const FunctionPtr& callee) const {
@@ -2344,12 +2346,15 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
 
     auto new_functions = program->functions_;
     bool changed = false;
+    // All analyses read the original immutable Program. Share the cache across
+    // callers so nested returns in a callee's body are scanned only once per pass.
+    ReturnedParamIndexCache returned_param_indices;
 
     for (auto& [gvar, func] : new_functions) {
       (void)gvar;
       if (!func || !func->body_) continue;
 
-      StorageRootAnalysis storage(program);
+      StorageRootAnalysis storage(program, returned_param_indices);
       storage.Initialize(func->params_);
       storage.VisitStmt(func->body_);
 
