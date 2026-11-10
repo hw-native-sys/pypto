@@ -62,7 +62,7 @@ from .param_info import bind_complete_args
 # ``_artifact_metadata`` (both feed the build-kind marker table there) and is
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
-_META_SCHEMA = 3
+_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime

@@ -241,6 +241,38 @@ def test_from_dir_incompatible_schema_raises(compiled, tmp_path):
         DistributedCompiledProgram.from_dir(tmp_path)
 
 
+def test_distributed_schema_four_preserves_nz_provenance_and_reads_legacy(tmp_path):
+    from pypto.ir.param_info import arg_shape_as_declared  # noqa: PLC0415
+
+    @pl.program
+    class NzHost:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def main(self, weight: pl.Tensor[[32, 64], pl.FP16, pl.NZ]):
+            return
+
+    DistributedCompiledProgram(NzHost, str(tmp_path))
+    path = tmp_path / _DISTRIBUTED_META_FILENAME
+    record = json.loads(path.read_text())
+    assert record["schema"] == 4
+    assert record["params"][0]["shape_is_lowered"] is False
+    restored = DistributedCompiledProgram.from_dir(tmp_path)
+    infos, _, _ = restored._get_metadata()
+    assert infos[0].shape_is_lowered is False
+    assert arg_shape_as_declared((32, 64), infos[0]) == [32, 64]
+
+    # Schema 3 has no marker and uses the legacy blocked-shape convention.
+    record["schema"] = 3
+    record["params"][0].pop("shape_is_lowered")
+    record["params"][0]["shape"] = [1, 4, 2, 16, 16]
+    path.write_text(json.dumps(record))
+    legacy = DistributedCompiledProgram.from_dir(tmp_path)
+    infos, _, _ = legacy._get_metadata()
+    assert infos[0].shape_is_lowered is None
+    assert infos[0].shape == (1, 4, 2, 16, 16)
+    assert arg_shape_as_declared((32, 64), infos[0]) == [1, 4, 2, 16, 16]
+    assert legacy.execution_capabilities == ExecutionCapabilities()
+
+
 def test_from_dir_rejects_non_member_backend_type(compiled, tmp_path):
     """A 'backend_type' naming a class attribute is not a backend.
 

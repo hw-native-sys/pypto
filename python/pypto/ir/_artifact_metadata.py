@@ -37,7 +37,9 @@ from .param_info import (
 # independently, so a change to *that* shared format must bump this schema AND
 # ``distributed_compiled_program._META_SCHEMA``.
 _COMPILED_META_FILENAME = "compiled_meta.json"
-_COMPILED_META_SCHEMA = 3
+# Schema 4 adds NZ shape provenance. Older readers must reject it instead of
+# silently ignoring the marker and comparing logical shapes as blocked ones.
+_COMPILED_META_SCHEMA = 4
 
 # The L3 counterpart, kept here so both names sit next to the marker table below;
 # ``distributed_compiled_program`` re-exports it and owns its schema constant.
@@ -212,9 +214,11 @@ def _load_meta(
     meta = raw_meta
 
     found_schema = meta.get("schema")
-    if type(found_schema) is not int or found_schema not in (
-        (1, 2, 3) if filename == _COMPILED_META_FILENAME else (schema,)
-    ):
+    # L2 schemas 1/2 are program-only; schema 3 introduced the complete kernel
+    # contract. L3 schema 3 is the first supported capability-aware format.
+    # All these legacy records may omit NZ provenance and retain its fallback.
+    supported_schemas = (1, 2, 3, schema) if filename == _COMPILED_META_FILENAME else (3, schema)
+    if type(found_schema) is not int or found_schema not in supported_schemas:
         raise ValueError(
             f"Incompatible {filename} schema {found_schema!r} (expected "
             f"{schema}) in {meta_path}. The metadata was written by a "
@@ -340,7 +344,9 @@ class ArtifactMetadata:
                 }
                 if required - raw.keys() or raw.get("platform") is None:
                     raise ValueError("Kernel metadata is incomplete; recompile")
-            if raw["schema"] == _COMPILED_META_SCHEMA:
+            # Schema 3 already stores aliases and the lowered signature; keep
+            # them when loading it after a later schema bump.
+            if raw["schema"] >= 3:
                 raw_aliases: object = raw["return_aliases"]
                 if raw_aliases is not None and not _is_int_list(raw_aliases):
                     raise ValueError("return_aliases must be a list of integer indices or null")

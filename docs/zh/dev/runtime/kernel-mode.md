@@ -56,9 +56,13 @@ NZ lowering 按元素单位验证无 padding 的
 blocked 表示，dtype 不变，因此字节数一致。动态 NZ 支持逻辑 `[B, R, C]` 的 batch
 维度；blocked shape 不作为 Torch 的逻辑 shape。
 
-`compiled_meta.json` schema 3 保存两种签名、返回数量、别名、平台/backend 和已验证
+`compiled_meta.json` schema 4 保存两种签名、返回数量、别名、平台/backend 和已验证
 执行能力。生产者仅声明本次请求的能力，不自动声明双模式兼容。schema 1/2 旧 program
-metadata 仅按 PROGRAM 恢复，不推断 kernel 契约。kernel 必需字段缺失、索引非法或
+metadata 仅按 PROGRAM 恢复，不推断 kernel 契约。
+schema 3 加载后保留其签名、别名及执行能力。本 sidecar 与 `distributed_meta.json`
+均使用 schema 4 记录 NZ 阶段信息，使旧运行时拒绝新格式，避免忽略标记。
+分布式 schema 3 仍可读取；缺少阶段信息的记录沿用上文的旧版 NZ 约定。
+kernel 必需字段缺失、索引非法或
 能力不一致时要求重编译。`from_dir()` 仅读取 metadata，不加载 native。
 
 `ArtifactRuntime` 仍是唯一缓存晋级/加载实现。单芯片恢复先创建 `CompiledArtifact`，

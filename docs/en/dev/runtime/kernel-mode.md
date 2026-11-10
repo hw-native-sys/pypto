@@ -73,10 +73,15 @@ NZ lowering is checked against the unpadded blocked representation in element
 units with unchanged dtype, preserving byte size. Dynamic NZ supports the logical
 `[B, R, C]` batch dimension. A blocked shape is never treated as a Torch shape.
 
-`compiled_meta.json` schema 3 persists both signatures, return count, aliases,
+`compiled_meta.json` schema 4 persists both signatures, return count, aliases,
 platform/backend and verified execution capabilities. Producers declare only the
 requested capability, never implicit dual-mode support. Schema 1/2 program
 metadata can reload as PROGRAM only; it does not establish a kernel contract.
+Schema 3 retains its signatures, aliases and execution capabilities when loaded.
+Both this sidecar and `distributed_meta.json` use schema 4 for NZ provenance,
+so older runtimes reject the new format instead of ignoring the marker.
+Distributed schema 3 remains readable; records without provenance use the
+legacy NZ convention described above.
 Missing kernel fields, invalid indices or mismatched capabilities require
 recompilation. `from_dir()` reads metadata without loading native code.
 
