@@ -12,8 +12,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import backend, passes
-from pypto.ir.printer import python_print
+from pypto import backend, ir, passes
 from pypto.pypto_core import codegen
 
 N = pl.dynamic("alias_profile_rows")
@@ -38,6 +37,33 @@ class SameCapture:
         else:
             merged = self.touch(target)
         return merged
+
+    @pl.function
+    def main(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        return self.layer(target, profile)
+
+
+@pl.program
+class ExpectedSameCapture:
+    @pl.function
+    def touch(self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(target, [0, 0], [16, 16])
+            pl.store(tile, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.touch(target)
+        if pl.tensor.dim(profile, 0) > 8:
+            _branch_alias = target
+        else:
+            _branch_result = self.touch(target)
+        return target
 
     @pl.function
     def main(
@@ -200,24 +226,15 @@ class SameTwoCaptures:
         return self.layer(first, second, profile)
 
 
+def _prepare(program):
+    ssa = passes.convert_to_ssa()(program)
+    outlined = passes.outline_incore_scopes()(ssa)
+    return passes.normalize_return_order()(outlined)
+
+
 def _legalize(program):
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
-        ssa = passes.convert_to_ssa()(program)
-        outlined = passes.outline_incore_scopes()(ssa)
-        normalized = passes.normalize_return_order()(outlined)
-        return passes.legalize_graph_boundary()(normalized)
-
-
-@pytest.mark.parametrize("program,count", [(SameCapture, 1), (SameTwoCaptures, 2)])
-def test_exact_return_only_inout_phi_is_own_parameter(program, count):
-    result = _legalize(program)
-    graph = result.get_function("layer")
-    assert graph is not None
-    printed = python_print(graph)
-    expected = "return " + ", ".join(p.name_hint for p in graph.params[:count])
-    assert expected in printed, printed
-    assert "touch(" in printed, printed  # The branch call and writes must survive.
-    assert "if " in printed, printed
+        return passes.legalize_graph_boundary()(_prepare(program))
 
 
 @pytest.mark.parametrize("program", [DifferentCapture, ChangedView, MovingBoundary, NestedTupleCaptures])
@@ -285,15 +302,116 @@ class SameSubmitCaptures:
         return first, second
 
 
-@pytest.mark.parametrize("program,count", [(SameOutCapture, 1), (SameSubmitCaptures, 2)])
-def test_written_capture_phi_preserves_exact_return_alias(program, count):
-    graph = _legalize(program).get_function("layer")
-    assert graph is not None
-    printed = python_print(graph)
-    assert "return " + ", ".join(p.name_hint for p in graph.params[:count]) in printed
-    assert "if " in printed and "write" in printed
-    if program is SameSubmitCaptures:
-        assert printed.count("pl.submit(write,") == 2, printed
+@pl.program
+class ExpectedSameTwoCaptures:
+    @pl.function
+    def touch(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]]
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            a = pl.load(first, [0, 0], [16, 16])
+            pl.store(a, [0, 0], first)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            b = pl.load(second, [0, 0], [8, 16])
+            pl.store(b, [0, 0], second)
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        self.touch(first, second)
+        if pl.tensor.dim(profile, 0) > 8:
+            _first_alias = first
+            _second_alias = second
+        else:
+            first_result, second_result = self.touch(first, second)
+        return first, second
+
+    @pl.function
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        return self.layer(first, second, profile)
+
+
+@pl.program
+class ExpectedSameOutCapture:
+    @pl.function(type=pl.FunctionType.AIV)
+    def write(self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.create_tile([16, 16], dtype=pl.FP32)
+        pl.store(tile, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            _then_result = self.write(target)
+        else:
+            _else_result = self.write(target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.layer(target, profile)
+        return target
+
+
+@pl.program
+class ExpectedSameSubmitCaptures:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def write(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.Out[pl.Tensor[[8, 16], pl.INT32]]
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        with pl.manual_scope():
+            if pl.tensor.dim(profile, 0) > 8:
+                (then_first, then_second), done = pl.submit(self.write, first, second)
+            else:
+                (else_first, else_second), done = pl.submit(self.write, first, second)
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        self.layer(first, second, profile)
+        return first, second
+
+
+@pytest.mark.parametrize(
+    "before,expected",
+    [
+        (SameCapture, ExpectedSameCapture),
+        (SameTwoCaptures, ExpectedSameTwoCaptures),
+        (SameOutCapture, ExpectedSameOutCapture),
+        (SameSubmitCaptures, ExpectedSameSubmitCaptures),
+    ],
+)
+def test_exact_return_phi_preserves_branch_writes_and_caller_binding(before, expected):
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        ir.assert_structural_equal(passes.legalize_graph_boundary()(_prepare(before)), _prepare(expected))
 
 
 def test_codegen_does_not_initialize_a_dead_tensor_phi():
@@ -308,6 +426,48 @@ def test_codegen_does_not_initialize_a_dead_tensor_phi():
         cpp = codegen.generate_orchestration(program, main).code
     assert "rt_submit_graph" in cpp
     assert "merged__phi" not in cpp
+
+
+@pl.program
+class LiveGraphPhi:
+    @pl.function(type=pl.FunctionType.AIV)
+    def write(self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        value = pl.load(target, [0, 0], [16, 16])
+        pl.store(value, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, profile: pl.Tensor[[N, 16], pl.FP32], target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = self.write(target)
+        else:
+            merged = self.write(target)
+        self.write(merged)
+        return target
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, profile: pl.Tensor[[N, 16], pl.FP32], target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.layer(profile, target)
+        return target
+
+
+def test_codegen_seeds_live_tensor_phi_with_graph_parameter():
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.derive_call_directions()(_legalize(LiveGraphPhi))
+        program = passes.materialize_runtime_scopes()(program)
+        program = passes.classify_iter_arg_carry()(program)
+        main = program.get_function("main")
+        assert main is not None
+        cpp = codegen.generate_orchestration(program, main).code
+    assert "rt_submit_graph" in cpp
+    assert "Tensor merged" in cpp and " = profile;" in cpp
+    assert "profile.shapes[0]" in cpp
 
 
 if __name__ == "__main__":

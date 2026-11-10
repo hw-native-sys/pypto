@@ -1657,7 +1657,7 @@ class ReturnOnlyPhiRewriter : public IRMutator {
     // The return now uses the caller's descriptor. Remove the dead phi
     // positions as well, leaving the branch calls and other results intact.
     auto prune_yield = [&](const StmtPtr& branch) {
-      return transform_utils::RewriteLastYieldStmt(branch, [&](const YieldStmtPtr& yield) -> StmtPtr {
+      auto body = transform_utils::RewriteLastYieldStmt(branch, [&](const YieldStmtPtr& yield) -> StmtPtr {
         std::vector<ExprPtr> values;
         std::vector<StmtPtr> statements;
         size_t live_index = 0;
@@ -1672,8 +1672,9 @@ class ReturnOnlyPhiRewriter : public IRMutator {
         if (!values.empty()) {
           statements.push_back(std::make_shared<YieldStmt>(std::move(values), yield->span_));
         }
-        return SeqStmts::Flatten(std::move(statements), yield->span_);
+        return statements.empty() ? nullptr : SeqStmts::Flatten(std::move(statements), yield->span_);
       });
+      return body ? body : std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, branch->span_);
     };
     auto result = MutableCopy(rewritten);
     result->return_vars_ = std::move(live_results);

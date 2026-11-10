@@ -46,7 +46,7 @@ namespace codegen {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 OrchestrationStmtCodegen::OrchestrationStmtCodegen(
-    const ProgramPtr& prog, KernelRegistrations* registrations,
+    const ProgramPtr& prog, KernelRegistrations* registrations, const std::vector<VarPtr>& params,
     std::unordered_map<const Var*, std::string> param_to_emit_name, std::set<std::string> param_name_set,
     std::map<std::string, int> param_name_to_orch_index,
     std::unordered_map<std::string, std::string> dist_param_to_ctx_param)
@@ -57,6 +57,12 @@ OrchestrationStmtCodegen::OrchestrationStmtCodegen(
       param_name_to_orch_index_(std::move(param_name_to_orch_index)),
       dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
   declared_var_names_ = param_name_set_;
+  const auto first_tensor = std::find_if(params.begin(), params.end(), [](const VarPtr& param) {
+    return AsTensorTypeLike(param->GetType()) != nullptr;
+  });
+  if (first_tensor != params.end()) {
+    tensor_phi_param_init_ = GetExternalTensorName(emit_name_map_.at(first_tensor->get()));
+  }
   // Function ``Scalar[TASK_ID]`` parameters (and lineage aliases seeded into
   // ``emit_name_map_`` before construction) are live for the whole body.
   // Register them in the TaskId binding maps / live-emit set so

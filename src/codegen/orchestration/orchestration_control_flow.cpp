@@ -11,7 +11,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -664,30 +663,11 @@ void OrchestrationStmtCodegen::VisitStmt_(const IfStmtPtr& if_stmt) {
   // A default-constructed ``Tensor`` is deliberately uninitialised. Seed
   // the phi declaration for a Tensor return_var from a valid Tensor
   // that's already in scope instead. Try sources in order:
-  //   1. The first tensor function parameter (selected by orch arg index,
-  //      not lexical name — picking from ``param_name_set_`` could yield a
-  //      scalar param and emit ``Tensor x = <scalar>;`` which won't compile).
+  //   1. The first tensor function parameter, bound by either the orchestration
+  //      entry prologue or the Graph body prologue.
   //   2. A Var yielded by either branch that's already declared at
-  //      if-entry (an outer iter_arg, or a prior in-body assignment). This
-  //      handles parameterless functions whose branches yield a name
-  //      computed before the if.
-  std::string tensor_phi_init;
-  if (!param_name_to_orch_index_.empty()) {
-    // param_name_to_orch_index_ is keyed by tensor param name only (scalar
-    // params are excluded from this map). Pick the entry with the smallest
-    // orch index to keep the choice deterministic across parameter order.
-    const std::string* first_tensor_name = nullptr;
-    int min_idx = std::numeric_limits<int>::max();
-    for (const auto& [name, idx] : param_name_to_orch_index_) {
-      if (idx < min_idx) {
-        min_idx = idx;
-        first_tensor_name = &name;
-      }
-    }
-    if (first_tensor_name) {
-      tensor_phi_init = GetExternalTensorName(*first_tensor_name);
-    }
-  }
+  //      if-entry (an outer iter_arg, or a prior in-body assignment).
+  std::string tensor_phi_init = tensor_phi_param_init_;
   if (tensor_phi_init.empty()) {
     auto find_in_scope_tensor_var = [&](const StmtPtr& body) -> std::string {
       // The branch body may be wrapped in an AUTO scope by
