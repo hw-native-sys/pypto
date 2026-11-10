@@ -4424,7 +4424,7 @@ class TestDCERegression:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
@@ -4511,7 +4511,7 @@ class TestDCERegression:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
@@ -4575,7 +4575,7 @@ class TestDCERegression:
                     out_0_rv = pl.yield_(out_0_store)
                 return out_0_rv
 
-            @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],

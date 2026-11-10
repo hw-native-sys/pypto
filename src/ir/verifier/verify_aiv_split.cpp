@@ -73,8 +73,8 @@ std::optional<BoundaryMemoryContract> GetBoundaryMemoryContract(const CallPtr& o
         MemorySpace::Acc, MemorySpace::Vec, "cube", "half to the vector",
         " Only a cube-produced value reaches the vector lane through this boundary: Acc is the "
         "matmul result the c2v pipe can push. A Vec operand is vector-produced (pl.load / "
-        "pl.full) and already lives on the AIV lane — drop the pl.aiv_shard and let the implicit "
-        "affinity-gated split halve it. A Mat operand is not a supported producer pipe; move it "
+        "pl.full) and already lives on the AIV lane — drop the pl.aiv_shard and author "
+        "its shape and offsets per AIV lane. A Mat operand is not a supported producer pipe; move it "
         "through a pl.matmul, or load it on the vector lane instead."};
   }
   if (IsOp(op, "tile.aic_gather")) {
@@ -453,19 +453,10 @@ void CheckSingleTransportClass(const FunctionSplitFacts& facts, std::vector<Diag
 //       type-checks either way, so a body seeded with a half-shaped tile.full and
 //       fed by a shard from iteration 1 onwards defeats the same passes with no
 //       init-side signal.
-//   (j) A boundary result must be consumed in the region that produced it, when
-//       the consuming region is DATA-PARALLEL. Both paths such a region can take
-//       mishandle one from elsewhere: with no boundary op of its own it halves
-//       every tile it computes along the split axis and localizes every store
-//       offset to the lane, so an already-per-lane value is halved twice and
-//       offset twice; with one, nothing is re-halved but AnalyzeSplitBody is
-//       seeded per REGION, so the incoming value is misjudged as full width. A
-//       mode=NONE region takes neither path and is exempt — that carve-out is
-//       what keeps the cross-core comm-kernel shape (shard in one region, consume
-//       in a NONE one) legal, and it is why (j) is gated rather than universal.
-//       Keyed on the DEFINITION being a boundary op, not on the value being
-//       per-lane: a per-lane value one op removed from the boundary is legal and
-//       shipped (see the note on CheckBoundaryRegionLocality).
+//   (j) A boundary result remains owned by its data-parallel region. A sibling
+//       region may have a different split mode; preserve this lexical contract
+//       even though region computation is now always explicitly authored.
+//       NONE regions retain the existing cross-region communication exception.
 //
 //   (k) A function must not mix a no-split crossing with a split one. Every
 //       pl.aiv_shard / pl.aic_gather in one function rides ONE logical
@@ -657,8 +648,8 @@ class SplitAivStructuralVerifier : public IRVisitor {
         }
         if (data_parallel) {
           // (j) A boundary result belongs to the region that produced it. Gated
-          // on the data-parallel modes for the same reason as (b) below: only
-          // they rewrite the region's tiles and offsets.
+          // on the data-parallel modes for the same reason as (b) below: their boundaries
+          // carry a split axis.
           CheckBoundaryRegionLocality(op);
           // (b) A reduce over the split axis yields a partial per-lane result.
           // Gated on the data-parallel modes: a NONE region has no split axis,
@@ -906,21 +897,10 @@ class SplitAivStructuralVerifier : public IRVisitor {
 
   /// (j) A boundary result must be consumed in the region that produced it.
   ///
-  /// Runs only in a DATA-PARALLEL region. Both lowering paths such a region can
-  /// take mishandle a boundary result from ANOTHER region, for different reasons:
-  ///   * IMPLICIT (no boundary op written in this region): LowerAutoVectorSplit
-  ///     halves every tile the region computes along the split axis and localizes
-  ///     every store offset to the lane, so an already-per-lane value is halved
-  ///     twice and offset twice. The offset corruption is silent; the shape
-  ///     corruption escapes pypto and surfaces from ptoas.
-  ///   * EXPLICIT (this region writes its own aiv_shard / aic_gather): nothing is
-  ///     re-halved, but AnalyzeSplitBody seeds its half-width set per REGION,
-  ///     so the incoming value is misjudged as full width and the region is
-  ///     rejected with a message that is factually wrong about it.
-  /// A mode=NONE region takes neither path -- no split axis, no halving, no
-  /// scan -- so it may legitimately consume a boundary result produced elsewhere.
-  /// That is the shape the cross-core comm kernels use, and it is why this check
-  /// is gated rather than applied to every region.
+  /// Runs only in a DATA-PARALLEL region.
+  /// Boundary results keep their lexical region ownership. A sibling region
+  /// may use a different split mode; removing implicit body halving does not
+  /// change that contract. NONE regions retain the existing exception.
   ///
   /// Keyed on the DEFINITION being a boundary op, not on the value being
   /// per-lane. A per-lane value one op removed from the boundary (a `row_scale`
@@ -946,20 +926,16 @@ class SplitAivStructuralVerifier : public IRVisitor {
       if (!def.call || !IsBoundaryOp(def.call)) continue;
       if (def.region == cur_region_) continue;  // produced right here -- the legal case
       reported.push_back(var.get());
-      Err(op->span_,
-          "'" + var->name_hint_ + "' is a " + BoundaryOpDslName(def.call) +
-              " result produced in a DIFFERENT pl.split_aiv region, but '" + op->op_->name_ +
-              "' reads it inside this data-parallel one. A data-parallel region (mode=UP_DOWN / "
-              "LEFT_RIGHT) mishandles a boundary result it did not produce, whichever way it lowers: "
-              "if the region has no boundary op of its own the compiler halves every tile it computes "
-              "along the split axis and localizes every store offset to the lane, so an ALREADY "
-              "per-lane value is halved a second time and offset twice; and if the region does write "
-              "its own boundary op, nothing is re-halved but the half-width scan is seeded per region, "
-              "so the incoming value is misjudged as full width. Fix it one of two ways: (1) move the "
-              "ops that read it into the region that produced it; or (2) move the " +
-              BoundaryOpDslName(def.call) +
-              " call into this region. A mode=SplitMode.NONE region has no split axis and halves "
-              "nothing, so it MAY consume a boundary result produced elsewhere.");
+      Err(op->span_, "'" + var->name_hint_ + "' is a " + BoundaryOpDslName(def.call) +
+                         " result produced in a DIFFERENT pl.split_aiv region, but '" + op->op_->name_ +
+                         "' reads it inside this data-parallel one. A data-parallel region (mode=UP_DOWN / "
+                         "LEFT_RIGHT) may consume a boundary result only in the region that produced it. "
+                         "The result's lane-local shape and lifetime belong to that region. "
+                         "Fix it one of two ways: (1) move the "
+                         "ops that read it into the region that produced it; or (2) move the " +
+                         BoundaryOpDslName(def.call) +
+                         " call into this region. A mode=SplitMode.NONE region may consume a boundary result "
+                         "produced elsewhere under the existing full-width region contract.");
     }
   }
 

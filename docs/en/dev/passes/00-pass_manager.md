@@ -500,7 +500,7 @@ The PTO-oriented tile stage of `Default` is:
 8. `InferTileMemorySpace`
 9. [`InsertMxScaleAddr`](23-insert_mx_scale_addr.md) (Ascend950 MX path; inserts internal scale-address bindings after memory spaces are resolved)
 10. [`ResolveBackendOpLayouts`](24-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
-11. [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) (live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form before ExpandMixedKernel)
+11. [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) (prepares explicit `split_aiv` boundaries before ExpandMixedKernel; preserves authored bodies and rejects mixed function-level AUTO splitting)
 12. `ExpandMixedKernel`
 13. [`InjectGMPipeBuffer`](27-inject_gm_pipe_buffer.md)
 14. [`SplitVectorKernel`](28-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)

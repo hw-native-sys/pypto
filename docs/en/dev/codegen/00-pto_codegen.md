@@ -363,7 +363,7 @@ not the FP32 accumulator. The accumulator itself remains FP32 for other users.
   tpop result is not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place).
   The split-axis extent is one exception: it stays per-lane on the TPOP operands, because that is
   what tells the ISA where lane 1's band begins — which is also why a per-lane extent the compiler
-  could not verify must never get there. A `pl.split` or `pl.split_aiv` boundary whose split-axis extent is a
+  could not verify must never get there. An explicit `pl.split_aiv` boundary whose split-axis extent is a
   runtime value keeps the FULL box on the popped tile (`split_axis::WithFullSplitAxisValid`) so the
   even code's band lands on the box half, and carries the lane's own extent on the consumers
   instead.

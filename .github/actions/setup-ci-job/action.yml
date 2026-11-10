@@ -615,7 +615,7 @@ runs:
           mkdir -p "$wheel_cache_dir"
           tmp_wheel="$(mktemp "$wheel_cache_dir/.ptoas-${PTOAS_ARCH}.XXXXXX")"
           trap 'rm -f "$tmp_wheel"' EXIT
-          curl --fail --location --retry 3 --retry-all-errors \
+          curl --fail --location --retry 3 \
             "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
             -o "$tmp_wheel"
           echo "${PTOAS_SHA256}  $tmp_wheel" | sha256sum -c -

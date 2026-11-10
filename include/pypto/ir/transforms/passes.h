@@ -806,21 +806,11 @@ Pass ResolveBackendOpLayouts();
 Pass ExpandMixedKernel();
 
 /**
- * @brief Lower AUTO pl.split mixed InCore functions into the explicit split_aiv
- *        form before ExpandMixedKernel (RFC #1300 staged convergence).
+ * @brief Lower explicit AIV regions without implicitly halving their bodies.
  *
- * For each mixed InCore function carrying a function-level split mode (UP_DOWN /
- * LEFT_RIGHT), inserts tile.aiv_shard at C->V boundaries and tile.aic_gather at
- * V->C boundaries, halves only the VECTOR sub-region (affinity-gated reuse of the
- * split_axis machinery), injects get_subblock_idx, and stamps split + split_aiv.
- * ExpandMixedKernel then folds aiv_shard/aic_gather into split-stamped tpush/tpop
- * via its op-driven boundary arm, and SplitVectorKernel takes its "already
- * explicit" arm (attribute stamping only).
- *
- * This is the LIVE auto-split lowering path: it always runs, immediately before
- * ExpandMixedKernel. SplitVectorKernel's former per-op halving driver was deleted
- * once this pass became unconditional — the halving machinery now lives only in
- * split_axis_utils, shared by this pass.
+ * Retains regions for ExpandMixedKernel, localizes explicit boundary valid
+ * extents, and stamps split_aiv. Mixed function-level AUTO splitting is rejected
+ * with a migration diagnostic. The public name is retained for compatibility.
  */
 Pass LowerAutoVectorSplit();
 

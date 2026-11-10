@@ -58,7 +58,7 @@ Keep the English and Chinese documentation synchronized.
 | 22 | [InferTileMemorySpace](22-infer_tile_memory_space.md) | Infers the on-chip `MemorySpace` of every tile and inserts `tile.move` to legalize mismatches |
 | 23 | [InsertMxScaleAddr](23-insert_mx_scale_addr.md) | Inserts `tile.tget_scale_addr` before MX matmul consumers after memory spaces are resolved |
 | 24 | [ResolveBackendOpLayouts](24-resolve_backend_op_layouts.md) | Repairs backend-required tile layouts for elementwise ops |
-| 25 | [LowerAutoVectorSplit](25-lower_auto_vector_split.md) | Converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form |
+| 25 | [LowerAutoVectorSplit](25-lower_auto_vector_split.md) | Prepares authored `split_aiv` regions and rejects implicit mixed-kernel splitting |
 | 26 | [ExpandMixedKernel](26-expand_mixed_kernel.md) | Splits mixed InCore functions into separate AIC (Cube) and AIV (Vector) kernels |
 | 27 | [InjectGMPipeBuffer](27-inject_gm_pipe_buffer.md) | Injects the `__gm_pipe_buffer` workspace for GM-routed cross-core pipes (Ascend910) |
 | 28 | [SplitVectorKernel](28-split_vector_kernel.md) | Stamps split attributes and handles the no-split dual-AIV path |

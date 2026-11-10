@@ -165,14 +165,14 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | Form | Scope Kind | Notes |
 | ---- | ---------- | ----- |
 | `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | Fixed-boundary outline at CORE_GROUP |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | InCore + cross-core split hint |
+| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | Legacy split metadata; non-NONE mixed-kernel splits are rejected |
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.cross_core_slot(slot_num=N)])` | `InCore` | InCore + cross-core pipe slot count |
 | `pl.at(level=pl.Level.HOST)` *(or any non-`CORE_GROUP` level)* | `Hierarchy` | Distributed hierarchy scope |
 | `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
 | `pl.graph("name", deps=[...]) as done` | `Graph` | Recordable orchestration region; deps/capture are optional outer-task metadata, and the required name identifies the outlined function — see [OutlineGraphScopes](../passes/09-outline_graph_scopes.md) |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd` (for-form wraps inner `InCore`) | SPMD multi-block dispatch — see [pl.spmd](#plspmd-multi-block-dispatch) |
-| `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
-| `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |
+| `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Legacy split metadata on the inner InCore; non-NONE mixed-kernel splits are rejected |
+| `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); compatible with explicit `pl.split_aiv` regions |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives) |
 | `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/54-materialize_runtime_scopes.md) |
 
@@ -206,12 +206,13 @@ are compile-time errors naming the tensor and parameter index. On the empty
 path, returned tensors keep their existing contents; no output is initialized.
 See [LegalizeSpmdLaunches](../passes/45-legalize_spmd_launches.md).
 
-Optional `optimizations=[...]`. The entries are orthogonal and may be combined
-in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):
+Optional `optimizations=[...]`. Mixed kernels use `pl.split_aiv` regions with
+explicit shard/gather and authored per-lane computation. Set pipe capacity
+independently with `optimizations=[pl.cross_core_slot(slot_num=4)]`:
 
 | Entry | Form | Effect |
 | ----- | ---- | ------ |
-| `pl.split(MODE)` | both | Sets the inner InCore's `split_` field (cross-core transfer hint, consumed by `ExpandMixedKernel` / `MemoryReuse`). The with-form gains an inner `InCoreScopeStmt` wrapper around the call. |
+| `pl.split(MODE)` | both | Sets legacy inner InCore split metadata. UP_DOWN/LEFT_RIGHT are rejected for mixed kernels; standalone AIV/AIC splitting remains supported. It cannot coexist with explicit split regions, even with MODE=NONE. |
 | `pl.cross_core_slot(slot_num=N)` | both | Sets the inner InCore's `slot_num` attr — the slot count (ring depth) of the automatic cross-core pipe, consumed by `ExpandMixedKernel`. Sizes a data channel only; it does **not** partition work, so it coexists with `pl.split_aiv` regions where `pl.split(...)` does not. Omit to keep the default depth of 2 per active direction. |
 
 `pl.cross_core_slot(slot_num=N, local_slot_num=L)` additionally sets the A2/A3
@@ -219,8 +220,8 @@ local consumer depth (`1 <= L <= N`). Omitting `L` preserves the ring-depth-size
 reserve. An explicit local depth is unsupported on A5. See
 [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
 
-> `pl.split(MODE, slot_num=N)` is a deprecated alias for the slot count and warns
-> — see [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
+> `pl.split(MODE, slot_num=N)` is deprecated and does not restore mixed-kernel
+> implicit splitting. Use `pl.cross_core_slot(slot_num=N)` — see [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
 
 ### Yield Statement
 

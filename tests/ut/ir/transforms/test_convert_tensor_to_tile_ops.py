@@ -18,7 +18,6 @@ import pytest
 from pypto import DataType, InternalError, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir import IRBuilder
-from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
 from pypto.language.parser.text_parser import parse
@@ -7290,8 +7289,8 @@ class TestConvertCrossCoreSplitOps:
     ``tensor.aiv_shard`` / ``tensor.aic_gather`` (emitted by ``pl.aiv_shard`` /
     ``pl.aic_gather`` inside a ``for aiv_id in pl.split_aiv(...)`` region) 1:1 to
     ``tile.aiv_shard`` / ``tile.aic_gather``, re-attaching the Vec boundary memory
-    the tile deducer drops so the result is byte-identical to the AUTO
-    ``pl.split`` path (LowerAutoVectorSplit).
+    the tile deducer drops so explicit shard/gather results retain their
+    per-lane shape and producing/consuming memory-space contract.
 
     Each Before is authored the way a user writes one — a plain ``@pl.function``
     (Opaque) holding a ``pl.at(level=CORE_GROUP)`` scope — and the pass input is
@@ -7539,161 +7538,27 @@ class TestConvertCrossCoreSplitOps:
         After = self._convert(Source)
         ir.assert_structural_equal(_incore_only(After), _incore_only(Expected))
 
-    def test_explicit_shard_type_matches_auto_path(self):
-        """AUTO oracle: the ``tile.aiv_shard`` result type produced by the explicit
-        ``tensor.aiv_shard`` conversion is structurally identical to the one the
-        AUTO ``pl.split`` path synthesizes via LowerAutoVectorSplit (same halved
-        shape, Vec memory, no residual view)."""
-        span = ir.Span.unknown()
-
-        # Explicit path: pl.aiv_shard(matmul) → tile.aiv_shard (Vec half).
+    def test_explicit_shard_preserves_boundary_shape_and_memory(self):
+        """Tensor-to-tile conversion keeps the explicit per-lane boundary type."""
         explicit = passes.convert_tensor_to_tile_ops()(
             self._parse_split_kernel("aiv_shard", "UP_DOWN", [64, 128])
         )
-        explicit_call = self._find_split_op(explicit, ir.get_op("tile.aiv_shard").name)
+        call = self._find_split_op(explicit, ir.get_op("tile.aiv_shard").name)
+        assert isinstance(call.type, ir.TileType)
+        for dim, expected in zip(call.type.shape, [64, 128], strict=True):
+            assert isinstance(dim, ir.ConstInt) and dim.value == expected
+        assert call.type.memory_space == MemorySpace.Vec
 
-        # AUTO path: a mixed InCore function whose C->V tile.move boundary
-        # LowerAutoVectorSplit rewrites into tile.aiv_shard. Built at the tile level
-        # (the pass runs post-InferTileMemorySpace), so run it under an empty
-        # PassContext to skip the DSL-level roundtrip check on this hand-built IR
-        # (mirrors test_lower_auto_vector_split._lower).
-        qk = ir.Var("qk", ir.TileType([128, 128], DataType.FP32, None, None, MemorySpace.Mat), span)
-        out_0 = ir.Var("out_0", ir.TensorType([128, 128], DataType.FP32), span)
-        move = tile_ops.move(qk, MemorySpace.Vec, span=span)
-        assert isinstance(move.type, ir.TileType)
-        popped = ir.Var(
-            "popped",
-            ir.TileType(move.type.shape, DataType.FP32, None, move.type.tile_view, MemorySpace.Vec),
-            span,
-        )
-        add = tile_ops.add(popped, popped, span)
-        y = ir.Var("y", add.type, span)
-        store = tile_ops.store(y, [0, 0], out_0, span=span)
-        out_store = ir.Var("out_store", store.type, span)
-        auto_func = ir.Function(
-            "split_auto",
-            [(qk, ir.ParamDirection.In), (out_0, ir.ParamDirection.Out)],
-            [out_0.type],
-            ir.SeqStmts(
-                [
-                    ir.AssignStmt(popped, move, span),
-                    ir.AssignStmt(y, add, span),
-                    ir.AssignStmt(out_store, store, span),
-                    ir.ReturnStmt([out_store], span),
-                ],
-                span,
-            ),
-            span,
-            ir.FunctionType.InCore,
-            attrs={"split": ir.SplitMode.UP_DOWN},
-        )
-        auto_program = ir.Program([auto_func], "auto", span)
-        auto_lowered = passes.lower_auto_vector_split()(auto_program)
-        auto_call = _find_first_call_to(
-            _require_function(auto_lowered, "split_auto"), ir.get_op("tile.aiv_shard").name
-        )
-        assert auto_call is not None
-
-        # The two aiv_shard result types must be structurally identical.
-        ir.assert_structural_equal(explicit_call.type, auto_call.type)
-
-    def test_explicit_gather_type_matches_auto_path(self):
-        """AUTO oracle for the mirror direction: the ``tile.aic_gather`` result type
-        from the explicit ``tensor.aic_gather`` conversion is structurally identical
-        to the one LowerAutoVectorSplit synthesizes (same doubled shape, Mat memory).
-
-        This is the direction the boundary memory contract actually flipped
-        (producer-side Vec -> consuming-lane Mat), so it is what guards the
-        "the two lowering paths cannot drift apart" claim.
-        """
-        span = ir.Span.unknown()
-
-        # Explicit path: pl.aic_gather(vector value) → tile.aic_gather (Mat full).
+    def test_explicit_gather_preserves_boundary_shape_and_memory(self):
+        """The vector half becomes a full tile on the cube's consuming memory."""
         explicit = passes.convert_tensor_to_tile_ops()(
             self._parse_split_kernel("aic_gather", "UP_DOWN", [256, 128])
         )
-        explicit_call = self._find_split_op(explicit, ir.get_op("tile.aic_gather").name)
-
-        # AUTO path: a mixed InCore function whose V->C tile.move boundary
-        # LowerAutoVectorSplit rewrites into tile.aic_gather. Built at the tile
-        # level for the same reason as the shard oracle above.
-        #
-        # The gather source is VECTOR-PRODUCED (load -> add), not a parameter: the
-        # pass's precondition is that the V->C boundary source has already been
-        # halved by the affinity gate, so the gather doubles HALF -> FULL. Sourcing
-        # it from a full-width Vec param instead is out of contract — nothing
-        # inside the region partitions it, so halving the add's result alone would
-        # emit tile.add([256, 128], [256, 128]) -> [128, 128], and the pass now
-        # rejects that (see
-        # test_lower_auto_vector_split.py::test_vector_op_rejects_unsharded_full_width_operand).
-        # Hence the [256, 128] tensor + tile.load: the load halves to the
-        # [128, 128] per-lane half, add carries it, and the gather doubles that
-        # back to the [256, 128] FULL tile the explicit path also produces.
-        #
-        # The gathered tile is then CONSUMED (move -> Left, matmul, store of the
-        # Acc result — tile.store takes only {Vec, Acc}, never Mat). Leaving it
-        # dead would let a future DCE drop the synthesized gather.
-        vec_t = ir.Var("vec_t", ir.TensorType([256, 128], DataType.FP32), span)
-        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP32, None, None, MemorySpace.Right), span)
-        out_0 = ir.Var("out_0", ir.TensorType([256, 128], DataType.FP32), span)
-        load = tile_ops.load(vec_t, [0, 0], [256, 128], [256, 128], target_memory=MemorySpace.Vec, span=span)
-        vec = ir.Var("vec", load.type, span)
-        add = tile_ops.add(vec, vec, span)
-        vec_h = ir.Var("vec_h", add.type, span)
-        move = tile_ops.move(vec_h, MemorySpace.Mat, span=span)
-        assert isinstance(move.type, ir.TileType)
-        gathered = ir.Var("gathered", move.type, span)
-        to_left = tile_ops.move(gathered, MemorySpace.Left, span=span)
-        left = ir.Var("left", to_left.type, span)
-        matmul = tile_ops.matmul(left, rhs, span)
-        acc = ir.Var("acc", matmul.type, span)
-        store = tile_ops.store(acc, [0, 0], out_0, span=span)
-        out_store = ir.Var("out_store", store.type, span)
-        auto_func = ir.Function(
-            "split_auto",
-            [
-                (vec_t, ir.ParamDirection.In),
-                (rhs, ir.ParamDirection.In),
-                (out_0, ir.ParamDirection.Out),
-            ],
-            [out_0.type],
-            ir.SeqStmts(
-                [
-                    ir.AssignStmt(vec, load, span),
-                    ir.AssignStmt(vec_h, add, span),
-                    ir.AssignStmt(gathered, move, span),
-                    ir.AssignStmt(left, to_left, span),
-                    ir.AssignStmt(acc, matmul, span),
-                    ir.AssignStmt(out_store, store, span),
-                    ir.ReturnStmt([out_store], span),
-                ],
-                span,
-            ),
-            span,
-            ir.FunctionType.InCore,
-            attrs={"split": ir.SplitMode.UP_DOWN},
-        )
-        auto_program = ir.Program([auto_func], "auto", span)
-        # Property verification AND the print->parse roundtrip are both on: every
-        # value the halving touches is lane-local here, so the pass output is
-        # well-typed and re-parsable. The roundtrip is what caught the defect this
-        # fixture used to encode (a halved result over a full-width operand), so it
-        # stays enabled to keep that regression visible.
-        with passes.PassContext(
-            [
-                passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
-                make_roundtrip_instrument(),
-            ]
-        ):
-            auto_lowered = passes.lower_auto_vector_split()(auto_program)
-        auto_call = _find_first_call_to(
-            _require_function(auto_lowered, "split_auto"), ir.get_op("tile.aic_gather").name
-        )
-        assert auto_call is not None
-
-        assert isinstance(explicit_call.type, ir.TileType)
-        assert explicit_call.type.memory_space == MemorySpace.Mat
-        ir.assert_structural_equal(explicit_call.type, auto_call.type)
+        call = self._find_split_op(explicit, ir.get_op("tile.aic_gather").name)
+        assert isinstance(call.type, ir.TileType)
+        for dim, expected in zip(call.type.shape, [256, 128], strict=True):
+            assert isinstance(dim, ir.ConstInt) and dim.value == expected
+        assert call.type.memory_space == MemorySpace.Mat
 
 
 class TestSynthesizedOpSpans:

@@ -659,10 +659,8 @@ void BindPass(nb::module_& m) {
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("lower_auto_vector_split", &pass::LowerAutoVectorSplit,
-             "Create a pass that lowers AUTO pl.split mixed InCore functions into the explicit\n"
-             "split_aiv form (tile.aiv_shard at C->V, tile.aic_gather at V->C, halved vector\n"
-             "sub-region, get_subblock_idx) BEFORE ExpandMixedKernel. This is the live auto-split\n"
-             "lowering path; SplitVectorKernel then only stamps attrs for the split_aiv functions.");
+             "Preserve explicit AIV regions and localize boundary valid extents. "
+             "Reject mixed function-level AUTO splitting; keep authored shapes and offsets.");
   passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
              "Create a backend-gated pass that injects the __gm_pipe_buffer workspace parameter\n"
              "into functions containing cross-core initialize_pipe ops, propagating the parameter\n"

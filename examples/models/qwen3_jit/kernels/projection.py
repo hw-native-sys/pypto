@@ -118,12 +118,10 @@ def out_projection_residual(
     for ob in pl.parallel(0, HIDDEN // Q_OUT_CHUNK, 2):
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
             name_hint="out_proj_residual",
         ):
             for oi in pl.range(ob, ob + 2):
                 o0 = oi * Q_OUT_CHUNK
-                hidden_chunk = hidden_states[:, o0 : o0 + Q_OUT_CHUNK]
 
                 o_acc = pl.create_tensor([BATCH, Q_OUT_CHUNK], dtype=pl.FP32)
 
@@ -137,8 +135,12 @@ def out_projection_residual(
                     else:
                         o_acc = pl.matmul_acc(o_acc, a_chunk, w_chunk)
 
-                resid = pl.cast(hidden_chunk, target_type=pl.FP32)
-                resid1_tile = pl.assemble(resid1_tile, pl.add(o_acc, resid), [0, o0])
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    o_half = pl.aiv_shard(o_acc)
+                    row = lane * (BATCH // 2)
+                    hidden_half = hidden_states[row : row + BATCH // 2, o0 : o0 + Q_OUT_CHUNK]
+                    resid = pl.cast(hidden_half, target_type=pl.FP32)
+                    resid1_tile = pl.assemble(resid1_tile, pl.add(o_half, resid), [row, o0])
     return resid1_tile
 
 
@@ -153,12 +155,10 @@ def down_projection_residual(
     for db in pl.parallel(0, HIDDEN // DOWN_N_CHUNK, 2):
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
             name_hint="down_proj_residual",
         ):
             for di in pl.range(db, db + 2):
                 d0 = di * DOWN_N_CHUNK
-                resid_chunk = resid1_tile[:, d0 : d0 + DOWN_N_CHUNK]
 
                 down_acc = pl.create_tensor([BATCH, DOWN_N_CHUNK], dtype=pl.FP32)
 
@@ -172,6 +172,10 @@ def down_projection_residual(
                     else:
                         down_acc = pl.matmul_acc(down_acc, mlp_chunk, w_chunk)
 
-                out_chunk = pl.add(down_acc, resid_chunk)
-                out = pl.assemble(out, pl.cast(out_chunk, target_type=pl.BF16), [0, d0])
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    down_half = pl.aiv_shard(down_acc)
+                    row = lane * (BATCH // 2)
+                    resid_half = resid1_tile[row : row + BATCH // 2, d0 : d0 + DOWN_N_CHUNK]
+                    out_chunk = pl.add(down_half, resid_half)
+                    out = pl.assemble(out, pl.cast(out_chunk, target_type=pl.BF16), [row, d0])
     return out

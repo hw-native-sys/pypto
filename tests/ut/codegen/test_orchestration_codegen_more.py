@@ -2127,7 +2127,7 @@ int main() {{
 
         @pl.program
         class MixedOrderProgram:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],

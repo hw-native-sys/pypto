@@ -126,10 +126,11 @@ pinning it to the vector lane would let the matmul race past the peer data it
 waits on.
 
 The flag is orthogonal to affinity (it constrains replication, not placement).
-Its only consumer is `LowerAutoVectorSplit`'s `pl.split_aiv` region placement
-stamp, which pins a region's no-duplicate calls to the AIV lane; see
+`ExpandMixedKernel` applies it when consuming `pl.split_aiv` regions, pinning
+a region's core-agnostic no-duplicate calls to the AIV lane. Software-pipeline
+analysis also treats these calls as non-replicable; see
 `docs/en/dev/ir/05-operators.md` and
-`docs/en/dev/passes/25-lower_auto_vector_split.md`.
+`docs/en/dev/passes/26-expand_mixed_kernel.md`.
 
 **Comm ops written outside every region are still duplicated onto both lanes,
 and nothing diagnoses it.** Putting the comm phase in a `pl.split_aiv` region is

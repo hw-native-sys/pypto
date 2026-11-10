@@ -11,19 +11,19 @@
 Mixed kernel: cube (AIC) and vector (AIV) work inside one scope.
 
 An Ascend core group pairs a cube unit with vector units. A matmul runs on the
-cube; the bias-add that follows runs on the vector units. A *mixed* kernel puts
-both in one scope and adds ``pl.split(...)``, which shards the vector work across
-two lanes and inserts cube/vector transfers. This example uses a one-slot ring
-to fit safely; it demonstrates mixed dataflow, not a double-buffering speedup.
+cube; the bias-add that follows runs on the vector units. Written as two separate
+scopes, the vector units idle while the cube works and vice versa. A *mixed*
+kernel puts both in one scope and explicitly shards the cube result for two AIV
+lanes. Each lane authors its own bias slice and output address.
 
 Kernels:
   staged_matmul_bias    — TWO scopes: cube finishes, then vector starts
-  mixed_matmul_bias     — ONE scope + pl.split(UP_DOWN)
-  mixed_matmul_bias_lr  — ONE scope + pl.split(LEFT_RIGHT)
+  mixed_matmul_bias     — ONE scope + explicit UP_DOWN shard
+  mixed_matmul_bias_lr  — ONE scope + explicit LEFT_RIGHT shard
 
 Concepts introduced:
-  - pl.split(pl.SplitMode.UP_DOWN) as a pl.at optimization
-  - One scope instead of two dispatches for a cube-then-vector chain
+  - pl.split_aiv regions with explicit pl.aiv_shard boundaries
+  - Why one scope beats two for a cube-then-vector chain
   - UP_DOWN (row axis) vs LEFT_RIGHT (column axis)
   - pl.cross_core_slot(slot_num=) — retuning the cube/vector ring depth
 
@@ -66,21 +66,20 @@ def staged_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[
 def mixed_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[pl.Tensor]):
     """``a @ b + bias`` as ONE scope, split along the row axis.
 
-    ``pl.split(pl.SplitMode.UP_DOWN)`` marks the scope as mixed: the compiler
-    shards the vector work by rows and inserts the cube-to-vector transfer.
+    ``pl.aiv_shard`` partitions the cube result by rows. The region binds the
+    lane ID used to address each lane's bias and output rows.
     """
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        # The crossing [128,128] FP32 tile needs 64 KiB per ring slot. Each
-        # vector lane also needs separate 32 KiB bias and output buffers: the
-        # Ascend910 load/TPOP safety guard forbids their in-place reuse. Two
-        # slots would need 192 KiB total, above the safe 184 KiB Vec budget.
-        # One slot keeps this example at 128 KiB; it is not double buffered.
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
+        # One pipe slot leaves room for per-lane bias and output buffers.
+        optimizations=[pl.cross_core_slot(slot_num=1)],
         name_hint="mixed_up_down",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)  # cube (AIC)
-        out[:] = pl.add(acc, bias)  # vector (AIV)
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            half = pl.aiv_shard(acc)
+            row = lane * (M // 2)
+            out[row : row + M // 2, :] = pl.add(half, bias[row : row + M // 2, :])
     return out
 
 
@@ -89,12 +88,14 @@ def mixed_matmul_bias_lr(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Ou
     """Same as :func:`mixed_matmul_bias`, halved along the column axis."""
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        # The column split has the same per-lane footprint as the row split.
-        optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT), pl.cross_core_slot(slot_num=1)],
+        optimizations=[pl.cross_core_slot(slot_num=1)],
         name_hint="mixed_left_right",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)
-        out[:] = pl.add(acc, bias)
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+            half = pl.aiv_shard(acc)
+            col = lane * (N // 2)
+            out[:, col : col + N // 2] = pl.add(half, bias[:, col : col + N // 2])
     return out
 
 

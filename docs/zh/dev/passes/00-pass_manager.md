@@ -496,7 +496,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 8. `InferTileMemorySpace`
 9. [`InsertMxScaleAddr`](23-insert_mx_scale_addr.md)（Ascend950 MX 路径；在内存空间解析后插入内部 scale 地址绑定）
 10. [`ResolveBackendOpLayouts`](24-resolve_backend_op_layouts.md)（pass 内部已自动归一化语句结构）
-11. [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md)（在用自动拆分下降路径；在 ExpandMixedKernel 之前把 AUTO `pl.split` 混合 InCore 函数转换为显式 `split_aiv` 形态）
+11. [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md)（在 ExpandMixedKernel 之前准备显式 `split_aiv` 边界；保留用户编写的 body，并拒绝混合函数级 AUTO 拆半）
 12. `ExpandMixedKernel`
 13. [`InjectGMPipeBuffer`](27-inject_gm_pipe_buffer.md)
 14. [`SplitVectorKernel`](28-split_vector_kernel.md)（仅为 split_aiv 函数打属性 + 处理无拆分双 AIV 路径）

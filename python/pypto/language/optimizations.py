@@ -72,12 +72,11 @@ class Optimization:
 
 @dataclass(frozen=True)
 class Split(Optimization):
-    """Cross-core data-transfer split hint.
+    """Legacy function-level cross-core split hint.
 
-    Sets ``ScopeStmt::split_`` on the enclosing ``pl.at`` scope; that metadata
-    is consumed by the ``ExpandMixedKernel`` pass via the outlined function's
-    ``SplitMode``. ``optimizations=[pl.split(mode)]`` lowers the scope to
-    ``ScopeKind::InCore`` with the split metadata attached.
+    Mixed kernels no longer support implicit UP_DOWN/LEFT_RIGHT splitting.
+    Use ``pl.split_aiv`` with explicit ``pl.aiv_shard`` / ``pl.aic_gather`` and
+    per-lane shapes and offsets. Use ``pl.cross_core_slot`` to size pipe slots.
 
     Args:
         mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or

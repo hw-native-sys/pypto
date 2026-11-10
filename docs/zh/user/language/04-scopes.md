@@ -74,16 +74,14 @@ torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
 
 | 关键字 | 含义 |
 | ------ | ---- |
-| `optimizations=[pl.split(mode)]` | 被 outline kernel 的跨核切分模式 |
 | `optimizations=[pl.cross_core_slot(slot_num=N)]` | 自动跨核管道的环深度 |
 | `name_hint="..."` | outline 出的函数名 |
 
-`optimizations=` 的条目必须在调用点内联书写 —— 解析器读的是 AST，因此用变量拼出来的列表不被接受。`pl.split` 与 `pl.cross_core_slot` 彼此正交、可自由组合：一个切分工作，一个给通道定尺寸。
+`optimizations=` 的条目必须在调用点内联书写 —— 解析器读的是 AST，因此用变量拼出来的列表不被接受。`pl.cross_core_slot` 给通道定尺寸；scope 内的显式 `pl.split_aiv` 区域描述每 lane 的工作。
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
-                          pl.cross_core_slot(slot_num=4)]):
+           optimizations=[pl.cross_core_slot(slot_num=4)]):
     ...
 ```
 
@@ -145,8 +143,10 @@ torch.testing.assert_close(out, X + Y, rtol=1e-4, atol=1e-4)
 
 | `mode=` | 每条 lane 拿到 |
 | ------- | -------------- |
-| `pl.SplitMode.UP_DOWN` / `LEFT_RIGHT` | 每块 tile 的一半（按行 / 按列）—— 数据并行 |
+| `pl.SplitMode.UP_DOWN` / `LEFT_RIGHT` | 显式 shard/gather 按行或列分片/聚合；用户编写每 lane 计算 |
 | `pl.SplitMode.NONE` | **完整**函数体；由你通过 `aiv_id` 分派互不相交的工作 —— 任务并行 |
+
+区域不再隐式拆半计算 tile 或改写 load/store 偏移；没有跨核数据的区域也一样。用户用 lane ID 明确每 lane 的切片与输出地址。
 
 **只要开了一个区域，整个函数的规则就变了。** 此后区域拥有向量计算的全部放置决定权，因此向量计算必须写在区域里：
 

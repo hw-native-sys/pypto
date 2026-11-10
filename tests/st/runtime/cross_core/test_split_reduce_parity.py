@@ -88,17 +88,24 @@ def split_updown_reshape(
     y: pl.Out[pl.Tensor[[T, C], pl.BF16]],
     dummy_out: pl.Out[pl.Tensor[[NTASK * MM_M, MM_N], pl.BF16]],
 ):
-    for t in pl.spmd(NTASK, name_hint="reduce_repro", optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+    for t in pl.spmd(NTASK, name_hint="reduce_repro"):
         t0 = t * T_TILE
         acc = pl.matmul(x[0:MM_M, 0:MM_K], x[0:MM_N, 0:MM_K], b_trans=True, out_dtype=pl.FP32)
-        dummy_out[t * MM_M : t * MM_M + MM_M, 0:MM_N] = pl.cast(acc, target_type=pl.BF16, mode="rint")
-        xc = pl.cast(x[t0 : t0 + T_TILE, 0:C], target_type=pl.FP32)
-        rs = pl.row_sum(xc)
-        rs_row = pl.reshape(rs, [1, T_TILE])
-        inv_row = pl.recip(rs_row)
-        inv_col = pl.reshape(inv_row, [T_TILE, 1])
-        yc = pl.row_expand_mul(xc, inv_col)
-        y[t0 : t0 + T_TILE, 0:C] = pl.cast(yc, target_type=pl.BF16, mode="rint")
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            dummy_out[t * MM_M + lane * (MM_M // 2) : t * MM_M + (lane + 1) * (MM_M // 2), 0:MM_N] = pl.cast(
+                pl.aiv_shard(acc), target_type=pl.BF16, mode="rint"
+            )
+            xc = pl.cast(
+                x[t0 + lane * (T_TILE // 2) : t0 + (lane + 1) * (T_TILE // 2), 0:C], target_type=pl.FP32
+            )
+            rs = pl.row_sum(xc)
+            rs_row = pl.reshape(rs, [1, T_TILE // 2])
+            inv_row = pl.recip(rs_row)
+            inv_col = pl.reshape(inv_row, [T_TILE // 2, 1])
+            yc = pl.row_expand_mul(xc, inv_col)
+            y[t0 + lane * (T_TILE // 2) : t0 + (lane + 1) * (T_TILE // 2), 0:C] = pl.cast(
+                yc, target_type=pl.BF16, mode="rint"
+            )
     return y
 
 
@@ -125,14 +132,21 @@ def split_updown_direct(
     y: pl.Out[pl.Tensor[[T, C], pl.BF16]],
     dummy_out: pl.Out[pl.Tensor[[NTASK * MM_M, MM_N], pl.BF16]],
 ):
-    for t in pl.spmd(NTASK, name_hint="reduce_repro", optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+    for t in pl.spmd(NTASK, name_hint="reduce_repro"):
         t0 = t * T_TILE
         acc = pl.matmul(x[0:MM_M, 0:MM_K], x[0:MM_N, 0:MM_K], b_trans=True, out_dtype=pl.FP32)
-        dummy_out[t * MM_M : t * MM_M + MM_M, 0:MM_N] = pl.cast(acc, target_type=pl.BF16, mode="rint")
-        xc = pl.cast(x[t0 : t0 + T_TILE, 0:C], target_type=pl.FP32)
-        inv_col = pl.recip(pl.row_sum(xc))
-        yc = pl.row_expand_mul(xc, inv_col)
-        y[t0 : t0 + T_TILE, 0:C] = pl.cast(yc, target_type=pl.BF16, mode="rint")
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            dummy_out[t * MM_M + lane * (MM_M // 2) : t * MM_M + (lane + 1) * (MM_M // 2), 0:MM_N] = pl.cast(
+                pl.aiv_shard(acc), target_type=pl.BF16, mode="rint"
+            )
+            xc = pl.cast(
+                x[t0 + lane * (T_TILE // 2) : t0 + (lane + 1) * (T_TILE // 2), 0:C], target_type=pl.FP32
+            )
+            inv_col = pl.recip(pl.row_sum(xc))
+            yc = pl.row_expand_mul(xc, inv_col)
+            y[t0 + lane * (T_TILE // 2) : t0 + (lane + 1) * (T_TILE // 2), 0:C] = pl.cast(
+                yc, target_type=pl.BF16, mode="rint"
+            )
     return y
 
 
@@ -188,12 +202,7 @@ def test_none_split_row_sum_is_correct(case_run):
 @pytest.mark.platforms("a2a3")
 @st.cases(_parity_case("updown_reshape"), _parity_case("updown_direct"))
 def test_updown_split_row_sum_matches_none(case_run):
-    """UP_DOWN must equal the golden (gh#1864 regression).
-
-    Pre-fix, the column reshape that feeds the reciprocal kept its stale
-    full width after the split, so each lane read garbage columns and emitted
-    inf. SplitVectorKernel now migrates the split axis through the reshape.
-    """
+    """Explicit UP_DOWN lane shapes survive row-to-column reshapes and match the golden."""
     case_run.assert_passed()
 
 

@@ -1345,7 +1345,7 @@ def test_boundary_produced_and_consumed_in_one_iteration_passes():
 
 
 def test_boundary_consumed_in_other_up_down_region_fails():
-    """A shard produced in one UP_DOWN region and read in another is double-halved."""
+    """A shard belongs to its producing UP_DOWN region, not another data-parallel region."""
     span = ir.Span.unknown()
     shard_stmt, sharded = _shard_of_acc(span)
     producer = _region(ir.SplitMode.UP_DOWN, [shard_stmt])
@@ -1358,7 +1358,8 @@ def test_boundary_consumed_in_other_up_down_region_fails():
     assert len(errors) == 1
     assert errors[0].rule_name == "AivSplitValid"
     assert "produced in a DIFFERENT pl.split_aiv region" in errors[0].message
-    assert "halved a second time" in errors[0].message
+    assert "only in the region that produced it" in errors[0].message
+    assert "halved a second time" not in errors[0].message
     assert "pl.aiv_shard" in errors[0].message
 
 

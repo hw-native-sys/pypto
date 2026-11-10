@@ -32,6 +32,13 @@ def _run_cache(cache: Path, payload: Path, arch: str, digest: str) -> subprocess
     mocks = """
 uname() { printf '%s\n' "$TEST_ARCH"; }
 curl() {
+    # Older self-hosted runners reject this option before starting a download.
+    for arg in "$@"; do
+        if [ "$arg" = --retry-all-errors ]; then
+            printf 'curl: option --retry-all-errors: is unknown\n' >&2
+            return 2
+        fi
+    done
     printf 'download\n'
     cp "$TEST_PAYLOAD" "${@: -1}"
 }

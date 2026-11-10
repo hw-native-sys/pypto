@@ -91,7 +91,7 @@ def _assert_single_mat_handoff(pto: str, min_consumers: int = 1) -> str:
 
 @pytest.mark.parametrize("b_trans", [False, True])
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
-def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
+def test_explicit_split_mat_staging(tmp_path, ascend_backend, b_trans):
     """AutoTile's K loop consumes the gathered operand without a Mat->Mat move."""
     vn, vk = (256, 128) if b_trans else (128, 256)
 
@@ -105,13 +105,19 @@ def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
         for blk in pl.spmd(
             4,
             name_hint="attention",
-            optimizations=[pl.cross_core_slot(slot_num=1), pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.cross_core_slot(slot_num=1)],
         ):
             r0 = blk * 64
             scores = pl.matmul(q[r0 : r0 + 64, 0:256], k[0:128, 0:256], b_trans=True, out_dtype=pl.FP32)
-            prob = pl.cast(pl.exp(scores), target_type=pl.BF16, mode="rint")
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                score_half = pl.aiv_shard(scores)
+                prob_half = pl.cast(pl.exp(score_half), target_type=pl.BF16, mode="rint")
+                prob = pl.aic_gather(prob_half)
             product = pl.matmul(prob, v[0:vn, 0:vk], b_trans=b_trans, out_dtype=pl.FP32)
-            out[r0 : r0 + 64, 0:256] = pl.add(product, 1.0)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                product_half = pl.aiv_shard(product)
+                row = r0 + lane * 32
+                out[row : row + 32, 0:256] = pl.add(product_half, 1.0)
         return out
 
     attention.compile(
@@ -135,6 +141,8 @@ def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
 def test_explicit_vec_to_mat_qk_pv(tmp_path, ascend_backend, split_mode):
     """An authored NZ Vec->Mat boundary needs no copy, even without K tiling (#2992)."""
 
+    lane_rows = 8 if split_mode == pl.SplitMode.UP_DOWN else 0
+
     @pl.jit(auto_scope=False)
     def entry(
         query: pl.Tensor[[16, 16], pl.BF16],
@@ -142,29 +150,21 @@ def test_explicit_vec_to_mat_qk_pv(tmp_path, ascend_backend, split_mode):
         values: pl.Tensor[[16, 16], pl.BF16],
         output: pl.Out[pl.Tensor[[16, 16], pl.BF16]],
     ):
-        with pl.spmd(
-            1, name_hint="qk_pv", optimizations=[pl.split(split_mode), pl.cross_core_slot(slot_num=1)]
-        ):
+        with pl.spmd(1, name_hint="qk_pv", optimizations=[pl.cross_core_slot(slot_num=1)]):
             block = pl.tile.get_block_idx()
             q = pl.tile.load(query, [block * 16, 0], [16, 16], target_memory=pl.Mem.Mat)
             k = pl.tile.load(keys, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
             v = pl.tile.load(values, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
             qk = pl.tile.matmul(q, pl.tile.transpose_view(k))
-            scores = pl.tile.move(
-                qk, pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
-            )
-            probabilities = pl.exp(scores)
-            weights = pl.tile.move(
-                pl.cast(probabilities, pl.BF16, mode="rint"),
-                pl.Mem.Mat,
-                blayout=pl.TileLayout.col_major,
-                slayout=pl.TileLayout.row_major,
-            )
+            for lane in pl.split_aiv(2, mode=split_mode):
+                scores = pl.aiv_shard(qk)
+                probabilities = pl.exp(scores)
+                weights = pl.aic_gather(pl.cast(probabilities, pl.BF16, mode="rint"))
             pv = pl.tile.matmul(weights, v)
-            result = pl.tile.move(
-                pv, pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
-            )
-            pl.tile.store(pl.cast(result, pl.BF16, mode="rint"), [block * 16, 0], output)
+            for lane in pl.split_aiv(2, mode=split_mode):
+                result = pl.aiv_shard(pv)
+                row = block * 16 + lane * lane_rows
+                pl.tile.store(pl.cast(result, pl.BF16, mode="rint"), [row, 0], output)
         return output
 
     entry.compile(
@@ -201,7 +201,7 @@ def test_two_retained_mat_operands_require_two_fifo_slots(tmp_path, ascend_backe
     ):
         for _ in pl.spmd(
             1,
-            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.cross_core_slot(slot_num=slot_num)],
         ):
             av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
             bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
@@ -220,7 +220,7 @@ def test_two_retained_mat_operands_require_two_fifo_slots(tmp_path, ascend_backe
     ):
         for _ in pl.spmd(
             1,
-            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.cross_core_slot(slot_num=slot_num)],
         ):
             # Repeated and nested handoffs need one slot, not one per gather.
             for _iteration in pl.range(2):
@@ -268,7 +268,7 @@ def test_reverse_consumption_preserves_fifo_prefix(tmp_path, ascend_backend, thi
     ):
         for _ in pl.spmd(
             1,
-            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.cross_core_slot(slot_num=slot_num)],
         ):
             av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
             bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
@@ -289,7 +289,7 @@ def test_reverse_consumption_preserves_fifo_prefix(tmp_path, ascend_backend, thi
     ):
         for _ in pl.spmd(
             1,
-            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.cross_core_slot(slot_num=slot_num)],
         ):
             av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
             bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
@@ -346,7 +346,7 @@ def test_nested_handoff_cannot_release_an_enclosing_fifo_tile(tmp_path, ascend_b
     ):
         for _ in pl.spmd(
             1,
-            optimizations=[pl.cross_core_slot(slot_num=3), pl.split(pl.SplitMode.UP_DOWN)],
+            optimizations=[pl.cross_core_slot(slot_num=3)],
         ):
             base_l = pl.move(pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat), pl.Mem.Left)
             base_r = pl.move(pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)

@@ -1528,7 +1528,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.InCore)
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1552,7 +1552,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
 
     @pl.program
     class Expected:
-        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.AIC)
         def main_incore_0_aic(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1587,7 +1587,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
             z_tile = pl.matmul(x_left, y_right)
             pl.tpush_to_aiv(z_tile, split=0)
 
-        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
         def main_incore_0_aiv(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1614,7 +1614,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
             pl.tfree_to_aic(z_vec)
             return out_0_store
 
-        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.Group)
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1640,7 +1640,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.InCore)
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1663,7 +1663,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
 
     @pl.program
     class Expected:
-        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.AIC)
         def main_incore_0_aic(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1691,7 +1691,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
             z_tile = pl.matmul(x_left, y_right)
             pl.tpush_to_aiv(z_tile, split=0)
 
-        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
         def main_incore_0_aiv(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1713,7 +1713,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
             pl.tfree_to_aic(z_vec)
             return out_0_store
 
-        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.Group)
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1741,7 +1741,7 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.InCore)
         def gm_relay(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1764,7 +1764,7 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
 
     @pl.program
     class Expected:
-        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.AIC)
         def gm_relay_aic(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1797,7 +1797,7 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
             _scratch_stored: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_acc, [0, 0], scratch)
             pl.tpush_to_aiv(z_acc, split=0)
 
-        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
         def gm_relay_aiv(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1822,7 +1822,7 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
             out_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(chunk_exp, [0, 0], out)
             return out_store
 
-        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.Group)
         def gm_relay(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -1962,7 +1962,7 @@ def test_gm_sync_hoisted_before_consumer_loop_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.InCore)
         def gm_relay_loop(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2026,7 +2026,7 @@ def test_two_gm_syncs_hoisted_to_same_loop_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(type=pl.FunctionType.InCore)
         def gm_relay_two(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2087,7 +2087,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
+        @pl.function(type=pl.FunctionType.InCore, attrs={"slot_num": 16})
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2110,7 +2110,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
 
     @pl.program
     class Expected:
-        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
+        @pl.function(type=pl.FunctionType.AIC, attrs={"slot_num": 16})
         def main_incore_0_aic(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2138,7 +2138,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
             z_tile = pl.matmul(x_left, y_right)
             pl.tpush_to_aiv(z_tile, split=0)
 
-        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
+        @pl.function(type=pl.FunctionType.AIV, attrs={"slot_num": 16, "dual_aiv_dispatch": True})
         def main_incore_0_aiv(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2160,7 +2160,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
             pl.tfree_to_aic(z_vec)
             return out_0_store
 
-        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN, "slot_num": 16})
+        @pl.function(type=pl.FunctionType.Group, attrs={"slot_num": 16})
         def main_incore_0(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2187,7 +2187,7 @@ def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
             y: pl.Tensor[[128, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
-            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            pl.func_attr({"slot_num": 16, "local_slot_num": 4})
             x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
             x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
             y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
@@ -2211,7 +2211,7 @@ def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
             y: pl.Tensor[[128, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ):
-            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            pl.func_attr({"slot_num": 16, "local_slot_num": 4})
             main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
                 name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
             )
@@ -2241,7 +2241,7 @@ def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
             y: pl.Tensor[[128, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
-            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            pl.func_attr({"slot_num": 16, "local_slot_num": 4, "dual_aiv_dispatch": True})
             main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
                 name="main_incore_0_c2v_slot_buffer", size=16384, base=-1
             )
@@ -2265,7 +2265,7 @@ def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
             y: pl.Tensor[[128, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
-            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            pl.func_attr({"slot_num": 16, "local_slot_num": 4})
             self.main_incore_0_aic(x, y, out_0)
             self.main_incore_0_aiv(x, y, out_0)
             return out_0
@@ -2287,12 +2287,15 @@ def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
 # ---------------------------------------------------------------------------
 
 
-def test_transpose_hazard_backstopped_when_lowering_is_skipped():
+@pytest.mark.parametrize("explicit_split", [False, True])
+def test_transpose_hazard_backstopped_when_lowering_is_skipped(explicit_split):
     """Skipping pass 23 must not silently expand an unsplittable transpose."""
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(
+            type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": explicit_split}
+        )
         def t_hazard(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2314,8 +2317,12 @@ def test_transpose_hazard_backstopped_when_lowering_is_skipped():
     p = passes.flatten_tile_nd_to_2d()(p)
     p = passes.infer_tile_memory_space()(p)
     # No lower_auto_vector_split() — the documented direct-invocation flow.
-    with pytest.raises(pypto.InternalError, match="swaps the split axis"):
-        passes.expand_mixed_kernel()(p)
+    if explicit_split:
+        with pytest.raises(pypto.InternalError, match="swaps the split axis"):
+            passes.expand_mixed_kernel()(p)
+    else:
+        with pytest.raises(ValueError, match="Implicit AIV splitting is no longer supported"):
+            passes.expand_mixed_kernel()(p)
 
 
 # ---------------------------------------------------------------------------
