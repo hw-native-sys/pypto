@@ -171,6 +171,12 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// caller-supplied substitution maps (e.g. {A→B, B→A}) and stops recursion
   /// before a stack overflow.
   std::unordered_set<const Expr*> remap_resolving_;
+
+ private:
+  // Scalar-only type trees contain no Expr callbacks. Strong keys retain their
+  // immutable objects if this mutator is reused after an input is destroyed.
+  bool IsScalarTypeTree(const TypePtr& type);
+  std::unordered_map<TypePtr, bool> scalar_type_trees_;
 };
 
 }  // namespace ir

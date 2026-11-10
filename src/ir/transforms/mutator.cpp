@@ -199,8 +199,24 @@ ExprPtr IRMutator::VisitExpr(const ExprPtr& expr) { return ExprFunctor<ExprPtr>:
 
 StmtPtr IRMutator::VisitStmt(const StmtPtr& stmt) { return StmtFunctor<StmtPtr>::VisitStmt(stmt); }
 
+bool IRMutator::IsScalarTypeTree(const TypePtr& type) {
+  auto found = scalar_type_trees_.find(type);
+  if (found != scalar_type_trees_.end()) return found->second;
+  bool scalar = IsA<ScalarType>(type);
+  if (auto tuple = As<TupleType>(type)) {
+    scalar = true;
+    for (const auto& field : tuple->types_) scalar &= IsScalarTypeTree(field);
+  }
+  scalar_type_trees_.emplace(type, scalar);
+  return scalar;
+}
+
 TypePtr IRMutator::RemapTypeViaVisitor(const TypePtr& type) {
   if (!type) return type;
+  // No subclass callback can observe a scalar-only type tree: it contains no
+  // embedded Exprs. Memoize this immutable property once per shared type DAG,
+  // including Call/Submit result types; all expression-bearing types still walk.
+  if (IsScalarTypeTree(type)) return type;
   // No early-out on var_remap_.empty(): subclasses (e.g. DeepCloneMutator)
   // drive substitution through their own state and override VisitExpr_(VarPtr)
   // accordingly. Copy-on-write inside CloneTypeWithMemRefAndRemapExprs is the
