@@ -2425,6 +2425,7 @@ jobs:
           checkout-path: a5-checkout
 
   onboard-tests-a5-distributed:
+    timeout-minutes: 110
     # A5 (Ascend950) multi-card on-board coverage for the asynchronous URMA
     # acceptance suite. The async transfer path has no simulator backend: the
     # generated helper includes backend/urma/urma_completion_kernel.h, which
@@ -2462,6 +2463,7 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_MAXSIZE: 30G
       CCACHE_UMASK: '000'
+      TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
     steps:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
@@ -2477,9 +2479,9 @@ jobs:
           checkout-path: a5-dist-checkout
           checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
           needs-device: 'true'
-          pip-cache-name: pip-a5-dist
+          pip-cache-name: pip-a5
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
-          runtime-targets: build_package_a5;build_package_sim
+          runtime-targets: build_package_a5
           # The runner's systemd PTO2_RING_* environment breaks HCCL; the A5
           # URMA path still uses the PTO2 task/ring machinery.
           unset-ring: 'true'
@@ -2495,12 +2497,26 @@ jobs:
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
+          mkdir -p "$LOGDIR"
+          export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
           # No --forked: the suite runs one platform, and the JIT compile path
           # leaves a child that pytest-forked waits on past its timeout.
-          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 3900 --max-time 2700 \
+          task-submit --device auto --device-num 4 --timeout 3900 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
               tests/st/distributed/test_l3_urma_async.py \
-              -v --platform=a5 --device=\$TASK_DEVICE"
+              -v --platform=a5 --device=\$TASK_DEVICE \
+              --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/urma-junit.xml"
+
+      - name: Upload A5 URMA logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: urma-async-a5-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          path: |
+            a5-dist-checkout/outputs/urma_async/ascend/**
+            a5-dist-checkout/urma-junit.xml
 
       - name: Kill orphaned task-submit tasks
         if: always()

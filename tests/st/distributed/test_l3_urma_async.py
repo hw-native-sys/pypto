@@ -541,12 +541,259 @@ def _run(test_config: RunConfig, device_ids: list[int], n_ranks: int, round_inde
     return _execute(test_config, compiled, n_ranks, round_index)
 
 
+def _build_put_only_typed(n_ranks: int, dtype):
+    """PUT-only exchange in an arbitrary element type.
+
+    Mirrors the FP32 ladder with a single transfer set, so a second dtype can
+    be checked without a second full exchange.
+    """
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], dtype],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], dtype]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], dtype]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.tensor.put_async(
+                    data,
+                    peer=peer,
+                    src=data,
+                    dst_offsets=[my_rank, 0],
+                    src_offsets=[my_rank, 0],
+                    shape=[1, SIZE],
+                    engine=pld.CommEngine.URMA,
+                )
+        return data
+
+    @pl.jit.incore
+    def announce(
+        data: pld.DistributedTensor[[n_ranks, SIZE], dtype],
+        signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[n_ranks, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(
+                    signal,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.Set,
+                )
+        return signal
+
+    @pl.jit.incore
+    def await_peers(
+        signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[n_ranks, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.wait(
+                    signal=signal,
+                    offsets=[peer, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
+        return signal
+
+    @pl.jit.incore
+    def readback(
+        data: pld.DistributedTensor[[n_ranks, SIZE], dtype],
+        signal: pld.DistributedTensor[[n_ranks, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], dtype]],
+    ) -> pl.Tensor[[n_ranks, SIZE], dtype]:
+        ctx = pld.get_comm_ctx(data)
+        for row in pl.range(pld.nranks(ctx)):
+            chunk = pl.load(data, [row, 0], [1, SIZE])
+            out = pl.store(chunk, [row, 0], out)
+        return out
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], dtype],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], dtype]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], dtype]],
+        signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], dtype]:
+        published = publish(inp, data)
+        announced = announce(published, signal)
+        waited = await_peers(announced)
+        return readback(published, waited, out)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], dtype],
+        outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], dtype]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], dtype]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * dtype.get_byte())
+        signal_buf = pld.alloc_window_buffer(n_ranks * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=dtype)
+            sig = pld.window(signal_buf, [n_ranks, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], outputs[r], data, sig, device=r)
+        return outputs
+
+    return host_orch
+
+
+def _build_bad_peer(n_ranks: int):
+    """A PUT whose peer is the domain's own rank count, which is out of range."""
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        pld.tensor.put_async(
+            data,
+            peer=pld.nranks(ctx),
+            src=data,
+            dst_offsets=[my_rank, 0],
+            src_offsets=[my_rank, 0],
+            shape=[1, SIZE],
+            engine=pld.CommEngine.URMA,
+        )
+        return data
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        return publish(inp, data)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            chip_orch(inputs[r], outputs[r], data, device=r)
+        return outputs
+
+    return host_orch
+
+
+def _build_out_of_range(n_ranks: int):
+    """A PUT whose runtime column offset lands past the tensor's own extent."""
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        # nranks * SIZE is one full row past the last valid column.
+        col = nranks * SIZE
+        pld.tensor.put_async(
+            data,
+            peer=1 - my_rank,
+            src=data,
+            dst_offsets=[my_rank, 0],
+            src_offsets=[0, col],
+            shape=[1, SIZE],
+            engine=pld.CommEngine.URMA,
+        )
+        return data
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        return publish(inp, data)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            chip_orch(inputs[r], outputs[r], data, device=r)
+        return outputs
+
+    return host_orch
+
+
+def _typed_inputs(n_ranks: int, dtype, step: int):
+    inputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=dtype)
+    for r in range(n_ranks):
+        inputs[r, r, :] = torch.arange(SIZE, dtype=dtype) + r * step
+    return inputs
+
+
+def _typed_expected(n_ranks: int, dtype, step: int):
+    d = torch.arange(n_ranks, dtype=dtype).view(1, -1, 1)
+    j = torch.arange(SIZE, dtype=dtype).view(1, 1, -1)
+    return (d * step + j).expand(n_ranks, n_ranks, SIZE).contiguous()
+
+
+def _run_put_only_typed(test_config: RunConfig, device_ids: list[int], n_ranks: int, dtype, torch_dtype):
+    inputs = _typed_inputs(n_ranks, torch_dtype, step=100)
+    outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch_dtype)
+    host_orch = _build_put_only_typed(n_ranks, dtype)
+    compiled = host_orch.compile(
+        inputs,
+        outputs,
+        config=RunConfig(
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0),
+        ),
+    )
+    compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+    return outputs
+
+
+def _run_invalid(test_config: RunConfig, device_ids: list[int], n_ranks: int, builder):
+    inputs = _rank_inputs(n_ranks)
+    outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+    host_orch = builder(n_ranks)
+    compiled = host_orch.compile(
+        inputs,
+        outputs,
+        config=RunConfig(
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0),
+        ),
+    )
+    compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+
+
 @pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
 class TestL3UrmaAsync:
     """Asynchronous URMA PUT/GET and task-completion ordering on A5 silicon.
 
     The cases execute on A5 TMR hardware, and are skipped by the platform
     filter on a2a3 hosts. A skip is not evidence of correctness.
+
+    The ordering checks are value-based: an early release of the consumer
+    would change the observed rows, but the assertions do not read scheduler
+    state. A scheduler-side trace is the direct evidence and is not wired.
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
@@ -618,6 +865,41 @@ class TestL3UrmaAsync:
                 f"repeated GET round {round_index} mismatch: "
                 f"max diff = {(outputs_get - expected_get).abs().max().item()}"
             )
+
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_put_only_fp16(self, test_config, device_ids, n_ranks):
+        """A second element type crosses the same PUT path.
+
+        Values stay below 2048 so every integer is exactly representable in
+        FP16 and the golden can be compared without tolerance.
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async FP16 PUT P={n_ranks} needs {n_ranks} devices")
+
+        outputs = _run_put_only_typed(test_config, device_ids, n_ranks, pl.FP16, torch.float16)
+        expected = _typed_expected(n_ranks, torch.float16, step=100)
+        assert torch.equal(outputs, expected), (
+            f"FP16 PUT P={n_ranks} mismatch: max diff = "
+            f"{(outputs.float() - expected.float()).abs().max().item()}"
+        )
+
+    def test_invalid_peer_fails_loudly(self, test_config, device_ids):
+        """A runtime peer equal to the domain's rank count is rejected."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async invalid-peer case needs {n_ranks} devices")
+
+        with pytest.raises(RuntimeError):
+            _run_invalid(test_config, device_ids, n_ranks, _build_bad_peer)
+
+    def test_out_of_range_region_fails_loudly(self, test_config, device_ids):
+        """A runtime subregion past the tensor's own extent is rejected."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async out-of-range case needs {n_ranks} devices")
+
+        with pytest.raises(RuntimeError):
+            _run_invalid(test_config, device_ids, n_ranks, _build_out_of_range)
 
 
 if __name__ == "__main__":
