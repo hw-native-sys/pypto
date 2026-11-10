@@ -253,8 +253,48 @@ def test_c1_capacity_uses_constant_trip_view_extent():
             self.c1_group(a, c)
             return c
 
-    result = _legalize_outlined(Before)
-    assert "capacity" not in _scalar_param_names(_graph_func(result, "c1_group"))
+    rows = pl.dynamic("group_rows")
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def c1_group_incore_0(
+            self,
+            output_group: pl.Tensor[[rows, 128], pl.FP32],
+            capacity: pl.Scalar[pl.INDEX],
+            direct_capacity: pl.Scalar[pl.INDEX],
+            target: pl.Out[pl.Tensor[[80, 128], pl.FP32]],
+        ) -> pl.Tensor[[80, 128], pl.FP32]:
+            tile = pl.tile.load(output_group, [capacity - direct_capacity, 0], [80, 128], [80, 128])
+            _stored = pl.tile.store(tile, [0, 0], target)
+            return target
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def c1_group(
+            self,
+            a: pl.Tensor[[80, 128], pl.FP32],
+            c: pl.InOut[pl.Tensor[[80, 128], pl.FP32]],
+        ) -> pl.Tensor[[80, 128], pl.FP32]:
+            for group_start, (carry,) in pl.parallel(0, 80, 80, init_values=(c,)):
+                group_rows = 80 - group_start
+                output_group = pl.tensor.slice(a, [group_rows, 128], [group_start, 0])
+                direct_capacity = pl.tensor.dim(output_group, 0)
+                aliased_output = output_group
+                capacity = pl.tensor.dim(aliased_output, 0)
+                updated = self.c1_group_incore_0(output_group, capacity, direct_capacity, carry)
+                _result = pl.yield_(updated)
+            return c
+
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[80, 128], pl.FP32],
+            c: pl.InOut[pl.Tensor[[80, 128], pl.FP32]],
+        ) -> pl.Tensor[[80, 128], pl.FP32]:
+            self.c1_group(a, c)
+            return c
+
+    ir.assert_structural_equal(_legalize_outlined(Before), Expected)
 
 
 def test_num_tokens_derived_view_extent_is_rejected():
