@@ -474,9 +474,7 @@ def _run_single_output(test_config: RunConfig, device_ids: list[int], n_ranks: i
         outputs,
         config=RunConfig(
             platform=test_config.platform,
-            distributed_config=DistributedConfig(
-                device_ids=device_ids[:n_ranks], num_sub_workers=0
-            ),
+            distributed_config=DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0),
         ),
     )
     compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
@@ -494,9 +492,7 @@ def _run_two_outputs(test_config: RunConfig, device_ids: list[int], n_ranks: int
         outputs_get,
         config=RunConfig(
             platform=test_config.platform,
-            distributed_config=DistributedConfig(
-                device_ids=device_ids[:n_ranks], num_sub_workers=0
-            ),
+            distributed_config=DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0),
         ),
     )
     compiled(
