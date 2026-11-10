@@ -948,6 +948,23 @@ class BodyTransformer(ast.NodeTransformer):
             self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
             self._graph_captures = graph_captures
 
+    def _visit_literal_if(self, node: ast.If, condition: bool) -> ast.If | list[ast.stmt]:
+        """Emit only the live arm, keeping the parser's explicit yield binding."""
+        selected = node.body if condition else node.orelse
+        if not self._has_branch_yield(selected):
+            return self._visit_scoped_body(selected)
+        node.test = ast.copy_location(ast.Constant(value=condition), node.test)
+        self._scope_depth += 1
+        try:
+            selected = self._visit_scoped_body(selected)
+        finally:
+            self._scope_depth -= 1
+        # The parser binds the selected yield through the If. A Pass in the
+        # dead arm keeps the shape and dtype of dead yields out of that binding.
+        inactive: list[ast.stmt] = [ast.copy_location(ast.Pass(), node)]
+        node.body, node.orelse = (selected, inactive) if condition else (inactive, selected)
+        return node
+
     def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
@@ -986,12 +1003,7 @@ class BodyTransformer(ast.NodeTransformer):
 
         condition = values.literal_condition(node.test)
         if condition is not None:
-            selected = node.body if condition else node.orelse
-            # The parser binds explicit yields through the enclosing if.
-            # Keep both arms when flattening would remove that binding.
-            if not self._has_branch_yield(selected):
-                return self._visit_scoped_body(selected)
-            node.test = ast.copy_location(ast.Constant(value=condition), node.test)
+            return self._visit_literal_if(node, condition)
         self._scope_depth += 1
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)

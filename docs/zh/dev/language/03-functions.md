@@ -79,7 +79,8 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 
 替换 `pl.constexpr` 参数后，JIT 在 IR 解析前判定布尔和数字字面量、已知条件的取反，
 以及基本类型字面量之间的比较。只解析选中的分支，因此未选中的分支可以使用不同的
-Tile 形状或类型。依赖运行时值的条件仍保留为 IR 控制流。这一步不会执行 Python 调用。
+Tile 形状或类型。显式 `pl.yield_` 保留选中分支的结果绑定，helper 选中的返回类型
+也会传递给下游 helper 的特化。依赖运行时值的条件仍保留为 IR 控制流。这一步不会执行 Python 调用。
 
 ### 动态维度元数据
 

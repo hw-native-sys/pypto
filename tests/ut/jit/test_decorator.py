@@ -7972,6 +7972,30 @@ def test_constexpr_branch_specializes_return_type(mode, width):
     ir.assert_structural_equal(returned.value[0].type, expected)
 
 
+def test_constexpr_branch_return_metadata_reaches_following_helper():
+    @jit.inline
+    def select(a: pl.Tensor, b: pl.Tensor, MODE: pl.constexpr):
+        if MODE:
+            return a
+        else:
+            return b
+
+    @jit.inline
+    def flatten(x: pl.Tensor):
+        return pl.reshape(x, [2048])
+
+    @jit
+    def entry(a: pl.Tensor[[8, 512], pl.UINT8], b: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+        chosen = select(a, b, MODE)
+        return flatten(chosen)
+
+    flatten_fn = entry.specialize(MODE=False).get_function("flatten")
+    assert flatten_fn is not None
+    ir.assert_structural_equal(flatten_fn.params[0].type, ir.TensorType([8, 256], DataType.UINT8))
+    with pytest.raises(InvalidOperationError, match="cannot reshape"):
+        entry.specialize(MODE=True)
+
+
 @pytest.mark.parametrize("mode", [True, False])
 def test_constexpr_branch_preserves_yield_binding(mode):
     @jit
@@ -7988,6 +8012,30 @@ def test_constexpr_branch_preserves_yield_binding(mode):
     returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
     ir.assert_structural_equal(returned.value[0], branch.return_vars[0])
     ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, 64], DataType.FP32))
+
+
+@pytest.mark.parametrize(
+    ("mode", "width", "dtype"), [(True, 512, DataType.UINT8), (False, 256, DataType.FP32)]
+)
+def test_constexpr_branch_prunes_inactive_yield_type(mode, width, dtype):
+    @jit
+    def entry(a: pl.Tensor[[8, 512], pl.UINT8], b: pl.Tensor[[8, 256], pl.FP32], MODE: pl.constexpr):
+        if MODE:
+            result = pl.yield_(a)
+        else:
+            result = pl.yield_(b)
+        return result
+
+    program = entry.specialize(MODE=mode)
+    fn = program.get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    branch = next(stmt for stmt in fn.body if isinstance(stmt, ir.IfStmt))
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    ir.assert_structural_equal(returned.value[0], branch.return_vars[0])
+    ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, width], dtype))
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.TypeChecked)
+    assert not passes.PropertyVerifierRegistry.verify(properties, program)
 
 
 if __name__ == "__main__":

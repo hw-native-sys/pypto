@@ -255,10 +255,10 @@ class _ReturnMeta:
                         local[name] = meta
 
 
-def _return_site(func_def: ast.FunctionDef) -> ast.Return | None:
+def _return_site(tree: ast.AST) -> ast.Return | None:
     """Find the first value-carrying return."""
     return next(
-        (node for node in ast.walk(func_def) if isinstance(node, ast.Return) and node.value is not None),
+        (node for node in ast.walk(tree) if isinstance(node, ast.Return) and node.value is not None),
         None,
     )
 
@@ -434,11 +434,26 @@ def _summarize_dep_results(
         func_def = _ast_analysis.get_func_def(dep._func)
     except OSError:
         return None
-    site = _return_site(func_def)
+    preview = _preview_static_expressions(
+        func_def, seed_meta, _StaticScope.of(dep._func, constexpr), constexpr, summarize_return=True
+    )
+    if preview.selected_arms:
+        # Use the emitted return's position to identify the original node.
+        # Metadata and helper call bindings still refer to the original AST.
+        site = next(
+            (
+                node
+                for node in ast.walk(func_def)
+                if isinstance(node, ast.Return) and (node.lineno, node.col_offset) == preview.return_position
+            ),
+            None,
+        )
+    else:
+        site = _return_site(func_def)
     if site is None or site.value is None:
         return None
     elements = site.value.elts if isinstance(site.value, ast.Tuple) else [site.value]
-    return_meta = _ReturnMeta(site, elements) if track_returns else None
+    return_meta = _ReturnMeta(site, elements) if track_returns or preview.selected_arms else None
     _validate_dep_packed_fp4_dtypes(dep, seed_meta)
     callee_metas = extract_local_tensor_metas(
         dep._func,
@@ -448,7 +463,7 @@ def _summarize_dep_results(
         constexpr_values=constexpr,
         discover_deps=deps.discover_deps,
         visible_only=True,
-        return_meta=return_meta,
+        return_analysis=_ReturnAnalysis(preview, return_meta),
     )
     tuple_result = return_meta.tuple_result if return_meta is not None else None
     if tuple_result is not None:
@@ -1371,6 +1386,7 @@ def _walk_local_tensor_meta_stmts(
     stop_at_call: ast.Call | None = None,
     *,
     tuple_values: dict[str, _TupleMeta] | None = None,
+    selected_arms: Mapping[tuple[int, int], bool] | None = None,
 ) -> bool:
     """Walk source order with plain binding tables and branch undo journals.
 
@@ -1444,6 +1460,13 @@ def _walk_local_tensor_meta_stmts(
         return False
 
     def walk_if(stmt: ast.If) -> bool:
+        selected = (
+            selected_arms.get((getattr(stmt, "lineno", -1), getattr(stmt, "col_offset", -1)))
+            if selected_arms
+            else None
+        )
+        if selected is not None:
+            return walk(stmt.body if selected else stmt.orelse)
         dim_mark, tensor_mark, tuple_mark = len(dim_undo), len(tensor_undo), len(tuple_undo)
         if walk(stmt.body):
             return True
@@ -1613,6 +1636,15 @@ class _StaticPreview(NamedTuple):
 
     unary_plus: dict[tuple[int, int], int]
     constants: dict[tuple[int, int], int]
+    selected_arms: dict[tuple[int, int], bool]
+    return_position: tuple[int, int] | None
+
+
+class _ReturnAnalysis(NamedTuple):
+    """Preview and result capture for one dependency summary."""
+
+    preview: _StaticPreview
+    capture: _ReturnMeta | None
 
 
 def _preview_static_expressions(
@@ -1620,6 +1652,8 @@ def _preview_static_expressions(
     seed_meta: Mapping[str, TensorMeta],
     scope: _StaticScope,
     constexpr_values: Mapping[str, str] | None,
+    *,
+    summarize_return: bool = False,
 ) -> _StaticPreview:
     """Preview the real body rewrite once, recording expressions emitted as constants.
 
@@ -1629,10 +1663,12 @@ def _preview_static_expressions(
     initializer is known. Source positions associate the copy with the input AST.
     Memoizing the pure constant fold keeps nested unary expressions linear.
     """
-    if not any(isinstance(node, (ast.UAdd, ast.Subscript)) for node in ast.walk(func_def)):
-        return _StaticPreview({}, {})
+    interesting = (ast.UAdd, ast.Subscript, ast.If) if summarize_return else (ast.UAdd, ast.Subscript)
+    if not any(isinstance(node, interesting) for node in ast.walk(func_def)):
+        return _StaticPreview({}, {}, {}, None)
     values: dict[tuple[int, int], int] = {}
     constants: dict[tuple[int, int], int] = {}
+    selected_arms: dict[tuple[int, int], bool] = {}
 
     @functools.cache
     def static_int(node: ast.expr) -> int | None:
@@ -1652,6 +1688,11 @@ def _preview_static_expressions(
         return None
 
     class Preview(BodyTransformer):
+        def _visit_literal_if(self, node: ast.If, condition: bool) -> ast.If | list[ast.stmt]:
+            if summarize_return and hasattr(node, "lineno") and hasattr(node, "col_offset"):
+                selected_arms[node.lineno, node.col_offset] = condition
+            return super()._visit_literal_if(node, condition)
+
         def visit_Name(self, node: ast.Name) -> ast.expr:
             transformed = super().visit_Name(node)
             value = static_int(transformed)
@@ -1701,13 +1742,19 @@ def _preview_static_expressions(
         py_globals=scope.namespace,
         constexpr_values=constexpr_values,
     )
+    emitted: list[ast.stmt] = []
     try:
         for stmt in copy.deepcopy(func_def.body):
-            transformer.visit(stmt)
+            rewritten = transformer.visit(stmt)
+            if summarize_return and rewritten is not None:
+                emitted.extend(
+                    cast("list[ast.stmt]", rewritten) if isinstance(rewritten, list) else [rewritten]
+                )
     except (IndexError, KeyError, TypeError, ValueError):
         # Invalid source still belongs to the normal specializer/parser path.
-        return _StaticPreview({}, {})
-    return _StaticPreview(values, constants)
+        return _StaticPreview({}, {}, {}, None)
+    site = _return_site(ast.Module(body=emitted, type_ignores=[])) if selected_arms else None
+    return _StaticPreview(values, constants, selected_arms, (site.lineno, site.col_offset) if site else None)
 
 
 def _matching_static_unary_plus(value: int | None, operand: _DimValue) -> int | None:
@@ -1826,7 +1873,7 @@ def extract_local_tensor_metas(
     visible_only: bool = False,
     *,
     discover_deps: _call_binding.DiscoverDeps,
-    return_meta: _ReturnMeta | None = None,
+    return_analysis: _ReturnAnalysis | None = None,
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
@@ -1903,9 +1950,10 @@ def extract_local_tensor_metas(
     The default result collects observed metadata, including branch locals.
     Dependency consumers request ``visible_only`` so only bindings valid at
     their selected call or at the end of a callee can type a dependency.
-    When supplied, ``return_meta`` receives metadata for the requested return
-    expressions, using the callee's locals and tuple construction snapshots.
+    When supplied, ``return_analysis`` restricts the summary to emitted arms
+    and captures metadata for the return using the callee's original AST.
     """
+    return_meta = return_analysis.capture if return_analysis is not None else None
     return_meta = return_meta or (_ReturnMeta(None, []) if caller_func_type == "host" else None)
     func_def = _ast_analysis.get_func_def(func)
     scope = _StaticScope.of(func, constexpr_values)
@@ -1914,7 +1962,11 @@ def extract_local_tensor_metas(
     collected = dict(local)
     dynvar_anchors = _build_dynvar_anchor_index(seed_meta or {})
     declared_dims = _declared_dim_values(func_def, seed_meta or {})
-    static_preview = _preview_static_expressions(func_def, seed_meta or {}, scope, constexpr_values)
+    static_preview = (
+        return_analysis.preview
+        if return_analysis is not None
+        else _preview_static_expressions(func_def, seed_meta or {}, scope, constexpr_values)
+    )
     resolve_slice_int = functools.partial(
         _resolve_slice_int, scope=scope, constants=static_preview.constants, local=local
     )
@@ -2251,6 +2303,7 @@ def extract_local_tensor_metas(
         ),
         stop_at_call,
         tuple_values=return_meta.tuples if return_meta is not None else None,
+        selected_arms=static_preview.selected_arms,
     )
     return local if visible_only or stop_at_dep is not None or stop_at_call is not None else collected
 
