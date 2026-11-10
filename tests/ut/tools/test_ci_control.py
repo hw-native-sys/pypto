@@ -110,21 +110,31 @@ def test_failed_matrix_blocks_merge(control, needs):
 
 
 @pytest.mark.parametrize(
-    "kind,enabled,expected",
+    "kind,expected",
     [
-        ("pull_request", "true", "false"),
-        ("pull_request", "", "true"),
-        ("push", "true", "true"),
-        ("workflow_dispatch", "true", "true"),
+        ("pull_request", "false"),
+        ("push", "true"),
+        ("workflow_dispatch", "true"),
     ],
 )
-def test_rollout_preserves_legacy_and_main_runs(control, monkeypatch, tmp_path, kind, enabled, expected):
+@pytest.mark.parametrize("enabled", [None, "", "false", "true"])
+@pytest.mark.parametrize("fork", [False, True])
+def test_event_selects_tier_without_repository_variables(
+    control, monkeypatch, tmp_path, pr, kind, expected, enabled, fork
+):
     target = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(target))
     monkeypatch.setenv("GITHUB_EVENT_NAME", kind)
     monkeypatch.setenv("GITHUB_SHA", MERGE)
-    monkeypatch.setenv("CI_COMMENT_TIERS_ENABLED", enabled)
-    control.prepare(REPO, {})
+    # Fork runs supplied an empty value even with the base repository switch
+    # enabled. Missing or stale rollout settings must never opt a PR into full.
+    if enabled is None:
+        monkeypatch.delenv("CI_COMMENT_TIERS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("CI_COMMENT_TIERS_ENABLED", enabled)
+    if not fork:
+        pr["head"]["repo"] = pr["base"]["repo"]
+    control.prepare(REPO, {"pull_request": pr} if kind == "pull_request" else {})
     assert target.read_text() == f"full={expected}\ncheckout_sha={MERGE}\nreuse_lint=false\n"
 
 
@@ -523,8 +533,8 @@ def test_workflow_wiring_covers_every_full_job(control):
                 )
                 if name == "changes":
                     expected = (
-                        "github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' "
-                        "&& github.event.pull_request.base.sha || github.workflow_sha"
+                        "github.event_name == 'pull_request' && "
+                        "github.event.pull_request.base.sha || github.workflow_sha"
                     )
                 assert options["ref"] == "${{ " + expected + " }}"
                 assert options["persist-credentials"] is False
@@ -937,11 +947,15 @@ def test_tiered_pr_controller_uses_trusted_base_without_changing_trigger():
     assert "pull_request" in workflow[True]
     controller = workflow["jobs"]["changes"]["steps"][0]["with"]
     assert controller["ref"] == (
-        "${{ github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' "
-        "&& github.event.pull_request.base.sha || github.workflow_sha }}"
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.base.sha || github.workflow_sha }}"
     )
     assert controller["sparse-checkout"] == ".github/scripts"
     assert controller["persist-credentials"] is False
+    # The trusted base may still contain the old flag-based prepare helper.
+    # It must also select lint before this PR merges, without a vars lookup.
+    prepare = workflow["jobs"]["changes"]["steps"][1]
+    assert prepare["env"]["CI_COMMENT_TIERS_ENABLED"] == "true"
 
 
 @pytest.mark.parametrize(

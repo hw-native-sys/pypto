@@ -36,13 +36,13 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 
 ## 评论触发完整 CI
 
-启用后，创建或更新 PR 自动运行 `changes`、`toolchain`、`pre-commit` 和
+创建或更新 PR 自动运行 `changes`、`toolchain`、`pre-commit` 和
 `clang-tidy`，随后运行轻量 `lint-gate`；独立的 `Docs / build` 检查也会运行。纯文档 PR 保留自动跳过
 `clang-tidy` 的规则。PR 不再自动启动设备测试或 wheel 构建。
 
-启用分档 CI 后，自动 PR 运行从受信任的 PR base SHA 加载控制脚本。
-因此，PR 中修改 `ci_control.py` 不会改变档位选择。启用前仍使用工作流版本，
-便于控制脚本尚未合入 main 时验证本次改动。
+包括 fork 在内的自动 PR 运行始终选择 lint，并从受信任的 PR base SHA 加载控制脚本。
+因此，PR 中修改 `ci_control.py` 不会改变档位选择。控制脚本必须已存在于 main。
+档位选择不依赖仓库变量，因为 fork PR 运行中这些变量可能为空。
 
 这是现有 `pull_request` 流程的调度约定，不提供完整的防恶意占用 runner 保障。
 PR 仍可以修改自己的 workflow、删除任务条件，或新增使用可用 runner 的任务。
@@ -139,27 +139,29 @@ attempt 的状态仍会保留。较新 attempt 必须通过对应轮次的元数
 
 ### 管理员启用步骤
 
-仓库变量 `CI_COMMENT_TIERS_ENABLED` 是启用开关。未设置或为 false 时保留
-原来的自动 full CI，以便安全迁移必需检查。无需 GitHub App 密钥、公网
+旧仓库变量 `CI_COMMENT_TIERS_ENABLED` 不再用作启用开关。PR 始终自动运行 lint；
+设置、清除或修改该变量均不会启用自动 full CI。无需 GitHub App 密钥、公网
 webhook 地址或服务升级。
 
-1. 将工作流和脚本合入 `main`，暂不设置开关。
+1. 确保 main 的 ruleset 已将 `ci/full` 设为必需状态检查，保留 `pre-commit`、
+   `clang-tidy` 和原有审批要求；可选来源时选择 GitHub Actions。
+   完成后续验证前保留旧的重测试必需检查。评论处理器和控制脚本必须已存在于
+   main，使本次升级 PR 能在合入前通过 `ci/full`。
+2. 将更新后的工作流和脚本合入 `main`。
    更新测试 PR 分支以包含此版本，等待自动 lint 完成。没有包含 PR/head/base
    的 lint 运行标题的旧运行不能复用。
-2. 在测试 PR 评论 `/ci full`，验证 fork 检出、实际测试失败、
+3. 在测试 PR 评论 `/ci full`，验证 fork 检出、实际测试失败、
    **Re-run failed jobs** 和最终 `ci/full` 状态；确认外部用户评论可以启动 full，
    不符合条件的 PR 无法启动 full，旧版本结果无法放行新提交。
-3. 在 main 的 ruleset 中将 `ci/full` 加入必需状态检查；可选来源时选择
-   GitHub Actions。保留 `pre-commit`、`clang-tidy` 和原有审批要求。
    不要直接要求 dispatch 的 `full-result` job，因为它属于主分支工作流版本，
    并不直接挂在 PR head 上。
 4. 确认 `ci/full` 已成为必需检查后，移除旧的逐项重测试要求，包括
    `unit-tests` 的矩阵检查。Lint 运行中这些检查可能被跳过或不出现，
    测试覆盖由 `ci/full` 汇总强制保障。
-5. 设置 `CI_COMMENT_TIERS_ENABLED=true`，后续 PR 默认仅运行 lint。
 
-回滚时先取消该变量以恢复自动测试；恢复旧的重测试必需检查后，才能移除
-`ci/full` 要求。本实现针对当前 PR 合入流程；启用合并队列（merge queue）前
+回滚时需要通过工作流和控制脚本代码恢复自动 full CI；清除旧变量不会生效。
+恢复旧的重测试必需检查并在新运行中验证后，才能移除 `ci/full` 要求。
+本实现针对当前 PR 合入流程；启用合并队列（merge queue）前
 需要额外实现 `merge_group` 支持。
 
 ## 自动 PR 审查

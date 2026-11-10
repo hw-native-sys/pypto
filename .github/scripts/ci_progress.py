@@ -78,6 +78,11 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
     # Include per-attempt job reads, provenance/status reads and startup lookup
     # overhead. Spread a shared 500-request/hour polling budget across monitors.
     cost = 6 + attempt
+    writes = max(0, min(50, remaining // active - cost))
+    if writes == 0:
+        # A positive quota may still be too small for a poll and one write.
+        # Waiting proportionally can outlast the monitor; reset replenishes it.
+        return math.ceil(reset_in) + 1, 0
     interval = math.ceil(
         max(
             INTERVAL_SECONDS,
@@ -85,7 +90,6 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
             active * cost * reset_in / remaining,
         )
     )
-    writes = max(0, min(50, remaining // active - cost))
     return interval, writes
 
 

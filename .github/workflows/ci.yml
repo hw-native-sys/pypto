@@ -44,8 +44,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # PR pushes run lint after CI_COMMENT_TIERS_ENABLED is enabled. Until then,
-  # preserve legacy behavior so rulesets can be migrated without a merge gap.
+  # Every PR push runs lint, including forks with no repository variables.
   # /ci full dispatches trusted main with immutable PR head/base/merge inputs.
   # Dispatched PR full runs deliberately disable the docs-only exemption for
   # core tests. docs-examples and serving-guard retain their applicability gates.
@@ -68,17 +67,19 @@ jobs:
       - name: Checkout CI controller
         uses: actions/checkout@v4
         with:
-          # Once enabled, PR edits to ci_control.py cannot select the tier.
-          # The flag stays off until this helper has been installed on main.
+          # PR edits to ci_control.py cannot select the tier. The helper must
+          # already exist on main; repository variables may be absent on forks.
           # PR workflow edits themselves still require runner-policy controls.
-          ref: ${{ github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' && github.event.pull_request.base.sha || github.workflow_sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.workflow_sha }}
           sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Validate and pin the test revision
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_COMMENT_TIERS_ENABLED: ${{ vars.CI_COMMENT_TIERS_ENABLED }}
+          # Older base revisions still use the rollout flag in prepare. Pin
+          # it on until those helpers are retired; never read it from vars.
+          CI_COMMENT_TIERS_ENABLED: 'true'
         run: python .github/scripts/ci_control.py prepare
       - name: Classify changed paths
         id: classify

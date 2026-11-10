@@ -254,6 +254,21 @@ def test_poll_budget_reserves_capacity_for_gate_writer(progress, monkeypatch):
     assert progress.poll_budget(REPO, 1) == (3601, 0)
 
 
+@pytest.mark.parametrize("remaining,active,attempt", [(201, 1, 1), (207, 1, 1), (208, 1, 2), (215, 2, 1)])
+def test_poll_budget_wakes_at_reset_when_no_write_fits(progress, monkeypatch, remaining, active, attempt):
+    def api(path):
+        if path == "rate_limit":
+            return {"resources": {"core": {"remaining": remaining, "reset": 3600}}}
+        assert "ci-full-progress.yml/runs?status=in_progress" in path
+        return {"total_count": active}
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.time, "time", lambda: 0)
+    # With 201 remaining requests the proportional delay was seven hours,
+    # so a five-hour completion monitor never got to publish the final checks.
+    assert progress.poll_budget(REPO, attempt) == (3601, 0)
+
+
 def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event, harness):
     real_api = progress.control.api
     failed = False

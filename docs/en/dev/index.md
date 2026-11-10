@@ -38,15 +38,15 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 
 ## Comment-triggered full CI
 
-After rollout, PR creation and updates run `changes`, `toolchain`, `pre-commit`
+PR creation and updates run `changes`, `toolchain`, `pre-commit`
 and `clang-tidy`, followed by a lightweight `lint-gate`. The separate `Docs / build` check also runs. Documentation-only
 PRs retain the automatic `clang-tidy` exemption. No device tests or wheel builds
 start automatically for PRs.
 
-With tiered CI enabled, the automatic PR run loads its controller from the
-trusted PR base SHA. Editing `ci_control.py` in the PR therefore does not change
-tier selection. Before activation, it uses the workflow revision so this change
-can be tested before the helper exists on main.
+Automatic PR runs, including forks, always select lint and load their controller
+from the trusted PR base SHA. Editing `ci_control.py` in the PR therefore does
+not change tier selection. The helper must already exist on main. Tier selection
+does not depend on repository variables, which can be empty in fork PR runs.
 
 This is a scheduling convention for the existing `pull_request` flow, not a
 complete protection against malicious runner use. A PR can still modify its
@@ -173,29 +173,32 @@ leave all four empty to run CI against main.
 
 ### Operator rollout
 
-The repository variable `CI_COMMENT_TIERS_ENABLED` is an activation switch.
-Unset or false preserves existing automatic full CI while the required checks
-are migrated. No GitHub App secret, public webhook endpoint or service update
-is needed.
+The old repository variable `CI_COMMENT_TIERS_ENABLED` is no longer used as an
+activation switch. PR runs always use lint; setting, clearing or changing that
+variable does not enable automatic full CI. No GitHub App secret, public webhook
+endpoint or service update is needed.
 
-1. Merge the workflows and helpers onto `main`, leaving the switch unset.
+1. Ensure the main ruleset requires `ci/full`, keeping `pre-commit`, `clang-tidy`
+   and existing review requirements. Select the GitHub Actions source where
+   available. Keep the former heavy-test requirements until the checks below
+   pass. The comment handler and controller must already be installed on main
+   so the rollout PR can satisfy `ci/full` before merging.
+2. Merge the updated workflows and helpers onto `main`.
    Update the test PR branch to include this version and let its automatic lint
    finish. Older runs without the PR/head/base lint title cannot be reused.
-2. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
+3. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
    **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm
    external commenters can trigger full, invalid PRs cannot launch it, and
    stale-head results cannot approve a newer revision.
-3. Add `ci/full` to the main ruleset's required status checks, selecting the
-   GitHub Actions source where available. Keep `pre-commit`, `clang-tidy` and
-   existing review requirements. Do not require the dispatch job `full-result`
+   Do not require the dispatch job `full-result`
    itself: it belongs to the main workflow revision, not the PR head.
 4. Once `ci/full` is required, remove the former individual heavy-test contexts
    from the required list, including the `unit-tests` matrix context. They may
    be skipped or absent in lint runs; coverage is now enforced by `ci/full`.
-5. Set `CI_COMMENT_TIERS_ENABLED=true`. Subsequent PR runs use lint by default.
 
-For rollback, unset the switch to restore automatic tests; keep the `ci/full`
-requirement until the previous heavy-test requirements have been restored.
+For rollback, restore automatic full CI in the workflow/controller code; clearing
+the old variable has no effect. Keep the `ci/full` requirement until the previous
+heavy-test requirements have been restored and verified on a new run.
 This implementation targets the current PR merge flow, not merge queues;
 `merge_group` support is required before enabling a merge queue.
 

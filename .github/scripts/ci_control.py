@@ -435,7 +435,9 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     kind = os.environ["GITHUB_EVENT_NAME"]
     inputs: dict[str, str] = event.get("inputs") or {}
     number = inputs.get("pr_number", "")
-    full = kind != "pull_request" or os.environ.get("CI_COMMENT_TIERS_ENABLED") != "true"
+    # Fork PR runs can have an empty vars context. The event alone selects the
+    # tier so missing configuration cannot launch device tests automatically.
+    full = kind != "pull_request"
     checkout = sha(os.environ["GITHUB_SHA"])
     if number:
         if kind != "workflow_dispatch" or os.environ["GITHUB_REF"] != "refs/heads/main":
