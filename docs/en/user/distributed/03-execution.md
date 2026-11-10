@@ -13,6 +13,13 @@ orchestrator it indexes the configured devices, and in a POD orchestrator
 it indexes HOST workers. `pld.num_workers()` returns the number of immediate
 children. HOST code can still use `device=` and `pld.world_size()`.
 
+## POD artifact compilation
+
+A `@pl.jit.pod` entry or a `CLUSTER_0` program compiles with
+`cluster_config=ir.ClusterConfig(...)`. The output directory contains the
+root and its reachable HOST and CHIP entries. Use
+`ir.DistributedCompiledProgram.from_dir(output_dir)` to reload this closure.
+
 ## DistributedWorker
 
 Obtained via `compiled.prepare()`. Setup (fork, comm bootstrap, kernel assembly)

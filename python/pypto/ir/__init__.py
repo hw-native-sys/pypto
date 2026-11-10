@@ -47,7 +47,12 @@ from .builder import IRBuilder
 from .compile import compile
 from .compiled_program import CompiledProgram
 from .directions import make_call
-from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
+from .distributed_compiled_program import (
+    ClusterConfig,
+    ClusterNodeSpec,
+    DistributedCompiledProgram,
+    DistributedConfig,
+)
 
 # Import roundtrip instrument factory
 from .instruments import make_roundtrip_instrument
@@ -109,6 +114,8 @@ __all__ = [
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",
+    "ClusterConfig",
+    "ClusterNodeSpec",
     "PassManager",
     "OptimizationStrategy",
     "PassDumpLevel",

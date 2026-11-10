@@ -64,6 +64,14 @@ if TYPE_CHECKING:
 _tensor_from_continuous = _distributed_support._tensor_from_continuous
 
 
+def _require_supported_program(compiled: Any) -> None:
+    """Reject actual L4 artifacts while retaining internal HOST duck typing."""
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+    if isinstance(compiled, DistributedCompiledProgram):
+        compiled._require_supported_execution()
+
+
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
     """Resolve the retained-window reset policy.
 
@@ -347,6 +355,7 @@ def _assemble_chip_callables(
     it works identically for a freshly-compiled program and one reconstructed via
     :meth:`DistributedCompiledProgram.from_dir` (the ``runtime_dir`` replay path).
     """
+    _require_supported_program(compiled)
     artifact_runtime = vars(compiled).get("_artifact_runtime")
     if artifact_runtime is not None:
         chips = artifact_runtime.load()
@@ -1409,6 +1418,7 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
         place; per-run timing is read from the runtime's ``[STRACE]`` log
         markers (simpler PR #1177), not returned here.
     """
+    _require_supported_program(compiled)
     host_args: list[torch.Tensor] = []
     for arg in coerced_args:
         if not isinstance(arg, torch.Tensor):
@@ -1709,6 +1719,9 @@ class DistributedWorker(Worker):
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
         startup_timeout_s: float | None = None,
     ) -> None:
+        programs = list(compiled) if isinstance(compiled, Sequence) else [compiled]
+        for program in programs:
+            _require_supported_program(program)
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         # Simpler owns allocations as Buffer objects. PyPTO continues exposing
         # raw pointers from its public memory API and resolves them through this
@@ -1760,7 +1773,6 @@ class DistributedWorker(Worker):
         self._accepting_dispatches = False
         self._closing = False
 
-        programs = list(compiled) if isinstance(compiled, Sequence) else [compiled]
         if not programs:
             raise ValueError("DistributedWorker requires at least one compiled program")
 
@@ -3161,6 +3173,7 @@ class DistributedWorker(Worker):
         Returns:
             A handle that owns the dispatch lifetime and cached outcome.
         """
+        _require_supported_program(compiled)
         with self._dispatch_submit_mu:
             return self._submit_compiled(compiled, *args, config=config)
 
@@ -3207,6 +3220,7 @@ class DistributedWorker(Worker):
             ValueError: *compiled* is not one of the programs this worker was
                 constructed from.
         """
+        _require_supported_program(compiled)
         self._require_open("register")
         if compiled not in self._states:
             raise ValueError(

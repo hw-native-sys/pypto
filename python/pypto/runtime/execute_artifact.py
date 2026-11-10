@@ -134,6 +134,10 @@ def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str, bool
     ``PYPTO_EXEC_RESULT=INFRA``) rather than a device test failure.
     """
     try:
+        if (work_dir / "distributed_meta.json").is_file():
+            from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+            DistributedCompiledProgram.from_dir(work_dir)._require_supported_execution()
         meta_path = work_dir / _COMPILED_META_FILENAME
         if meta_path.exists():
             ArtifactMetadata.read(work_dir).execution_capabilities.require(ArtifactExecutionMode.PROGRAM)

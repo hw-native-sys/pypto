@@ -13,6 +13,12 @@ fork chip 进程、组装 kernel——分摊到可复用的 `DistributedWorker` 
 `pld.num_workers()` 返回直属 worker 数量。HOST 代码仍可使用
 `device=` 和 `pld.world_size()`。
 
+## POD 产物编译
+
+用 `cluster_config=ir.ClusterConfig(...)` 编译 `@pl.jit.pod` 入口或
+`CLUSTER_0` 程序。输出目录包含根入口及其可达的 HOST 和 CHIP 产物。
+用 `ir.DistributedCompiledProgram.from_dir(output_dir)` 冷加载整套产物。
+
 ## DistributedWorker
 
 通过 `compiled.prepare()` 获得。设置（fork、通信引导、kernel 组装）仅执行一次；
