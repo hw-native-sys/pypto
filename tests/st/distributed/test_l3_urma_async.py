@@ -49,7 +49,7 @@ from pypto.ir import DistributedConfig
 from pypto.runtime import RunConfig
 
 SIZE = 4096
-REPEATS = 2
+REPEATS = 3
 
 
 def _rank_inputs(n_ranks: int, *, round_index: int = 0) -> torch.Tensor:
@@ -740,6 +740,117 @@ def _build_out_of_range(n_ranks: int):
     return host_orch
 
 
+def _invalid_chip_orch(n_ranks: int, publish):
+    """Wrap a single publish kernel as the chip orchestrator."""
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        return publish(inp, data)
+
+    return chip_orch
+
+
+def _invalid_host_orch(n_ranks: int, chip_orch):
+    """Host orchestrator for a one-window rejection program."""
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            chip_orch(inputs[r], outputs[r], data, device=r)
+        return outputs
+
+    return host_orch
+
+
+def _build_self_peer(n_ranks: int):
+    """A PUT whose peer is the issuing rank."""
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        pld.tensor.put_async(
+            data,
+            peer=my_rank,
+            src=data,
+            dst_offsets=[my_rank, 0],
+            src_offsets=[my_rank, 0],
+            shape=[1, SIZE],
+            engine=pld.CommEngine.URMA,
+        )
+        return data
+
+    return _invalid_host_orch(n_ranks, _invalid_chip_orch(n_ranks, publish))
+
+
+def _build_zero_length(n_ranks: int):
+    """A PUT whose runtime transfer extent is zero."""
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        zero = my_rank - my_rank
+        pld.tensor.put_async(
+            data,
+            peer=1 - my_rank,
+            src=data,
+            dst_offsets=[my_rank, 0],
+            src_offsets=[my_rank, 0],
+            shape=[1, zero],
+            engine=pld.CommEngine.URMA,
+        )
+        return data
+
+    return _invalid_host_orch(n_ranks, _invalid_chip_orch(n_ranks, publish))
+
+
+def _build_negative_offset(n_ranks: int):
+    """A PUT with a negative runtime column offset on the odd rank."""
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        col = 0 - my_rank
+        pld.tensor.put_async(
+            data,
+            peer=1 - my_rank,
+            src=data,
+            dst_offsets=[my_rank, 0],
+            src_offsets=[my_rank, col],
+            shape=[1, HALF],
+            engine=pld.CommEngine.URMA,
+        )
+        return data
+
+    return _invalid_host_orch(n_ranks, _invalid_chip_orch(n_ranks, publish))
+
+
 def _typed_inputs(n_ranks: int, dtype, step: int):
     inputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=dtype)
     for r in range(n_ranks):
@@ -1243,16 +1354,16 @@ class TestL3UrmaAsync:
             f"GET-only P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
-    def test_dynamic_subregion(self, test_config, device_ids):
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_dynamic_subregion(self, test_config, device_ids, n_ranks):
         """A half-row transferred at a runtime column offset.
 
         The offset is `rank`, so the runtime per-dimension guard sees a value
         that is not a compile-time constant. Only the transferred half of each
         row is written; the rest of the window stays zero.
         """
-        n_ranks = 2
         if len(device_ids) < n_ranks:
-            pytest.skip(f"URMA async dynamic subregion needs {n_ranks} devices")
+            pytest.skip(f"URMA async dynamic subregion P={n_ranks} needs {n_ranks} devices")
 
         outputs = _run_single_output(test_config, device_ids, n_ranks, _build_dynamic_subregion)
 
@@ -1282,6 +1393,54 @@ class TestL3UrmaAsync:
         assert torch.allclose(outputs, expected), (
             f"burst mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
+
+    def test_put_only_int32(self, test_config, device_ids):
+        """A third element type crosses the PUT path."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async INT32 PUT needs {n_ranks} devices")
+
+        outputs = _run_put_only_typed(test_config, device_ids, n_ranks, pl.INT32, torch.int32)
+        expected = _typed_expected(n_ranks, torch.int32, step=100)
+        assert torch.equal(outputs, expected), (
+            f"INT32 PUT mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+    def test_self_peer_fails_loudly(self, test_config, device_ids):
+        """A PUT addressed to the issuing rank is rejected."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async self-peer case needs {n_ranks} devices")
+
+        with pytest.raises(RuntimeError):
+            _run_invalid(test_config, device_ids, n_ranks, _build_self_peer)
+
+    def test_zero_length_fails_loudly(self, test_config, device_ids):
+        """A runtime transfer extent of zero is rejected."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async zero-length case needs {n_ranks} devices")
+
+        with pytest.raises(RuntimeError):
+            _run_invalid(test_config, device_ids, n_ranks, _build_zero_length)
+
+    def test_negative_offset_fails_loudly(self, test_config, device_ids):
+        """A negative runtime column offset is rejected."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async negative-offset case needs {n_ranks} devices")
+
+        with pytest.raises(RuntimeError):
+            _run_invalid(test_config, device_ids, n_ranks, _build_negative_offset)
+
+    def test_capacity_overflow_fails_loudly(self, test_config, device_ids):
+        """More than 64 registered submissions from one task is rejected."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async capacity case needs {n_ranks} devices")
+
+        with pytest.raises(RuntimeError):
+            _run_invalid(test_config, device_ids, n_ranks, lambda n: _build_burst(n, repeats=65))
 
 
 if __name__ == "__main__":
