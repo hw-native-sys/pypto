@@ -140,7 +140,10 @@ def test_local_loop_allocation_axes_can_be_frozen(case, accepted):
     program = ir.Program(functions, "local_extent", s)
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         if accepted:
-            passes.legalize_graph_boundary()(program)
+            # Legalization proves this local extent without moving the
+            # allocation or rewriting the loop body.
+            after = passes.legalize_graph_boundary()(program)
+            ir.assert_structural_equal(after, program)
         else:
             with pytest.raises(ValueError):
                 passes.legalize_graph_boundary()(program)

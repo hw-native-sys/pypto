@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import passes
+from pypto import ir, passes
 from pypto.pypto_core import passes as core_passes
 
 
@@ -57,7 +57,42 @@ class Before:
     program = pl.parse_program(source)
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         if case == "metadata":
-            legalized = passes.legalize_graph_boundary()(passes.convert_to_ssa()(program))
+            normalized = passes.convert_to_ssa()(program)
+            legalized = passes.legalize_graph_boundary()(normalized)
+            expected = pl.parse_program("""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def consume(
+        self, c: pl.InOut[pl.Tensor[[80, 16], pl.FP32]], flag: pl.Scalar[pl.INT32]
+    ) -> pl.Tensor[[80, 16], pl.FP32]:
+        return c
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph(
+        self, c: pl.InOut[pl.Tensor[[80, 16], pl.FP32]], index: pl.Tensor[[1], pl.INT32],
+        num_tokens: pl.Scalar[pl.INT32], flag_false: pl.Scalar[pl.INT32], flag_true: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[80, 16], pl.FP32]:
+        width = pl.tensor.dim(c, 0)
+        capacity = pl.tensor.dim(c, 1)
+        if width > capacity:
+            flag: pl.Scalar[pl.INT32] = pl.yield_(flag_true)
+        else:
+            flag: pl.Scalar[pl.INT32] = pl.yield_(flag_false)
+        self.consume(c, flag)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, c: pl.InOut[pl.Tensor[[80, 16], pl.FP32]], index: pl.Tensor[[1], pl.INT32],
+        num_tokens: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[80, 16], pl.FP32]:
+        flag_false = pl.cast(0, pl.INT32)
+        flag_true = pl.cast(1, pl.INT32)
+        self.graph(c, index, num_tokens, flag_false, flag_true)
+        return c
+""")
+            ir.assert_structural_equal(legalized, expected)
             properties = core_passes.IRPropertySet()
             properties.insert(core_passes.IRProperty.GraphBoundaryLegalized)
             assert core_passes.PropertyVerifierRegistry.verify(properties, legalized) == []

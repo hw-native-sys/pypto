@@ -164,7 +164,10 @@ def test_an_invariant_view_dim_can_feed_a_submit():
                     c, done = pl.submit(self.consume, slab, c, rows)
             return c
 
-    graph = _graph_func(_legalize(Before), "view_submit")
+    legalized = _legalize(Before)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        ir.assert_structural_equal(legalized, passes.convert_to_ssa()(Before))
+    graph = _graph_func(legalized, "view_submit")
     assert "rows" not in _scalar_param_names(graph)
 
 

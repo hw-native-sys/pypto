@@ -135,6 +135,7 @@ def test_metadata_topology_pass_and_independent_verifier(case):
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         normalized = _lower(_program(case))
         legalized = passes.legalize_graph_boundary()(normalized)
+        ir.assert_structural_equal(legalized, normalized)
         assert _diagnostics(legalized) == []
         if case == "posthoist":
             # The parser already folded dim(profile, 0) to the descriptor symbol.
@@ -319,6 +320,7 @@ def test_explicit_dim_call_and_posthoist_scalar_are_independently_reproved():
     program = public_ir.Program([child, graph, caller], "metadata_hoist", s)
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         result = passes.legalize_graph_boundary()(program)
+        ir.assert_structural_equal(result, program)
         assert _diagnostics(result) == []
         # Independently test the post-hoist ABI, without requiring the pass to
         # hoist an expression it may safely retain inside the region.
@@ -358,6 +360,7 @@ def test_explicit_dim_call_and_posthoist_scalar_are_independently_reproved():
         assert isinstance(dim, public_ir.Call)
         assert _diagnostics(post_program) == []
         legalized = passes.legalize_graph_boundary()(post_program)
+        ir.assert_structural_equal(legalized, post_program)
         graph = legalized.get_function("layer")
         assert graph is not None
         assert any(isinstance(p.type, public_ir.ScalarType) for p in graph.params)
@@ -385,6 +388,7 @@ def test_graph_keeps_shaped_view_inside_its_guard():
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         normalized = _lower(_program("guarded_reshape"))
         legalized = passes.legalize_graph_boundary()(normalized)
+        ir.assert_structural_equal(legalized, normalized)
         assert _diagnostics(legalized) == []
         graph = legalized.get_function("layer")
         assert graph is not None
