@@ -52,6 +52,12 @@ SSA 值而存在。
 两端都必须是窗口绑定、稠密行主序（dense row-major）的 `DistributedTensor`。
 结果与 `dst` 共用存储；算子返回不代表传输完成。
 
+后端从物化后的 domain `engines` 读取 URMA 可用性，并在拆分 chip/kernel 时将其
+传给 PTO codegen 和 kernel wrapper。在当前全程序保守引擎策略下，即使单个 kernel
+没有异步传输，也会获得相同的隐藏原始调度参数。没有 HOST domain IR 的独立
+`PTOCodegen.generate` / `generate_bundle` 调用需为 URMA kernel 显式传入
+`uses_urma=True`。adapter 符号与 C++ 元素类型复用公共 dtype 转换。
+
 - Python builder 要求 `engine=pld.CommEngine.URMA`（也是默认值）。
   整数、浮点数、布尔值、字符串及其他枚举在整数转换前即被拒绝。
   原始 IR 将 engine 存储为整数 `1`。

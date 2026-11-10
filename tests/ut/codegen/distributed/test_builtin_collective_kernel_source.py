@@ -41,6 +41,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import codegen, ir
+from pypto.backend import pto_backend
 from pypto.ir import DistributedConfig
 from pypto.pypto_core import passes
 
@@ -772,7 +773,7 @@ def test_local_operand_domain_also_receives_program_engines(tmp_path):
     assert 'workspace_engines=("urma",)' in d1, host_orch
 
 
-@pytest.mark.parametrize("engines", [[], ["urma"], ["sdma", "urma"]])
+@pytest.mark.parametrize("engines", [[], ["sdma"], ["urma"], ["sdma", "urma"]])
 def test_codegen_reads_explicit_domain_engines(engines):
     """Codegen emits IR requirements even when the body contains no collective."""
     span = ir.Span.unknown()
@@ -781,7 +782,9 @@ def test_codegen_reads_explicit_domain_engines(engines):
         [0], [buffer], "comm_d0", body=ir.SeqStmts([], span), span=span, engines=engines
     )
     host = ir.Function("host_orch", [], [], body, span, level=ir.Level.HOST, role=ir.Role.Orchestrator)
-    source = codegen.DistributedCodegen().generate(ir.Program([host], "explicit_engines", span))
+    program = ir.Program([host], "explicit_engines", span)
+    source = codegen.DistributedCodegen().generate(program)
+    assert pto_backend._uses_urma(program) == ("urma" in engines)
     if engines:
         expected = "workspace_engines=(" + "".join(f'"{engine}",' for engine in engines) + "),"
         assert expected in source
@@ -797,7 +800,8 @@ def test_chip_rail_requests_no_async_workspace(tmp_path):
     assert "workspace_engines" not in host_orch, host_orch
 
 
-def test_async_transfer_requests_the_urma_workspace(tmp_path):
+@pytest.mark.parametrize("skip_ptoas", [True, False])
+def test_async_transfer_requests_the_urma_workspace(tmp_path, monkeypatch, skip_ptoas):
     """End-to-end A9: an async transfer reaches the host domain's engine list.
 
     The engine scan must recognise ``put_async`` on the chip function, the pass
@@ -808,6 +812,15 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path):
     """
     f32_bytes = pl.FP32.get_byte()
     window_bytes = SIZE * f32_bytes
+    # Exercise both backend emission branches without requiring PTOAS. The
+    # generated MLIR and wrapper ABI are checked independently below.
+    emitted_mlir = []
+
+    def capture_ptoas(pto_code, *args, **kwargs):
+        emitted_mlir.append(pto_code)
+        return "// PTOAS output omitted in this host-codegen unit test\n"
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", capture_ptoas)
 
     @pl.program
     class AsyncProgram:
@@ -844,7 +857,7 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path):
         AsyncProgram,
         output_dir=str(tmp_path / "async_workspace"),
         platform="a5",
-        skip_ptoas=True,
+        skip_ptoas=skip_ptoas,
         dump_passes=False,
         distributed_config=DistributedConfig(device_ids=list(range(NR)), num_sub_workers=0),
     )
@@ -853,6 +866,12 @@ def test_async_transfer_requests_the_urma_workspace(tmp_path):
     assert 'workspace_engines=("urma",)' in host_orch, host_orch
     # No synchronous fallback may be introduced by the lowering.
     assert "DmaEngine" not in host_orch, host_orch
+    if skip_ptoas:
+        emitted_mlir = [p.read_text() for p in result.output_dir.rglob("*.pto")]
+    else:
+        wrappers = [p.read_text() for p in result.output_dir.rglob("*.cpp") if "kernels" in p.parts]
+        assert any("pypto_urma_put_async_f32" in wrapper and ", args);" in wrapper for wrapper in wrappers)
+    assert any("%__pypto_deferred_raw_args: !pto.ptr<i64>" in source for source in emitted_mlir)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,14 @@ pending. Both endpoints must be window-bound, dense row-major
 `DistributedTensor`s. The result aliases `dst`; returning from the op does not
 imply completion.
 
+The backend reads URMA availability from materialized domain `engines`, then
+forwards it through chip/kernel splitting to both PTO codegen and the kernel
+wrapper. Under the conservative program-wide engine policy, kernels receive
+the same hidden raw dispatch-args parameter even if an individual kernel has
+no async transfer. Isolated `PTOCodegen.generate` / `generate_bundle` callers
+without host domain IR must supply `uses_urma=True` for URMA kernels. Adapter
+symbols and C++ element types reuse the shared dtype conversions.
+
 - Python builders require `engine=pld.CommEngine.URMA` (also the default).
   Integers, floats, booleans, strings, and unrelated enums are rejected before
   integer conversion. Raw IR stores the engine as integer `1`.

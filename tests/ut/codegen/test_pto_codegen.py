@@ -2424,7 +2424,7 @@ class TestGenerateKernelWrapper:
 
         func = UrmaWrapperProgram.get_function("kernel")
         assert func is not None
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_urma=True)
 
         assert '#include "backend/urma/urma_completion_kernel.h"' in wrapper
         assert '#include "platform_comm/comm_context.h"' in wrapper
@@ -2442,26 +2442,59 @@ class TestGenerateKernelWrapper:
         assert ", args);" in wrapper
         assert "pypto_register_counter_completion" not in wrapper
 
-    def test_urma_transfer_adapter_covers_fp8(self):
-        """FP8 async transfers are accepted by the op and need an adapter too."""
+    @pytest.mark.parametrize(
+        "dtype,suffix,cpp_type",
+        [
+            (pl.FP32, "f32", "float"),
+            (pl.FP16, "f16", "half"),
+            (pl.BF16, "bf16", "bfloat16_t"),
+            (pl.INT8, "i8", "int8_t"),
+            (pl.UINT8, "ui8", "uint8_t"),
+            (pl.INT16, "i16", "int16_t"),
+            (pl.UINT16, "ui16", "uint16_t"),
+            (pl.INT32, "i32", "int32_t"),
+            (pl.UINT32, "ui32", "uint32_t"),
+            (pl.INT64, "i64", "int64_t"),
+            (pl.UINT64, "ui64", "uint64_t"),
+            (pl.FP8E4M3FN, "f8E4M3FN", "float8_e4m3_t"),
+            (pl.FP8E5M2, "f8E5M2", "float8_e5m2_t"),
+        ],
+    )
+    def test_urma_transfer_adapter_element_types(self, dtype, suffix, cpp_type):
+        """Shared dtype conversions preserve every supported helper ABI."""
 
         @pl.program
-        class Fp8Program:
+        class TransferProgram:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                dst: pld.DistributedTensor[[16, 64], pl.FP8E4M3FN],
-                src: pld.DistributedTensor[[16, 64], pl.FP8E4M3FN],
+                dst: pld.DistributedTensor[[16, 64], dtype],
+                src: pld.DistributedTensor[[16, 64], dtype],
                 peer: pl.Scalar[pl.INT32],
             ):
                 pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
 
-        func = Fp8Program.get_function("kernel")
+        func = TransferProgram.get_function("kernel")
         assert func is not None
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_urma=True)
 
-        assert "static __aicore__ void pypto_urma_put_async_f8E4M3FN(" in wrapper
-        assert "pypto_urma_transfer_impl<float8_e4m3_t, true>" in wrapper
+        assert f"static __aicore__ void pypto_urma_put_async_{suffix}(" in wrapper
+        assert f"pypto_urma_transfer_impl<{cpp_type}, true>" in wrapper
+
+    def test_urma_domain_forwards_raw_args_without_transfer_ops(self):
+        """Domain metadata, rather than an op scan, controls the wrapper ABI."""
+        func = _make_func("kernel", [("a", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_urma=True)
+        assert "kernel(a, args);" in wrapper
+        # No transfer helper is needed for a compute-only task in this domain.
+        assert "urma_completion_kernel.h" not in wrapper
+        assert "pypto_urma_transfer_impl" not in wrapper
+        plain = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "kernel(a);" in plain
+        program = _run_default_passes(ir.Program([func], "compute_only", ir.Span.unknown()))
+        generator = PTOCodegen()
+        assert "%__pypto_deferred_raw_args: !pto.ptr<i64>" in generator.generate(program, uses_urma=True)
+        assert "__pypto_deferred_raw_args" not in generator.generate(program)
 
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
