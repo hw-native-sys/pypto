@@ -1389,6 +1389,7 @@ def lint_run(control, monkeypatch, pr):
         "id": 40,
         "run_number": 4,
         "run_attempt": 1,
+        "status": "completed",
         "display_title": f"CI lint PR #123 @{HEAD} base:{BASE}",
         "event": "pull_request",
         "path": control.WORKFLOW,
@@ -1412,7 +1413,7 @@ def lint_run(control, monkeypatch, pr):
     def pages(path, key=None):
         if path == f"repos/{REPO}/actions/workflows/ci.yml/runs?event=pull_request&head_sha={HEAD}":
             return runs
-        if path == f"repos/{REPO}/actions/runs/40/jobs?filter=latest":
+        if path == f"repos/{REPO}/actions/runs/40/attempts/1/jobs":
             return jobs
         assert path == f"repos/{REPO}/pulls/123/files"
         return files
@@ -1575,6 +1576,31 @@ def test_lint_gate_shell_rejects_unjustified_skips(reuse, docs, pre, clang, acce
         capture_output=True,
     )
     assert (result.returncode == 0) == accepted
+
+
+def test_lint_reuse_waits_for_rerun_attempt(control, pr, lint_run):
+    lint_run[0]["status"] = "in_progress"
+    with pytest.raises(ValueError, match="still running"):
+        control.matching_lint_run(REPO, pr)
+
+
+def test_effective_jobs_preserves_successful_dependencies(control, monkeypatch):
+    attempts = {
+        1: [
+            {"name": "pre-commit", "id": 1, "conclusion": "success"},
+            {"name": "clang-tidy", "id": 2, "conclusion": "failure"},
+        ],
+        2: [{"name": "clang-tidy", "id": 3, "conclusion": "success"}],
+    }
+
+    def pages(path, key):
+        assert key == "jobs"
+        number = int(path.split("/attempts/")[1].split("/")[0])
+        return attempts[number]
+
+    monkeypatch.setattr(control, "pages", pages)
+    jobs = control.effective_jobs(REPO, {"id": 40, "run_attempt": 2})
+    assert {job["name"]: job["id"] for job in jobs} == {"pre-commit": 1, "clang-tidy": 3}
 
 
 if __name__ == "__main__":

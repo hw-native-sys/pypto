@@ -28,12 +28,11 @@ HIDDEN_JOBS = {"changes", "toolchain", "lint-gate", "pre-commit", "clang-tidy", 
 
 
 def sync_jobs(repo: str, head: str, run: dict[str, Any], checks: dict[str, Any]) -> None:
-    # filter=latest includes previously successful jobs retained by native reruns.
-    jobs = control.pages(f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+    jobs = control.effective_jobs(repo, run)
     for job in jobs:
         if job["name"] in HIDDEN_JOBS:
             continue
-        key = f"ci-full:{run['id']}:{run['run_attempt']}:{job['id']}"
+        key = f"ci-full:{run['id']}:{run['run_attempt']}:{job['name']}"
         status = job["status"] if job["status"] in {"in_progress", "completed"} else "queued"
         payload = {
             "name": f"full / {job['name']}"[:100],

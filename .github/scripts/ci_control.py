@@ -237,6 +237,21 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
     return False
 
 
+def effective_jobs(repo: str, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Overlay attempts by job name, preserving dependencies omitted by a rerun."""
+    attempt = run["run_attempt"]
+    if type(attempt) is not int or not 1 <= attempt <= 100:
+        raise ValueError("Cannot reconstruct CI jobs: invalid or excessive attempt count")
+    latest: dict[str, dict[str, Any]] = {}
+    for number in range(1, attempt + 1):
+        jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{number}/jobs", "jobs")
+        names = [job["name"] for job in jobs]
+        if len(set(names)) != len(names):
+            raise ValueError("CI job names must be unique within an attempt")
+        latest.update({job["name"]: job for job in jobs})
+    return list(latest.values())
+
+
 def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
     """Reuse only the latest automatic run for this exact PR/head/base snapshot."""
     head, base = pr["head"]["sha"], pr["base"]["sha"]
@@ -259,9 +274,11 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
     if not candidates:
         raise ValueError("No matching PR lint run; update the PR branch and wait for lint before /ci full")
     run = max(candidates, key=lambda item: item["run_number"])
-    # The jobs endpoint with filter=latest includes successful jobs retained by a
-    # failed-jobs rerun. Never fall back to an older green run after a newer failure.
-    jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+    # Wait for the attempt to finish so not-yet-indexed rerun jobs cannot make
+    # an earlier success look reusable while that check is actually rerunning.
+    if run["status"] != "completed":
+        raise ValueError("PR lint run is still running; wait before /ci full")
+    jobs = effective_jobs(repo, run)
     for name in ("changes", "pre-commit", "clang-tidy"):
         selected = [job for job in jobs if job["name"] == name]
         if len(selected) != 1 or selected[0]["status"] != "completed":

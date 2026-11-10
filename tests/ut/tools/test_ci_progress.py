@@ -82,7 +82,7 @@ def harness(progress, monkeypatch, event):
 
     def pages(path, key):
         if key == "jobs":
-            assert path == f"repos/{REPO}/actions/runs/50/jobs?filter=latest"
+            assert path == f"repos/{REPO}/actions/runs/50/attempts/1/jobs"
             return jobs
         assert key == "check_runs" and f"/commits/{HEAD}/check-runs?filter=all" in path
         return checks
@@ -140,7 +140,7 @@ def test_completed_event_reconciles_existing_checks(progress, event, harness):
     checks.append(
         {
             "id": 999,
-            "external_id": "ci-full:50:1:101",
+            "external_id": "ci-full:50:1:system-tests",
             "app": {"slug": "github-actions"},
             "status": "in_progress",
         }
@@ -198,6 +198,32 @@ def test_progress_workflow_is_isolated_from_test_code():
     assert checkout["ref"] == "${{ github.workflow_sha }}"
     assert checkout["sparse-checkout"] == ".github/scripts"
     assert checkout["persist-credentials"] is False
+
+
+def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch, event, harness):
+    run, _, _, writes, _ = harness
+    run.update(run_attempt=2, status="completed")
+    event["workflow_run"].update(run_attempt=2)
+    old_jobs = [
+        {"id": 100, "name": "unit-tests", "status": "completed", "conclusion": "success"},
+        {"id": 101, "name": "system-tests", "status": "completed", "conclusion": "failure"},
+    ]
+    new_jobs = [{"id": 102, "name": "system-tests", "status": "completed", "conclusion": "success"}]
+
+    def pages(path, key):
+        if key == "check_runs":
+            return []
+        assert key == "jobs"
+        if path.endswith("/attempts/1/jobs"):
+            return old_jobs
+        assert path.endswith("/attempts/2/jobs")
+        return new_jobs
+
+    monkeypatch.setattr(progress.control, "pages", pages)
+    progress.monitor(REPO, event)
+    assert {payload["name"] for _, payload, _ in writes} == {"full / unit-tests", "full / system-tests"}
+    assert all(payload["conclusion"] == "success" for _, payload, _ in writes)
+    assert all(payload["external_id"].startswith("ci-full:50:2:") for _, payload, _ in writes)
 
 
 if __name__ == "__main__":
