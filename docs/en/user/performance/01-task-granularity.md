@@ -199,10 +199,10 @@ everywhere else.
 **Cost:** the merged task holds every intermediate live at once.
 
 > **Merging across engines is not this.** Putting a cube op and a vector op in one scope
-> additionally needs a split mode — without `pl.split(...)` the buffers do not fit and the
-> compiler refuses the scope. That case is [a mixed
-> kernel](02-runtime-overhead.md#build-a-mixed-kernel); read it before merging a `matmul`
-> with the vector op that consumes it.
+> creates a mixed kernel with cross-core transfers. If the full-width vector work exceeds
+> the buffer budget, author `pl.split_aiv` regions with explicit shard/gather boundaries
+> and per-lane shapes and offsets. See [mixed kernels](02-runtime-overhead.md#build-a-mixed-kernel)
+> before merging a `matmul` with the vector op that consumes it.
 
 **How to confirm:** the merged task disappears from `deps.json` as a separate node, and the
 GM traffic for the intermediate disappears from the kernel.

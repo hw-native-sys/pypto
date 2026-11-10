@@ -69,30 +69,25 @@ _STORE_POLICIES = [
 ]
 
 
-@pl.program
-class V2CUDProgram:
+@pl.jit
+def v2c_ud(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    b: pl.Tensor[[32, 32], pl.FP32],
+    output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
     """V2C updown-split cross-core program.
 
     Vector producer: loads tiles a and b, computes add and sub, pushes both to Cube.
-    Cube consumer: pops tiles, performs matmul, stores result.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[32, 32], pl.FP32],
-        b: pl.Tensor[[32, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                a_half = a[lane * 16 : lane * 16 + 16, :]
-                b_half = b[lane * 16 : lane * 16 + 16, :]
-                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
-                sub = pl.aic_gather(pl.sub(a_half, b_half))
-            out = pl.matmul(a_plus_b, sub)
-            output = pl.assemble(output, out, [0, 0])
-        return output
+    Cube consumer: pops tiles, performs matmul, stores result."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            a_half = a[lane * 16 : lane * 16 + 16, :]
+            b_half = b[lane * 16 : lane * 16 + 16, :]
+            a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+            sub = pl.aic_gather(pl.sub(a_half, b_half))
+        out = pl.matmul(a_plus_b, sub)
+        output = pl.assemble(output, out, [0, 0])
+    return output
 
 
 class V2CUDTest(PTOTestCase):
@@ -111,7 +106,7 @@ class V2CUDTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return V2CUDProgram
+        return v2c_ud.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"].float()
@@ -119,30 +114,25 @@ class V2CUDTest(PTOTestCase):
         tensors["output"][:] = torch.matmul(a + b, a - b)
 
 
-@pl.program
-class V2CLRProgram:
+@pl.jit
+def v2c_lr(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    b: pl.Tensor[[32, 32], pl.FP32],
+    output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
     """V2C left-right-split cross-core program.
 
     Vector producer: loads tiles a and b, computes add and sub, pushes both to Cube.
-    Cube consumer: pops tiles, performs matmul, stores result.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[32, 32], pl.FP32],
-        b: pl.Tensor[[32, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                a_half = a[:, lane * 16 : lane * 16 + 16]
-                b_half = b[:, lane * 16 : lane * 16 + 16]
-                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
-                sub = pl.aic_gather(pl.sub(a_half, b_half))
-            out = pl.matmul(a_plus_b, sub)
-            output = pl.assemble(output, out, [0, 0])
-        return output
+    Cube consumer: pops tiles, performs matmul, stores result."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+            a_half = a[:, lane * 16 : lane * 16 + 16]
+            b_half = b[:, lane * 16 : lane * 16 + 16]
+            a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+            sub = pl.aic_gather(pl.sub(a_half, b_half))
+        out = pl.matmul(a_plus_b, sub)
+        output = pl.assemble(output, out, [0, 0])
+    return output
 
 
 class V2CLRTest(PTOTestCase):
@@ -161,7 +151,7 @@ class V2CLRTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return V2CLRProgram
+        return v2c_lr.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"].float()
@@ -169,27 +159,22 @@ class V2CLRTest(PTOTestCase):
         tensors["output"][:] = torch.matmul(a + b, a - b)
 
 
-@pl.program
-class V2CNoSplitProgram:
+@pl.jit
+def v2c_nosplit(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    b: pl.Tensor[[32, 32], pl.FP32],
+    output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
     """V2C no-split cross-core program.
 
     Vector producer: loads tiles a and b, computes add and sub, pushes both to Cube.
-    Cube consumer: pops tiles, performs matmul, stores result.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[32, 32], pl.FP32],
-        b: pl.Tensor[[32, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            a_plus_b = pl.add(a, b)
-            sub = pl.sub(a, b)
-            out = pl.matmul(a_plus_b, sub)
-            output = pl.assemble(output, out, [0, 0])
-        return output
+    Cube consumer: pops tiles, performs matmul, stores result."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        a_plus_b = pl.add(a, b)
+        sub = pl.sub(a, b)
+        out = pl.matmul(a_plus_b, sub)
+        output = pl.assemble(output, out, [0, 0])
+    return output
 
 
 class V2CNoSplitTest(PTOTestCase):
@@ -208,7 +193,7 @@ class V2CNoSplitTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return V2CNoSplitProgram
+        return v2c_nosplit.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"].float()
@@ -216,35 +201,30 @@ class V2CNoSplitTest(PTOTestCase):
         tensors["output"][:] = torch.matmul(a + b, a - b)
 
 
-@pl.program
-class C2VLRProgram:
+@pl.jit
+def c2v_lr(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
     """C2V left-right-split cross-core program.
 
     Cube producer: computes matmul in blocks over N, pushes results to Vector.
-    Vector consumer: accumulates result into output tensor.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for cb in pl.range(0, N_BLOCKS // 4):
-                for ci in pl.range(0, 4):
-                    nb = cb * 4 + ci
-                    n0 = nb * N_BLOCK
-                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    acc = pl.matmul(a, b_chunk)
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        half = pl.aiv_shard(acc)
-                        col = n0 + lane * (N_BLOCK // 2)
-                        c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
-                        c_next = pl.add(c_prev, half)
-                        c = pl.assemble(c, c_next, [0, col])
-        return c
+    Vector consumer: accumulates result into output tensor."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for cb in pl.range(0, N_BLOCKS // 4):
+            for ci in pl.range(0, 4):
+                nb = cb * 4 + ci
+                n0 = nb * N_BLOCK
+                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                acc = pl.matmul(a, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    half = pl.aiv_shard(acc)
+                    col = n0 + lane * (N_BLOCK // 2)
+                    c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [0, col])
+    return c
 
 
 class C2VLRTest(PTOTestCase):
@@ -263,7 +243,7 @@ class C2VLRTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return C2VLRProgram
+        return c2v_lr.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
@@ -272,35 +252,30 @@ class C2VLRTest(PTOTestCase):
         tensors["c"][:] = c_prev + torch.matmul(a, b)
 
 
-@pl.program
-class C2VUDProgram:
+@pl.jit
+def c2v_ud(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
     """C2V updown-split cross-core program.
 
     Cube producer: computes matmul in blocks over N, pushes results to Vector.
-    Vector consumer: accumulates result into output tensor.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for cb in pl.range(0, N_BLOCKS // 4):
-                for ci in pl.range(0, 4):
-                    nb = cb * 4 + ci
-                    n0 = nb * N_BLOCK
-                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    acc = pl.matmul(a, b_chunk)
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        half = pl.aiv_shard(acc)
-                        row = lane * (M // 2)
-                        c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
-                        c_next = pl.add(c_prev, half)
-                        c = pl.assemble(c, c_next, [row, n0])
-        return c
+    Vector consumer: accumulates result into output tensor."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for cb in pl.range(0, N_BLOCKS // 4):
+            for ci in pl.range(0, 4):
+                nb = cb * 4 + ci
+                n0 = nb * N_BLOCK
+                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                acc = pl.matmul(a, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    half = pl.aiv_shard(acc)
+                    row = lane * (M // 2)
+                    c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [row, n0])
+    return c
 
 
 class C2VUDTest(PTOTestCase):
@@ -319,7 +294,7 @@ class C2VUDTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return C2VUDProgram
+        return c2v_ud.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
@@ -328,31 +303,26 @@ class C2VUDTest(PTOTestCase):
         tensors["c"][:] = c_prev + torch.matmul(a, b)
 
 
-@pl.program
-class C2VNoSplitProgram:
+@pl.jit
+def c2v_nosplit(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
     """C2V no-split cross-core program.
 
     Cube producer: computes matmul in blocks over N, pushes results to Vector.
-    Vector consumer: accumulates result into output tensor.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for cb in pl.range(0, N_BLOCKS // 4):
-                for ci in pl.range(0, 4):
-                    nb = cb * 4 + ci
-                    n0 = nb * N_BLOCK
-                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                    c = pl.assemble(c, c_next, [0, n0])
-        return c
+    Vector consumer: accumulates result into output tensor."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for cb in pl.range(0, N_BLOCKS // 4):
+            for ci in pl.range(0, 4):
+                nb = cb * 4 + ci
+                n0 = nb * N_BLOCK
+                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
+                c = pl.assemble(c, c_next, [0, n0])
+    return c
 
 
 class C2VNoSplitTest(PTOTestCase):
@@ -371,7 +341,7 @@ class C2VNoSplitTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return C2VNoSplitProgram
+        return c2v_nosplit.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
@@ -380,37 +350,32 @@ class C2VNoSplitTest(PTOTestCase):
         tensors["c"][:] = c_prev + torch.matmul(a, b)
 
 
-@pl.program
-class BiDirectUDProgram:
+@pl.jit
+def bidirect_ud(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
     """Bidirectional (V→C→V) updown-split cross-core program.
 
-    Vector sends data to Cube for matmul, Cube sends results back to Vector.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for cb in pl.range(0, N_BLOCKS // 4):
-                for ci in pl.range(0, 4):
-                    nb = cb * 4 + ci
-                    n0 = nb * N_BLOCK
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        a_half = a[lane * (M // 2) : lane * (M // 2) + M // 2, :]
-                        a_add = pl.aic_gather(pl.add(a_half, 1.0))
-                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    acc = pl.matmul(a_add, b_chunk)
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        half = pl.aiv_shard(acc)
-                        row = lane * (M // 2)
-                        c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
-                        c_next = pl.add(c_prev, half)
-                        c = pl.assemble(c, c_next, [row, n0])
-        return c
+    Vector sends data to Cube for matmul, Cube sends results back to Vector."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for cb in pl.range(0, N_BLOCKS // 4):
+            for ci in pl.range(0, 4):
+                nb = cb * 4 + ci
+                n0 = nb * N_BLOCK
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    a_half = a[lane * (M // 2) : lane * (M // 2) + M // 2, :]
+                    a_add = pl.aic_gather(pl.add(a_half, 1.0))
+                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                acc = pl.matmul(a_add, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    half = pl.aiv_shard(acc)
+                    row = lane * (M // 2)
+                    c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [row, n0])
+    return c
 
 
 class BiDirectUDTest(PTOTestCase):
@@ -429,7 +394,7 @@ class BiDirectUDTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return BiDirectUDProgram
+        return bidirect_ud.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
@@ -438,37 +403,32 @@ class BiDirectUDTest(PTOTestCase):
         tensors["c"][:] = c_prev + torch.matmul(a + 1, b)
 
 
-@pl.program
-class BiDirectLRProgram:
+@pl.jit
+def bidirect_lr(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
     """Bidirectional (V→C→V) left-right-split cross-core program.
 
-    Vector sends data to Cube for matmul, Cube sends results back to Vector.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for cb in pl.range(0, N_BLOCKS // 4):
-                for ci in pl.range(0, 4):
-                    nb = cb * 4 + ci
-                    n0 = nb * N_BLOCK
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        a_half = a[:, lane * (K // 2) : lane * (K // 2) + K // 2]
-                        a_add = pl.aic_gather(pl.add(a_half, 1.0))
-                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    acc = pl.matmul(a_add, b_chunk)
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        half = pl.aiv_shard(acc)
-                        col = n0 + lane * (N_BLOCK // 2)
-                        c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
-                        c_next = pl.add(c_prev, half)
-                        c = pl.assemble(c, c_next, [0, col])
-        return c
+    Vector sends data to Cube for matmul, Cube sends results back to Vector."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for cb in pl.range(0, N_BLOCKS // 4):
+            for ci in pl.range(0, 4):
+                nb = cb * 4 + ci
+                n0 = nb * N_BLOCK
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    a_half = a[:, lane * (K // 2) : lane * (K // 2) + K // 2]
+                    a_add = pl.aic_gather(pl.add(a_half, 1.0))
+                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                acc = pl.matmul(a_add, b_chunk)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                    half = pl.aiv_shard(acc)
+                    col = n0 + lane * (N_BLOCK // 2)
+                    c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                    c_next = pl.add(c_prev, half)
+                    c = pl.assemble(c, c_next, [0, col])
+    return c
 
 
 class BiDirectLRTest(PTOTestCase):
@@ -487,7 +447,7 @@ class BiDirectLRTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return BiDirectLRProgram
+        return bidirect_lr.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]
@@ -496,31 +456,26 @@ class BiDirectLRTest(PTOTestCase):
         tensors["c"][:] = c_prev + torch.matmul(a + 1, b)
 
 
-@pl.program
-class BiDirectNoSplitProgram:
+@pl.jit
+def bidirect_nosplit(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
     """Bidirectional (V→C→V) no-split cross-core program.
 
-    Vector sends data to Cube for matmul, Cube sends results back to Vector.
-    """
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for cb in pl.range(0, N_BLOCKS // 4):
-                for ci in pl.range(0, 4):
-                    nb = cb * 4 + ci
-                    n0 = nb * N_BLOCK
-                    c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                    a_add = pl.add(a, 1.0)
-                    b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                    c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                    c = pl.assemble(c, c_next, [0, n0])
-        return c
+    Vector sends data to Cube for matmul, Cube sends results back to Vector."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for cb in pl.range(0, N_BLOCKS // 4):
+            for ci in pl.range(0, 4):
+                nb = cb * 4 + ci
+                n0 = nb * N_BLOCK
+                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+                a_add = pl.add(a, 1.0)
+                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
+                c = pl.assemble(c, c_next, [0, n0])
+    return c
 
 
 class BiDirectNoSplitTest(PTOTestCase):
@@ -539,7 +494,7 @@ class BiDirectNoSplitTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return BiDirectNoSplitProgram
+        return bidirect_nosplit.specialize()
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         a = tensors["a"]

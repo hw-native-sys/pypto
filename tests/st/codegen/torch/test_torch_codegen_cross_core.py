@@ -14,6 +14,7 @@ runs it with test tensors, and compares outputs to the golden reference.
 """
 
 import tempfile
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
@@ -22,7 +23,8 @@ from harness.core.harness import PLATFORMS, platform_to_backend
 from pypto import ir as _ir
 from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
 from pypto.debug import torch_codegen
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.jit import JITFunction
+from pypto.runtime import RunConfig
 
 M = 32
 K = 64
@@ -31,210 +33,183 @@ N_BLOCK = 64
 N_BLOCKS = N // N_BLOCK
 
 
-@pl.program
-class V2CUDProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[32, 32], pl.FP32],
-        b: pl.Tensor[[32, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-        ):
-            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                a_half = a[lane * 16 : lane * 16 + 16, :]
-                b_half = b[lane * 16 : lane * 16 + 16, :]
-                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
-                sub = pl.aic_gather(pl.sub(a_half, b_half))
-            out = pl.matmul(a_plus_b, sub)
-            output = pl.assemble(output, out, [0, 0])
-        return output
+@pl.jit
+def v2c_ud(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    b: pl.Tensor[[32, 32], pl.FP32],
+    output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+    ):
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            a_half = a[lane * 16 : lane * 16 + 16, :]
+            b_half = b[lane * 16 : lane * 16 + 16, :]
+            a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+            sub = pl.aic_gather(pl.sub(a_half, b_half))
+        out = pl.matmul(a_plus_b, sub)
+        output = pl.assemble(output, out, [0, 0])
+    return output
 
 
-@pl.program
-class V2CLRProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[32, 32], pl.FP32],
-        b: pl.Tensor[[32, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-        ):
+@pl.jit
+def v2c_lr(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    b: pl.Tensor[[32, 32], pl.FP32],
+    output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+    ):
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+            a_half = a[:, lane * 16 : lane * 16 + 16]
+            b_half = b[:, lane * 16 : lane * 16 + 16]
+            a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
+            sub = pl.aic_gather(pl.sub(a_half, b_half))
+        out = pl.matmul(a_plus_b, sub)
+        output = pl.assemble(output, out, [0, 0])
+    return output
+
+
+@pl.jit
+def v2c_nosplit(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    b: pl.Tensor[[32, 32], pl.FP32],
+    output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+) -> pl.Tensor[[32, 32], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        a_plus_b = pl.add(a, b)
+        sub = pl.sub(a, b)
+        out = pl.matmul(a_plus_b, sub)
+        output = pl.assemble(output, out, [0, 0])
+    return output
+
+
+@pl.jit
+def c2v_lr(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+    ):
+        for nb in pl.range(0, N_BLOCKS):
+            n0 = nb * N_BLOCK
+            b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+            acc = pl.matmul(a, b_chunk)
             for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                a_half = a[:, lane * 16 : lane * 16 + 16]
-                b_half = b[:, lane * 16 : lane * 16 + 16]
-                a_plus_b = pl.aic_gather(pl.add(a_half, b_half))
-                sub = pl.aic_gather(pl.sub(a_half, b_half))
-            out = pl.matmul(a_plus_b, sub)
-            output = pl.assemble(output, out, [0, 0])
-        return output
+                half = pl.aiv_shard(acc)
+                col = n0 + lane * (N_BLOCK // 2)
+                c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                c_next = pl.add(c_prev, half)
+                c = pl.assemble(c, c_next, [0, col])
+    return c
 
 
-@pl.program
-class V2CNoSplitProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[32, 32], pl.FP32],
-        b: pl.Tensor[[32, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            a_plus_b = pl.add(a, b)
-            sub = pl.sub(a, b)
-            out = pl.matmul(a_plus_b, sub)
-            output = pl.assemble(output, out, [0, 0])
-        return output
+@pl.jit
+def c2v_ud(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+    ):
+        for nb in pl.range(0, N_BLOCKS):
+            n0 = nb * N_BLOCK
+            b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+            acc = pl.matmul(a, b_chunk)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                half = pl.aiv_shard(acc)
+                row = lane * (M // 2)
+                c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                c_next = pl.add(c_prev, half)
+                c = pl.assemble(c, c_next, [row, n0])
+    return c
 
 
-@pl.program
-class C2VLRProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-        ):
-            for nb in pl.range(0, N_BLOCKS):
-                n0 = nb * N_BLOCK
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                acc = pl.matmul(a, b_chunk)
-                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                    half = pl.aiv_shard(acc)
-                    col = n0 + lane * (N_BLOCK // 2)
-                    c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
-                    c_next = pl.add(c_prev, half)
-                    c = pl.assemble(c, c_next, [0, col])
-        return c
+@pl.jit
+def c2v_nosplit(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for nb in pl.range(0, N_BLOCKS):
+            n0 = nb * N_BLOCK
+            c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+            b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+            c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
+            c = pl.assemble(c, c_next, [0, n0])
+    return c
 
 
-@pl.program
-class C2VUDProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-        ):
-            for nb in pl.range(0, N_BLOCKS):
-                n0 = nb * N_BLOCK
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                acc = pl.matmul(a, b_chunk)
-                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                    half = pl.aiv_shard(acc)
-                    row = lane * (M // 2)
-                    c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
-                    c_next = pl.add(c_prev, half)
-                    c = pl.assemble(c, c_next, [row, n0])
-        return c
+@pl.jit
+def bidirect_ud(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+    ):
+        for nb in pl.range(0, N_BLOCKS):
+            n0 = nb * N_BLOCK
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                a_half = a[lane * (M // 2) : lane * (M // 2) + M // 2, :]
+                a_add = pl.aic_gather(pl.add(a_half, 1.0))
+            b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+            acc = pl.matmul(a_add, b_chunk)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                half = pl.aiv_shard(acc)
+                row = lane * (M // 2)
+                c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
+                c_next = pl.add(c_prev, half)
+                c = pl.assemble(c, c_next, [row, n0])
+    return c
 
 
-@pl.program
-class C2VNoSplitProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for nb in pl.range(0, N_BLOCKS):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
-        return c
+@pl.jit
+def bidirect_lr(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+    ):
+        for nb in pl.range(0, N_BLOCKS):
+            n0 = nb * N_BLOCK
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                a_half = a[:, lane * (K // 2) : lane * (K // 2) + K // 2]
+                a_add = pl.aic_gather(pl.add(a_half, 1.0))
+            b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+            acc = pl.matmul(a_add, b_chunk)
+            for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                half = pl.aiv_shard(acc)
+                col = n0 + lane * (N_BLOCK // 2)
+                c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
+                c_next = pl.add(c_prev, half)
+                c = pl.assemble(c, c_next, [0, col])
+    return c
 
 
-@pl.program
-class BiDirectUDProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-        ):
-            for nb in pl.range(0, N_BLOCKS):
-                n0 = nb * N_BLOCK
-                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                    a_half = a[lane * (M // 2) : lane * (M // 2) + M // 2, :]
-                    a_add = pl.aic_gather(pl.add(a_half, 1.0))
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                acc = pl.matmul(a_add, b_chunk)
-                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                    half = pl.aiv_shard(acc)
-                    row = lane * (M // 2)
-                    c_prev = pl.slice(c, [M // 2, N_BLOCK], [row, n0])
-                    c_next = pl.add(c_prev, half)
-                    c = pl.assemble(c, c_next, [row, n0])
-        return c
-
-
-@pl.program
-class BiDirectLRProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-        ):
-            for nb in pl.range(0, N_BLOCKS):
-                n0 = nb * N_BLOCK
-                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                    a_half = a[:, lane * (K // 2) : lane * (K // 2) + K // 2]
-                    a_add = pl.aic_gather(pl.add(a_half, 1.0))
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                acc = pl.matmul(a_add, b_chunk)
-                for lane in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                    half = pl.aiv_shard(acc)
-                    col = n0 + lane * (N_BLOCK // 2)
-                    c_prev = pl.slice(c, [M, N_BLOCK // 2], [0, col])
-                    c_next = pl.add(c_prev, half)
-                    c = pl.assemble(c, c_next, [0, col])
-        return c
-
-
-@pl.program
-class BiDirectNoSplitProgram:
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[M, K], pl.FP32],
-        b: pl.Tensor[[K, N], pl.FP32],
-        c: pl.Tensor[[M, N], pl.FP32],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            for nb in pl.range(0, N_BLOCKS):
-                n0 = nb * N_BLOCK
-                c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
-                a_add = pl.add(a, 1.0)
-                b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
-                c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
-                c = pl.assemble(c, c_next, [0, n0])
-        return c
+@pl.jit
+def bidirect_nosplit(
+    a: pl.Tensor[[M, K], pl.FP32],
+    b: pl.Tensor[[K, N], pl.FP32],
+    c: pl.Tensor[[M, N], pl.FP32],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for nb in pl.range(0, N_BLOCKS):
+            n0 = nb * N_BLOCK
+            c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
+            a_add = pl.add(a, 1.0)
+            b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
+            c_next = pl.add(c_prev, pl.matmul(a_add, b_chunk))
+            c = pl.assemble(c, c_next, [0, n0])
+    return c
 
 
 def _build_v2c_tensors() -> dict[str, torch.Tensor]:
@@ -270,19 +245,41 @@ def _golden_bidirect(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
     return tensors["c"]
 
 
+def _compile_and_lower(
+    kernel: JITFunction,
+    tensors: dict[str, torch.Tensor],
+    arg_order: list[str],
+    backend_type: BackendType,
+) -> _ir.Program:
+    """Exercise the public JIT compile path before checking lowered torch numerics."""
+    args = [tensors[name] for name in arg_order]
+    with tempfile.TemporaryDirectory() as directory:
+        config = RunConfig(
+            backend_type=backend_type,
+            codegen_only=True,
+            save_kernels=True,
+            save_kernels_dir=directory,
+        )
+        kernel.compile(*args, config=config)
+        pto_files = list(Path(directory).rglob("*.pto"))
+        assert pto_files, "JIT compile did not emit PTO kernels"
+        assert all("__FREE_VAR" not in path.read_text() for path in pto_files)
+        return kernel.lower(*args, config=config)
+
+
 def _run_codegen_and_check(
-    program: _ir.Program | _ir.Function,
+    program: JITFunction,
     tensors: dict[str, torch.Tensor],
     arg_order: list[str],
     out_name: str,
     expected: torch.Tensor,
 ) -> None:
-    code = torch_codegen(program, check_shapes=True)
+    code = torch_codegen(program.specialize(*[tensors[n] for n in arg_order]), check_shapes=True)
     ns: dict = {}
     exec(code, ns)  # noqa: S102
 
     args = [tensors[name] for name in arg_order]
-    result = ns["main"](*args)
+    result = ns[program.__name__](*args)
     actual = tensors[out_name]
 
     assert torch.allclose(actual, expected, rtol=5e-2, atol=5e-2), (
@@ -295,7 +292,7 @@ def _run_codegen_and_check(
 
 
 def _run_codegen_after_default_pass_and_check(
-    program: _ir.Program | _ir.Function,
+    program: JITFunction,
     tensors: dict[str, torch.Tensor],
     arg_order: list[str],
     out_name: str,
@@ -307,7 +304,7 @@ def _run_codegen_after_default_pass_and_check(
     reset_for_testing()
     set_backend_type(backend_type)
     try:
-        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        transformed = _compile_and_lower(program, tensors, arg_order, backend_type)
         code = torch_codegen(transformed, check_shapes=True)
     finally:
         reset_for_testing()
@@ -319,7 +316,7 @@ def _run_codegen_after_default_pass_and_check(
     exec(code, ns)  # noqa: S102
 
     args = [tensors[name] for name in arg_order]
-    result = ns["main"](*args)
+    result = ns[program.__name__](*args)
     actual = tensors[out_name]
 
     assert torch.allclose(actual, expected, rtol=5e-2, atol=5e-2), (
@@ -332,15 +329,15 @@ def _run_codegen_after_default_pass_and_check(
 
 
 _SCENARIOS = [
-    ("v2c_updown", V2CUDProgram, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
-    ("v2c_leftright", V2CLRProgram, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
-    ("v2c_nosplit", V2CNoSplitProgram, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
-    ("c2v_leftright", C2VLRProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
-    ("c2v_updown", C2VUDProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
-    ("c2v_nosplit", C2VNoSplitProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
-    ("bidirect_updown", BiDirectUDProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
-    ("bidirect_leftright", BiDirectLRProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
-    ("bidirect_nosplit", BiDirectNoSplitProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
+    ("v2c_updown", v2c_ud, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
+    ("v2c_leftright", v2c_lr, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
+    ("v2c_nosplit", v2c_nosplit, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
+    ("c2v_leftright", c2v_lr, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
+    ("c2v_updown", c2v_ud, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
+    ("c2v_nosplit", c2v_nosplit, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
+    ("bidirect_updown", bidirect_ud, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
+    ("bidirect_leftright", bidirect_lr, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
+    ("bidirect_nosplit", bidirect_nosplit, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
 ]
 
 
@@ -353,7 +350,7 @@ _SCENARIOS = [
 )
 def test_cross_core_codegen_vs_golden(
     _name: str,
-    program: _ir.Program | _ir.Function,
+    program: JITFunction,
     builder,
     arg_order: list[str],
     out_name: str,
@@ -377,7 +374,7 @@ def test_cross_core_codegen_vs_golden(
 def test_cross_core_codegen_after_default_pass_vs_golden(
     platform: str,
     _name: str,
-    program: _ir.Program | _ir.Function,
+    program: JITFunction,
     builder,
     arg_order: list[str],
     out_name: str,
@@ -403,8 +400,8 @@ def test_cross_core_codegen_after_default_pass_vs_golden(
 # Explicit AIV-split (pl.split_aiv) fused-mixed kernels.
 #
 # A ``for aiv_id in pl.split_aiv(...)`` loop nested inside a ``pl.at(CORE_GROUP)``
-# scope is FLATTENED by the parser onto the enclosing InCore scope (no nested
-# sub-scope). The cube ops (load Mat -> move Left/Right -> matmul -> Acc tile)
+# scope retains an explicit AIV region until mixed-kernel expansion. The cube
+# ops (load Mat -> move Left/Right -> matmul -> Acc tile)
 # live outside the loop; the vector ops shard the Acc tile DIRECTLY via
 # ``pl.aiv_shard`` (the shard IS the C->V boundary — no intermediate move->Vec,
 # which would create a double boundary and a FREE_VAR codegen crash).
@@ -417,61 +414,53 @@ SA_K = 64
 SA_N = 64
 
 
-@pl.program
-class SplitAivShardProgram:
+@pl.jit
+def split_aiv_shard(
+    a: pl.Tensor[[SA_M, SA_K], pl.FP32],
+    b: pl.Tensor[[SA_K, SA_N], pl.FP32],
+    out: pl.Out[pl.Tensor[[SA_M, SA_N], pl.FP32]],
+) -> pl.Tensor[[SA_M, SA_N], pl.FP32]:
     """Direct-shard aiv_shard-only kernel: out = (a @ b) * 2, sharded UP_DOWN."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[SA_M, SA_K], pl.FP32],
-        b: pl.Tensor[[SA_K, SA_N], pl.FP32],
-        out: pl.Out[pl.Tensor[[SA_M, SA_N], pl.FP32]],
-    ) -> pl.Tensor[[SA_M, SA_N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, name_hint="qk"):
-            a_l1 = pl.load(a, [0, 0], [SA_M, SA_K], target_memory=pl.MemorySpace.Mat)
-            b_l1 = pl.load(b, [0, 0], [SA_K, SA_N], target_memory=pl.MemorySpace.Mat)
-            a_left = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
-            b_right = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
-            qk = pl.matmul(a_left, b_right)  # Acc tile [M, N]
-            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                qk_h = pl.aiv_shard(qk)  # DIRECT shard of the Acc tile -> [M/2, N] Vec
-                sc = pl.mul(qk_h, 2.0)  # vector op
-                offset = aiv_id * (SA_M // 2)
-                out = pl.store(sc, [offset, 0], out)
-        return out
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="qk"):
+        a_l1 = pl.load(a, [0, 0], [SA_M, SA_K], target_memory=pl.MemorySpace.Mat)
+        b_l1 = pl.load(b, [0, 0], [SA_K, SA_N], target_memory=pl.MemorySpace.Mat)
+        a_left = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
+        b_right = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
+        qk = pl.matmul(a_left, b_right)  # Acc tile [M, N]
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            qk_h = pl.aiv_shard(qk)  # DIRECT shard of the Acc tile -> [M/2, N] Vec
+            sc = pl.mul(qk_h, 2.0)  # vector op
+            offset = aiv_id * (SA_M // 2)
+            out = pl.store(sc, [offset, 0], out)
+    return out
 
 
-@pl.program
-class SplitAivQkPvProgram:
+@pl.jit
+def split_aiv_qk_pv(
+    a: pl.Tensor[[SA_M, SA_K], pl.FP32],
+    b: pl.Tensor[[SA_K, SA_N], pl.FP32],
+    v: pl.Tensor[[SA_N, SA_N], pl.FP32],
+    out: pl.Out[pl.Tensor[[SA_M, SA_N], pl.FP32]],
+) -> pl.Tensor[[SA_M, SA_N], pl.FP32]:
     """aic_gather round-trip: out = ((a @ b) * 2) @ v, gather half -> full -> cube."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        a: pl.Tensor[[SA_M, SA_K], pl.FP32],
-        b: pl.Tensor[[SA_K, SA_N], pl.FP32],
-        v: pl.Tensor[[SA_N, SA_N], pl.FP32],
-        out: pl.Out[pl.Tensor[[SA_M, SA_N], pl.FP32]],
-    ) -> pl.Tensor[[SA_M, SA_N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, name_hint="qkpv"):
-            a_l1 = pl.load(a, [0, 0], [SA_M, SA_K], target_memory=pl.MemorySpace.Mat)
-            b_l1 = pl.load(b, [0, 0], [SA_K, SA_N], target_memory=pl.MemorySpace.Mat)
-            a_left = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
-            b_right = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
-            qk = pl.matmul(a_left, b_right)  # AIC (cube): Acc tile [M, N]
-            # The split_aiv loop is the AIV (vector) per-lane region on HALF tiles.
-            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                qk_h = pl.aiv_shard(qk)  # C->V: full [M,N] -> this lane's half [M/2, N] Vec
-                sc = pl.mul(qk_h, 2.0)  # AIV vector work on the half
-                full = pl.aic_gather(sc)  # V->C: gather halves -> full [M, N] (leaks out of the loop)
-            # Cube ops live OUTSIDE the loop and consume the gathered full tile.
-            full_left = pl.move(full, target_memory=pl.MemorySpace.Left)
-            v_l1 = pl.load(v, [0, 0], [SA_N, SA_N], target_memory=pl.MemorySpace.Mat)
-            v_right = pl.move(v_l1, target_memory=pl.MemorySpace.Right)
-            pv = pl.matmul(full_left, v_right)  # AIC (cube): post-gather matmul on the full tile
-            out = pl.store(pv, [0, 0], out)
-        return out
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="qkpv"):
+        a_l1 = pl.load(a, [0, 0], [SA_M, SA_K], target_memory=pl.MemorySpace.Mat)
+        b_l1 = pl.load(b, [0, 0], [SA_K, SA_N], target_memory=pl.MemorySpace.Mat)
+        a_left = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
+        b_right = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
+        qk = pl.matmul(a_left, b_right)  # AIC (cube): Acc tile [M, N]
+        # The split_aiv loop is the AIV (vector) per-lane region on HALF tiles.
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            qk_h = pl.aiv_shard(qk)  # C->V: full [M,N] -> this lane's half [M/2, N] Vec
+            sc = pl.mul(qk_h, 2.0)  # AIV vector work on the half
+            full = pl.aic_gather(sc)  # V->C: gather halves -> full [M, N] (leaks out of the loop)
+        # Cube ops live OUTSIDE the loop and consume the gathered full tile.
+        full_left = pl.move(full, target_memory=pl.MemorySpace.Left)
+        v_l1 = pl.load(v, [0, 0], [SA_N, SA_N], target_memory=pl.MemorySpace.Mat)
+        v_right = pl.move(v_l1, target_memory=pl.MemorySpace.Right)
+        pv = pl.matmul(full_left, v_right)  # AIC (cube): post-gather matmul on the full tile
+        out = pl.store(pv, [0, 0], out)
+    return out
 
 
 def _build_split_aiv_shard_tensors() -> dict[str, torch.Tensor]:
@@ -528,8 +517,8 @@ def _iter_func_bodies_op_names(program: _ir.Program) -> list[str]:
 def _assert_split_aiv_lowered_and_codegen(transformed: _ir.Program, base_name: str) -> str:
     """Assert structural + PTO-codegen health of a lowered split_aiv program.
 
-    Shared by the ``@pl.program`` tile-ISA path and the ``@pl.jit`` high-level
-    tensor path — both funnel through the SAME lowering (tile.aiv_shard /
+    Shared by the ``@pl.jit`` tile-ISA and high-level tensor paths, which both
+    funnel through the same lowering (tile.aiv_shard /
     tile.aic_gather folded into cross-core tpush/tpop by ExpandMixedKernel), so
     the post-pipeline invariants are identical. The caller must have already run
     the Default pipeline under the active Ascend910 backend (the split_aiv /
@@ -607,7 +596,7 @@ def _exec_and_compare_golden(
 
 
 def _run_split_aiv_default_and_check(
-    program: _ir.Program,
+    program: JITFunction,
     tensors: dict[str, torch.Tensor],
     arg_order: list[str],
     base_name: str,
@@ -623,18 +612,18 @@ def _run_split_aiv_default_and_check(
     reset_for_testing()
     set_backend_type(BackendType.Ascend910)
     try:
-        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        transformed = _compile_and_lower(program, tensors, arg_order, BackendType.Ascend910)
         code = _assert_split_aiv_lowered_and_codegen(transformed, base_name)
     finally:
         reset_for_testing()
 
-    _exec_and_compare_golden(code, "main", tensors, arg_order, expected)
+    _exec_and_compare_golden(code, program.__name__, tensors, arg_order, expected)
 
 
 _SPLIT_AIV_SCENARIOS = [
     (
         "split_aiv_shard_updown",
-        SplitAivShardProgram,
+        split_aiv_shard,
         _build_split_aiv_shard_tensors,
         ["a", "b", "out"],
         "qk",
@@ -642,7 +631,7 @@ _SPLIT_AIV_SCENARIOS = [
     ),
     (
         "split_aiv_qk_pv",
-        SplitAivQkPvProgram,
+        split_aiv_qk_pv,
         _build_split_aiv_qk_pv_tensors,
         ["a", "b", "v", "out"],
         "qkpv",
@@ -658,7 +647,7 @@ _SPLIT_AIV_SCENARIOS = [
 )
 def test_split_aiv_fused_mixed_codegen_vs_golden(
     _name: str,
-    program: _ir.Program,
+    program: JITFunction,
     builder,
     arg_order: list[str],
     base_name: str,
@@ -681,7 +670,7 @@ def test_split_aiv_fused_mixed_codegen_vs_golden(
 # ---------------------------------------------------------------------------
 # High-level (@pl.jit) tensor-vocabulary AIV split (issue #1915).
 #
-# The author-facing analog of the tile-ISA SplitAivQkPvProgram above: producers
+# The author-facing analog of the tile-ISA split_aiv_qk_pv above: producers
 # are high-level ``pl.matmul`` calls that return a *Tensor*, and the C->V shard
 # (``pl.aiv_shard``) / V->C gather (``pl.aic_gather``) operate on that Tensor
 # inside a ``for aiv_id in pl.split_aiv(...)`` region. Those emit tensor.aiv_shard
@@ -699,7 +688,7 @@ def TensorSplitAivQkPvProgram(  # noqa: N802 — mirrors the sibling @pl.program
     v: pl.Tensor,
     out: pl.Out[pl.Tensor],
 ):
-    """High-level (@pl.jit) analog of SplitAivQkPvProgram: out = ((q @ k^T) * 2) @ v.
+    """High-level (@pl.jit) analog of split_aiv_qk_pv: out = ((q @ k^T) * 2) @ v.
 
     Both matmuls live OUTSIDE the ``pl.split_aiv`` region (cube work); the region
     shards the ``raw = q @ k^T`` Tensor to each AIV lane, scales the half, and
@@ -741,7 +730,7 @@ def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
     tensor.* shard/gather ops lower 1:1 to tile.* at ConvertTensorToTileOps and
     are then folded (no tile.* / tensor.* aiv_shard/aic_gather survives); PTO
     codegen emits both lanes with no ``__FREE_VAR``; torch golden matches. It then
-    layers an equivalence check against the low-level tile-ISA SplitAivQkPvProgram
+    layers an equivalence check against the low-level tile-ISA split_aiv_qk_pv
     fed the same math (``a = q``, ``b = k^T``): the two forms must produce
     bit-for-bit-close device outputs, proving the high-level tensor path is a
     faithful sugar over the tile path.
@@ -759,7 +748,9 @@ def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
     try:
         # @pl.jit compiles through the SAME Default pipeline (the specializer
         # rewrites the kernel into @pl.program source, then run_passes runs).
-        transformed = TensorSplitAivQkPvProgram.lower(*[tensor_tensors[n] for n in arg_order])
+        transformed = _compile_and_lower(
+            TensorSplitAivQkPvProgram, tensor_tensors, arg_order, BackendType.Ascend910
+        )
         code = _assert_split_aiv_lowered_and_codegen(transformed, "tqkpv")
     finally:
         reset_for_testing()
@@ -768,16 +759,14 @@ def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
     tensor_out = tensor_tensors["out"].clone()
 
     # Equivalence vs the low-level tile-ISA form: feeding a = q, b = k^T reproduces
-    # q @ k^T, so SplitAivQkPvProgram computes the identical ((q @ k^T) * 2) @ v.
+    # q @ k^T, so split_aiv_qk_pv computes the identical ((q @ k^T) * 2) @ v.
     tile_tensors = {
         "a": base_tensors["q"].clone(),
         "b": base_tensors["k"].t().contiguous(),
         "v": base_tensors["v"].clone(),
         "out": torch.zeros(SA_M, SA_N, dtype=torch.float32),
     }
-    _run_split_aiv_default_and_check(
-        SplitAivQkPvProgram, tile_tensors, ["a", "b", "v", "out"], "qkpv", expected
-    )
+    _run_split_aiv_default_and_check(split_aiv_qk_pv, tile_tensors, ["a", "b", "v", "out"], "qkpv", expected)
     assert torch.allclose(tensor_out, tile_tensors["out"], rtol=5e-2, atol=5e-2), (
         "high-level tensor split_aiv output diverged from the tile-ISA form: "
         f"max abs diff = {(tensor_out - tile_tensors['out']).abs().max().item():.6e}"
@@ -791,19 +780,17 @@ def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
 
 
 def _run_explicit_split_golden(
-    program: _ir.Program,
+    program: JITFunction,
     tensors: dict[str, torch.Tensor],
     arg_order: list[str],
     out_name: str,
     expected: torch.Tensor,
 ) -> None:
-    """Run the Default pipeline (Ascend910) on an AUTO ``pl.split`` kernel +
-    torch codegen and assert the lowered kernel is functionally correct against
-    the golden."""
+    """Compile the explicit JIT kernel and compare its lowered torch code to the golden."""
     reset_for_testing()
     set_backend_type(BackendType.Ascend910)
     try:
-        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        transformed = _compile_and_lower(program, tensors, arg_order, BackendType.Ascend910)
         code = torch_codegen(transformed, check_shapes=True)
     finally:
         reset_for_testing()
@@ -811,7 +798,7 @@ def _run_explicit_split_golden(
     ns: dict = {}
     exec(code, ns)  # noqa: S102
     args = [tensors[name] for name in arg_order]
-    result = ns["main"](*args)
+    result = ns[program.__name__](*args)
     actual = tensors[out_name]
     assert torch.allclose(actual, expected, rtol=5e-2, atol=5e-2), (
         f"explicit-split golden mismatch: max abs diff = {(expected - actual).abs().max().item():.6e}"
@@ -823,12 +810,12 @@ def _run_explicit_split_golden(
 
 
 _SPLIT_PARITY_SCENARIOS = [
-    ("v2c_updown", V2CUDProgram, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
-    ("v2c_leftright", V2CLRProgram, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
-    ("c2v_updown", C2VUDProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
-    ("c2v_leftright", C2VLRProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
-    ("bidirect_updown", BiDirectUDProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
-    ("bidirect_leftright", BiDirectLRProgram, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
+    ("v2c_updown", v2c_ud, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
+    ("v2c_leftright", v2c_lr, _build_v2c_tensors, ["a", "b", "output"], "output", _golden_v2c),
+    ("c2v_updown", c2v_ud, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
+    ("c2v_leftright", c2v_lr, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_c2v),
+    ("bidirect_updown", bidirect_ud, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
+    ("bidirect_leftright", bidirect_lr, _build_c2v_tensors, ["a", "b", "c"], "c", _golden_bidirect),
 ]
 
 
@@ -839,7 +826,7 @@ _SPLIT_PARITY_SCENARIOS = [
 )
 def test_explicit_split_golden(
     _name: str,
-    program: _ir.Program,
+    program: JITFunction,
     builder,
     arg_order: list[str],
     out_name: str,
@@ -862,85 +849,39 @@ def test_split_singleton_broadcast_golden(mode, manual):
     scale_rows, scale_cols = (1, cols) if mode == pl.SplitMode.UP_DOWN else (rows, 1)
     row_step, col_step = (rows // 2, 0) if mode == pl.SplitMode.UP_DOWN else (0, cols // 2)
 
-    if mode == pl.SplitMode.UP_DOWN:
+    @pl.jit
+    def manual_kernel(
+        a: pl.Tensor[[rows, inner], pl.FP16],
+        b: pl.Tensor[[inner, cols], pl.FP16],
+        scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
+        out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="broadcast"):
+            acc = pl.matmul(a, b, out_dtype=pl.FP32)
+            for aiv_id in pl.split_aiv(2, mode=mode):
+                half = pl.aiv_shard(acc)
+                factors = scale[0:scale_rows, 0:scale_cols]
+                y = pl.mul(half, factors)
+                out = pl.assemble(out, y, [aiv_id * row_step, aiv_id * col_step])
+        return out
 
-        @pl.program
-        class Manual:
-            @pl.function
-            def main(
-                a: pl.Tensor[[rows, inner], pl.FP16],
-                b: pl.Tensor[[inner, cols], pl.FP16],
-                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
-                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
-            ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, name_hint="broadcast"):
-                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        half = pl.aiv_shard(acc)
-                        factors = scale[0:scale_rows, 0:scale_cols]
-                        y = pl.mul(half, factors)
-                        out = pl.assemble(out, y, [aiv_id * row_step, aiv_id * col_step])
-                return out
-
-        @pl.program
-        class Auto:
-            @pl.function
-            def main(
-                a: pl.Tensor[[rows, inner], pl.FP16],
-                b: pl.Tensor[[inner, cols], pl.FP16],
-                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
-                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
-            ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                with pl.at(
-                    level=pl.Level.CORE_GROUP,
-                    name_hint="broadcast",
-                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
-                ):
-                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
-                    factors = scale[0:scale_rows, 0:scale_cols]
-                    y = pl.mul(acc, factors)
-                    out = pl.assemble(out, y, [0, 0])
-                return out
-
-    else:
-
-        @pl.program
-        class Manual:
-            @pl.function
-            def main(
-                a: pl.Tensor[[rows, inner], pl.FP16],
-                b: pl.Tensor[[inner, cols], pl.FP16],
-                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
-                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
-            ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, name_hint="broadcast"):
-                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        half = pl.aiv_shard(acc)
-                        factors = scale[0:scale_rows, 0:scale_cols]
-                        y = pl.mul(half, factors)
-                        out = pl.assemble(out, y, [aiv_id * row_step, aiv_id * col_step])
-                return out
-
-        @pl.program
-        class Auto:
-            @pl.function
-            def main(
-                a: pl.Tensor[[rows, inner], pl.FP16],
-                b: pl.Tensor[[inner, cols], pl.FP16],
-                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
-                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
-            ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                with pl.at(
-                    level=pl.Level.CORE_GROUP,
-                    name_hint="broadcast",
-                    optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
-                ):
-                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
-                    factors = scale[0:scale_rows, 0:scale_cols]
-                    y = pl.mul(acc, factors)
-                    out = pl.assemble(out, y, [0, 0])
-                return out
+    @pl.jit
+    def legacy_auto_kernel(
+        a: pl.Tensor[[rows, inner], pl.FP16],
+        b: pl.Tensor[[inner, cols], pl.FP16],
+        scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
+        out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+    ):
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            name_hint="broadcast",
+            optimizations=[pl.split(mode)],
+        ):
+            acc = pl.matmul(a, b, out_dtype=pl.FP32)
+            factors = scale[0:scale_rows, 0:scale_cols]
+            y = pl.mul(acc, factors)
+            out = pl.assemble(out, y, [0, 0])
+        return out
 
     if not manual:
         # The former whole-function AUTO authoring surface now reports a
@@ -949,7 +890,9 @@ def test_split_singleton_broadcast_golden(mode, manual):
         set_backend_type(BackendType.Ascend910B)
         try:
             with pytest.raises(ValueError, match="Implicit AIV splitting is no longer supported"):
-                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Auto)
+                legacy_auto_kernel.compile(
+                    config=RunConfig(backend_type=BackendType.Ascend910, codegen_only=True)
+                )
         finally:
             reset_for_testing()
         return
@@ -962,7 +905,9 @@ def test_split_singleton_broadcast_golden(mode, manual):
         "out": torch.zeros(rows, cols),
     }
     expected = (tensors["a"].float() @ tensors["b"].float()) * tensors["scale"]
-    _run_split_aiv_default_and_check(Manual, tensors, ["a", "b", "scale", "out"], "broadcast", expected)
+    _run_split_aiv_default_and_check(
+        manual_kernel, tensors, ["a", "b", "scale", "out"], "broadcast", expected
+    )
 
 
 if __name__ == "__main__":

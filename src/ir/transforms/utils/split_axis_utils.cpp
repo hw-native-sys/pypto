@@ -29,7 +29,6 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -42,11 +41,9 @@
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
-#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -2499,8 +2496,7 @@ int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, cons
   // lane 1's band sits at the box half and the even code points pto-isa there;
   // which lane holds how much data is carried by the tile's CONSUMERS, where no
   // band offset depends on it. LocalizeExplicitBoundaryValid establishes that
-  // pairing for a pl.split_aiv region's boundary op, and for a pl.split body
-  // that holds one (WithFullSplitAxisValid).
+  // pairing for an explicit pl.split_aiv boundary (WithFullSplitAxisValid).
   //
   // The pairing is what makes this safe. The even code beside a PER-LANE extent
   // silently mis-places lane 1: a 16-row box valid to 12 leaves the lanes 8 and
@@ -2520,19 +2516,15 @@ int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, cons
   // that does not reach the second lane at all).
   if (extents->lane1 == 0) return SplitCodeFor(mode, /*odd_extent=*/false);
 
-  // Only the BOX partition can land here: the balanced stride is ceil(V / 2) by
-  // construction, so its lanes never differ by more than one. the explicit boundary contract
-  // declined to rebalance this body, and the reason is what the fix must target.
+  // Explicit boundaries retain the authored partition. The compiler does not
+  // rebalance a ragged valid extent; the author must make it representable.
   CHECK_SPAN(false, span)
       << op_name << ": the Cube -> Vector boundary tile's valid split-axis extent (" << extents->valid
       << " of a " << PythonPrint(tt->shape_[split_dim]) << "-wide dim " << split_dim
       << ") leaves the two AIV lanes " << extents->lane0 << " and " << extents->lane1
       << " cells. pto-isa places lane 1's band at its own extent (TILE_UP_DOWN / TILE_LEFT_RIGHT) or one "
          "past it (the _ODD modes), so the lanes must be equal, differ by exactly one, or leave lane 1 "
-         "empty. The compiler balances a ragged boundary across the lanes automatically, but only when "
-         "the whole split body derives from it — this one also holds an independently split value (a "
-         "tile.load, a generator, a full-width operand) or a Vector -> Cube gather, which spans the full "
-         "box. Either move that value out of the split scope, or widen the valid extent to "
+         "empty. The compiler does not rebalance an explicit boundary. Widen the valid extent to "
       << (2 * extents->box_half) << " / " << (2 * extents->box_half - 1)
       << " with pl.tile.set_validshape(...), or narrow it to at most " << extents->box_half
       << " so the whole value stays on lane 0.";

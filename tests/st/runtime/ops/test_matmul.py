@@ -1252,7 +1252,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
        compounding the IterArg nesting around the ``_l0_c`` accumulator variable
        introduced by AutoTileMatmulL0.
 
-    3. **CORE_GROUP + split=UP_DOWN** — the AIC/AIV split causes MemoryReuse to
+    3. **CORE_GROUP + explicit UP_DOWN shard boundaries** — the AIC/AIV split causes MemoryReuse to
        run only on the AIC function.  gate is consumed (to Vec) before the up
        pipeline, so up *reuses* gate's freed Acc buffer.  Before the fix,
        MemoryReuse's greedy pass retyped up's producer/init vars onto gate's
@@ -1265,11 +1265,9 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
        MemRefs to their reused init top-down, so the whole up chain lands on the
        single reused Acc buffer and no acc→acc move is ever inserted.
 
-    Note: only ``split=UP_DOWN`` is used (no ``auto_chunk``).  ``split=UP_DOWN``
-    alone is what forces the AIC/AIV split that triggers MemoryReuse on the AIC
-    function — the root condition for #1352.  ``auto_chunk`` is deliberately
-    omitted to avoid it incorrectly distributing K-pipeline iterations across
-    cores when no ``pl.parallel`` outer loop is present.
+    Explicit ``pl.split_aiv(2, mode=UP_DOWN)`` regions with ``pl.aiv_shard``
+    at C->V crossings create the AIC/AIV split. No ``auto_chunk`` is used;
+    K-pipeline iterations belong to the same cube accumulation.
 
     Usage note on sequential consumption
     -------------------------------------
@@ -1332,101 +1330,98 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
         N = self.N
         NUM_CHUNKS = self.NUM_CHUNKS
 
-        @pl.program
-        class PipelineGateUpProgram:
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                x: pl.Tensor[[BATCH, K_CHUNK * NUM_CHUNKS], pl.BF16],
-                wg: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
-                wu: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
-                out: pl.Out[pl.Tensor[[BATCH, N], pl.BF16]],
-            ) -> pl.Tensor[[BATCH, N], pl.BF16]:
-                # Mirror the exact gate_up_silu structure from qwen3_32b:
-                # Explicit UP_DOWN boundaries trigger the AIC/AIV split that causes
-                # MemoryReuse to run on the AIC function, where the two
-                # concurrent same-shape accumulators expose the MemRef-base
-                # mismatch that triggers the acc→acc pto.tmov bug (#1352).
+        @pl.jit
+        def pipeline_gate_up(
+            x: pl.Tensor[[BATCH, K_CHUNK * NUM_CHUNKS], pl.BF16],
+            wg: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
+            wu: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
+            out: pl.Out[pl.Tensor[[BATCH, N], pl.BF16]],
+        ) -> pl.Tensor[[BATCH, N], pl.BF16]:
+            # Mirror the exact gate_up_silu structure from qwen3_32b:
+            # Explicit UP_DOWN boundaries trigger the AIC/AIV split that causes
+            # MemoryReuse to run on the AIC function, where the two
+            # concurrent same-shape accumulators expose the MemRef-base
+            # mismatch that triggers the acc→acc pto.tmov bug (#1352).
+            #
+            # out_tile is a separate DDR BF16 staging tensor used as an
+            # intermediate write target before the final assemble into the
+            # caller-provided ``out``.  Assembling a BF16 Vec tile directly
+            # into the caller's DDR ND tensor (via TStore NZ→ND) fails with
+            # a layout mismatch on A2/A3; routing through a fresh DDR
+            # staging tensor (allocated here via pl.create_tensor) and then
+            # assembling that into ``out`` avoids the restriction.  The
+            # name "out_tile" is historical; this is a Tensor, not a Tile.
+            out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
+
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                name_hint="gate_up_pipeline_acc",
+            ):
+                # Prolog: unrolled first two K_CHUNK slices
+                x0 = pl.slice(x, [BATCH, K_CHUNK], [0, 0])
+                x1 = pl.slice(x, [BATCH, K_CHUNK], [0, K_CHUNK])
+                wg0 = pl.slice(wg, [K_CHUNK, N], [0, 0])
+                wg1 = pl.slice(wg, [K_CHUNK, N], [K_CHUNK, 0])
+                wu0 = pl.slice(wu, [K_CHUNK, N], [0, 0])
+                wu1 = pl.slice(wu, [K_CHUNK, N], [K_CHUNK, 0])
+
+                # Gate projection — mirrors the exact structure in qwen3_32b
+                # gate_up_silu: each of gate and up has its OWN independent
+                # pl.pipeline loop.  Two separate pipeline loops over the
+                # same K range produce two independent IterArg chains for
+                # gate_acc and up_acc.  LowerPipelineLoops replicates each
+                # loop body separately, making MemoryReuse more likely to
+                # leave the _l0_c bases of gate and up ununified with the
+                # outer acc bases — the condition that exposes #1352.
+                gate_acc = pl.matmul(x0, wg0, out_dtype=pl.FP32)
+                gate_acc = pl.matmul_acc(gate_acc, x1, wg1)
+                for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
+                    k0 = kb * K_CHUNK
+                    xk = pl.slice(x, [BATCH, K_CHUNK], [0, k0])
+                    wgk = pl.slice(wg, [K_CHUNK, N], [k0, 0])
+                    gate_acc = pl.matmul_acc(gate_acc, xk, wgk)
+
+                # --- match the exact Qwen3-32B consumption ordering ---
+                # In the model, gate_acc is first consumed by:
+                #   sigmoid = recip(add(exp(neg(gate_acc)), 1.0))
+                # which is a Vec operation that forces the compiler to
+                # emit a tpush for gate_acc BEFORE the up pipeline starts.
+                # Without this intermediate use, both tpushes would be
+                # scheduled after both pipelines, so gate_acc's tpop would
+                # read the shared Acc buffer = up_final (wrong).
                 #
-                # out_tile is a separate DDR BF16 staging tensor used as an
-                # intermediate write target before the final assemble into the
-                # caller-provided ``out``.  Assembling a BF16 Vec tile directly
-                # into the caller's DDR ND tensor (via TStore NZ→ND) fails with
-                # a layout mismatch on A2/A3; routing through a fresh DDR
-                # staging tensor (allocated here via pl.create_tensor) and then
-                # assembling that into ``out`` avoids the restriction.  The
-                # name "out_tile" is historical; this is a Tensor, not a Tile.
-                out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
+                # Here we approximate sigmoid with a no-op-equivalent
+                # pl.add(gate_acc, 0.0) that forces the tpush between the
+                # two pipelines.  gate_fp32 is a Vec FP32 tile that
+                # correctly captures gate_final at this point.
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    gate_half = pl.aiv_shard(gate_acc)
+                    gate_fp32 = pl.add(gate_half, 0.0)
 
-                with pl.at(
-                    level=pl.Level.CORE_GROUP,
-                    name_hint="gate_up_pipeline_acc",
-                ):
-                    # Prolog: unrolled first two K_CHUNK slices
-                    x0 = pl.slice(x, [BATCH, K_CHUNK], [0, 0])
-                    x1 = pl.slice(x, [BATCH, K_CHUNK], [0, K_CHUNK])
-                    wg0 = pl.slice(wg, [K_CHUNK, N], [0, 0])
-                    wg1 = pl.slice(wg, [K_CHUNK, N], [K_CHUNK, 0])
-                    wu0 = pl.slice(wu, [K_CHUNK, N], [0, 0])
-                    wu1 = pl.slice(wu, [K_CHUNK, N], [K_CHUNK, 0])
+                # Up projection — independent pipeline loop, same shape.
+                # AIC overwrites the shared Acc buffer with up values here;
+                # gate_fp32 is already in Vec space so it is unaffected.
+                up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
+                up_acc = pl.matmul_acc(up_acc, x1, wu1)
+                for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
+                    k0 = kb * K_CHUNK
+                    xk = pl.slice(x, [BATCH, K_CHUNK], [0, k0])
+                    wuk = pl.slice(wu, [K_CHUNK, N], [k0, 0])
+                    up_acc = pl.matmul_acc(up_acc, xk, wuk)
 
-                    # Gate projection — mirrors the exact structure in qwen3_32b
-                    # gate_up_silu: each of gate and up has its OWN independent
-                    # pl.pipeline loop.  Two separate pipeline loops over the
-                    # same K range produce two independent IterArg chains for
-                    # gate_acc and up_acc.  LowerPipelineLoops replicates each
-                    # loop body separately, making MemoryReuse more likely to
-                    # leave the _l0_c bases of gate and up ununified with the
-                    # outer acc bases — the condition that exposes #1352.
-                    gate_acc = pl.matmul(x0, wg0, out_dtype=pl.FP32)
-                    gate_acc = pl.matmul_acc(gate_acc, x1, wg1)
-                    for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
-                        k0 = kb * K_CHUNK
-                        xk = pl.slice(x, [BATCH, K_CHUNK], [0, k0])
-                        wgk = pl.slice(wg, [K_CHUNK, N], [k0, 0])
-                        gate_acc = pl.matmul_acc(gate_acc, xk, wgk)
+                # gate_fp32 × up_acc (FP32 tmul, supported on A2/A3).
+                # up_acc's tpush happens after the up pipeline, reading
+                # the shared Acc buffer = up_final ✓.
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    up_half = pl.aiv_shard(up_acc)
+                    combined = pl.mul(gate_fp32, up_half)
+                    combined_bf16 = pl.cast(combined, pl.BF16)
+                    out_tile = pl.assemble(out_tile, combined_bf16, [lane * (BATCH // 2), 0])
 
-                    # --- match the exact Qwen3-32B consumption ordering ---
-                    # In the model, gate_acc is first consumed by:
-                    #   sigmoid = recip(add(exp(neg(gate_acc)), 1.0))
-                    # which is a Vec operation that forces the compiler to
-                    # emit a tpush for gate_acc BEFORE the up pipeline starts.
-                    # Without this intermediate use, both tpushes would be
-                    # scheduled after both pipelines, so gate_acc's tpop would
-                    # read the shared Acc buffer = up_final (wrong).
-                    #
-                    # Here we approximate sigmoid with a no-op-equivalent
-                    # pl.add(gate_acc, 0.0) that forces the tpush between the
-                    # two pipelines.  gate_fp32 is a Vec FP32 tile that
-                    # correctly captures gate_final at this point.
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        gate_half = pl.aiv_shard(gate_acc)
-                        gate_fp32 = pl.add(gate_half, 0.0)
+            out = pl.assemble(out, out_tile, [0, 0])
+            return out
 
-                    # Up projection — independent pipeline loop, same shape.
-                    # AIC overwrites the shared Acc buffer with up values here;
-                    # gate_fp32 is already in Vec space so it is unaffected.
-                    up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
-                    up_acc = pl.matmul_acc(up_acc, x1, wu1)
-                    for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
-                        k0 = kb * K_CHUNK
-                        xk = pl.slice(x, [BATCH, K_CHUNK], [0, k0])
-                        wuk = pl.slice(wu, [K_CHUNK, N], [k0, 0])
-                        up_acc = pl.matmul_acc(up_acc, xk, wuk)
-
-                    # gate_fp32 × up_acc (FP32 tmul, supported on A2/A3).
-                    # up_acc's tpush happens after the up pipeline, reading
-                    # the shared Acc buffer = up_final ✓.
-                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        up_half = pl.aiv_shard(up_acc)
-                        combined = pl.mul(gate_fp32, up_half)
-                        combined_bf16 = pl.cast(combined, pl.BF16)
-                        out_tile = pl.assemble(out_tile, combined_bf16, [lane * (BATCH // 2), 0])
-
-                out = pl.assemble(out, out_tile, [0, 0])
-                return out
-
-        return PipelineGateUpProgram
+        return pipeline_gate_up.specialize()
 
     def compute_expected(self, tensors, params=None):
         x = tensors["x"].to(torch.float32)

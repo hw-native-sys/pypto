@@ -140,7 +140,7 @@ tile that crosses the cube/vector boundary
 | **`Vec buffer usage ... exceeds platform limit`** | 环加上 tile 超出片上预算 | 调低 `pl.cross_core_slot(slot_num=N)`，或缩小跨越的 tile |
 | **显式分片没有带来加速** | 一侧占主导，对半分无从重叠 | 检查这份工作是否真的是 cube 接 vector |
 | **生产者跑一阵后卡住** | 弹出的槽从未 `tfree` | 让每次 pop 都配一次 `tfree` |
-| **作用域上的 split 被拒** | 区域体混合了 split 与普通全宽 vector 算子 | 改用显式的 `pl.split_aiv` 区域形式 |
+| **Implicit AIV splitting is no longer supported** | 混合 kernel 的旧式函数级 AUTO split 已不受支持 | 使用 `pl.split_aiv`、显式 shard/gather，并编写每 lane 的形状和偏移 |
 
 ## 真实模型里的同一形状
 

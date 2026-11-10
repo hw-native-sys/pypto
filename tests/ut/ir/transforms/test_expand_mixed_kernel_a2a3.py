@@ -2287,12 +2287,15 @@ def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
 # ---------------------------------------------------------------------------
 
 
-def test_transpose_hazard_backstopped_when_lowering_is_skipped():
+@pytest.mark.parametrize("explicit_split", [False, True])
+def test_transpose_hazard_backstopped_when_lowering_is_skipped(explicit_split):
     """Skipping pass 23 must not silently expand an unsplittable transpose."""
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        @pl.function(
+            type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": explicit_split}
+        )
         def t_hazard(
             self,
             x: pl.Tensor[[16, 128], pl.BF16],
@@ -2314,8 +2317,12 @@ def test_transpose_hazard_backstopped_when_lowering_is_skipped():
     p = passes.flatten_tile_nd_to_2d()(p)
     p = passes.infer_tile_memory_space()(p)
     # No lower_auto_vector_split() — the documented direct-invocation flow.
-    with pytest.raises(pypto.InternalError, match="swaps the split axis"):
-        passes.expand_mixed_kernel()(p)
+    if explicit_split:
+        with pytest.raises(pypto.InternalError, match="swaps the split axis"):
+            passes.expand_mixed_kernel()(p)
+    else:
+        with pytest.raises(ValueError, match="Implicit AIV splitting is no longer supported"):
+            passes.expand_mixed_kernel()(p)
 
 
 # ---------------------------------------------------------------------------

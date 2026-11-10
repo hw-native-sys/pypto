@@ -7289,8 +7289,8 @@ class TestConvertCrossCoreSplitOps:
     ``tensor.aiv_shard`` / ``tensor.aic_gather`` (emitted by ``pl.aiv_shard`` /
     ``pl.aic_gather`` inside a ``for aiv_id in pl.split_aiv(...)`` region) 1:1 to
     ``tile.aiv_shard`` / ``tile.aic_gather``, re-attaching the Vec boundary memory
-    the tile deducer drops so the result is byte-identical to the AUTO
-    ``pl.split`` path (LowerAutoVectorSplit).
+    the tile deducer drops so explicit shard/gather results retain their
+    per-lane shape and producing/consuming memory-space contract.
 
     Each Before is authored the way a user writes one — a plain ``@pl.function``
     (Opaque) holding a ``pl.at(level=CORE_GROUP)`` scope — and the pass input is

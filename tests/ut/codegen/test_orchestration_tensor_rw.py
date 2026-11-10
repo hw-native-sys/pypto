@@ -987,6 +987,7 @@ class TestTensorReadWriteOffsetCodegen:
 
         @pl.program
         class SpmdGMPipeProgram:
+            # split_aiv marks outliner-produced InCore IR, as required by the placement verifier.
             @pl.function(
                 type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True}
             )

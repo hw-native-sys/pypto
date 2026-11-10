@@ -202,12 +202,7 @@ def test_none_split_row_sum_is_correct(case_run):
 @pytest.mark.platforms("a2a3")
 @st.cases(_parity_case("updown_reshape"), _parity_case("updown_direct"))
 def test_updown_split_row_sum_matches_none(case_run):
-    """UP_DOWN must equal the golden (gh#1864 regression).
-
-    Pre-fix, the column reshape that feeds the reciprocal kept its stale
-    full width after the split, so each lane read garbage columns and emitted
-    inf. SplitVectorKernel now migrates the split axis through the reshape.
-    """
+    """Explicit UP_DOWN lane shapes survive row-to-column reshapes and match the golden."""
     case_run.assert_passed()
 
 

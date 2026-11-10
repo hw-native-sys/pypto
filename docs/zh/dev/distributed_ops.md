@@ -111,10 +111,10 @@ SSA 值而存在。
 `pld.system.wait` 刻意不加标记，原因并非 TWAIT 幂等：它会*阻塞*，出现在 cube 通路
 上是有实际作用的 —— 把它钉在向量通路上，会让 matmul 越过它本应等待的对端数据。
 
-该标记与亲和性正交（它约束的是复制而非放置位置）。它唯一的消费者是
-`LowerAutoVectorSplit` 的 `pl.split_aiv` 区域放置标记：该 pass 把区域内的
-no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md` 与
-`docs/zh/dev/passes/25-lower_auto_vector_split.md`。
+该标记与亲和性正交（它约束的是复制而非放置位置）。`ExpandMixedKernel` 在消费
+`pl.split_aiv` 区域时，将区域内核无关的 no-duplicate 调用固定在 AIV 通路上。
+软件流水分析也将这些调用视为不可复制；参见 `docs/zh/dev/ir/05-operators.md` 与
+`docs/zh/dev/passes/26-expand_mixed_kernel.md`。
 
 **写在所有区域之外的通信算子仍然会被复制到两条通路上，且没有任何诊断会提示这一点。**
 把通信阶段放进 `pl.split_aiv` 区域是作者的职责；参见

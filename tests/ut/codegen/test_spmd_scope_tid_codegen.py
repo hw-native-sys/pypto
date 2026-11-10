@@ -222,7 +222,7 @@ class TestSpmdScopeTaskIdCodegen:
         )
 
     def test_mixed_spmd_in_equals_out_aliases_shared_buffer(self):
-        """A MIXED (split=) ``pl.spmd`` dispatch passing one buffer as both an
+        """A MIXED (cube+vector) ``pl.spmd`` dispatch passing one buffer as both an
         input AND the output must codegen — and both lanes of the aliased buffer
         must resolve to the SAME external tensor.
 
@@ -674,7 +674,7 @@ class TestSpmdScopeTaskIdCodegen:
         assert "ext_signal_ctx" not in code, code
 
     def test_mixed_spmd_dist_tensor_threads_comm_ctx_through_group_bridge(self):
-        """A MIXED (``split=``) ``pl.spmd`` dispatch carrying a ``DistributedTensor``
+        """A MIXED (cube+vector) ``pl.spmd`` dispatch carrying a ``DistributedTensor``
         threads the CommContext scalar through the Spmd-wrapped-Group bridge too
         (issue #1913).
 

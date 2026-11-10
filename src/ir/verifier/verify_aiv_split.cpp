@@ -926,20 +926,16 @@ class SplitAivStructuralVerifier : public IRVisitor {
       if (!def.call || !IsBoundaryOp(def.call)) continue;
       if (def.region == cur_region_) continue;  // produced right here -- the legal case
       reported.push_back(var.get());
-      Err(op->span_,
-          "'" + var->name_hint_ + "' is a " + BoundaryOpDslName(def.call) +
-              " result produced in a DIFFERENT pl.split_aiv region, but '" + op->op_->name_ +
-              "' reads it inside this data-parallel one. A data-parallel region (mode=UP_DOWN / "
-              "LEFT_RIGHT) mishandles a boundary result it did not produce, whichever way it lowers: "
-              "if the region has no boundary op of its own the compiler halves every tile it computes "
-              "along the split axis and localizes every store offset to the lane, so an ALREADY "
-              "per-lane value is halved a second time and offset twice; and if the region does write "
-              "its own boundary op, nothing is re-halved but the half-width scan is seeded per region, "
-              "so the incoming value is misjudged as full width. Fix it one of two ways: (1) move the "
-              "ops that read it into the region that produced it; or (2) move the " +
-              BoundaryOpDslName(def.call) +
-              " call into this region. A mode=SplitMode.NONE region has no split axis and halves "
-              "nothing, so it MAY consume a boundary result produced elsewhere.");
+      Err(op->span_, "'" + var->name_hint_ + "' is a " + BoundaryOpDslName(def.call) +
+                         " result produced in a DIFFERENT pl.split_aiv region, but '" + op->op_->name_ +
+                         "' reads it inside this data-parallel one. A data-parallel region (mode=UP_DOWN / "
+                         "LEFT_RIGHT) may consume a boundary result only in the region that produced it. "
+                         "The result's lane-local shape and lifetime belong to that region. "
+                         "Fix it one of two ways: (1) move the "
+                         "ops that read it into the region that produced it; or (2) move the " +
+                         BoundaryOpDslName(def.call) +
+                         " call into this region. A mode=SplitMode.NONE region may consume a boundary result "
+                         "produced elsewhere under the existing full-width region contract.");
     }
   }
 

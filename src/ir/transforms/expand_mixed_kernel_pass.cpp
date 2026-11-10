@@ -2079,6 +2079,15 @@ struct ExpandedKernel {
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
                                    bool had_regions) {
+  // Custom pipelines may call this pass without LowerAutoVectorSplit. Do not
+  // let retired mixed AUTO metadata reach the standalone AIV/AIC halving path.
+  const auto split_mode = func->GetSplitMode();
+  CHECK_SPAN(had_regions || func->GetAttr<bool>(kAttrSplitAiv, false) || !split_mode ||
+                 *split_mode == SplitMode::None,
+             func->span_)
+      << "Implicit AIV splitting is no longer supported in mixed kernel '" << func->name_
+      << "'. Use pl.split_aiv with explicit pl.aiv_shard / pl.aic_gather and per-lane offsets.";
+
   // Whole-function transpose-split hazard: BACKSTOP only.
   //
   // The AUTHORING report moved to LowerAutoVectorSplit (pass 23), which reaches
@@ -2110,15 +2119,6 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
       }
     }
   }
-
-  // Custom pipelines may call this pass without LowerAutoVectorSplit. Do not
-  // let retired mixed AUTO metadata reach the standalone AIV/AIC halving path.
-  const auto split_mode = func->GetSplitMode();
-  CHECK_SPAN(had_regions || func->GetAttr<bool>(kAttrSplitAiv, false) || !split_mode ||
-                 *split_mode == SplitMode::None,
-             func->span_)
-      << "Implicit AIV splitting is no longer supported in mixed kernel '" << func->name_
-      << "'. Use pl.split_aiv with explicit pl.aiv_shard / pl.aic_gather and per-lane offsets.";
 
   const bool needs_dual_aiv_dispatch =
       PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&

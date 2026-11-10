@@ -657,7 +657,12 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor, OUTSIDE the region
 ```
 
-This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) (pass 23). `ExpandMixedKernel` (pass 24) then folds both into the cross-core `tpush`/`tpop` machinery.
+This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` →
+`tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`).
+[`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) prepares the authored
+boundary valid extents without synthesizing boundaries or repartitioning the
+body. `ExpandMixedKernel` then lowers the explicit crossings to cross-core
+`tpush`/`tpop` operations.
 
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 
@@ -668,7 +673,7 @@ This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_s
 **Conversion details:**
 
 - **Split-kwarg forwarding.** The `split` int attr (`1` = `UP_DOWN`/axis0, `2` = `LEFT_RIGHT`/axis1, the tpush/tpop encoding) is passed through verbatim to the tile op, which halves (shard) or doubles (gather) the split-axis extent.
-- **Boundary memory.** The tile-level split deducer intentionally leaves the boundary memory space null (the deduction fixpoint must not inherit an input-side layout); `OpRegistry::Create` then fills it from the tile op's `set_output_memory` declaration, so this converter needs no re-attachment of its own. `LowerAutoVectorSplit` builds its `aiv_shard` / `aic_gather` through the same `Create`, which is what keeps the two paths byte-identical — one declaration, read once. That space is the **consuming lane's**: `tile.aiv_shard` → `Vec` (AIV pops the half into UB), `tile.aic_gather` → `Mat` (AIC pops the full tile into L1, the space `ExpandMixedKernel` builds its V→C tpop in). The operand side is the mirror — `Acc` for the shard, `Vec` for the gather — and is enforced by the `AivSplitValid` verifier rather than declared as an input constraint, because a violated input constraint would make `InferTileMemorySpace` *insert a move* to the required space instead of reporting the authoring error.
+- **Boundary memory.** The tile-level split deducer intentionally leaves the boundary memory space null (the deduction fixpoint must not inherit an input-side layout); `OpRegistry::Create` then fills it from the tile op's `set_output_memory` declaration, so this converter needs no re-attachment of its own. That space is the **consuming lane's**: `tile.aiv_shard` → `Vec` (AIV pops the half into UB), `tile.aic_gather` → `Mat` (AIC pops the full tile into L1, the space `ExpandMixedKernel` builds its V→C tpop in). The operand side is the mirror — `Acc` for the shard, `Vec` for the gather — and is enforced by the `AivSplitValid` verifier rather than declared as an input constraint, because a violated input constraint would make `InferTileMemorySpace` *insert a move* to the required space instead of reporting the authoring error.
 - **No synthesized load.** The realistic (region-only) operand is already an on-chip tile by the time the converter runs (its producer — a cube matmul for `aiv_shard`, a Vec vector op for `aic_gather` — lowered earlier in this same pass), so no `tile.load` is injected; `aiv_shard` / `aic_gather` **are** the cross-core transfer.
 
 **Recognized before this pass.** Because the `tensor.*` form survives from `OutlineIncoreScopes` until this pass runs, earlier stages already treat it as the AIV-split boundary: `ClassifyCallAffinity` rolls both `tensor.*` and `tile.*` shard/gather up as `MIXED` (so cube/vector outlining splits correctly), and `SplitAivStructuralVerifier` requires both forms to be region-scoped.

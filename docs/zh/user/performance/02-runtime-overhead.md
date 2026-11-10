@@ -49,7 +49,7 @@ def fresh(rows=ROWS):
 ```python
 with pl.at(
     level=pl.Level.CORE_GROUP,
-    optimizations=[pl.cross_core_slot(slot_num=2)],
+    optimizations=[pl.cross_core_slot(slot_num=1)],
 ):
     acc = pl.matmul(a, b, out_dtype=pl.FP32)   # cube (AIC)
     for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):

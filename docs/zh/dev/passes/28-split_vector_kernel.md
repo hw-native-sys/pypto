@@ -105,7 +105,7 @@ lane 1 重放将其 tile `valid_shape` 置零以不产生可见写入，但其�
 ### 示例 1 —— split_aiv 属性打标
 
 一对 `split_aiv` AIC/AIV 函数已为显式 per-lane 形态（折半的 `[8, 128]` 计算 tile，
-一个 手写/`LowerAutoVectorSplit` 写入的 `get_subblock_idx`）。本 pass 打属性，函数体
+一个用户编写的 `get_subblock_idx`）。本 pass 打属性，函数体
 不动。
 
 ```python
@@ -199,14 +199,14 @@ passes.def("split_vector_kernel", &pass::SplitVectorKernel, ...);
 
 **测试**：`tests/ut/ir/transforms/test_split_vector_kernel.py`
 （`TestSplitVectorKernelExplicitSplitAivBypass`、`TestSplitVectorKernelNoSplitA2A3`、
-`TestSplitVectorKernelNoSplitPassthrough`）。逐算子折半测试已迁移至
-`tests/ut/ir/transforms/test_lower_auto_vector_split.py`。
+`TestSplitVectorKernelNoSplitPassthrough`）。显式区域保留和旧式 mixed split 拒绝
+由 `tests/ut/ir/transforms/test_lower_auto_vector_split.py` 覆盖。
 
 ## 相关
 
-- [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) —— 显式区域降低路径；
-  产生本 pass 打标的 `split_aiv` 函数。逐算子向量折半规则位于该处及
-  `split_axis_utils`。
+- [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) —— 准备用户编写的
+  `split_aiv` 区域及其边界 valid extent，保留每 lane 的计算形状与偏移，
+  并拒绝混合函数级 AUTO 拆半。
 - [`ExpandMixedKernel`](26-expand_mixed_kernel.md) —— AIC/AIV 函数与
   `dual_aiv_dispatch` 标记的上游生产者。
 - [`InjectGMPipeBuffer`](27-inject_gm_pipe_buffer.md) —— 紧邻其前运行；本 pass 依赖

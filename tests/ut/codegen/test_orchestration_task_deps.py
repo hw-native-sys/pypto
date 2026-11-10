@@ -1074,6 +1074,7 @@ def test_spmd_submit_group_emits_mixed_kernels_and_launch_spec():
 
     @pl.program
     class P:
+        # split_aiv marks outliner-produced InCore IR, as required by the placement verifier.
         @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
         def kernel(
             self,

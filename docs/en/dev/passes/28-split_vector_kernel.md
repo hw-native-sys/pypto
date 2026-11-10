@@ -219,14 +219,15 @@ passes.def("split_vector_kernel", &pass::SplitVectorKernel, ...);
 
 **Tests**: `tests/ut/ir/transforms/test_split_vector_kernel.py`
 (`TestSplitVectorKernelExplicitSplitAivBypass`, `TestSplitVectorKernelNoSplitA2A3`,
-`TestSplitVectorKernelNoSplitPassthrough`). The per-op halving tests moved to
+`TestSplitVectorKernelNoSplitPassthrough`). Explicit-region preservation and
+legacy mixed-split rejection are covered by
 `tests/ut/ir/transforms/test_lower_auto_vector_split.py`.
 
 ## Related
 
-- [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) — the live auto-split
-  lowering path; produces the `split_aiv` functions this pass stamps. The per-op
-  vector halving rules live there + in `split_axis_utils`.
+- [`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) — prepares authored
+  `split_aiv` regions and their boundary valid extents, preserving per-lane
+  computation shapes and offsets; rejects mixed function-level AUTO splitting.
 - [`ExpandMixedKernel`](26-expand_mixed_kernel.md) — upstream producer of
   AIC/AIV functions and of the `dual_aiv_dispatch` marker.
 - [`InjectGMPipeBuffer`](27-inject_gm_pipe_buffer.md) — runs immediately before;

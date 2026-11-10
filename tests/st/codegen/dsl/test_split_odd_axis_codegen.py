@@ -26,7 +26,7 @@ from pypto.runtime import RunConfig  # noqa: E402
 ROWS, COLS, K = 16, 128, 128
 HALF = ROWS // 2
 ODD_VALID_M = 15  # lanes hold 8 and 7 -> TILE_UP_DOWN_ODD
-DEEP_TAIL_VALID_M = 13  # box lanes 8 and 5 -> rebalanced to 7 and 6
+DEEP_TAIL_VALID_M = 13  # box lanes 8 and 5 -> unrepresentable explicit partition
 ODD_BOX_ROWS = 17  # an odd source extent; its Acc box is 32, so lanes hold 16 and 1
 ODD_BOX_HALF = (ODD_BOX_ROWS + 1) // 2
 
@@ -79,9 +79,8 @@ def deep_tail_with_independent_value(
 ):
     """The same tail, plus a value split independently of the boundary.
 
-    ``extra`` spans all 16 rows, which the boundary's 13-row balanced partition
-    would not cover — so the body stays on the box partition, whose 8 / 5 lanes
-    have no placeable transport.
+    ``extra`` has authored lane-local slices. It does not alter the boundary's
+    box partition, whose 8 / 5 lanes have no representable transport.
     """
     with pl.at(
         level=pl.Level.CORE_GROUP,
@@ -265,14 +264,8 @@ def test_deep_tail_requires_an_explicit_representable_partition():
         deep_tail_rows.lower(config=RunConfig(platform="a2a3"))
 
 
-def test_rebalance_is_declined_when_a_value_is_split_independently():
-    """A body that also splits its own value keeps the box partition — and reports.
-
-    ``extra`` spans the full 16-row box, which the boundary's balanced partition
-    does not cover, so rebalancing is unsound here. The box partition's 8 / 5
-    lanes then have no expressible transport, and the diagnostic must name both
-    the blocking value and the extents that would work.
-    """
+def test_independent_lane_value_does_not_change_boundary_partition():
+    """An independent lane-local value does not change explicit boundary admission."""
     with pytest.raises(ValueError) as exc:
         deep_tail_with_independent_value.lower(config=RunConfig(platform="a2a3"))
 
@@ -281,6 +274,8 @@ def test_rebalance_is_declined_when_a_value_is_split_independently():
     # The diagnostic must hand the author a way out, not just a refusal.
     assert "pl.tile.set_validshape" in message
     assert "16 / 15" in message
+    assert "does not rebalance an explicit boundary" in message
+    assert "independently split value" not in message
 
 
 def test_explicit_region_odd_box_is_refused_with_unplaceable_lanes():
