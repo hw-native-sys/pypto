@@ -8,6 +8,21 @@
 fork chip 进程、组装 kernel——分摊到可复用的 `DistributedWorker` 上的多次
 派发中。
 
+分发时使用 `worker=` 选择下一层的逻辑编号。在 HOST 编排函数中，
+它索引配置的设备。在 POD 编排函数中，它索引 HOST worker。
+`pld.num_workers()` 返回直属 worker 数量。HOST 代码仍可使用
+`device=` 和 `pld.world_size()`。
+
+## POD 产物编译
+
+用 `cluster_config=ir.ClusterConfig(...)` 编译 `@pl.jit.pod` 入口或
+`CLUSTER_0` 程序。输出目录包含根入口及其可达的 HOST 和 CHIP 产物。
+用 `ir.DistributedCompiledProgram.from_dir(output_dir)` 冷加载整套产物。
+
+下述 `DistributedWorker` 接口适用于 HOST/L3 执行。CLUSTER_0/L4 入口返回
+同步 `ClusterWorker`；其启动及 host tensor 要求见
+[集群启动配置](#集群启动配置podcluster_0)。
+
 ## DistributedWorker
 
 通过 `compiled.prepare()` 获得。设置（fork、通信引导、kernel 组装）仅执行一次；
@@ -190,6 +205,133 @@ with compiled.prepare(
 
 该标记只作用于命名拷贝的 descriptor。dispatch 参数由 runtime 自己的路径命名，不经过这里，
 因此把一个 dispatch IO buffer 标记为只读并不能阻止子进程写它。
+
+## 集群启动配置（POD/CLUSTER_0）
+
+`pypto.ir.ClusterNodeSpec` 和 `ClusterConfig` 用于描述多节点设备分配。
+构造时会校验并复制输入列表，不进行 DNS 查询或网络连接。
+POD/CLUSTER_0（L4）程序可编译为集群产物，并通过集群运行器执行。
+更高的集群编排层级尚不支持。预备会话、共享窗口和冷加载的使用方式见
+[持久化 L3 会话](../../dev/06-persistent-l3.md)。
+
+```python
+import os
+from pypto.ir import ClusterConfig, ClusterNodeSpec
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+
+cluster = ClusterConfig(
+    nodes=[
+        ClusterNodeSpec(host, [int(d) for d in devices.split(",")])
+        for host, devices in node_device_assignments
+    ],
+    python_executable=os.environ["CLUSTER_PYTHON"],
+    mpirun_path=os.environ["CLUSTER_MPIRUN"],
+    mpirun_args=(),
+    runtime="tensormap_and_ringbuffer",
+    startup_timeout_s=120.0,
+)
+config = RunConfig(
+    backend_type=BackendType.Ascend910,
+    execution_mode=ExecutionMode.ONBOARD,
+    cluster_config=cluster,
+)
+compile_kwargs = config.compile_kwargs()
+```
+
+`node_device_assignments` 来自实际资源分配，每一对包含主机名和以逗号分隔的
+该主机获配物理设备索引。不要通过全局 rank 推断物理设备。
+`node_device_counts()` 返回各 MPI 节点条目的设备数；`global_device_ranks()`
+按节点声明顺序、再按节点内设备列表顺序分配连续 rank；`world_size()`
+统计设备总数，而非 MPI 条目数。例如设备数 `[2, 2]` 对应 rank 分组
+`[(0, 1), (2, 3)]`。
+
+| 字段 | 默认值 | 约束 |
+| ---- | ------ | ---- |
+| `nodes` | 必填 | 非空 `ClusterNodeSpec(host, devices)` 列表；`devices` 默认使用独立的 `[0]` |
+| `python_executable` | 必填 | 启动器可访问的 Python 可执行文件 |
+| `comm_profile` | `"a3-fabric-v1"` | 通信配置标识 |
+| `runtime` | `"tensormap_and_ringbuffer"` | 运行时类型 |
+| `num_sub_workers` | `0` | 非负整数；`0` 由运行时选择 worker 数量 |
+| `startup_timeout_s` | `120.0` | 有限正数，单位为秒 |
+| `mpirun_path` | `"mpirun"` | 启动器可执行文件 |
+| `mpirun_args` | `()` | 有序字符串 tuple/list，构造时复制为 tuple |
+| `aicpu_thread_num` | `0` | `0` 选择架构默认值；显式整数必须至少为 `2` |
+
+设备索引必须是互不重复的非负整数，不接受布尔值。同一确切主机名可对应多个
+条目，但设备所有权不能重叠。初期要求各节点条目的设备数相等，暂不支持不等长
+形状/布局。主机名、可执行文件、通信配置、运行时及启动参数字符串必须非空，
+且不能包含 NUL 或换行符。计数和超时参数均拒绝布尔值。
+rank 0 的部署位置由后续运行时校验，配置 API 不作该检查。
+
+`RunConfig.compile_options()` 和 `CompileOptions.as_compile_kwargs()` 会转发
+`cluster_config`；每次编译请求会重新校验并快照嵌套配置。
+所有设备分配及启动器字段均参与 JIT 缓存键。
+`cluster_config` 与 `distributed_config` 互斥；为 HOST/CHIP 程序提供集群配置
+会在发现后端之前报错。
+
+### Direct MPI 会话
+
+L4 在 prepared 会话的整个生命周期内复用一个静态 MPI world：MPI rank 0
+运行 L4 controller，rank `1..N` 对应 `N` 个配置节点条目的 L3 executor。
+每个 executor 管理该条目的 CHIP worker。因此，两个节点条目会启动三个
+MPI rank，与各条目的设备数无关；`ClusterConfig.world_size()` 仍统计设备数。
+
+调用端在启动前编译或加载全部已准备程序及其 CHIP 产物。Simpler 会在
+executor 的内部 worker 启动前安装生成代码包、初始 CHIP 注册信息和
+executor Python callable 注册。MPI controller 和生成的接收端使用代码包、Torch
+与 Simpler，不导入 PyPTO。生成的 L4 到 L3 提交及全局域操作均走
+Simpler 原生 direct MPI 传输。
+
+`compiled.prepare()` 保留 Python 调用方式，并一次性启动这个 MPI world。
+`rt(...)` 执行主程序，`rt.run(other, ...)` 在同一会话中选择一个
+`extra_compiled` 程序。对 `ClusterWorker`，`prepare(config=...)` 提供默认
+运行配置，单次调用的 `config=` 可覆盖它。调用为同步执行，不支持 `submit()`。
+普通参数须为非空、连续的 CPU tensor 或受支持的标量。tensor 可以在
+`prepare()` 后创建：
+
+```python
+with compiled.prepare(extra_compiled=[other]) as rt:
+    x = torch.randn(input_shape, dtype=torch.float32)
+    out = torch.empty(output_shape, dtype=torch.float32)
+    rt(x, out)
+    rt.run(other, x, out)
+```
+
+调用端通过私有的本地内存映射文件与 rank 0 共享暂存 storage，保留别名关系
+和 view 偏移。rank 0 再将普通 I/O 暂存到所选 executor。只有执行成功完成后，
+才会读回调用端的可写参数。L4 tensor 无须调用 `.share_memory_()`，也无须
+在 `prepare()` 前分配。跨节点重叠的普通访问若包含写入，需要显式传输和
+fence，当前普通 I/O 路径会拒绝此类访问。
+
+`persistent=True`、`reset_persistent_windows` 和显式 `shared_domains`
+保留其会话语义：窗口可跨 run 保留，默认在复用前清零；跨程序共享仅通过
+兼容的显式绑定建立。`ClusterWorker` 不提供 callback 覆盖、继承 host buffer
+或常驻 tensor 分配接口。
+
+### 启动要求
+
+调用端必须运行在第一个配置节点上。rank 0 部署在该主机，通过 loopback
+连接及本地映射文件与调用端通信。多机运行时，第一个主机名必须解析到本机
+且所有 MPI 主机均可访问的地址；应使用可路由的主机名或地址，避免 loopback
+别名。完全在本机运行的会话可以使用 loopback 地址。
+
+MPI rank 默认以 `/` 为工作目录，因此 executor 无需拥有调用端的 checkout
+路径。`mpirun_args` 中显式指定的工作目录选项会保留。相对 launcher 路径和
+launcher 文件参数仍在调用端解析；Python 可执行文件路径包含相对目录时，
+会先转换成绝对路径再启动 rank。
+
+`python_executable` 指定的 Python 路径须在每台 MPI 主机上可用，并安装
+Simpler、Torch、mpi4py 及选定的原生运行时。`mpirun_path` 指定调用端的
+MPI launcher，`mpirun_args` 传递其额外选项。Simpler 决定静态 rank 数量
+及部署位置，并检查 launcher 与 mpi4py 的 MPI vendor 是否匹配。启动前需
+配置好主机访问方式和获配设备。调用端仍使用 `python script.py` 启动，
+集群适配层负责启动和管理 MPI supervisor。
+
+启动就绪和调用端关闭等待均使用有限的 `startup_timeout_s`。正常 run 和
+调用端空闲时间不受启动超时限制，原生 MPI heartbeat 及退出清理检查仍有界。
+关闭时会检查 controller 及每个 executor 的清理报告，并确认 launcher 退出；
+清理未确认时会保留会话的 I/O journal 和私有文件。
 
 ## One-Shot vs 持久 Worker
 
