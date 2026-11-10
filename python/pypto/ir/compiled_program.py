@@ -75,6 +75,7 @@ from ._artifact_metadata import (  # noqa: F401 -- compatibility re-exports for 
     _remove_meta,
     _write_meta_atomically,
 )
+from ._compile_contract import entry_function
 from .compiled_artifact import CompiledArtifact
 from .param_info import (  # noqa: F401  -- re-export
     _DATATYPE_TO_CTYPE,
@@ -128,7 +129,9 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
         )
 
 
-def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
+def _validate_device_tensor(
+    arg: DeviceTensor, info: _ParamInfo, *, nz_tensor_views_blocked: bool | None = False
+) -> None:
     """Check a ``DeviceTensor`` arg against IR parameter metadata.
 
     Raises:
@@ -141,13 +144,15 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     runtime can't map to torch are also skipped.
     """
     if info.shape is not None:
-        blocked_arg_shape = _arg_shape_as_declared(arg.shape, info)
-        if len(info.shape) != len(blocked_arg_shape):
+        declared_shape = _arg_shape_as_declared(
+            arg.shape, info, nz_tensor_views_blocked=nz_tensor_views_blocked
+        )
+        if len(info.shape) != len(declared_shape):
             raise TypeError(
                 f"Parameter {info.name!r} expects rank {len(info.shape)} "
                 f"(shape {tuple(info.shape)}); got DeviceTensor shape {arg.shape}"
             )
-        for expected_dim, actual_dim in zip(info.shape, blocked_arg_shape, strict=True):
+        for expected_dim, actual_dim in zip(info.shape, declared_shape, strict=True):
             if expected_dim >= 0 and expected_dim != actual_dim:
                 raise TypeError(
                     f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
@@ -161,7 +166,9 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
         )
 
 
-def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None:
+def _validate_stacked_tensor(
+    arg: StackedDeviceTensor, info: _ParamInfo, *, nz_tensor_views_blocked: bool | None = False
+) -> None:
     """Check a ``StackedDeviceTensor`` arg against IR parameter metadata.
 
     The stacked tensor stands in for a ``[B, *tail]`` parameter the orchestrator
@@ -174,13 +181,15 @@ def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None
         TypeError: when ``full_shape`` rank/dims or dtype disagree with ``info``.
     """
     if info.shape is not None:
-        blocked_full_shape = _arg_shape_as_declared(arg.full_shape, info)
-        if len(info.shape) != len(blocked_full_shape):
+        declared_shape = _arg_shape_as_declared(
+            arg.full_shape, info, nz_tensor_views_blocked=nz_tensor_views_blocked
+        )
+        if len(info.shape) != len(declared_shape):
             raise TypeError(
                 f"Parameter {info.name!r} expects rank {len(info.shape)} "
                 f"(shape {tuple(info.shape)}); got StackedDeviceTensor full_shape {arg.full_shape}"
             )
-        for expected_dim, actual_dim in zip(info.shape, blocked_full_shape, strict=True):
+        for expected_dim, actual_dim in zip(info.shape, declared_shape, strict=True):
             if expected_dim >= 0 and expected_dim != actual_dim:
                 raise TypeError(
                     f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
@@ -232,6 +241,7 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
     return_types: list[Any],
     *,
     caller_name: str,
+    nz_tensor_views_blocked: bool | None = False,
 ) -> "tuple[list[torch.Tensor | DeviceTensor | ctypes._SimpleCData[Any]], bool]":
     """Validate user-provided args against IR metadata and coerce them.
 
@@ -286,7 +296,7 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
                     f"Pass a torch.Tensor (host) or DeviceTensor (worker-resident)."
                 )
             if isinstance(arg, DeviceTensor):
-                _validate_device_tensor(arg, info)
+                _validate_device_tensor(arg, info, nz_tensor_views_blocked=nz_tensor_views_blocked)
             else:
                 _validate_fp4_carrier_shape(arg.shape, info)
                 if info.dtype in (DataType.FP4E2M1X2, DataType.FP4E1M2X2):
@@ -295,7 +305,9 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
                             f"Parameter {info.name!r} expects dtype {_to_torch_dtype(info.dtype)} "
                             f"or torch.uint8 carriers; got torch.Tensor dtype {arg.dtype}"
                         )
-                    declared_shape = _arg_shape_as_declared(arg.shape, info)
+                    declared_shape = _arg_shape_as_declared(
+                        arg.shape, info, nz_tensor_views_blocked=nz_tensor_views_blocked
+                    )
                     if len(declared_shape) != len(info.shape) or any(
                         expected >= 0 and expected != actual
                         for expected, actual in zip(info.shape, declared_shape)
@@ -320,6 +332,7 @@ def _invoke_compiled(
     config: Any,
     caller_name: str,
     artifact_runtime: Any = None,
+    nz_tensor_views_blocked: bool | None = False,
 ) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
     """Shared dispatch: coerce args, call the runtime, pack outputs.
 
@@ -335,7 +348,12 @@ def _invoke_compiled(
     the runtime's ``[STRACE]`` log markers (simpler PR #1177).
     """
     coerced, return_style = _coerce_args(
-        args, param_infos, output_indices, return_types, caller_name=caller_name
+        args,
+        param_infos,
+        output_indices,
+        return_types,
+        caller_name=caller_name,
+        nz_tensor_views_blocked=nz_tensor_views_blocked,
     )
 
     # Lazy import from outside the overlay scope; its precision lives there.
@@ -508,6 +526,13 @@ class _RuntimeFacade:
             [i for i, p in enumerate(params) if p.direction == ParamDirection.Out],
             [None] * metadata.num_return_types,
         )
+
+    @property
+    def _nz_tensor_views_blocked(self) -> bool | None:
+        """Select lowered-signature compatibility for this entry only."""
+        self._get_metadata()
+        assert self._artifact.metadata is not None
+        return self._artifact.metadata.nz_tensor_views_blocked
 
     @property
     def param_names(self) -> list[str]:
@@ -757,7 +782,12 @@ class CompiledProgram(_RuntimeFacade):
                 _remove_meta(sub_dir)
                 continue
             metadata = ArtifactMetadata(
-                tuple(params), tuple(params), len(returns), self.platform, self.backend_type
+                tuple(params),
+                tuple(params),
+                len(returns),
+                self.platform,
+                self.backend_type,
+                nz_tensor_views_blocked="nz_tensor_views_blocked" in func.attrs,
             )
             metadata.write(sub_dir)
             self._sub_artifacts[name] = CompiledArtifact(sub_dir, self.platform, metadata)
@@ -957,7 +987,12 @@ class CompiledProgram(_RuntimeFacade):
             )
         param_infos, output_indices, return_types = self._get_metadata()
         coerced, return_style = _coerce_args(
-            args, param_infos, output_indices, return_types, caller_name="CompiledProgram"
+            args,
+            param_infos,
+            output_indices,
+            return_types,
+            caller_name="CompiledProgram",
+            nz_tensor_views_blocked=self._nz_tensor_views_blocked,
         )
         if worker is None:
             raise TypeError(
@@ -1039,7 +1074,12 @@ class CompiledProgram(_RuntimeFacade):
                 )
             params, _, returns = _extract_param_infos(self._program)
             self._artifact.metadata = ArtifactMetadata(
-                tuple(params), tuple(params), len(returns), self.platform, self.backend_type
+                tuple(params),
+                tuple(params),
+                len(returns),
+                self.platform,
+                self.backend_type,
+                nz_tensor_views_blocked="nz_tensor_views_blocked" in entry_function(self._program).attrs,
             )
         return super()._get_metadata()
 
@@ -1142,6 +1182,7 @@ class CompiledProgram(_RuntimeFacade):
             args=args,
             config=config,
             caller_name="CompiledProgram",
+            nz_tensor_views_blocked=self._nz_tensor_views_blocked,
             artifact_runtime=getattr(self, "_artifact_runtime", None),
         )
 
@@ -1186,6 +1227,7 @@ class _SubChipCallable(_RuntimeFacade):
                     platform,
                     _parse_platform(platform)[0],
                     execution_capabilities=execution_capabilities,
+                    nz_tensor_views_blocked="nz_tensor_views_blocked" in func.attrs,
                 ),
             )
 
@@ -1208,6 +1250,7 @@ class _SubChipCallable(_RuntimeFacade):
             output_indices,
             return_types,
             caller_name=f"orchestration {self._name!r}",
+            nz_tensor_views_blocked=self._nz_tensor_views_blocked,
         )
         if worker is None:
             raise TypeError(
@@ -1256,6 +1299,7 @@ class _SubChipCallable(_RuntimeFacade):
             args=args,
             config=config,
             caller_name=f"orchestration {self._name!r}",
+            nz_tensor_views_blocked=self._nz_tensor_views_blocked,
         )
 
 

@@ -45,13 +45,15 @@ metadata 区分编译输入签名 `params` 与 assembly 签名 `lowered_params`�
 `ParamInfo`。PROGRAM 参数绑定和输出分配使用编译输入的原始 `params`，
 从产物恢复以及选择多 orchestration 子入口时也保持这一行为；`lowered_params`
 仍用于 assembly ABI 校验。Torch 按逻辑 shape 校验。
-NZ 元数据记录 `shape_is_lowered`：逻辑签名为 `false`，lowering 后为 `true`。
-编译输入已经是 pass 处理后的 IR 时，函数的 `nz_tensor_views_blocked` 标记使
-`params` 保留已 lowering 的阶段信息，多 orchestration 子入口也遵循此规则。
 驻留张量和堆叠张量按逻辑 shape 直接比较，包括逻辑 rank 五及更高维度。
-lowering 后的元数据需要先将调用者的 shape 分块再比较；这个计算不会重新排列存储。
-该标记在元数据重新加载后保持不变。没有标记的旧记录保留原有约定：小于五维按逻辑
-shape 比较，更高维度采用分块转换。旧版高维逻辑 NZ 产物需要重新编译以记录明确的阶段信息。
+layout 注解不决定 shape 是否转换。`ParamInfo` 不包含编译阶段标记；编译入口在签名
+旁保存一次已有函数属性 `nz_tensor_views_blocked`。正常编译记录 `false`，从 pass
+处理后的 IR 编译则记录 `true`，每个多 orchestration 子入口分别保存。
+仅兼容已 lowering 输入的路径需要先将调用者的 shape 分块，再与输入签名比较；
+这个计算不会重新排列存储。分布式入口根据 HOST 函数属性选择同一路径，每个已准备
+程序独立记录。两种 sidecar 均持久化入口状态，重新加载后保持比较方式不变。
+没有入口状态的旧记录保留原有约定：小于五维按逻辑 shape 比较，更高维度采用分块
+转换。旧版高维逻辑 NZ 产物需要重新编译，以确定明确的调用者签名。
 NZ lowering 按元素单位验证无 padding 的
 blocked 表示，dtype 不变，因此字节数一致。动态 NZ 支持逻辑 `[B, R, C]` 的 batch
 维度；blocked shape 不作为 Torch 的逻辑 shape。

@@ -37,8 +37,8 @@ from .param_info import (
 # independently, so a change to *that* shared format must bump this schema AND
 # ``distributed_compiled_program._META_SCHEMA``.
 _COMPILED_META_FILENAME = "compiled_meta.json"
-# Schema 4 adds NZ shape provenance. Older readers must reject it instead of
-# silently ignoring the marker and comparing logical shapes as blocked ones.
+# Schema 4 records the entry's NZ lowering state once, outside ParamInfo.
+# Older readers assume NZ parameters are blocked and must reject this format.
 _COMPILED_META_SCHEMA = 4
 
 # The L3 counterpart, kept here so both names sit next to the marker table below;
@@ -226,6 +226,13 @@ def _load_meta(
         )
 
     capabilities = _read_capabilities(meta, found_schema, filename, require_program, _bad)
+    # Legacy metadata had no entry-stage record. Do not infer it from shape:
+    # a logical rank-five signature can look exactly like a blocked one.
+    if found_schema >= 4 and "nz_tensor_views_blocked" not in meta:
+        raise _bad("missing nz_tensor_views_blocked entry state")
+    nz_tensor_views_blocked = meta.get("nz_tensor_views_blocked") if found_schema >= 4 else None
+    if nz_tensor_views_blocked is not None and type(nz_tensor_views_blocked) is not bool:
+        raise _bad("nz_tensor_views_blocked must be a bool or null")
 
     raw_params: object = meta.get("params")
     if not _is_obj_list(raw_params):
@@ -262,6 +269,7 @@ def _load_meta(
     return {
         "execution_capabilities": capabilities,
         "param_infos": param_infos,
+        "nz_tensor_views_blocked": nz_tensor_views_blocked,
         "num_return_types": num_return_types,
         "platform": platform,
         "backend_type": backend_type,
@@ -284,8 +292,14 @@ class ArtifactMetadata:
     backend_type: BackendType
     return_aliases: tuple[int, ...] | None = None
     execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
+    # State of the entry that supplied parameters, not lowered_parameters.
+    # False is the normal logical caller contract; True supports compilation
+    # from post-pass IR. None preserves only pre-schema-4 compatibility.
+    nz_tensor_views_blocked: bool | None = False
 
     def __post_init__(self) -> None:
+        if self.nz_tensor_views_blocked is not None and type(self.nz_tensor_views_blocked) is not bool:
+            raise ValueError("nz_tensor_views_blocked must be a bool or null")
         object.__setattr__(self, "parameters", tuple(self.parameters))
         object.__setattr__(self, "lowered_parameters", tuple(self.lowered_parameters))
         if type(self.num_return_types) is not int or self.num_return_types < 0:
@@ -306,13 +320,18 @@ class ArtifactMetadata:
             )
 
             validate_kernel_parameters(self.parameters)
-            validate_lowered_signature(self.parameters, self.lowered_parameters)
+            validate_lowered_signature(
+                self.parameters,
+                self.lowered_parameters,
+                nz_tensor_views_blocked=self.nz_tensor_views_blocked is True,
+            )
 
     def record(self) -> dict[str, Any]:
         return {
             "schema": _COMPILED_META_SCHEMA,
             "supported_execution_modes": self.execution_capabilities.record(),
             "params": [_param_info_to_dict(p) for p in self.parameters],
+            "nz_tensor_views_blocked": self.nz_tensor_views_blocked,
             "lowered_params": [_param_info_to_dict(p) for p in self.lowered_parameters],
             "num_return_types": self.num_return_types,
             "return_aliases": None if self.return_aliases is None else list(self.return_aliases),
@@ -379,6 +398,7 @@ class ArtifactMetadata:
                 meta["backend_type"],
                 aliases,
                 meta["execution_capabilities"],
+                meta["nz_tensor_views_blocked"],
             )
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
             raise _meta_error(_COMPILED_META_FILENAME, path, str(exc)) from exc

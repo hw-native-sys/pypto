@@ -137,6 +137,7 @@ class _CompilationResult(NamedTuple):
     backend_type: BackendType
     logical_parameters: "list[ParamInfo] | None"
     return_aliases: tuple[int, ...] | None
+    nz_tensor_views_blocked: bool = False
 
 
 def _is_distributed(program: _ir_core.Program) -> bool:
@@ -511,7 +512,7 @@ def compile(  # noqa: PLR0913
             lowered_entry = lowered_program.get_function(name)
             assert original is not None and lowered_entry is not None
             child_logical, _, _ = _extract_func_param_infos(original)
-            child_lowered, _, returns = _extract_func_param_infos(lowered_entry, shape_is_lowered=True)
+            child_lowered, _, returns = _extract_func_param_infos(lowered_entry)
             child_lowered = external_parameter_names(child_logical, child_lowered)
             metadata = ArtifactMetadata(
                 tuple(child_logical),
@@ -520,6 +521,7 @@ def compile(  # noqa: PLR0913
                 result.platform,
                 result.backend_type,
                 return_aliases(program, original),
+                nz_tensor_views_blocked="nz_tensor_views_blocked" in original.attrs,
             )
             child_dir = Path(result.output_dir) / "next_levels" / name
             metadata.write(child_dir)
@@ -534,9 +536,7 @@ def compile(  # noqa: PLR0913
         )
 
     try:
-        lowered, _, returns = _extract_func_param_infos(
-            entry_function(lowered_program), shape_is_lowered=True
-        )
+        lowered, _, returns = _extract_func_param_infos(entry_function(lowered_program))
     except (ValueError, TypeError):
         # Standalone mixed kernels may lower to several core functions without
         # a canonical entry. Only the public program API retains this legacy
@@ -574,9 +574,7 @@ def _compile_artifact(  # pyright: ignore[reportUnusedFunction]
     result = _compile_to_files(program, contract=contract, **compile_kwargs)
     if _is_distributed(result.lowered_program):
         raise ValueError("Artifact compilation requires a single chip after lowering")
-    lowered, _, returns = _extract_func_param_infos(
-        entry_function(result.lowered_program), shape_is_lowered=True
-    )
+    lowered, _, returns = _extract_func_param_infos(entry_function(result.lowered_program))
     return _make_single_chip_artifact(result, lowered, len(returns), contract)
 
 
@@ -614,6 +612,11 @@ def _compile_to_files(  # noqa: PLR0913
     from .param_info import _extract_func_param_infos  # noqa: PLC0415
 
     logical, aliases = analyze_contract(program, contract)
+    # The pass marks functions, not individual parameters. Keep that state
+    # with the entry; ParamInfo remains a stage-independent shape snapshot.
+    nz_tensor_views_blocked = (
+        logical is not None and "nz_tensor_views_blocked" in entry_function(program).attrs
+    )
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
     platform = _platform_string(backend_type, mode)
     _select_backend(backend_type=backend_type, platform=platform)
@@ -674,12 +677,10 @@ def _compile_to_files(  # noqa: PLR0913
         effective_runtime = pipeline.runtime
 
         if contract is ArtifactExecutionMode.KERNEL:
-            lowered, _, _ = _extract_func_param_infos(
-                entry_function(transformed_program), shape_is_lowered=True
-            )
+            lowered, _, _ = _extract_func_param_infos(entry_function(transformed_program))
             assert logical is not None
             lowered = external_parameter_names(logical, lowered)
-            validate_lowered_signature(logical, lowered)
+            validate_lowered_signature(logical, lowered, nz_tensor_views_blocked=nz_tensor_views_blocked)
             if effective_runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH:
                 validate_kernel_host_access(transformed_program)
 
@@ -714,7 +715,13 @@ def _compile_to_files(  # noqa: PLR0913
     _log_debug(f"PyPTO artifacts written to {os.path.realpath(output_dir)}")
 
     return _CompilationResult(
-        transformed_program, output_dir, platform, effective_backend_type, logical, aliases
+        transformed_program,
+        output_dir,
+        platform,
+        effective_backend_type,
+        logical,
+        aliases,
+        nz_tensor_views_blocked,
     )
 
 
@@ -743,6 +750,7 @@ def _make_single_chip_artifact(
         result.backend_type,
         result.return_aliases,
         ExecutionCapabilities((contract,)),
+        nz_tensor_views_blocked=True if result.logical_parameters is None else result.nz_tensor_views_blocked,
     )
     directory = Path(result.output_dir)
     _drop_foreign_build_markers(directory, keep=(_COMPILED_META_FILENAME, "kernel_config.py"))

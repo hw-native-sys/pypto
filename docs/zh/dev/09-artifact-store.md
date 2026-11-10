@@ -41,8 +41,9 @@ SHA-256 源码和特化摘要。其记录保留每个环境组件摘要和两个
 ## 执行能力与完整参数绑定
 
 公开 program 编译声明 `["program"]`，内部 kernel 契约编译声明 `["kernel"]`。
-单芯片 `compiled_meta.json` schema 3 保存逻辑签名、lowered 签名及有序外部返回别名。
-分布式 metadata 保持 schema 3 和 PROGRAM 专用能力。`CompiledProgram` 组合公共
+单芯片 `compiled_meta.json` schema 4 保存逻辑签名、lowered 签名、有序外部返回别名，
+以及入口的 `nz_tensor_views_blocked` 状态。分布式 metadata 同样使用 schema 4，
+仍只声明 PROGRAM 能力。schema 3 是仍可读取、没有入口状态字段的旧版格式。`CompiledProgram` 组合公共
 `CompiledArtifact`；metadata 恢复不加载二进制或初始化 Worker。消费者要求对应的
 能力，本次不切换公开 JIT 调用模式。
 

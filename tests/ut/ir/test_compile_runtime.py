@@ -21,6 +21,8 @@ by wrapping the call in a context is the path these tests exercise, and the one
 users take in practice.
 """
 
+from unittest.mock import patch
+
 import pypto.language as pl
 import pytest
 import torch
@@ -263,8 +265,7 @@ def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path):
     assert isinstance(kernel, CompiledArtifact) and kernel.metadata is not None
     assert kernel.metadata.parameters[0].shape == (64, 128)
     assert kernel.metadata.lowered_parameters[0].shape == (1, 8, 4, 16, 16)
-    assert kernel.metadata.parameters[0].shape_is_lowered is False
-    assert kernel.metadata.lowered_parameters[0].shape_is_lowered is True
+    assert kernel.metadata.nz_tensor_views_blocked is False
     assert kernel.metadata.return_aliases == (2,)
 
 
@@ -287,14 +288,21 @@ def test_kernel_preserves_pre_lowered_nz_metadata(tmp_path):
     assert isinstance(artifact, CompiledArtifact) and artifact.metadata is not None
     metadata = artifact.metadata
     assert metadata.parameters[0].shape == (1, 8, 4, 16, 16)
-    assert metadata.parameters[0].shape_is_lowered is True
+    assert metadata.nz_tensor_views_blocked is True
     assert metadata.parameters == metadata.lowered_parameters
     arg = DeviceTensor(0x1000, (64, 128), torch.float16)
-    assert _validate_device_tensor(arg, metadata.parameters[0]) is None
+    assert (
+        _validate_device_tensor(
+            arg, metadata.parameters[0], nz_tensor_views_blocked=metadata.nz_tensor_views_blocked
+        )
+        is None
+    )
 
 
-@pytest.mark.parametrize("pre_lowered", [False, True])
-@pytest.mark.parametrize("multi_entry", [False, True])
+@pytest.mark.parametrize(
+    ("pre_lowered", "multi_entry"),
+    [(False, False), (True, False), (False, True), (True, True), ("mixed", True)],
+)
 def test_program_preserves_input_nz_lowering_state(tmp_path, pre_lowered, multi_entry):
     from pypto import ir  # noqa: PLC0415
 
@@ -316,22 +324,50 @@ def test_program_preserves_input_nz_lowering_state(tmp_path, pre_lowered, multi_
             source.span,
         )
     if pre_lowered:
-        source = passes.block_nz_tensor_views()(source)
+        lowered_source = passes.block_nz_tensor_views()(source)
+        if pre_lowered == "mixed":
+            first = source.get_function("first")
+            second = lowered_source.get_function("second")
+            assert first is not None and second is not None
+            source = ir.Program([first, second], source.name, source.span)
+        else:
+            source = lowered_source
     compiled = ir_compile(source, output_dir=str(tmp_path), skip_ptoas=True)
     assert isinstance(compiled, CompiledProgram)
     entries = [compiled["first"], compiled["second"]] if multi_entry else [compiled]
-    for entry in entries:
+    for index, entry in enumerate(entries):
+        blocked_entry = index == 1 if pre_lowered == "mixed" else pre_lowered
         for program in (entry, CompiledProgram.from_dir(entry.output_dir)):
             infos, _, _ = program._get_metadata()
-            assert infos[0].shape_is_lowered is pre_lowered
-            assert infos[0].shape == ((1, 8, 4, 16, 16) if pre_lowered else (64, 128))
+            assert program._nz_tensor_views_blocked is blocked_entry
+            assert infos[0].shape == ((1, 8, 4, 16, 16) if blocked_entry else (64, 128))
             # The caller still describes logical dimensions when the input IR
             # has passed BlockNzTensorViews, including multi-entry artifacts.
             arg = DeviceTensor(0x1000, (64, 128), torch.float16)
-            assert _validate_device_tensor(arg, infos[0]) is None
+            # Exercise both public call routes. Stub native execution/config/ABI;
+            # binding and entry-state propagation must run unchanged.
+            with (
+                patch("pypto.runtime.runner._execute_compiled") as execute,
+                patch.object(type(program), "_host_tensor_indices", return_value=()),
+                patch("pypto.runtime.runner._coerced_to_orch_args", return_value="args"),
+                patch("pypto.ir.param_info.block_nz_shape", wraps=block_nz_shape) as block,
+            ):
+                assert program(arg) is None
+                execute.assert_called_once()
+                _, coerced, _ = program._build_orch_args(arg, worker=object())
+                assert coerced == [arg]
+                assert block.called is bool(blocked_entry)
+                if not blocked_entry:
+                    # Adding a leading singleton preserves the blocked shape,
+                    # but violates the logical signature's rank.
+                    with pytest.raises(TypeError, match="expects rank"):
+                        program(DeviceTensor(0x1000, (1, 64, 128), torch.float16))
 
 
-@pytest.mark.parametrize("shape", [(2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32)])
+@pytest.mark.parametrize(
+    "shape",
+    [(5120, 1280), (2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32), (1, 1, 1, 16, 32)],
+)
 def test_program_preserves_high_rank_logical_nz_metadata(tmp_path, shape):
     """Compilation and reload must keep logical provenance despite a rank-five ABI."""
 
@@ -346,17 +382,20 @@ def test_program_preserves_high_rank_logical_nz_metadata(tmp_path, shape):
     metadata = compiled._artifact.metadata
     assert metadata is not None
     assert metadata.parameters[0].shape == shape
-    assert metadata.parameters[0].shape_is_lowered is False
+    assert metadata.nz_tensor_views_blocked is False
     assert metadata.lowered_parameters[0].shape == tuple(block_nz_shape(shape, torch.int8))
-    assert metadata.lowered_parameters[0].shape_is_lowered is True
     for program in (compiled, CompiledProgram.from_dir(tmp_path)):
         infos, _, _ = program._get_metadata()
-        assert infos[0].shape_is_lowered is False
+        assert program._nz_tensor_views_blocked is False
         assert _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), infos[0]) is None
         assert program._artifact.metadata is not None
         lowered = program._artifact.metadata.lowered_parameters[0]
-        assert lowered.shape_is_lowered is True
-        assert _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), lowered) is None
+        assert (
+            _validate_device_tensor(
+                DeviceTensor(0x1000, shape, torch.int8), lowered, nz_tensor_views_blocked=True
+            )
+            is None
+        )
 
 
 def test_kernel_multiple_returns_keep_full_parameter_indices(tmp_path):

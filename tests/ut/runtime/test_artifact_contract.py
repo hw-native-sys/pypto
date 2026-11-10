@@ -159,14 +159,30 @@ def test_schema_three_preserves_nz_signatures_and_aliases(tmp_path, mode):
     )
     record = original.record()
     record["schema"] = 3
-    # This is a pre-provenance record: neither signature contains the marker.
+    record.pop("nz_tensor_views_blocked")
+    # Entry state is absent in legacy records, and never belongs to ParamInfo.
     assert "shape_is_lowered" not in record["params"][0]
     assert "shape_is_lowered" not in record["lowered_params"][0]
     (tmp_path / "compiled_meta.json").write_text(json.dumps(record))
     restored = ArtifactMetadata.read(tmp_path)
-    assert restored == original
-    assert restored.parameters[0].shape_is_lowered is None
-    assert restored.lowered_parameters[0].shape_is_lowered is None
+    assert restored == replace(original, nz_tensor_views_blocked=None)
+
+
+def test_schema_four_requires_entry_nz_state(params, tmp_path):
+    record = metadata(params).record()
+    del record["nz_tensor_views_blocked"]
+    (tmp_path / "compiled_meta.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="missing nz_tensor_views_blocked"):
+        CompiledArtifact.from_dir(tmp_path)
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", [], {}])
+def test_metadata_rejects_invalid_entry_nz_state(params, tmp_path, value):
+    record = metadata(params).record()
+    record["nz_tensor_views_blocked"] = value
+    (tmp_path / "compiled_meta.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="nz_tensor_views_blocked"):
+        CompiledArtifact.from_dir(tmp_path)
 
 
 @pytest.mark.parametrize("filename", ["compiled_meta.json", "distributed_meta.json"])

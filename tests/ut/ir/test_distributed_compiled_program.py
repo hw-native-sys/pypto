@@ -241,8 +241,10 @@ def test_from_dir_incompatible_schema_raises(compiled, tmp_path):
         DistributedCompiledProgram.from_dir(tmp_path)
 
 
-def test_distributed_schema_four_preserves_nz_provenance_and_reads_legacy(tmp_path):
+@pytest.mark.parametrize("pre_lowered", [False, True])
+def test_distributed_schema_four_preserves_nz_entry_state_and_reads_legacy(tmp_path, pre_lowered):
     from pypto.ir.param_info import arg_shape_as_declared  # noqa: PLC0415
+    from pypto.pypto_core import passes  # noqa: PLC0415
 
     @pl.program
     class NzHost:
@@ -250,26 +252,37 @@ def test_distributed_schema_four_preserves_nz_provenance_and_reads_legacy(tmp_pa
         def main(self, weight: pl.Tensor[[32, 64], pl.FP16, pl.NZ]):
             return
 
-    DistributedCompiledProgram(NzHost, str(tmp_path))
+    source = passes.block_nz_tensor_views()(NzHost) if pre_lowered else NzHost
+    DistributedCompiledProgram(source, str(tmp_path))
     path = tmp_path / _DISTRIBUTED_META_FILENAME
     record = json.loads(path.read_text())
     assert record["schema"] == 4
-    assert record["params"][0]["shape_is_lowered"] is False
+    assert record["nz_tensor_views_blocked"] is pre_lowered
+    assert "shape_is_lowered" not in record["params"][0]
     restored = DistributedCompiledProgram.from_dir(tmp_path)
     infos, _, _ = restored._get_metadata()
-    assert infos[0].shape_is_lowered is False
-    assert arg_shape_as_declared((32, 64), infos[0]) == [32, 64]
+    assert restored._nz_tensor_views_blocked is pre_lowered
+    assert (
+        tuple(
+            arg_shape_as_declared(
+                (32, 64), infos[0], nz_tensor_views_blocked=restored._nz_tensor_views_blocked
+            )
+        )
+        == infos[0].shape
+    )
 
     # Schema 3 has no marker and uses the legacy blocked-shape convention.
     record["schema"] = 3
-    record["params"][0].pop("shape_is_lowered")
+    record.pop("nz_tensor_views_blocked")
     record["params"][0]["shape"] = [1, 4, 2, 16, 16]
     path.write_text(json.dumps(record))
     legacy = DistributedCompiledProgram.from_dir(tmp_path)
     infos, _, _ = legacy._get_metadata()
-    assert infos[0].shape_is_lowered is None
+    assert legacy._nz_tensor_views_blocked is None
     assert infos[0].shape == (1, 4, 2, 16, 16)
-    assert arg_shape_as_declared((32, 64), infos[0]) == [1, 4, 2, 16, 16]
+    assert arg_shape_as_declared(
+        (32, 64), infos[0], nz_tensor_views_blocked=legacy._nz_tensor_views_blocked
+    ) == [1, 4, 2, 16, 16]
     assert legacy.execution_capabilities == ExecutionCapabilities()
 
 

@@ -70,6 +70,7 @@ def _fake_compiled(param_infos, output_indices):
     compiled = MagicMock(name="DistributedCompiledProgram")
     compiled._get_metadata.return_value = (param_infos, output_indices, [])
     compiled._distributed_config = DistributedConfig()
+    compiled._nz_tensor_views_blocked = False
     compiled.platform = "a2a3sim"
     return compiled
 
@@ -2003,6 +2004,34 @@ class TestMultiProgram:
         rt.run(prog_a, a)
         assert m["submit_dispatch"].call_args.args[1] is entry_a
         rt.close()
+
+    @pytest.mark.parametrize("stacked", [False, True])
+    def test_nz_shape_validation_uses_each_programs_entry_state(self, patched_setup, stacked):
+        logical_shape = (2, 32, 64) if stacked else (32, 64)
+        blocked_shape = (2 if stacked else 1, 8, 2, 16, 8)
+        logical = _ParamInfo("weight", ParamDirection.In, logical_shape, DataType.FP32, "NZ")
+        lowered = _ParamInfo("weight", ParamDirection.In, blocked_shape, DataType.FP32, "NZ")
+        prog_a = _fake_compiled([logical], [])
+        prog_b = _fake_compiled([lowered], [])
+        prog_b._nz_tensor_views_blocked = True
+        for prog in (prog_a, prog_b):
+            prog._distributed_config = DistributedConfig(device_ids=[0, 1])
+        rt = DistributedWorker([prog_a, prog_b])
+        try:
+            if stacked:
+                arg = StackedDeviceTensor(
+                    [_resident(rt, (32, 64), worker_id=i) for i in range(2)], logical_shape, [0, 1]
+                )
+            else:
+                arg = _resident(rt, logical_shape)
+            # Alternate entries on one Worker: the primary program's state
+            # must not govern validation of a different program's signature.
+            rt.run(prog_b, arg)
+            rt.run(prog_a, arg)
+            rt.run(prog_b, arg)
+            assert patched_setup["submit_dispatch"].call_count == 3
+        finally:
+            rt.close()
 
     def test_num_sub_workers_is_max_across_programs(self, patched_setup):
         m = patched_setup
