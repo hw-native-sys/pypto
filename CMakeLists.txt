@@ -151,6 +151,7 @@ set(PYPTO_SOURCES
     src/ir/op/sync_ops/launch.cpp
     src/ir/op/distributed/memory.cpp
     src/ir/op/distributed/world_size.cpp
+    src/ir/op/distributed/num_workers.cpp
     src/ir/op/distributed/remote_load.cpp
     src/ir/op/distributed/remote_store.cpp
     src/ir/op/distributed/collective.cpp

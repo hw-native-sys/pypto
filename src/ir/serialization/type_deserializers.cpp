@@ -390,7 +390,7 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
         }
         kwargs.emplace_back(key, std::move(entries));
       } else if (type_name == "Expr") {
-        // Reserved Expr-valued attr (kAttrDevice). Resolved through the node table.
+        // Reserved Expr-valued attr (kAttrWorker). Resolved through the node table.
         // A missing 'value' field is a malformed envelope (fail fast); an
         // explicit nil value is the null placeholder.
         if (!has_value_obj) {
@@ -552,6 +552,9 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
+  // Normalize the legacy literal "device" key only after resolving Expr refs.
+  // Reuse the node-table pointers so arguments and placement share Var identity.
+  NormalizeWorkerPlacementAttrs(attrs, span);
   return std::make_shared<Call>(op, args, std::move(kwargs), std::move(attrs), type, span);
 }
 
@@ -632,6 +635,9 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
+  // Normalize the legacy literal "device" key only after resolving Expr refs.
+  // Reuse the node-table pointers so arguments and placement share Var identity.
+  NormalizeWorkerPlacementAttrs(attrs, span);
   return std::make_shared<Submit>(op, args, deps, std::move(kwargs), std::move(attrs), type, span,
                                   std::move(core_num), sync_start, allow_early_resolve, std::move(predicate));
 }
