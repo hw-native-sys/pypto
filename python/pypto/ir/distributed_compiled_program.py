@@ -62,7 +62,7 @@ from .param_info import bind_complete_args
 # ``_artifact_metadata`` (both feed the build-kind marker table there) and is
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
-_META_SCHEMA = 4
+_META_SCHEMA = 3
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
@@ -224,7 +224,6 @@ class DistributedCompiledProgram:
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
         _execution_capabilities: ExecutionCapabilities = ExecutionCapabilities(),
-        _nz_tensor_views_blocked: bool | None = None,
     ) -> None:
         # ``program`` is the post-pass IR. The runtime needs post-pass IR for
         # orchestrator metadata (post-SSA names that match the generated
@@ -248,7 +247,6 @@ class DistributedCompiledProgram:
         )
         self._distributed_config = distributed_config or DistributedConfig()
         self._param_infos = _param_infos
-        self._nz_tensor_views_blocked = _nz_tensor_views_blocked
         self._output_indices = _output_indices
         self._return_types = _return_types
 
@@ -295,7 +293,6 @@ class DistributedCompiledProgram:
             "schema": _META_SCHEMA,
             "supported_execution_modes": self.execution_capabilities.record(),
             "params": [_param_info_to_dict(p) for p in param_infos],
-            "nz_tensor_views_blocked": self._nz_tensor_views_blocked,
             "num_return_types": len(return_types),
             "platform": self._platform,
             "backend_type": self._backend_type.name,
@@ -390,7 +387,6 @@ class DistributedCompiledProgram:
             _output_indices=output_indices,
             _return_types=return_types,
             _execution_capabilities=meta["execution_capabilities"],
-            _nz_tensor_views_blocked=meta["nz_tensor_views_blocked"],
         )
 
     @property
@@ -453,16 +449,10 @@ class DistributedCompiledProgram:
                     break
 
             if host_orch is not None:
-                self._nz_tensor_views_blocked = "nz_tensor_views_blocked" in host_orch.attrs
                 self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(
                     host_orch
                 )
             else:
-                from ._compile_contract import entry_function  # noqa: PLC0415
-
-                self._nz_tensor_views_blocked = (
-                    "nz_tensor_views_blocked" in entry_function(self._program).attrs
-                )
                 self._param_infos, self._output_indices, self._return_types = _extract_param_infos(
                     self._program
                 )

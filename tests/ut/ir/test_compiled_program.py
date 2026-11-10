@@ -1711,17 +1711,7 @@ def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_p
 
 
 @pytest.mark.parametrize(
-    "dtype,torch_dtype,c0",
-    [
-        (DataType.INT8, torch.int8, 32),
-        (DataType.FP16, torch.float16, 16),
-        pytest.param(
-            DataType.FP8E4M3FN,
-            getattr(torch, "float8_e4m3fn", None),
-            32,
-            marks=pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Requires PyTorch float8"),
-        ),
-    ],
+    "dtype,torch_dtype,c0", [(DataType.INT8, torch.int8, 32), (DataType.FP16, torch.float16, 16)]
 )
 def test_nz_device_tensor_shape_and_sidecar_round_trip(dtype, torch_dtype, c0):
     """Logical resident shapes remain valid after serializing blocked metadata."""
@@ -1729,16 +1719,16 @@ def test_nz_device_tensor_shape_and_sidecar_round_trip(dtype, torch_dtype, c0):
     restored = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
     assert restored == info
     arg = DeviceTensor(0x1000, (2, 4, 256, 512), torch_dtype)
-    assert _validate_device_tensor(arg, restored, nz_tensor_views_blocked=True) is None
+    assert _validate_device_tensor(arg, restored) is None
     shards = [DeviceTensor(0x1000 + i * 0x100000, (4, 256, 512), torch_dtype) for i in range(2)]
     stacked = StackedDeviceTensor(shards, (2, 4, 256, 512), [0, 1])
-    assert _validate_stacked_tensor(stacked, restored, nz_tensor_views_blocked=True) is None
+    assert _validate_stacked_tensor(stacked, restored) is None
     wrong_shape = DeviceTensor(0x1000, (2, 3, 256, 512), torch_dtype)
     with pytest.raises(TypeError, match="expects shape"):
-        _validate_device_tensor(wrong_shape, restored, nz_tensor_views_blocked=True)
+        _validate_device_tensor(wrong_shape, restored)
     unaligned = DeviceTensor(0x1000, (2, 4, 255, 512), torch_dtype)
     with pytest.raises(TypeError, match="expects rank"):
-        _validate_device_tensor(unaligned, restored, nz_tensor_views_blocked=True)
+        _validate_device_tensor(unaligned, restored)
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -1753,10 +1743,8 @@ def test_dynamic_batch_nz_validation_requires_logical_rank_three(stacked, reload
         if stacked:
             shards = [DeviceTensor(0x1000 + i * 0x100000, shape[1:], torch.int8) for i in range(shape[0])]
             arg = StackedDeviceTensor(shards, shape, list(range(shape[0])))
-            return _validate_stacked_tensor(arg, info, nz_tensor_views_blocked=True)
-        return _validate_device_tensor(
-            DeviceTensor(0x1000, shape, torch.int8), info, nz_tensor_views_blocked=True
-        )
+            return _validate_stacked_tensor(arg, info)
+        return _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), info)
 
     for shape in [(1, 256, 512), (8, 256, 512)]:
         assert validate(shape) is None
@@ -1767,113 +1755,168 @@ def test_dynamic_batch_nz_validation_requires_logical_rank_three(stacked, reload
         validate((8, 512, 512))
 
 
-@pytest.mark.parametrize(
-    ("declared", "actual"),
-    [
-        ((5120, 1280), (5120, 1280)),
-        ((-1, 256, 512), (3, 256, 512)),
-        ((2, 3, 256, 512), (2, 3, 256, 512)),
-    ],
-)
-@pytest.mark.parametrize("reload_metadata", [False, True])
-@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Requires PyTorch float8")
-def test_logical_nz_device_tensor_validation(declared, actual, reload_metadata):
-    """Original NZ signatures must compare shapes before backend blocking."""
-    info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.FP8E4M3FN, "NZ")
-    if reload_metadata:
-        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
-    arg = DeviceTensor(0x1000, actual, torch.float8_e4m3fn)
-    assert _validate_device_tensor(arg, info) is None
-    # Exercise the actual binding path too; no descriptor address is dereferenced.
-    coerced, return_style = _coerce_args((arg,), [info], [], [], caller_name="NZ program")
-    assert coerced == [arg]
-    assert not return_style
-    with pytest.raises(TypeError, match="expects shape"):
-        _validate_device_tensor(
-            DeviceTensor(0x1000, (*actual[:-1], actual[-1] // 2), torch.float8_e4m3fn), info
-        )
-    with pytest.raises(TypeError, match="expects rank"):
-        _validate_device_tensor(DeviceTensor(0x1000, (actual[-1],), torch.float8_e4m3fn), info)
-    with pytest.raises(TypeError, match="expects dtype"):
-        _validate_device_tensor(DeviceTensor(0x1000, actual, torch.int8), info)
-
-
-@pytest.mark.parametrize("declared", [(-1, 256, 512), (2, 256, 512), (2, 3, 256, 512)])
-@pytest.mark.parametrize("reload_metadata", [False, True])
-def test_logical_nz_stacked_tensor_validation(declared, reload_metadata):
-    """Stacked resident tensors use the same logical parameter contract."""
-    info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.INT8, "NZ")
-    if reload_metadata:
-        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
-
-    def validate(shape, dtype=torch.int8):
-        shards = [DeviceTensor(0x1000 + i * 0x100000, shape[1:], dtype) for i in range(shape[0])]
-        return _validate_stacked_tensor(StackedDeviceTensor(shards, shape, list(range(shape[0]))), info)
-
-    actual = (2, *declared[1:])
-    assert validate(actual) is None
-    with pytest.raises(TypeError, match="expects shape"):
-        validate((*actual[:-1], actual[-1] // 2))
-    with pytest.raises(TypeError, match="expects rank"):
-        validate((2, actual[-1]))
-    with pytest.raises(TypeError, match="expects dtype"):
-        validate(actual, torch.float16)
-
-
-@pytest.mark.parametrize("declared", [(2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32)])
-@pytest.mark.parametrize("reload_metadata", [False, True])
-def test_logical_high_rank_nz_validation_preserves_rank(declared, reload_metadata):
-    """Logical rank five can look blocked; layout must not change the caller contract."""
-    info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.INT8, "NZ")
-    if reload_metadata:
-        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
-    assert "shape_is_lowered" not in _param_info_to_dict(info)
-    assert _validate_device_tensor(DeviceTensor(0x1000, declared, torch.int8), info) is None
-    shards = [DeviceTensor(0x1000 + i * 0x100000, declared[1:], torch.int8) for i in range(declared[0])]
-    assert (
-        _validate_stacked_tensor(StackedDeviceTensor(shards, declared, list(range(declared[0]))), info)
-        is None
-    )
-    with pytest.raises(TypeError, match="expects shape"):
-        _validate_device_tensor(DeviceTensor(0x1000, (*declared[:-1], declared[-1] * 2), torch.int8), info)
-    # For the last case, blocking this wrong-rank argument produces exactly
-    # the declared five extents. It must still be rejected as a logical input.
-    with pytest.raises(TypeError, match="expects rank"):
-        _validate_device_tensor(DeviceTensor(0x1000, (256, 128), torch.int8), info)
-
-
-@pytest.mark.parametrize("pre_lowered", [False, True])
-def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path, pre_lowered):
+def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path):
     """Live and reloaded artifacts retain the NZ layout needed by argument binding."""
-    from pypto.pypto_core import passes  # noqa: PLC0415
-
     span = ir.Span.unknown()
     tensor_type = ir.TensorType(
-        [2, 4, 256, 512], DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ)
+        [8, 16, 16, 16, 32], DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ)
     )
     param = ir.Var("w", tensor_type, span)
     func = ir.Function("main", [param], [], ir.ReturnStmt([], span), span, ir.FunctionType.Orchestration)
-    program = ir.Program([func], "Nz", span)
-    if pre_lowered:
-        # Use actual pass output, including its provenance marker, rather than
-        # constructing a rank-five logical signature that only looks blocked.
-        program = passes.block_nz_tensor_views()(program)
-    live = CompiledProgram(program, str(tmp_path), platform="a2a3sim")
+    live = CompiledProgram(ir.Program([func], "Nz", span), str(tmp_path), platform="a2a3sim")
     restored = CompiledProgram.from_dir(tmp_path)
     for cp in (live, restored):
         infos, _, _ = cp._get_metadata()
         assert infos[0].layout == "NZ"
-        assert cp._nz_tensor_views_blocked is pre_lowered
-        arg = DeviceTensor(0x1000, (2, 4, 256, 512), torch.int8)
-        coerced, _ = _coerce_args(
-            (arg,),
-            infos,
-            [],
-            [],
-            caller_name="NZ entry",
-            nz_tensor_views_blocked=cp._nz_tensor_views_blocked,
+        assert _validate_device_tensor(DeviceTensor(0x1000, (2, 4, 256, 512), torch.int8), infos[0]) is None
+
+
+@pytest.mark.parametrize(
+    "schema,legacy_duplicate",
+    [(1, False), (2, False), (_COMPILED_META_SCHEMA, False), (_COMPILED_META_SCHEMA, True)],
+)
+@pytest.mark.parametrize("declared_shape", [(32, 64), (1, 4, 2, 16, 16)])
+@pytest.mark.parametrize(
+    "dtype,torch_dtype", [(DataType.FP16, torch.float16), (DataType.UINT16, torch.int16)]
+)
+def test_legacy_nz_wrapper_normalizes_only_lowered_metadata(
+    tmp_path, monkeypatch, schema, legacy_duplicate, declared_shape, dtype, torch_dtype
+):
+    if dtype == DataType.UINT16:
+        # Legacy normalization also needs to work on Torch versions without
+        # an unsigned dtype mapping. The carrier uses the same storage width.
+        monkeypatch.delitem(param_info._DATATYPE_TO_TORCH, str(dtype), raising=False)
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType(list(declared_shape), dtype, None, ir.TensorView(layout=ir.TensorLayout.NZ))
+    param = ir.Var("weight", tensor_type, span)
+    func = ir.Function("main", [param], [], ir.ReturnStmt([], span), span, ir.FunctionType.Orchestration)
+    live = CompiledProgram(ir.Program([func], "Nz", span), str(tmp_path), platform="a2a3sim")
+    path = tmp_path / _COMPILED_META_FILENAME
+    record = json.loads(path.read_text())
+    record["schema"] = schema
+    if schema < _COMPILED_META_SCHEMA:
+        record.pop("lowered_params")
+        record.pop("return_aliases")
+    elif legacy_duplicate:
+        # Pre-change schema-3 direct wrappers copied params into lowered_params,
+        # even when the source NZ signature was still logical.
+        record["lowered_params"] = record["params"]
+    path.write_text(json.dumps(record))
+    for program in (live, CompiledProgram.from_dir(tmp_path)):
+        metadata = program._artifact.metadata
+        assert metadata is not None
+        assert metadata.parameters[0].shape == declared_shape
+        assert metadata.lowered_parameters[0].shape == (1, 4, 2, 16, 16)
+        with patch("pypto.runtime.runner._execute_compiled") as execute:
+            assert program(DeviceTensor(0x1000, (32, 64), torch_dtype)) is None
+            execute.assert_called_once()
+
+
+@pytest.mark.parametrize("mode", ["program", "kernel"])
+def test_schema3_nz_normalization_preserves_analyzed_signatures(tmp_path, mode):
+    info = _ParamInfo("weight", ir.ParamDirection.In, [32, 64], DataType.FP16, "NZ")
+    record = ArtifactMetadata((info,), (info,), 0, "a2a3sim", BackendType.Ascend910).record()
+    # An analyzed signature does not have the legacy direct-wrapper contract,
+    # even when its shape values happen to be duplicated.
+    record["return_aliases"] = []
+    record["supported_execution_modes"] = [mode]
+    (tmp_path / _COMPILED_META_FILENAME).write_text(json.dumps(record))
+    if mode == "kernel":
+        with pytest.raises(ValueError, match="Lowering changed external storage"):
+            ArtifactMetadata.read(tmp_path)
+    else:
+        restored = ArtifactMetadata.read(tmp_path)
+        assert restored.lowered_parameters[0].shape == (32, 64)
+        assert restored.return_aliases == ()
+
+
+def test_schema3_nz_normalization_preserves_distinct_lowered_signature(tmp_path):
+    info = _ParamInfo("weight", ir.ParamDirection.In, [32, 64], DataType.FP16, "NZ")
+    record = ArtifactMetadata((info,), (info,), 0, "a2a3sim", BackendType.Ascend910).record()
+    record["lowered_params"][0]["shape"] = [64, 32]
+    (tmp_path / _COMPILED_META_FILENAME).write_text(json.dumps(record))
+    restored = CompiledProgram.from_dir(tmp_path)
+    assert restored._artifact.metadata is not None
+    assert restored._artifact.metadata.lowered_parameters[0].shape == (64, 32)
+    with patch("pypto.runtime.runner._execute_compiled") as execute:
+        with pytest.raises(TypeError, match="expects rank"):
+            restored(DeviceTensor(0x1000, (32, 64), torch.float16))
+        execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "dtype,carrier_dtype,c0", [(DataType.HF8, torch.uint8, 32), (DataType.UINT16, torch.int16, 16)]
+)
+def test_unmapped_nz_stacked_tensor_requires_matching_carrier_width(monkeypatch, dtype, carrier_dtype, c0):
+    monkeypatch.delitem(param_info._DATATYPE_TO_TORCH, str(dtype), raising=False)
+    info = _ParamInfo("weight", ir.ParamDirection.In, [2, 64 // c0, 2, 16, c0], dtype, "NZ")
+
+    def stacked(torch_dtype):
+        shards = [DeviceTensor(0x1000 + i * 0x10000, (32, 64), torch_dtype) for i in range(2)]
+        return StackedDeviceTensor(shards, (2, 32, 64), [0, 1])
+
+    assert _validate_stacked_tensor(stacked(carrier_dtype), info) is None
+    wrong_dtype = torch.float16 if c0 == 32 else torch.uint8
+    with pytest.raises(TypeError, match=f"expects {256 // c0}-bit storage"):
+        _validate_stacked_tensor(stacked(wrong_dtype), info)
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT4, DataType.UINT4, DataType.HF4, DataType.BOOL])
+def test_block_nz_shape_rejects_sub_byte_ir_dtypes(dtype):
+    # get_byte() rounds these dtypes up; NZ lowering requires whole-byte
+    # elements and must use get_bit() instead of accepting that rounding.
+    with pytest.raises(ValueError, match="whole-byte"):
+        param_info.block_nz_shape((32, 64), dtype)
+
+
+@pytest.mark.parametrize(
+    "dtype,torch_dtype,c0", [(DataType.FP16, torch.float16, 16), (DataType.FP4E2M1X2, torch.uint8, 32)]
+)
+def test_nz_lowered_validation_preserves_logical_output_allocation(dtype, torch_dtype, c0):
+    params = [
+        _ParamInfo("weight", ir.ParamDirection.In, [32, 64], dtype, "NZ"),
+        _ParamInfo("result", ir.ParamDirection.Out, [32, 64], dtype, "NZ"),
+    ]
+    lowered = [
+        _ParamInfo(info.name, info.direction, [1, 64 // c0, 2, 16, c0], dtype, "NZ") for info in params
+    ]
+    arg = DeviceTensor(0x1000, (32, 64), torch_dtype)
+    coerced, return_style = _coerce_args(
+        (arg,), params, [1], [None], caller_name="program", lowered_param_infos=lowered
+    )
+    assert return_style
+    assert coerced[0] is arg
+    output = coerced[1]
+    assert isinstance(output, torch.Tensor)
+    assert output.shape == (32, 64)
+    with pytest.raises(TypeError, match="expects shape"):
+        _coerce_args(
+            (DeviceTensor(0x1000, (16, 128), torch_dtype),),
+            params,
+            [1],
+            [None],
+            caller_name="program",
+            lowered_param_infos=lowered,
         )
-        assert coerced == [arg]
+
+
+def test_dynamic_nz_lowered_validation_keeps_runtime_batch_contract():
+    params = [_ParamInfo("weight", ir.ParamDirection.In, [-1, 32, 64], DataType.FP16, "NZ")]
+    lowered = [_ParamInfo("weight", ir.ParamDirection.In, [-1, 4, 2, 16, 16], DataType.FP16, "NZ")]
+    arg = DeviceTensor(0x1000, (8, 32, 64), torch.float16)
+    assert _coerce_args((arg,), params, [], [], caller_name="program", lowered_param_infos=lowered) == (
+        [arg],
+        False,
+    )
+    with pytest.raises(TypeError, match="logical rank 3"):
+        _coerce_args(
+            (DeviceTensor(0x1000, (2, 4, 32, 64), torch.float16),),
+            params,
+            [],
+            [],
+            caller_name="program",
+            lowered_param_infos=lowered,
+        )
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
@@ -1914,9 +1957,8 @@ def test_fp4e1m2_return_allocation_uses_raw_carrier_bytes():
 
 
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
-@pytest.mark.parametrize("layout", [None, "NZ"])
-def test_packed_fp4_compiled_host_args_validate_carrier_shape_and_dtype(dtype, layout):
-    info = _ParamInfo("packed", ir.ParamDirection.In, [-1, 32], dtype, layout)
+def test_packed_fp4_compiled_host_args_validate_carrier_shape_and_dtype(dtype):
+    info = _ParamInfo("packed", ir.ParamDirection.In, [-1, 32], dtype)
 
     def bind(value):
         return _coerce_args((value,), [info], [], [], caller_name="packed artifact")

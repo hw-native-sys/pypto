@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
-from pypto.ir._artifact_metadata import ArtifactMetadata, _load_meta
+from pypto.ir._artifact_metadata import ArtifactMetadata
 from pypto.ir._compile_contract import validate_lowered_signature
 from pypto.ir.compiled_artifact import CompiledArtifact
 from pypto.ir.compiled_program import CompiledProgram
@@ -148,53 +148,6 @@ def test_legacy_program_only_metadata(params, tmp_path, schema):
     assert restored._artifact.metadata.return_aliases is None
     with pytest.raises(ValueError, match="requires 'kernel'"):
         restored.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
-
-
-@pytest.mark.parametrize("mode", [ArtifactExecutionMode.PROGRAM, ArtifactExecutionMode.KERNEL])
-def test_schema_three_preserves_nz_signatures_and_aliases(tmp_path, mode):
-    logical = ParamInfo("x", ParamDirection.InOut, (32, 64), DataType.FP16, "NZ")
-    lowered = replace(logical, shape=(1, 4, 2, 16, 16))
-    original = ArtifactMetadata(
-        (logical,), (lowered,), 1, "a2a3sim", BackendType.Ascend910, (0,), ExecutionCapabilities((mode,))
-    )
-    record = original.record()
-    record["schema"] = 3
-    record.pop("nz_tensor_views_blocked")
-    # Entry state is absent in legacy records, and never belongs to ParamInfo.
-    assert "shape_is_lowered" not in record["params"][0]
-    assert "shape_is_lowered" not in record["lowered_params"][0]
-    (tmp_path / "compiled_meta.json").write_text(json.dumps(record))
-    restored = ArtifactMetadata.read(tmp_path)
-    assert restored == replace(original, nz_tensor_views_blocked=None)
-
-
-def test_schema_four_requires_entry_nz_state(params, tmp_path):
-    record = metadata(params).record()
-    del record["nz_tensor_views_blocked"]
-    (tmp_path / "compiled_meta.json").write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="missing nz_tensor_views_blocked"):
-        CompiledArtifact.from_dir(tmp_path)
-
-
-@pytest.mark.parametrize("value", [0, 1, "false", [], {}])
-def test_metadata_rejects_invalid_entry_nz_state(params, tmp_path, value):
-    record = metadata(params).record()
-    record["nz_tensor_views_blocked"] = value
-    (tmp_path / "compiled_meta.json").write_text(json.dumps(record))
-    with pytest.raises(ValueError, match="nz_tensor_views_blocked"):
-        CompiledArtifact.from_dir(tmp_path)
-
-
-@pytest.mark.parametrize("filename", ["compiled_meta.json", "distributed_meta.json"])
-def test_nz_provenance_schema_is_rejected_by_schema_three_reader(params, tmp_path, filename):
-    record = metadata(params).record()
-    assert record["schema"] == 4
-    path = tmp_path / filename
-    path.write_text(json.dumps(record))
-    # A consumer supporting only schema 3 must fail at the version boundary,
-    # before it could silently discard fields that determine NZ validation.
-    with pytest.raises(ValueError, match=r"Incompatible .* schema 4.*expected 3"):
-        _load_meta(path, filename=filename, schema=3)
 
 
 @pytest.mark.parametrize(

@@ -3118,9 +3118,7 @@ class DistributedWorker(Worker):
             )
         return self._run_compiled(self._compiled, *args, config=config)
 
-    def _validate_prepared_dispatch_arg(
-        self, info: Any, arg: Any, *, nz_tensor_views_blocked: bool | None = False
-    ) -> None:
+    def _validate_prepared_dispatch_arg(self, info: Any, arg: Any) -> None:
         """Validate one non-scalar argument at the public prepared boundary."""
         from pypto.ir.compiled_program import (  # noqa: PLC0415
             _validate_device_tensor,
@@ -3134,10 +3132,10 @@ class DistributedWorker(Worker):
                     f"Parameter {info.name!r} shard {shard_index}",
                     worker_id=worker_id,
                 )
-            _validate_stacked_tensor(arg, info, nz_tensor_views_blocked=nz_tensor_views_blocked)
+            _validate_stacked_tensor(arg, info)
         elif isinstance(arg, DeviceTensor):
             self._require_owned_resident_tensor(arg, f"Parameter {info.name!r}")
-            _validate_device_tensor(arg, info, nz_tensor_views_blocked=nz_tensor_views_blocked)
+            _validate_device_tensor(arg, info)
         elif isinstance(arg, torch.Tensor):
             if not arg.is_shared():
                 raise TypeError(
@@ -3200,9 +3198,7 @@ class DistributedWorker(Worker):
                     # Scalar parameter (e.g. seq_len): forwarded as-is to the entry.
                     tensors[info.name] = arg
                     continue
-                self._validate_prepared_dispatch_arg(
-                    info, arg, nz_tensor_views_blocked=compiled._nz_tensor_views_blocked
-                )
+                self._validate_prepared_dispatch_arg(info, arg)
                 tensors[info.name] = arg
 
             if two_pass_swimlane:

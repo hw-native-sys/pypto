@@ -54,11 +54,10 @@ subsequent private requests build again. This is not a private-object cache.
 ## Execution capabilities and complete argument binding
 
 Public program compilation emits `["program"]`; internal kernel-contract
-compilation emits `["kernel"]`. Single-chip `compiled_meta.json` schema 4 stores
-logical and lowered signatures, ordered external return aliases, and the entry's
-`nz_tensor_views_blocked` state. Distributed metadata also uses schema 4 and remains
-program-only. Schema 3 is a readable legacy format without the entry-state field.
-`CompiledProgram` composes the shared `CompiledArtifact`; metadata restoration does not load binaries or start workers.
+compilation emits `["kernel"]`. Single-chip `compiled_meta.json` schema 3 stores
+logical and lowered signatures plus ordered external return aliases. Distributed
+metadata remains schema 3 and program-only. `CompiledProgram` composes the shared
+`CompiledArtifact`; metadata restoration does not load binaries or start workers.
 Consumers require their declared capability. No public JIT calling mode changes.
 
 `ArtifactSpec.execution_capabilities` records the same declaration in the

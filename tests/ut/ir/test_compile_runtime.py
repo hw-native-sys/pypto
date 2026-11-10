@@ -28,7 +28,7 @@ import pytest
 import torch
 from pypto.ir.compile import compile as ir_compile
 from pypto.ir.compiled_artifact import CompiledArtifact
-from pypto.ir.compiled_program import CompiledProgram, _validate_device_tensor
+from pypto.ir.compiled_program import CompiledProgram
 from pypto.ir.param_info import block_nz_shape
 from pypto.pypto_core import passes
 from pypto.runtime import DeviceTensor
@@ -265,45 +265,14 @@ def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path):
     assert isinstance(kernel, CompiledArtifact) and kernel.metadata is not None
     assert kernel.metadata.parameters[0].shape == (64, 128)
     assert kernel.metadata.lowered_parameters[0].shape == (1, 8, 4, 16, 16)
-    assert kernel.metadata.nz_tensor_views_blocked is False
     assert kernel.metadata.return_aliases == (2,)
-
-
-def test_kernel_preserves_pre_lowered_nz_metadata(tmp_path):
-    from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
-    from pypto.ir.compile import _compile_artifact, _run_pass_pipeline  # noqa: PLC0415
-
-    @pl.program
-    class NzEntry:
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, weight: pl.Tensor[[64, 128], pl.FP16, pl.NZ]):
-            return
-
-    # Exercise the compilation-input signature after real lowering. The empty
-    # body isolates this contract from the idempotence of compute-body passes.
-    lowered = _run_pass_pipeline(NzEntry, operation="lower").transformed_program
-    artifact = _compile_artifact(
-        lowered, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
-    )
-    assert isinstance(artifact, CompiledArtifact) and artifact.metadata is not None
-    metadata = artifact.metadata
-    assert metadata.parameters[0].shape == (1, 8, 4, 16, 16)
-    assert metadata.nz_tensor_views_blocked is True
-    assert metadata.parameters == metadata.lowered_parameters
-    arg = DeviceTensor(0x1000, (64, 128), torch.float16)
-    assert (
-        _validate_device_tensor(
-            arg, metadata.parameters[0], nz_tensor_views_blocked=metadata.nz_tensor_views_blocked
-        )
-        is None
-    )
 
 
 @pytest.mark.parametrize(
     ("pre_lowered", "multi_entry"),
     [(False, False), (True, False), (False, True), (True, True), ("mixed", True)],
 )
-def test_program_preserves_input_nz_lowering_state(tmp_path, pre_lowered, multi_entry):
+def test_program_validates_nz_against_lowered_signature(tmp_path, pre_lowered, multi_entry):
     from pypto import ir  # noqa: PLC0415
 
     @pl.program
@@ -324,78 +293,126 @@ def test_program_preserves_input_nz_lowering_state(tmp_path, pre_lowered, multi_
             source.span,
         )
     if pre_lowered:
-        lowered_source = passes.block_nz_tensor_views()(source)
+        lowered = passes.block_nz_tensor_views()(source)
         if pre_lowered == "mixed":
             first = source.get_function("first")
-            second = lowered_source.get_function("second")
+            second = lowered.get_function("second")
             assert first is not None and second is not None
             source = ir.Program([first, second], source.name, source.span)
         else:
-            source = lowered_source
+            source = lowered
     compiled = ir_compile(source, output_dir=str(tmp_path), skip_ptoas=True)
     assert isinstance(compiled, CompiledProgram)
     entries = [compiled["first"], compiled["second"]] if multi_entry else [compiled]
     for index, entry in enumerate(entries):
         blocked_entry = index == 1 if pre_lowered == "mixed" else pre_lowered
         for program in (entry, CompiledProgram.from_dir(entry.output_dir)):
-            infos, _, _ = program._get_metadata()
-            assert program._nz_tensor_views_blocked is blocked_entry
-            assert infos[0].shape == ((1, 8, 4, 16, 16) if blocked_entry else (64, 128))
-            # The caller still describes logical dimensions when the input IR
-            # has passed BlockNzTensorViews, including multi-entry artifacts.
-            arg = DeviceTensor(0x1000, (64, 128), torch.float16)
-            # Exercise both public call routes. Stub native execution/config/ABI;
-            # binding and entry-state propagation must run unchanged.
+            metadata = program._artifact.metadata
+            assert metadata is not None
+            assert metadata.parameters[0].shape == ((1, 8, 4, 16, 16) if blocked_entry else (64, 128))
+            assert metadata.lowered_parameters[0].shape == (1, 8, 4, 16, 16)
+            # Exercise public calls and TaskArgs construction without native
+            # execution. Static logical ranks may differ when storage agrees.
             with (
                 patch("pypto.runtime.runner._execute_compiled") as execute,
                 patch.object(type(program), "_host_tensor_indices", return_value=()),
                 patch("pypto.runtime.runner._coerced_to_orch_args", return_value="args"),
-                patch("pypto.ir.param_info.block_nz_shape", wraps=block_nz_shape) as block,
             ):
-                assert program(arg) is None
-                execute.assert_called_once()
-                _, coerced, _ = program._build_orch_args(arg, worker=object())
-                assert coerced == [arg]
-                assert block.called is bool(blocked_entry)
-                if not blocked_entry:
-                    # Adding a leading singleton preserves the blocked shape,
-                    # but violates the logical signature's rank.
-                    with pytest.raises(TypeError, match="expects rank"):
-                        program(DeviceTensor(0x1000, (1, 64, 128), torch.float16))
+                for shape in [(64, 128), (1, 64, 128)]:
+                    arg = DeviceTensor(0x1000, shape, torch.float16)
+                    assert program(arg) is None
+                    _, coerced, _ = program._build_orch_args(arg, worker=object())
+                    assert coerced == [arg]
+                assert execute.call_count == 2
+                with pytest.raises(TypeError, match="expects shape"):
+                    program(DeviceTensor(0x1000, (128, 64), torch.float16))
+                with pytest.raises(TypeError, match="expects dtype"):
+                    program(DeviceTensor(0x1000, (64, 128), torch.int8))
+                assert execute.call_count == 2
 
 
 @pytest.mark.parametrize(
-    "shape",
-    [(5120, 1280), (2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32), (1, 1, 1, 16, 32)],
+    ("shape", "dtype", "torch_dtype"),
+    [
+        ((5120, 1280), pl.FP8E4M3FN, getattr(torch, "float8_e4m3fn", None)),
+        ((2, 3, 4, 256, 512), pl.INT8, torch.int8),
+        ((2, 3, 4, 5, 256, 512), pl.INT8, torch.int8),
+        ((1, 4, 16, 16, 32), pl.INT8, torch.int8),
+    ],
 )
-def test_program_preserves_high_rank_logical_nz_metadata(tmp_path, shape):
-    """Compilation and reload must keep logical provenance despite a rank-five ABI."""
+def test_program_uses_pass_produced_nz_shape(tmp_path, shape, dtype, torch_dtype):
+    if torch_dtype is None:
+        pytest.skip("Torch does not provide this optional dtype")
 
     @pl.program
     class NzEntry:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, weight: pl.Tensor[shape, pl.INT8, pl.NZ]):
+        def main(self, weight: pl.Tensor[shape, dtype, pl.NZ]):
             return
 
     compiled = ir_compile(NzEntry, output_dir=str(tmp_path), skip_ptoas=True)
     assert isinstance(compiled, CompiledProgram)
-    metadata = compiled._artifact.metadata
-    assert metadata is not None
-    assert metadata.parameters[0].shape == shape
-    assert metadata.nz_tensor_views_blocked is False
-    assert metadata.lowered_parameters[0].shape == tuple(block_nz_shape(shape, torch.int8))
     for program in (compiled, CompiledProgram.from_dir(tmp_path)):
-        infos, _, _ = program._get_metadata()
-        assert program._nz_tensor_views_blocked is False
-        assert _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), infos[0]) is None
-        assert program._artifact.metadata is not None
-        lowered = program._artifact.metadata.lowered_parameters[0]
-        assert (
-            _validate_device_tensor(
-                DeviceTensor(0x1000, shape, torch.int8), lowered, nz_tensor_views_blocked=True
-            )
-            is None
-        )
+        metadata = program._artifact.metadata
+        assert metadata is not None
+        assert metadata.parameters[0].shape == shape
+        assert metadata.lowered_parameters[0].shape == tuple(block_nz_shape(shape, torch_dtype))
+        with patch("pypto.runtime.runner._execute_compiled") as execute:
+            assert program(DeviceTensor(0x1000, shape, torch_dtype)) is None
+            execute.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "dtype,carrier_dtype,c0",
+    [
+        (pl.HF8, torch.uint8, 32),
+        (pl.FP8E4M3FN, torch.uint8, 32),
+        (pl.UINT16, torch.int16, 16),
+        (pl.UINT32, torch.int32, 8),
+        (pl.UINT64, torch.int64, 4),
+    ],
+)
+def test_program_validates_nz_without_torch_dtype_mapping(tmp_path, monkeypatch, dtype, carrier_dtype, c0):
+    from pypto.ir import param_info  # noqa: PLC0415
+
+    # HF8 has no Torch equivalent. Remove optional mappings to reproduce
+    # older supported Torch versions without requiring those versions in CI.
+    monkeypatch.delitem(param_info._DATATYPE_TO_TORCH, str(dtype), raising=False)
+
+    @pl.program
+    class NzEntry:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, weight: pl.Tensor[[32, 64], dtype, pl.NZ]):
+            return
+
+    compiled = ir_compile(NzEntry, output_dir=str(tmp_path), skip_ptoas=True)
+    assert isinstance(compiled, CompiledProgram)
+    for program in (compiled, CompiledProgram.from_dir(tmp_path)):
+        metadata = program._artifact.metadata
+        assert metadata is not None
+        assert metadata.parameters[0].shape == (32, 64)
+        assert metadata.lowered_parameters[0].shape == (1, 64 // c0, 2, 16, c0)
+        arg = DeviceTensor(0x1000, (32, 64), carrier_dtype)
+        with (
+            patch("pypto.runtime.runner._execute_compiled") as execute,
+            patch.object(type(program), "_host_tensor_indices", return_value=()),
+            patch("pypto.runtime.runner._coerced_to_orch_args", return_value="args"),
+        ):
+            assert program(arg) is None
+            _, coerced, _ = program._build_orch_args(arg, worker=object())
+            assert coerced == [arg]
+            # Missing a Torch dtype mapping must not disable shape checks.
+            with pytest.raises(TypeError, match="expects shape"):
+                program(DeviceTensor(0x1000, (16, 128), carrier_dtype))
+            # Equal logical shapes do not make a carrier with a different
+            # element width compatible with the compiler's NZ storage view.
+            wrong_dtype = torch.float16 if c0 == 32 else torch.uint8
+            wrong_carrier = DeviceTensor(0x1000, (32, 64), wrong_dtype)
+            with pytest.raises(TypeError, match=f"expects {256 // c0}-bit storage"):
+                program(wrong_carrier)
+            with pytest.raises(TypeError, match=f"expects {256 // c0}-bit storage"):
+                program._build_orch_args(wrong_carrier, worker=object())
+            execute.assert_called_once()
 
 
 def test_kernel_multiple_returns_keep_full_parameter_indices(tmp_path):

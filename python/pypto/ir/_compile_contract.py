@@ -89,12 +89,7 @@ def external_parameter_names(logical: Sequence[ParamInfo], lowered: Sequence[Par
     return result
 
 
-def validate_lowered_signature(
-    logical: Sequence[ParamInfo],
-    lowered: Sequence[ParamInfo],
-    *,
-    nz_tensor_views_blocked: bool = False,
-) -> None:
+def validate_lowered_signature(logical: Sequence[ParamInfo], lowered: Sequence[ParamInfo]) -> None:
     """Prove assembly still consumes the caller's external buffers and scalars.
 
     NZ is a reshape of unpadded storage in element units; logical carrier
@@ -108,9 +103,7 @@ def validate_lowered_signature(
         if (before.name, before.direction, before.dtype) != (after.name, after.direction, after.dtype):
             raise ValueError(f"Lowering changed external parameter {before.name!r}")
         expected = before.shape
-        # Post-pass compilation inputs already describe the assembly shape;
-        # only a logical NZ signature needs blocking for this comparison.
-        if before.layout == "NZ" and before.shape is not None and not nz_tensor_views_blocked:
+        if before.layout == "NZ" and before.shape is not None:
             dtype = _to_torch_dtype(before.dtype)
             if dtype is None:
                 raise ValueError(f"Unsupported NZ dtype for {before.name!r}: {before.dtype}")

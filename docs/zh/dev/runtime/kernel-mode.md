@@ -41,30 +41,27 @@ kernel 要求单芯片、单入口、显式提供 Out/InOut buffer，
 HBG Host Tensor 数据读写被拒绝，设备 submit predicate 保留原语义；program 编译
 仍支持原有分配及 Host 控制流程。
 
-metadata 区分编译输入签名 `params` 与 assembly 签名 `lowered_params`，均使用
-`ParamInfo`。PROGRAM 参数绑定和输出分配使用编译输入的原始 `params`，
+metadata 区分逻辑调用签名 `params` 与 assembly 签名 `lowered_params`，均使用
+`ParamInfo`。PROGRAM 参数绑定和输出分配使用 lowering 前的原始 `params`，
 从产物恢复以及选择多 orchestration 子入口时也保持这一行为；`lowered_params`
-仍用于 assembly ABI 校验。Torch 按逻辑 shape 校验。
-驻留张量和堆叠张量按逻辑 shape 直接比较，包括逻辑 rank 五及更高维度。
-layout 注解不决定 shape 是否转换。`ParamInfo` 不包含编译阶段标记；编译入口在签名
-旁保存一次已有函数属性 `nz_tensor_views_blocked`。正常编译记录 `false`，从 pass
-处理后的 IR 编译则记录 `true`，每个多 orchestration 子入口分别保存。
-仅兼容已 lowering 输入的路径需要先将调用者的 shape 分块，再与输入签名比较；
-这个计算不会重新排列存储。分布式入口根据 HOST 函数属性选择同一路径，每个已准备
-程序独立记录。两种 sidecar 均持久化入口状态，重新加载后保持比较方式不变。
-没有入口状态的旧记录保留原有约定：小于五维按逻辑 shape 比较，更高维度采用分块
-转换。旧版高维逻辑 NZ 产物需要重新编译，以确定明确的调用者签名。
-NZ lowering 按元素单位验证无 padding 的
-blocked 表示，dtype 不变，因此字节数一致。动态 NZ 支持逻辑 `[B, R, C]` 的 batch
-维度；blocked shape 不作为 Torch 的逻辑 shape。
+为驻留张量和 packed FP4 参数校验提供预期的 NZ shape：将输入的逻辑 shape 转为
+blocked 表示，再与编译器生成的五维 shape 比较。运行时 NZ blocking 根据 IR dtype
+的位宽计算 C0，因此当前 Torch 版本缺少对应 dtype 映射时也能校验；此时驻留 carrier
+的存储位宽必须与 IR dtype 一致。普通编译输入和已经 lowering 的编译
+输入使用同一比较方式，无需 shape 阶段标记或修改 sidecar 格式。静态 NZ shape 只要
+转换后的 blocked shape 一致，就具有兼容的存储表示，允许逻辑 rank 或前导维度的
+拆分方式不同。动态 NZ 仍要求逻辑三维，因为入口代码从第一维读取 batch。
+旧的直接包装方式及缺少独立 lowered 签名的 schema 1/2 sidecar，在 metadata 边界
+将非五维 NZ shape 转为 blocked 表示；五维 shape 保留原有的 blocked 约定。
+schema 3 中仅支持 PROGRAM、没有返回别名分析且 `params` 与 `lowered_params` 完全相同
+的旧直接包装 sidecar，也使用相同的归一化处理。
+旧产物中的逻辑五维存在歧义，需要重新编译。Torch interop 按逻辑 shape 校验。
+NZ lowering 按元素单位验证无 padding 的 blocked 表示，dtype 不变，因此字节数一致。
+动态 NZ 支持逻辑 `[B, R, C]` 的 batch 维度；blocked shape 不作为 Torch 的逻辑 shape。
 
-`compiled_meta.json` schema 4 保存两种签名、返回数量、别名、平台/backend 和已验证
+`compiled_meta.json` schema 3 保存两种签名、返回数量、别名、平台/backend 和已验证
 执行能力。生产者仅声明本次请求的能力，不自动声明双模式兼容。schema 1/2 旧 program
-metadata 仅按 PROGRAM 恢复，不推断 kernel 契约。
-schema 3 加载后保留其签名、别名及执行能力。本 sidecar 与 `distributed_meta.json`
-均使用 schema 4 记录 NZ 阶段信息，使旧运行时拒绝新格式，避免忽略标记。
-分布式 schema 3 仍可读取；缺少阶段信息的记录沿用上文的旧版 NZ 约定。
-kernel 必需字段缺失、索引非法或
+metadata 仅按 PROGRAM 恢复，不推断 kernel 契约。kernel 必需字段缺失、索引非法或
 能力不一致时要求重编译。`from_dir()` 仅读取 metadata，不加载 native。
 
 `ArtifactRuntime` 仍是唯一缓存晋级/加载实现。单芯片恢复先创建 `CompiledArtifact`，

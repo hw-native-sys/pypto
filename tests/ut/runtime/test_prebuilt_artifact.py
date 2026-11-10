@@ -96,7 +96,6 @@ def _chip(root: Path) -> None:
 def _generated(root: Path, kind: BuildKind) -> None:
     meta: dict[str, Any] = dict(
         schema=_COMPILED_META_SCHEMA,
-        nz_tensor_views_blocked=False,
         supported_execution_modes=["program"],
         params=[],
         lowered_params=[],

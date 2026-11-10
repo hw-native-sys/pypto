@@ -147,7 +147,7 @@ _NZ_C0_BYTES = 32
 _NZ_FRACTAL_ROWS = 16
 
 
-def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
+def block_nz_shape(shape: Sequence[int], dtype: torch.dtype | DataType) -> list[int]:
     """The blocked rank-5 shape an NZ parameter of logical *shape* is compiled to.
 
     ``[..., R, C]`` becomes ``[prod(lead), C/c0, R/16, 16, c0]``: every leading
@@ -159,7 +159,15 @@ def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
     if len(shape) < 2:
         raise ValueError(f"an NZ shape needs a trailing [R, C] pair, got {tuple(shape)}")
     rows, cols = shape[-2], shape[-1]
-    c0 = _NZ_C0_BYTES // torch.empty((), dtype=dtype).element_size()
+    # Runtime metadata carries the IR dtype even when Torch has no equivalent
+    # (HF8, or optional dtypes on older Torch). Use its bit width exactly as
+    # NzC0Elems does; packed FP4 x2 carriers already report eight bits.
+    bits = dtype.get_bit() if isinstance(dtype, DataType) else torch.empty((), dtype=dtype).element_size() * 8
+    if bits < 8 or (_NZ_C0_BYTES * 8) % bits:
+        raise ValueError(
+            f"an NZ dtype must be whole-byte and divide a 32-byte C0 line, got {dtype} ({bits} bits)"
+        )
+    c0 = (_NZ_C0_BYTES * 8) // bits
     if rows % _NZ_FRACTAL_ROWS or cols % c0:
         raise ValueError(
             f"an NZ shape needs {_NZ_FRACTAL_ROWS}-row fractals and whole C0 lines of {c0} "
@@ -171,20 +179,17 @@ def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
     return [batch, cols // c0, rows // _NZ_FRACTAL_ROWS, _NZ_FRACTAL_ROWS, c0]
 
 
-def arg_shape_as_declared(
-    arg_shape: Sequence[int], info: _ParamInfo, *, nz_tensor_views_blocked: bool | None = False
-) -> list[int]:
-    """Compare logical shapes unless the entry explicitly supplies lowered metadata.
+def arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[int]:
+    """*arg_shape* in the parameter's own terms, ready to compare with ``info.shape``.
 
-    Layout describes byte order, not compilation stage. Normal argument binding
-    uses the original signature and must preserve logical rank, even at rank five
-    or higher. Only callers with a lowered entry opt into NZ blocking. None is
-    reserved for legacy sidecars that did not record the entry's lowering state;
-    those retain the historical blocked-shape convention at rank five and above.
+    An NZ parameter is compiled to the blocked rank-5 shape the backend
+    addresses, while its caller allocates and passes the logical one — the same
+    bytes under two spellings. Comparing them means blocking the caller's shape
+    with the rule the compiler used. Every other parameter is already in its
+    caller's terms, and a shape that does not block at all (an odd row count,
+    say) is left alone so it is reported as the mismatch it is.
     """
-    if info.layout != "NZ" or nz_tensor_views_blocked is False:
-        return list(arg_shape)
-    if nz_tensor_views_blocked is None and info.shape is not None and len(info.shape) < 5:
+    if info.layout != "NZ":
         return list(arg_shape)
     # A dynamic blocked batch can only come from logical [B, R, C]: the NZ
     # pass rejects dynamic leading extents at rank > 3. Entry code reads B
@@ -195,11 +200,8 @@ def arg_shape_as_declared(
             f"Parameter {info.name!r} with a dynamic NZ batch expects logical rank 3 "
             f"(shape [B, R, C]); got shape {tuple(arg_shape)}"
         )
-    expected_dtype = _to_torch_dtype(info.dtype)
-    if expected_dtype is None:
-        return list(arg_shape)
     try:
-        return block_nz_shape(arg_shape, expected_dtype)
+        return block_nz_shape(arg_shape, info.dtype)
     except ValueError:
         return list(arg_shape)
 
@@ -373,6 +375,7 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
     """
     param_infos: list[_ParamInfo] = []
     output_indices: list[int] = []
+
     for i, (param, direction) in enumerate(zip(func.params, func.param_directions, strict=True)):
         param_type = param.type
         shape: list[int] | None = None
@@ -393,13 +396,7 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
             )
 
         param_infos.append(
-            _ParamInfo(
-                name=param.name_hint,
-                direction=direction,
-                shape=shape,
-                dtype=dtype,
-                layout=layout,
-            )
+            _ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype, layout=layout)
         )
 
         # Only pure Out params can be auto-allocated in return-style calls.

@@ -54,37 +54,34 @@ HBG host tensor data reads/writes are rejected; device submit
 predicates retain their existing semantics. Program compilation keeps its
 allocation and host-control behavior.
 
-Metadata distinguishes `params` (compilation input signature) from `lowered_params`
+Metadata distinguishes `params` (logical caller signature) from `lowered_params`
 (assembly signature); both use `ParamInfo`. PROGRAM argument binding and output
-allocation use the original input `params`, including after reloading
+allocation use the original, pre-lowering `params`, including after reloading
 an artifact and when selecting a multi-orchestration child. `lowered_params`
-remains available for assembly ABI validation. Torch validates logical shapes.
-Resident and stacked tensor validation compares logical shapes directly, including
-logical rank five or higher. A layout annotation never selects a shape conversion.
-`ParamInfo` contains no compilation-stage flag. The compiled entry retains the
-existing function attribute `nz_tensor_views_blocked` once, alongside its signature.
-Normal compilation records `false`; compilation from post-pass IR records `true`,
-including each multi-orchestration child. Only that compatibility path blocks the
-caller's shape before comparing it with the lowered input signature. This computes
-a shape, without repacking storage. Distributed entries select the same path from
-their HOST function's attribute, independently for each prepared program.
-Both sidecars persist the entry state, so reload preserves the comparison.
-Legacy records without entry state retain the previous convention: ranks below
-five are logical, higher ranks use blocking. Recompile legacy high-rank logical
-NZ artifacts to establish an unambiguous caller signature.
+provides the expected NZ shape for resident-tensor and packed-FP4 argument
+validation: block the caller's logical shape and compare it with the compiler's
+rank-five shape. Runtime NZ blocking derives C0 from the IR dtype's bit width,
+including when that dtype has no mapping in the installed Torch version.
+For unmapped NZ dtypes, resident carriers must match the IR storage width.
+Ordinary and already-lowered compilation inputs use the same
+comparison; no shape-stage flag or sidecar format change is needed. Static NZ
+shapes that block identically are storage-compatible, even if their logical ranks
+or leading-axis decompositions differ. Dynamic NZ still requires logical rank
+three because entry code reads the batch from the first axis.
+Legacy direct wrappers and schema-1/2 sidecars without a separate lowered
+signature normalize non-five-dimensional NZ shapes at the metadata boundary.
+Schema-3 PROGRAM-only direct-wrapper sidecars with no return-alias analysis and
+identical `params`/`lowered_params` use the same normalization.
+They retain the old blocked convention for five-dimensional shapes; recompile
+ambiguous legacy logical rank-five artifacts. Torch interop validates logical shapes.
 NZ lowering is checked against the unpadded blocked representation in element
 units with unchanged dtype, preserving byte size. Dynamic NZ supports the logical
 `[B, R, C]` batch dimension. A blocked shape is never treated as a Torch shape.
 
-`compiled_meta.json` schema 4 persists both signatures, return count, aliases,
+`compiled_meta.json` schema 3 persists both signatures, return count, aliases,
 platform/backend and verified execution capabilities. Producers declare only the
 requested capability, never implicit dual-mode support. Schema 1/2 program
 metadata can reload as PROGRAM only; it does not establish a kernel contract.
-Schema 3 retains its signatures, aliases and execution capabilities when loaded.
-Both this sidecar and `distributed_meta.json` use schema 4 for the entry's NZ lowering state,
-so older runtimes reject the new format instead of ignoring the marker.
-Distributed schema 3 remains readable; records without provenance use the
-legacy NZ convention described above.
 Missing kernel fields, invalid indices or mismatched capabilities require
 recompilation. `from_dir()` reads metadata without loading native code.
 

@@ -12,7 +12,7 @@
 import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -24,6 +24,7 @@ from .param_info import (
     _param_info_from_dict,
     _param_info_to_dict,
     _ParamInfo,
+    block_nz_shape,
     validate_parameter_names,
     validate_return_aliases,
 )
@@ -37,9 +38,7 @@ from .param_info import (
 # independently, so a change to *that* shared format must bump this schema AND
 # ``distributed_compiled_program._META_SCHEMA``.
 _COMPILED_META_FILENAME = "compiled_meta.json"
-# Schema 4 records the entry's NZ lowering state once, outside ParamInfo.
-# Older readers assume NZ parameters are blocked and must reject this format.
-_COMPILED_META_SCHEMA = 4
+_COMPILED_META_SCHEMA = 3
 
 # The L3 counterpart, kept here so both names sit next to the marker table below;
 # ``distributed_compiled_program`` re-exports it and owns its schema constant.
@@ -214,11 +213,9 @@ def _load_meta(
     meta = raw_meta
 
     found_schema = meta.get("schema")
-    # L2 schemas 1/2 are program-only; schema 3 introduced the complete kernel
-    # contract. L3 schema 3 is the first supported capability-aware format.
-    # All these legacy records may omit NZ provenance and retain its fallback.
-    supported_schemas = (1, 2, 3, schema) if filename == _COMPILED_META_FILENAME else (3, schema)
-    if type(found_schema) is not int or found_schema not in supported_schemas:
+    if type(found_schema) is not int or found_schema not in (
+        (1, 2, 3) if filename == _COMPILED_META_FILENAME else (schema,)
+    ):
         raise ValueError(
             f"Incompatible {filename} schema {found_schema!r} (expected "
             f"{schema}) in {meta_path}. The metadata was written by a "
@@ -226,13 +223,6 @@ def _load_meta(
         )
 
     capabilities = _read_capabilities(meta, found_schema, filename, require_program, _bad)
-    # Legacy metadata had no entry-stage record. Do not infer it from shape:
-    # a logical rank-five signature can look exactly like a blocked one.
-    if found_schema >= 4 and "nz_tensor_views_blocked" not in meta:
-        raise _bad("missing nz_tensor_views_blocked entry state")
-    nz_tensor_views_blocked = meta.get("nz_tensor_views_blocked") if found_schema >= 4 else None
-    if nz_tensor_views_blocked is not None and type(nz_tensor_views_blocked) is not bool:
-        raise _bad("nz_tensor_views_blocked must be a bool or null")
 
     raw_params: object = meta.get("params")
     if not _is_obj_list(raw_params):
@@ -269,12 +259,28 @@ def _load_meta(
     return {
         "execution_capabilities": capabilities,
         "param_infos": param_infos,
-        "nz_tensor_views_blocked": nz_tensor_views_blocked,
         "num_return_types": num_return_types,
         "platform": platform,
         "backend_type": backend_type,
         "raw": meta,
     }
+
+
+def _legacy_lowered_parameters(parameters: Sequence[_ParamInfo]) -> tuple[_ParamInfo, ...]:
+    """Supply NZ storage shapes when no separate lowered signature was captured.
+
+    Legacy direct wrappers (including their schema-3 sidecars) and schema-1/2
+    sidecars used one signature for both binding and validation.
+    Preserve their rank-five blocked convention; other
+    ranks are necessarily logical and can be normalized once at this boundary.
+    New compilations already carry the pass-produced lowered signature.
+    """
+    lowered: list[_ParamInfo] = []
+    for param in parameters:
+        if param.layout == "NZ" and param.shape is not None and len(param.shape) != 5:
+            param = replace(param, shape=block_nz_shape(param.shape, param.dtype))
+        lowered.append(param)
+    return tuple(lowered)
 
 
 @dataclass(frozen=True)
@@ -292,14 +298,8 @@ class ArtifactMetadata:
     backend_type: BackendType
     return_aliases: tuple[int, ...] | None = None
     execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
-    # State of the entry that supplied parameters, not lowered_parameters.
-    # False is the normal logical caller contract; True supports compilation
-    # from post-pass IR. None preserves only pre-schema-4 compatibility.
-    nz_tensor_views_blocked: bool | None = False
 
     def __post_init__(self) -> None:
-        if self.nz_tensor_views_blocked is not None and type(self.nz_tensor_views_blocked) is not bool:
-            raise ValueError("nz_tensor_views_blocked must be a bool or null")
         object.__setattr__(self, "parameters", tuple(self.parameters))
         object.__setattr__(self, "lowered_parameters", tuple(self.lowered_parameters))
         if type(self.num_return_types) is not int or self.num_return_types < 0:
@@ -320,18 +320,13 @@ class ArtifactMetadata:
             )
 
             validate_kernel_parameters(self.parameters)
-            validate_lowered_signature(
-                self.parameters,
-                self.lowered_parameters,
-                nz_tensor_views_blocked=self.nz_tensor_views_blocked is True,
-            )
+            validate_lowered_signature(self.parameters, self.lowered_parameters)
 
     def record(self) -> dict[str, Any]:
         return {
             "schema": _COMPILED_META_SCHEMA,
             "supported_execution_modes": self.execution_capabilities.record(),
             "params": [_param_info_to_dict(p) for p in self.parameters],
-            "nz_tensor_views_blocked": self.nz_tensor_views_blocked,
             "lowered_params": [_param_info_to_dict(p) for p in self.lowered_parameters],
             "num_return_types": self.num_return_types,
             "return_aliases": None if self.return_aliases is None else list(self.return_aliases),
@@ -363,9 +358,7 @@ class ArtifactMetadata:
                 }
                 if required - raw.keys() or raw.get("platform") is None:
                     raise ValueError("Kernel metadata is incomplete; recompile")
-            # Schema 3 already stores aliases and the lowered signature; keep
-            # them when loading it after a later schema bump.
-            if raw["schema"] >= 3:
+            if raw["schema"] == _COMPILED_META_SCHEMA:
                 raw_aliases: object = raw["return_aliases"]
                 if raw_aliases is not None and not _is_int_list(raw_aliases):
                     raise ValueError("return_aliases must be a list of integer indices or null")
@@ -379,8 +372,17 @@ class ArtifactMetadata:
                         raise ValueError("lowered_params entries must be objects")
                     lowered_params.append(_param_info_from_dict(item))
                 lowered = tuple(lowered_params)
+                # Old direct wrappers wrote the input signature twice, without
+                # return analysis. Normalize only that PROGRAM-only form; a
+                # distinct lowered signature or kernel ABI remains authoritative.
+                if (
+                    aliases is None
+                    and meta["execution_capabilities"].modes == (ArtifactExecutionMode.PROGRAM,)
+                    and lowered == tuple(meta["param_infos"])
+                ):
+                    lowered = _legacy_lowered_parameters(lowered)
             else:
-                aliases, lowered = None, tuple(meta["param_infos"])
+                aliases, lowered = None, _legacy_lowered_parameters(meta["param_infos"])
             platform = meta["platform"]
             if platform is None:
                 from pypto.pypto_core import backend  # noqa: PLC0415
@@ -398,7 +400,6 @@ class ArtifactMetadata:
                 meta["backend_type"],
                 aliases,
                 meta["execution_capabilities"],
-                meta["nz_tensor_views_blocked"],
             )
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
             raise _meta_error(_COMPILED_META_FILENAME, path, str(exc)) from exc

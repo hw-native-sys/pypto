@@ -395,7 +395,6 @@ def test_kernel_metadata_is_setup_failure_before_assembly(tmp_path, stub_compile
         json.dumps(
             {
                 "schema": _COMPILED_META_SCHEMA,
-                "nz_tensor_views_blocked": False,
                 "supported_execution_modes": ["kernel"],
                 "params": [],
                 "lowered_params": [],
