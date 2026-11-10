@@ -1134,3 +1134,59 @@ def test_submitted_external_projects_public_results_and_task_id(tmp_path, spmd, 
     assert ir.structural_equal(external.type.types[1], ir.TensorType([16, 32], pl.FP32))
     assert external.core_num is not None if spmd else external.core_num is None
     assert len(consumer.deps) == 1
+
+
+def test_submit_uses_complete_return_type_for_unmodeled_result():
+    @pl.jit.incore
+    def producer(x: pl.Tensor) -> pl.Tensor[[16, 32], pl.FP16]:
+        return pl.cast(x, pl.FP16)
+
+    @pl.jit.incore
+    def consumer(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        result, done = pl.submit(producer, x)
+        value, finish = pl.submit(consumer, result, out, deps=[done])
+        return value
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32, dtype=torch.float16))
+    callee = program.get_function("consumer")
+    assert callee is not None
+    assert ir.structural_equal(callee.params[0].type, ir.TensorType([16, 32], pl.FP16))
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_submit_specializes_an_omitted_external_output(tmp_path, explicit):
+    native = tmp_path / "submit_external.cpp"
+    native.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+
+    if explicit:
+
+        @pl.jit.extern(source=native, core_type="aiv")
+        def producer(x: pl.Tensor, out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]):
+            return out
+
+    else:
+
+        @pl.jit.extern(source=native, core_type="aiv")
+        def producer(x: pl.Tensor, out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]): ...
+
+    @pl.jit.incore
+    def consumer(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        result, done = pl.submit(producer, x)
+        value, finish = pl.submit(consumer, result, out, deps=[done])
+        return value
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    producer_launch, consumer_launch = _submissions(program)
+    assert len(producer_launch.args) == 1
+    assert len(consumer_launch.deps) == 1
+    callee = program.get_function("consumer")
+    assert callee is not None
+    assert ir.structural_equal(callee.params[0].type, ir.TensorType([16, 32], pl.FP32))

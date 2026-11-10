@@ -21,6 +21,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
+from pypto.pypto_core.ir import ParamDirection
+
 from .._call_syntax import SUBMIT_DISPATCH_KEYWORDS, submit_target
 from ._alias_analysis import AliasTracker, _AliasRoots, _AliasValue
 from .normalization import CallPlan
@@ -102,12 +104,23 @@ def _lower_call(  # noqa: PLR0912
     fresh = aliases.fresh
     plan = binding.plan
     submitted = value is not operands
-    if operands.keywords or len(operands.args) != len(plan.parameter_directions):
+    supplied = len(operands.args)
+    directions = plan.parameter_directions
+    omitted = directions[supplied:]
+    if (
+        operands.keywords
+        or supplied > len(directions)
+        or (omitted and (not submitted or any(d != ParamDirection.Out for d in omitted)))
+    ):
         raise ValueError(f"External call {ast.unparse(operands.func)!r} has unbound arguments")
+    writebacks = [(parameter, slot) for parameter, slot in plan.writeback_slots if parameter < supplied]
     for operand in [*operands.args, *(kw.value for kw in value.keywords)]:
         reject_nested(operand)
     aliases.check_aliases(operands, binding)
-    roots = [aliases.alias_of(operands.args[parameter]) for parameter in plan.result_parameters]
+    roots = [
+        aliases.alias_of(operands.args[parameter]) if parameter < supplied else None
+        for parameter in plan.result_parameters
+    ]
     public_roots = [roots[slot] for slot in plan.public_slots]
     if not submitted and not plan.writeback_slots and plan.public_slots == (0,) and not binding.public_tuple:
         aliases.record_assignment(statement, public_roots)
@@ -125,9 +138,7 @@ def _lower_call(  # noqa: PLR0912
             arguments.append(ast.Name(id=name, ctx=ast.Load()))
 
     value.args = [value.args[0], *arguments] if submitted else arguments
-    occupied = {
-        arg.id for parameter, _ in plan.writeback_slots if isinstance(arg := arguments[parameter], ast.Name)
-    }
+    occupied = {arg.id for parameter, _ in writebacks if isinstance(arg := arguments[parameter], ast.Name)}
     unpack = (
         _bind_submit_targets(statement, value, plan, occupied, aliases, public_roots) if submitted else None
     )
@@ -151,7 +162,7 @@ def _lower_call(  # noqa: PLR0912
         result.append(ast.copy_location(ast.Expr(value=value), statement))
         projections = []
 
-    for parameter, slot in plan.writeback_slots:
+    for parameter, slot in writebacks:
         target = arguments[parameter]
         if not isinstance(target, ast.Name):
             raise ValueError(

@@ -22,9 +22,10 @@ import math
 import types
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NamedTuple, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from pypto.arith import Analyzer
+from pypto.language.distributed.typing.distributed_tensor import DistributedTensor
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
@@ -43,6 +44,7 @@ from .specializer import (
     _LangTensor,
     _LangTuple,
     _legacy_inout_return_params,
+    _tuple_annotation_elements,
     func_name_lookup,
 )
 
@@ -325,22 +327,14 @@ def _omitted_output_metas(
     return result
 
 
-def _declared_return_count(annotation: Any) -> int | None:
-    # A Python tuple annotation declares flat function results. pl.Tuple is a
-    # single tuple-valued result, not a list to flatten into Submit slots.
-    if get_origin(annotation) is tuple:
-        return len(get_args(annotation))
-    if isinstance(annotation, (_LangTensor, _LangTuple)):
-        return 1
-    return None
-
-
 def _dep_out_metas(
     call: ast.Call,
     dep_name: str,
     target: ast.expr,
     deps: _DepScan,
     local: Mapping[str, TensorMeta],
+    *,
+    submitted: bool = False,
 ) -> dict[str, TensorMeta]:
     """For ``v1, ..., vk = dep(args)`` where ``dep`` has ``k`` ``Out`` params,
     return each ``vi``'s meta from the caller arg passed to the matching ``Out``
@@ -366,10 +360,13 @@ def _dep_out_metas(
     if not names or not out_params or len(names) != len(out_params):
         return {}
     argument_metas = _call_tensor_metas(call, dep_params, local, deps.resolve_expr)
+    constexpr = _call_site_constexpr(dep, call, deps) if dep is not None else {}
+    if submitted and dep is not None:
+        argument_metas.update(_omitted_output_metas(dep, call, constexpr))
     output_metas = {name: argument_metas[name] for name in out_params if name in argument_metas}
     if dep is not None:
         # A returned Out buffer must retain the callee's declared packed format.
-        _validate_dep_packed_fp4_dtypes(dep, output_metas, _call_site_constexpr(dep, call, deps))
+        _validate_dep_packed_fp4_dtypes(dep, output_metas, constexpr)
     return {
         vname: output_metas[out_param]
         for vname, out_param in zip(names, out_params, strict=True)
@@ -1250,6 +1247,33 @@ def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None, stop_at_call: ast.Call
     return False
 
 
+def _annotated_submit_metas(annotations: Sequence[Any], call: ast.Call, owner: str) -> _TupleMeta:
+    """Treat declared dynamic axes as descriptor reads of this call's result."""
+    result: list[TensorMeta | None] = []
+    dynamic: dict[str, DynDim] = {}
+    for index, annotation in enumerate(annotations):
+        if not (
+            isinstance(annotation, _LangTensor)
+            and annotation.shape is not None
+            and annotation.dtype is not None
+        ):
+            result.append(None)
+            continue
+        meta = _arguments.signature_tensor_meta(annotation, annotation.dtype, {}, _LangDynVar)
+        shape: list[ShapeDim] = []
+        for axis, dim in enumerate(meta.shape):
+            if isinstance(dim, DynDim):
+                if dim.literal not in dynamic:
+                    label = f"return_l{call.lineno}_c{call.col_offset}_r{index}"
+                    dynamic[dim.literal] = synthesized_dyn_dim(owner, label, axis)
+                dim = dynamic[dim.literal]
+            shape.append(dim)
+        result.append(
+            replace(meta, shape=tuple(shape), is_distributed=isinstance(annotation, DistributedTensor))
+        )
+    return tuple(result)
+
+
 def _submitted_value_metas(
     call: ast.Call, dep_name: str, deps: _DepScan, local: Mapping[str, TensorMeta]
 ) -> _TupleMeta:
@@ -1257,34 +1281,45 @@ def _submitted_value_metas(
     dep = deps.funcs.get(dep_name)
     if dep is None:
         return ()
-    annotation = _arguments.resolve_annotation(
-        inspect.signature(dep._func).return_annotation,
-        _dep_annotation_namespace(dep, _call_site_constexpr(dep, call, deps)),
-    )
-    # pl.Tuple describes one non-tensor result, unlike a flat Python tuple
-    # of results. The caller's trailing TaskId must stay in the next slot.
-    if isinstance(annotation, _LangTuple):
+    definition = _ast_analysis.get_func_def(dep._func)
+    binding = _call_site_constexpr(dep, call, deps)
+    eager = inspect.signature(dep._func).return_annotation
+    namespace = _dep_annotation_namespace(dep, binding)
+    # A DSL Tuple is one result. Python tuple[...] declares separate values.
+    if isinstance(_arguments.resolve_annotation(eager, namespace), _LangTuple):
         return (None,)
     results = _dep_result_metas(call, dep_name, deps, local, arity=None, submitted=True)
-    if results is not None:
+    if results is not None and all(meta is not None for meta in results.metas):
         return results.metas
-    declared = _declared_return_count(annotation)
-    definition = _ast_analysis.get_func_def(dep._func)
+
+    annotation = _arguments.resolve_call_annotation(definition.returns, eager, namespace, binding)
+    if isinstance(annotation, _LangTuple):
+        return (None,)
+    declared = _tuple_annotation_elements(annotation)
+    if declared is None and (isinstance(annotation, _LangTensor) or annotation is _LangTensor):
+        declared = (annotation,)
+    if results is not None:
+        slots = results.metas
+        if declared is not None and len(declared) == len(slots):
+            fallback = _annotated_submit_metas(declared, call, deps.owner)
+            return tuple(
+                meta if meta is not None else other for meta, other in zip(slots, fallback, strict=True)
+            )
+        return slots
+    if dep._func_type != "extern":
+        return _annotated_submit_metas(declared, call, deps.owner) if declared is not None else ()
+
+    # Signature-only externs use their public writable aliases, including
+    # trailing Out storage that the parser will allocate for this launch.
     outputs, inouts, _, _, _ = _classify_params(definition)
-    legacy_single = dep._func_type == "extern" and (
-        bool(outputs) or bool(_legacy_inout_return_params(definition, inouts, func_name_lookup(dep._func)))
+    legacy_single = bool(outputs) or bool(
+        _legacy_inout_return_params(definition, inouts, func_name_lookup(dep._func))
     )
-    count = declared if declared is not None else int(legacy_single)
+    count = len(declared) if declared is not None else int(legacy_single)
     names = [f"_submit_value_{index}" for index in range(count)]
-    if not names:
-        return ()
-    target: ast.expr = (
-        ast.Name(id=names[0], ctx=ast.Store())
-        if count == 1
-        else ast.Tuple(elts=[ast.Name(id=name, ctx=ast.Store()) for name in names], ctx=ast.Store())
-    )
-    result = _dep_out_metas_or_return(call, dep_name, target, deps, local)
-    return tuple(result.metas.get(name) for name in names)
+    target = ast.Tuple(elts=[ast.Name(id=name, ctx=ast.Store()) for name in names], ctx=ast.Store())
+    inferred = _dep_out_metas(call, dep_name, target, deps, local, submitted=True)
+    return tuple(inferred.get(name) for name in names)
 
 
 def _submit_result_meta(
