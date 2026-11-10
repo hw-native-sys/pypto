@@ -1551,8 +1551,10 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 16], pl.FP32] = pl.tile.create(
-                        [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    # 272 columns is the high-precision scratch contract at one
+                    # 64-lane vector; the default path would only need 16.
+                    tmp: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                        [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     return pl.store(result, [0, 0], out)

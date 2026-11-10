@@ -426,7 +426,7 @@ static std::string MakeCmpCodegenPTO(const std::string& pto_op_name, const CallP
 // attr-dict after the complete ins()/outs() clause.
 static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* attr_kind, const CallPtr& op,
-                                           codegen::CodegenBase& codegen_base) {
+                                           codegen::CodegenBase& codegen_base, bool warn_if_ignored = true) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
   const bool high_precision = op->GetKwarg<bool>("high_precision", false);
@@ -436,7 +436,9 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
     code += attr_kind;
     // PTOAS 0.70 names the former division HighPrecision selector DiffCompensation.
     code += ir::IsOp(op, "tile.div") ? " diff_compensation>}" : " high_precision>}";
-    codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
+    if (warn_if_ignored) {
+      codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
+    }
   }
   codegen.Emit(code);
   return "";
@@ -533,7 +535,14 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
 
   std::string result;
   if (precision_attr_kind != nullptr) {
-    result = MakePrecisionCodegenPTO(pto_op_name, arity, precision_attr_kind, op, codegen_base);
+    // The remainder family is exempt from the HighPrecisionIgnored diagnostic:
+    // PTO-ISA implements RemAlgorithm::HIGH_PRECISION for TREM/TREMS on A2/A3 as
+    // well as A5, so the attribute selects a genuinely different algorithm on
+    // both. The warning speaks for the attributes governed by
+    // HonorsHighPrecisionAlgorithm -- tile.div / tile.log / tile.recip -- which
+    // A2/A3 still drops.
+    result = MakePrecisionCodegenPTO(pto_op_name, arity, precision_attr_kind, op, codegen_base,
+                                     /*warn_if_ignored=*/false);
   } else {
     result = MakeNaryCodegenPTO(pto_op_name, arity, op, codegen_base);
   }
