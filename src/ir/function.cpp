@@ -15,6 +15,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
+#include "pypto/ir/type.h"
+
 namespace pypto {
 namespace ir {
 
