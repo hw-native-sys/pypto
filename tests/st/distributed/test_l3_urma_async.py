@@ -120,9 +120,13 @@ def _build_urma_exchange(n_ranks: int):
 
     @pl.jit.incore
     def announce(
+        src: pld.DistributedTensor[[n_ranks, SIZE], pl.FP32],
         data: pld.DistributedTensor[[n_ranks, SIZE], pl.FP32],
         signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
     ) -> pld.DistributedTensor[[n_ranks, 1], pl.INT32]:
+        # `src` is unused: passing the filled window makes this task depend on
+        # fill_src, so the notification cannot reach a peer before this rank
+        # publishes its own source row.
         ctx = pld.get_comm_ctx(signal)
         my_rank = pld.rank(ctx)
         nranks = pld.nranks(ctx)
@@ -220,7 +224,7 @@ def _build_urma_exchange(n_ranks: int):
         staged = stage_put(inp, data)
         # Ordered after stage_put's completion by the InOut -> In dependency.
         overwritten = overwrite_after_completion(inp2, staged)
-        announced = announce(overwritten, signal)
+        announced = announce(filled, overwritten, signal)
         waited = await_peers(announced)
         fetched = fetch(filled, waited, recv)
         readback_put(overwritten, waited, out_put)

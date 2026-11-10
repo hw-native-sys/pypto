@@ -1347,14 +1347,28 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
         const std::string off = unclamped_offset(offsets[dim]);
         const std::string extent = GetSizeCodes({transfer_shape[dim]}, codegen).front();
         const std::string limit = GetSizeCodes({type->shape_[dim]}, codegen).front();
-        const std::string non_negative = codegen.NewTemp();
-        codegen.Emit(non_negative + " = arith.cmpi sge, " + off + ", " + zero_index + " : index");
-        const std::string end = codegen.NewTemp();
-        codegen.Emit(end + " = arith.addi " + off + ", " + extent + " : index");
-        const std::string fits = codegen.NewTemp();
-        codegen.Emit(fits + " = arith.cmpi sle, " + end + ", " + limit + " : index");
+        // `off + extent <= limit` can wrap for large runtime coordinates and
+        // pass the upper-bound check. Bound the terms separately instead: both
+        // must be non-negative, the origin must fit, and the room left to the
+        // endpoint limit must cover the extent. A wrapped `limit - off` only
+        // feeds a guard whose `off_fits` term is already false.
+        const std::string off_non_negative = codegen.NewTemp();
+        codegen.Emit(off_non_negative + " = arith.cmpi sge, " + off + ", " + zero_index + " : index");
+        const std::string extent_non_negative = codegen.NewTemp();
+        codegen.Emit(extent_non_negative + " = arith.cmpi sge, " + extent + ", " + zero_index + " : index");
+        const std::string off_fits = codegen.NewTemp();
+        codegen.Emit(off_fits + " = arith.cmpi sle, " + off + ", " + limit + " : index");
+        const std::string room = codegen.NewTemp();
+        codegen.Emit(room + " = arith.subi " + limit + ", " + off + " : index");
+        const std::string extent_fits = codegen.NewTemp();
+        codegen.Emit(extent_fits + " = arith.cmpi sle, " + extent + ", " + room + " : index");
+        const std::string position_ok = codegen.NewTemp();
+        codegen.Emit(position_ok + " = arith.andi " + off_non_negative + ", " + extent_non_negative +
+                     " : i1");
+        const std::string length_ok = codegen.NewTemp();
+        codegen.Emit(length_ok + " = arith.andi " + off_fits + ", " + extent_fits + " : i1");
         const std::string dim_ok = codegen.NewTemp();
-        codegen.Emit(dim_ok + " = arith.andi " + non_negative + ", " + fits + " : i1");
+        codegen.Emit(dim_ok + " = arith.andi " + position_ok + ", " + length_ok + " : i1");
         if (in_bounds.empty()) {
           in_bounds = dim_ok;
         } else {

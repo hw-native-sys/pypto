@@ -53,11 +53,12 @@ exist for their cross-rank effect, not for an SSA value a consumer reads.
 dtype-suffixed external helper call (`pypto_urma_{put,get}_async_<dtype>`). The
 helper validates the request against both endpoint tensor extents and the
 communication window, requests the URMA workspace from the IR `engines` field,
-and submits through the existing runtime entry point; it never polls. Task
-completion integration (the enclosing task releasing the consumer) is still
-pending. Both endpoints must be window-bound, dense row-major
-`DistributedTensor`s. The result aliases `dst`; returning from the op does not
-imply completion.
+and submits through the existing runtime entry point; it never polls.
+Completion is owned by the enclosing task: submission registers the request's
+completion condition, so a later task that consumes the destination as an input
+is released only after the transfer retires. Both endpoints must be
+window-bound, dense row-major `DistributedTensor`s. The result aliases `dst`;
+returning from the op does not imply completion.
 
 Adapter symbols and C++ element types reuse the shared dtype conversions.
 

@@ -48,7 +48,8 @@ SSA 值而存在。
 `pld.tensor.put_async` 和 `pld.tensor.get_async` 在 A5 后端下降为按 dtype 后缀命名的
 外部 helper 调用（`pypto_urma_{put,get}_async_<dtype>`）。helper 会同时校验两端张量的
 范围与通信窗口，通过 IR `engines` 字段申请 URMA workspace，并复用现有运行时入口提交；
-它从不轮询。任务完成集成（由所属任务释放消费者）尚待实现。
+它从不轮询。完成由所属任务拥有：提交时会注册该请求的完成条件，因此后续以目标为
+输入的任务要等传输完成后才会被释放。
 两端都必须是窗口绑定、稠密行主序（dense row-major）的 `DistributedTensor`。
 结果与 `dst` 共用存储；算子返回不代表传输完成。
 

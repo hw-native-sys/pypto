@@ -2308,6 +2308,9 @@ def test_put_async_dynamic_subregion_guards_each_dimension():
 
     assert "arith.cmpi sge" in mlir, mlir
     assert "arith.cmpi sle" in mlir, mlir
+    # The bounds check is `extent <= limit - off`, not `off + extent <= limit`:
+    # the sum can wrap for large runtime coordinates and pass the check.
+    assert "arith.subi" in mlir, mlir
     assert "arith.select" in mlir, mlir
 
 
