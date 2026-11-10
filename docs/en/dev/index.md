@@ -51,29 +51,31 @@ can be tested before the helper exists on main.
 This is a scheduling convention for the existing `pull_request` flow, not a
 complete protection against malicious runner use. A PR can still modify its
 workflow, remove a job condition, or add a job that targets an available runner.
-The `/ci full` command checks permissions, and its result publisher verifies
-the trusted dispatch, but neither restricts arbitrary PR-authored workflows.
+The `/ci full` command validates the PR revision, and its result publisher
+verifies the trusted dispatch, but neither restricts arbitrary PR-authored workflows.
 Enforcing that boundary requires separate GitHub runner access policies and
 trusted workflow restrictions. Those administrative settings are unchanged.
 
-A collaborator with repository **write**, **maintain** or **admin** permission
-can post exactly this comment in the PR conversation:
+Anyone who can comment on a PR, including external contributors without
+repository write access, can post exactly this comment in the PR conversation:
 
 ```text
 /ci full
 ```
 
-The `CI Command` workflow checks current repository permissions and dispatches
-`CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
+The `CI Command` workflow requires an open PR targeting this repository's `main`
+branch and dispatches `CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 A conflicting PR, or one whose merge is still being computed, must be resolved
 or retried. The command's Actions summary records acceptance or rejection.
-An identical request already queued/running is not dispatched again.
-After authorization and revision checks, the command writes `ci/full=pending`
+An identical request already queued/running is not dispatched again. Comment
+access allows users to request device tests; it does not grant repository write
+or merge permission, and duplicate detection is not a general rate limit.
+After PR and revision checks, the command writes `ci/full=pending`
 before dispatching, clearing any previous success while the publisher is queued.
-A read-only admission job authorizes the comment and pins the head before joining
-the publisher's PR/head queue. Inside that queue, the command checks permission
-and the head again, writes pending, dispatches, and binds the pending status to
+A read-only admission job validates the PR and pins the head before joining
+the publisher's PR/head queue. Inside that queue, the command checks the PR
+and its revision again, writes pending, dispatches, and binds the pending status to
 the returned run ID. A moved head is rejected rather than written under the wrong lock.
 If the initial status write fails, no run is dispatched. If dispatch or run-ID
 binding fails, the unbound pending marker is retained and older publishers cannot
@@ -158,7 +160,8 @@ is needed.
 1. Merge the workflows and helper onto `main`, leaving the switch unset.
 2. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
    **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm
-   unauthorized comments and stale-head results cannot launch or approve full.
+   external commenters can trigger full, invalid PRs cannot launch it, and
+   stale-head results cannot approve a newer revision.
 3. Add `ci/full` to the main ruleset's required status checks, selecting the
    GitHub Actions source where available. Keep `pre-commit`, `clang-tidy` and
    existing review requirements. Do not require the dispatch job `full-result`

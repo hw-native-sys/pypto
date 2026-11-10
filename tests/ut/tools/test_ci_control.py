@@ -56,7 +56,7 @@ def event():
     return {
         "action": "created",
         "issue": {"number": 123, "pull_request": {}},
-        "comment": {"body": "/ci full", "user": {"login": "maintainer"}},
+        "comment": {"body": "/ci full", "user": {"login": "external-user"}, "author_association": "NONE"},
     }
 
 
@@ -145,7 +145,9 @@ def test_changed_pr_rejected_before_checkout(control, pr):
 
 
 @pytest.mark.parametrize("failure", ["", "pending", "dispatch", "bind", "ack"])
-def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr, failure):
+@pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "MEMBER", "OWNER"])
+def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, pr, failure, association):
+    event["comment"]["author_association"] = association
     writes = []
     gate = {"state": "success"}
 
@@ -162,8 +164,6 @@ def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr, f
             writes.append((path, payload))
             if path.endswith("/dispatches"):
                 return None if failure == "ack" else {"workflow_run_id": 51}
-        elif path.endswith("/permission"):
-            return {"permission": "write"}
         elif "/actions/workflows/ci.yml/runs?" in path:
             return {"workflow_runs": []}
         elif "/pulls/" in path:
@@ -217,30 +217,23 @@ def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr, f
     ]
 
 
-@pytest.mark.parametrize("permission", ["write", "read"])
+@pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "MEMBER", "OWNER"])
 @pytest.mark.parametrize("body", ["/ci full", "/ci full extra"])
-def test_command_queue_admission_requires_authorization(
-    control, monkeypatch, event, pr, tmp_path, permission, body
-):
+def test_command_queue_admits_any_commenter(control, monkeypatch, event, pr, tmp_path, association, body):
     output_file = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
     event["comment"]["body"] = body
+    event["comment"]["author_association"] = association
 
     def request(path):
-        if path.endswith("/permission"):
-            return {"permission": permission}
         if "/pulls/" in path:
             return pr
         assert path.endswith(f"/git/commits/{MERGE}")
         return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
 
     monkeypatch.setattr(control, "api", request)
-    if body == "/ci full" and permission == "read":
-        with pytest.raises(ValueError, match="Only collaborators"):
-            control.command_route(REPO, event)
-    else:
-        control.command_route(REPO, event)
-    if permission == "write" and body == "/ci full":
+    control.command_route(REPO, event)
+    if body == "/ci full":
         assert output_file.read_text() == f"key=123-{HEAD}\nhead={HEAD}\n"
     else:
         assert not output_file.exists()
@@ -249,18 +242,43 @@ def test_command_queue_admission_requires_authorization(
 @pytest.mark.parametrize("routed_head", ["", "d" * 40])
 def test_dispatch_cannot_write_outside_admitted_head(control, monkeypatch, event, pr, routed_head):
     monkeypatch.setenv("CI_ROUTED_HEAD", routed_head)
-    monkeypatch.setattr(control, "authorized_request", lambda *args: pr)
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
     monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes outside the admitted queue"))
     with pytest.raises(ValueError, match="head changed after queue admission"):
         control.dispatch(REPO, event)
 
 
-def test_contributor_association_does_not_grant_full_access(control, monkeypatch, event):
-    event["issue"]["pull_request"] = {"url": "unused"}
-    event["comment"]["author_association"] = "CONTRIBUTOR"
-    monkeypatch.setattr(control, "api", lambda path: {"permission": "read"})
-    with pytest.raises(ValueError, match="Only collaborators"):
-        control.dispatch(REPO, event)
+@pytest.mark.parametrize("command", ["command_route", "dispatch"])
+@pytest.mark.parametrize("invalid", ["closed", "other-branch", "other-repo", "deleted-fork"])
+def test_any_commenter_still_requires_valid_pr(control, monkeypatch, event, pr, command, invalid):
+    # Opening comment access must not broaden which PRs the trusted workflow runs.
+    if invalid == "closed":
+        pr["state"] = "closed"
+    elif invalid == "other-branch":
+        pr["base"]["ref"] = "release"
+    elif invalid == "other-repo":
+        pr["base"]["repo"]["full_name"] = "other/repo"
+    else:
+        pr["head"]["repo"] = None
+
+    def request(path):
+        assert path == f"repos/{REPO}/pulls/123"
+        return pr
+
+    monkeypatch.setattr(control, "api", request)
+    with pytest.raises(ValueError, match="open PR targeting this repository's main branch"):
+        getattr(control, command)(REPO, event)
+
+
+@pytest.mark.parametrize("command", ["command_route", "dispatch"])
+@pytest.mark.parametrize("invalid", ["edited", "deleted", "issue"])
+def test_only_new_pr_comments_are_accepted(control, monkeypatch, event, command, invalid):
+    if invalid == "issue":
+        del event["issue"]["pull_request"]
+    else:
+        event["action"] = invalid
+    monkeypatch.setattr(control, "api", lambda *a: pytest.fail("Unexpected API call"))
+    getattr(control, command)(REPO, event)
 
 
 @pytest.mark.parametrize("body", ["please /ci full", "/ci full extra", "/ci full\necho injected"])
@@ -533,8 +551,6 @@ def test_unavailable_merge_never_dispatches(control, monkeypatch, event, pr, con
     pr["mergeable"] = conflicting
 
     def request(path):
-        if path.endswith("/permission"):
-            return {"permission": "write"}
         assert path.endswith("/pulls/123")
         return pr
 
@@ -625,8 +641,6 @@ def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch
         if payload is not None:
             writes.append(payload)
             return {"workflow_run_id": 51} if path.endswith("/dispatches") else None
-        if path.endswith("/permission"):
-            return {"permission": "write"}
         if path.endswith("/pulls/123"):
             return pr
         if path.endswith(f"/git/commits/{MERGE}"):
@@ -850,7 +864,7 @@ def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tm
     def fail(*args):
         if cli_error:
             raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="Forbidden <detail> secret-token")
-        raise ValueError("Only collaborators may request full CI")
+        raise ValueError("PR changed; post /ci full again for the new revision")
 
     monkeypatch.setattr(control, "dispatch", fail)
     with pytest.raises(SystemExit) as error:
@@ -862,7 +876,7 @@ def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tm
         assert "Forbidden &lt;detail&gt; [REDACTED]" in text
         assert "secret-token" not in text
     else:
-        assert "Only collaborators" in text
+        assert "PR changed" in text
 
 
 def test_pr_jobs_cannot_write_github_caches():

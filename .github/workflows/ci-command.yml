@@ -28,7 +28,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           sparse-checkout: .github/scripts
           persist-credentials: false
-      - name: Authorize before joining the status writer queue
+      - name: Validate PR before joining the status writer queue
         id: route
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,7 +55,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           sparse-checkout: .github/scripts
           persist-credentials: false
-      - name: Authorize and dispatch full CI
+      - name: Validate PR and dispatch full CI
         env:
           CI_ROUTED_HEAD: ${{ needs.route.outputs.head }}
           GH_TOKEN: ${{ github.token }}

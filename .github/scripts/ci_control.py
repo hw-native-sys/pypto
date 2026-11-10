@@ -238,20 +238,15 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
     return False
 
 
-def authorized_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
+def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
     if (
         event.get("action") != "created"
         or "pull_request" not in event.get("issue", {})
         or event.get("comment", {}).get("body", "").strip() != "/ci full"
     ):
         return
-    comment = event["comment"]
-    actor = comment["user"]["login"]
-    # author_association is not a repository permission check: a contributor may
-    # have no write access, and membership alone must not spend device capacity.
-    permission = api(f"repos/{repo}/collaborators/{actor}/permission")["permission"]
-    if permission not in {"write", "maintain", "admin"}:
-        raise ValueError("Only collaborators with write, maintain or admin permission may request full CI")
+    # Anyone who can comment may request full CI, including external contributors.
+    # Validate the live PR and merge revision both before queueing and dispatching.
     number = int(event["issue"]["number"])
     pr = pull(repo, number)
     if pr.get("mergeable") is not True or not pr.get("merge_commit_sha"):
@@ -262,15 +257,15 @@ def authorized_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def command_route(repo: str, event: dict[str, Any]) -> None:
-    """Authorize before allowing a comment to join the shared writer queue."""
-    pr = authorized_request(repo, event)
+    """Validate the PR revision before joining the shared writer queue."""
+    pr = validated_request(repo, event)
     if pr is not None:
         head = pr["head"]["sha"]
         output({"key": f"{pr['number']}-{head}", "head": head})
 
 
 def dispatch(repo: str, event: dict[str, Any]) -> None:
-    pr = authorized_request(repo, event)
+    pr = validated_request(repo, event)
     if pr is None:
         return
     number = pr["number"]
