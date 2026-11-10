@@ -1,3 +1,5 @@
+# TEMPORARY (PR #3373): full CI is scoped to the A5 distributed acceptance lane.
+# Revert this commit before merge; the disabled jobs are listed in the diff.
 name: CI
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
@@ -504,7 +506,7 @@ jobs:
     # EXT_SUFFIX), so the two legs cannot collide even if they somehow shared a
     # cache root: they write different slots.
     needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     permissions:
       contents: read
     strategy:
@@ -586,7 +588,7 @@ jobs:
     # pinned version. simpler resolves its own pto-isa from
     # runtime/pto_isa.pin at build time, and no ptoas is installed.
     needs: [changes, pre-commit]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # `packages: read` is not decoration. Declaring a `permissions:` block at
     # all narrows GITHUB_TOKEN to exactly what it lists, and pulling the job
     # container is an authenticated ghcr.io read — so `contents: read` alone
@@ -758,11 +760,7 @@ jobs:
     # install step falls back to building in place instead, which is what this
     # job did before the prebuild existed.
     needs: [changes, pre-commit, clang-tidy, prebuild-wheels-github]
-    if: >-
-      needs.changes.outputs.full == 'true' &&
-      !cancelled()
-      && needs.pre-commit.result == 'success'
-      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -847,7 +845,7 @@ jobs:
     # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
     # blocks run inside examples-tests, against the code it changed.
     needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_changed == 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     permissions:
       contents: read
     runs-on: [self-hosted, linux, cpu]
@@ -901,7 +899,7 @@ jobs:
     # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
     # instead of rebuilding in an ephemeral container on every PR.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1116,7 +1114,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1256,7 +1254,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1485,7 +1483,7 @@ jobs:
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1638,7 +1636,7 @@ jobs:
     # Compile selected DeepSeek and Qwen operator cases without device execution.
     # A2/A3 extern wrappers need CANN headers from the npu runner.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     permissions:
       contents: read
     runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
@@ -1739,7 +1737,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1941,10 +1939,7 @@ jobs:
     #
     # Lint gate + docs-only gate, as every other device job here.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: >-
-      needs.changes.outputs.full == 'true' &&
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.ptoas_version_changed == 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + clone pypto-serving + test only.
     permissions:
       contents: read
@@ -2258,7 +2253,7 @@ jobs:
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree that
     # doesn't lint. Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -2528,13 +2523,7 @@ jobs:
     # as before; the prebuild only decides whether the install step has a wheel
     # to use.
     needs: [changes, toolchain, pre-commit, clang-tidy, prebuild-wheels-github]
-    if: >-
-      needs.changes.outputs.full == 'true' &&
-      !cancelled()
-      && needs.changes.outputs.docs_only != 'true'
-      && needs.pre-commit.result == 'success'
-      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
-      && needs.toolchain.result == 'success'
+    if: false  # TEMPORARY: scope full CI to the A5 distributed lane; revert before merge
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
