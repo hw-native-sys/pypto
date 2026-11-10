@@ -44,7 +44,7 @@ from importlib import resources
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import codegen
+from pypto import DataType, codegen, ir
 from pypto.backend import BackendType, pto_backend
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
@@ -755,30 +755,102 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
     bug where ``EmitCallToWorker`` caches the first dispatch's handle and
     reuses it for the second (state-bleed); the routing comes from the
     arg's ``WindowBuffer`` identity, not from any per-callee state.
+    This constructs the codegen boundary directly with a nullable formal and
+    an explicit ctx ABI. First-phase materialization rejects distinct windows
+    reaching one formal; that restriction remains covered by
+    test_c2a_multiple_callers_require_one_object_identity in the materializer
+    suite. This backend routing test does not claim that source pattern lowers.
     """
-
-    @pl.program
-    class Prog:
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, x: pld.DistributedTensor[[SIZE], pl.FP32]):
-            return x
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            buf_a = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
-            buf_b = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
-            a = pld.window(buf_a, [SIZE], dtype=pl.FP32)
-            b = pld.window(buf_b, [SIZE], dtype=pl.FP32)
-            # buf_a → group on {0}; buf_b → group on {2}. Distinct device
-            # subsets → distinct CommGroups even though the *same*
-            # chip_orch is dispatched against each. The handle picked at
-            # emit time must reflect the *arg's* WindowBuffer, not any
-            # callee-keyed cache.
-            self.chip_orch(a, device=0)
-            self.chip_orch(b, device=2)
-            return 0
-
-    code = _lower(Prog)
+    span = ir.Span.unknown()
+    shape = [ir.ConstInt(SIZE, DataType.INDEX, span)]
+    byte_size = ir.ConstInt(SIZE * pl.FP32.get_byte(), DataType.INDEX, span)
+    formal_type = ir.DistributedTensorType(shape, DataType.FP32)
+    formal = ir.Var("x", formal_type, span)
+    formal_ctx = ir.Var("x_ctx", ir.CommCtxType(), span)
+    chip = ir.Function(
+        "chip_orch",
+        [formal, formal_ctx],
+        [formal_type],
+        ir.ReturnStmt([formal], span),
+        span,
+        type=ir.FunctionType.Orchestration,
+        level=ir.Level.CHIP,
+        role=ir.Role.Orchestrator,
+    )
+    shared_callee = ir.GlobalVar("chip_orch")
+    bases = [ir.Var(name, ir.PtrType(), span) for name in ("buf_a", "buf_b")]
+    windows = [ir.WindowBuffer(base, byte_size, span=span) for base in bases]
+    types = [ir.DistributedTensorType(shape, DataType.FP32, window) for window in windows]
+    values = [ir.Var(name, ty, span) for name, ty in zip(("a", "b"), types)]
+    contexts = [ir.Var(name, ir.CommCtxType(), span) for name in ("a_ctx", "b_ctx")]
+    statements = []
+    for base, ty, value, ctx in zip(bases, types, values, contexts):
+        alloc = ir.create_op_call(
+            "pld.tensor.alloc_window_buffer", [byte_size], {"name": base.name_hint}, span
+        )
+        # Record the already-materialized type on both sides of the assignment,
+        # exactly as the late IR does; keep each actual's concrete window.
+        view = ir.Call(
+            ir.get_op("pld.tensor.window"),
+            [base, ir.MakeTuple(shape, span)],
+            {"dtype": DataType.FP32},
+            {},
+            ty,
+            span,
+        )
+        get_ctx = ir.create_op_call("pld.system.get_comm_ctx", [value], {}, span)
+        statements.extend(
+            [
+                ir.AssignStmt(base, alloc, span),
+                ir.AssignStmt(value, view, span),
+                ir.AssignStmt(ctx, get_ctx, span),
+            ]
+        )
+    for value, ctx, worker in zip(values, contexts, (0, 2)):
+        dispatch = ir.Call(
+            shared_callee,
+            [value, ctx],
+            {},
+            {"worker": ir.ConstInt(worker, DataType.INDEX, span)},
+            formal_type,
+            span,
+        )
+        statements.append(ir.EvalStmt(dispatch, span))
+    statements.append(ir.ReturnStmt([ir.ConstInt(0, DataType.INDEX, span)], span))
+    inner = ir.CommDomainScopeStmt(
+        [2], [windows[1]], "comm_d1", body=ir.SeqStmts(statements, span), span=span
+    )
+    outer = ir.CommDomainScopeStmt([0], [windows[0]], "comm_d0", body=inner, span=span)
+    host = ir.Function(
+        "host_orch",
+        [],
+        [ir.ScalarType(DataType.INDEX)],
+        outer,
+        span,
+        level=ir.Level.HOST,
+        role=ir.Role.Orchestrator,
+    )
+    program = passes.derive_call_directions()(ir.Program([chip, host], "RoutingBoundary", span))
+    lowered_host = program.get_function("host_orch")
+    dispatches = [stmt.expr for stmt in lowered_host.body.body.body.stmts if isinstance(stmt, ir.EvalStmt)]
+    assert len(dispatches) == 2
+    assert dispatches[0].op is dispatches[1].op is shared_callee
+    assert program.get_function(shared_callee.name) is chip
+    assert chip.params[0].type.window_buffer is None
+    properties = passes.IRPropertySet()
+    for prop in (
+        passes.IRProperty.SSAForm,
+        passes.IRProperty.UseAfterDef,
+        passes.IRProperty.TypeChecked,
+        passes.IRProperty.AssignTypeSymmetry,
+        passes.IRProperty.CommDomainScopesMaterialized,
+        passes.IRProperty.DistTensorCtxMaterialized,
+        passes.IRProperty.CallDirectionsResolved,
+    ):
+        properties.insert(prop)
+    diagnostics = passes.PropertyVerifierRegistry.verify(properties, program)
+    assert diagnostics == [], diagnostics
+    code = codegen.DistributedCodegen().generate(program)
 
     # Each dispatch site emits one Buffer.tensor line; the handle
     # prefix uniquely identifies the group.
@@ -1762,6 +1834,17 @@ def test_host_all_to_all_v_builtin_variant_shared_across_core_num():
         ):
             return data
 
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch2(
+            self,
+            inp: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
@@ -1789,7 +1872,7 @@ def test_host_all_to_all_v_builtin_variant_shared_across_core_num():
             counts2 = pld.window(counts_buf2, [4, 1], dtype=pl.INT32)
             recv2 = pld.window(recv_buf2, [4, 1], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
-                self.chip_orch(inp2, data2, signal2, counts2, recv2, device=r)
+                self.chip_orch2(inp2, data2, signal2, counts2, recv2, device=r)
             pld.tensor.all_to_all_v(inp2, data2, signal2, counts2, recv2, core_num=4)
             return 0
 
@@ -2221,7 +2304,3 @@ def test_if_cross_branch_phi_yields_tensors() -> None:
     assert not re.search(r"boundary__ssa_v\d+\s*=.*\w+__ssa", then_block), (
         "Then-branch must not contain bare Python tensor assignments:\n" + code
     )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

@@ -11,6 +11,7 @@
 
 import ast
 import copy
+import warnings
 from typing import Any, cast
 
 from pypto.ir.printer import python_print
@@ -57,6 +58,16 @@ INTEGER_DTYPES = frozenset(
 # can express. Reuses the IR's own comparison nodes — the runtime PredicateOp
 # mapping lives in orchestration codegen, not here.
 PREDICATE_CMP_TYPES = (ir.Eq, ir.Ne, ir.Gt, ir.Lt, ir.Ge, ir.Le)
+
+
+def validate_placement_callee(caller: ir.Level | None, callee: ir.Function, span: ir.Span) -> None:
+    if callee.role != ir.Role.Orchestrator:
+        raise ParserTypeError("Placement requires an Orchestrator callee", span=span)
+    # Nanobind keeps enum aliases (POD and NODE) as distinct Python members.
+    target = callee.level
+    if caller is not None and caller.value == ir.Level.CLUSTER_0.value:
+        if target is None or target.value != ir.Level.HOST.value:
+            raise ParserTypeError("CLUSTER_0 worker dispatch requires a HOST Orchestrator", span=span)
 
 
 class DispatchSemantics:
@@ -920,35 +931,47 @@ class DispatchSemantics:
             hint=hint,
         )
 
-    def parse_dispatch_device_kwarg(
+    def parse_dispatch_worker_kwarg(
         self,
         keywords: list[ast.keyword],
+        extra_attrs: dict[str, Any],
+        func_obj: ir.Function | None,
+        span: ir.Span,
     ) -> ir.Expr | None:
-        """Extract the optional ``device=`` kwarg on a ``self.<orch>(...)`` call.
+        """Extract the logical immediate-child selector for a Call or Submit.
 
-        ``device=`` selects the physical device for an orchestrator dispatch
-        and is legal only when the callee has :class:`ir.Role.Orchestrator`
-        (i.e. either chip-level ``FunctionType.Orchestration`` or a function
-        declared with ``level=..., role=Role.Orchestrator``; both forms set
-        the same ``role`` field on the IR Function). Callee-role validation
-        happens in :meth:`ASTParser.parse_call` via the ``allowed_kwargs`` filter
-        before this method runs, so by the time we reach this point the
-        kwarg is known to be legal. The parser is intentionally permissive
-        about the value form: any IR expression works. Downstream passes
-        (the comm-collection pass, simplify) inspect the resolved expression
-        and decide:
-
-        * ``ConstInt`` (literal or after simplify-time constant folding) →
-          fixed-device dispatch.
-        * IR Var that is a ``for``-loop induction variable with a known
-          range → device subset / kAll.
-        * Anything else → rejected by the comm-collection pass, with the
-          full def-use chain available for a good error message.
-
-        Returns:
-            The parsed IR expression, or ``None`` when ``device=`` is absent.
+        Top-level kwarg role validation happens before this method; placement
+        recovered from attrs is checked here. Keep expression parsing
+        permissive so downstream scope analysis can resolve loop variables and
+        folded constants with full def-use context. Reject competing sources
+        before merging attrs: choosing one silently can dispatch to a wrong child.
         """
-        device_kw = next((kw for kw in keywords if kw.arg == "device"), None)
-        if device_kw is None:
-            return None
-        return self.callbacks.expression(device_kw.value)
+        placement_kwargs = [kw for kw in keywords if kw.arg in {"worker", "device"}]
+        placement_attrs = [key for key in ("worker", "device") if key in extra_attrs]
+        if placement_attrs and func_obj is not None and func_obj.role != ir.Role.Orchestrator:
+            # Printed attrs must obey the same role restriction as worker=/device=.
+            # Otherwise a plain kernel call could acquire the dispatch-only layout
+            # exemption simply by hiding its placement metadata in attrs.
+            raise ParserTypeError(
+                f"Placement attrs {placement_attrs} require an Orchestrator callee",
+                span=span,
+            )
+        if len(placement_kwargs) + len(placement_attrs) > 1:
+            raise ParserTypeError(
+                "Dispatch placement must use only one worker or device spelling, including attrs",
+                span=self.services.span_tracker.get_span(placement_kwargs[0].value)
+                if placement_kwargs
+                else None,
+            )
+        if placement_kwargs:
+            keyword = placement_kwargs[0]
+            if keyword.arg == "device":
+                warnings.warn(
+                    "device= is deprecated for dispatch; use worker= for the logical child selector",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+            return self.callbacks.expression(keyword.value)
+        if placement_attrs:
+            return cast(ir.Expr, extra_attrs.pop(placement_attrs[0]))
+        return None

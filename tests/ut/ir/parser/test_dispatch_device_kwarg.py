@@ -8,13 +8,12 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Parser tests for the ``device=`` kwarg on Orchestration dispatch calls.
+"""Compatibility and canonical worker-placement tests for hierarchical dispatch.
 
-``self.<orch>(..., device=r)`` selects the physical device for a per-rank
-dispatch. The kwarg is only legal when the callee is an
-``ir.FunctionType.Orchestration`` function. The parser is intentionally
+``self.<orch>(..., device=r)`` is the deprecated spelling for a logical child
+dispatch. The kwarg is only legal when the callee is an orchestrator. The parser is intentionally
 permissive about the value form — any IR expression is parsed and stashed
-on ``call.attrs['device']``. Downstream passes (simplify, comm-collection)
+on ``call.attrs['worker']``. Downstream passes (simplify, comm-collection)
 inspect the resolved expression to derive the per-dispatch device subset:
 
 * ``ConstInt`` → fixed-device dispatch
@@ -60,12 +59,41 @@ def _find_callee_call(func: ir.Function, callee_name: str) -> ir.Call:
 
 
 # ---------------------------------------------------------------------------
-# Positive cases — parser stashes the IR expression on ``call.attrs['device']``
+# Positive cases — parser stashes the IR expression on ``call.attrs['worker']``
 # ---------------------------------------------------------------------------
 
 
+def test_forward_dispatch_accepts_printed_placement_attrs():
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self):
+            self.chip(attrs={"worker": 0})
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self):
+            return
+
+    placement = _find_callee_call(_get_func(P, "host"), "chip").attrs["worker"]
+    assert placement.value == 0
+
+
+def test_forward_placement_rejects_non_orchestrator():
+    with pytest.raises(ParserTypeError, match="Placement requires an Orchestrator callee"):
+
+        @pl.program
+        class P:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self):
+                self.kernel(attrs={"worker": 0})
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self):
+                return
+
+
 def test_device_int_literal():
-    """``device=0`` lifts to a ConstInt stored on call.attrs['device']."""
+    """``device=0`` lifts to a ConstInt stored on call.attrs['worker']."""
 
     @pl.program
     class P:
@@ -80,7 +108,7 @@ def test_device_int_literal():
 
     func = _get_func(P, "host_orch")
     call = _find_callee_call(func, "chip_orch")
-    device = call.attrs["device"]
+    device = call.attrs["worker"]
     assert isinstance(device, ir.ConstInt)
     assert device.value == 0
 
@@ -102,7 +130,7 @@ def test_device_uses_for_loop_induction_var():
 
     func = _get_func(P, "host_orch")
     call = _find_callee_call(func, "chip_orch")
-    device = call.attrs["device"]
+    device = call.attrs["worker"]
     assert isinstance(device, ir.Var)
     assert device.name_hint == "r"
     assert isinstance(device.type, ir.ScalarType)
@@ -127,7 +155,7 @@ def test_device_accepts_locally_bound_constant():
 
     func = _get_func(P, "host_orch")
     call = _find_callee_call(func, "chip_orch")
-    device = call.attrs["device"]
+    device = call.attrs["worker"]
     # The parser hands back the Var; downstream simplify can fold it to
     # ConstInt(3) when the comm-collection pass needs a literal.
     assert isinstance(device, ir.Var)
@@ -152,7 +180,7 @@ def test_device_accepts_arithmetic_expression():
 
     func = _get_func(P, "host_orch")
     call = _find_callee_call(func, "chip_orch")
-    device = call.attrs["device"]
+    device = call.attrs["worker"]
     # Parser does not constrain shape — comm-collection pass will validate.
     assert isinstance(device, ir.Expr)
 
@@ -175,7 +203,7 @@ def test_device_accepts_explicit_level_role_orchestrator():
 
     func = _get_func(P, "host_orch")
     call = _find_callee_call(func, "chip_orch")
-    device = call.attrs["device"]
+    device = call.attrs["worker"]
     assert isinstance(device, ir.ConstInt)
     assert device.value == 2
 
@@ -205,3 +233,36 @@ def test_device_rejected_on_non_orchestrator_callee():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("target", ["node", "chip"])
+def test_pod_worker_dispatch_requires_immediate_host_child(target):
+    source = f"""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def chip(self, x: pl.Tensor[[4], pl.FP32]):
+        return x
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def node(self, x: pl.Tensor[[4], pl.FP32]):
+        for chip_id in pl.range(pld.world_size()):
+            self.chip(x, worker=chip_id)
+        return 0
+
+    @pl.function(level=pl.Level.POD, role=pl.Role.Orchestrator)
+    def pod(self, x: pl.Tensor[[4], pl.FP32]):
+        for node_id in pl.range(pld.num_workers()):
+            self.{target}(x, worker=node_id)
+        return 0
+"""
+    if target == "chip":
+        with pytest.raises(ParserTypeError, match="CLUSTER_0 worker dispatch requires a HOST Orchestrator"):
+            pl.parse_program(source)
+        return
+
+    program = pl.parse_program(source)
+    for caller, callee, selector in (("pod", "node", "node_id"), ("node", "chip", "chip_id")):
+        call = _find_callee_call(_get_func(program, caller), callee)
+        assert call.attrs["worker"].name_hint == selector
+    _ = pl.parse_program(ir.python_print(program, format=False))

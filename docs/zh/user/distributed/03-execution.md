@@ -8,6 +8,11 @@
 fork chip 进程、组装 kernel——分摊到可复用的 `DistributedWorker` 上的多次
 派发中。
 
+分发时使用 `worker=` 选择下一层的逻辑编号。在 HOST 编排函数中，
+它索引配置的设备。在 POD 编排函数中，它索引 HOST worker。
+`pld.num_workers()` 返回直属 worker 数量。HOST 代码仍可使用
+`device=` 和 `pld.world_size()`。
+
 ## DistributedWorker
 
 通过 `compiled.prepare()` 获得。设置（fork、通信引导、kernel 组装）仅执行一次；
