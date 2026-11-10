@@ -1902,9 +1902,10 @@ class DistributedWorker(Worker):
     be ordinary tensors created after ``prepare``.
 
     ``window_sources`` maps compiled Host-window ``init`` keys to open binary
-    files or contiguous CPU tensors in domain rank order. Bind files after compilation; Simpler reads them
-    only when creating a domain. Persistent Host windows retain their contents,
-    while Device windows follow ``reset_persistent_windows``. The caller owns
+    files or contiguous CPU tensors in domain rank order. Sources are copied only
+    when creating a domain. Host and Device windows both follow ``persistent``
+    and ``reset_persistent_windows``. Disable reset explicitly to retain loaded
+    table contents across dispatches. The caller owns
     the files and must keep them open until initialization completes.
 
     ``inherited_host_tensors`` keeps such a host range alive for the worker's
@@ -2342,14 +2343,12 @@ class DistributedWorker(Worker):
         domains: dict[str, tuple[tuple[Any, ...], Any]],
         reset_buffers: dict[int, Any],
     ) -> None:
-        """Restore retained Device buffers to zero while preserving Host table contents.
+        """Restore all retained communication buffers to zero, regardless of backing.
 
         The host Buffers are created before ``Worker.run`` and released after it;
         this callback only issues copies while Simpler holds its submit lock.
         """
         for domain_name, (spec, handle) in domains.items():
-            if spec[3] == "host":
-                continue  # Host tables retain their initialized contents across dispatches.
             _workers, window_nbytes, buffer_specs, *_resource_spec = spec
             for worker_id in handle.workers:
                 actual_window_size = int(handle[worker_id].actual_window_size)
@@ -2379,8 +2378,6 @@ class DistributedWorker(Worker):
     ) -> None:
         """Create zero-filled host Buffers, shared by every named buffer of the same size."""
         for domain_name, (spec, _handle) in domains.items():
-            if spec[3] == "host":
-                continue  # Host tables retain their initialized contents across dispatches.
             _workers, window_nbytes, buffer_specs, *_resource_spec = spec
             named_nbytes = sum(int(buffer_spec[3]) for buffer_spec in buffer_specs)
             if named_nbytes != int(window_nbytes):

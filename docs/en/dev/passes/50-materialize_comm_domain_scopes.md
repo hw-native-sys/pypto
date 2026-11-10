@@ -244,7 +244,7 @@ from pypto.runtime import DistributedWorker
 compiled = program.compile(...)  # no shard files needed here
 with ExitStack() as stack:
     shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
-    with DistributedWorker(compiled, persistent=True,
+    with DistributedWorker(compiled, persistent=True, reset_persistent_windows=False,
                            window_sources={"engram_l1": shard_files}) as worker:
         worker(...)  # creates the domain and loads the files before submitting chip tasks
         worker(...)  # reuses the loaded Host domain
@@ -288,6 +288,9 @@ files open. Source bindings are snapshotted at worker creation; changing the ori
 mapping/list does not reload a retained table. Create a new worker to load new data.
 
 Persistent execution validates memory source, workspace engines and initializer
-bindings when reusing domains. Host windows retain their contents regardless of
-`reset_persistent_windows`; Device scratch/signal buffers keep the existing reset
-policy (zero before reuse by default). Domain release remains owned by Simpler.
+bindings when reusing domains. Host and Device windows use the same policy:
+`persistent=True` retains allocations, and `reset_persistent_windows` controls
+zeroing before reuse (enabled by default). Initialization is not repeated after
+zeroing. Set `reset_persistent_windows=False` to retain the loaded Engram table;
+this also disables reset for Device scratch/signal buffers, whose state the caller
+must then manage. Domain release remains owned by Simpler.

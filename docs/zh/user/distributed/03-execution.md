@@ -304,7 +304,8 @@ worker 复用其芯片进程和通信设置——没有 fork 开销。`compiled_
 或 `DistributedWorker` 中传入 `window_sources={"engram_l1": shard_files}`。
 文件在**编译后**打开，按域内 rank 顺序排列。初始化从文件偏移零开始读取逻辑窗口大小，
 之后恢复文件原有位置。文件由调用者管理。启用 `persistent=True` 后只在创建域时加载一次，
-Host 内容在复用时保留；Device 窗口仍按默认策略清零。
+Host 与 Device 窗口默认均在复用前清零。设置 `reset_persistent_windows=False` 可保留已加载的表，
+此时所有复用通信 buffer 的状态均由调用者管理。清零不会重新执行 initializer。
 完整生命周期与错误约定见 [Host DDR 窗口](../../dev/passes/50-materialize_comm_domain_scopes.md)。
 
 Rank 列表也可以包含连续 CPU `torch.Tensor`，例如

@@ -3632,10 +3632,11 @@ def test_window_sources_validate_before_worker_init(patched_setup, bindings, pat
 
 
 class TestPersistentDistributedWorker:
-    @pytest.mark.parametrize("reset", [False, True])
+    @pytest.mark.parametrize("reset", [None, False, True])
     def test_host_domain_reuse_and_reset_policy(self, patched_setup, reset):
         m = patched_setup
         m["worker"]._live_domains = {}
+        m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
         orch = _PersistentOrch(m["worker"])
 
         def worker_submit(fn):
@@ -3655,12 +3656,19 @@ class TestPersistentDistributedWorker:
             assert len(orch.allocate_calls) == 1
             assert orch.allocate_calls[0]["memory_source"] == "host"
             assert orch.allocate_calls[0]["workspace_engines"] == ("urma",)
-            assert not orch.copy_calls
+            expected_copies = [] if reset is False else [(0, 256)]
+            assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == (
+                expected_copies
+            )
+            assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
         finally:
             rt.close()
 
     @pytest.mark.parametrize("tensor_source", [False, True])
-    def test_initialized_host_reuse_preserves_table_and_resets_device(self, patched_setup, tensor_source):
+    @pytest.mark.parametrize("reset", [None, False, True])
+    def test_initialized_host_and_device_reuse_share_reset_policy(
+        self, patched_setup, monkeypatch, tensor_source, reset
+    ):
         from pypto.runtime.window_sources import make_window_initializer  # noqa: PLC0415
 
         m = patched_setup
@@ -3671,6 +3679,16 @@ class TestPersistentDistributedWorker:
         source = torch.tensor(list(b"table"), dtype=torch.uint8) if tensor_source else io.BytesIO(b"table")
         device_entry = _persistent_entry(64, [])
         loaded = []
+        record_copy = orch.copy_to
+
+        def copy_to(dst, src):
+            record_copy(dst, src)
+            # Model the Host reset's bytes as well as recording its destination,
+            # so the second dispatch observes zeroing rather than a stale table.
+            if dst.owner_worker_id == 1:
+                orch.handles[0].host_data[1][: dst.nbytes] = ctypes.string_at(src.base, src.nbytes)
+
+        monkeypatch.setattr(orch, "copy_to", copy_to)
 
         def entry(orch, *args, _window_sources, _domain_provider, **kwargs):
             initializer = make_window_initializer(_window_sources, (("data", "engram", 5),), 1)
@@ -3690,7 +3708,9 @@ class TestPersistentDistributedWorker:
         setattr(entry, "_window_source_keys", ("engram",))
         m["load_entry"].return_value = (entry, None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        with DistributedWorker(compiled, persistent=True, window_sources={"engram": [source]}) as rt:
+        with DistributedWorker(
+            compiled, persistent=True, reset_persistent_windows=reset, window_sources={"engram": [source]}
+        ) as rt:
             arg = _resident(rt, (16, 16))
             rt(arg)
             # Reuse must neither reread a closed file nor copy mutated tensor data.
@@ -3699,9 +3719,15 @@ class TestPersistentDistributedWorker:
             else:
                 source.close()
             rt(arg)
-            assert loaded == [b"table", b"table"]
+            assert loaded == [b"table", b"table" if reset is False else bytes(5)]
             assert len(orch.allocate_calls) == 2
-            assert len(orch.copy_calls) > 0
+            # One Host window on worker 1 and one Device window on worker 0:
+            # both follow the same reset flag, including its default value.
+            expected_copies = [] if reset is False else [(1, 64), (0, 64)]
+            assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == (
+                expected_copies
+            )
+            assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
             assert len(orch.reuse_calls) == 4
 
     def test_window_reset_requires_persistent_mode(self):

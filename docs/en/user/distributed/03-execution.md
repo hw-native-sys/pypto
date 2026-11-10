@@ -334,8 +334,11 @@ Pass `window_sources={"engram_l1": shard_files}` to `compiled.prepare()` or
 `DistributedWorker` for a window declared with `memory_source="host", init="engram_l1"`.
 Open the files **after compilation**, in domain rank order. Initialization reads each
 file from offset zero, restores its position, and copies the logical window size.
-The caller owns the files. With `persistent=True`, initialization runs once and Host
-contents survive reuse; the default Device window reset still applies.
+The caller owns the files. With `persistent=True`, initialization runs once; Host
+and Device windows are both zeroed before reuse by default. Set
+`reset_persistent_windows=False` to preserve the loaded table and manage the state
+of all reused communication buffers yourself. Resetting a domain does not rerun
+its initializer.
 See [Host DDR windows](../../dev/passes/50-materialize_comm_domain_scopes.md)
 for the full lifecycle and error contract.
 

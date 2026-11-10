@@ -204,7 +204,7 @@ from pypto.runtime import DistributedWorker
 compiled = program.compile(...)  # 此时无需 shard 文件
 with ExitStack() as stack:
     shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
-    with DistributedWorker(compiled, persistent=True,
+    with DistributedWorker(compiled, persistent=True, reset_persistent_windows=False,
                            window_sources={"engram_l1": shard_files}) as worker:
         worker(...)  # 创建通信域、加载文件，然后提交 chip 任务
         worker(...)  # 复用已加载的 Host 域
@@ -236,6 +236,7 @@ PyPTO 接入 Simpler #2939 的创建时 initializer，从文件偏移零开始�
 未启用 `persistent=True` 时，每次派发都会创建并初始化新域，因此文件须保持打开。
 worker 创建时固定来源映射与文件列表，修改原来的字典或列表不会重新加载持久表；更新数据需创建新 worker。
 
-持久执行的复用校验包含内存来源、工作区引擎和初始化绑定。Host 窗口始终保留内容，
-不受 `reset_persistent_windows` 影响；Device scratch/signal buffer 保持原有重置策略，默认复用前清零。
-通信域仍由 Simpler 负责释放。
+持久执行的复用校验包含内存来源、工作区引擎和初始化绑定。Host 与 Device 窗口遵循相同策略：
+`persistent=True` 保留分配，`reset_persistent_windows` 控制复用前是否清零（默认开启）。
+清零后不会重新执行初始化。若要保留已加载的 Engram 表，设置 `reset_persistent_windows=False`；
+这也会关闭 Device scratch/signal buffer 的重置，其状态须由调用者管理。通信域仍由 Simpler 负责释放。
