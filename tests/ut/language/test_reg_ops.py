@@ -18,6 +18,19 @@ from pypto.ir.printer import python_print
 from pypto.language.parser import ParserError
 
 
+def test_dynamic_active_mask_roundtrip():
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec], count: pl.Scalar[pl.INDEX]):
+        with pl.reg_scope():
+            mask = pl.reg.active_mask(count, lanes=64)
+            value = pl.reg.load(src, lanes=64)
+            _out = pl.reg.store(src, value=value, mask=mask)
+
+    printed = python_print(kernel, format=False)
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
+
+
 def test_reg_region_roundtrip():
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
@@ -172,6 +185,24 @@ def test_raw_reg_defaults_roundtrip(op_name, kwargs):
     original = function.get_result()
     restored = pl.parse(python_print(original, format=False))
     ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
+
+
+def test_bf16_rounding_and_reduction_broadcast_roundtrip():
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]):
+        with pl.reg_scope():
+            full = pl.reg.full_mask(lanes=64)
+            value = pl.reg.load(src, lanes=64)
+            bf = pl.reg.convert(value, dtype=pl.BF16, saturate=False)
+            widened = pl.reg.convert(bf, dtype=pl.FP32)
+            total = pl.reg.reduce_sum(widened, full, reassoc=True)
+            broadcast = pl.reg.broadcast(total, lanes=64, dtype=pl.FP32)
+            out = pl.reg.store(src, value=broadcast)
+        _consumer = pl.tile.add(out, out)
+
+    printed = python_print(kernel, format=False)
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(kernel, restored, enable_auto_mapping=True)
 
 
 def test_raw_same_dtype_convert_roundtrip():

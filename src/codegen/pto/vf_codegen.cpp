@@ -99,10 +99,16 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   if (!operands.loops.empty()) {
     for (const auto& loop : operands.loops) {
       const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
-      CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && loop->iter_args_.empty() &&
-                     stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
+      CHECK_SPAN(loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require && stop_type &&
+                     (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
                  loop->span_)
-          << "VF hardware loop lowering requires canonical integer loops without loop-carried values";
+          << "VF hardware loop lowering requires canonical integer loops";
+      // Register/mask carries remain inside the VF. Tile carries would need
+      // capture alias/effect analysis across iterations and are not admitted.
+      for (const auto& arg : loop->iter_args_) {
+        CHECK_SPAN(ir::As<ir::RegType>(arg->GetType()), loop->span_)
+            << "VF hardware loops support register or mask loop-carried values only";
+      }
     }
   }
 

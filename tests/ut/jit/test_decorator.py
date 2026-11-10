@@ -7947,5 +7947,120 @@ class TestRuntimeSizedLocalExtents:
         assert not dim.synthesized
 
 
+@pytest.mark.parametrize(("mode", "width"), [(True, 512), (False, 256)])
+def test_constexpr_branch_specializes_return_type(mode, width):
+    @jit.inline
+    def select(a: pl.Tensor, b: pl.Tensor, MODE: pl.constexpr):
+        if MODE:
+            return a
+        else:
+            return b
+
+    @jit
+    def entry(a: pl.Tensor[[8, 512], pl.UINT8], b: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+        result = select(a, b, MODE)
+        return result
+
+    program = entry.specialize(MODE=mode)
+    callee = program.get_function("select")
+    caller = program.get_function("entry")
+    assert callee is not None and caller is not None
+    expected = ir.TensorType([8, width], DataType.UINT8)
+    ir.assert_structural_equal(callee.return_types[0], expected)
+    assert isinstance(callee.body, ir.ReturnStmt)
+    ir.assert_structural_equal(callee.body.value[0].type, expected)
+    assert isinstance(caller.body, ir.SeqStmts)
+    returned = next(stmt for stmt in caller.body if isinstance(stmt, ir.ReturnStmt))
+    ir.assert_structural_equal(returned.value[0].type, expected)
+
+
+def test_constexpr_branch_return_metadata_reaches_following_helper():
+    @jit.inline
+    def select(a: pl.Tensor, b: pl.Tensor, MODE: pl.constexpr):
+        if MODE:
+            return a
+        else:
+            return b
+
+    @jit.inline
+    def flatten(x: pl.Tensor):
+        return pl.reshape(x, [2048])
+
+    @jit
+    def entry(a: pl.Tensor[[8, 512], pl.UINT8], b: pl.Tensor[[8, 256], pl.UINT8], MODE: pl.constexpr):
+        chosen = select(a, b, MODE)
+        return flatten(chosen)
+
+    flatten_fn = entry.specialize(MODE=False).get_function("flatten")
+    assert flatten_fn is not None
+    ir.assert_structural_equal(flatten_fn.params[0].type, ir.TensorType([8, 256], DataType.UINT8))
+    with pytest.raises(InvalidOperationError, match="cannot reshape"):
+        entry.specialize(MODE=True)
+
+
+@pytest.mark.parametrize("mode", [True, False])
+def test_constexpr_branch_preserves_yield_binding(mode):
+    @jit
+    def entry(a: pl.Tensor[[8, 64], pl.FP32], b: pl.Tensor[[8, 64], pl.FP32], MODE: pl.constexpr):
+        if MODE:
+            result = pl.yield_(a)
+        else:
+            result = pl.yield_(b)
+        return result
+
+    program = entry.specialize(MODE=mode)
+    PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    fn = program.get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    binding = next(stmt for stmt in fn.body if isinstance(stmt, ir.AssignStmt))
+    assert returned.value[0] is binding.var
+    assert binding.value is fn.params[0 if mode else 1]
+
+
+@pytest.mark.parametrize(
+    ("mode", "width", "dtype"), [(True, 512, DataType.UINT8), (False, 256, DataType.FP32)]
+)
+def test_constexpr_branch_prunes_inactive_yield_type(mode, width, dtype):
+    @jit
+    def entry(a: pl.Tensor[[8, 512], pl.UINT8], b: pl.Tensor[[8, 256], pl.FP32], MODE: pl.constexpr):
+        if MODE:
+            result = pl.yield_(a)
+        else:
+            result = pl.yield_(b)
+        return result
+
+    program = entry.specialize(MODE=mode)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.TypeChecked)
+    assert not passes.PropertyVerifierRegistry.verify(properties, program)
+    PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    fn = program.get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    ir.assert_structural_equal(returned.value[0].type, ir.TensorType([8, width], dtype))
+
+
+@pytest.mark.parametrize("mode", [True, False])
+def test_constexpr_branch_preserves_multiple_yield_results(mode):
+    @jit
+    def entry(a: pl.Tensor[[8, 64], pl.FP32], b: pl.Tensor[[8, 128], pl.FP32], MODE: pl.constexpr):
+        if MODE:
+            first, second = pl.yield_(a, b)
+        else:
+            with pl.scope(mode=pl.ScopeMode.MANUAL):
+                first, second = pl.yield_(b, a)
+        return first, second
+
+    program = entry.specialize(MODE=mode)
+    PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    fn = program.get_function("entry")
+    assert fn is not None and isinstance(fn.body, ir.SeqStmts)
+    returned = next(stmt for stmt in fn.body if isinstance(stmt, ir.ReturnStmt))
+    widths = [64, 128] if mode else [128, 64]
+    for value, width in zip(returned.value, widths, strict=True):
+        ir.assert_structural_equal(value.type, ir.TensorType([8, width], DataType.FP32))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

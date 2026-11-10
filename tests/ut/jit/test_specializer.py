@@ -3646,6 +3646,67 @@ class TestInlineTupleTileAnnotations:
         ir.assert_structural_equal(func.params[0].type, ir.TupleType([ir.TileType([8, 64], DataType.FP32)]))
 
 
+@pytest.mark.parametrize("mode", [0, 1, 2])
+def test_constexpr_branch_discards_incompatible_dead_tile_store(mode):
+    """The inactive FP8 publication branch cannot store 512 bytes into FP4 output."""
+
+    width = (256, 1024, 512)[mode]
+    ctx = _make_ctx(
+        "publish",
+        f"""
+        def publish(out: pl.Tensor[[8, {width}], pl.UINT8], MODE: pl.constexpr):
+            if MODE == 2:
+                wide = pl.tile.full([1, 512], dtype=pl.UINT8, value=0)
+                pl.store(wide, [0, 0], out)
+            elif MODE == 1:
+                extra_wide = pl.tile.full([1, 1024], dtype=pl.UINT8, value=0)
+                pl.store(extra_wide, [0, 0], out)
+            else:
+                narrow = pl.tile.full([1, 256], dtype=pl.UINT8, value=0)
+                pl.store(narrow, [0, 0], out)
+            return out
+        """,
+        func_type="inline",
+        param_names=["out", "MODE"],
+        tensor_meta={"out": TensorMeta((8, width), DataType.UINT8)},
+        auto_scope=False,
+    )
+    ctx.py_globals = {"pl": pl}
+    ctx.constexpr_values = {"MODE": str(mode)}
+    source = specialize("_TestClass", [ctx])
+    tree = ast.parse(source)
+    # Constants must prune before type deduction, not only in later IR passes.
+    assert not any(isinstance(node, ast.If) for node in ast.walk(tree))
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert names & {"wide", "extra_wide", "narrow"} == {("narrow", "extra_wide", "wide")[mode]}
+    _specialized_function(ctx, source)
+
+
+def test_runtime_condition_remains_an_ir_branch():
+    tree = ast.parse("if count == 2:\n    x = 1\nelse:\n    x = 3\n")
+    transformed = BodyTransformer({}, set(), param_names=["count"]).visit(tree)
+    assert any(isinstance(node, ast.If) for node in ast.walk(transformed))
+
+
+@pytest.mark.parametrize(
+    ("mode", "condition", "taken"),
+    [
+        (False, "MODE", False),
+        (True, "MODE", True),
+        (-1, "MODE", True),
+        (-0.5, "MODE == -0.5", True),
+        (-1, "+1 == MODE", False),
+    ],
+)
+def test_constexpr_branch_rebinding_survives_specialization(mode, condition, taken):
+    source = f"def select():\n    x = 1\n    if {condition}:\n        x = 2\n    return x\n"
+    tree = BodyTransformer({}, set(), constexpr_values={"MODE": str(mode)}).visit(ast.parse(source))
+    assert not any(isinstance(node, ast.If) for node in ast.walk(tree))
+    namespace: dict[str, Any] = {}
+    exec(compile(ast.fix_missing_locations(tree), "<specialized>", "exec"), namespace)
+    assert namespace["select"]() == (2 if taken else 1)
+
+
 @pytest.mark.parametrize("iterations", [0, 4])
 def test_jit_while_graph_capture_becomes_taskid_carry(iterations):
     """Native SSA carries completion; full codegen rejects orchestration while."""
@@ -4248,8 +4309,8 @@ def test_jit_constexpr_selected_branch_preserves_folded_shape(selected, inactive
     ctx.constexpr_values = {"enabled": str(selected), "mode": "0" if selected else "1"}
     function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
     assert function is not None
-    assert isinstance(function.body, ir.SeqStmts)
-    returned = function.body.stmts[-1]
+    body = function.body
+    returned = body.stmts[-1] if isinstance(body, ir.SeqStmts) else body
     assert isinstance(returned, ir.ReturnStmt)
     (value,) = returned.value
     assert isinstance(value.type, ir.TensorType)

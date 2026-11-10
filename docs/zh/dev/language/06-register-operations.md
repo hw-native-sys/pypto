@@ -28,6 +28,10 @@ def kernel(
 位于 AIV 函数内。禁止直接在调度代码中使用，也禁止在 RegScope 内嵌套调度作用域。
 显式配置非 A5 目标时拒绝；尚未选定目标时，目标检查延迟到编译阶段。
 
+内联 helper 可以包含 `reg_scope` 并接收显式标注的 Vec Tile。展开时继承调用方的
+执行上下文，最终仍必须位于 AIV。寄存器值不能跨越 helper 边界，应返回由
+`reg.store` 写入的 Tile。
+
 `pl.Reg[lanes, dtype]` 表示向量寄存器（VecReg）。
 `pl.Reg[lanes, pl.BOOL, pl.RegKind.MaskReg]` 表示谓词掩码（MaskReg）。
 第三个可选类型注解参数为寄存器种类，默认为 `pl.RegKind.VecReg`。
@@ -95,10 +99,10 @@ offset 以**元素**计，不是字节。静态 offset 必须非负，完整的
 
 | API 签名 | 参数与行为 | 返回值 | Dtype |
 | -------- | ---------- | ------ | ----- |
-| `broadcast(scalar, *, lanes, dtype)` | 将 `scalar` 广播到所有 lane。scalar dtype 必须等于 `dtype`。 | VecReg | `T` |
+| `broadcast(scalar, *, lanes, dtype)` | 将标量或单 lane VecReg 广播到所有 lane。输入 dtype 必须等于 `dtype`。 | VecReg | `T` |
 | `index_gen(base, *, lanes, dtype, order="ascending")` | `base` 为标量起始值；第 `i` 个 lane 为 `base + i`。`order` 仅支持 `"ascending"`。base dtype 必须等于 `dtype`。 | VecReg | `F + I`；类型推导时即拒绝 BF16，不进入 codegen |
 | `full_mask(*, lanes)` | 激活所有逻辑 lane。 | BOOL MaskReg | BOOL |
-| `active_mask(active_lanes, *, lanes)` | 激活前缀 `[0, active_lanes)`。`active_lanes` 必须是 `[0, lanes]` 内的静态 INDEX 整数；零产生全 false 掩码，不支持动态数量。 | BOOL MaskReg | BOOL |
+| `active_mask(active_lanes, *, lanes)` | 使用静态或运行时 INDEX 数量激活前缀 `[0, active_lanes)`。常量检查范围 `[0, lanes]`；运行时数量由调用者保证在该范围内。零产生全 false 掩码，输入数量保持不变。 | BOOL MaskReg | BOOL |
 
 ## 向量算术
 
@@ -225,7 +229,10 @@ with pl.reg_scope():
 | 源类型 | 目标类型 | `rounding` | `saturate` |
 | ------ | -------- | ---------- | ---------- |
 | FP16 | FP32 | 必须省略 | 必须省略 |
+| BF16 | FP32 | 必须省略 | 必须省略 |
 | FP32 | FP16 | R/A/Z；DSL 默认 R | 必需：True 或 False |
+| FP32 | BF16 | R/A/Z；DSL 默认 R | 必需：True 或 False |
+| FP32 | FP8E4M3FN | R/A/Z；DSL 默认 R | 必需：True 或 False |
 | FP32 | INT32 | R/A/F/C/Z；DSL 默认 Z | 必需：True 或 False |
 | INT32 | FP32 | 必须省略 | 必须省略 |
 | INT8 | FP16 | 必须省略 | 必须省略 |
@@ -239,8 +246,12 @@ R 为最近偶数舍入；A 为远离零舍入；F 为向负无穷舍入；C 为
 Z 为向零舍入。FP32→FP16 收窄不支持 H 模式，会在 codegen 前拒绝。
 `saturate=True` 表示饱和转换，限制到目标类型范围；`saturate=False` 表示非饱和转换。
 同 dtype 的 DSL 转换在两个可选属性均省略时返回原寄存器。
-其余 dtype 转换对均拒绝，包括 BF16 转换。原始 IR/Builder 调用必须在要求舍入属性
+其余 dtype 转换对均拒绝。原始 IR/Builder 调用必须在要求舍入属性
 的转换中显式传入归一化后的 rounding；上表默认值由 DSL 封装提供。
+
+FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
+`interpret_cast(result, dtype=pl.UINT8)` 可通过整数 Tile 写出原始字节。
+该转换不开放 FP8 算术、直接寄存器加载/存储或反向数值转换。
 
 ## 扩展 VMI 操作
 

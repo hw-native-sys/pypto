@@ -103,7 +103,8 @@ Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用及一般 
 ## Required hardware loops
 
 A5 PTO codegen 支持 `pl.reg_scope()` 内的规范 `pl.hardware_loop(stop)`，
-最多嵌套四层，不支持 loop-carried value。`start` 固定为 0，`step` 固定为 1。
+最多嵌套四层。VF helper 可在迭代间携带 VecReg 和 MaskReg；不支持携带 Scalar、Tile
+和 Tensor。`start` 固定为 0，`step` 固定为 1。
 整数 stop 可以是静态或动态值。标量捕获 ABI 支持有符号和无符号的 8、16、32、64 位整数以及 index 值。
 对于非空循环，只有在静态算出的 stop 超过 65535 时才拒绝。静态求值在能够证明结果时遵循结果 dtype 的语义，
 包括窄位宽无符号整数的回绕。无法证明范围的 stop 继续放行；

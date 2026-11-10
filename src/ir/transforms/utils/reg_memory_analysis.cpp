@@ -139,7 +139,11 @@ class InitializationChecker : public IRVisitor {
     if (IsOp(call, "reg.full_mask")) {
       masks_[stmt->var_.get()] = As<RegType>(stmt->var_->GetType())->shape_;
     } else if (IsOp(call, "reg.active_mask")) {
-      masks_[stmt->var_.get()] = As<ConstInt>(call->args_[0])->value_;
+      // Runtime counts may be zero, so they establish no definite initialized
+      // prefix. Keep them unknown instead of assuming a constant operand.
+      if (auto active = As<ConstInt>(call->args_[0])) {
+        masks_[stmt->var_.get()] = active->value_;
+      }
     }
     if (IsOp(call, "tile.create") || IsOp(call, "reg.store") || IsOp(call, "reg.scatter") ||
         op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {

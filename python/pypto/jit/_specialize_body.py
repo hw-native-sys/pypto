@@ -908,6 +908,36 @@ class BodyTransformer(ast.NodeTransformer):
         node.orelse = self._visit_scoped_body(node.orelse)
         return node
 
+    @staticmethod
+    def _is_attribute_call(expr: ast.expr | None, name: str) -> bool:
+        return isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == name
+
+    @classmethod
+    def _lower_if_yields(cls, statements: list[ast.stmt]) -> None:
+        """Turn the selected arm's explicit results into ordinary assignments."""
+        for stmt in statements:
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                value = stmt.value
+                if not isinstance(value, ast.Call) or not cls._is_attribute_call(value, "yield_"):
+                    continue
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) != 1:
+                    continue
+                target = stmt.targets[0] if isinstance(stmt, ast.Assign) else stmt.target
+                if isinstance(target, ast.Tuple) and len(target.elts) == len(value.args):
+                    stmt.value = ast.copy_location(ast.Tuple(elts=value.args, ctx=ast.Load()), value)
+                elif isinstance(target, ast.Name) and len(value.args) == 1:
+                    stmt.value = value.args[0]
+            # These parser scopes are transparent to the enclosing if's yields.
+            # Nested ifs and real loops keep ownership of their own yields.
+            elif isinstance(stmt, ast.With) and any(
+                cls._is_attribute_call(item.context_expr, name)
+                for item in stmt.items
+                for name in ("scope", "manual_scope")
+            ):
+                cls._lower_if_yields(stmt.body)
+            elif isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
+                cls._lower_if_yields(stmt.body)
+
     def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
         """Transform a constexpr-dead branch without publishing its bindings."""
         state = (
@@ -926,7 +956,13 @@ class BodyTransformer(ast.NodeTransformer):
             self._meta, self._shape_inlined, self._assign_count, self._assign_depth, self._var_renames = state
             self._graph_captures = graph_captures
 
-    def visit_If(self, node: ast.If) -> ast.stmt:
+    def _visit_literal_if(self, node: ast.If, condition: bool) -> list[ast.stmt]:
+        """Emit only the live arm, binding explicit results without an IfStmt."""
+        selected = node.body if condition else node.orelse
+        self._lower_if_yields(selected)
+        return self._visit_scoped_body(selected)
+
+    def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:
         """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
         A name first-assigned inside the then-branch is branch-local: the
@@ -942,16 +978,16 @@ class BodyTransformer(ast.NodeTransformer):
         (``exit_scope(leak_vars=True)``) and ConvertToSSA, as for ``@pl.program``.
         """
         node.test = self.visit(node.test)
-        self._scope_depth += 1
-        selected = _constant_condition(node.test)
-        if selected is not None and any(
+        capture_condition = _constant_condition(node.test)
+        if capture_condition is not None and any(
             isinstance(item, ast.withitem) and isinstance(item.optional_vars, ast.Name)
             for stmt in (*node.body, *node.orelse)
             for item in ast.walk(stmt)
         ):
             # Keep both bodies for the parser's yield handling. Isolate the
             # inactive capture so it cannot overwrite the live binding.
-            if selected:
+            self._scope_depth += 1
+            if capture_condition:
                 if node.orelse:
                     node.orelse = self._visit_inactive_branch(node.orelse)
                 node.body = self._visit_scoped_body(node.body)
@@ -962,6 +998,10 @@ class BodyTransformer(ast.NodeTransformer):
             self._scope_depth -= 1
             return node
 
+        condition = values.literal_condition(node.test)
+        if condition is not None:
+            return self._visit_literal_if(node, condition)
+        self._scope_depth += 1
         before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)
         if node.orelse:
