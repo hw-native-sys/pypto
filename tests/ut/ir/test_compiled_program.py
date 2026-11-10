@@ -1848,18 +1848,28 @@ def test_parameter_metadata_rejects_invalid_shape_provenance(value):
         _param_info_from_dict(payload)
 
 
-@pytest.mark.parametrize("declared", [[2, 4, 256, 512], [8, 16, 16, 16, 32]])
-def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path, declared):
+@pytest.mark.parametrize("pre_lowered", [False, True])
+def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path, pre_lowered):
     """Live and reloaded artifacts retain the NZ layout needed by argument binding."""
+    from pypto.pypto_core import passes  # noqa: PLC0415
+
     span = ir.Span.unknown()
-    tensor_type = ir.TensorType(declared, DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ))
+    tensor_type = ir.TensorType(
+        [2, 4, 256, 512], DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ)
+    )
     param = ir.Var("w", tensor_type, span)
     func = ir.Function("main", [param], [], ir.ReturnStmt([], span), span, ir.FunctionType.Orchestration)
-    live = CompiledProgram(ir.Program([func], "Nz", span), str(tmp_path), platform="a2a3sim")
+    program = ir.Program([func], "Nz", span)
+    if pre_lowered:
+        # Use actual pass output, including its provenance marker, rather than
+        # constructing a rank-five logical signature that only looks blocked.
+        program = passes.block_nz_tensor_views()(program)
+    live = CompiledProgram(program, str(tmp_path), platform="a2a3sim")
     restored = CompiledProgram.from_dir(tmp_path)
     for cp in (live, restored):
         infos, _, _ = cp._get_metadata()
         assert infos[0].layout == "NZ"
+        assert infos[0].shape_is_lowered is pre_lowered
         assert _validate_device_tensor(DeviceTensor(0x1000, (2, 4, 256, 512), torch.int8), infos[0]) is None
 
 

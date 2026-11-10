@@ -240,7 +240,7 @@ def test_kernel_rejects_hbg_host_data_access_but_program_compiles(tmp_path):
 @pytest.mark.parametrize("pre_lowered", [False, True])
 def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path, pre_lowered):
     from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
-    from pypto.ir.compile import _compile_artifact  # noqa: PLC0415
+    from pypto.ir.compile import _compile_artifact, _run_pass_pipeline  # noqa: PLC0415
 
     @pl.program
     class NzMatmul:
@@ -260,7 +260,9 @@ def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path, pre_lowered
 
     # A compilation input may already carry the blocked signature. Re-running
     # compilation must neither call it logical nor block it a second time.
-    source = passes.block_nz_tensor_views()(NzMatmul) if pre_lowered else NzMatmul
+    source = (
+        _run_pass_pipeline(NzMatmul, operation="lower").transformed_program if pre_lowered else NzMatmul
+    )
     kernel = _compile_artifact(
         source, output_dir=str(tmp_path), skip_ptoas=True, contract=ArtifactExecutionMode.KERNEL
     )
