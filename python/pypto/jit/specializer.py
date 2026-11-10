@@ -1711,8 +1711,10 @@ def _infer_tuple_return_type(  # noqa: PLR0913
     has_bare_element = False
     for index, elt in enumerate(return_elts):
         inferred = return_metas[index] if return_metas and len(return_metas) == len(return_elts) else None
-        if inferred is not None and not (isinstance(elt, ast.Name) and elt.id in tensor_meta):
-            elt_annotations.append(_build_tensor_annotation(inferred, is_out=False))
+        if inferred is not None:
+            elt_annotations.append(
+                _build_tensor_annotation(inferred, is_out=False, is_distributed=inferred.is_distributed)
+            )
         elif isinstance(elt, ast.Name) and elt.id in tensor_meta:
             elt_annotations.append(
                 _build_tensor_annotation(
@@ -1812,10 +1814,8 @@ def _infer_return_type(  # noqa: PLR0913
         return ast.unparse(_fold_const_names(func_def.returns, py_globals or {}))
 
     if return_node is not None and return_metas and len(return_metas) == 1 and return_metas[0] is not None:
-        value = return_node.value
-        return _build_tensor_annotation(
-            return_metas[0], is_out=False, is_distributed=isinstance(value, ast.Name) and value.id in dist_set
-        )
+        result = return_metas[0]
+        return _build_tensor_annotation(result, is_out=False, is_distributed=result.is_distributed)
 
     # `return f(...)`: the result type depends on f's declared return types,
     # which we don't have here. Emit no annotation rather than wrongly assuming

@@ -671,6 +671,29 @@ def test_returned_submit_projection_uses_rebound_tuple():
     assert returned.metas[task_id] is None
 
 
+@pytest.mark.parametrize("local_alias", [False, True])
+def test_submit_preserves_distributed_writeback_result(local_alias):
+    @pl.jit.incore
+    def direct(x: pl.Tensor, window: pl.InOut[pld.DistributedTensor]):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], window)
+
+    @pl.jit.incore
+    def indirect(x: pl.Tensor, window: pl.InOut[pld.DistributedTensor]):
+        stored = pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], window)
+        return stored
+
+    kernel = indirect if local_alias else direct
+
+    @pl.jit
+    def entry(x: pl.Tensor, window: pl.InOut[pld.DistributedTensor]):
+        result, _ = pl.submit(kernel, x, window)
+        return result
+
+    (launch,) = _submissions(entry.specialize(torch.empty(16, 32), torch.empty(16, 32)))
+    assert isinstance(launch.type, ir.TupleType)
+    assert isinstance(launch.type.types[0], ir.DistributedTensorType)
+
+
 def test_distributed_eager_annotation_keeps_its_kind_with_constexpr():
     source = ast.parse("pld.DistributedTensor[[16, WIDTH], pl.FP32]", mode="eval").body
     eager = pld.DistributedTensor[[16, 64], pl.FP32]

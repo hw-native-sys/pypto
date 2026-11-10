@@ -76,6 +76,9 @@ class TensorMeta:
     # it without asserting equality with the parent bound.
     runtime_dims: dict[int, DynDim] = field(default_factory=dict[int, DynDim], compare=False, repr=False)
 
+    # The result ABI distinguishes a window descriptor from a plain Tensor.
+    is_distributed: bool = False
+
     def actual_dim(self, axis: int) -> ShapeDim | None:
         """Return a proven static/symbolic extent, never an inexact fallback bound."""
         if axis in self.inexact_axes:

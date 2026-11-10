@@ -157,6 +157,7 @@ _TensorSeedKey = tuple[
     _ir.TensorLayout | None,
     frozenset[int],
     tuple[tuple[int, int, DynDim], ...],
+    bool,
 ]
 
 
@@ -188,7 +189,7 @@ def _tensor_seed_key(meta: TensorMeta) -> _TensorSeedKey:
     # this metadata walk. An equal-valued but unrelated DynDim is distinct.
     shape = tuple((id(dim), dim) if isinstance(dim, DynDim) else dim for dim in meta.shape)
     runtime = tuple((axis, id(dim), dim) for axis, dim in sorted(meta.runtime_dims.items()))
-    return shape, meta.dtype, meta.layout, meta.inexact_axes, runtime
+    return shape, meta.dtype, meta.layout, meta.inexact_axes, runtime, meta.is_distributed
 
 
 _SubmitTupleMeta = tuple[TensorMeta | None, ...]
@@ -522,6 +523,13 @@ def _summarize_dep_results(
     elements = site.value.elts if isinstance(site.value, ast.Tuple) else [site.value]
     return_meta = _ReturnMeta(site, elements) if track_returns else None
     _validate_dep_packed_fp4_dtypes(dep, seed_meta, constexpr)
+    _, _, tensors, _, distributed = _classify_params(func_def)
+    seed_meta = {
+        name: replace(meta, is_distributed=name in distributed)
+        if name in tensors and meta.is_distributed != (name in distributed)
+        else meta
+        for name, meta in seed_meta.items()
+    }
     callee_metas = extract_local_tensor_metas(
         dep._func,
         seed_meta=seed_meta,
@@ -1146,7 +1154,13 @@ def _declared_dim_values(
 
 def _merge_tensor_metas(lhs: TensorMeta | None, rhs: TensorMeta | None) -> TensorMeta | None:
     """Merge equal tensor types without losing known layout or dynamic-axis identity."""
-    if lhs is None or rhs is None or lhs.shape != rhs.shape or lhs.dtype != rhs.dtype:
+    if (
+        lhs is None
+        or rhs is None
+        or lhs.shape != rhs.shape
+        or lhs.dtype != rhs.dtype
+        or lhs.is_distributed != rhs.is_distributed
+    ):
         return None
     # An omitted annotation layout spells ND, not an arbitrary layout wildcard.
     lhs_layout = _ir.TensorLayout.ND if lhs.layout is None else lhs.layout
@@ -2333,6 +2347,7 @@ def extract_local_tensor_metas(
         return TensorMeta(
             shape=shape,
             dtype=dtype_val,
+            is_distributed=True,
             inexact_axes=_shape_inexact_axes(
                 scope.fold(_call_operand(call, 1, "shape")), shape, resolve_slice_int
             ),
