@@ -1077,3 +1077,60 @@ def test_submit_uses_call_site_metadata_with_an_external_dependency(tmp_path):
     (launch,) = _submissions(program)
     assert isinstance(launch.type, ir.TupleType)
     assert ir.structural_equal(launch.type.types[0], ir.TensorType([16, 32], pl.FP32))
+
+
+@pytest.mark.parametrize("spmd", [False, True])
+@pytest.mark.parametrize("unpack", [False, True])
+def test_submitted_external_projects_public_results_and_task_id(tmp_path, spmd, unpack):
+    native = tmp_path / "submit_external.cpp"
+    native.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+
+    @pl.jit.extern(source=native, core_type="aiv")
+    def kernel(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.Out[pl.Tensor]):
+        return out
+
+    @pl.jit.incore
+    def consume(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    if spmd and unpack:
+
+        @pl.jit
+        def entry(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.Out[pl.Tensor]):
+            result, done = pl.spmd_submit(kernel, x, state, out, core_num=2)
+            value, finish = pl.submit(consume, result, out, deps=[done])
+            return value
+
+    elif spmd:
+
+        @pl.jit
+        def entry(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.Out[pl.Tensor]):
+            launch = pl.spmd_submit(kernel, x, state, out, core_num=2)
+            done = launch[1]
+            value, finish = pl.submit(consume, launch[0], out, deps=[done])
+            return value
+
+    elif unpack:
+
+        @pl.jit
+        def entry(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.Out[pl.Tensor]):
+            result, done = pl.submit(kernel, x, state, out)
+            value, finish = pl.submit(consume, result, out, deps=[done])
+            return value
+
+    else:
+
+        @pl.jit
+        def entry(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.Out[pl.Tensor]):
+            launch = pl.submit(kernel, x, state, out)
+            done = launch[1]
+            value, finish = pl.submit(consume, launch[0], out, deps=[done])
+            return value
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(4, 32), torch.empty(16, 32))
+    external, consumer = _submissions(program)
+    assert isinstance(external.type, ir.TupleType)
+    assert ir.structural_equal(external.type.types[0], ir.TensorType([4, 32], pl.FP32))
+    assert ir.structural_equal(external.type.types[1], ir.TensorType([16, 32], pl.FP32))
+    assert external.core_num is not None if spmd else external.core_num is None
+    assert len(consumer.deps) == 1

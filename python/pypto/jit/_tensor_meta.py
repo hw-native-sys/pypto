@@ -356,7 +356,10 @@ def _dep_out_metas(
     if dep is not None and dep._func_type == "extern" and len(names) == 1:
         definition = _ast_analysis.get_func_def(dep._func)
         outputs, inouts, _, _, _ = _classify_params(definition)
-        if not outputs:
+        if outputs:
+            # A signature-only single-result extern exposes its first Out.
+            out_params = outputs[:1]
+        else:
             out_params = (
                 _legacy_inout_return_params(definition, inouts, func_name_lookup(dep._func)) or out_params
             )
@@ -1262,14 +1265,16 @@ def _submitted_value_metas(
     # of results. The caller's trailing TaskId must stay in the next slot.
     if isinstance(annotation, _LangTuple):
         return (None,)
-    if dep._func_type != "extern":
-        results = _dep_result_metas(call, dep_name, deps, local, arity=None, submitted=True)
-        if results is not None:
-            return results.metas
+    results = _dep_result_metas(call, dep_name, deps, local, arity=None, submitted=True)
+    if results is not None:
+        return results.metas
     declared = _declared_return_count(annotation)
-    count = (
-        declared if declared is not None else len(deps.io[dep_name][1]) if dep._func_type == "extern" else 0
+    definition = _ast_analysis.get_func_def(dep._func)
+    outputs, inouts, _, _, _ = _classify_params(definition)
+    legacy_single = dep._func_type == "extern" and (
+        bool(outputs) or bool(_legacy_inout_return_params(definition, inouts, func_name_lookup(dep._func)))
     )
+    count = declared if declared is not None else int(legacy_single)
     names = [f"_submit_value_{index}" for index in range(count)]
     if not names:
         return ()
@@ -1429,7 +1434,12 @@ def _update_local_tensor_meta(
             )
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # Ordinary call metadata keeps the legacy writable-operand convention.
-            exact_result = return_meta is not None and return_meta.site is not None and has_named_target
+            exact_result = (
+                return_meta is not None
+                and return_meta.site is not None
+                and has_named_target
+                and deps.funcs[fn.id]._func_type != "extern"
+            )
             meta = resolve_expr(value) if exact_result and resolve_expr is not None else None
             dep_returns = (
                 dep_returns

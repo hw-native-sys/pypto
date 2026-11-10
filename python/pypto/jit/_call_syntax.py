@@ -27,6 +27,18 @@ SUBMIT_DISPATCH_KEYWORDS = frozenset(
 )
 
 
+def submit_target(node: ast.Call) -> ast.expr | None:
+    if (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+        and node.func.attr in {"submit", "spmd_submit"}
+        and node.args
+    ):
+        return node.args[0]
+    return None
+
+
 def dependency_call(node: ast.AST) -> ast.Call | None:
     """View a bare call or a DSL submission as a call to its JIT dependency.
 
@@ -38,23 +50,17 @@ def dependency_call(node: ast.AST) -> ast.Call | None:
         return None
     if isinstance(node.func, ast.Name):
         return node
-    if (
-        isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "pl"
-        and node.func.attr in {"submit", "spmd_submit"}
-        and node.args
-        and isinstance(node.args[0], ast.Name)
-    ):
-        return ast.copy_location(
-            ast.Call(
-                func=node.args[0],
-                args=node.args[1:],
-                keywords=[kw for kw in node.keywords if kw.arg not in SUBMIT_DISPATCH_KEYWORDS],
-            ),
-            node,
-        )
-    return None
+    target = submit_target(node)
+    if not isinstance(target, ast.Name):
+        return None
+    return ast.copy_location(
+        ast.Call(
+            func=target,
+            args=node.args[1:],
+            keywords=[kw for kw in node.keywords if kw.arg not in SUBMIT_DISPATCH_KEYWORDS],
+        ),
+        node,
+    )
 
 
 def call_operand(call: ast.Call, index: int | None, name: str) -> ast.expr | None:
