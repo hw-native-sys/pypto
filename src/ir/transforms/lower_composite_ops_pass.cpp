@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -249,6 +250,13 @@ class LowerCompositeOpsMutator : public IRMutator {
 /// own rail: LowerHostTensorCollectives for HOST, LowerL2TensorCollectives for
 /// CHIP. Only an InCore body still expands here.
 FunctionPtr TransformLowerCompositeOps(const FunctionPtr& func) {
+  // Standalone callers may bypass TypeChecked instrumentation. Validate before
+  // the managed-collective deferral so CLUSTER_0 never silently retains one.
+  const auto context_errors = op_predicates::DistributedOpContextErrors(func);
+  if (!context_errors.empty()) {
+    throw pypto::ValueError(context_errors.front().first + " at " +
+                            context_errors.front().second.to_string());
+  }
   const bool skip_managed_collectives =
       func && (func->func_type_ == FunctionType::Orchestration ||
                (func->role_.has_value() && *func->role_ == Role::Orchestrator));

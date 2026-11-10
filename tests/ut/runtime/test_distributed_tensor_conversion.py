@@ -12,6 +12,7 @@
 import ctypes
 from types import SimpleNamespace
 
+import pytest
 import torch
 from pypto.runtime.distributed_runner import _tensor_from_continuous
 
@@ -56,13 +57,29 @@ def test_packed_fp4_mapped_arg_preserves_carrier_units_and_aliases():
     assert backing[4] == 0x98
 
 
-def test_legacy_data_pointer_remains_supported():
+@pytest.mark.parametrize("pointer_kind", ["integer", "c_void_p", "typed"])
+def test_legacy_data_pointer_remains_supported(pointer_kind):
     backing = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
-    arg = SimpleNamespace(data=ctypes.addressof(backing), shapes=(2, 2), dtype=_Float32())
+    address = ctypes.addressof(backing)
+    pointers = {
+        "integer": address,
+        "c_void_p": ctypes.c_void_p(address),
+        "typed": ctypes.cast(backing, ctypes.POINTER(ctypes.c_float)),
+    }
+    arg = SimpleNamespace(data=pointers[pointer_kind], shapes=(2, 2), dtype=_Float32())
 
     tensor = _tensor_from_continuous(arg)
 
     torch.testing.assert_close(tensor, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    tensor[1, 1] = 99
+    assert backing[3] == 99
+
+
+@pytest.mark.parametrize("pointer", [0, ctypes.c_void_p(), ctypes.POINTER(ctypes.c_float)()])
+def test_legacy_null_data_pointer_is_rejected(pointer):
+    arg = SimpleNamespace(data=pointer, shapes=(2, 2), dtype=_Float32())
+    with pytest.raises(TypeError, match="Legacy tensor.*non-null pointer"):
+        _tensor_from_continuous(arg)
 
 
 def test_unrecognized_arg_shape_fails_explicitly():

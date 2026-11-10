@@ -10,7 +10,7 @@
 """Unit tests for the DistTensorCtxMaterialized property verifier.
 
 ``MaterializeDistTensorCtx`` replaces every ``pld.system.get_comm_ctx`` outside
-host orchestration with the explicit ``CommCtxType`` parameter, because device
+HOST/CLUSTER_0 orchestration with the explicit ``CommCtxType`` parameter, because device
 and chip-orchestration codegen have no runtime representation for the query.
 The pass enforces that for every function it rewrites; this verifier checks the
 invariant independently, which also covers the Programs the pass returns
