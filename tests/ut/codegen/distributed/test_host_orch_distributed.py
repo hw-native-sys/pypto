@@ -2242,7 +2242,8 @@ def test_host_window_requests_urma_and_context():
     assert "memory_source=AddressSpace.HOST" in code
     assert 'workspace_engines=("urma",)' in code
     assert '__comm_d0.device_context(0, workspace_engines=("urma",))' in code
-    assert "validate_host_domain_runtime(orch)" in code
+    assert "host._requires_host_domain = True" in code
+    assert "validate_host_domain_runtime" not in code
 
 
 @pytest.mark.parametrize("key", ["engram_l1", 'table"\\\nkey'])

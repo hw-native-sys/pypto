@@ -183,7 +183,8 @@ pass 运行之后：
 
 Host 代码生成向 Simpler 请求 `AddressSpace.HOST` 和 `workspace_engines=("urma",)`，
 并获取带 URMA 工作区的各 rank 通信上下文。这要求 Simpler #2913 或更新版本，以及其支持的
-同机 A5 `tensormap_and_ringbuffer` 配置。旧运行时在分配前报错；平台和运行时组合由
+同机 A5 `tensormap_and_ringbuffer` 配置。运行时 API 能力在 worker 初始化加载入口时检查一次，
+需要初始化时也检查 `initializer` 参数；每次派发不再重复反射函数签名。平台和运行时组合由
 Simpler 校验。当前 runtime 子模块已提供此 API。
 
 所属 rank 可以通过设备映射的 tensor 进行本地访问。Host peer 窗口不是 MTE 映射，
@@ -191,7 +192,7 @@ Simpler 校验。当前 runtime 子模块已提供此 API。
 包括通过 chip/InCore 参数转发的情况。URMA 异步算子不被归类为 peer MTE。
 Host peer URMA 读取的执行接入仍是独立的后续工作。
 
-### 运行时文件初始化
+### 运行时来源初始化
 
 用 `pld.alloc_window_buffer(size, memory_source="host", init="engram_l1")` 声明运行时来源键。
 编译阶段仅记录键和逻辑字节数，不打开或读取文件。编译完成后，为每个域内 rank 绑定一个已打开的二进制文件：
@@ -212,6 +213,18 @@ with ExitStack() as stack:
 `init` 必须是非空字符串，且只支持 Host 窗口。`window_sources` 属于 worker 的运行时配置，
 也可传给 `compiled.prepare`。文件序列按**域内 rank 顺序**排列，包括只覆盖部分 worker 的域。
 缺失或未使用的来源键、错误的文件数量都会报错。
+
+同一映射也接受连续的 CPU `torch.Tensor`，可以混合文件与 tensor：
+`window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`。
+Tensor 从视图的存储偏移起按原始字节复制，不转换 dtype、不创建暂存副本，支持 BF16 和 FP8。
+非 CPU、非连续、稀疏、量化以及共轭或负值视图会被拒绝。来源至少包含窗口逻辑字节数，
+多余尾部字节被忽略。绑定保留 tensor 对象而非内容快照；创建域时才读取数据，因此派发完成前须保持来源稳定。
+
+Codegen 输出 `(buffer_name, init_key, logical_nbytes)` 绑定，并向固定的
+`make_window_initializer` helper 传入 worker 的来源映射。Helper 创建内部回调，
+由 Simpler 在所有 rank 映射就绪后调用。对每项绑定，将
+`window_sources[init_key][domain_rank]` 复制到相应命名 buffer，偏移由
+`domain.buffer_range(buffer_name)` 获取。不会根据文件句柄或 tensor 内容动态生成 Python 函数。
 
 PyPTO 接入 Simpler #2939 的创建时 initializer，从文件偏移零开始，分块直接读入对应命名 buffer
 的 Host 映射，并恢复文件原先的位置。只复制逻辑字节数，不改动对齐填充，忽略文件尾部多余字节。

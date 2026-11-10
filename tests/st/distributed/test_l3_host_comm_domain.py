@@ -99,7 +99,8 @@ def initialized_host_program(
 
 
 @pytest.mark.platforms("a5")
-def test_host_domain_runtime_file_initialization(test_config, device_ids, tmp_path):
+@pytest.mark.parametrize("source_kind", ["file", "tensor"])
+def test_host_domain_runtime_file_initialization(test_config, device_ids, tmp_path, source_kind):
     if len(device_ids) < 2:
         pytest.skip("Host initialization smoke test requires two A5 devices")
     expected = torch.arange(128, dtype=torch.float32).reshape(2, 1, 64)
@@ -117,14 +118,20 @@ def test_host_domain_runtime_file_initialization(test_config, device_ids, tmp_pa
     with ExitStack() as stack:
         sources = []
         for rank in range(2):
-            path = tmp_path / f"rank{rank}.bin"
-            path.write_bytes(expected[rank].numpy().tobytes())
-            sources.append(stack.enter_context(path.open("rb")))
+            if source_kind == "tensor":
+                sources.append(expected[rank].clone())
+            else:
+                path = tmp_path / f"rank{rank}.bin"
+                path.write_bytes(expected[rank].numpy().tobytes())
+                sources.append(stack.enter_context(path.open("rb")))
         with DistributedWorker(compiled, persistent=True, window_sources={"engram_l1": sources}) as worker:
             worker(outputs)
             assert torch.equal(outputs, expected)
             for source in sources:
-                source.close()
+                if isinstance(source, torch.Tensor):
+                    source.zero_()
+                else:
+                    source.close()
             outputs.zero_()
             worker(outputs)
             assert torch.equal(outputs, expected)

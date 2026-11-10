@@ -1891,6 +1891,28 @@ class TestLoadOrchEntry:
         assert entry_fn.__name__ == "moe_ep_l3"
         assert alloc_fn is None
 
+    @pytest.mark.parametrize("initialized", [False, True])
+    def test_host_capabilities_checked_at_load_not_dispatch(self, tmp_path, monkeypatch, initialized):
+        from pypto.runtime.distributed_runner import _load_orch_entry  # noqa: PLC0415
+
+        orch_type = object()
+        runtime = ModuleType("simpler.orchestrator")
+        setattr(runtime, "Orchestrator", orch_type)
+        monkeypatch.setitem(sys.modules, "simpler.orchestrator", runtime)
+        root = self._write_orch(
+            tmp_path,
+            "def host(orch, args, config, **kw):\n    return 'ok'\n"
+            "host._pypto_distributed_entry = True\n"
+            "host._requires_host_domain = True\n"
+            f"host._window_source_keys = {('table',) if initialized else ()!r}\n",
+        )
+        with patch("pypto.runtime.distributed_runner.validate_host_domain_runtime") as check:
+            entry, _ = _load_orch_entry(root)
+            check.assert_called_once_with(orch_type, initialized=initialized)
+            for _ in range(3):
+                assert entry(None, None, None) == "ok"
+            assert check.call_count == 1
+
     def test_returns_alloc_intermediates_when_present(self, tmp_path):
         from pypto.runtime.distributed_runner import _load_orch_entry  # noqa: PLC0415
 
@@ -3637,7 +3659,8 @@ class TestPersistentDistributedWorker:
         finally:
             rt.close()
 
-    def test_initialized_host_reuse_preserves_table_and_resets_device(self, patched_setup):
+    @pytest.mark.parametrize("tensor_source", [False, True])
+    def test_initialized_host_reuse_preserves_table_and_resets_device(self, patched_setup, tensor_source):
         from pypto.runtime.window_sources import make_window_initializer  # noqa: PLC0415
 
         m = patched_setup
@@ -3645,7 +3668,7 @@ class TestPersistentDistributedWorker:
         orch = _PersistentOrch(m["worker"])
         m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
         m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
-        source = io.BytesIO(b"table")
+        source = torch.tensor(list(b"table"), dtype=torch.uint8) if tensor_source else io.BytesIO(b"table")
         device_entry = _persistent_entry(64, [])
         loaded = []
 
@@ -3670,7 +3693,11 @@ class TestPersistentDistributedWorker:
         with DistributedWorker(compiled, persistent=True, window_sources={"engram": [source]}) as rt:
             arg = _resident(rt, (16, 16))
             rt(arg)
-            source.close()  # Reuse must neither validate nor read this file again.
+            # Reuse must neither reread a closed file nor copy mutated tensor data.
+            if isinstance(source, torch.Tensor):
+                source.zero_()
+            else:
+                source.close()
             rt(arg)
             assert loaded == [b"table", b"table"]
             assert len(orch.allocate_calls) == 2
@@ -4790,9 +4817,20 @@ def test_host_domain_runtime_capability_check():
         def allocate_domain(self, *, memory_source, workspace_engines):
             raise AssertionError("validation must not allocate")
 
+    setattr(NewOrch, "get_or_allocate_domain", NewOrch.allocate_domain)
     with pytest.raises(RuntimeError, match="#2913"):
         validate_host_domain_runtime(OldOrch())
     validate_host_domain_runtime(NewOrch())
+    with pytest.raises(RuntimeError, match="#2939"):
+        validate_host_domain_runtime(NewOrch(), initialized=True)
+
+    class InitializingOrch:
+        def allocate_domain(self, *, memory_source, workspace_engines, initializer):
+            raise AssertionError("validation must not allocate")
+
+        get_or_allocate_domain = allocate_domain
+
+    validate_host_domain_runtime(InitializingOrch, initialized=True)
 
 
 def test_persistent_domain_identity_includes_source_and_workspace():

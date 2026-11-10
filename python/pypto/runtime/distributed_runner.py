@@ -64,14 +64,23 @@ _DTYPE_MAP: dict[str, tuple[type[ctypes._CData], torch.dtype]] = {
 }
 
 
-def validate_host_domain_runtime(orch: Any) -> None:
-    """Require Simpler's Host-source domain API before allocating any resources."""
-    parameters = inspect.signature(orch.allocate_domain).parameters
-    if not {"memory_source", "workspace_engines"}.issubset(parameters):
-        raise RuntimeError(
-            "memory_source='host' requires Simpler Host-source communication domains "
-            "(simpler PR #2913 or later); upgrade the runtime"
-        )
+def validate_host_domain_runtime(orch: Any, *, initialized: bool = False) -> None:
+    """Check Host APIs once while loading an artifact, before constructing a worker.
+
+    Generated entries carry capability metadata; dispatch only binds sources and
+    requests domains. Accepting an instance also supports older generated entries.
+    """
+    required = {"memory_source", "workspace_engines"}
+    if initialized:
+        required.add("initializer")
+    for method in ("allocate_domain", "get_or_allocate_domain"):
+        api = getattr(orch, method, None)
+        if api is None or not required.issubset(inspect.signature(api).parameters):
+            version = "#2939" if initialized else "#2913"
+            raise RuntimeError(
+                f"memory_source='host' requires Simpler Host-source communication domains "
+                f"(simpler PR {version} or later); {method} must accept {sorted(required)}"
+            )
 
 
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
@@ -531,6 +540,12 @@ def _load_orch_entry(output_dir: Path) -> tuple[Any, Any]:
             f"orchestration module is malformed — regenerate via distributed codegen."
         )
     entry_fn = entry_candidates[0]
+    if getattr(entry_fn, "_requires_host_domain", False):
+        from simpler.orchestrator import Orchestrator  # noqa: PLC0415
+
+        validate_host_domain_runtime(
+            Orchestrator, initialized=bool(getattr(entry_fn, "_window_source_keys", ()))
+        )
 
     alloc_fn = getattr(orch_module, "_alloc_intermediates", None)
     return entry_fn, alloc_fn
@@ -1525,7 +1540,7 @@ def _make_dispatch_orchestration(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
-    window_sources: Mapping[str, Sequence[BinaryIO]] | None = None,
+    window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1574,7 +1589,7 @@ def _submit_dispatch(
     keepalive: list[Any],
     *,
     dfx_dispatch_idx: dict[str, int] | None = None,
-    window_sources: Mapping[str, Sequence[BinaryIO]] | None = None,
+    window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1887,7 +1902,7 @@ class DistributedWorker(Worker):
     be ordinary tensors created after ``prepare``.
 
     ``window_sources`` maps compiled Host-window ``init`` keys to open binary
-    files in domain rank order. Bind files after compilation; Simpler reads them
+    files or contiguous CPU tensors in domain rank order. Bind files after compilation; Simpler reads them
     only when creating a domain. Persistent Host windows retain their contents,
     while Device windows follow ``reset_persistent_windows``. The caller owns
     the files and must keep them open until initialization completes.
@@ -1958,7 +1973,7 @@ class DistributedWorker(Worker):
         *,
         persistent: bool = False,
         reset_persistent_windows: bool | None = None,
-        window_sources: Mapping[str, Sequence[BinaryIO]] | None = None,
+        window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,

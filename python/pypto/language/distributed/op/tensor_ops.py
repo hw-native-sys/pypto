@@ -226,9 +226,9 @@ def alloc_window_buffer(  # type: ignore[no-redef]
             ``None`` (default) in the canonical byte form.
         memory_source: Physical backing, "device" (default) or "host". Host domains
             require A5 TMR and automatically allocate URMA resources for peer access.
-        init: Non-empty runtime source key for a Host window. Bind rank-ordered open
-            binary files through DistributedWorker(window_sources=...) after compilation.
-            Files are read only when the domain is created, not on reuse.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered binary files or
+            contiguous CPU tensors through DistributedWorker(window_sources=...) after compilation.
+            Sources are copied only when the domain is created, not on reuse.
         name: Unique buffer identifier. The parser injects this from the LHS
             of the surrounding assignment
             (``buf = pld.tensor.alloc_window_buffer(...)``); users **must not**

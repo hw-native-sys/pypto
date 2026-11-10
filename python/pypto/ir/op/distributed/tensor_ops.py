@@ -49,8 +49,8 @@ def alloc_window_buffer(
             :class:`ir.Expr`).
         name: Unique buffer identifier, kwarg-only.
         memory_source: Physical backing, "device" or "host". Host requires URMA resources.
-        init: Non-empty runtime source key for a Host window. Bind rank-ordered open
-            binary files through DistributedWorker(window_sources=...) after compilation.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered binary files or
+            contiguous CPU tensors through DistributedWorker(window_sources=...) after compilation.
         span: Optional source span (auto-captured if absent).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

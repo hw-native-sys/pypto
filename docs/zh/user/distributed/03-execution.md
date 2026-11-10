@@ -306,3 +306,8 @@ worker 复用其芯片进程和通信设置——没有 fork 开销。`compiled_
 之后恢复文件原有位置。文件由调用者管理。启用 `persistent=True` 后只在创建域时加载一次，
 Host 内容在复用时保留；Device 窗口仍按默认策略清零。
 完整生命周期与错误约定见 [Host DDR 窗口](../../dev/passes/50-materialize_comm_domain_scopes.md)。
+
+Rank 列表也可以包含连续 CPU `torch.Tensor`，例如
+`window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`，或混合文件与 tensor。
+Tensor 在创建域时按原始字节复制，不转换 dtype；来源至少包含窗口逻辑字节数。
+初始化完成前须保持来源的存储与内容稳定。运行时能力检查在 worker 初始化阶段完成，不在每次 submit 重复执行。

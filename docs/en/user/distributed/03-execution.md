@@ -338,3 +338,10 @@ The caller owns the files. With `persistent=True`, initialization runs once and 
 contents survive reuse; the default Device window reset still applies.
 See [Host DDR windows](../../dev/passes/50-materialize_comm_domain_scopes.md)
 for the full lifecycle and error contract.
+
+The rank list may also contain contiguous CPU `torch.Tensor` objects, for example
+`window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`, or mix files and tensors.
+Tensor sources are copied as raw bytes at domain creation, with no dtype conversion.
+They must contain at least the logical window size. Keep their storage and contents
+stable until initialization completes. Runtime capability checks run during worker
+setup rather than on each submit.

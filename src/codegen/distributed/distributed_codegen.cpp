@@ -277,6 +277,7 @@ void DistributedCodegen::EmitImports() {
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   declared_vars_.clear();
   window_source_keys_.clear();
+  requires_host_domain_ = false;
   task_args_counter_ = 0;
   current_func_ = func;
 
@@ -344,6 +345,7 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   }
 
   emitter_.DecreaseIndent();
+  if (requires_host_domain_) emitter_.EmitLine(func->name_ + "._requires_host_domain = True");
   // Validate runtime bindings before Worker initialization without opening files
   // during compilation or serializing process-local handles into the artifact.
   if (!window_source_keys_.empty()) {
@@ -602,8 +604,7 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   }
 
   if (op->slots_.front()->memory_source_ == "host") {
-    emitter_.EmitLine("from pypto.runtime.distributed_runner import validate_host_domain_runtime");
-    emitter_.EmitLine("validate_host_domain_runtime(orch)");
+    requires_host_domain_ = true;
     emitter_.EmitLine("from simpler.task_interface import AddressSpace");
   }
   // One Simpler callback initializes all named slots after every rank is mapped.

@@ -221,8 +221,9 @@ coverage and memory source: Host and Device allocations never share a physical d
 Host codegen requests `AddressSpace.HOST` and `workspace_engines=("urma",)` from
 Simpler, and obtains the per-rank context with the URMA workspace. This requires
 Simpler #2913 or later and its supported same-machine A5 `tensormap_and_ringbuffer`
-configuration. Older runtimes fail before allocation; Simpler validates the platform
-and runtime combination. The current runtime submodule already provides this API.
+configuration. Runtime API capabilities are checked once when loading the generated
+entry during worker setup, including `initializer` support when needed; dispatch does
+not repeat signature inspection. Simpler validates the platform and runtime combination. The current runtime submodule already provides this API.
 
 The owning rank may use its device-mapped tensor locally. Host peer windows are not
 MTE mappings: peer access requires URMA. Existing peer-MTE primitives and collectives
@@ -230,7 +231,7 @@ are rejected when their remote operands originate from Host windows, including t
 forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
 peer MTE. Host peer URMA reads remain a separate execution feature.
 
-### Runtime file initialization
+### Runtime source initialization
 
 Declare a runtime source key with `pld.alloc_window_buffer(size, memory_source="host",
 init="engram_l1")`. Compilation records the key and logical byte count; it never opens
@@ -251,8 +252,24 @@ with ExitStack() as stack:
 
 `init` must be a non-empty string and is supported only for Host windows. The
 `window_sources` mapping belongs to the worker (also accepted by `compiled.prepare`).
-The file sequence follows **domain rank order**, including domains covering a subset
+The source sequence follows **domain rank order**, including domains covering a subset
 of workers. Missing/unused source keys and a wrong rank count raise errors.
+
+The same mapping accepts contiguous CPU `torch.Tensor` sources, or a mixture of
+files and tensors: `window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`.
+Tensor data is copied as raw bytes, starting at its view's storage offset, without
+dtype conversion or a staging clone. BF16 and FP8 are supported. Non-CPU,
+noncontiguous, sparse, quantized, conjugate and negative views are rejected.
+The source must contain at least the logical window byte count; trailing bytes are
+ignored. Binding retains the tensor object, not a snapshot of its contents: data is
+read at domain creation, so keep sources stable until that dispatch completes.
+
+Codegen emits `(buffer_name, init_key, logical_nbytes)` bindings and calls the fixed
+`make_window_initializer` helper with the worker's source map. The helper creates an
+internal callback; Simpler invokes it after all rank mappings exist. For each binding,
+it copies `window_sources[init_key][domain_rank]` into the corresponding named
+buffer, using `domain.buffer_range(buffer_name)` for its byte offset. No Python
+function is generated from file handles or tensor contents.
 
 Simpler #2939 supplies the creation-time initializer. PyPTO reads each source from
 file offset zero directly into the named buffer's Host mapping, in bounded chunks,

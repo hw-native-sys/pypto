@@ -302,6 +302,7 @@ class DistributedCodegen : public CodegenBase {
   std::string current_expr_value_;
   std::set<std::string> declared_vars_;
   std::set<std::string> window_source_keys_;
+  bool requires_host_domain_ = false;
   bool is_worker_context_{false};
   int task_args_counter_{0};  // Counter for generating unique TaskArgs variable names
 
