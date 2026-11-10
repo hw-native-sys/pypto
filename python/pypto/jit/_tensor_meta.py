@@ -215,6 +215,7 @@ class _DepScan(NamedTuple):
     # Keep runtime JIT recognition at the decorator boundary, also for callee returns.
     discover_deps: _call_binding.DiscoverDeps
     submit_results: dict[str, _SubmitTupleMeta]
+    static_constants: Mapping[tuple[int, int], int]
 
 
 def _target_names(target: ast.expr) -> list[str]:
@@ -462,17 +463,13 @@ def _dep_result_metas(
         summaries.cycles += 1
         return None
     dep_params, _ = deps.io[dep_name]
-    seed_meta: dict[str, TensorMeta] = {}
-    for dep_param, caller_arg in _call_binding.build_param_mapping(
-        dep_params, _call_binding.call_arg_refs(call)
-    ).items():
-        # A ``SlicedArg`` (``chip_orch(x[r], ...)``) seeds nothing: that
-        # per-rank dispatch form returns through ``Out`` params, so the
-        # descent below never needs the sliced param's meta.
-        if not isinstance(caller_arg, str):
-            continue
-        if caller_arg in local:
-            seed_meta[dep_param] = local[caller_arg]
+    seed_meta = _bind_dep_tensor_metas(
+        _call_binding.build_param_mapping(dep_params, _call_binding.call_arg_refs(call)),
+        _call_binding.build_param_mapping(dep_params, _call_binding.call_arg_nodes(call)),
+        local,
+        deps.submit_results,
+        lambda node: _resolve_slice_int(node, deps.scope, deps.static_constants, local),
+    )
     constexpr = _call_site_constexpr(dep, call, deps)
     seed_meta.update(_omitted_output_metas(dep, call, constexpr))
     track_returns = arity is None or dep._func_type in {"orchestration", "graph"}
@@ -1282,6 +1279,36 @@ def _submitted_projection_meta(
         return None
     index = resolve_int(value.slice)
     return slots[index] if index is not None and -len(slots) <= index < len(slots) else None
+
+
+def _bind_dep_tensor_metas(
+    arguments: Mapping[str, str | _call_binding.SlicedArg | None],
+    actual_nodes: Mapping[str, ast.expr],
+    local: Mapping[str, TensorMeta],
+    submitted: Mapping[str, _SubmitTupleMeta],
+    resolve_int: Callable[[ast.expr], int | None],
+) -> dict[str, TensorMeta]:
+    """Bind the same tensor descriptors for signatures and result inference."""
+    bound: dict[str, TensorMeta] = {}
+    for param, arg in arguments.items():
+        projection = _submitted_projection_meta(actual_nodes.get(param), submitted, resolve_int)
+        if projection is not None:
+            bound[param] = projection
+        elif isinstance(arg, str) and arg in local:
+            bound[param] = local[arg]
+        elif isinstance(arg, _call_binding.SlicedArg) and (base := local.get(arg.base)) is not None:
+            # Per-rank dispatch chip_orch(x[r], ...) drops leading axes.
+            drop = arg.drop
+            if drop < len(base.shape):
+                bound[param] = replace(
+                    base,
+                    shape=base.shape[drop:],
+                    inexact_axes=frozenset(axis - drop for axis in base.inexact_axes if axis >= drop),
+                    runtime_dims={
+                        axis - drop: dim for axis, dim in base.runtime_dims.items() if axis >= drop
+                    },
+                )
+    return bound
 
 
 def _update_submit_result_meta(
@@ -2477,6 +2504,7 @@ def extract_local_tensor_metas(
         owner=func_def.name,
         discover_deps=discover_deps,
         submit_results={} if outputs.submit_results is None else outputs.submit_results,
+        static_constants=static_preview.constants,
     )
 
     # Dispatch table: pl.<attr>(...) → meta extraction function.
@@ -2624,51 +2652,21 @@ def resolve_dep_call_metadata(
     # rebindings. Its result is therefore the authoritative state at the call.
     all_tensor_meta = intermediate_metas
 
-    dep_tensor_meta: dict[str, TensorMeta] = {}
-    dep_scalar_dtypes: dict[str, DataType] = {}
-
     if call_args is not None:
-        for dep_param, caller_arg in _call_binding.build_param_mapping(dep_param_names, call_args).items():
-            if caller_arg is None:
-                continue
-            projection = _submitted_projection_meta(
-                actual_nodes.get(dep_param),
-                submitted,
-                lambda node: _resolve_slice_int(node, scope, static_constants, all_tensor_meta),
-            )
-            if projection is not None:
-                dep_tensor_meta[dep_param] = projection
-                continue
-            if isinstance(caller_arg, _call_binding.SlicedArg):
-                # Per-rank dispatch ``chip_orch(x[r], ...)``: the dep parameter
-                # inherits the base tensor's meta with ``drop`` leading dims
-                # removed (the subscripted dims selected by integer indices).
-                base_meta = all_tensor_meta.get(caller_arg.base)
-                if base_meta is not None and caller_arg.drop < len(base_meta.shape):
-                    dep_tensor_meta[dep_param] = TensorMeta(
-                        shape=base_meta.shape[caller_arg.drop :],
-                        dtype=base_meta.dtype,
-                        # Layout describes the trailing dims, so dropping
-                        # leading ones leaves it intact.
-                        layout=base_meta.layout,
-                        inexact_axes=frozenset(
-                            axis - caller_arg.drop
-                            for axis in base_meta.inexact_axes
-                            if axis >= caller_arg.drop
-                        ),
-                        runtime_dims={
-                            axis - caller_arg.drop: dim
-                            for axis, dim in base_meta.runtime_dims.items()
-                            if axis >= caller_arg.drop
-                        },
-                    )
-                continue
-            if caller_arg in all_tensor_meta:
-                dep_tensor_meta[dep_param] = all_tensor_meta[caller_arg]
-            elif caller_arg in caller_scalar_dtypes:
-                # A scalar arg is a runtime value, so only its declared type
-                # crosses the call boundary.
-                dep_scalar_dtypes[dep_param] = caller_scalar_dtypes[caller_arg]
+        arguments = _call_binding.build_param_mapping(dep_param_names, call_args)
+        dep_tensor_meta = _bind_dep_tensor_metas(
+            arguments,
+            actual_nodes,
+            all_tensor_meta,
+            submitted,
+            lambda node: _resolve_slice_int(node, scope, static_constants, all_tensor_meta),
+        )
+        # Scalar values cross the call boundary with their declared dtype.
+        dep_scalar_dtypes = {
+            param: caller_scalar_dtypes[arg]
+            for param, arg in arguments.items()
+            if param not in dep_tensor_meta and isinstance(arg, str) and arg in caller_scalar_dtypes
+        }
     else:
         # Fallback: name-based matching against the caller's metadata pool.
         dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}

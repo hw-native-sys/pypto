@@ -543,13 +543,18 @@ def test_direct_submit_projection_argument_preserves_tensor_metadata(projection)
     def consume(value: pl.Tensor):
         return value
 
+    @pl.jit.graph
+    def final(value: pl.Tensor):
+        return value
+
     if projection == "literal":
 
         @pl.jit
         def entry(selector: pl.Tensor, first: pl.InOut[pl.Tensor], second: pl.InOut[pl.Tensor]):
             launch = pl.submit(stage, first, second)
             result, done = pl.submit(consume, launch[1])
-            return result
+            output, _ = pl.submit(final, result)
+            return output
     else:
 
         @pl.jit
@@ -557,13 +562,18 @@ def test_direct_submit_projection_argument_preserves_tensor_metadata(projection)
             launch = pl.submit(stage, first, second)
             slot = selector.shape[0]  # pyright: ignore[reportOptionalSubscript]
             result, done = pl.submit(consume, launch[slot])
-            return result
+            output, _ = pl.submit(final, result)
+            return output
 
     program = entry.specialize(torch.empty(1, 32), torch.empty(8, 32), torch.empty(16, 32))
-    assert len(_submissions(program)) == 2
+    assert len(_submissions(program)) == 3
     consumer = program.get_function("consume")
     assert consumer is not None
-    assert ir.structural_equal(consumer.params[0].type, ir.TensorType([16, 32], pl.FP32))
+    final_ir = program.get_function("final")
+    assert final_ir is not None
+    expected = ir.TensorType([16, 32], pl.FP32)
+    assert ir.structural_equal(consumer.params[0].type, expected)
+    assert ir.structural_equal(final_ir.params[0].type, expected)
 
 
 def test_first_omitted_output_uses_call_owned_constexpr_shape(tmp_path, monkeypatch):
