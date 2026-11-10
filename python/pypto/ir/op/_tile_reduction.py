@@ -357,8 +357,11 @@ def row_max(
 ) -> Call:
     """Row-wise max reduction of a tile (reduces along the last axis, maps to TROWMAX).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType)
@@ -391,8 +394,11 @@ def row_sum(
 ) -> Call:
     """Row-wise sum reduction of a tile (reduces along the last axis, maps to TROWSUM).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType)
@@ -425,8 +431,11 @@ def row_min(
 ) -> Call:
     """Row-wise min reduction (reduces along the last axis, maps to TROWMIN).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType, e.g. [M, N])
@@ -446,7 +455,7 @@ def row_min(
             pad-zeroing follow-up lands.
 
     Returns:
-        Call expression for row-wise min reduction (TileType, e.g. [M, 1])
+        Call expression for row-wise min reduction (shape depends on out_layout, see above)
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
@@ -459,8 +468,11 @@ def row_prod(
 ) -> Call:
     """Row-wise product reduction (reduces along the last axis, maps to TROWPROD).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType, e.g. [M, N])
@@ -480,7 +492,7 @@ def row_prod(
             pad-zeroing follow-up lands.
 
     Returns:
-        Call expression for row-wise product reduction (TileType, e.g. [M, 1])
+        Call expression for row-wise product reduction (shape depends on out_layout, see above)
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call(

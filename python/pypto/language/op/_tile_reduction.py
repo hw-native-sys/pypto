@@ -21,8 +21,11 @@ from ..typing import Scalar, Tile
 def row_max(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise max reduction.
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile
@@ -50,8 +53,11 @@ def row_max(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
 def row_sum(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise sum reduction.
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile
@@ -79,8 +85,11 @@ def row_sum(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
 def row_min(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise min reduction.
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile
@@ -108,8 +117,11 @@ def row_min(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) ->
 def row_prod(tile: Tile, tmp_tile: Tile, out_layout: TileLayout | None = None) -> Tile:
     """Row-wise product reduction.
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile

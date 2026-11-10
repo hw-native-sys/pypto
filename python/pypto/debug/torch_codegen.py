@@ -1138,12 +1138,33 @@ def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
 _OP_MAP: dict[str, OpHandler] = {}
 
 
+def _row_reduce_handler(method: str) -> OpHandler:
+    """Build a row-reduction handler that honors out_layout=row_major's padded shape.
+
+    DeduceTileRowReductionType now records shape ``[rows, pad_cols]`` for
+    out_layout=row_major (issue #3319), but a plain ``keepdim=True`` torch
+    reduction only ever produces ``[rows, 1]``. Padding the generated
+    expression to match keeps the TileType shape check in generated Torch IR
+    from failing immediately on every row_major call. This only matches the
+    *shape* -- it does not claim columns 1..pad-1 hold the same (undefined)
+    values the real kernel would leave there; see the op's own docstring.
+    """
+
+    def handler(a: list[str], kw: dict[str, Any]) -> str:
+        base = f"{a[0]}.{method}(dim=-1, keepdim=True)"
+        if kw.get("out_layout") == _ir.TileLayout.row_major:
+            return f"torch.nn.functional.pad({base}, (0, max(32 // {a[0]}.element_size(), 1) - 1))"
+        return base
+
+    return handler
+
+
 def _register_reductions(m: dict[str, OpHandler], prefix: str) -> None:
     """Register row/col reduction handlers (tile forms may carry an ignored tmp_tile)."""
-    m[f"{prefix}.row_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-1, keepdim=True)"
-    m[f"{prefix}.row_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-1, keepdim=True)"
-    m[f"{prefix}.row_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-1, keepdim=True)"
-    m[f"{prefix}.row_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-1, keepdim=True)"
+    m[f"{prefix}.row_sum"] = _row_reduce_handler("sum")
+    m[f"{prefix}.row_max"] = _row_reduce_handler("amax")
+    m[f"{prefix}.row_min"] = _row_reduce_handler("amin")
+    m[f"{prefix}.row_prod"] = _row_reduce_handler("prod")
     m[f"{prefix}.col_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-2, keepdim=True)"
     m[f"{prefix}.col_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-2, keepdim=True)"
     m[f"{prefix}.col_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-2, keepdim=True)"
