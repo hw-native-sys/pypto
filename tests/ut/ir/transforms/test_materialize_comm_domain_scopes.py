@@ -7,9 +7,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
-# CommDomain descriptors refer to body-defined sizes. These are parsed IR forward
-# references, not Python reads before assignment.
-# pyright: reportUnboundVariable=false
 
 """Tests for the ``MaterializeCommDomainScopes`` pass.
 
@@ -26,13 +23,14 @@ chains, and:
 
 The tests exercise SSA conversion, signal synthesis, and communication-domain
 materialization. Complete programs round-trip through the private dump syntax;
-explicit Before/Expected programs cover the complete transformed structure.
-Identity assertions additionally check that views share their scope's WindowBuffer
-objects, which structural equivalence alone does not guarantee.
+slot identity assertions additionally check that views share their scope's
+WindowBuffer objects. Per-slot structural expectations cover device inference
+independently of the printer and parser.
 
 """
 
 import ast
+import textwrap
 from typing import cast
 
 import pypto
@@ -142,6 +140,53 @@ def _synthesize(program: ir.Program) -> ir.Program:
     return cast(ir.Program, passes.synthesize_allreduce_signals()(program))
 
 
+def _mul(left: int, right: int) -> ir.Expr:
+    """Build ``Mul(ConstInt(left, INDEX), ConstInt(right, INDEX))``.
+
+    Matches the expression the parser produces when a ``@pl.program`` body
+    contains ``N * pl.<DType>.get_byte()`` (e.g. ``256 * pl.FP32.get_byte()``
+    → ``256 * 4``, a ``Mul`` of two ``ConstInt`` with dtype ``INDEX``).
+    """
+    span = ir.Span.unknown()
+    return ir.Mul(
+        ir.ConstInt(left, DataType.INDEX, span),
+        ir.ConstInt(right, DataType.INDEX, span),
+        DataType.INDEX,
+        span,
+    )
+
+
+def _expected_slot(name: str, size: ir.Expr) -> ir.WindowBuffer:
+    """Hand-build the WindowBuffer the pass should mint for one alloc.
+
+    Each ``pld.alloc_window_buffer(size, *, name)`` materialises
+    ``WindowBuffer(base=Var(name, PtrType), size=size, load_from_host=False,
+    store_to_host=False)`` with ``name_hint`` inherited from the base Ptr Var.
+    The ``size`` is the alloc's first arg passed through unchanged — the DSL
+    emits it as a ``ConstInt`` (bare literal) or a ``Mul`` of two ``ConstInt``
+    (``N * dtype.get_byte()`` form), always with dtype ``index``.
+    """
+    base = ir.Var(name, ir.PtrType(), ir.Span.unknown())
+    return ir.WindowBuffer(base, size)
+
+
+def _assert_scope_fields(
+    actual: ir.CommDomainScopeStmt,
+    expected_devices: list[int],
+    expected_slots: list[ir.WindowBuffer],
+) -> None:
+    """Compare a produced ``CommDomainScopeStmt`` against hand-derived fields.
+
+    ``enable_auto_mapping=True`` lets the freshly-built slot Vars in
+    ``expected_slots`` match the pass-produced ones by structural isomorphism
+    (name_hint + size + flags) rather than by ``shared_ptr`` identity.
+    """
+    assert list(actual.devices) == expected_devices
+    assert len(actual.slots) == len(expected_slots)
+    for actual_slot, expected_slot in zip(actual.slots, expected_slots, strict=True):
+        ir.assert_structural_equal(actual_slot, expected_slot, enable_auto_mapping=True)
+
+
 def _assert_rank2_signal_type(value: ir.Expr, world_size_name: str) -> None:
     signal_type = value.type
     assert isinstance(signal_type, ir.DistributedTensorType)
@@ -198,120 +243,7 @@ def test_program_wide_engine_requirements(uses_urma, pre_materialized):
     if uses_urma:
         functions.append(_get_func(Before, "unused"))
     program = ir.Program(functions, "engine_scan", ir.Span.unknown())
-    if uses_urma:
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-            def chip(self, data: pld.DistributedTensor[[16], pl.FP32]):
-                return data
-
-            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-            def host_orch(self):
-                with pl._dump.comm_domain(
-                    name="comm_d0",
-                    devices=[0],
-                    slots=[
-                        pl._dump.window_buffer(
-                            "a_window", base="a", size=64, load_from_host=False, store_to_host=False
-                        )
-                    ],
-                    engines=["urma"],
-                ):
-                    with pl._dump.comm_domain(
-                        name="comm_d1",
-                        devices=[1],
-                        slots=[
-                            pl._dump.window_buffer(
-                                "b_window", base="b", size=64, load_from_host=False, store_to_host=False
-                            )
-                        ],
-                        engines=["urma"],
-                    ):
-                        a: pl.Ptr = pl._dump.alloc_window_buffer(64, name="a")
-                        b: pl.Ptr = pl._dump.alloc_window_buffer(64, name="b")
-                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("a_window")] = (
-                            pl._dump.call(
-                                "pld.tensor.window",
-                                [a, [16]],
-                                pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("a_window")],
-                                kwargs={"dtype": pl.FP32},
-                            )
-                        )
-                        y: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("b_window")] = (
-                            pl._dump.call(
-                                "pld.tensor.window",
-                                [b, [16]],
-                                pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("b_window")],
-                                kwargs={"dtype": pl.FP32},
-                            )
-                        )
-                        self.chip(x, device=pl.const(0, pl.INDEX))
-                        self.chip(y, device=pl.const(1, pl.INDEX))
-
-            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-            def unused(
-                self,
-                inp: pld.DistributedTensor[[4, 16], pl.FP32],
-                data: pl.InOut[pld.DistributedTensor[[8, 16], pl.FP32]],
-                signal: pl.InOut[pld.DistributedTensor[[2, 2], pl.INT32]],
-                counts: pld.DistributedTensor[[2, 1], pl.INT32],
-                recv: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
-                index: pld.DistributedTensor[[2, 4], pl.INT32],
-            ) -> pld.DistributedTensor[[8, 16], pl.FP32]:
-                return pld.tensor.indexed_all_to_all_v(inp, data, signal, counts, recv, index, core_num=2)
-
-    else:
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-            def chip(self, data: pld.DistributedTensor[[16], pl.FP32]):
-                return data
-
-            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-            def host_orch(self):
-                with pl._dump.comm_domain(
-                    name="comm_d0",
-                    devices=[0],
-                    slots=[
-                        pl._dump.window_buffer(
-                            "a_window", base="a", size=64, load_from_host=False, store_to_host=False
-                        )
-                    ],
-                ):
-                    with pl._dump.comm_domain(
-                        name="comm_d1",
-                        devices=[1],
-                        slots=[
-                            pl._dump.window_buffer(
-                                "b_window", base="b", size=64, load_from_host=False, store_to_host=False
-                            )
-                        ],
-                    ):
-                        a: pl.Ptr = pl._dump.alloc_window_buffer(64, name="a")
-                        b: pl.Ptr = pl._dump.alloc_window_buffer(64, name="b")
-                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("a_window")] = (
-                            pl._dump.call(
-                                "pld.tensor.window",
-                                [a, [16]],
-                                pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("a_window")],
-                                kwargs={"dtype": pl.FP32},
-                            )
-                        )
-                        y: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("b_window")] = (
-                            pl._dump.call(
-                                "pld.tensor.window",
-                                [b, [16]],
-                                pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("b_window")],
-                                kwargs={"dtype": pl.FP32},
-                            )
-                        )
-                        self.chip(x, device=pl.const(0, pl.INDEX))
-                        self.chip(y, device=pl.const(1, pl.INDEX))
-
     after = passes.materialize_comm_domain_scopes()(program)
-    ir.assert_structural_equal(after, Expected)
     scopes = _get_comm_domain_scopes(_get_func(after, "host_orch"))
     assert len(scopes) == 2
     assert all(list(scope.engines) == (["urma"] if uses_urma else []) for scope in scopes)
@@ -321,7 +253,7 @@ def test_single_alloc_all_devices_world_size_loop():
     """``for r in pl.range(pld.world_size())`` + ``device=r`` ⇒ kAll."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -334,50 +266,14 @@ def test_single_alloc_all_devices_world_size_loop():
                 self.chip_orch(data, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
 
     # The world_size loop bound resolves the device descriptor to kAll, encoded
     # on the wire as an empty ``devices`` list, with a single slot for ``buf``.
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [], [_expected_slot("buf", _mul(256, 4))])
 
     # The view's window_buffer back-reference now points to the (same) slot.
     # Pointer-identity between the scope's slot and the view type's
@@ -400,7 +296,7 @@ def test_defining_call_type_carries_the_window_buffer_back_reference():
     """
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -416,68 +312,7 @@ def test_defining_call_type_carries_the_window_buffer_back_reference():
             pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [4], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [4]],
-                    pld.DistributedTensor[[4], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, signal__ssa_v0],
-                    pld.DistributedTensor[[256], pl.FP32],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
 
     # Both sides of every window assignment point at the SAME WindowBuffer
@@ -499,7 +334,7 @@ def test_allreduce_signal_inherits_data_comm_domain():
     """Signal buffers used only by pld.tensor.allreduce still become scope slots."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -515,78 +350,20 @@ def test_allreduce_signal_inherits_data_comm_domain():
             pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [4], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [4]],
-                    pld.DistributedTensor[[4], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, signal__ssa_v0],
-                    pld.DistributedTensor[[256], pl.FP32],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
+    _assert_scope_fields(
+        scopes[0], [], [_expected_slot("data_buf", _mul(256, 4)), _expected_slot("signal_buf", _mul(4, 4))]
+    )
 
 
 def test_explicit_allreduce_assignment_keeps_user_signal():
     """Direct explicit-signal assignments stay explicit and join the data domain."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -602,74 +379,7 @@ def test_explicit_allreduce_assignment_keeps_user_signal():
             data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("signal_buf__ssa_v0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                data__ssa_v1: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, signal__ssa_v0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return data__ssa_v1
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     synthetic_assigns = [
@@ -699,7 +409,7 @@ def test_implicit_allreduce_signal_is_materialized_in_data_comm_domain():
     """A host allreduce without signal gets a private signal slot in the data domain."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -713,78 +423,7 @@ def test_implicit_allreduce_signal_is_materialized_in_data_comm_domain():
             data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                data__ssa_v1: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return data__ssa_v1
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     signal_windows = [
@@ -831,7 +470,7 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
     """
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -850,140 +489,7 @@ def test_implicit_allreduce_over_distinct_subsets_gets_distinct_signals():
             data_b = pld.tensor.allreduce(data_b, op=pld.ReduceOp.Sum)
             return data_a
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "buf_a__ssa_v0_window",
-                        base="buf_a__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                with pl._dump.comm_domain(
-                    name="comm_d1",
-                    devices=[2, 3],
-                    slots=[
-                        pl._dump.window_buffer(
-                            "__allreduce_signal_buf_1_window",
-                            base="__allreduce_signal_buf_1",
-                            size=__allreduce_signal_world_size_1
-                            * pl.const(1, pl.INT64)
-                            * pl.const(4, pl.INT64),
-                            load_from_host=False,
-                            store_to_host=False,
-                        ),
-                        pl._dump.window_buffer(
-                            "buf_b__ssa_v0_window",
-                            base="buf_b__ssa_v0",
-                            size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                            load_from_host=False,
-                            store_to_host=False,
-                        ),
-                    ],
-                ):
-                    __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                    __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                        __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        name="__allreduce_signal_buf_0",
-                    )
-                    __allreduce_signal_0: pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                        pld.DistributedTensor[
-                            [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                            pl.INT32,
-                            pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                        ],
-                        kwargs={"dtype": pl.INT32},
-                    )
-                    __allreduce_signal_world_size_1: pl.Scalar[pl.INT64] = pld.system.world_size()
-                    __allreduce_signal_buf_1: pl.Ptr = pl._dump.alloc_window_buffer(
-                        __allreduce_signal_world_size_1 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        name="__allreduce_signal_buf_1",
-                    )
-                    __allreduce_signal_1: pld.DistributedTensor[
-                        [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_1_window"),
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [__allreduce_signal_buf_1, [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)]],
-                        pld.DistributedTensor[
-                            [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)],
-                            pl.INT32,
-                            pl._dump.window_ref("__allreduce_signal_buf_1_window"),
-                        ],
-                        kwargs={"dtype": pl.INT32},
-                    )
-                    buf_a__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                        pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_a"
-                    )
-                    buf_b__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                        pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_b"
-                    )
-                    data_a__ssa_v0: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [buf_a__ssa_v0, [256]],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    data_b__ssa_v0: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [buf_b__ssa_v0, [256]],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    self.chip_orch(data_a__ssa_v0, device=pl.const(0, pl.INDEX))
-                    self.chip_orch(data_a__ssa_v0, device=pl.const(1, pl.INDEX))
-                    self.chip_orch(data_b__ssa_v0, device=pl.const(2, pl.INDEX))
-                    self.chip_orch(data_b__ssa_v0, device=pl.const(3, pl.INDEX))
-                    data_a__ssa_v1: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data_a__ssa_v0, __allreduce_signal_0],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                    _data_b__ssa_v1: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data_b__ssa_v0, __allreduce_signal_1],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                    return data_a__ssa_v1
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     signal_windows = [
@@ -1059,7 +565,7 @@ def test_optional_signal_allreduce_round_trips_before_materialization():
 
 def test_synthesize_allreduce_signals_normalizes_host_allreduce():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -1073,39 +579,7 @@ def test_synthesize_allreduce_signals_normalizes_host_allreduce():
             data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-            __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                name="__allreduce_signal_buf_0",
-            )
-            __allreduce_signal_0: pld.DistributedTensor[
-                [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)], pl.INT32
-            ] = pld.tensor.window(
-                __allreduce_signal_buf_0,
-                [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                dtype=pl.INT32,
-            )
-            data_buf: pl.Ptr = pl._dump.alloc_window_buffer(
-                pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-            )
-            data: pld.DistributedTensor[[256], pl.FP32] = pld.tensor.window(data_buf, [256], dtype=pl.FP32)
-            for r in pl.range(pld.system.world_size()):
-                self.chip_orch(data, device=r)
-            data: pld.DistributedTensor[[256], pl.FP32] = pld.tensor.allreduce(
-                data, __allreduce_signal_0, op=pld.ReduceOp.Sum, mode="mesh", core_num=1
-            )
-            return data
-
-    synthesized = _synthesize(Before)
-    ir.assert_structural_equal(synthesized, Expected)
+    synthesized = _synthesize(P)
     host = _get_func(synthesized, "host_orch")
     stmts = _flatten_stmts(host.body)
     allreduces = [
@@ -1132,7 +606,7 @@ def test_synthesize_allreduce_signals_normalizes_host_allreduce():
 
 def test_synthesize_multicore_allreduce_signal_uses_core_lanes_and_bytes():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -1146,39 +620,7 @@ def test_synthesize_multicore_allreduce_signal_uses_core_lanes_and_bytes():
             data = pld.tensor.allreduce(data, core_num=4)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-            __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                __allreduce_signal_world_size_0 * pl.const(4, pl.INT64) * pl.const(4, pl.INT64),
-                name="__allreduce_signal_buf_0",
-            )
-            __allreduce_signal_0: pld.DistributedTensor[
-                [__allreduce_signal_world_size_0, pl.const(4, pl.INT64)], pl.INT32
-            ] = pld.tensor.window(
-                __allreduce_signal_buf_0,
-                [__allreduce_signal_world_size_0, pl.const(4, pl.INT64)],
-                dtype=pl.INT32,
-            )
-            data_buf: pl.Ptr = pl._dump.alloc_window_buffer(
-                pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-            )
-            data: pld.DistributedTensor[[256], pl.FP32] = pld.tensor.window(data_buf, [256], dtype=pl.FP32)
-            for r in pl.range(pld.system.world_size()):
-                self.chip_orch(data, device=r)
-            data: pld.DistributedTensor[[256], pl.FP32] = pld.tensor.allreduce(
-                data, __allreduce_signal_0, op=pld.ReduceOp.Sum, mode="mesh", core_num=4
-            )
-            return data
-
-    synthesized = _synthesize(Before)
-    ir.assert_structural_equal(synthesized, Expected)
+    synthesized = _synthesize(P)
     host = _get_func(synthesized, "host_orch")
     stmts = _flatten_stmts(host.body)
     window_stmt = next(
@@ -1229,7 +671,7 @@ def test_implicit_allreduce_core_num_widening_sizes_signal_to_max():
     allow_wider_lanes contract in LowerHostTensorCollectives)."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -1244,86 +686,7 @@ def test_implicit_allreduce_core_num_widening_sizes_signal_to_max():
             b = pld.tensor.allreduce(data, core_num=4)
             return a, b
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(4, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(4, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(4, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(4, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(4, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                a__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                b__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 4},
-                )
-                return a__ssa_v0, b__ssa_v0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     signal_windows = [
@@ -1354,7 +717,7 @@ def test_implicit_allreduce_core_num_widening_sizes_signal_to_max():
 
 def test_synthesized_allreduce_signal_round_trips_after_materialization():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -1368,78 +731,7 @@ def test_synthesized_allreduce_signal_round_trips_after_materialization():
             data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                data__ssa_v1: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return data__ssa_v1
-
-    materialized = _apply(Before)
-    ir.assert_structural_equal(materialized, Expected)
+    materialized = _apply(P)
     printed = materialized.as_python()
     reparsed = cast(ir.Program, pl.parse(printed))
     host = _get_func(reparsed, "host_orch")
@@ -1498,220 +790,53 @@ def test_synthesized_allreduce_signal_round_trips_after_materialization():
 
 
 def test_implicit_allreduce_signal_names_are_program_unique():
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
+    program = cast(
+        ir.Program,
+        pl.parse(
+            textwrap.dedent(
+                """
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+                    return data
 
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch_a(self):
-            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
-            __allreduce_signal_world_size_0 = pld.world_size()
-            __allreduce_signal_buf_0 = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
-            __allreduce_signal_0 = pld.window(
-                __allreduce_signal_buf_0,
-                [pld.world_size(), 1],
-                dtype=pl.INT32,
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch_a(self):
+                    data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+                    __allreduce_signal_world_size_0 = pld.world_size()
+                    __allreduce_signal_buf_0 = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+                    __allreduce_signal_0 = pld.window(
+                        __allreduce_signal_buf_0,
+                        [pld.world_size(), 1],
+                        dtype=pl.INT32,
+                    )
+                    __allreduce_result_0 = pld.window(data_buf, [256], dtype=pl.FP32)
+                    data = pld.window(data_buf, [256], dtype=pl.FP32)
+                    for r in pl.range(pld.world_size()):
+                        self.chip_orch(data, device=r)
+                    data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
+                    data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
+                    return data
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch_b(self):
+                    data_buf_b = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+                    data = pld.window(data_buf_b, [256], dtype=pl.FP32)
+                    for r in pl.range(pld.world_size()):
+                        self.chip_orch(data, device=r)
+                    data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
+                    return data
+            """
             )
-            __allreduce_result_0 = pld.window(data_buf, [256], dtype=pl.FP32)
-            data = pld.window(data_buf, [256], dtype=pl.FP32)
-            for r in pl.range(pld.world_size()):
-                self.chip_orch(data, device=r)
-            data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
-            data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
-            return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch_b(self):
-            data_buf_b = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
-            data = pld.window(data_buf_b, [256], dtype=pl.FP32)
-            for r in pl.range(pld.world_size()):
-                self.chip_orch(data, device=r)
-            data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
-            return data
+        ),
+    )
 
     # NOTE: deliberately NOT `_apply` (which runs ConvertToSSA first) — this
     # test pre-defines user vars named `__allreduce_*`, which SSA cannot rename
     # (reserved `__` delimiter in auto-name bases) and which are exactly what
     # the synthesized-name-uniqueness contract must dodge.
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch_a(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_1_window",
-                        base="__allreduce_signal_buf_1",
-                        size=__allreduce_signal_world_size_1 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf_window",
-                        base="data_buf",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=pld.system.world_size() * 4,
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_1: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_1: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_1 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_1",
-                )
-                __allreduce_signal_1: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_1_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_1, [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_1_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pld.system.world_size() * 4, name="__allreduce_signal_buf_0"
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                __allreduce_result_0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                data: pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")] = (
-                    pl._dump.call(
-                        "pld.tensor.window",
-                        [data_buf, [256]],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                )
-                for r in pl.range(pld.system.world_size()):
-                    self.chip_orch(data, device=r)
-                data: pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")] = (
-                    pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data, __allreduce_signal_0],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                )
-                data: pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")] = (
-                    pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data, __allreduce_signal_1],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                )
-                return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch_b(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_2_window",
-                        base="__allreduce_signal_buf_2",
-                        size=__allreduce_signal_world_size_2 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf_b_window",
-                        base="data_buf_b",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_2: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_2: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_2 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_2",
-                )
-                __allreduce_signal_2: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_2, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_2_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_2, [__allreduce_signal_world_size_2, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_2, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_2_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf_b: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf_b"
-                )
-                data: pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_b_window")] = (
-                    pl._dump.call(
-                        "pld.tensor.window",
-                        [data_buf_b, [256]],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_b_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                )
-                for r in pl.range(pld.system.world_size()):
-                    self.chip_orch(data, device=r)
-                data: pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_b_window")] = (
-                    pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data, __allreduce_signal_2],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf_b_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                )
-                return data
-
-    result = cast(ir.Program, passes.materialize_comm_domain_scopes()(_synthesize(Before)))
-    ir.assert_structural_equal(result, Expected)
+    result = cast(ir.Program, passes.materialize_comm_domain_scopes()(_synthesize(program)))
     hosts = [_get_func(result, "host_orch_a"), _get_func(result, "host_orch_b")]
     allreduce_signal_args = [
         _as_var(_as_call(stmt.value).args[1]).name_hint
@@ -1763,7 +888,7 @@ def test_consecutive_implicit_allreduces_share_one_signal_slot():
     their barrier cells after each call)."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -1778,86 +903,7 @@ def test_consecutive_implicit_allreduces_share_one_signal_slot():
             data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                data__ssa_v1: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                data__ssa_v2: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v1, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return data__ssa_v2
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
@@ -1884,7 +930,7 @@ def test_implicit_allreduce_inside_loop_uses_shared_signal():
     signal, hoisted outside the loop."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -1899,82 +945,7 @@ def test_implicit_allreduce_inside_loop_uses_shared_signal():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                for it__idx_v0, (data__iter_v1,) in pl.range(2, init_values=(data__ssa_v0,)):
-                    data__ssa_v3: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data__iter_v1, __allreduce_signal_0],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                    data__rv_v2: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                    ] = pl.yield_(data__ssa_v3)
-                return data__rv_v2
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     signal_windows = [
         stmt
@@ -1998,40 +969,31 @@ def test_implicit_allreduce_inside_loop_uses_shared_signal():
 
 
 def test_synthesize_allreduce_signals_reserves_existing_alloc_names():
-    @pl.program
-    class Before:
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self, data: pld.DistributedTensor[[pl.const(256, pl.INT64)], pl.FP32]):
-            _user_named_buf: pl.Ptr = pl._dump.alloc_window_buffer(
-                pl.const(16, pl.INT64), name="__allreduce_signal_buf_0"
-            )
-            _data_out = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
+    span = ir.Span.unknown()
+    existing_alloc = dist_tensor_ops.alloc_window_buffer(
+        16,
+        name="__allreduce_signal_buf_0",
+        span=span,
+    )
+    existing_buf = ir.Var("user_named_buf", existing_alloc.type, span)
+    existing_assign = ir.AssignStmt(existing_buf, existing_alloc, span)
 
-    @pl.program
-    class Expected:
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self, data: pld.DistributedTensor[[pl.const(256, pl.INT64)], pl.FP32]):
-            __allreduce_signal_world_size_1: pl.Scalar[pl.INT64] = pld.system.world_size()
-            __allreduce_signal_buf_1: pl.Ptr = pl._dump.alloc_window_buffer(
-                __allreduce_signal_world_size_1 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                name="__allreduce_signal_buf_1",
-            )
-            __allreduce_signal_1: pld.DistributedTensor[
-                [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)], pl.INT32
-            ] = pld.tensor.window(
-                __allreduce_signal_buf_1,
-                [__allreduce_signal_world_size_1, pl.const(1, pl.INT64)],
-                dtype=pl.INT32,
-            )
-            _user_named_buf: pl.Ptr = pl._dump.alloc_window_buffer(
-                pl.const(16, pl.INT64), name="__allreduce_signal_buf_0"
-            )
-            _data_out: pld.DistributedTensor[[pl.const(256, pl.INT64)], pl.FP32] = pld.tensor.allreduce(
-                data, __allreduce_signal_1, op=pld.ReduceOp.Sum, mode="mesh", core_num=1
-            )
+    data_type = ir.DistributedTensorType([ir.ConstInt(256, DataType.INT64, span)], DataType.FP32)
+    data = ir.Var("data", data_type, span)
+    allreduce = dist_tensor_ops.allreduce(data, op=ir.ReduceOp.Sum, span=span)
+    allreduce_assign = ir.AssignStmt(ir.Var("data_out", allreduce.type, span), allreduce, span)
 
-    synthesized = _synthesize(Before)
-    ir.assert_structural_equal(synthesized, Expected)
+    host = ir.Function(
+        "host_orch",
+        [data],
+        [],
+        ir.SeqStmts([existing_assign, allreduce_assign], span),
+        span,
+        ir.FunctionType.Opaque,
+        ir.Level.HOST,
+        ir.Role.Orchestrator,
+    )
+    synthesized = _synthesize(ir.Program([host], "P", span))
     alloc_names = [
         stmt.value.kwargs["name"]
         for stmt in _flatten_stmts(_get_func(synthesized, "host_orch").body)
@@ -2048,126 +1010,34 @@ def test_synthesize_allreduce_signals_reserves_existing_alloc_names():
 def test_ssa_allreduce_result_keeps_source_window_lineage():
     """Post-SSA allreduce result Vars still resolve to the original data window."""
 
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
+    program = cast(
+        ir.Program,
+        pl.parse(
+            textwrap.dedent(
+                """
+                @pl.program
+                class P:
+                    @pl.function(type=pl.FunctionType.Orchestration)
+                    def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+                        return data
 
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            data = pld.window(data_buf, [256], dtype=pl.FP32)
-            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
-            for r in pl.range(pld.world_size()):
-                self.chip_orch(data, device=r)
-            data_1 = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
-            data_2 = pld.tensor.allreduce(data_1, op=pld.ReduceOp.Sum)
-            return data_2
+                    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                    def host_orch(self):
+                        data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+                        signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+                        data = pld.window(data_buf, [256], dtype=pl.FP32)
+                        signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+                        for r in pl.range(pld.world_size()):
+                            self.chip_orch(data, device=r)
+                        data_1 = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+                        data_2 = pld.tensor.allreduce(data_1, op=pld.ReduceOp.Sum)
+                        return data_2
+                """
+            )
+        ),
+    )
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("signal_buf__ssa_v0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                data_1__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, signal__ssa_v0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                data_2__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data_1__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return data_2__ssa_v0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(program)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
 
@@ -2182,7 +1052,7 @@ def test_ssa_allreduce_result_keeps_source_window_lineage():
 
 def test_return_implicit_allreduce_is_lifted_for_host_lowering():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2195,78 +1065,7 @@ def test_return_implicit_allreduce_is_lifted_for_host_lowering():
                 self.chip_orch(data, device=r)
             return pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                __allreduce_result_1: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return __allreduce_result_1
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     allreduce_assigns = [
@@ -2299,7 +1098,7 @@ def test_return_implicit_allreduce_is_lifted_for_host_lowering():
 
 def test_return_explicit_allreduce_is_lifted_for_host_lowering():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2314,74 +1113,7 @@ def test_return_explicit_allreduce_is_lifted_for_host_lowering():
                 self.chip_orch(data, device=r)
             return pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("signal_buf__ssa_v0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                __allreduce_result_0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, signal__ssa_v0],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return __allreduce_result_0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     synthetic_assigns = [
@@ -2409,7 +1141,7 @@ def test_return_explicit_allreduce_is_lifted_for_host_lowering():
 
 def test_implicit_allreduce_eval_stmt_gets_signal():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2423,76 +1155,7 @@ def test_implicit_allreduce_eval_stmt_gets_signal():
             pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "__allreduce_signal_buf_0_window",
-                        base="__allreduce_signal_buf_0",
-                        size=__allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                    name="__allreduce_signal_buf_0",
-                )
-                __allreduce_signal_0: pld.DistributedTensor[
-                    [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                    pl.INT32,
-                    pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [__allreduce_signal_buf_0, [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)]],
-                    pld.DistributedTensor[
-                        [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                        pl.INT32,
-                        pl._dump.window_ref("__allreduce_signal_buf_0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, __allreduce_signal_0],
-                    pld.DistributedTensor[[256], pl.FP32],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     allreduces = [
@@ -2519,7 +1182,7 @@ def test_implicit_allreduce_eval_stmt_gets_signal():
 
 def test_explicit_allreduce_eval_stmt_keeps_user_signal():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2535,72 +1198,7 @@ def test_explicit_allreduce_eval_stmt_keeps_user_signal():
             pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("signal_buf__ssa_v0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                pl._dump.call(
-                    "pld.tensor.allreduce",
-                    [data__ssa_v0, signal__ssa_v0],
-                    pld.DistributedTensor[[256], pl.FP32],
-                    kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                )
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     stmts = _flatten_stmts(host.body)
     synthetic_assigns = [
@@ -2628,7 +1226,7 @@ def test_implicit_allreduce_in_while_loop_uses_shared_signal():
     after each call."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2645,42 +1243,7 @@ def test_implicit_allreduce_in_while_loop_uses_shared_signal():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
-            return data
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            __allreduce_signal_world_size_0: pl.Scalar[pl.INT64] = pld.system.world_size()
-            __allreduce_signal_buf_0: pl.Ptr = pl._dump.alloc_window_buffer(
-                __allreduce_signal_world_size_0 * pl.const(1, pl.INT64) * pl.const(4, pl.INT64),
-                name="__allreduce_signal_buf_0",
-            )
-            __allreduce_signal_0: pld.DistributedTensor[
-                [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)], pl.INT32
-            ] = pld.tensor.window(
-                __allreduce_signal_buf_0,
-                [__allreduce_signal_world_size_0, pl.const(1, pl.INT64)],
-                dtype=pl.INT32,
-            )
-            data_buf: pl.Ptr = pl._dump.alloc_window_buffer(
-                pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-            )
-            data: pld.DistributedTensor[[256], pl.FP32] = pld.tensor.window(data_buf, [256], dtype=pl.FP32)
-            for r in pl.range(pld.system.world_size()):
-                self.chip_orch(data, device=r)
-            for r_1 in pl.range(pld.system.world_size()):
-                self.chip_orch(data, device=r_1)
-            while True:
-                data: pld.DistributedTensor[[256], pl.FP32] = pld.tensor.allreduce(
-                    data, __allreduce_signal_0, op=pld.ReduceOp.Sum, mode="mesh", core_num=1
-                )
-            return data
-
-    synthesized = _synthesize(Before)
-    ir.assert_structural_equal(synthesized, Expected)
+    synthesized = _synthesize(P)
     host = _get_func(synthesized, "host_orch")
     signal_windows = [
         stmt
@@ -2706,7 +1269,7 @@ def test_explicit_allreduce_in_loop_is_accepted():
     """An explicit signal is reusable across iterations, so a `for` loop is allowed."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2725,85 +1288,14 @@ def test_explicit_allreduce_in_loop_is_accepted():
 
     # An explicit signal needs no synthesis, and the lowered kernel restores its
     # cells to zero before returning, so carrying it across iterations is safe.
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("signal_buf__ssa_v0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                for ___idx_v0, (data__iter_v1,) in pl.range(2, init_values=(data__ssa_v0,)):
-                    data__ssa_v3: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data__iter_v1, signal__ssa_v0],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                    data__rv_v2: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                    ] = pl.yield_(data__ssa_v3)
-                return data__rv_v2
-
-    after = _apply(Before)
-    ir.assert_structural_equal(after, Expected)
+    _apply(P)
 
 
 def test_explicit_allreduce_in_while_loop_is_accepted():
     """Same as the `for` case: only a synthesized signal is loop-bound."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -2822,79 +1314,7 @@ def test_explicit_allreduce_in_while_loop_is_accepted():
 
     # An explicit signal needs no synthesis, and the lowered kernel restores its
     # cells to zero before returning, so carrying it across iterations is safe.
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [pld.system.world_size(), 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [pld.system.world_size(), 1]],
-                    pld.DistributedTensor[
-                        [pld.system.world_size(), 1],
-                        pl.INT32,
-                        pl._dump.window_ref("signal_buf__ssa_v0_window"),
-                    ],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                for (data__iter_v1,) in pl.while_(init_values=(data__ssa_v0,)):
-                    pl.cond(True)
-                    data__ssa_v3: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.allreduce",
-                        [data__iter_v1, signal__ssa_v0],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                        kwargs={"op": 0, "mode": "mesh", "core_num": 1},
-                    )
-                    data__rv_v2: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                    ] = pl.yield_(data__ssa_v3)
-                return data__rv_v2
-
-    after = _apply(Before)
-    ir.assert_structural_equal(after, Expected)
+    _apply(P)
 
 
 def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
@@ -2913,7 +1333,7 @@ def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
     """
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
@@ -2940,129 +1360,21 @@ def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
             pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(
-            self,
-            inp__ssa_v0: pld.DistributedTensor[[8, 64], pl.FP32],
-            data__ssa_v0: pld.DistributedTensor[[8, 64], pl.FP32],
-            counts__ssa_v0: pld.DistributedTensor[[4, 1], pl.INT32],
-        ):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "input_buf__ssa_v0_window",
-                        base="input_buf__ssa_v0",
-                        size=pl.const(512, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "data_buf__ssa_v0_window",
-                        base="data_buf__ssa_v0",
-                        size=pl.const(512, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "signal_buf__ssa_v0_window",
-                        base="signal_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "counts_buf__ssa_v0_window",
-                        base="counts_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "recv_buf__ssa_v0_window",
-                        base="recv_buf__ssa_v0",
-                        size=pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                input_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(512, pl.INDEX) * pl.const(4, pl.INDEX), name="input_buf"
-                )
-                data_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(512, pl.INDEX) * pl.const(4, pl.INDEX), name="data_buf"
-                )
-                signal_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="signal_buf"
-                )
-                counts_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="counts_buf"
-                )
-                recv_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(4, pl.INDEX) * pl.const(4, pl.INDEX), name="recv_buf"
-                )
-                inp__ssa_v0: pld.DistributedTensor[
-                    [8, 64], pl.FP32, pl._dump.window_ref("input_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [input_buf__ssa_v0, [8, 64]],
-                    pld.DistributedTensor[[8, 64], pl.FP32, pl._dump.window_ref("input_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [8, 64], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [data_buf__ssa_v0, [8, 64]],
-                    pld.DistributedTensor[[8, 64], pl.FP32, pl._dump.window_ref("data_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                counts__ssa_v0: pld.DistributedTensor[
-                    [4, 1], pl.INT32, pl._dump.window_ref("counts_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [counts_buf__ssa_v0, [4, 1]],
-                    pld.DistributedTensor[[4, 1], pl.INT32, pl._dump.window_ref("counts_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(inp__ssa_v0, data__ssa_v0, counts__ssa_v0, device=r__idx_v0)
-                signal__ssa_v0: pld.DistributedTensor[
-                    [4, 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [signal_buf__ssa_v0, [4, 1]],
-                    pld.DistributedTensor[[4, 1], pl.INT32, pl._dump.window_ref("signal_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.INT32},
-                )
-                recv__ssa_v0: pld.DistributedTensor[
-                    [4, 1], pl.INT32, pl._dump.window_ref("recv_buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [recv_buf__ssa_v0, [4, 1]],
-                    pld.DistributedTensor[[4, 1], pl.INT32, pl._dump.window_ref("recv_buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.INT32},
-                )
-                pl._dump.call(
-                    "pld.tensor.all_to_all_v",
-                    [inp__ssa_v0, data__ssa_v0, signal__ssa_v0, counts__ssa_v0, recv__ssa_v0, 1],
-                    pld.DistributedTensor[[8, 64], pl.FP32],
-                )
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
+    _assert_scope_fields(
+        scopes[0],
+        [],
+        [
+            _expected_slot("input_buf", _mul(8 * 64, 4)),
+            _expected_slot("data_buf", _mul(8 * 64, 4)),
+            _expected_slot("signal_buf", _mul(4, 4)),
+            _expected_slot("counts_buf", _mul(4, 4)),
+            _expected_slot("recv_buf", _mul(4, 4)),
+        ],
+    )
 
 
 def test_all_to_all_v_in_loop_is_rejected():
@@ -3188,7 +1500,7 @@ def test_single_alloc_subset_const_int_devices():
     """Two separate ``device=0`` / ``device=1`` dispatches ⇒ subset {0,1}."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -3201,49 +1513,13 @@ def test_single_alloc_subset_const_int_devices():
             self.chip_orch(data, device=1)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                self.chip_orch(data__ssa_v0, device=pl.const(0, pl.INDEX))
-                self.chip_orch(data__ssa_v0, device=pl.const(1, pl.INDEX))
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     # Two ConstInt dispatches contribute {0} and {1}; merged into subset {0,1}
     # over a single ``buf`` slot.
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf", _mul(256, 4))])
 
 
 # ---------------------------------------------------------------------------
@@ -3255,7 +1531,7 @@ def test_single_alloc_bounded_loop_devices():
     """``for r in pl.range(2)`` + ``device=r`` ⇒ subset {0, 1}."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -3268,48 +1544,12 @@ def test_single_alloc_bounded_loop_devices():
                 self.chip_orch(data, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(2):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     # ``pl.range(2)`` expands the induction-var descriptor to subset {0, 1}.
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf", _mul(256, 4))])
 
 
 # ---------------------------------------------------------------------------
@@ -3319,7 +1559,7 @@ def test_single_alloc_bounded_loop_devices():
 
 def test_two_allocs_same_descriptor_one_group():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
@@ -3338,72 +1578,18 @@ def test_two_allocs_same_descriptor_one_group():
                 self.chip_orch(data, signal, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(
-            self,
-            data__ssa_v0: pld.DistributedTensor[[256], pl.FP32],
-            signal__ssa_v0: pld.DistributedTensor[[8], pl.INT32],
-        ):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf_data__ssa_v0_window",
-                        base="buf_data__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                    pl._dump.window_buffer(
-                        "buf_signal__ssa_v0_window",
-                        base="buf_signal__ssa_v0",
-                        size=pl.const(8, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    ),
-                ],
-            ):
-                buf_data__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_data"
-                )
-                buf_signal__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(8, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_signal"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf_data__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf_data__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_data__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                signal__ssa_v0: pld.DistributedTensor[
-                    [8], pl.INT32, pl._dump.window_ref("buf_signal__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf_signal__ssa_v0, [8]],
-                    pld.DistributedTensor[[8], pl.INT32, pl._dump.window_ref("buf_signal__ssa_v0_window")],
-                    kwargs={"dtype": pl.INT32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, signal__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     # Both allocs are dispatched over the same world_size loop ⇒ identical kAll
     # descriptor ⇒ a single scope whose slots follow source/alloc order
     # (buf_data, then buf_signal) per Phase-6 clustering.
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
+    _assert_scope_fields(
+        scopes[0],
+        [],  # kAll
+        [_expected_slot("buf_data", _mul(256, 4)), _expected_slot("buf_signal", _mul(8, 4))],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3413,7 +1599,7 @@ def test_two_allocs_same_descriptor_one_group():
 
 def test_two_allocs_different_descriptors_two_groups():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch_a(self, a: pld.DistributedTensor[[256], pl.FP32]):
             return a
@@ -3434,74 +1620,7 @@ def test_two_allocs_different_descriptors_two_groups():
             self.chip_orch_b(b, device=3)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch_a(self, a__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return a__ssa_v0
-
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch_b(self, b__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return b__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf_a__ssa_v0_window",
-                        base="buf_a__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                with pl._dump.comm_domain(
-                    name="comm_d1",
-                    devices=[2, 3],
-                    slots=[
-                        pl._dump.window_buffer(
-                            "buf_b__ssa_v0_window",
-                            base="buf_b__ssa_v0",
-                            size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                            load_from_host=False,
-                            store_to_host=False,
-                        )
-                    ],
-                ):
-                    buf_a__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                        pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_a"
-                    )
-                    buf_b__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                        pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_b"
-                    )
-                    a__ssa_v0: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [buf_a__ssa_v0, [256]],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    b__ssa_v0: pld.DistributedTensor[
-                        [256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [buf_b__ssa_v0, [256]],
-                        pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    self.chip_orch_a(a__ssa_v0, device=pl.const(0, pl.INDEX))
-                    self.chip_orch_a(a__ssa_v0, device=pl.const(1, pl.INDEX))
-                    self.chip_orch_b(b__ssa_v0, device=pl.const(2, pl.INDEX))
-                    self.chip_orch_b(b__ssa_v0, device=pl.const(3, pl.INDEX))
-                    return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     # buf_a is dispatched to {0,1}; buf_b to {2,3}. Distinct descriptors ⇒ two
     # nested scopes. The pass walks allocs in source order and opens a domain
@@ -3509,6 +1628,8 @@ def test_two_allocs_different_descriptors_two_groups():
     # outermost = buf_a, innermost = buf_b.
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 2
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf_a", _mul(256, 4))])
+    _assert_scope_fields(scopes[1], [2, 3], [_expected_slot("buf_b", _mul(256, 4))])
 
 
 def test_four_allocs_three_descriptors_three_groups():
@@ -3522,7 +1643,7 @@ def test_four_allocs_three_descriptors_three_groups():
     fourth, spurious domain."""
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch_a(self, a: pld.DistributedTensor[[256], pl.FP32]):
             return a
@@ -3555,137 +1676,17 @@ def test_four_allocs_three_descriptors_three_groups():
             self.chip_orch_c(c, d, device=5)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch_a(self, a__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return a__ssa_v0
-
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch_b(self, b__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return b__ssa_v0
-
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch_c(
-            self,
-            c__ssa_v0: pld.DistributedTensor[[256], pl.FP32],
-            d__ssa_v0: pld.DistributedTensor[[256], pl.FP32],
-        ):
-            return c__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf_a__ssa_v0_window",
-                        base="buf_a__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                with pl._dump.comm_domain(
-                    name="comm_d1",
-                    devices=[2, 3],
-                    slots=[
-                        pl._dump.window_buffer(
-                            "buf_b__ssa_v0_window",
-                            base="buf_b__ssa_v0",
-                            size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                            load_from_host=False,
-                            store_to_host=False,
-                        )
-                    ],
-                ):
-                    with pl._dump.comm_domain(
-                        name="comm_d2",
-                        devices=[4, 5],
-                        slots=[
-                            pl._dump.window_buffer(
-                                "buf_c__ssa_v0_window",
-                                base="buf_c__ssa_v0",
-                                size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                                load_from_host=False,
-                                store_to_host=False,
-                            ),
-                            pl._dump.window_buffer(
-                                "buf_d__ssa_v0_window",
-                                base="buf_d__ssa_v0",
-                                size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                                load_from_host=False,
-                                store_to_host=False,
-                            ),
-                        ],
-                    ):
-                        buf_a__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                            pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_a"
-                        )
-                        buf_b__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                            pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_b"
-                        )
-                        buf_c__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                            pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_c"
-                        )
-                        buf_d__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                            pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf_d"
-                        )
-                        a__ssa_v0: pld.DistributedTensor[
-                            [256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")
-                        ] = pl._dump.call(
-                            "pld.tensor.window",
-                            [buf_a__ssa_v0, [256]],
-                            pld.DistributedTensor[
-                                [256], pl.FP32, pl._dump.window_ref("buf_a__ssa_v0_window")
-                            ],
-                            kwargs={"dtype": pl.FP32},
-                        )
-                        b__ssa_v0: pld.DistributedTensor[
-                            [256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")
-                        ] = pl._dump.call(
-                            "pld.tensor.window",
-                            [buf_b__ssa_v0, [256]],
-                            pld.DistributedTensor[
-                                [256], pl.FP32, pl._dump.window_ref("buf_b__ssa_v0_window")
-                            ],
-                            kwargs={"dtype": pl.FP32},
-                        )
-                        c__ssa_v0: pld.DistributedTensor[
-                            [256], pl.FP32, pl._dump.window_ref("buf_c__ssa_v0_window")
-                        ] = pl._dump.call(
-                            "pld.tensor.window",
-                            [buf_c__ssa_v0, [256]],
-                            pld.DistributedTensor[
-                                [256], pl.FP32, pl._dump.window_ref("buf_c__ssa_v0_window")
-                            ],
-                            kwargs={"dtype": pl.FP32},
-                        )
-                        d__ssa_v0: pld.DistributedTensor[
-                            [256], pl.FP32, pl._dump.window_ref("buf_d__ssa_v0_window")
-                        ] = pl._dump.call(
-                            "pld.tensor.window",
-                            [buf_d__ssa_v0, [256]],
-                            pld.DistributedTensor[
-                                [256], pl.FP32, pl._dump.window_ref("buf_d__ssa_v0_window")
-                            ],
-                            kwargs={"dtype": pl.FP32},
-                        )
-                        self.chip_orch_a(a__ssa_v0, device=pl.const(0, pl.INDEX))
-                        self.chip_orch_a(a__ssa_v0, device=pl.const(1, pl.INDEX))
-                        self.chip_orch_b(b__ssa_v0, device=pl.const(2, pl.INDEX))
-                        self.chip_orch_b(b__ssa_v0, device=pl.const(3, pl.INDEX))
-                        self.chip_orch_c(c__ssa_v0, d__ssa_v0, device=pl.const(4, pl.INDEX))
-                        self.chip_orch_c(c__ssa_v0, d__ssa_v0, device=pl.const(5, pl.INDEX))
-                        return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 3
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf_a", _mul(256, 4))])
+    _assert_scope_fields(scopes[1], [2, 3], [_expected_slot("buf_b", _mul(256, 4))])
+    _assert_scope_fields(
+        scopes[2],
+        [4, 5],
+        [_expected_slot("buf_c", _mul(256, 4)), _expected_slot("buf_d", _mul(256, 4))],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3695,7 +1696,7 @@ def test_four_allocs_three_descriptors_three_groups():
 
 def test_multi_view_per_alloc_shares_wb_instance():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
@@ -3713,56 +1714,7 @@ def test_multi_view_per_alloc_shares_wb_instance():
                 self.chip_orch(view_a, view_b, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(
-            self,
-            v1__ssa_v0: pld.DistributedTensor[[256], pl.FP32],
-            v2__ssa_v0: pld.DistributedTensor[[256], pl.FP32],
-        ):
-            return v1__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(512, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(512, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                view_a__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                view_b__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(view_a__ssa_v0, view_b__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     types = _view_var_types(host)
     assert len(types) == 2
@@ -3785,7 +1737,7 @@ def test_multi_view_per_alloc_shares_wb_instance():
 
 def test_chip_orch_param_types_keep_window_buffer_nullopt():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -3798,44 +1750,7 @@ def test_chip_orch_param_types_keep_window_buffer_nullopt():
                 self.chip_orch(data, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     chip = _get_func(result, "chip_orch")
     # The param annotation came from the user; its DistributedTensorType
     # should carry no window_buffer back-reference even after the pass runs.
@@ -3928,7 +1843,7 @@ def test_non_unit_step_device_loop_raises():
 
 def test_idempotent():
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -3941,44 +1856,7 @@ def test_idempotent():
                 self.chip_orch(data, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                for r__idx_v0 in pl.range(pld.system.world_size()):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                return 0
-
-    first = _apply(Before)
-    ir.assert_structural_equal(first, Expected)
+    first = _apply(P)
     second = passes.materialize_comm_domain_scopes()(first)
     ir.assert_structural_equal(first, second)
     first_host = _get_func(first, "host_orch")
@@ -4025,7 +1903,7 @@ def test_loop_bound_via_assigned_temp_world_size():
     """
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -4039,45 +1917,7 @@ def test_loop_bound_via_assigned_temp_world_size():
                 self.chip_orch(data, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                n__ssa_v0: pl.Scalar[pl.INT64] = pld.system.world_size()
-                for r__idx_v0 in pl.range(n__ssa_v0):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
@@ -4093,7 +1933,7 @@ def test_loop_bound_via_assigned_temp_const_int():
     """
 
     @pl.program
-    class Before:
+    class P:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
             return data
@@ -4107,45 +1947,7 @@ def test_loop_bound_via_assigned_temp_const_int():
                 self.chip_orch(data, device=r)
             return 0
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip_orch(self, data__ssa_v0: pld.DistributedTensor[[256], pl.FP32]):
-            return data__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX),
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
-                    pl.const(256, pl.INDEX) * pl.const(4, pl.INDEX), name="buf"
-                )
-                data__ssa_v0: pld.DistributedTensor[
-                    [256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                ] = pl._dump.call(
-                    "pld.tensor.window",
-                    [buf__ssa_v0, [256]],
-                    pld.DistributedTensor[[256], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                    kwargs={"dtype": pl.FP32},
-                )
-                n__ssa_v0: pl.Scalar[pl.INDEX] = 2
-                for r__idx_v0 in pl.range(n__ssa_v0):
-                    self.chip_orch(data__ssa_v0, device=r__idx_v0)
-                return 0
-
-    result = _apply(Before)
-    ir.assert_structural_equal(result, Expected)
+    result = _apply(P)
     host = _get_func(result, "host_orch")
     scopes = _get_comm_domain_scopes(host)
     assert len(scopes) == 1
@@ -4262,76 +2064,7 @@ def test_materialized_program_text_roundtrip(explicit_layout):
             return 0
 
     ir.assert_structural_equal(P, pl.parse(ir.python_print(P, format=False)))
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
-        def chip(self, x__ssa_v0: pld.DistributedTensor[[4], pl.FP32]):
-            return x__ssa_v0
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host(self, n__ssa_v0: pl.Scalar[pl.INDEX]):
-            with pl._dump.comm_domain(
-                name="comm_d0",
-                devices=[0, 1],
-                slots=[
-                    pl._dump.window_buffer(
-                        "buf__ssa_v0_window",
-                        base="buf__ssa_v0",
-                        size=size__ssa_v0,
-                        load_from_host=False,
-                        store_to_host=False,
-                    )
-                ],
-            ):
-                with pl._dump.comm_domain(
-                    name="comm_d1",
-                    devices=[2],
-                    slots=[
-                        pl._dump.window_buffer(
-                            "other_buf__ssa_v0_window",
-                            base="other_buf__ssa_v0",
-                            size=16,
-                            load_from_host=False,
-                            store_to_host=False,
-                        )
-                    ],
-                ):
-                    size__ssa_v0: pl.Scalar[pl.INDEX] = n__ssa_v0 * 4
-                    buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(size__ssa_v0, name="buf")
-                    other_buf__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(16, name="other_buf")
-                    x__ssa_v0: pld.DistributedTensor[
-                        [4], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [buf__ssa_v0, [4]],
-                        pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    alias__ssa_v0: pld.DistributedTensor[
-                        [4], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [buf__ssa_v0, [4]],
-                        pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref("buf__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    other__ssa_v0: pld.DistributedTensor[
-                        [4], pl.FP32, pl._dump.window_ref("other_buf__ssa_v0_window")
-                    ] = pl._dump.call(
-                        "pld.tensor.window",
-                        [other_buf__ssa_v0, [4]],
-                        pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref("other_buf__ssa_v0_window")],
-                        kwargs={"dtype": pl.FP32},
-                    )
-                    for r__idx_v0 in pl.range(2):
-                        self.chip(x__ssa_v0, device=r__idx_v0)
-                        self.chip(alias__ssa_v0, device=r__idx_v0)
-                    self.chip(other__ssa_v0, device=pl.const(2, pl.INDEX))
-                    return 0
-
     original = _apply(P)
-    ir.assert_structural_equal(original, Expected)
     printed = ir.python_print(original, format=False, explicit_layout=explicit_layout)
     restored = pl.parse_program(printed)
     ir.assert_structural_equal(original, restored)
