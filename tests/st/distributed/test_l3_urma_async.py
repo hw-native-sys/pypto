@@ -504,22 +504,28 @@ def _run_two_outputs(test_config: RunConfig, device_ids: list[int], n_ranks: int
     return outputs_put, outputs_get
 
 
-def _run(
-    test_config: RunConfig, device_ids: list[int], n_ranks: int, round_index: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    inputs = _rank_inputs(n_ranks, round_index=round_index)
-    inputs2 = _rank_inputs(n_ranks, round_index=round_index + 1)
+def _compile(test_config: RunConfig, device_ids: list[int], n_ranks: int):
+    """Compile the exchange once; execution reuses the returned program."""
+    inputs = _rank_inputs(n_ranks)
+    inputs2 = _rank_inputs(n_ranks, round_index=1)
     outputs_put = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
     outputs_get = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
     distributed_config = DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0)
     host_orch = _build_urma_exchange(n_ranks)
-    compiled = host_orch.compile(
+    return host_orch.compile(
         inputs,
         inputs2,
         outputs_put,
         outputs_get,
         config=RunConfig(platform=test_config.platform, distributed_config=distributed_config),
     )
+
+
+def _execute(test_config: RunConfig, compiled, n_ranks: int, round_index: int):
+    inputs = _rank_inputs(n_ranks, round_index=round_index)
+    inputs2 = _rank_inputs(n_ranks, round_index=round_index + 1)
+    outputs_put = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+    outputs_get = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
     compiled(
         inputs,
         inputs2,
@@ -528,6 +534,11 @@ def _run(
         config=RunConfig(platform=test_config.platform),
     )
     return outputs_put, outputs_get
+
+
+def _run(test_config: RunConfig, device_ids: list[int], n_ranks: int, round_index: int):
+    compiled = _compile(test_config, device_ids, n_ranks)
+    return _execute(test_config, compiled, n_ranks, round_index)
 
 
 @pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
@@ -594,8 +605,9 @@ class TestL3UrmaAsync:
         if len(device_ids) < n_ranks:
             pytest.skip(f"URMA async repeated exchange needs {n_ranks} devices")
 
+        compiled = _compile(test_config, device_ids, n_ranks)
         for round_index in range(REPEATS):
-            outputs_put, outputs_get = _run(test_config, device_ids, n_ranks, round_index)
+            outputs_put, outputs_get = _execute(test_config, compiled, n_ranks, round_index)
             expected_put = _expected_put(n_ranks, round_index=round_index)
             expected_get = _expected_exchange(n_ranks, round_index=round_index) + 1.0
             assert torch.allclose(outputs_put, expected_put), (
