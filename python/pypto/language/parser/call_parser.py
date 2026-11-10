@@ -21,7 +21,7 @@ from .diagnostics import (
     ParserTypeError,
     UndefinedVariableError,
 )
-from .dispatch_semantics import DispatchSemantics
+from .dispatch_semantics import DispatchSemantics, validate_placement_callee
 from .parser_state import FunctionContext, InlineState, ParseCallbacks, ParserServices, ProgramBindings
 from .syntax_helpers import is_pl_call
 from .type_resolver import (
@@ -245,7 +245,7 @@ class CallParser:
         ``deps=`` / ``dumps=`` / ``timing_slot=`` are accepted only on
         ``pl.submit(...)``;
         ``core_num=`` / ``sync_start=`` only on ``pl.spmd_submit(...)``;
-        ``device=`` only when the callee is an Orchestrator. Raises
+        ``worker=`` (or deprecated ``device=``) only for an Orchestrator callee. Raises
         ``ParserTypeError`` with a targeted hint for the common
         deps/dumps-on-a-plain-call mistakes.
         """
@@ -258,8 +258,8 @@ class CallParser:
             allowed_kwargs.add("timing_slot")
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
-        if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
-            allowed_kwargs.add("device")
+        if func_obj is None or func_obj.role == ir.Role.Orchestrator:
+            allowed_kwargs.update({"worker", "device"})
         for kw in keywords:
             if kw.arg in allowed_kwargs:
                 continue
@@ -472,9 +472,15 @@ class CallParser:
             in_dumps = any(arg is d for d in explicit_dump_vars)
             if (tagged or in_dumps) and isinstance(arg, ir.Var):
                 dump_vars.append(arg)
-        # Orchestration dispatch ``device=`` kwarg: resolves to a ConstInt or
-        # an enclosing-loop induction Var.
-        device_expr = self.dispatch.parse_dispatch_device_kwarg(keywords)
+        # Placement is the logical immediate-child selector, including legacy
+        # device spellings recovered from dispatch attrs.
+        worker_expr = self.dispatch.parse_dispatch_worker_kwarg(keywords, extra_attrs, func_obj, span)
+        if worker_expr is not None:
+            caller_level = self.dispatch.regions.distributed_level
+            if func_obj is None:
+                self.bindings.pending_placements.append((caller_level, gvar, span))
+            else:
+                validate_placement_callee(caller_level, func_obj, span)
         # ``pl.spmd_submit`` parses the SPMD launch spec (``core_num=`` /
         # ``sync_start=``) into a (positive int Expr, bool) pair recorded on
         # the resulting Submit.
@@ -540,7 +546,7 @@ class CallParser:
             no_dep_indices=no_dep_indices,
             dump_vars=dump_vars,
             user_dep_vars=user_dep_vars,
-            device_expr=device_expr,
+            worker_expr=worker_expr,
             augment_task_id=as_submit,
             core_num=core_num_expr,
             sync_start=sync_start,
@@ -619,7 +625,7 @@ class CallParser:
         no_dep_indices: list[int] | None = None,
         dump_vars: list[ir.Var] | None = None,
         user_dep_vars: list[ir.Var] | None = None,
-        device_expr: ir.Expr | None = None,
+        worker_expr: ir.Expr | None = None,
         augment_task_id: bool = False,
         core_num: ir.Expr | None = None,
         sync_start: bool = False,
@@ -659,10 +665,9 @@ class CallParser:
                 ``augment_task_id=True`` — ManualDepsOnSubmitOnly invariant);
                 codegen emits a ``set_dependencies(arr, count)`` call built
                 from the entries (array entries expand to one slot each).
-            device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
-                on an Orchestration dispatch call. Stored under
-                ``attrs['device']`` so the comm-collection pass can recover
-                per-dispatch device subsets without re-parsing the AST.
+            worker_expr: Logical immediate-child selector from ``worker=``
+                (or legacy ``device=``). Stored as a typed Expr under
+                ``attrs['worker']`` for scope analysis, SSA and codegen.
             augment_task_id: When True (``pl.submit(...)`` path), the call's
                 return type is wrapped as the flat
                 ``TupleType([*<callee returns>, Scalar[TASK_ID]])`` — elements
@@ -703,9 +708,9 @@ class CallParser:
         if no_dep_indices:
             attrs = attrs or {}
             attrs["arg_direction_overrides"] = list(no_dep_indices)
-        if device_expr is not None:
+        if worker_expr is not None:
             attrs = attrs or {}
-            attrs["device"] = device_expr
+            attrs["worker"] = worker_expr
         # Generic round-trip attrs (e.g. arg_direction_overrides from a printed
         # attrs dict, dummy_task, future keys). setdefault so a value already
         # supplied by a dedicated param above wins — the two sources are

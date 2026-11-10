@@ -31,7 +31,7 @@ from pypto.pypto_core.ir import AtomicType, Call, Expr
 from ..typing.distributed_tensor import DistributedTensor
 from . import tensor_ops as _tensor
 from . import tile_ops as _tile
-from .system_ops import get_comm_ctx, nranks, rank, world_size
+from .system_ops import get_comm_ctx, nranks, num_workers, rank, world_size
 from .tensor_ops import alloc_window_buffer, window
 from .tile_ops import remote_load
 
@@ -39,6 +39,7 @@ __all__ = [
     "alloc_window_buffer",
     "get_comm_ctx",
     "nranks",
+    "num_workers",
     "rank",
     "remote_load",
     "remote_store",

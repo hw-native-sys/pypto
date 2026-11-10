@@ -113,13 +113,14 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
         )
         assert isinstance(key, tuple)
-        assert len(key) == 6
-        source_hash, platform, strategy, tensor_part, dist_part, compile_opts = key
+        assert len(key) == 7
+        source_hash, platform, strategy, tensor_part, dist_part, compile_opts, cluster_part = key
         assert source_hash == "abc"
         assert platform is None
         assert strategy is None
         assert isinstance(tensor_part, tuple)
         assert dist_part is None  # single-chip default
+        assert cluster_part is None
         assert compile_opts == (
             ("scalar_semantics", 2),
             ("analyze_auto_scopes_for_deps", False),
@@ -139,7 +140,7 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (128, 64)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        _, _, _, tensor_part, _, _ = key
+        _, _, _, tensor_part, _, _, _ = key
         assert len(tensor_part) == 1
         info = tensor_part[0]
         assert info.name == "a"
@@ -153,7 +154,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
         )
-        _, _, _, tensor_part, _, _ = key
+        _, _, _, tensor_part, _, _, _ = key
         assert tensor_part[0].shape == (None, 128)
 
     def test_dynamic_dim_cache_hit_on_different_concrete_value(self):
@@ -199,7 +200,7 @@ class TestMakeCacheKey:
         folded into the body could be served to a request that expects the
         parameter to stay symbolic.
         """
-        _, _, _, _, _, compile_opts = self._make_key(param_names=["B"])
+        _, _, _, _, _, compile_opts, _ = self._make_key(param_names=["B"])
         assert compile_opts is not None
         assert ("scalar_semantics", SCALAR_SEMANTICS) in compile_opts
 
@@ -212,7 +213,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP16, "b": DataType.FP32},
             dynamic_dims=set(),
         )
-        _, _, _, tensor_part, _, _ = key
+        _, _, _, tensor_part, _, _, _ = key
         assert tensor_part[0].name == "b"
         assert tensor_part[1].name == "a"
 
