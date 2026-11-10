@@ -68,6 +68,9 @@ from ._call_syntax import dependency_call
 from ._source import _UNBOUND, cache_in_snapshot, function_namespace
 from ._specialize_body import BodyTransformer
 from ._specialize_types import DynDim, ShapeDim, TensorMeta
+from .external._call_normalizer import CallBinding, normalize_calls
+from .external.contracts import KernelContract
+from .external.normalization import plan_call, plan_results
 
 # Preserve existing imports while source emission and cache hashing share the
 # exact renderer objects defined in the private values module.
@@ -220,6 +223,10 @@ class SpecializeContext:
     # An incoming Submit needs explicit result arity before its body is lowered.
     requires_return_contract: bool = False
     return_metas: tuple[TensorMeta | None, ...] | None = None
+
+    # Internal provider hand-off after preparation/validation. Legacy externs
+    # derive the equivalent result plan from their validated declaration.
+    external_contract: KernelContract | None = None
 
     @property
     def source_def_name(self) -> str:
@@ -1543,6 +1550,31 @@ def _render_folded_return_annotation(
     return None
 
 
+def _legacy_inout_return_params(
+    definition: ast.FunctionDef, inout_params: list[str], namespace: Mapping[str, Any]
+) -> list[str] | None:
+    """Expose the first buffer of a legacy InOut-only stub with a bare Tensor result."""
+    if not inout_params or definition.returns is None:
+        return None
+    annotation = _eval_annotation(ast.unparse(definition.returns), namespace)
+    if isinstance(annotation, str):
+        annotation = _eval_annotation(annotation, namespace)
+    # Unannotated void stubs keep their updates hidden. Complete return types
+    # and explicit aliases go through the normal return-contract validation.
+    return [inout_params[0]] if annotation is _LangTensor else None
+
+
+def _extern_parameter_annotation(parameter: str, function_name: str) -> tuple[str, str]:
+    """Reject incomplete parameters before parsing an external return contract."""
+    name, separator, annotation = parameter.partition(": ")
+    if not separator:
+        raise ValueError(
+            f"External function '{function_name}' parameter '{name}' requires a supported "
+            "tensor or scalar annotation (pl.Tensor or pl.Scalar[dtype])"
+        )
+    return name, annotation
+
+
 def _extern_return_type(
     definition: ast.FunctionDef,
     ctx: SpecializeContext,
@@ -2215,6 +2247,7 @@ class Specializer:
         # emitted in the generated module preamble so the source is
         # self-contained (mirrors the ``import pypto.language as pl`` line).
         self._needs_pld_import: bool = False
+        self._external_calls: dict[str, CallBinding] = {}
 
     @property
     def rename_map(self) -> dict[str, str]:
@@ -2244,6 +2277,7 @@ class Specializer:
         self._fn_origin = []
         self._graph_rebinds = {}
         self._needs_pld_import = False
+        self._external_calls = {}
 
         # Specialize bodies first so per-context state (DynVars,
         # _needs_pld_import) is fully populated before assembling the preamble.
@@ -2494,24 +2528,16 @@ class Specializer:
         # kernel expands to an AIC member + AIV member + Group wrapper so the
         # entry's call lowers to a single MixedKernels submit.
         if ctx.func_type == "extern":
-            returned_params = self._external_return_params(func_def, tensor_params, out_params, None)
-            # A signature-only extern has no Return node. Preserve its complete
-            # declaration before the legacy first-Out fallback can erase outputs.
-            ret_type = _extern_return_type(func_def, ctx, ann_globals, params, returned_params)
-            ret_type = ret_type or _infer_return_type(
-                func_def,
-                ctx.tensor_meta,
-                out_params,
-                distributed_params,
-                ctx.py_globals,
-                ctx.constexpr_values,
-            )
-            return self._render_external(
+            return self._specialize_external(
                 ctx,
+                func_def,
+                tensor_params,
+                out_params,
+                inout_params,
+                distributed_params,
+                ann_globals,
                 params,
-                f" -> {ret_type}" if ret_type else "",
                 all_param_names,
-                self._external_return_params(func_def, tensor_params, out_params, ret_type),
             )
 
         ret_type = self._specialize_return_annotation(func_def, ctx, out_params, distributed_params)
@@ -2563,6 +2589,7 @@ class Specializer:
                 flat_body.append(item)
 
         _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
+        flat_body = normalize_calls(flat_body, self._external_calls, all_param_names)
 
         if not flat_body:
             flat_body = [ast.Pass()]
@@ -2617,6 +2644,111 @@ class Specializer:
         result_lines.extend(body_lines[1:])
 
         return result_lines
+
+    def _specialize_external(
+        self,
+        ctx: SpecializeContext,
+        func_def: ast.FunctionDef,
+        tensor_params: list[str],
+        out_params: list[str],
+        inout_params: list[str],
+        distributed_params: set[str],
+        ann_globals: dict[str, Any],
+        params: list[str],
+        all_param_names: list[str],
+    ) -> list[str]:
+        """Validate public aliases, then render all internal tensor updates."""
+        parameter_annotations = [_extern_parameter_annotation(p, ctx.func_name) for p in params]
+        returned_params = self._external_return_params(func_def, tensor_params, out_params, None)
+        # A signature-only extern has no Return node. Preserve its complete
+        # declaration before the legacy first-Out fallback can erase outputs.
+        ret_type = _extern_return_type(func_def, ctx, ann_globals, params, returned_params)
+        ret_type = ret_type or _infer_return_type(
+            func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
+        )
+        returned_params = self._external_return_params(func_def, tensor_params, out_params, ret_type)
+        if ret_type is None and returned_params is None:
+            returned_params = _legacy_inout_return_params(func_def, inout_params, ann_globals)
+        indices = {name: index for index, name in enumerate(all_param_names)}
+        writable = set(out_params + inout_params)
+        public = (
+            returned_params
+            if returned_params is not None
+            else ([name for name in all_param_names if name in writable] if ret_type else [])
+        )
+        if ctx.external_contract is not None:
+            if tuple(all_param_names) != tuple(p.name for p in ctx.external_contract.parameters):
+                raise ValueError(
+                    f"Extern '{ctx.source_def_name}' contract parameter order differs from its signature"
+                )
+            plan = plan_call(ctx.external_contract)
+            contract_public = tuple(plan.result_parameters[slot] for slot in plan.public_slots)
+            if contract_public != tuple(indices[name] for name in public):
+                raise ValueError(
+                    f"Extern '{ctx.source_def_name}' contract public returns differ from its declaration; "
+                    "declare the same returned tensor parameters so caller metadata stays consistent"
+                )
+        else:
+            plan = plan_results(
+                tuple(
+                    _ir.ParamDirection.Out
+                    if name in out_params
+                    else _ir.ParamDirection.InOut
+                    if name in inout_params
+                    else _ir.ParamDirection.In
+                    for name in all_param_names
+                ),
+                tuple(indices[name] for name in public),
+            )
+        # Python tuple annotations declare a flat list of IR returns. One
+        # declared result is still a Tensor, even when spelled tuple[Tensor].
+        public_tuple = len(plan.public_slots) > 1
+        self._external_calls[ctx.func_name] = CallBinding(
+            plan,
+            public_tuple,
+            frozenset(
+                (min(p.first, p.second), max(p.first, p.second))
+                for p in ctx.external_contract.alias_permissions
+            )
+            if ctx.external_contract is not None
+            else None,
+        )
+        # The native ABI still receives the original parameters. Only the
+        # compiler-visible results expand to include every tensor update.
+        bare_types: list[str] = []
+        for index, (name, annotation) in enumerate(parameter_annotations):
+            if annotation.startswith(("pl.Out[", "pl.InOut[")):
+                annotation = annotation[annotation.index("[") + 1 : -1]
+            bare_types.append(annotation)
+            direction = plan.parameter_directions[index]
+            params[index] = (
+                f"{name}: {annotation}"
+                if direction == _ir.ParamDirection.In
+                else f"{name}: pl.{direction.name}[{annotation}]"
+            )
+        result_types = [bare_types[index] for index in plan.result_parameters]
+        internal_type = (
+            result_types[0]
+            if len(result_types) == 1
+            else f"tuple[{', '.join(result_types)}]"
+            if result_types
+            else "tuple[()]"
+        )
+        if (
+            ctx.external_contract is None
+            and ret_type
+            and tuple(indices[name] for name in public) == plan.result_parameters
+        ):
+            # Keep a validated complete annotation, including its dynamic
+            # symbol spelling, when normalization did not change the results.
+            internal_type = ret_type
+        return self._render_external(
+            ctx,
+            params,
+            f" -> {internal_type}",
+            all_param_names,
+            [all_param_names[index] for index in plan.result_parameters],
+        )
 
     @staticmethod
     def _external_return_params(
@@ -2682,6 +2814,12 @@ class Specializer:
         call_args = ", ".join(all_param_names)
         header = f"def {name}(self, {sig_params}){ret_ann}:"
 
+        result_contract = (
+            [f"    pl.func_attr({{{EXTERNAL_RETURN_PARAMS_ATTR!r}: [{', '.join(returned_params)}]}})"]
+            if returned_params is not None
+            else []
+        )
+
         def _member(
             member_name: str,
             core_upper: str,
@@ -2696,11 +2834,6 @@ class Specializer:
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
-            result_contract = (
-                [f"    pl.func_attr({{{EXTERNAL_RETURN_PARAMS_ATTR!r}: [{', '.join(returned_params)}]}})"]
-                if returned_params is not None
-                else []
-            )
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
@@ -2730,13 +2863,18 @@ class Specializer:
         )
         lines.append("@pl.function(type=pl.FunctionType.Group)")
         lines.append(header)
-        # AIV lanes never capture a return; the AIC lane echoes the outputs, so
-        # a value-returning kernel threads through the AIC member (matching the
-        # @pl.program group example). A void kernel emits both calls uncaptured.
+        # Both lanes keep their write effects. Known return aliases use the
+        # wrapper parameters directly; otherwise capture the AIC result as in
+        # the @pl.program group route. Void members remain uncaptured.
         if ret_ann and ret_ann != " -> tuple[()]":
-            lines.append(f"    _r = self.{name}_aic({call_args})")
+            # The wrapper has an ordinary body, so expose its return aliases
+            # directly rather than attaching native-only contract attributes.
+            # Both member calls still carry their explicit write effects.
+            capture = "" if returned_params is not None else "_r = "
+            lines.append(f"    {capture}self.{name}_aic({call_args})")
             lines.append(f"    self.{name}_aiv({call_args})")
-            lines.append("    return _r")
+            returned = ", ".join(returned_params) if returned_params is not None else "_r"
+            lines.append(f"    return {returned}")
         else:
             lines.append(f"    self.{name}_aic({call_args})")
             lines.append(f"    self.{name}_aiv({call_args})")
@@ -2839,6 +2977,8 @@ class Specializer:
             elif name in scalar_dtype_strs:
                 dtype_s = scalar_dtype_strs[name]
                 result.append(f"{name}: pl.Scalar[{dtype_s}]")
+            elif name in ctx.scalar_dtypes:
+                result.append(f"{name}: pl.Scalar[{values.dtype_str(ctx.scalar_dtypes[name])}]")
             elif extra_anns and name in extra_anns:
                 result.append(f"{name}: {extra_anns[name]}")
             else:

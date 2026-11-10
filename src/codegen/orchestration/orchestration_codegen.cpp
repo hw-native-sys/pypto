@@ -371,7 +371,7 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
           auto_name::ReserveUniqueName(auto_name::GetCompatibleBaseName(param->name_hint_), param_emit_names);
       emit_name_map[param.get()] = std::move(name);
     }
-    OrchestrationStmtCodegen body_codegen(program, registrations, emit_name_map,
+    OrchestrationStmtCodegen body_codegen(program, registrations, graph_func->params_, emit_name_map,
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
                                           /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
@@ -528,7 +528,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   std::ostringstream oss;
 
-  OrchestrationStmtCodegen stmt_codegen(program, &registrations, std::move(emit_name_map),
+  OrchestrationStmtCodegen stmt_codegen(program, &registrations, func->params_, std::move(emit_name_map),
                                         std::move(param_name_set), std::move(param_name_to_orch_index),
                                         std::move(dist_param_to_ctx_param));
   // Reserve every external reference before allocating NZ temporaries, even

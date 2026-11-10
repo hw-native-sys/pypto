@@ -23,7 +23,7 @@
 
 **失效 (Invalidates)**：无。
 
-`PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 在重写表达式、删除死绑定，以及折叠可证明的分支或纯零次/单次循环时，仍保留 `SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等已建立的属性。InitMemRef 使用的仅常量辅助函数则保留这些控制流语句及其 yield 槽位。
+`PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 在重写表达式、删除死绑定，以及折叠可证明的分支或纯零次/单次循环时，仍保留 `SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等已建立的属性。InitMemRef 使用的仅常量辅助函数则保留这些控制流语句及其 yield 槽位。 在进入约束上下文前,它仍会证明分支的可达性：不可达分支只重映射变量,不求值其算术表达式,也不记录相互矛盾的标量边界。
 
 整数及 INDEX 表达式重写保留声明的结果类型。若化简选中的操作数具有不同的整数类型，会保留转换（插入 cast，或折叠为对应类型的常量）。例如，结果声明为 INT32 的 `(index + 1) - 1` 会化简为 `cast(index, INT32)`。打印器通过 `pl.const(value, dtype)` 保留非 INDEX 整数常量的类型，包括传播到嵌套 Call 参数中的常量。
 

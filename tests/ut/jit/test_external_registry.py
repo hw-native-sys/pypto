@@ -517,8 +517,12 @@ def test_runtime_extent_provenance_survives_full_views_and_shape_reads(kernel_re
     extent = metas["short"].actual_dim(0)
     assert isinstance(extent, DynDim) and extent.synthesized
     assert extent is not metas["x"].actual_dim(0)
-    for name in ("full", "sliced", "reshaped"):
-        assert metas[name].actual_dim(0) is extent
+    assert metas["full"].actual_dim(0) is extent
+    # Descriptor reads remain dynamic but cannot impose equality with the
+    # original runtime scalar: the parser does not prove that relationship.
+    for name in ("sliced", "reshaped"):
+        assert isinstance(metas[name].actual_dim(0), DynDim)
+        assert metas[name].actual_dim(0) is not extent
     assert metas["independent"].actual_dim(0) is not extent
     context.param_names = ["x", "short", "full", "sliced", "reshaped", "independent"]
     context.tensor_meta = {name: metas[name] for name in context.param_names}
@@ -529,7 +533,8 @@ def test_runtime_extent_provenance_survives_full_views_and_shape_reads(kernel_re
     for parameter in request.parameters:
         assert isinstance(parameter.type, TensorSpec)
         shapes.append(parameter.type.shape)
-    assert shapes[1] == shapes[2] == shapes[3] == shapes[4]
+    assert shapes[1] == shapes[2]
+    assert len({shapes[index] for index in (1, 3, 4, 5)}) == 4
     assert shapes[0] != shapes[1] != shapes[5]
 
 

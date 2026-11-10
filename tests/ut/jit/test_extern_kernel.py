@@ -1095,5 +1095,46 @@ def test_legacy_jit_hook_rejects_non_jit_results(result):
         entry._get_deps()
 
 
+@pytest.mark.parametrize("difference", ["shape", "dtype"])
+def test_external_signatures_split_through_inline_helper(tmp_path, difference):
+    cpp = _write_kernel(tmp_path)
+
+    @pl.jit.extern(source=cpp, core_type="aiv")
+    def external(x: pl.Tensor, out: pl.Out[pl.Tensor]): ...
+
+    @pl.jit.inline
+    def helper(x: pl.Tensor, out: pl.Tensor):
+        result = external(x, out)
+        return result
+
+    @pl.jit
+    def entry(a: pl.Tensor, b: pl.Tensor, out_a: pl.Out[pl.Tensor], out_b: pl.Out[pl.Tensor]):
+        first = helper(a, out_a)
+        second = helper(b, out_b)
+        first = helper(a, first)
+        return first, second
+
+    a = torch.empty(32, dtype=torch.float32)
+    b = torch.empty(
+        64 if difference == "shape" else 32, dtype=torch.float32 if difference == "shape" else torch.bfloat16
+    )
+    source = _specialize(entry, a, b, torch.empty_like(a), torch.empty_like(b))
+    program = pl.parse(source)
+    assert isinstance(program, ir.Program)
+    # Three calls use only two signatures. Splitting the inline caller is
+    # necessary so its external call also receives the second argument type.
+    assert source.count("def external(") == 1
+    assert source.count("def external__2(") == 1
+    assert "def external__3(" not in source
+    assert "def helper__2(" in source
+    first = program.get_function("external")
+    second = program.get_function("external__2")
+    assert first is not None and second is not None
+    assert not ir.structural_equal(first.params[0].type, second.params[0].type)
+    after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    files = generate(after, str(tmp_path / "generated"), skip_ptoas=True)
+    assert "orchestration/entry.cpp" in files
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

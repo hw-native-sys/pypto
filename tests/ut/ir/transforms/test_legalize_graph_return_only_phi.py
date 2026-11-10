@@ -1,0 +1,474 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+
+"""Exact return-only tensor merges, including Out and Submit aliases."""
+
+import pypto.language as pl
+import pytest
+from pypto import backend, ir, passes
+from pypto.pypto_core import codegen
+
+N = pl.dynamic("alias_profile_rows")
+
+
+@pl.program
+class SameCapture:
+    @pl.function
+    def touch(self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(target, [0, 0], [16, 16])
+            pl.store(tile, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.touch(target)
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = target
+        else:
+            merged = self.touch(target)
+        return merged
+
+    @pl.function
+    def main(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        return self.layer(target, profile)
+
+
+@pl.program
+class ExpectedSameCapture:
+    @pl.function
+    def touch(self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(target, [0, 0], [16, 16])
+            pl.store(tile, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.touch(target)
+        if pl.tensor.dim(profile, 0) > 8:
+            _branch_alias = target
+        else:
+            _branch_result = self.touch(target)
+        return target
+
+    @pl.function
+    def main(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        return self.layer(target, profile)
+
+
+@pl.program
+class DifferentCapture:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        left: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        right: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = left
+        else:
+            merged = right
+        return merged
+
+    @pl.function
+    def main(
+        self,
+        left: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        right: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        return self.layer(left, right, profile)
+
+
+@pl.program
+class ChangedView:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[8, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = target
+        else:
+            merged = target
+        view = pl.tensor.slice(merged, [8, 16], [0, 0])
+        return view
+
+    @pl.function
+    def main(
+        self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[8, 16], pl.FP32]:
+        return self.layer(target, profile)
+
+
+@pl.program
+class MovingBoundary:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        target: pl.InOut[pl.Tensor[[32, 16], pl.FP32]],
+        dest: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+        offset: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[32, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = target
+        else:
+            merged = target
+        view = pl.tensor.slice(merged, [16, 16], [offset, 0])
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(view, [0, 0], [16, 16])
+            pl.store(tile, [0, 0], dest)
+        return merged
+
+    @pl.function
+    def main(
+        self,
+        target: pl.InOut[pl.Tensor[[32, 16], pl.FP32]],
+        dest: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+        offset: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[32, 16], pl.FP32]:
+        return self.layer(target, dest, profile, offset)
+
+
+@pl.program
+class NestedTupleCaptures:
+    @pl.function
+    def touch(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]]
+    ) -> pl.Tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            a = pl.load(first, [0, 0], [16, 16])
+            pl.store(a, [0, 0], first)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            b = pl.load(second, [0, 0], [8, 16])
+            pl.store(b, [0, 0], second)
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> pl.Tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        if pl.tensor.dim(profile, 0) > 8:
+            left = first
+            right = second
+        else:
+            left, right = self.touch(first, second)
+        return left, right
+
+    @pl.function
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> pl.Tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        return self.layer(first, second, profile)
+
+
+# Match actual pool_select_spmd: two flat return positions, not one nested TupleType.
+@pl.program
+class SameTwoCaptures:
+    @pl.function
+    def touch(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]]
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            a = pl.load(first, [0, 0], [16, 16])
+            pl.store(a, [0, 0], first)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            b = pl.load(second, [0, 0], [8, 16])
+            pl.store(b, [0, 0], second)
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        self.touch(first, second)
+        if pl.tensor.dim(profile, 0) > 8:
+            left = first
+            right = second
+        else:
+            left, right = self.touch(first, second)
+        return left, right
+
+    @pl.function
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        return self.layer(first, second, profile)
+
+
+def _prepare(program):
+    ssa = passes.convert_to_ssa()(program)
+    outlined = passes.outline_incore_scopes()(ssa)
+    return passes.normalize_return_order()(outlined)
+
+
+def _legalize(program):
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        return passes.legalize_graph_boundary()(_prepare(program))
+
+
+@pytest.mark.parametrize("program", [DifferentCapture, ChangedView, MovingBoundary, NestedTupleCaptures])
+def test_unknown_descriptor_or_nonreturn_phi_remains_rejected(program):
+    with pytest.raises(ValueError, match="returns a value it computed"):
+        _legalize(program)
+
+
+@pl.program
+class SameOutCapture:
+    @pl.function(type=pl.FunctionType.AIV)
+    def write(self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.create_tile([16, 16], dtype=pl.FP32)
+        pl.store(tile, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = self.write(target)
+        else:
+            merged = self.write(target)
+        return merged
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.layer(target, profile)
+        return target
+
+
+@pl.program
+class SameSubmitCaptures:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def write(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.Out[pl.Tensor[[8, 16], pl.INT32]]
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        with pl.manual_scope():
+            if pl.tensor.dim(profile, 0) > 8:
+                (left, right), done = pl.submit(self.write, first, second)
+            else:
+                (left, right), done = pl.submit(self.write, first, second)
+        return left, right
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        self.layer(first, second, profile)
+        return first, second
+
+
+@pl.program
+class ExpectedSameTwoCaptures:
+    @pl.function
+    def touch(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]]
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            a = pl.load(first, [0, 0], [16, 16])
+            pl.store(a, [0, 0], first)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            b = pl.load(second, [0, 0], [8, 16])
+            pl.store(b, [0, 0], second)
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        self.touch(first, second)
+        if pl.tensor.dim(profile, 0) > 8:
+            _first_alias = first
+            _second_alias = second
+        else:
+            first_result, second_result = self.touch(first, second)
+        return first, second
+
+    @pl.function
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        return self.layer(first, second, profile)
+
+
+@pl.program
+class ExpectedSameOutCapture:
+    @pl.function(type=pl.FunctionType.AIV)
+    def write(self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile = pl.create_tile([16, 16], dtype=pl.FP32)
+        pl.store(tile, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            _then_result = self.write(target)
+        else:
+            _else_result = self.write(target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, target: pl.Out[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.layer(target, profile)
+        return target
+
+
+@pl.program
+class ExpectedSameSubmitCaptures:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def write(
+        self, first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], second: pl.Out[pl.Tensor[[8, 16], pl.INT32]]
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        with pl.manual_scope():
+            if pl.tensor.dim(profile, 0) > 8:
+                (then_first, then_second), done = pl.submit(self.write, first, second)
+            else:
+                (else_first, else_second), done = pl.submit(self.write, first, second)
+        return first, second
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        second: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+        profile: pl.Tensor[[N, 16], pl.FP32],
+    ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.INT32]]:
+        self.layer(first, second, profile)
+        return first, second
+
+
+@pytest.mark.parametrize(
+    "before,expected",
+    [
+        (SameCapture, ExpectedSameCapture),
+        (SameTwoCaptures, ExpectedSameTwoCaptures),
+        (SameOutCapture, ExpectedSameOutCapture),
+        (SameSubmitCaptures, ExpectedSameSubmitCaptures),
+    ],
+)
+def test_exact_return_phi_preserves_branch_writes_and_caller_binding(before, expected):
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        ir.assert_structural_equal(passes.legalize_graph_boundary()(_prepare(before)), _prepare(expected))
+
+
+def test_codegen_does_not_initialize_a_dead_tensor_phi():
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.derive_call_directions()(_legalize(SameOutCapture))
+        program = passes.materialize_runtime_scopes()(program)
+        program = passes.classify_iter_arg_carry()(program)
+        main = program.get_function("main")
+        assert main is not None
+        cpp = codegen.generate_orchestration(program, main).code
+    assert "rt_submit_graph" in cpp
+    assert "merged__phi" not in cpp
+
+
+@pl.program
+class LiveGraphPhi:
+    @pl.function(type=pl.FunctionType.AIV)
+    def write(self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        value = pl.load(target, [0, 0], [16, 16])
+        pl.store(value, [0, 0], target)
+        return target
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self, profile: pl.Tensor[[N, 16], pl.FP32], target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        if pl.tensor.dim(profile, 0) > 8:
+            merged = self.write(target)
+        else:
+            merged = self.write(target)
+        self.write(merged)
+        return target
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, profile: pl.Tensor[[N, 16], pl.FP32], target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.layer(profile, target)
+        return target
+
+
+def test_codegen_seeds_live_tensor_phi_with_graph_parameter():
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        program = passes.derive_call_directions()(_legalize(LiveGraphPhi))
+        program = passes.materialize_runtime_scopes()(program)
+        program = passes.classify_iter_arg_carry()(program)
+        main = program.get_function("main")
+        assert main is not None
+        cpp = codegen.generate_orchestration(program, main).code
+    assert "rt_submit_graph" in cpp
+    assert "Tensor merged" in cpp and " = profile;" in cpp
+    assert "profile.shapes[0]" in cpp
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

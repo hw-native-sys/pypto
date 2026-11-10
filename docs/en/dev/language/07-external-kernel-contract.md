@@ -1,6 +1,6 @@
 # External Kernel Contract (Internal v1)
 
-This is the interface baseline for tasks 34.1/34.2 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
+This is the interface baseline for tasks 34.1–34.3 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
 It defines data exchange and executable IR prototypes, not a public provider
 registration API or an installed CANNBotDSL runtime adapter.
 
@@ -16,8 +16,8 @@ registration API or an installed CANNBotDSL runtime adapter.
 The implementation lives in `python/pypto/jit/external/`; the bridge protocol is
 in `python/pypto/backend/external_bridge.py`. Importing either does not import an
 optional DSL. Internal registration and capture are implemented in `registry.py` and
-`compatibility.py`. Whole-program normalization follows in 34.3, and native
-wrappers/runtime binding checks in 34.4.
+`compatibility.py`. Call normalization and signature variants are implemented in the JIT; native
+wrappers/runtime binding checks remain in 34.4.
 
 ## Provider discovery and capture
 
@@ -72,8 +72,10 @@ length is unproven receives an independent symbol even if metadata retains its p
 dynamic dimension as a fallback; full slices preserve proven equality. Repeated aliases
 of the same inexact tensor metadata share their axis symbols; independent views do not.
 Shortened views retain separate runtime extent identities alongside their fallback
-bounds. Full slices, whole-shape reads, and descriptor-based reshapes preserve these
-identities, including when the derived view crosses an ordinary JIT dependency.
+bounds. Whole-shape reads and descriptor-based reshapes keep those axes dynamic,
+including across ordinary JIT dependencies. A descriptor read of a local view may
+receive an independent symbol: the parser cannot always prove it equal to the
+scalar that originally sized the view. Full subscript slices preserve proven equality.
 Omitted layouts normalize to ND, while unsupported constants fail explicitly.
 Strides remain unconstrained and offsets
 runtime-bound because the legacy context cannot prove those values.
@@ -85,7 +87,8 @@ an explicitly supplied `lower(PreparedKernel)` to produce the legacy builder res
 The provider never sees the live context, AST, globals or tensor addresses. This is
 an adapter boundary for the builder path in PR #3231; it does not install that PR's
 runtime wrappers or make arbitrary registered objects executable in JIT programs.
-Automatic generic call lowering and real DSL migration remain subsequent tasks.
+Connecting arbitrary registered objects to executable runtime wrappers and real DSL
+migration remain subsequent tasks.
 
 ## Requests and prepared kernels
 
@@ -174,10 +177,60 @@ assert plan.writeback_slots == ((1, 0), (2, 1))
 ```
 
 For a public `result = stage(x, state, out)`, the internal call returns updated
-`state` and `out`; only the latter is projected as `result`. Task 34.3 must also
-replace subsequent state uses and propagate the effect through inline boundaries.
-The plan itself does not rewrite Python source. Materialize its projections as
-IR before passes run: slot numbers are not stable across `NormalizeReturnOrder`.
+`state` and `out`; only the latter is projected as `result`. The JIT now emits
+those projections and writeback assignments before parsing and SSA conversion.
+Existing inline and storage analysis propagate writes through aliases while keeping
+helper-local name rebindings local. Void public calls still capture hidden updates.
+Result projections become IR before passes run: slot numbers are not stable across
+`NormalizeReturnOrder`.
+
+The internal `SpecializeContext.external_contract` hand-off accepts a prepared
+contract for an already bound extern declaration. Its public return mapping must
+match the declaration: caller metadata is inferred before this hand-off, so a
+different mapping is rejected rather than reusing stale result metadata.
+Legacy externs derive the same
+call plan from their validated direction annotations and public return aliases.
+Partial/unknown writes become `InOut`; public return ordering, repeated aliases,
+readonly aliases, and complete Python tuple annotations retain their meaning.
+The native ABI's argument order is unchanged.
+Writeback projections retain the actual argument's descriptor type, including
+dynamic dimensions read through local aliases. Legacy InOut-only stubs with a
+bare `-> pl.Tensor` annotation expose their first InOut buffer as the public result;
+unannotated void stubs keep those writes hidden.
+
+Calls must be standalone statements or the complete value of an assignment or
+return. Nested external calls and calls inside conditions, loop iterators, or
+context-manager headers fail with a diagnostic; bind their results explicitly.
+View arguments are evaluated once. Calls in loop/branch bodies stay in those bodies,
+so zero-trip loops and untaken branches do not issue a kernel.
+
+## Call-site signature variants
+
+Graphs containing extern kernels specialize each dependency, including ordinary
+helpers, by constexpr values and tensor shape/dtype/layout plus scalar dtype.
+Equivalent signatures reuse a generated function; incompatible signatures receive
+separate names. Dynamic symbols are canonicalized by equality relationships rather
+than spelling or sampled bounds. Independent shortened views stay independent.
+Omitted layout stays distinct from explicit `ND`: omission can inherit a downstream
+declaration, while explicit layout takes precedence. Local allocations retain their
+known layout, including explicit or default `ND`.
+Bare `pl.Scalar` helper/extern parameters inherit the call-site scalar type; explicit
+scalar annotations keep their declared types.
+Literal, explicitly typed `pl.const`, arithmetic, cast, dimension-read and local scalar arguments use the
+parser's scalar promotion rules. Branches retain a scalar type only when both
+paths agree.
+Sample-argument binding carries those declared dtypes too; scalar values do not
+split the cache. Missing or unsupported external parameter annotations name the
+function and parameter in the diagnostic.
+
+Function/call indices are request-local. One metadata walk per caller variant supplies
+its call sites, including composed slice/reshape arguments, instead of replaying the
+caller prefix at each call. The existing metadata walker handles branch joins.
+Returned aliases of direct view arguments retain metadata for subsequent JIT calls.
+An inline helper that directly returns an extern call preserves the same result
+metadata as one that binds the result to a local before returning it.
+Slices that read the same unchanged runtime count share an extent symbol; scalar
+rebindings and uncertain control-flow joins invalidate that equality.
 
 IR prototypes use existing `external_return_params` with references to the
 function's own parameters, together with `param_directions` and return types.
@@ -199,7 +252,17 @@ See [existing extern return declarations](04-external-kernels.md).
 
 Missing/unknown access is rejected; unknown *coverage* of a known write may be
 conservative. Alias permissions guarantee kernel-internal safety, not merely
-scheduling order. Runtime alias/alignment checks apply on cache hits too.
+scheduling order. Known straight-line aliases and views passed to provider contracts
+without the required permission fail during normalization unless constant one-dimensional
+sibling slices prove disjoint intervals in the same parent coordinates. Unknown
+coordinates, clamped slices, different parents, and reshaped coordinate systems remain conservative.
+Name rebindings change
+that provenance, including tuple/list unpacking, constant-index projections from
+immutable tuple bindings, and keyword-based views. Uncertain
+control-flow joins discard the proof. This static check
+does not prove distinct input buffers or aliases across helper boundaries disjoint.
+The runtime bridge must check those cases, including on cache hits. Legacy externs
+retain their existing alias policy.
 
 Do not reinterpret `ReturnedParamIndices == None` as proof of fresh storage.
 Full-parameter return lineage deliberately stops at a changed view; storage-region
@@ -268,7 +331,11 @@ zero/multi-trip loops, branches, AIC/AIV/MIX and a view-to-root dependency.
 immutable captures, concurrent loading and builder request isolation. The legacy
 hook regression in `test_extern_kernel.py` runs a full JIT compile.
 
+`test_external_normalization.py` starts from JIT source and exercises hidden writes
+through nested inline helpers, control flow, partial-write contracts, views, local
+rebindings, signature variants, and unsupported nested-call/overlap diagnostics.
+
 These are CPU compiler checks. They do not establish numerical device correctness,
-automatic source-level writeback propagation, safe overlapping execution, or full
+safe overlapping execution, or full
 runtime completion behavior. Those require the subsequent integration tasks and
 focused device tests. Existing extern APIs continue to use their compatibility path.

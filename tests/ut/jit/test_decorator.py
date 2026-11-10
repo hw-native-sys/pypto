@@ -282,7 +282,9 @@ class TestFp4DependencyContracts:
         seed = {"src": TensorMeta(shape=(16, 32), dtype=dtype)}
         contexts = entry._build_contexts(seed, {}, {}, {})
         consumer = next(ctx for ctx in contexts if ctx.func_name == "consume")
-        assert consumer.tensor_meta["src"] == TensorMeta(shape=(16, 32), dtype=dtype)
+        assert consumer.tensor_meta["src"] == TensorMeta(
+            shape=(16, 32), dtype=dtype, layout=ir.TensorLayout.ND if return_kind == "allocated" else None
+        )
         assert seed["src"] == TensorMeta(shape=(16, 32), dtype=dtype)
 
     @pytest.mark.parametrize(
@@ -1786,11 +1788,11 @@ class TestSliceAndDepReturnMetadata:
         )
         # pl.slice view: shape from the literal list, dtype inherited from src.
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
-        # pl.create_tensor: unchanged behaviour.
-        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        # Allocations have a known default ND layout, unlike omitted parameter layouts.
+        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
         # @pl.jit.incore call result: inherits the dep's pl.Out param meta,
         # which here maps to ``buf``.
-        assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_extract_local_tensor_metas_runtime_slice_uses_parent_dim(self):
         """A pl.slice dim that isn't a static int falls back to the parent
@@ -1816,8 +1818,8 @@ class TestSliceAndDepReturnMetadata:
             _annotated_slice_body, seed_meta=seed, discover_deps=_discover_dep_bindings
         )
         assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
-        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
-        assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
+        assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_slice_view_flows_into_incore_dep(self):
         """A pl.slice view of an entry parameter can be passed into an @pl.jit.incore dep."""
@@ -1918,8 +1920,8 @@ class TestSliceAndDepReturnMetadata:
         )
         # Each target takes the pl.create_tensor meta of the matching returned
         # name — including the dtype, which differs between the two.
-        assert metas["a"] == TensorMeta(shape=(1, 8), dtype=DataType.FP32)
-        assert metas["b"] == TensorMeta(shape=(16, 8), dtype=DataType.FP16)
+        assert metas["a"] == TensorMeta(shape=(1, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
+        assert metas["b"] == TensorMeta(shape=(16, 8), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
 
     def test_callee_allocated_tuple_return_flows_into_next_dep(self, monkeypatch, tmp_path):
         """The reported failure: two tensors an inline helper created itself are
@@ -1993,7 +1995,7 @@ class TestSliceAndDepReturnMetadata:
         )
         # ``pl.create_tensor(..., dtype=pl.FP32)`` sized by ``pl.tensor.dim(src, 1)``
         # of the caller's ``x``.
-        assert metas["wide"] == TensorMeta(shape=(2, 64), dtype=DataType.FP32)
+        assert metas["wide"] == TensorMeta(shape=(2, 64), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_partially_resolved_tuple_clears_the_unresolved_target(self):
         """A target the callee rebinds to something untypeable must not keep the
@@ -2008,7 +2010,7 @@ class TestSliceAndDepReturnMetadata:
             _mixed_pair_body, seed_meta=seed, discover_deps=_discover_dep_bindings
         )
         # ``b`` still resolves from the callee's own pl.create_tensor ...
-        assert metas["b"] == TensorMeta(shape=(4, 4), dtype=DataType.FP16)
+        assert metas["b"] == TensorMeta(shape=(4, 4), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
         # ... while ``a`` drops its stale pre-call [16, 8] FP32 rather than
         # advertising it to whatever consumes ``a`` next.
         assert "a" not in metas
@@ -3628,7 +3630,7 @@ class TestDtypeOperandResolution:
             return t
 
         metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
-        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16)
+        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
 
     def test_create_tensor_positional_dtype(self):
         def body():
@@ -3636,14 +3638,14 @@ class TestDtypeOperandResolution:
             return t
 
         metas = extract_local_tensor_metas(body, seed_meta={}, discover_deps=_discover_dep_bindings)
-        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16)
+        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
 
     def test_create_tensor_dtype_of_tracked_tensor(self):
         seed = {"src": TensorMeta(shape=(16, 16), dtype=DataType.INT8)}
         metas = extract_local_tensor_metas(
             _create_tensor_dtype_of_src_body, seed_meta=seed, discover_deps=_discover_dep_bindings
         )
-        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.INT8)
+        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.INT8, layout=ir.TensorLayout.ND)
 
     def test_local_shadowing_dtype_constant_untracked(self):
         # The specializer does not fold a name the body binds, so neither may
@@ -3700,7 +3702,7 @@ class TestShapeOperandResolution:
         metas = extract_local_tensor_metas(
             _shape_spellings_body, seed_meta=seed, discover_deps=_discover_dep_bindings
         )
-        expected = TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        expected = TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
         for name in (
             "by_keyword",
             "by_list_constant",
@@ -3747,7 +3749,7 @@ class TestShapeOperandResolution:
         metas = extract_local_tensor_metas(
             _rebound_source_body, seed_meta=seed, discover_deps=_discover_dep_bindings
         )
-        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+        assert metas["t"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
 
     def test_loop_target_drops_bound_dim(self):
         seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
@@ -3794,8 +3796,8 @@ class TestLayoutOperandResolution:
         nz = TensorMeta(shape=(16, 16), dtype=DataType.FP16, layout=ir.TensorLayout.NZ)
         assert metas["nz"] == nz
         assert metas["by_constant"] == nz
-        # ND is what an omitted layout already means, so it is recorded as none.
-        assert metas["nd"] == TensorMeta(shape=(16, 16), dtype=DataType.FP16)
+        # Explicit ND is known storage layout; downstream annotations cannot override it.
+        assert metas["nd"] == TensorMeta(shape=(16, 16), dtype=DataType.FP16, layout=ir.TensorLayout.ND)
 
     def test_unresolved_layout_untracked(self):
         # Claiming ND for a layout the walker cannot see would mis-declare deps.
@@ -3816,7 +3818,7 @@ class TestConstexprOperandResolution:
             constexpr_values={"rows": "16", "acc_dtype": "pl.BF16"},
             discover_deps=_discover_dep_bindings,
         )
-        assert metas["t"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16)
+        assert metas["t"] == TensorMeta(shape=(16, 8), dtype=DataType.BF16, layout=ir.TensorLayout.ND)
 
     def test_constexpr_whole_shape_folds_into_slice(self):
         seed = {"src": TensorMeta(shape=(8, 8), dtype=DataType.FP16)}
@@ -6021,7 +6023,7 @@ class TestRuntimeSizedLocalExtents:
         metas = extract_local_tensor_metas(
             _slice_then_dep_body, seed_meta=seed, discover_deps=_discover_dep_bindings
         )
-        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32, layout=ir.TensorLayout.ND)
         assert all(not isinstance(d, DynDim) for d in metas["buf"].shape)
 
     def test_reshape_stays_strict(self):

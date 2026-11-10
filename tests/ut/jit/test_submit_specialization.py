@@ -552,8 +552,8 @@ def test_direct_submit_projection_argument_preserves_tensor_metadata(projection)
         @pl.jit
         def entry(selector: pl.Tensor, first: pl.InOut[pl.Tensor], second: pl.InOut[pl.Tensor]):
             launch = pl.submit(stage, first, second)
-            result, done = pl.submit(consume, launch[1])
-            output, _ = pl.submit(final, result)
+            launch = pl.submit(consume, launch[1])
+            output, _ = pl.submit(final, launch[0])
             return output
     else:
 
@@ -695,7 +695,7 @@ def test_returned_submit_projection_uses_rebound_tuple():
         seed_meta={"x": TensorMeta((16, 32), pl.FP32), "out": out},
         caller_func_type="graph",
         discover_deps=_discover_dep_bindings,
-        outputs=_tensor_meta._MetadataOutputs(return_meta=returned),
+        scan=_tensor_meta.LocalMetaScan(return_meta=returned),
     )
     result, task_id = site.value.elts
     assert returned.metas[result] == out
@@ -757,7 +757,7 @@ def test_submit_tuple_metadata_joins_zero_trip_loop_path():
         entry._func,
         seed_meta={"first": first, "next_out": next_out},
         discover_deps=_discover_dep_bindings,
-        outputs=_tensor_meta._MetadataOutputs(return_meta=returned),
+        scan=_tensor_meta.LocalMetaScan(return_meta=returned),
     )
     assert returned.metas[site.value] is None
 
@@ -983,10 +983,11 @@ def test_submitted_dynamic_reshape_preserves_body_shape_expression(computed_alia
 
         @pl.jit.incore
         def flatten(x: pl.Tensor[[rows, 32], pl.FP32]):
-            height = pl.tensor.dim(x, 0)
+            alias = x
+            height = pl.tensor.dim(alias, 0)
             size = height * 32
             extent = size
-            return pl.reshape(x, [extent])
+            return pl.reshape(alias, [extent])
     else:
 
         @pl.jit.incore
@@ -1053,3 +1054,26 @@ def test_dtype_specialization_keeps_canonical_dsl_references():
     callee = program.get_function("kernel")
     assert callee is not None
     assert ir.structural_equal(callee.params[0].type, ir.TensorType([16, 32], pl.FP16))
+
+
+def test_submit_uses_call_site_metadata_with_an_external_dependency(tmp_path):
+    native = tmp_path / "submit_external.cpp"
+    native.write_text('extern "C" void kernel_entry(long long* args) {}\n')
+
+    @pl.jit.extern(source=native, core_type="aiv")
+    def kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return out
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return kernel(x, out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        result, done = pl.submit(stage, x, out)
+        return result
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    (launch,) = _submissions(program)
+    assert isinstance(launch.type, ir.TupleType)
+    assert ir.structural_equal(launch.type.types[0], ir.TensorType([16, 32], pl.FP32))

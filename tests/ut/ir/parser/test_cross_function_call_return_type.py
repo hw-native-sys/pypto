@@ -717,14 +717,14 @@ def test_call_return_type_solves_single_variable_integer_affine_extents(expressi
         pattern = ir.Sub(ir.ConstInt(5, pl.INDEX, span), ir.Neg(scaled, pl.INDEX, span), pl.INDEX, span)
     else:
         pattern = ir.Add(rows, rows, pl.INDEX, span)
-    param = ir.Var("tile", ir.TileType([pattern, 64], pl.FP32), span)
+    param = ir.Var("tile", ir.TileType([pattern, ir.ConstInt(64, pl.INDEX, span)], pl.FP32), span)
     actual_extent = (
         ir.Add(ir.ConstInt(8, pl.INDEX, span), ir.ConstInt(8, pl.INDEX, span), pl.INDEX, span)
         if expression == "constant_actual"
-        else extent
+        else ir.ConstInt(extent, pl.INDEX, span)
     )
-    actual = ir.Var("actual", ir.TileType([actual_extent, 64], pl.FP32), span)
-    return_type = ir.TileType([rows, 64], pl.FP32)
+    actual = ir.Var("actual", ir.TileType([actual_extent, ir.ConstInt(64, pl.INDEX, span)], pl.FP32), span)
+    return_type = ir.TileType([rows, ir.ConstInt(64, pl.INDEX, span)], pl.FP32)
 
     (deduced,) = ir.deduce_call_return_type([param], [actual], [return_type])
 
@@ -770,9 +770,9 @@ def test_call_return_type_does_not_invent_unsafe_affine_bindings(expression):
     else:
         pattern = ir.Mul(ir.ConstInt(2, dtype, span), rows, dtype, span)
     extent = 256 if expression == "narrow_overflow" else 16
-    param = ir.Var("tile", ir.TileType([pattern, 64], pl.FP32), span)
+    param = ir.Var("tile", ir.TileType([pattern, ir.ConstInt(64, pl.INDEX, span)], pl.FP32), span)
     actual = ir.Var("actual", ir.TileType([extent, 64], pl.FP32), span)
-    return_type = ir.TileType([rows, 64], pl.FP32)
+    return_type = ir.TileType([rows, ir.ConstInt(64, pl.INDEX, span)], pl.FP32)
 
     (deduced,) = ir.deduce_call_return_type([param], [actual], [return_type])
 
@@ -791,7 +791,7 @@ def test_call_return_type_keeps_shared_shape_contracts_strict(contract):
         second_type = ir.TileType([64, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[32, 64]))
     else:
         shaped_type = ir.TensorType if contract == "inline_tensor" else ir.TileType
-        formal_type = shaped_type([pattern, 64], pl.FP32)
+        formal_type = shaped_type([pattern, ir.ConstInt(64, pl.INDEX, span)], pl.FP32)
         first_type = shaped_type([16, 64], pl.FP32)
         second_type = shaped_type([32, 64], pl.FP32)
     params = [ir.Var("first", formal_type, span), ir.Var("second", formal_type, span)]

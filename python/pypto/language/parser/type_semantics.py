@@ -335,6 +335,7 @@ class ParameterReturnDims(ir.IRMutator):
         assignments.visit_stmt(func.body)
         parameter_ids = {param.unique_id for param in func.params}
         self.params = parameter_ids - assignments.assigned_ids
+        self.tensor_origins = inline_immutable_aliases(func, assignments)
         self.signature_symbols = {
             symbol
             for param in func.params
@@ -374,6 +375,8 @@ class ParameterReturnDims(ir.IRMutator):
             self.unresolved = True
             return op
         tensor, axis = op.args
+        if isinstance(tensor, ir.Var):
+            tensor = self.tensor_origins.get(tensor.unique_id, tensor)
         if (
             isinstance(tensor, ir.Var)
             and tensor.unique_id in self.params
@@ -484,14 +487,14 @@ def inline_immutable_aliases(
     return {identity: origin for identity, origin in origins.items() if identity not in parameter_ids}
 
 
-def returned_tile_types(actual: ir.Type, fallback: ir.Type) -> ir.Type | None:
-    """Recover only returned Tile metadata; other result kinds retain native deduction."""
-    if isinstance(actual, ir.TileType) and isinstance(fallback, ir.TileType):
+def returned_descriptor_types(actual: ir.Type, fallback: ir.Type) -> ir.Type | None:
+    """Recover returned tensor/Tile descriptors; scalar results retain native deduction."""
+    if isinstance(actual, (ir.TileType, ir.TensorType)) and type(actual) is type(fallback):
         return actual
     if isinstance(actual, ir.TupleType) and isinstance(fallback, ir.TupleType):
         if len(actual.types) != len(fallback.types):
             return None
-        projected = [returned_tile_types(a, f) for a, f in zip(actual.types, fallback.types)]
+        projected = [returned_descriptor_types(a, f) for a, f in zip(actual.types, fallback.types)]
         if any(t is not None for t in projected):
             return ir.TupleType([p if p is not None else f for p, f in zip(projected, fallback.types)])
     return None
@@ -508,7 +511,7 @@ def inline_argument_return_type(
     if isinstance(value, ir.Var):
         actual = argument_types.get(value.unique_id)
         if actual is not None and value.unique_id not in assigned_ids:
-            return returned_tile_types(actual, fallback)
+            return returned_descriptor_types(actual, fallback)
         origin = aliases.get(value.unique_id)
         if origin is not None:
             return inline_argument_return_type(origin, fallback, argument_types, assigned_ids, aliases)
@@ -526,5 +529,5 @@ def inline_argument_return_type(
             value.tuple, value.tuple.type, argument_types, assigned_ids, aliases
         )
         if isinstance(container, ir.TupleType) and 0 <= value.index < len(container.types):
-            return returned_tile_types(container.types[value.index], fallback)
+            return returned_descriptor_types(container.types[value.index], fallback)
     return None
