@@ -1006,7 +1006,7 @@ StmtPtr ScopeOutliner::VisitStmt_(const SeqStmtsPtr& op) {
       // propagated required_outputs_, or when the scope sits directly
       // inside another scope (e.g. an InCoreScopeStmt at the top of a
       // SpmdScopeStmt body produced by the ``for i in pl.spmd(...)`` form).
-      if (used_after.empty() && target_scope_kind_ != ScopeKind::Graph) {
+      if (used_after.empty()) {
         used_after = ComputeFallbackUsedAfter(scope);
       }
 
@@ -1061,13 +1061,6 @@ StmtPtr ScopeOutliner::VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
   // child of another scope (SpmdScopeStmt{InCoreScopeStmt{...}}) — the
   // enclosing SeqStmts visitor populates required_outputs_ with variables
   // the post-scope statements still reference.
-  // Graph regions expose real tail uses and external mutations, not every
-  // temporary defined in a terminal region. OutlineScope already exports
-  // caller-owned store destinations after its live-in classification. Adding
-  // all store targets here would also export scope-local allocations.
-  if (target_scope_kind_ == ScopeKind::Graph) {
-    return OutlineScope(op, required_outputs_);
-  }
   if (required_outputs_.empty()) {
     return OutlineScope(op, ComputeFallbackUsedAfter(op));
   }
@@ -2663,130 +2656,6 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
     var_to_idx[input_vars[i].get()] = i;
   }
 
-  // A Graph has to declare effects on every possible captured buffer.
-  // A merge may refer to more than one capture, and a loop backedge may
-  // add roots that were absent at the first iteration.
-  std::unordered_map<const Var*, std::vector<size_t>> merged_roots;
-  if (target_scope_kind_ == ScopeKind::Graph) {
-    // Reject an oversized boundary before walking the alias graph once per
-    // tensor. LegalizeGraphBoundary also checks the final, post-hoist count.
-    constexpr size_t kMaxGraphTensorCaptures = 128;  // Runtime GRAPH_MAX_TENSOR_ARGS.
-    const auto tensor_captures = std::count_if(input_vars.begin(), input_vars.end(), [](const VarPtr& var) {
-      return AsTensorTypeLike(var->GetType()) != nullptr;
-    });
-    CHECK_SPAN(static_cast<size_t>(tensor_captures) <= kMaxGraphTensorCaptures, body->span_)
-        << "Graph scope captures more than " << kMaxGraphTensorCaptures
-        << " tensor parameters. Split the scope into smaller Graphs.";
-
-    class CaptureAliasCollector : public IRVisitor {
-     public:
-      std::unordered_map<const Var*, std::vector<const Var*>> successors;
-
-     protected:
-      void VisitStmt_(const AssignStmtPtr& op) override {
-        if (auto tuple = FindTuple(op->value_)) tuples_.emplace(op->var_.get(), tuple);
-        auto call = As<Call>(op->value_);
-        if (!call) {
-          AddEdge(op->value_, op->var_);
-        } else if (!call->args_.empty() && (IsOp(call, "tensor.slice") || IsOp(call, "tensor.view") ||
-                                            IsOp(call, "tensor.reshape") || IsOp(call, "tensor.transpose"))) {
-          AddEdge(call->args_.front(), op->var_);
-        } else if (auto index = ResultAliasedArgIndex(call)) {
-          AddEdge(call->args_[*index], op->var_);
-        }
-        IRVisitor::VisitStmt_(op);
-      }
-
-      void VisitStmt_(const IfStmtPtr& op) override {
-        AddYieldEdges(op->then_body_, op->return_vars_);
-        if (op->else_body_) AddYieldEdges(*op->else_body_, op->return_vars_);
-        IRVisitor::VisitStmt_(op);
-      }
-
-      void VisitStmt_(const ForStmtPtr& op) override {
-        AddLoopEdges(op->body_, op->iter_args_, op->return_vars_);
-        IRVisitor::VisitStmt_(op);
-      }
-
-      void VisitStmt_(const WhileStmtPtr& op) override {
-        AddLoopEdges(op->body_, op->iter_args_, op->return_vars_);
-        IRVisitor::VisitStmt_(op);
-      }
-
-     private:
-      [[nodiscard]] MakeTuplePtr FindTuple(const ExprPtr& value) const {
-        if (auto tuple = As<MakeTuple>(value)) return tuple;
-        auto var = AsVarLike(value);
-        auto found = tuples_.find(var.get());
-        return found == tuples_.end() ? nullptr : found->second;
-      }
-
-      void AddEdge(const ExprPtr& source, const VarPtr& target) {
-        if (!target || !AsTensorTypeLike(target->GetType())) return;
-        if (auto projection = As<TupleGetItemExpr>(source)) {
-          auto tuple = FindTuple(projection->tuple_);
-          if (tuple && projection->index_ >= 0 &&
-              static_cast<size_t>(projection->index_) < tuple->elements_.size()) {
-            AddEdge(tuple->elements_[projection->index_], target);
-          }
-        } else if (auto var = AsVarLike(source)) {
-          successors[var.get()].push_back(target.get());
-        }
-      }
-
-      // Tuple packaging preserves the backing storage of each element.
-      std::unordered_map<const Var*, MakeTuplePtr> tuples_;
-
-      void AddYieldEdges(const StmtPtr& body, const std::vector<VarPtr>& targets) {
-        auto yield = transform_utils::GetLastYieldStmt(body);
-        if (!yield) return;
-        for (size_t i = 0; i < targets.size() && i < yield->value_.size(); ++i) {
-          AddEdge(yield->value_[i], targets[i]);
-        }
-      }
-
-      void AddLoopEdges(const StmtPtr& body, const std::vector<IterArgPtr>& args,
-                        const std::vector<VarPtr>& results) {
-        for (size_t i = 0; i < args.size() && i < results.size(); ++i) {
-          AddEdge(args[i]->initValue_, args[i]);
-          AddEdge(args[i], results[i]);
-        }
-        AddYieldEdges(body, std::vector<VarPtr>(args.begin(), args.end()));
-      }
-    };
-
-    CaptureAliasCollector aliases;
-    aliases.VisitStmt(body);
-    std::unordered_map<const Var*, std::vector<size_t>> roots;
-    std::vector<const Var*> alias_order;
-    // Walk each capture's reachable aliases once, including loop cycles.
-    for (size_t i = 0; i < input_vars.size(); ++i) {
-      const auto* input = input_vars[i].get();
-      if (!AsTensorTypeLike(input->GetType())) continue;
-      std::vector<const Var*> pending{input};
-      std::unordered_set<const Var*> visited{input};
-      for (size_t next = 0; next < pending.size(); ++next) {
-        auto it = aliases.successors.find(pending[next]);
-        if (it == aliases.successors.end()) continue;
-        for (const auto* alias : it->second) {
-          if (!visited.insert(alias).second) continue;
-          auto [root, inserted] = roots.try_emplace(alias);
-          if (inserted) alias_order.push_back(alias);
-          root->second.push_back(i);
-          pending.push_back(alias);
-        }
-      }
-    }
-    for (const auto* alias : alias_order) {
-      const auto& indices = roots.at(alias);
-      if (indices.size() == 1) {
-        var_to_idx.try_emplace(alias, indices.front());
-      } else {
-        merged_roots.emplace(alias, indices);
-      }
-    }
-  }
-
   // Step 0: which captured vars does the body read? A written param earns
   // ``InOut`` only when it is also read; write-only earns ``Out``.
   std::vector<bool> has_read(input_vars.size(), false);
@@ -2810,21 +2679,13 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
   class WrittenParamUpgrader : public IRVisitor {
    public:
     WrittenParamUpgrader(const std::unordered_map<const Var*, size_t>& var_to_idx,
-                         const std::unordered_map<const Var*, std::vector<size_t>>& merged_roots,
                          std::vector<ParamDirection>& directions,
                          const std::vector<ParamDirection>& written_direction)
-        : var_to_idx_(var_to_idx),
-          merged_roots_(merged_roots),
-          directions_(directions),
-          written_direction_(written_direction) {}
+        : var_to_idx_(var_to_idx), directions_(directions), written_direction_(written_direction) {}
 
    protected:
     void VisitExpr_(const CallPtr& call) override {
       for (const auto& target : CallWriteTargets(call)) {
-        if (auto roots = merged_roots_.find(target.var.get()); roots != merged_roots_.end()) {
-          for (size_t index : roots->second) directions_[index] = ParamDirection::InOut;
-          continue;
-        }
         auto it = var_to_idx_.find(target.var.get());
         if (it == var_to_idx_.end()) continue;
         directions_[it->second] =
@@ -2835,11 +2696,10 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
 
    private:
     const std::unordered_map<const Var*, size_t>& var_to_idx_;
-    const std::unordered_map<const Var*, std::vector<size_t>>& merged_roots_;
     std::vector<ParamDirection>& directions_;
     const std::vector<ParamDirection>& written_direction_;
   };
-  WrittenParamUpgrader(var_to_idx, merged_roots, directions, written_direction).VisitStmt(body);
+  WrittenParamUpgrader(var_to_idx, directions, written_direction).VisitStmt(body);
 
   if (!program_) return directions;
 
@@ -2906,20 +2766,9 @@ std::vector<ParamDirection> ScopeOutliner::InferParamDirections(
       // parameter to the seeded ``In`` no matter what the callee declared.
       auto arg_var = AsVarLike(call_args[arg_idx]);
       if (!arg_var) continue;
-      const ParamDirection callee_dir = callee_dirs[arg_idx];
-      if (auto roots = merged_roots.find(arg_var.get()); roots != merged_roots.end()) {
-        for (size_t index : roots->second) {
-          if (callee_dir != ParamDirection::Out) callee_reads[index] = true;
-          if (callee_dir != ParamDirection::In) {
-            callee_writes[index] = true;
-            // A branch or loop may leave this root untouched.
-            callee_reads[index] = true;
-          }
-        }
-        continue;
-      }
       auto it = var_to_idx.find(arg_var.get());
       if (it == var_to_idx.end()) continue;
+      const ParamDirection callee_dir = callee_dirs[arg_idx];
       if (callee_dir == ParamDirection::In || callee_dir == ParamDirection::InOut) {
         callee_reads[it->second] = true;
       }

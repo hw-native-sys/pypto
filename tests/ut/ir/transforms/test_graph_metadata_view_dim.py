@@ -95,10 +95,46 @@ def test_an_invariant_view_dim_read_is_accepted():
             self.view_dim(a, c)
             return c
 
-    graph = _graph_func(_legalize_outlined(Before), "view_dim")
-    # The invariant extent stays in the region instead of becoming a patched
-    # scalar. Passing a task-produced scalar here must continue to fail.
-    assert "view_rows" not in _scalar_param_names(graph)
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def view_dim_incore_0(
+            self,
+            matrix: pl.Tensor[[128, 128], pl.FP32],
+            view_rows: pl.Scalar[pl.INDEX],
+            target: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            tile: pl.Tile[[128, 128], pl.FP32] = pl.tile.load(
+                matrix, [view_rows - 128, 0], [128, 128], [128, 128]
+            )
+            _stored = pl.tile.store(tile, [0, 0], target)
+            return target
+
+        @pl.function(type=pl.FunctionType.Graph, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def view_dim(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            for i, (carry,) in pl.range(4, init_values=(c,)):
+                slab = pl.tensor.slice(a, [128, 128], [i * 128, 0])
+                matrix = pl.tensor.reshape(slab, [128, 128])
+                matrix_view = pl.tensor.view(matrix, [128, 128])
+                view_rows = pl.tensor.dim(matrix_view, 0)
+                updated = self.view_dim_incore_0(matrix, view_rows, carry)
+                _result = pl.yield_(updated)
+            return c
+
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            self.view_dim(a, c)
+            return c
+
+    ir.assert_structural_equal(_legalize_outlined(Before), Expected)
 
 
 def test_an_invariant_view_dim_can_feed_a_submit():

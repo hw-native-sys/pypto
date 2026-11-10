@@ -32,6 +32,7 @@ class SameCapture:
     def layer(
         self, target: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], profile: pl.Tensor[[N, 16], pl.FP32]
     ) -> pl.Tensor[[16, 16], pl.FP32]:
+        self.touch(target)
         if pl.tensor.dim(profile, 0) > 8:
             merged = target
         else:
@@ -181,6 +182,7 @@ class SameTwoCaptures:
         second: pl.InOut[pl.Tensor[[8, 16], pl.FP32]],
         profile: pl.Tensor[[N, 16], pl.FP32],
     ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+        self.touch(first, second)
         if pl.tensor.dim(profile, 0) > 8:
             left = first
             right = second
