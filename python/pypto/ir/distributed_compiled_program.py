@@ -68,6 +68,7 @@ _CLUSTER_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
+    from pypto.runtime.cluster_runner import ClusterWorker
     from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
     from pypto.runtime.runner import RunConfig
 
@@ -745,7 +746,7 @@ class DistributedCompiledProgram:
     def _require_supported_execution(self) -> None:
         if self._entry_kind == "cluster":
             raise NotImplementedError(
-                "Cluster/POD (L4) execution is unsupported until the Direct MPI runtime is available"
+                "Cluster/POD (L4) execution requires compiled.prepare() and its Direct MPI session"
             )
 
     @property
@@ -837,6 +838,9 @@ class DistributedCompiledProgram:
         live Worker; use :meth:`prepare`, allocate it through the returned
         ``DistributedWorker``, then call ``worker.run(...)``.
         """
+        if self._entry_kind == "cluster":
+            with self.prepare() as worker:
+                return worker(*args, config=config)
         self._require_supported_execution()
         from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
@@ -896,7 +900,7 @@ class DistributedCompiledProgram:
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
-    ) -> "DistributedWorker":
+    ) -> "DistributedWorker | ClusterWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
         Runs the expensive setup (``_compile_and_assemble``, generated-module
@@ -973,6 +977,18 @@ class DistributedCompiledProgram:
             A :class:`DistributedWorker`; use it as a context manager or call
             ``close()`` when done.
         """
+        if self._entry_kind == "cluster":
+            self._require_artifact_ready()
+            if persistent or reset_persistent_windows is not None:
+                raise NotImplementedError("Persistent cluster domains are not available in this runtime")
+            if callbacks or sub_worker_overrides or inherited_host_tensors:
+                raise NotImplementedError(
+                    "ClusterWorker supports synchronous Tensor/Scalar execution without callback overrides "
+                    "or inherited host buffers"
+                )
+            from pypto.runtime.cluster_runner import ClusterWorker  # noqa: PLC0415
+
+            return ClusterWorker([self, *extra_compiled], config, startup_timeout_s=startup_timeout_s)
         self._require_supported_execution()
         for compiled in extra_compiled:
             compiled._require_supported_execution()

@@ -1415,10 +1415,15 @@ class JITFunction:
 
         compiled = self.compile(*args, **kwargs)
         if isinstance(compiled, DistributedCompiledProgram):
-            compiled._require_supported_execution()
-            from pypto.runtime.distributed_runner import _assemble_chip_callables  # noqa: PLC0415
+            if compiled.entry_kind == "cluster":
+                from pypto.runtime.cluster_runner import _assemble_cluster_chips  # noqa: PLC0415
 
-            _assemble_chip_callables(compiled)
+                compiled._require_artifact_ready()
+                _assemble_cluster_chips(compiled)
+            else:
+                from pypto.runtime.distributed_runner import _assemble_chip_callables  # noqa: PLC0415
+
+                _assemble_chip_callables(compiled)
         elif isinstance(compiled, CompiledProgram):
             if compiled.orchestration_names:
                 for name in compiled.orchestration_names:
