@@ -304,6 +304,11 @@ with compiled.prepare(extra_compiled=[other]) as rt:
 在 `prepare()` 前分配。跨节点重叠的普通访问若包含写入，需要显式传输和
 fence，当前普通 I/O 路径会拒绝此类访问。
 
+`persistent=True`、`reset_persistent_windows` 和显式 `shared_domains`
+保留其会话语义：窗口可跨 run 保留，默认在复用前清零；跨程序共享仅通过
+兼容的显式绑定建立。`ClusterWorker` 不提供 callback 覆盖、继承 host buffer
+或常驻 tensor 分配接口。
+
 ### 启动要求
 
 调用端必须运行在第一个配置节点上。rank 0 部署在该主机，通过 loopback

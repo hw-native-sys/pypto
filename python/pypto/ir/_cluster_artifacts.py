@@ -13,6 +13,7 @@ import ast
 import json
 import re
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
 from pypto.pypto_core import codegen, ir
@@ -445,3 +446,199 @@ def validate_entry_files(root: Path, closure: dict[str, Any]) -> None:
             _relative_file(root, f"{directory}/kernel_config.py")
         for filename in entry["sub_worker_paths"].values():
             _relative_file(root, filename)
+
+
+def freeze_domains(value: Any) -> Any:
+    """Return immutable descriptors without retaining caller-owned containers."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: freeze_domains(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_domains(item) for item in value)
+    return value
+
+
+def make_domain_records(program: ir.Program, entries: dict[str, Any], node_count: int) -> dict[str, Any]:
+    """Persist root-domain provenance from native post-pass IR, never source bodies."""
+    from .distributed_compiled_program import _actual_orchestration_entry  # noqa: PLC0415
+
+    scopes = []
+
+    class Collector(ir.IRVisitor):
+        def visit_stmt(self, op):
+            if isinstance(op, ir.CommDomainScopeStmt):
+                scopes.append(op)
+            super().visit_stmt(op)
+
+    root = _actual_orchestration_entry(program)
+    Collector().visit_stmt(root.body)
+    domains = []
+    for ordinal, scope in enumerate(scopes):
+        slots = []
+        for index, slot in enumerate(scope.slots):
+            size = slot.size.value if isinstance(slot.size, ir.ConstInt) else None
+            slots.append(
+                {
+                    "ordinal": index,
+                    "generated_name": re.sub(r"[^A-Za-z0-9_]", "_", slot.name_hint),
+                    "logical_nbytes": size,
+                    "allocated_nbytes": ((size + 63) // 64) * 64 if size is not None else None,
+                }
+            )
+        by_name = {slot["generated_name"]: slot["ordinal"] for slot in slots}
+        windows = []
+        for entry in entries["entries"]:
+            for window, geometry in zip(
+                entry["layout"]["window_slots"], entry["view_geometry"]["window_slots"], strict=True
+            ):
+                if window[4] in by_name:
+                    windows.append(
+                        {
+                            "entry_logical_path": entry["logical_path"],
+                            "ctx_scalar_index": window[3],
+                            "logical_window_name": window[4],
+                            "slot_ordinal": by_name[window[4]],
+                            "dtype": window[5],
+                            "shape": window[7],
+                            "strides": geometry["strides"],
+                            "byte_offset": geometry["byte_offset"],
+                        }
+                    )
+        domains.append(
+            {
+                "ordinal": ordinal,
+                "generated_name": scope.name_hint,
+                "node_indices": list(scope.devices) or list(range(node_count)),
+                "slots": slots,
+                "entry_windows": windows,
+            }
+        )
+    return validate_domain_records({"version": 1, "domains": domains}, entries, node_count)
+
+
+def validate_domain_records(value: Any, entries: dict[str, Any], node_count: int) -> dict[str, Any]:
+    """Check complete cold slot/view identities before session selection or startup."""
+
+    def require(condition, detail):
+        if not condition:
+            raise ValueError("cluster_domains " + detail)
+
+    require(isinstance(value, dict) and set(value) == {"version", "domains"}, "invalid fields")
+    require(type(value["version"]) is int and value["version"] == 1, "unsupported version")
+    require(isinstance(value["domains"], list), "domains must be a list")
+    native_windows = {}
+    for entry in entries["entries"]:
+        for window, geometry in zip(
+            entry["layout"]["window_slots"], entry["view_geometry"]["window_slots"], strict=True
+        ):
+            native_windows[(entry["logical_path"], window[3], window[4])] = (
+                window[5],
+                window[7],
+                geometry["strides"],
+                geometry["byte_offset"],
+            )
+    seen_domains, seen_slots, covered_windows = set(), set(), set()
+    for ordinal, domain in enumerate(value["domains"]):
+        require(
+            isinstance(domain, dict)
+            and set(domain) == {"ordinal", "generated_name", "node_indices", "slots", "entry_windows"},
+            "invalid domain fields",
+        )
+        require(
+            type(domain["ordinal"]) is int and domain["ordinal"] == ordinal, "domain ordinal is not dense"
+        )
+        name = domain["generated_name"]
+        require(_name(name) and name not in seen_domains, "invalid or duplicate domain name")
+        seen_domains.add(name)
+        nodes = domain["node_indices"]
+        require(
+            isinstance(nodes, list)
+            and bool(nodes)
+            and len(set(nodes)) == len(nodes)
+            and all(type(node) is int and 0 <= node < node_count for node in nodes),
+            "invalid member order",
+        )
+        slots = domain["slots"]
+        require(isinstance(slots, list) and bool(slots), "domain needs slots")
+        for index, slot in enumerate(slots):
+            require(
+                isinstance(slot, dict)
+                and set(slot) == {"ordinal", "generated_name", "logical_nbytes", "allocated_nbytes"},
+                "invalid slot fields",
+            )
+            require(type(slot["ordinal"]) is int and slot["ordinal"] == index, "slot ordinal is not dense")
+            require(
+                _name(slot["generated_name"]) and slot["generated_name"] not in seen_slots,
+                "invalid or duplicate slot name",
+            )
+            seen_slots.add(slot["generated_name"])
+            size, allocated = slot["logical_nbytes"], slot["allocated_nbytes"]
+            require(
+                (size is None and allocated is None)
+                or (
+                    type(size) is int
+                    and size > 0
+                    and type(allocated) is int
+                    and allocated == ((size + 63) // 64) * 64
+                ),
+                "invalid slot size/alignment",
+            )
+        windows = domain["entry_windows"]
+        require(isinstance(windows, list), "entry_windows must be a list")
+        seen_windows = set()
+        for window in windows:
+            require(
+                isinstance(window, dict)
+                and set(window)
+                == {
+                    "entry_logical_path",
+                    "ctx_scalar_index",
+                    "logical_window_name",
+                    "slot_ordinal",
+                    "dtype",
+                    "shape",
+                    "strides",
+                    "byte_offset",
+                },
+                "invalid view fields",
+            )
+            index = window["slot_ordinal"]
+            require(type(index) is int and 0 <= index < len(slots), "invalid view slot reference")
+            key = (window["entry_logical_path"], window["ctx_scalar_index"], window["logical_window_name"])
+            require(
+                type(window["ctx_scalar_index"]) is int and key in native_windows and key not in seen_windows,
+                "invalid or duplicate entry view",
+            )
+            require(window["logical_window_name"] == slots[index]["generated_name"], "view slot name differs")
+            require(
+                (window["dtype"], window["shape"], window["strides"], window["byte_offset"])
+                == native_windows[key],
+                "view geometry differs from native entry",
+            )
+            size = slots[index]["logical_nbytes"]
+            itemsize = {"bool": 1, "fp16": 2, "bf16": 2, "fp32": 4, "fp64": 8}.get(window["dtype"])
+            if itemsize is None:
+                itemsize = int(re.sub(r"\D", "", window["dtype"])) // 8
+            extent = window["byte_offset"] + itemsize * (
+                1
+                + sum(
+                    (dimension - 1) * stride
+                    for dimension, stride in zip(window["shape"], window["strides"], strict=True)
+                )
+            )
+            require(size is None or extent <= size, "view exceeds its logical slot")
+            seen_windows.add(key)
+        slot_names = {slot["generated_name"] for slot in slots}
+        expected_windows = {key for key in native_windows if key[2] in slot_names}
+        require(seen_windows == expected_windows, "incomplete native window view coverage")
+        require(not (seen_windows & covered_windows), "duplicate native window view ownership")
+        covered_windows.update(seen_windows)
+    require(covered_windows == set(native_windows), "incomplete global domain window view coverage")
+    return value
+
+
+def restore_domain_records(raw: dict[str, Any], entries: Any, node_count: int) -> dict[str, Any] | None:
+    if "cluster_domains" not in raw:
+        return None
+    if entries is None:
+        raise ValueError("cluster_domains requires l3_entries")
+    return validate_domain_records(raw["cluster_domains"], entries, node_count)

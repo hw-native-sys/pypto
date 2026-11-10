@@ -228,6 +228,10 @@ def test_l4_nonpersistent_multi_program_dynamic_windows(test_config, tmp_path):
         )
         for i in range(2)
     ]
+    for program in programs:
+        assert program.comm_domains[0]["slots"][0]["logical_nbytes"] is None
+    with pytest.raises(ValueError, match="requires static slot sizes"):
+        programs[0].prepare(persistent=True)
     with programs[0].prepare(extra_compiled=[programs[1]], persistent=False) as worker:
         for i, (index, size) in enumerate(((0, 256), (1, 512), (0, 768))):
             current = inputs + i * 1000
@@ -236,3 +240,205 @@ def test_l4_nonpersistent_multi_program_dynamic_windows(test_config, tmp_path):
             worker.run(programs[index], current, outputs, counts, size)
             assert torch.equal(outputs, current)
             assert torch.all(counts == sum(cluster.node_device_counts()))
+
+
+def _shared_programs(local_devices: int, rank_count: int):
+    """Two actual JIT programs with different window names and one run per phase."""
+    nd, nr = local_devices, rank_count
+
+    @pl.jit.incore
+    def add_to_window(
+        lhs: pl.Tensor[[1, SIZE], pl.FP32],
+        rhs: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        echo: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        value = pl.add(pl.load(lhs, [0, 0], [1, SIZE]), pl.load(rhs, [0, 0], [1, SIZE]))
+        data = pl.store(value, [0, 0], data)
+        return pl.store(value, [0, 0], echo)
+
+    @pl.jit
+    def compute_chip(
+        lhs: pl.Tensor[[1, SIZE], pl.FP32],
+        rhs: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        echo: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    ) -> tuple[pld.DistributedTensor[[1, SIZE], pl.FP32], pl.Tensor[[1, SIZE], pl.FP32]]:
+        echo = add_to_window(lhs, rhs, data, echo)
+        return data, echo
+
+    @pl.jit.host
+    def compute_host(
+        lhs: pl.Tensor[[nd, 1, SIZE], pl.FP32],
+        rhs: pl.Tensor[[nd, 1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        echo: pl.Out[pl.Tensor[[nd, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[nd, 1, SIZE], pl.FP32]:
+        current_data = data
+        for device, (current_data,) in pl.range(pld.num_workers(), init_values=(current_data,)):
+            next_data, _echo = compute_chip(
+                lhs[device], rhs[device], current_data, echo[device], worker=device
+            )
+            current_data = pl.yield_(next_data)
+        return echo
+
+    @pl.jit.pod
+    def compute(
+        lhs: pl.Tensor[[2, nd, 1, SIZE], pl.FP32],
+        rhs: pl.Tensor[[2, nd, 1, SIZE], pl.FP32],
+        echo: pl.Out[pl.Tensor[[2, nd, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[2, nd, 1, SIZE], pl.FP32]:
+        prefill_window = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        for node in pl.range(pld.num_workers()):
+            data = pld.window(prefill_window, [1, SIZE], dtype=pl.FP32)
+            compute_host(lhs[node], rhs[node], data, echo[node], worker=node)
+        return echo
+
+    @pl.jit.incore
+    def read_every_peer(
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[nr, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        current_output = out
+        for peer, (current_output,) in pl.range(pld.nranks(ctx), init_values=(current_output,)):
+            value = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+            current_output = pl.yield_(pl.store(value, [peer, 0], current_output))
+        return current_output
+
+    @pl.jit
+    def communication_chip(
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[nr, SIZE], pl.FP32]],
+    ) -> tuple[pld.DistributedTensor[[1, SIZE], pl.FP32], pl.Tensor[[nr, SIZE], pl.FP32]]:
+        out = read_every_peer(data, out)
+        return data, out
+
+    @pl.jit.host
+    def communication_host(
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        outputs: pl.Out[pl.Tensor[[nd, nr, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[nd, nr, SIZE], pl.FP32]:
+        current_data = data
+        for device, (current_data,) in pl.range(pld.num_workers(), init_values=(current_data,)):
+            next_data, _output = communication_chip(current_data, outputs[device], worker=device)
+            current_data = pl.yield_(next_data)
+        return outputs
+
+    @pl.jit.pod
+    def communication(
+        outputs: pl.Out[pl.Tensor[[2, nd, nr, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[2, nd, nr, SIZE], pl.FP32]:
+        decode_window = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        for node in pl.range(pld.num_workers()):
+            data = pld.window(decode_window, [1, SIZE], dtype=pl.FP32)
+            communication_host(data, outputs[node], worker=node)
+        return outputs
+
+    return compute, communication
+
+
+def _run_shared_programs(test_config, tmp_path, *, cold: bool = False, default_reset: bool = False):
+    from pypto import ir  # noqa: PLC0415
+
+    cluster = _cluster_config()
+    if test_config.codegen_only:
+        pytest.skip("This test requires real CHIP execution, not --codegen-only")
+    nd = cluster.node_device_counts()[0]
+    nranks = sum(cluster.node_device_counts())
+    inputs = torch.arange(nranks * SIZE, dtype=torch.float32).reshape(2, nd, 1, SIZE)
+    rhs = torch.full_like(inputs, 3)
+    echo = torch.full_like(inputs, -1)
+    peer_values = torch.full((2, nd, nranks, SIZE), -1, dtype=torch.float32)
+    config = RunConfig(
+        backend_type=BackendType.Ascend910,
+        execution_mode=test_config.execution_mode,
+        cluster_config=cluster,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path / "two-programs"),
+    )
+    compute_jit, communication_jit = _shared_programs(nd, nranks)
+    compute = compute_jit.compile(
+        inputs,
+        rhs,
+        echo,
+        config=replace(config, save_kernels_dir=str(tmp_path / "two-programs" / "compute")),
+    )
+    communication = communication_jit.compile(
+        peer_values,
+        config=replace(config, save_kernels_dir=str(tmp_path / "two-programs" / "communication")),
+    )
+    assert compute.output_dir != communication.output_dir, "Each compiled program must own its artifacts"
+    if cold:
+        compute_domains, communication_domains = compute.comm_domains, communication.comm_domains
+        compute_platform, communication_platform = compute.platform, communication.platform
+        # Execute only metadata-restored objects: neither can consult post-pass IR
+        # when validating sharing or assembling the generated runtime artifacts.
+        compute = ir.DistributedCompiledProgram.from_dir(
+            compute.output_dir,
+            backend_type=BackendType.Ascend910,
+            execution_mode=test_config.execution_mode,
+        )
+        communication = ir.DistributedCompiledProgram.from_dir(
+            communication.output_dir,
+            backend_type=BackendType.Ascend910,
+            execution_mode=test_config.execution_mode,
+        )
+        assert compute._program is None
+        assert communication._program is None
+        assert compute.platform == compute_platform
+        assert communication.platform == communication_platform
+        assert compute.cluster_config == communication.cluster_config == cluster
+        assert compute.comm_domains == compute_domains
+        assert communication.comm_domains == communication_domains
+    binding = getattr(ir, "SharedDomainBinding", None)
+    assert callable(binding), "I2 requires public explicit session sharing"
+    assert len(compute.comm_domains) == len(communication.comm_domains) == 1
+    assert (
+        compute.comm_domains[0]["slots"][0]["generated_name"]
+        != (communication.comm_domains[0]["slots"][0]["generated_name"])
+    )
+    # Omit the reset option to exercise the public default, rather than passing
+    # True and accidentally leaving the None -> True contract untested.
+    reset_options = {} if default_reset else {"reset_persistent_windows": False}
+    with compute.prepare(
+        extra_compiled=[communication],
+        persistent=True,
+        shared_domains=[
+            binding(program=compute, domain=0, key="activations", slots={0: "values"}),
+            binding(program=communication, domain=0, key="activations", slots={0: "values"}),
+        ],
+        **reset_options,
+    ) as worker:
+        for iteration in range(2):
+            current = inputs + iteration * 1000
+            echo.fill_(-1)
+            peer_values.fill_(-1)
+            worker.run(compute, current, rhs, echo)
+            assert torch.equal(echo, current + rhs)
+            worker.run(communication, peer_values)
+            expected = (current + rhs).reshape(nranks, SIZE)
+            if default_reset:
+                # Compute really wrote the changed sum (echo above); the next
+                # run must clear every shared peer window before any TLOAD.
+                expected = torch.zeros_like(expected)
+            assert torch.equal(peer_values, expected.expand_as(peer_values))
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+def test_i2_l4_two_program_compute_then_tload_every_rank(test_config, tmp_path):
+    _run_shared_programs(test_config, tmp_path)
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+def test_i3_l4_cold_two_program_compute_then_tload_every_rank(test_config, tmp_path):
+    _run_shared_programs(test_config, tmp_path, cold=True)
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+def test_i3_l4_shared_domains_default_reset_every_rank(test_config, tmp_path):
+    _run_shared_programs(test_config, tmp_path, default_reset=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

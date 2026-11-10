@@ -52,6 +52,7 @@ from .distributed_compiled_program import (
     ClusterNodeSpec,
     DistributedCompiledProgram,
     DistributedConfig,
+    SharedDomainBinding,
 )
 
 # Import roundtrip instrument factory
@@ -116,6 +117,7 @@ __all__ = [
     "DistributedConfig",
     "ClusterConfig",
     "ClusterNodeSpec",
+    "SharedDomainBinding",
     "PassManager",
     "OptimizationStrategy",
     "PassDumpLevel",

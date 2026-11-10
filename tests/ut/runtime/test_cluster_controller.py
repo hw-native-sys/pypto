@@ -75,6 +75,8 @@ def setup_controller(controller_module, monkeypatch):
         runtime="host_build_graph",
         startup_timeout_s=10,
         enable_sdma=False,
+        persistent=True,
+        reset=True,
         node_sizes=[1, 1],
         programs=[
             dict(
@@ -82,6 +84,7 @@ def setup_controller(controller_module, monkeypatch):
                 module_prefix="bundle.programs.p0",
                 param_names=["count"],
                 entries=[dict(entry_name="host", module="orchestration.host", qualname="host")],
+                plans=[],
             )
         ],
     )
@@ -153,6 +156,61 @@ def test_io_preserves_alias_offsets_and_rejects_cross_rank_writes(controller_mod
         io.argument(9, tensor[4:], TensorArgType.INPUT)
     io.release()
     assert events == [107, 109]
+
+
+def test_domains_share_across_programs_and_reset_once_per_invocation(setup_controller):
+    controller, _, _, _ = setup_controller
+    handle = SimpleNamespace(
+        members=[SimpleNamespace(node_worker_id=7, local_worker_id=0, global_device_rank=0, domain_rank=0)],
+        mapping_size=16,
+        released=False,
+        freed=False,
+    )
+    allocations = []
+    copies = []
+    releases = []
+    handle.release = lambda: releases.append(True)
+    orch = SimpleNamespace(
+        allocate_global_domain=lambda **kwargs: allocations.append(kwargs) or handle,
+        copy_to_global_domain=lambda *args, **kwargs: copies.append((args, kwargs)),
+    )
+    plan = dict(
+        pool_key=("shared", "state"),
+        name="pypto:shared:0",
+        members=[[0, 0, 0]],
+        canonical=[["canonical", 8, 16, []]],
+        domain=dict(
+            generated_name="first",
+            slots=[
+                dict(
+                    generated_name="slot0",
+                    logical_nbytes=8,
+                    allocated_nbytes=16,
+                )
+            ],
+        ),
+    )
+    first = controller._domain_provider({"plans": [plan]}, orch)
+    from simpler.task_interface import CommBufferSpec  # noqa: PLC0415
+
+    with first(
+        name="first",
+        members=[(7, 0)],
+        window_size=16,
+        buffers=[CommBufferSpec(name="slot0", dtype="opaque", count=8, nbytes=16)],
+        retain_after_run=True,
+    ) as actual:
+        assert actual is handle
+    assert len(allocations) == 1
+    assert copies == []
+    assert releases == []
+    second = dict(plan, domain=dict(plan["domain"], generated_name="second"))
+    controller._domain_provider({"plans": [second, second]}, orch)
+    assert len(allocations) == 1
+    assert len(copies) == 1
+    assert copies[0][0][2] == bytes(16)
+    controller.close()
+    assert releases == [True]
 
 
 def test_remote_descriptors_reject_lazy_view_flags(controller_module):

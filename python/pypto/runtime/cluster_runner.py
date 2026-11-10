@@ -13,6 +13,7 @@ import json
 import math
 import tempfile
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ from ._artifact_sources import build_cluster_session_bundle
 from ._cluster_channel import PackedValues
 from ._cluster_direct_session import DirectSession as _DirectSession
 from ._prebuilt import chip_directories
-from .distributed_runner import _make_call_config
+from .distributed_runner import _make_call_config, _resolve_persistent_window_reset
 
 _UNCONFIRMED_WORKERS: set[Any] = set()
 _InvocationIO = _cluster_controller._InvocationIO
@@ -52,7 +53,147 @@ def _assemble_cluster_chips(compiled: Any) -> dict[str, tuple[Any, str, dict[str
     }
 
 
-def _entry_bindings(program, chips, staging):
+def _plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _session_domains(programs: list[Any], bindings: Any) -> list[list[dict[str, Any]]]:
+    """Snapshot explicit domain identities and compare canonical physical layouts."""
+    from pypto.ir.distributed_compiled_program import SharedDomainBinding  # noqa: PLC0415
+
+    selected = {}
+    keys: dict[str, int] = {}
+    for binding in tuple(bindings):
+        if not isinstance(binding, SharedDomainBinding):
+            raise TypeError("shared_domains requires SharedDomainBinding values")
+        index = next((i for i, program in enumerate(programs) if binding.program is program), None)
+        if index is None:
+            raise ValueError("Shared domain program is not prepared")
+        if type(binding.domain) is not int or not 0 <= binding.domain < len(programs[index].comm_domains):
+            raise ValueError("Shared domain ordinal is unavailable; regenerate legacy artifacts")
+        if not isinstance(binding.key, str) or not binding.key:
+            raise ValueError("Shared domain key must be nonempty")
+        identity = (index, binding.domain)
+        if identity in selected:
+            raise ValueError("Duplicate shared domain binding")
+        if not isinstance(binding.slots, Mapping):
+            raise TypeError("Shared domain slots must be a mapping")
+        slots = dict(binding.slots)
+        if (
+            any(type(slot) is not int for slot in slots)
+            or set(slots) != set(range(len(programs[index].comm_domains[binding.domain]["slots"])))
+            or any(not isinstance(name, str) or not name for name in slots.values())
+            or len(set(slots.values())) != len(slots)
+        ):
+            raise ValueError("Shared domain slots require a complete one-to-one canonical slot map")
+        keys.setdefault(binding.key, len(keys))
+        selected[identity] = (binding.key, slots)
+    signatures = {}
+    result = []
+    for index, program in enumerate(programs):
+        cc = program.cluster_config
+        global_ranks = cc.global_device_ranks()
+        plans = []
+        for domain in _plain(program.comm_domains):
+            identity = (index, domain["ordinal"])
+            sharing = selected.get(identity)
+            slot_map = (
+                sharing[1]
+                if sharing
+                else {slot["ordinal"]: slot["generated_name"] for slot in domain["slots"]}
+            )
+            canonical = []
+            for slot in domain["slots"]:
+                views = sorted(
+                    set(
+                        (
+                            window["dtype"],
+                            tuple(window["shape"]),
+                            tuple(window["strides"]),
+                            window["byte_offset"],
+                        )
+                        for window in domain["entry_windows"]
+                        if window["slot_ordinal"] == slot["ordinal"]
+                    )
+                )
+                canonical.append(
+                    (
+                        slot_map[slot["ordinal"]],
+                        slot["logical_nbytes"],
+                        slot["allocated_nbytes"],
+                        tuple(views),
+                    )
+                )
+            if sharing:
+                canonical.sort()
+            members = [
+                (node, local, global_ranks[node][local])
+                for node in domain["node_indices"]
+                for local in range(len(cc.nodes[node].devices))
+            ]
+            if any(slot[1] is None for slot in canonical):
+                raise ValueError("Persistent cluster domain requires static slot sizes")
+            signature = (tuple(members), tuple(canonical))
+            pool_key = ("shared", sharing[0]) if sharing else ("isolated", index, domain["ordinal"])
+            if pool_key in signatures and signatures[pool_key] != signature:
+                raise ValueError("Shared domain has incompatible member/window/dtype/view layout")
+            signatures[pool_key] = signature
+            runtime_name = (
+                f"pypto:shared:{keys[sharing[0]]}" if sharing else f"pypto:p{index}:{domain['ordinal']}"
+            )
+            plans.append(
+                {
+                    "domain": domain,
+                    "pool_key": pool_key,
+                    "name": runtime_name,
+                    "slot_map": slot_map,
+                    "canonical": canonical,
+                    "members": members,
+                }
+            )
+        result.append(plans)
+    return result
+
+
+def _node_domain_bindings(plans: list[dict[str, Any]], logical_path: str) -> list[dict[str, Any]]:
+    bindings = []
+    for plan in plans:
+        windows = [
+            window
+            for window in plan["domain"]["entry_windows"]
+            if window["entry_logical_path"] == logical_path
+        ]
+        if windows:
+            bindings.append(
+                {
+                    "name": plan["name"],
+                    "members": [[rank, local, i] for i, (_, local, rank) in enumerate(plan["members"])],
+                    "window_size": sum(slot[2] for slot in plan["canonical"]),
+                    "slots": [[slot[0], slot[2]] for slot in plan["canonical"]],
+                    "windows": [
+                        [
+                            window["ctx_scalar_index"],
+                            window["logical_window_name"],
+                            plan["slot_map"][window["slot_ordinal"]],
+                        ]
+                        for window in windows
+                    ],
+                }
+            )
+    merged = {}
+    for binding in bindings:
+        if binding["name"] in merged:
+            merged[binding["name"]]["windows"].extend(binding["windows"])
+        else:
+            merged[binding["name"]] = binding
+    return list(merged.values())
+
+
+def _entry_bindings(program, chips, plans, staging):
     chip_bindings = {
         path: (staging.register(chip).digest.hex(), tuple(config.get("host_tensor_indices", ())))
         for path, (chip, _, config) in chips.items()
@@ -66,7 +207,7 @@ def _entry_bindings(program, chips, staging):
                 name: path.removesuffix(".py").replace("/", ".")
                 for name, path in entry["sub_worker_paths"].items()
             },
-            "domain_bindings": [],
+            "domain_bindings": _node_domain_bindings(plans, entry["logical_path"]),
         }
         for entry in program.l3_entries["entries"]
     }
@@ -139,6 +280,9 @@ class ClusterWorker:
         config: Any = None,
         *,
         startup_timeout_s: float | None = None,
+        persistent: bool = False,
+        reset_persistent_windows: bool | None = None,
+        shared_domains: Any = (),
     ) -> None:
         from simpler.mpi_direct_topology import MpiDirectExecutorSpec  # noqa: PLC0415
         from simpler.startup_artifacts import StartupArtifactSpec, read_startup_artifacts  # noqa: PLC0415
@@ -149,9 +293,15 @@ class ClusterWorker:
         compiled = programs[0]
         cc = compiled.cluster_config
         _validate_programs(programs, compiled, cc)
+        if shared_domains and not persistent:
+            raise ValueError("shared_domains requires persistent=True")
+        if persistent and any(program._cluster_domains is None for program in programs):
+            raise ValueError("Cluster metadata has no domain records; recompile before persistent execution")
+        plans = _session_domains(programs, shared_domains) if persistent else [[] for _ in programs]
         timeout = cc.startup_timeout_s if startup_timeout_s is None else startup_timeout_s
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Cluster startup_timeout_s must be positive and finite")
+        reset = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
         chip_sets = [_assemble_cluster_chips(program) for program in programs]
         if any(runtime != cc.runtime for chips in chip_sets for _, runtime, _ in chips.values()):
             raise ValueError("Every cluster CHIP dependency must use ClusterConfig.runtime")
@@ -179,8 +329,8 @@ class ClusterWorker:
                 enable_sdma=enable_sdma,
             )
             bindings = [
-                _entry_bindings(program, chips, staging)
-                for program, chips in zip(programs, chip_sets, strict=True)
+                _entry_bindings(program, chips, plan, staging)
+                for program, chips, plan in zip(programs, chip_sets, plans, strict=True)
             ]
             digest, payload = build_cluster_session_bundle(programs, bindings)
             prefix = "_pypto_cluster_" + digest
@@ -197,6 +347,13 @@ class ClusterWorker:
                         "module_prefix": program_prefix,
                         "entries": program.l3_entries["entries"],
                         "param_names": [info.name for info in infos],
+                        "plans": [
+                            {
+                                key: _plain(plan[key])
+                                for key in ("domain", "pool_key", "name", "canonical", "members")
+                            }
+                            for plan in plans[index]
+                        ],
                     }
                 )
             minimum = sum(
@@ -233,6 +390,8 @@ class ClusterWorker:
                 "runtime": cc.runtime,
                 "startup_timeout_s": timeout,
                 "enable_sdma": enable_sdma,
+                "persistent": bool(persistent),
+                "reset": reset,
                 "node_sizes": cc.node_device_counts(),
                 "programs": execution,
             }
