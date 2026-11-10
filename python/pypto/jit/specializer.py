@@ -2352,6 +2352,7 @@ class Specializer:
         out_params: list[str],
         distributed_params: set[str],
     ) -> str | None:
+        implicit_out = _implicit_entry_output_name(func_def, ctx.func_type, out_params)
         ret_type = _infer_return_type(
             func_def,
             ctx.tensor_meta,
@@ -2360,7 +2361,7 @@ class Specializer:
             ctx.py_globals,
             ctx.constexpr_values,
             eager_annotation=ctx.eager_return_annotation,
-            emit_expression_contract=ctx.requires_return_contract,
+            emit_expression_contract=ctx.requires_return_contract and implicit_out is None,
             return_metas=ctx.return_metas,
         )
         if ret_type is None and ctx.requires_return_contract and ctx.return_metas:

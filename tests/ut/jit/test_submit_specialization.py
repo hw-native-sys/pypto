@@ -965,14 +965,24 @@ def test_submitted_forward_uses_actual_incore_result(via_alias):
     assert ir.structural_equal(consumer.params[0].type, expected)
 
 
-def test_submitted_dynamic_reshape_preserves_body_shape_expression():
+@pytest.mark.parametrize("computed_alias", [False, True])
+def test_submitted_dynamic_reshape_preserves_body_shape_expression(computed_alias):
     rows = pl.dynamic("submit_reshape_rows")
 
-    @pl.jit.incore
-    def flatten(x: pl.Tensor[[rows, 32], pl.FP32]):
-        height = pl.tensor.dim(x, 0)
-        flat = pl.reshape(x, [height * 32])
-        return flat
+    if computed_alias:
+
+        @pl.jit.incore
+        def flatten(x: pl.Tensor[[rows, 32], pl.FP32]):
+            height = pl.tensor.dim(x, 0)
+            size = height * 32
+            extent = size
+            return pl.reshape(x, [extent])
+    else:
+
+        @pl.jit.incore
+        def flatten(x: pl.Tensor[[rows, 32], pl.FP32]):
+            height = pl.tensor.dim(x, 0)
+            return pl.reshape(x, [height * 32])
 
     @pl.jit
     def entry(x: pl.Tensor[[rows, 32], pl.FP32]):
@@ -992,3 +1002,44 @@ def test_submitted_dynamic_reshape_preserves_body_shape_expression():
     assert isinstance(caller_rows, ir.Var)
     assert isinstance(result_dim.left, ir.Var) and result_dim.left.unique_id == caller_rows.unique_id
     assert isinstance(result_dim.right, ir.ConstInt) and result_dim.right.value == 32
+
+
+def test_submitted_chip_keeps_its_implicit_output():
+    @pl.jit
+    def chip(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            value = pl.load(x, [0, 0], [16, 32])
+            pl.store(value, [0, 0], out)
+
+    @pl.jit.host
+    def entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        value, done = pl.submit(chip, x, out, device=0)
+        return value
+
+    program = entry.specialize(torch.empty(16, 32), torch.empty(16, 32))
+    (submit,) = _submissions(program)
+    assert isinstance(submit.type, ir.TupleType)
+    assert ir.structural_equal(submit.type.types[0], ir.TensorType([16, 32], pl.FP32))
+    assert ir.structural_equal(submit.type.types[1], ir.ScalarType(pl.TASK_ID))
+
+
+def test_dtype_specialization_keeps_canonical_dsl_references():
+    flag = True
+
+    @pl.jit.incore
+    def kernel(
+        x: pl.Tensor[[16, 32], pl.FP32 if flag else pl.FP16],
+        out: pl.InOut[pl.Tensor],
+        flag: pl.constexpr,
+    ):
+        return pl.store(pl.load(x, [0, 0], [16, 32]), [0, 0], out)
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        return kernel(x, out, flag=False)
+
+    sample = torch.empty(16, 32, dtype=torch.float16)
+    program = entry.specialize(sample, sample)
+    callee = program.get_function("kernel")
+    assert callee is not None
+    assert ir.structural_equal(callee.params[0].type, ir.TensorType([16, 32], pl.FP16))

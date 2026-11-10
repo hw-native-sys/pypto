@@ -27,7 +27,13 @@ from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
-from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
+from .diagnostics import (
+    BUG_CLASS_EXCEPTIONS,
+    ParserError,
+    ParserSyntaxError,
+    ParserTypeError,
+    concise_error_message,
+)
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 from .parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
@@ -1121,9 +1127,7 @@ def inline(func: Callable[..., Any]) -> InlineFunction:
     )
 
 
-def _bind_jit_submit_returns(
-    ir_func: ir.Function, arity: int | None, dim_aliases: dict[int, ir.Call]
-) -> ir.Function:
+def _bind_jit_submit_returns(ir_func: ir.Function, arity: int | None) -> ir.Function:
     """Publish typed JIT Submit results after the ordinary body parser resolves them."""
     if arity is None:
         return ir_func
@@ -1131,11 +1135,18 @@ def _bind_jit_submit_returns(
     if arity > 1 and len(return_types) == 1 and isinstance(return_types[0], ir.TupleType):
         return_types = list(return_types[0].types)
     if len(return_types) == arity:
-        dims = ParameterReturnDims(ir_func.params, dim_aliases)
+        dims = ParameterReturnDims(ir_func)
+        return_types = [dims.return_type(typ) for typ in return_types]
+        if dims.unresolved:
+            raise ParserTypeError(
+                f"Cannot express JIT Submit results of '{ir_func.name}' in its parameter dimensions",
+                span=ir_func.span,
+                hint="Express returned tensor extents using parameter dimensions and scalar arithmetic.",
+            )
         return ir.Function(
             ir_func.name,
             list(zip(ir_func.params, ir_func.param_directions, strict=True)),
-            [dims.return_type(typ) for typ in return_types],
+            return_types,
             ir_func.body,
             ir_func.span,
             ir_func.func_type,
@@ -1387,9 +1398,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         hint="Check your function definition for errors",
                     ) from e
 
-                ir_func = _bind_jit_submit_returns(
-                    ir_func, submit_return_arities.get(ir_func.name), parser.function.shape_dim_aliases
-                )
+                ir_func = _bind_jit_submit_returns(ir_func, submit_return_arities.get(ir_func.name))
                 functions.append(ir_func)
                 # Update gvar_to_func map so subsequent functions can use this function's return type
                 gvar = global_vars[ir_func.name]

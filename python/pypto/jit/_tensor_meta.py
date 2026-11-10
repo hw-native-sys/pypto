@@ -516,12 +516,15 @@ def _summarize_dep_results(
     except OSError:
         return None
     site = _return_site(func_def)
+    out_params, _, tensors, _, distributed = _classify_params(func_def)
     if site is None or site.value is None:
+        implicit_out = _implicit_entry_output_name(func_def, dep._func_type, out_params)
+        if implicit_out is not None and (meta := seed_meta.get(implicit_out)) is not None:
+            return _DepResults((replace(meta, is_distributed=implicit_out in distributed),), frozenset())
         return None if dep._func_type == "extern" else _DepResults((), frozenset())
     elements = site.value.elts if isinstance(site.value, ast.Tuple) else [site.value]
     return_meta = _ReturnMeta(site, elements) if track_returns else None
     _validate_dep_packed_fp4_dtypes(dep, seed_meta, constexpr)
-    _, _, tensors, _, distributed = _classify_params(func_def)
     seed_meta = {
         name: replace(meta, is_distributed=name in distributed)
         if name in tensors and meta.is_distributed != (name in distributed)

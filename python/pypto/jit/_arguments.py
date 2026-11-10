@@ -14,6 +14,7 @@ read captured namespaces through the existing specializer services."""
 
 import ast
 import inspect
+import sys
 import warnings
 from collections.abc import Mapping, Sequence
 from types import GenericAlias
@@ -243,7 +244,12 @@ def _resolve_eager_field(
     # An eagerly evaluated field preserves its value, not the individual
     # factory locals used to compute it. Re-evaluating a mixed expression
     # can silently use a different global with the same name.
-    if names - binding.keys():
+    canonical_modules = {
+        name
+        for name, module in (("pl", "pypto.language"), ("pld", "pypto.language.distributed"))
+        if module in sys.modules and namespace.get(name) is sys.modules[module]
+    }
+    if names - binding.keys() - canonical_modules:
         raise ValueError(
             f"Annotation field {spelling!r} mixes call-owned and definition-owned names; "
             "compute the field at the call site and pass its value as a constexpr"

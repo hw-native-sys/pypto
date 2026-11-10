@@ -9,7 +9,7 @@
 
 """Pure IR shape/type comparison and annotation normalization helpers."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from pypto.pypto_core import arith as _arith
 from pypto.pypto_core import ir
@@ -54,8 +54,8 @@ def get_source_valid_shape(source_type: ir.Type) -> list[ir.Expr] | None:
     return None
 
 
-def collect_type_symbol_ids(param_type: ir.Type) -> set[int]:
-    """Return ``id()`` of every Var read by a parameter type's shape metadata.
+def collect_type_symbol_ids(param_type: ir.Type, key: Callable[[ir.Var], int] = id) -> set[int]:
+    """Return the identity of every Var read by a parameter type's shape metadata.
 
     Used to detect a scalar parameter that shadows a ``pl.dynamic()`` symbol an
     earlier parameter annotation already resolved, which cannot be rebound.
@@ -66,7 +66,7 @@ def collect_type_symbol_ids(param_type: ir.Type) -> set[int]:
         if expr is None:
             return
         if isinstance(expr, ir.Var):
-            symbol_ids.add(id(expr))
+            symbol_ids.add(key(expr))
             return
         for attr in ("left", "right", "operand"):
             operand = getattr(expr, attr, None)
@@ -326,19 +326,52 @@ class ShapeDimAliasExpander(ir.IRMutator):
         return op
 
 
-class ParameterReturnDims(ShapeDimAliasExpander):
-    """Anchor direct descriptor reads to the corresponding signature extents."""
+class ParameterReturnDims(ir.IRMutator):
+    """Expand shape computations that can be expressed in the signature."""
 
-    def __init__(self, params: Sequence[ir.Var], aliases: dict[int, ir.Call]) -> None:
-        super().__init__(aliases)
-        self.params = {param.unique_id for param in params}
+    def __init__(self, func: ir.Function) -> None:
+        super().__init__()
+        assignments = InlineReturnProvenanceCollector()
+        assignments.visit_stmt(func.body)
+        parameter_ids = {param.unique_id for param in func.params}
+        self.params = parameter_ids - assignments.assigned_ids
+        self.signature_symbols = {
+            symbol
+            for param in func.params
+            for symbol in collect_type_symbol_ids(param.type, key=lambda var: var.unique_id)
+        }
+        self.aliases: dict[int, ir.Expr] = {}
+        self.unresolved = False
+
+        # Only unconditional, single-definition scalar bindings are eligible.
+        # Substitute each definition once, in dominance order, so a later
+        # reference can share the already-expanded expression tree.
+        statements = func.body.stmts if isinstance(func.body, ir.SeqStmts) else (func.body,)
+        for stmt in statements:
+            if not isinstance(stmt, ir.AssignStmt) or not isinstance(stmt.var.type, ir.ScalarType):
+                continue
+            target = stmt.var.unique_id
+            if target in parameter_ids or assignments.assignment_counts[target] != 1:
+                continue
+            self.unresolved = False
+            value = self.visit_expr(stmt.value)
+            if not self.unresolved:
+                self.aliases[target] = value
+        self.unresolved = False
 
     def visit_var(self, op: ir.Var) -> ir.Expr:
-        value = super().visit_var(op)
-        return self.visit_call(value) if isinstance(value, ir.Call) else value
+        if op.unique_id in self.aliases:
+            return self.aliases[op.unique_id]
+        self.unresolved |= op.unique_id not in self.signature_symbols
+        return op
+
+    def visit_iter_arg(self, op: ir.IterArg) -> ir.Expr:
+        self.unresolved = True
+        return op
 
     def visit_call(self, op: ir.Call) -> ir.Expr:
         if op.op.name != ir.get_op("tensor.dim").name or len(op.args) != 2:
+            self.unresolved = True
             return op
         tensor, axis = op.args
         if (
@@ -349,6 +382,7 @@ class ParameterReturnDims(ShapeDimAliasExpander):
             and -len(tensor.type.shape) <= axis.value < len(tensor.type.shape)
         ):
             return tensor.type.shape[axis.value]
+        self.unresolved = True
         return op
 
     def return_type(self, typ: ir.Type) -> ir.Type:
