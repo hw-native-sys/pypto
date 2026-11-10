@@ -1330,11 +1330,21 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   // byte count, which the helper rejects with the async-invalid error.
   if (n == 6) {
     const std::string zero_index = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+    // GetIndexOffsetCodes clamps to zero so a negative coordinate cannot reach
+    // address generation. That also makes a non-negative check on its result
+    // vacuous, so the guard reads the unclamped index value instead; clamping
+    // remains in place for the emitted byte offset.
+    auto unclamped_offset = [&](const ExprPtr& expr) -> std::string {
+      if (auto constant = As<ir::ConstInt>(expr)) {
+        return codegen.GetOrEmitConstant(constant->value_, DataType::INDEX);
+      }
+      return codegen.EmitCastToIndex(expr, codegen.GetExprAsCode(expr));
+    };
     std::string in_bounds;
     auto append_dim_checks = [&](const std::shared_ptr<const ir::DistributedTensorType>& type,
                                  const std::vector<ExprPtr>& offsets) {
       for (size_t dim = 0; dim < type->shape_.size(); ++dim) {
-        const std::string off = GetIndexOffsetCodes({offsets[dim]}, codegen).front();
+        const std::string off = unclamped_offset(offsets[dim]);
         const std::string extent = GetSizeCodes({transfer_shape[dim]}, codegen).front();
         const std::string limit = GetSizeCodes({type->shape_[dim]}, codegen).front();
         const std::string non_negative = codegen.NewTemp();
