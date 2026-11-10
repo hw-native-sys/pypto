@@ -1,0 +1,163 @@
+[
+  {
+    "name": "models-deepseek_v4_1_flash-compressor",
+    "entry": "models/deepseek_v4_1_flash/compressor.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-engram",
+    "entry": "models/deepseek_v4_1_flash/engram.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-expert_routed",
+    "entry": "models/deepseek_v4_1_flash/expert_routed.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-expert_shared",
+    "entry": "models/deepseek_v4_1_flash/expert_shared.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-gate",
+    "entry": "models/deepseek_v4_1_flash/gate.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-hc",
+    "entry": "models/deepseek_v4_1_flash/hc.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-input_pack",
+    "entry": "models/deepseek_v4_1_flash/input_pack.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-lm_head",
+    "entry": "models/deepseek_v4_1_flash/lm_head.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-o_proj",
+    "entry": "models/deepseek_v4_1_flash/o_proj.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_1_flash-sparse_attention",
+    "entry": "models/deepseek_v4_1_flash/sparse_attention.py",
+    "platforms": [
+      "a5"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_compressor_ratio128",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_compressor_ratio128.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_compressor_ratio4",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_compressor_ratio4.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-decode_sparse_attn_swa",
+    "entry": "models/deepseek_v4_flash_lowlat/decode_sparse_attn_swa.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-expert_routed",
+    "entry": "models/deepseek_v4_flash_lowlat/expert_routed.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-gate",
+    "entry": "models/deepseek_v4_flash_lowlat/gate.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-hc_post",
+    "entry": "models/deepseek_v4_flash_lowlat/hc_post.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-hc_pre",
+    "entry": "models/deepseek_v4_flash_lowlat/hc_pre.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-o_proj_tp",
+    "entry": "models/deepseek_v4_flash_lowlat/o_proj_tp.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-qkv_proj_rope",
+    "entry": "models/deepseek_v4_flash_lowlat/qkv_proj_rope.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-deepseek_v4_flash_lowlat-rmsnorm",
+    "entry": "models/deepseek_v4_flash_lowlat/rmsnorm.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-greedy_sample",
+    "entry": "models/qwen3_14b/greedy_sample.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-test_paged_attention_pypto",
+    "entry": "models/qwen3_14b/test_paged_attention_pypto.py",
+    "platforms": [
+      "a2a3"
+    ]
+  },
+  {
+    "name": "models-qwen3_14b-topk_select",
+    "entry": "models/qwen3_14b/topk_select.py",
+    "platforms": [
+      "a2a3"
+    ]
+  }
+]
