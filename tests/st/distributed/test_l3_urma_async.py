@@ -22,6 +22,12 @@ at its in-core finish, the peer would receive the overwritten bytes. The local
 row therefore carries the overwrite value while the peer rows carry the first
 value; the golden reflects both.
 
+The reduced cases pin the transfer stages: ``test_put_only`` runs one PUT per
+peer with a minimal notification handshake, and
+``test_put_get_no_handshake`` runs PUT and GET together with no notification.
+Both keep the program small enough to attribute a device fault to a single
+stage.
+
 **Hardware.** The generated helper includes ``backend/urma/urma_completion_kernel.h``,
 which exists only for A5 (Ascend 950) silicon; there is no simulator backend.
 Run on A5 TMR with two or four cards:
@@ -252,6 +258,256 @@ def _build_urma_exchange(n_ranks: int):
     return host_orch
 
 
+def _build_put_only(n_ranks: int):
+    """Publish each rank's own row to every peer, then read the window back.
+
+    Four AIV tasks: the URMA PUT, a notification, a wait for the peers'
+    notifications, and a readback ordered after the wait. The notification is
+    a separate task because it must run after the PUT retires; the wait then
+    establishes that every peer's PUT has landed, which makes the whole window
+    readable. No GET is involved.
+    """
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.tensor.put_async(
+                    data,
+                    peer=peer,
+                    src=data,
+                    dst_offsets=[my_rank, 0],
+                    src_offsets=[my_rank, 0],
+                    shape=[1, SIZE],
+                    engine=pld.CommEngine.URMA,
+                )
+        return data
+
+    @pl.jit.incore
+    def announce(
+        data: pld.DistributedTensor[[n_ranks, SIZE], pl.FP32],
+        signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[n_ranks, 1], pl.INT32]:
+        # Consuming `data` orders the notification after the PUT task retires.
+        ctx = pld.get_comm_ctx(signal)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(
+                    signal,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.Set,
+                )
+        return signal
+
+    @pl.jit.incore
+    def await_peers(
+        signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[n_ranks, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.wait(
+                    signal=signal,
+                    offsets=[peer, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
+        return signal
+
+    @pl.jit.incore
+    def readback(
+        data: pld.DistributedTensor[[n_ranks, SIZE], pl.FP32],
+        signal: pld.DistributedTensor[[n_ranks, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        # `signal` is unused except for the dependency on `await_peers`.
+        ctx = pld.get_comm_ctx(data)
+        for row in pl.range(pld.nranks(ctx)):
+            chunk = pl.load(data, [row, 0], [1, SIZE])
+            out = pl.store(chunk, [row, 0], out)
+        return out
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        published = publish(inp, data)
+        announced = announce(published, signal)
+        waited = await_peers(announced)
+        return readback(published, waited, out)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(n_ranks * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            sig = pld.window(signal_buf, [n_ranks, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], outputs[r], data, sig, device=r)
+        return outputs
+
+    return host_orch
+
+
+def _build_put_get_no_handshake(n_ranks: int):
+    """PUT and GET in one program without a cross-rank notification.
+
+    The GET is ordered after this rank's own PUT, but nothing orders it after
+    the peers' fills, so only the local row of the GET result is
+    deterministic. The PUT result must still show every row, because each row
+    has a single writer and the readback depends on the PUT task.
+    """
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        row = pl.load(inp, [my_rank, 0], [1, SIZE])
+        data = pl.store(row, [my_rank, 0], data)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.tensor.put_async(
+                    data,
+                    peer=peer,
+                    src=data,
+                    dst_offsets=[my_rank, 0],
+                    src_offsets=[my_rank, 0],
+                    shape=[1, SIZE],
+                    engine=pld.CommEngine.URMA,
+                )
+        return data
+
+    @pl.jit.incore
+    def fetch(
+        data: pld.DistributedTensor[[n_ranks, SIZE], pl.FP32],
+        recv: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(recv)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+        own = pl.load(data, [my_rank, 0], [1, SIZE])
+        recv = pl.store(own, [my_rank, 0], recv)
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.tensor.get_async(
+                    recv,
+                    peer=peer,
+                    src=data,
+                    dst_offsets=[peer, 0],
+                    src_offsets=[peer, 0],
+                    shape=[1, SIZE],
+                    engine=pld.CommEngine.URMA,
+                )
+        return recv
+
+    @pl.jit.incore
+    def readback(
+        window: pld.DistributedTensor[[n_ranks, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(window)
+        for row in pl.range(pld.nranks(ctx)):
+            chunk = pl.load(window, [row, 0], [1, SIZE])
+            out = pl.store(chunk, [row, 0], out)
+        return out
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        out_put: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        out_get: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+        recv: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        published = publish(inp, data)
+        fetched = fetch(published, recv)
+        readback(published, out_put)
+        return readback(fetched, out_get)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+        outputs_put: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+        outputs_get: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte())
+        recv_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            recv = pld.window(recv_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            chip_orch(inputs[r], outputs_put[r], outputs_get[r], data, recv, device=r)
+        return outputs_put
+
+    return host_orch
+
+
+def _run_single_output(test_config: RunConfig, device_ids: list[int], n_ranks: int, builder):
+    inputs = _rank_inputs(n_ranks)
+    outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+    host_orch = builder(n_ranks)
+    compiled = host_orch.compile(
+        inputs,
+        outputs,
+        config=RunConfig(
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:n_ranks], num_sub_workers=0
+            ),
+        ),
+    )
+    compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+    return outputs
+
+
+def _run_two_outputs(test_config: RunConfig, device_ids: list[int], n_ranks: int, builder):
+    inputs = _rank_inputs(n_ranks)
+    outputs_put = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+    outputs_get = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+    host_orch = builder(n_ranks)
+    compiled = host_orch.compile(
+        inputs,
+        outputs_put,
+        outputs_get,
+        config=RunConfig(
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:n_ranks], num_sub_workers=0
+            ),
+        ),
+    )
+    compiled(
+        inputs,
+        outputs_put,
+        outputs_get,
+        config=RunConfig(platform=test_config.platform),
+    )
+    return outputs_put, outputs_get
+
+
 def _run(
     test_config: RunConfig, device_ids: list[int], n_ranks: int, round_index: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -301,6 +557,40 @@ class TestL3UrmaAsync:
         assert torch.allclose(outputs_get, expected_get), (
             f"GET P={n_ranks} mismatch: max diff = {(outputs_get - expected_get).abs().max().item()}"
         )
+
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_put_only(self, test_config, device_ids, n_ranks):
+        """A single URMA PUT per peer, with no GET and a minimal handshake."""
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async PUT P={n_ranks} needs {n_ranks} devices")
+
+        outputs = _run_single_output(test_config, device_ids, n_ranks, _build_put_only)
+        expected = _expected_exchange(n_ranks)
+        assert torch.allclose(outputs, expected), (
+            f"PUT-only P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+    def test_put_get_no_handshake(self, test_config, device_ids):
+        """PUT and GET without a notification: only the local GET row is asserted."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async PUT/GET needs {n_ranks} devices")
+
+        outputs_put, outputs_get = _run_two_outputs(
+            test_config, device_ids, n_ranks, _build_put_get_no_handshake
+        )
+        expected = _expected_exchange(n_ranks)
+        # Without a notification, a peer's fill may not have happened when this
+        # rank's GET is served, so only the locally written rows are ordered.
+        for r in range(n_ranks):
+            assert torch.allclose(outputs_put[r, r], expected[r, r]), (
+                f"PUT local row mismatch on rank {r}: "
+                f"max diff = {(outputs_put[r, r] - expected[r, r]).abs().max().item()}"
+            )
+            assert torch.allclose(outputs_get[r, r], expected[r, r]), (
+                f"GET local row mismatch on rank {r}: "
+                f"max diff = {(outputs_get[r, r] - expected[r, r]).abs().max().item()}"
+            )
 
     def test_exchange_repeated(self, test_config, device_ids):
         """Repeated calls must each observe their own payload."""
