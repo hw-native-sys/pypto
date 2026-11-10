@@ -418,6 +418,35 @@ def test_tile_row_max_row_major_survives_result_named_max():
     torch.testing.assert_close(result[:, 0:1], value.amax(dim=-1, keepdim=True))
 
 
+def test_tile_row_max_row_major_pads_by_ir_dtype_not_torch_carrier():
+    """Pad width comes from the IR dtype, not the (possibly wider) Torch carrier.
+
+    UINT16's IR element width is 2 bytes, so out_layout=row_major pads to 16
+    columns (32 / 2). Torch has no uint16, so _DTYPE_MAP upcasts it to
+    torch.int32 -- a 4-byte carrier. Deriving the pad width from that carrier
+    at runtime (``element_size()``) would wrongly compute 8 columns instead
+    of the 16 DeduceTileRowReductionType actually declared (issue #3319).
+    """
+    a = _tile_var("a", [4, 48], DataType.UINT16)
+    tmp = _tile_var("tmp", [4, 48], DataType.UINT16)
+    call = _op_call("tile.row_max", [a, tmp], {"out_layout": ir.TileLayout.row_major})
+    out = ir.Var("out", call.type, _span())
+    body = ir.SeqStmts(
+        [ir.AssignStmt(out, call, _span()), ir.ReturnStmt([out], _span())],
+        _span(),
+    )
+    func = _simple_function("f", [a, tmp], body, [out.type])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    value = torch.randint(0, 100, (4, 48), dtype=torch.int32)
+    scratch = torch.zeros(4, 48, dtype=torch.int32)
+    result = ns["f"](value, scratch)
+    assert tuple(result.shape) == (4, 16)
+    torch.testing.assert_close(result[:, 0:1], value.amax(dim=-1, keepdim=True))
+
+
 # ---------------------------------------------------------------------------
 # Test: tile ops
 # ---------------------------------------------------------------------------
