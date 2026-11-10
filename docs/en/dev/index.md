@@ -155,6 +155,11 @@ Unset or false preserves existing automatic full CI while the required checks
 are migrated. No GitHub App secret, public webhook endpoint or service update
 is needed.
 
+Once the workflows are on `main`, `/ci full` works even while the activation
+switch is unset. Use an open, mergeable PR targeting `main` for this validation;
+a documentation-only PR is sufficient. The commenter needs write, maintain or
+admin permission on the target repository. A merged or closed PR cannot be used.
+
 1. Merge the workflows and helper onto `main`, leaving the switch unset.
 2. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
    **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm

@@ -125,6 +125,10 @@ attempt 的状态仍会保留。较新 attempt 必须通过对应轮次的元数
 原来的自动 full CI，以便安全迁移必需检查。无需 GitHub App 密钥、公网
 webhook 地址或服务升级。
 
+工作流合入 `main` 后，即使尚未设置启用开关，也可以使用 `/ci full`。
+验证时选择仍处于打开状态、目标为 `main` 且可合并的 PR；仅修改文档的 PR 也可以。
+评论者需要目标仓库的 write、maintain 或 admin 权限。已合入或已关闭的 PR 不能用于验证。
+
 1. 将工作流和脚本合入 `main`，暂不设置开关。
 2. 在测试 PR 评论 `/ci full`，验证 fork 检出、实际测试失败、
    **Re-run failed jobs** 和最终 `ci/full` 状态；确认无权限评论无法启动 full，
