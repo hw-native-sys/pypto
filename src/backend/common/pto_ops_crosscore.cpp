@@ -224,7 +224,17 @@ static std::string FormatFrontendPipeAttrs(const CallPtr& op, int split) {
   return oss.str();
 }
 
-static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, int slot_size) {
+static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, int slot_size,
+                                             const BackendHandler& handler) {
+  const bool epilogue = op->HasKwarg("c2v_dtype");
+  const bool relu = op->GetKwarg<bool>("pre_relu", false);
+  CHECK_SPAN(!relu || epilogue, op->span_) << "pre_relu requires an explicit c2v_dtype";
+  CHECK_SPAN(!epilogue || (dir_mask == 1 && handler.SupportsC2VFixpipeEpilogue()), op->span_)
+      << "C2V epilogues require an A5 C2V-only pipe (dir_mask=1)";
+  const auto dtype = op->GetKwarg<DataType>("c2v_dtype", DataType::FP32);
+  CHECK_SPAN(!epilogue || dtype == DataType::FP32 || dtype == DataType::FP16 || dtype == DataType::BF16,
+             op->span_)
+      << "c2v_dtype must be FP32, FP16, or BF16, got " << dtype.ToString();
   std::ostringstream oss;
   oss << "{";
   if (op->HasKwarg("id")) {
@@ -244,6 +254,15 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
                               << local_slot_num;
     oss << ", local_slot_num = " << local_slot_num;
   }
+  if (epilogue) {
+    // This is a per-pipe contract, not a per-push setting. PTOAS validates the
+    // peer initializer, FP32 Acc producer and typed non-split consumer together.
+    const char* quant = dtype == DataType::BF16   ? "f32_bf16"
+                        : dtype == DataType::FP16 ? "f32_f16"
+                                                  : "no_convert";
+    oss << ", nosplit = true, acc_push_epilogue = #pto.acc_push_epilogue<layout = nz2nd, quant = " << quant
+        << ", relu = " << (relu ? "normal_relu" : "no_relu") << ">";
+  }
   oss << "}";
   return oss.str();
 }
@@ -259,6 +278,16 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
       << op_name << " requires 1 argument (tile), got " << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK_SPAN(tile, op->span_) << op_name << " first argument must be a Var or IterArg";
+
+  if (std::string_view(target) == "aiv" && codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0)).has_value()) {
+    auto source = GetTpushTileType(op->args_[0]);
+    auto buffer = As<ir::BufferType>(op->args_[0]->GetType());
+    CHECK_SPAN(
+        (source && source->dtype_ == DataType::FP32 && source->GetMemorySpace() == ir::MemorySpace::Acc) ||
+            (buffer && buffer->dtype_ == DataType::FP32 && buffer->memory_space_ == ir::MemorySpace::Acc),
+        op->span_)
+        << "C2V epilogue producer must push an FP32 Acc tile";
+  }
 
   const int split = op->GetKwarg<int>("split", -1);
   CHECK(ir::IsValidSplitCode(split))
@@ -298,6 +327,15 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
 
   INTERNAL_CHECK_SPAN(op->args_.size() == 0, op->span_)
       << op_name << " takes no arguments, got " << op->args_.size();
+
+  if (std::string_view(target) == "aic") {
+    if (auto dtype = codegen.GetC2VPipeDtype(op->GetKwarg<int>("id", 0))) {
+      auto result = codegen.GetCurrentResultTileType();
+      auto buffer = As<ir::BufferType>(op->GetType());
+      CHECK_SPAN((result && result->dtype_ == *dtype) || (buffer && buffer->dtype_ == *dtype), op->span_)
+          << "C2V pop dtype must match the initializer's c2v_dtype=" << dtype->ToString();
+    }
+  }
 
   const int split = op->GetKwarg<int>("split", 0);
   CHECK(ir::IsValidSplitCode(split))
@@ -497,8 +535,12 @@ static std::string MakeInitializePipeCodegenPTO(const char* target, const CallPt
   CHECK(!c2v_ssa.empty() && !v2c_ssa.empty()) << op_name << ": failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
-  oss << "pto." << target << "_initialize_pipe " << FormatInitializePipeAttrs(op, dir_mask, slot_size);
+  oss << "pto." << target << "_initialize_pipe "
+      << FormatInitializePipeAttrs(op, dir_mask, slot_size, *codegen.GetBackendHandler());
   const int pipe_id = op->GetKwarg<int>("id", 0);
+  if (op->HasKwarg("c2v_dtype")) {
+    codegen.RecordC2VPipeDtype(pipe_id, op->GetKwarg<DataType>("c2v_dtype"));
+  }
   EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSAForPipe(pipe_id, dir_mask), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());
 

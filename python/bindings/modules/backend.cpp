@@ -167,6 +167,8 @@ void BindBackend(nb::module_& m) {
       .def("supports_runtime_bound_local_software_pipeline",
            &BackendHandler::SupportsRuntimeBoundLocalSoftwarePipeline,
            "Whether this backend enables local Vec software-pipeline lowering with runtime trip counts")
+      .def("supports_c2v_fixpipe_epilogue", &BackendHandler::SupportsC2VFixpipeEpilogue,
+           "Whether non-split C2V pipes support explicit FP32 output conversion and ReLU")
       .def("supports_local_pipe_depth", &BackendHandler::SupportsLocalPipeDepth,
            "Whether cross-core pipes support a local consumer depth independent of the transport ring")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,

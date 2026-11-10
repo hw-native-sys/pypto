@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 
 
 def compute_per_func_dyndim_maps(
-    entry_func: Any,
+    entry: "JITFunction",
     entry_param_names: list[str],
-    deps: list[Any],
-    callers_by_dep_id: dict[int, list[tuple[Any, str]]],
+    deps: "list[JITFunction]",
+    callers_by_dep_id: "dict[int, list[tuple[JITFunction, str]]]",
     call_args_cache: "dict[tuple[int, str], list[tuple[str | None, str | SlicedArg | None]] | None]",
 ) -> dict[int, dict[str, dict[int, DynDim]]]:
     """Per JIT function in the dep graph, return ``param → dim_idx → DynDim``.
@@ -51,15 +51,15 @@ def compute_per_func_dyndim_maps(
     bindings only fill dims the caller didn't already specify.
     """
     out: dict[int, dict[str, dict[int, DynDim]]] = {
-        id(entry_func): {
+        id(entry): {
             p: dict(dims)
             for p, dims in _ast_analysis.build_dyndim_map_for_func(
-                entry_func, tuple(entry_param_names)
+                entry._func, tuple(entry_param_names)
             ).items()
         }
     }
     for dep in deps:
-        out[id(dep._func)] = {
+        out[id(dep)] = {
             p: dict(dims)
             for p, dims in _ast_analysis.build_dyndim_map_for_func(
                 dep._func, tuple(dep._param_names())
@@ -68,15 +68,15 @@ def compute_per_func_dyndim_maps(
 
     # Leaf-first cascade: a dep's dynamic dim flows up to every recorded caller's arg.
     for dep in deps:
-        dep_map = out[id(dep._func)]
+        dep_map = out[id(dep)]
         if not dep_map:
             continue
-        for caller_func, call_name in callers_by_dep_id.get(id(dep._func), ()):
-            call_args = call_args_cache.get((id(caller_func), call_name))
+        for caller, call_name in callers_by_dep_id.get(id(dep), ()):
+            call_args = call_args_cache.get((id(caller), call_name))
             if call_args is None:
                 continue
             param_mapping = build_param_mapping(dep._param_names(), call_args)
-            caller_map = out.get(id(caller_func))
+            caller_map = out.get(id(caller))
             if caller_map is None:
                 continue
             for dep_param, dim_to_dyn in dep_map.items():
@@ -302,10 +302,9 @@ def resolve_call_site_constexpr(
 # A resolved compile-time binding: sorted ``(param, folded source text)`` pairs.
 # Hashable, so it can stand in the identity of one generated function.
 _ConstexprBinding = tuple[tuple[str, str], ...]
-# One generated ``@pl.function``: a Python function plus the compile-time
-# binding it is compiled against. Everything downstream used to key on
-# ``id(func)`` alone, which is why a dep reached with two different constants
-# had to be refused -- there was one slot to put it in.
+# One generated ``@pl.function``: a JIT wrapper plus its compile-time binding.
+# Separate wrappers may configure the same Python callable differently, so
+# callable identity alone cannot identify the generated function.
 VariantKey = tuple[int, _ConstexprBinding]
 
 
@@ -378,7 +377,7 @@ class VariantPlan:
 def expand_constexpr_variants(
     entry: "JITFunction",
     deps_topo: "Sequence[JITFunction]",
-    callers_by_id: Mapping[int, Sequence[tuple[Any, str]]],
+    callers_by_id: "Mapping[int, Sequence[tuple[JITFunction, str]]]",
     entry_constexpr: Mapping[str, str],
 ) -> VariantPlan:
     """Expand the dep graph into one generated function per compile-time binding.
@@ -393,7 +392,7 @@ def expand_constexpr_variants(
     Args:
         entry: The entry function, whose binding seeds the walk
         deps_topo: Every reachable dep, leaf-first
-        callers_by_id: ``id(dep func) -> [(caller func, call name), ...]``
+        callers_by_id: ``id(dep wrapper) -> [(caller wrapper, call name), ...]``
         entry_constexpr: The entry's own resolved binding
 
     Returns:
@@ -403,7 +402,7 @@ def expand_constexpr_variants(
         TypeError: if a constexpr parameter is unbound at a call site or bound
             to something with no compile-time value.
     """
-    entry_key: VariantKey = (id(entry._func), freeze_binding(entry_constexpr))
+    entry_key: VariantKey = (id(entry), freeze_binding(entry_constexpr))
     plan = VariantPlan(
         order=[entry_key],
         jit_func={entry_key: entry},
@@ -412,7 +411,7 @@ def expand_constexpr_variants(
         call_targets={entry_key: {}},
         submitted=set(),
     )
-    variants_by_func: dict[int, list[VariantKey]] = {id(entry._func): [entry_key]}
+    variants_by_func: dict[int, list[VariantKey]] = {id(entry): [entry_key]}
 
     for dep in reversed(deps_topo):
         # Both lists cost a full ``inspect.signature`` with annotation
@@ -421,12 +420,13 @@ def expand_constexpr_variants(
         # skips call-site folding entirely.
         signature = (_arguments.constexpr_params(dep._func), dep._param_names())
         splits = bool(signature[0])
-        for caller_func, call_name in callers_by_id.get(id(dep._func), ()):
+        for caller, call_name in callers_by_id.get(id(dep), ()):
+            caller_func = caller._func
             caller_globals = func_name_lookup(caller_func)
             caller_locals = frozenset(_ast_analysis.body_local_names(caller_func))
             caller_name = getattr(caller_func, "__name__", "<caller>")
             call_nodes = _dep_call_nodes(caller_func, call_name)
-            for caller_key in variants_by_func.get(id(caller_func), ()):
+            for caller_key in variants_by_func.get(id(caller), ()):
                 caller_binding = plan.binding[caller_key]
                 for ordinal, call in enumerate(call_nodes):
                     values = (
@@ -442,29 +442,29 @@ def expand_constexpr_variants(
                         if splits
                         else {}
                     )
-                    dep_key: VariantKey = (id(dep._func), freeze_binding(values))
+                    dep_key: VariantKey = (id(dep), freeze_binding(values))
                     if dep_key not in plan.binding:
                         plan.order.append(dep_key)
                         plan.jit_func[dep_key] = dep
                         plan.binding[dep_key] = values
                         plan.call_targets[dep_key] = {}
                         plan.origin[dep_key] = (caller_key, call_name, call)
-                        variants_by_func.setdefault(id(dep._func), []).append(dep_key)
+                        variants_by_func.setdefault(id(dep), []).append(dep_key)
                     plan.call_targets[caller_key][(call_name, ordinal)] = dep_key
                     # Dependency views only admit a bare call or a Submit.
                     if isinstance(call.func, ast.Attribute):
                         plan.submitted.add(dep_key)
-        if id(dep._func) not in variants_by_func:
+        if id(dep) not in variants_by_func:
             # Reached by dep discovery but with no ``name(...)`` call node to
             # fold against. It still has to be emitted -- dropping it would
             # leave the caller calling an undefined function -- so it gets the
             # empty binding, exactly what it received before variants existed.
-            fallback: VariantKey = (id(dep._func), ())
+            fallback: VariantKey = (id(dep), ())
             plan.order.append(fallback)
             plan.jit_func[fallback] = dep
             plan.binding[fallback] = {}
             plan.call_targets[fallback] = {}
-            variants_by_func[id(dep._func)] = [fallback]
+            variants_by_func[id(dep)] = [fallback]
 
     # Collected caller-first; the generated program must define callees first.
     plan.order.reverse()

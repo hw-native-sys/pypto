@@ -1251,3 +1251,27 @@ def test_omitted_output_uses_dynamic_axes_from_the_call_resolved_shape():
     (launch,) = _submissions(program)
     assert isinstance(launch.type, ir.TupleType)
     assert ir.structural_equal(launch.type.types[0], expected)
+
+
+def test_submit_does_not_declare_parent_extent_for_inexact_tuple_result():
+    rows = pl.dynamic("rows")
+
+    @pl.jit.incore
+    def producer(x: pl.Tensor[[rows, 32], pl.FP32]) -> tuple[pl.Tensor, pl.Tensor[[rows, 32], pl.FP16]]:
+        return pl.slice(x, [pl.tensor.dim(x, 0) // 2, 32], [0, 0]), pl.cast(x, pl.FP16)
+
+    @pl.jit
+    def entry(x: pl.Tensor[[rows, 32], pl.FP32]):
+        (half, converted), done = pl.submit(producer, x)
+        return half
+
+    program = entry.specialize(torch.empty(16, 32))
+    function = program.get_function("producer")
+    assert function is not None
+    (launch,) = _submissions(program)
+    assert isinstance(launch.type, ir.TupleType)
+    for result in (function.return_types[0], launch.type.types[0]):
+        assert isinstance(result, ir.TensorType)
+        assert isinstance(result.shape[0], ir.FloorDiv)
+    assert isinstance(launch.type.types[1], ir.TensorType)
+    assert launch.type.types[1].dtype == pl.FP16
