@@ -2424,7 +2424,7 @@ class TestGenerateKernelWrapper:
 
         func = UrmaWrapperProgram.get_function("kernel")
         assert func is not None
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_urma=True)
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
 
         assert '#include "backend/urma/urma_completion_kernel.h"' in wrapper
         assert '#include "platform_comm/comm_context.h"' in wrapper
@@ -2476,25 +2476,10 @@ class TestGenerateKernelWrapper:
 
         func = TransferProgram.get_function("kernel")
         assert func is not None
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_urma=True)
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
 
         assert f"static __aicore__ void pypto_urma_put_async_{suffix}(" in wrapper
         assert f"pypto_urma_transfer_impl<{cpp_type}, true>" in wrapper
-
-    def test_urma_domain_forwards_raw_args_without_transfer_ops(self):
-        """Domain metadata, rather than an op scan, controls the wrapper ABI."""
-        func = _make_func("kernel", [("a", "tensor")])
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_urma=True)
-        assert "kernel(a, args);" in wrapper
-        # No transfer helper is needed for a compute-only task in this domain.
-        assert "urma_completion_kernel.h" not in wrapper
-        assert "pypto_urma_transfer_impl" not in wrapper
-        plain = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        assert "kernel(a);" in plain
-        program = _run_default_passes(ir.Program([func], "compute_only", ir.Span.unknown()))
-        generator = PTOCodegen()
-        assert "%__pypto_deferred_raw_args: !pto.ptr<i64>" in generator.generate(program, uses_urma=True)
-        assert "__pypto_deferred_raw_args" not in generator.generate(program)
 
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])

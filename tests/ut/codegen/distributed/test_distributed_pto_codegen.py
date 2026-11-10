@@ -70,16 +70,12 @@ def _generate_mlir(program_cls) -> str:
     return codegen.PTOCodegen().generate(optimized)
 
 
-def _generate_mlir_a5(program_cls, *, uses_urma: bool = True) -> str:
+def _generate_mlir_a5(program_cls) -> str:
     """Generate PTO MLIR with the A5 backend, the only target with URMA."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
     try:
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(program_cls)
-        # These isolated kernel fixtures have no host domain. Supply the
-        # domain-engine metadata normally forwarded by the Python backend.
-        return codegen.PTOCodegen().generate(optimized, uses_urma=uses_urma)
+        return _generate_mlir(program_cls)
     finally:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
@@ -2211,9 +2207,6 @@ def test_put_async_emits_urma_helper_call():
     # both, and either would silently reintroduce synchronous completion.
     assert "pto.comm.tput" not in mlir, mlir
     assert "pto.alloc_tile" not in mlir, mlir
-
-    with pytest.raises(ValueError, match="URMA engine enabled"):
-        _generate_mlir_a5(P, uses_urma=False)
 
 
 def test_get_async_uses_the_get_symbol_and_element_bytes():
