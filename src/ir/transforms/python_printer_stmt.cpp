@@ -573,8 +573,11 @@ void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {
   // ``name_hint_`` is the region name the user wrote; the parser requires it,
   // so it is printed positionally rather than as an optional keyword.
   stream_ << "with " << prefix_ << ".graph(\"" << op->name_hint_ << "\"";
+  PrintScopeDepsAttr(op);
   PrintScopeDumpAttr(op);
-  stream_ << "):\n";
+  stream_ << ")";
+  PrintScopeTaskIdVarSuffix(op);
+  stream_ << ":\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();

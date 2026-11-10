@@ -25,11 +25,12 @@ single-comparison predicate.
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import ir, passes
 from pypto.ir import python_print
 from pypto.language.parser.diagnostics.exceptions import (
     ParserSyntaxError,
     ParserTypeError,
+    UndefinedVariableError,
     UnsupportedFeatureError,
 )
 
@@ -930,6 +931,125 @@ class Prog:
     )
     (scope,) = _at_incore_scopes(prog)
     assert "predicate" not in dict(scope.attrs.items())
+
+
+@pytest.mark.parametrize("producer", ["pl.at(level=pl.Level.CORE_GROUP)", "pl.spmd(1)"])
+@pytest.mark.parametrize("dependency", ["done", "inner", None])
+@pytest.mark.parametrize("rebind_completion", [False, True, "side_effect"])
+def test_graph_completion_covers_nested_predicate_producer(producer, dependency, rebind_completion):
+    deps = f"deps=[{dependency}], " if dependency else ""
+    rebound = (
+        '            with pl.graph("another_graph") as done:\n                rc2 = self.gate(rc2)\n'
+        if rebind_completion is True
+        else (
+            '            with pl.graph("another_graph") as done:\n                self.gate(rc2)\n'
+            if rebind_completion == "side_effect"
+            else ""
+        )
+    )
+    source = (
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}], rc2: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.manual_scope():
+            with pl.graph("gate_graph") as done:
+                with {producer} as inner:
+                    rc = self.gate(rc)
+{rebound}            with pl.spmd(1, {deps}predicate=(rc[0, 0] > 0)):
+                out = self.expert(x, out)
+        return out
+"""
+    )
+    if dependency == "inner":
+        # Recorded-local TaskIds do not enter the caller's symbol scope.
+        with pytest.raises(UndefinedVariableError, match="Undefined variable 'inner'"):
+            pl.parse_program(source)
+    elif dependency != "done" or rebind_completion:
+        with pytest.raises(ParserSyntaxError, match="'done' is not in deps="):
+            pl.parse_program(source)
+    else:
+        program = pl.parse_program(source)
+        # Exercise the real native IR, not only dispatch helper mocks.
+        outlined = passes.outline_graph_scopes()(passes.convert_to_ssa()(program))
+        assert outlined is not None
+
+
+@pytest.mark.parametrize("dependency", ["seed", "done"])
+@pytest.mark.parametrize("writes_predicate_tensor", [False, True])
+def test_graph_producer_tracks_tensor_identity_despite_local_task_id(dependency, writes_predicate_tensor):
+    write = (
+        "                with pl.at(level=pl.Level.CORE_GROUP):\n                    rc = self.gate(rc)\n"
+        if writes_predicate_tensor
+        else ""
+    )
+    source = (
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}], rc2: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.manual_scope():
+            with pl.at(level=pl.Level.CORE_GROUP) as seed:
+                rc = self.gate(rc)
+            with pl.graph("recording") as done:
+{write}                with pl.at(level=pl.Level.CORE_GROUP) as rc:
+                    rc2 = self.gate(rc2)
+                inner = pl.system.task_dummy(deps=[rc])
+                rc = inner
+            with pl.spmd(1, deps=[{dependency}], predicate=(rc[0, 0] > 0)):
+                out = self.expert(x, out)
+        return out
+"""
+    )
+    producer = "done" if writes_predicate_tensor else "seed"
+    if dependency == producer:
+        pl.parse_program(source)
+    else:
+        with pytest.raises(ParserSyntaxError, match=f"'{producer}' is not in deps="):
+            pl.parse_program(source)
+
+
+def test_plain_graph_local_task_id_assignment_does_not_export_a_task_id():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.manual_scope():
+                ready = pl.system.task_dummy(deps=[])
+                with pl.graph("recording") as done:
+                    out = pl.add(x, x)
+                    inner = pl.system.task_dummy(deps=[])
+                    ready = inner
+                    pl.system.task_dummy(deps=[ready])
+                pl.system.task_dummy(deps=[ready, done])
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Graph)
+        def recording(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.add(x, x)
+            inner = pl.system.task_dummy(deps=[])
+            recorded_ready = inner
+            pl.system.task_dummy(deps=[recorded_ready])
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.manual_scope():
+                outer_ready = pl.system.task_dummy(deps=[])
+                submission = pl.submit(self.recording, x)
+                result = submission[0]
+                completed = submission[1]
+                pl.system.task_dummy(deps=[outer_ready, completed])
+            return result
+
+    After = passes.outline_graph_scopes()(passes.convert_to_ssa()(Before))
+    ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

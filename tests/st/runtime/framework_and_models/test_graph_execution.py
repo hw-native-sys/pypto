@@ -554,5 +554,153 @@ class TestMoeGraphPredicate:
         assert len(moe.moe_decode._cache) == 1, "second call recompiled instead of replaying"
 
 
+@pl.jit
+def explicit_graph_dependency_chain(
+    c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], enabled: pl.constexpr = True
+):
+    with pl.manual_scope():
+        with pl.at(level=pl.Level.CORE_GROUP) as seed:
+            seed_tile = pl.load(c, [0, 0], [128, 128])
+            pl.store(pl.add(seed_tile, 1.0), [0, 0], c)
+        for seed_iteration in pl.range(1):
+            # Both paths establish the binding under a conditional region.
+            if enabled:
+                ready = seed
+            else:
+                ready = seed
+        for i in pl.range(4):
+            if enabled:
+                with pl.graph("layer", deps=[ready]) as ready:
+                    with pl.at(level=pl.Level.CORE_GROUP) as first:
+                        first_tile = pl.load(c, [0, 0], [128, 128])
+                        pl.store(pl.add(first_tile, 1.0), [0, 0], c)
+                    with pl.at(level=pl.Level.CORE_GROUP, deps=[first]):
+                        second_tile = pl.load(c, [0, 0], [128, 128])
+                        pl.store(pl.add(second_tile, 1.0), [0, 0], c)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+            final_tile = pl.load(c, [0, 0], [128, 128])
+            pl.store(pl.add(final_tile, 1.0), [0, 0], c)
+    return c
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_explicit_graph_dependency_chain(test_config, graph_runtime, enabled):
+    """JIT scope edges order seed -> four reused Graphs -> final consumer.
+
+    Each Graph adds two; the seed and final consumer add one each. Manual
+    scope disables automatic hazards, so the expected ten requires the edges.
+    With the guard disabled, only the seed and final consumer run (two).
+    """
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    explicit_graph_dependency_chain(c, enabled, config=test_config)
+    torch.testing.assert_close(c, torch.full_like(c, 10.0 if enabled else 2.0))
+
+
+@pl.jit
+def zero_trip_graph_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+    with pl.manual_scope():
+        with pl.at(level=pl.Level.CORE_GROUP) as seed:
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[seed]) as latest:
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+        for setup in pl.range(1):
+            # Deliberately create an active alias before the empty loop.
+            ready = seed
+            ready = latest
+        for unused in pl.range(0):
+            # Intentional: an empty loop must preserve the preceding TaskId binding.
+            with pl.graph("not_executed") as ready:  # noqa: F811
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1000.0), [0, 0], c)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+    return c
+
+
+def test_zero_trip_graph_capture_keeps_latest_dependency(test_config, graph_runtime):
+    """An unexecuted capture preserves the second producer's completion."""
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    zero_trip_graph_capture_chain(c, config=test_config)
+    torch.testing.assert_close(c, torch.full_like(c, 3.0))
+
+
+@pl.jit
+def branch_local_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], enabled: pl.constexpr):
+    with pl.manual_scope():
+        with pl.at(level=pl.Level.CORE_GROUP) as seed:
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+        if enabled:
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[seed]) as ready:
+                pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 10.0), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]) as latest:
+                pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 100.0), [0, 0], c)
+            ready = latest
+        else:
+            ready = seed
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1000.0), [0, 0], c)
+    return c
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_branch_local_capture_keeps_last_dependency(test_config, graph_runtime, enabled):
+    """The merged TaskId orders the final consumer after the last enabled task."""
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    branch_local_capture_chain(c, enabled, config=test_config)
+    # Manual scope makes the final explicit edge responsible for ordering.
+    torch.testing.assert_close(c, torch.full_like(c, 1111.0 if enabled else 1001.0))
+
+
+@pl.jit
+def recording_shadow_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+    with pl.manual_scope():
+        with pl.graph("first") as ready:
+            # These two inner IDs belong to the Definition; the outer ready
+            # must remain the completion of the whole first invocation.
+            with pl.at(level=pl.Level.CORE_GROUP) as ready:
+                pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]) as latest:
+                pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+            ready = latest
+        for invocation in pl.range(4):
+            with pl.graph("second", deps=[ready]) as ready:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 2.0), [0, 0], c)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 10.0), [0, 0], c)
+    return c
+
+
+def test_recorded_local_shadow_keeps_outer_completion(test_config, graph_runtime):
+    """Local shadowing cannot replace the caller's whole-invocation completion."""
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    recording_shadow_capture_chain(c, config=test_config)
+    # Two first-Graph tasks, four second invocations, then the consumer: 2+8+10.
+    torch.testing.assert_close(c, torch.full_like(c, 20.0))
+
+
+@pl.jit
+def recording_direct_alias_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
+    with pl.manual_scope():
+        with pl.at(level=pl.Level.CORE_GROUP) as ready:
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1.0), [0, 0], c)
+        with pl.graph("direct_alias", deps=[ready]) as ready:
+            with pl.at(level=pl.Level.CORE_GROUP) as inner:
+                pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 10.0), [0, 0], c)
+            ready = inner
+            with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+                pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 100.0), [0, 0], c)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[ready]):
+            pl.store(pl.add(pl.load(c, [0, 0], [128, 128]), 1000.0), [0, 0], c)
+    return c
+
+
+def test_recorded_direct_alias_keeps_outer_completion(test_config, graph_runtime):
+    """The local alias orders an inner task; the outer name orders the whole Graph."""
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    recording_direct_alias_chain(c, config=test_config)
+    torch.testing.assert_close(c, torch.full_like(c, 1111.0))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -79,11 +79,25 @@ def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
 区域内，也不能嵌套在 `pl.at` / `pl.cluster` / `pl.spmd` 内 —— 后者会变成单个设备 task，
 而 Graph 区域录制的是 task 的拓扑。三种情况都是编译期错误。
 
+编排代码生成目前支持有界的 `for ... in pl.range(...)` 循环，
+但不支持 `while`，包括在其中提交 Graph。动态循环可放在 InCore kernel 内。
+
+在 `@pl.program` 类的手动作用域中，可以通过
+`pl.submit(self.layer, ..., deps=[producer])` 提交 Graph 方法。这种 Submit
+写法要求 `self.<kernel>` 方法引用。在 JIT 入口里，`pl.submit(layer, ..., deps=[producer])`
+可直接使用由 `@pl.jit.graph` 修饰的依赖，JIT 会将其转为方法引用。
+内联区域可以使用 `with pl.graph("layer", deps=[producer]) as done:`
+表达依赖并取得完成号。
+`pl.submit` 的末尾 `TASK_ID` 结果与作用域的 `done` 均表示外层 Graph 任务；首次录制时也有效，只有整个调用完成后才完成。
+显式前驱约束的是这次调用的外层任务，不会进入已录制 Definition 的内部边。
+Graph 函数仍然写入调用方提供的张量，不能向调用方返回新计算的值或图内任务号。
+Definition 只在一次 orchestration run 内复用，不跨独立 L2 调用持久保存。
+
 传给 `pl.submit` 或 `pl.spmd_submit` 的 JIT 依赖也会被发现；callee 的 constexpr
 参数参与特化，`deps` 等提交元数据仍保留在提交操作上。
 
 首次提交也可省略由运行时分配的 Out 参数，但其完整张量注解必须能确定 shape 和 dtype；
-constexpr 使用本次调用的绑定值。JIT 从完整返回契约或已知 store 写回目标确定结果类型，
+constexpr 使用本次调用的绑定值。JIT 优先使用特化后的返回值元数据，并用完整注解补充无法推导的槽位。
 真正无返回值的 callee 不会额外产生张量结果。Submit 在 callee 各结果后追加一个 TaskId。
 单变量 tuple 绑定及常量投影会保留张量元数据，也支持直接作为调用实参的投影；
 TaskId 槽位不会被当成张量。
@@ -118,6 +132,17 @@ def host_orch(
 普通 `@pl.jit` 入口**不会**发现其他 `@pl.jit` 入口 —— 只有 `.host` 跨越 chip 边界。这防止两个互不相关的顶层 kernel 被静默折叠进同一个程序。
 
 `@pl.jit.host` 拒绝 `level=`（HOST 是隐含的）。
+
+### Graph 范围的显式依赖
+
+使用 `with pl.graph("layer", deps=[ready]) as done:` 等待前驱任务，并捕获整个
+Graph 的完成任务号。它复用 `pl.at`/`pl.spmd` 已有的 Submit 元数据；首次录制和
+同一次 orchestration run 内的缓存调用都能得到有效的外层完成号。
+
+录制体使用的 TaskId 数组应留在 Graph 内部。用 `deps` 传入外部就绪条件，在
+范围之后用 `done` 更新调用者的就绪状态。录制内部的 TaskId 和计算返回值仍
+不得跨界。编译产物可以用新参数再次调用，但 Definition 缓存属于每次
+orchestration run，不属于 Python callable 的整个生命周期。
 
 ### 子函数返回的张量会保留 shape 和 dtype
 

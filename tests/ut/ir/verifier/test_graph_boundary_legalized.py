@@ -428,5 +428,55 @@ def test_graph_submit_cannot_omit_out_storage():
             passes.legalize_graph_boundary()(outlined)
 
 
+@pytest.mark.parametrize("launch", ["plain", "predicate", "spmd_static", "spmd_dynamic", "spmd_sync"])
+def test_graph_submit_rejects_unsupported_launch_metadata(launch):
+    """Keep plain Graph submits valid while rejecting ignored launch intent.
+
+    Both the legalization gate and its verifier must reject real predicates and
+    static/dynamic SPMD launch specifications, including sync_start. An absent
+    optional predicate must still mean an unconditional ordinary Graph launch.
+    """
+    predicated = launch == "predicate"
+    spmd = launch.startswith("spmd_")
+    submit = "spmd_submit" if spmd else "submit"
+    options = ", predicate=(gate[0, 0] > 0)" if predicated else ""
+    if spmd:
+        options = ", core_num=" + ("blocks" if launch == "spmd_dynamic" else "4")
+        if launch == "spmd_sync":
+            options += ", sync_start=True"
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        f"{GRAPH_BODY}"
+        "    @pl.function\n"
+        "    def main(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], "
+        "gate: pl.Tensor[[1, 1], pl.INT32], blocks: pl.Scalar[pl.INDEX]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        f"        c, tid = pl.{submit}(self.layer, a, c{options})\n"
+        "        return c\n"
+    )
+    program = pl.parse_program(src)
+    messages = [d.message for d in _graph_diags(program)]
+    if predicated:
+        assert any("dispatch predicate" in m for m in messages), messages
+    elif spmd:
+        assert any("SPMD launch" in m for m in messages), messages
+    else:
+        assert not messages, messages
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(program))
+        if predicated:
+            with pytest.raises(ValueError, match="dispatch predicate"):
+                passes.legalize_graph_boundary()(outlined)
+        elif spmd:
+            with pytest.raises(ValueError, match="SPMD launch"):
+                passes.legalize_graph_boundary()(outlined)
+        else:
+            passes.legalize_graph_boundary()(outlined)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -2364,6 +2364,26 @@ class TestScalarDCE:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
 
+    def test_keeps_async_transfer_with_unused_result(self):
+        """An async transfer writes dst through argument 0 (ReadWrite) and
+        returns it. Even with the result unused, Simplify/DCE must keep the
+        assignment and preserve its engine kwarg."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+        assert "pld.CommEngine.URMA" in str(after)
+
     def test_keeps_used_scalar(self):
         """A scalar referenced downstream is preserved even after the
         upstream binding's LHS gets constant-folded away."""

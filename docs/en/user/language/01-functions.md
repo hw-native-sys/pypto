@@ -95,14 +95,33 @@ region cannot nest inside another Graph region, nor inside `pl.at` / `pl.cluster
 `pl.spmd` — those become a single device task, whereas a Graph region records a topology of
 them. All three are compile errors.
 
+Orchestration codegen currently supports bounded `for ... in pl.range(...)`
+loops, but rejects `while` loops, including Graph dispatches inside them.
+Dynamic loops can be placed inside an InCore kernel.
+
+Inside an `@pl.program` class, launch a Graph method with
+`pl.submit(self.layer, ..., deps=[producer])` under a manual scope. This Submit
+form requires a `self.<kernel>` method reference. A JIT entry may submit a
+`@pl.jit.graph` dependency by name. JIT specializes it and supplies the method
+reference. For an inline region, use
+`with pl.graph("layer", deps=[producer]) as done:` to express its dependencies
+and capture completion.
+The trailing `TASK_ID` result of `pl.submit`, or the scope's `done` binding,
+names the outer Graph task and becomes ready when
+the entire invocation completes, including on the first recording. Explicit
+predecessors order that outer task; they are not stored as internal edges of the
+recorded Definition. Graph functions still write into caller-supplied tensors;
+computed values and recorded-internal TaskIds cannot be returned to the caller.
+Definition reuse is within one orchestration run, not across separate L2 calls.
+
 Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
 the entry's body — call them by name. Functions passed to `pl.submit` or
 `pl.spmd_submit` are discovered too; callee constexpr arguments specialize the
 function, while `deps` and other dispatch metadata remain on the submission.
 A first submission can omit runtime-allocated Out parameters when their complete
 tensor annotations determine shape and dtype, including call-owned constexpr
-values. JIT determines result types from a complete return contract or a known store writeback;
-a genuinely void callee contributes no tensor result. Submit appends one TaskId
+values. JIT uses the specialized result metadata and fills unavailable slots
+from complete annotations. A genuinely void callee contributes no tensor result. Submit appends one TaskId
 after the callee values. Tensor metadata follows single-variable tuple bindings
 and constant projections, including projections used directly as call arguments;
 the TaskId slot is never treated as a tensor.
@@ -148,6 +167,19 @@ reaches across the chip boundary. That keeps two unrelated top-level kernels fro
 silently folding into one program.
 
 `@pl.jit.host` rejects `level=` (HOST is implicit).
+
+### Explicit dependencies on a Graph scope
+
+Use `with pl.graph("layer", deps=[ready]) as done:` to wait for preceding tasks
+and capture completion of the whole Graph. The scope uses the same existing
+Submit metadata as `pl.at`/`pl.spmd`; the completion is valid for the first
+recording as well as cached invocations in that orchestration run.
+
+Keep TaskId arrays used by the recorded body local to the region. Pass incoming
+readiness with `deps`, then update the caller's readiness state from `done`.
+Recorded-internal TaskIds and computed returns still cannot escape the Graph.
+A compiled program can be called again with fresh arguments, but the runtime
+Definition cache belongs to each orchestration run, not to the Python callable.
 
 ### What a sub-function hands back keeps its shape and dtype
 

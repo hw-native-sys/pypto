@@ -1122,44 +1122,12 @@ void OrchestrationStmtCodegen::GenerateFunctionCallCode(const CallPtr& call, con
       .Emit(*this);
 }
 
-/// Emit the launch of a Graph function: one task carrying the whole region.
-///
-/// Deliberately unlike every other submit here, in two ways:
-///
-/// * The result is discarded. ``rt_submit_graph`` returns a valid task id only
-///   on a cache *hit*; on the recording pass ``graph_begin`` reports an invalid
-///   one. Nothing may chain a dependency on it — ordering comes from the
-///   boundary tensors' dataflow, which is why LegalizeGraphBoundary rejects a
-///   Graph that returns a computed value.
-/// * The callee gets no kernel id. A Graph has no ``.cpp`` under ``kernels/``,
-///   so registering it in the kernel registrations would put a phantom entry in
-///   ``kernel_config.py``'s KERNELS list pointing at a file that does not
-///   exist.
-///
-/// The recording is identified by the emitted function's own address, via the
-/// ``rt_submit_graph(function, args)`` overload. The ``GRAPH_KEY("...")``
-/// overload exists for callers needing a name stable across builds, but it
-/// drops the function pointer from the cache identity, so two functions
-/// sharing a key silently replay one recording. One Graph function is one
-/// emitted C++ function here, so the address is already the right identity.
+/// Emit one outer GRAPH task, with the same dependency/result vocabulary as a
+/// kernel submit. Accepted cold, in-flight and cached submissions all own a
+/// GLOBAL shell id. That completion covers the entire body; no recorded-local
+/// TaskId escapes. The Graph itself is never registered as an AICore kernel.
 void OrchestrationStmtCodegen::GenerateGraphCallCode(const CallPtr& call, const FunctionPtr& callee_func,
                                                      bool capture_plain_task_id) {
-  // A graph launch produces no TaskId a consumer may depend on:
-  // `rt_submit_graph` returns a valid id only on a cache *hit*, so this
-  // function discards the result and declares no `TaskOutputTensors`. The
-  // caller, however, keys its dependency binding on `task_counter_` advancing
-  // and would then emit `task_<n>_outs.task_id()` naming a variable that was
-  // never declared — generated C++ that does not compile.
-  //
-  // `LegalizeGraphBoundary` rejects an *explicit* dependency on a graph
-  // launch; a compiler-derived manual-scope edge is the same situation and is
-  // caught here, where the producing edge is known.
-  INTERNAL_CHECK_SPAN(!capture_plain_task_id && CompilerDepOutputArgs(call).empty(), call->span_)
-      << "Internal error: Graph function '" << callee_func->name_
-      << "' is launched as the producer of a task dependency, but rt_submit_graph yields a valid "
-         "task id only on a cache hit. Order the graph against its consumers through its boundary "
-         "tensors instead of a TaskId edge.";
-
   auto params = BuildTaskParams(call, callee_func);
   const std::string task_var = CurrentTaskVarName();
 
@@ -1190,9 +1158,20 @@ void OrchestrationStmtCodegen::GenerateGraphCallCode(const CallPtr& call, const 
     EmitIndentedLine(task_var + "." + method + "(" + p.value + ");");
   }
   EmitSelectiveDumpCall(task_var, params);
+  EmitManualDeps(call, task_var);
   EmitIndentedLine(config_var + ".boundary = pypto_graph_boundary_layout(" + task_var + ");");
-  EmitIndentedLine("rt_submit_graph(&" + GraphFunctionSymbol(callee_func->name_) + ", " + task_var + ", " +
-                   config_var + ");");
+  const std::string submit = "rt_submit_graph(&" + GraphFunctionSymbol(callee_func->name_) + ", " + task_var +
+                             ", " + config_var + ")";
+  if (ShouldCaptureTaskOutputs(call, capture_plain_task_id)) {
+    // Graph boundaries use caller-owned tensors only. Normalize their shell
+    // completion into the existing zero-output handle so submit aliases and
+    // compiler-derived manual dependencies keep the same binding path.
+    const std::string outputs = "task_" + std::to_string(task_counter_) + "_outs";
+    EmitIndentedLine("TaskOutputTensors " + outputs + ";");
+    EmitIndentedLine(outputs + ".set_task_id(" + submit + ".task_id);");
+  } else {
+    EmitIndentedLine(submit + ";");
+  }
   ++task_counter_;
 }
 
