@@ -487,18 +487,9 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
       stream_ << GetTypeString(As<ir::ScalarType>(parameters[i]->GetType())->dtype_);
     }
   }
-  bool has_parameters = !parameters.empty();
-  // Domain engine requirements also apply to compute-only Buffer IR kernels.
-  // Keep the raw dispatch pointer before SPMD identities, matching the wrapper.
-  if (uses_urma_) {
-    fs_.deferred_completion_raw_args_ssa = "%__pypto_deferred_raw_args";
-    fs_.used_ssa_names.insert("__pypto_deferred_raw_args");
-    if (has_parameters) stream_ << ", ";
-    stream_ << fs_.deferred_completion_raw_args_ssa << ": !pto.ptr<i64>";
-    has_parameters = true;
-  }
   // The wrapper supplies SPMD identities after all user parameters. Detect
   // these scalar queries during preflight, without legacy storage discovery.
+  bool has_parameters = !parameters.empty();
   const auto append_identity = [&](std::string& binding, const char* name) {
     binding = std::string("%") + name;
     fs_.used_ssa_names.insert(name);

@@ -172,17 +172,15 @@ class PTOCodegen : public CodegenBase {
    *        constants section, which are deduplicated across every use so no
    *        single span fits them; and any operation whose span is unknown or
    *        carries no filename. When false, emit no locations at all.
-   * @param uses_urma Whether the enclosing communication domains require URMA.
-   *        Forwarded by the backend before host IR is split into kernel modules.
    * @return MLIR code as string
    */
-  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true, bool emit_source_loc = true,
-                       bool uses_urma = false);
+  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true,
+                       bool emit_source_loc = true);
 
   /// Separate explicit RegScopes into A5/AIV no-Bridge helpers for execution.
   /// Generate() retains the combined typed-VMI diagnostic representation.
   PTOCodegenBundle GenerateBundle(const ir::ProgramPtr& program, bool emit_tile_addr = true,
-                                  bool emit_source_loc = true, bool uses_urma = false);
+                                  bool emit_source_loc = true);
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
@@ -657,8 +655,8 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
    *
-   * Functions containing ``pld.system.defer_wait`` or emitted for a domain
-   * with the URMA engine enabled receive one hidden
+   * Functions containing ``pld.system.defer_wait`` or an async URMA transfer
+   * (``pld.tensor.put_async`` / ``get_async``) receive one hidden
    * ``!pto.ptr<i64>`` parameter after dynamic dimensions and before other
    * runtime-owned parameters. The kernel wrapper forwards its ``args`` pointer
    * through this slot so deferred-completion and URMA-transfer lowering can
@@ -886,8 +884,7 @@ class PTOCodegen : public CodegenBase {
   bool separate_vf_ = false;
   bool single_vf_function_ = false;
   std::vector<VFHelper> vf_helpers_;
-  std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc,
-                           bool uses_urma);
+  std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
   void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
   void EmitVFAdapter(const VFHelper& helper);
   /// SIMT functions borrow storage through a pointer ABI, never Tile values.
@@ -1406,9 +1403,6 @@ class PTOCodegen : public CodegenBase {
 
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
-
-  /// Domain-engine metadata supplied before splitting the host program.
-  bool uses_urma_ = false;
 
   /// URMA async transfer helper symbol -> MLIR element type.
   std::map<std::string, std::string> urma_adapter_element_types_;

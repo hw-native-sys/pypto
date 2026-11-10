@@ -1377,11 +1377,12 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   // aliasing a wide value (2**32 + 1) to a valid but unintended rank.
   const std::string peer = codegen.EmitCastToI64(op->args_[1], codegen.GetExprAsCode(op->args_[1]));
 
-  const std::string pointer_type = "!pto.ptr<" + codegen.GetTypeString(dtype) + ">";
-  const std::string adapter = codegen.RegisterUrmaTransferAdapter(is_put, dtype);
   const std::string raw_args = codegen.GetDeferredCompletionRawArgsSSA();
   INTERNAL_CHECK_SPAN(!raw_args.empty(), op->span_)
       << op_name << " requires the hidden raw dispatch-args parameter";
+
+  const std::string pointer_type = "!pto.ptr<" + codegen.GetTypeString(dtype) + ">";
+  const std::string adapter = codegen.RegisterUrmaTransferAdapter(is_put, dtype);
   // PUT resolves its remote endpoint from dst and GET from src; those operands
   // can belong to different communication domains, so the helper must receive
   // the context of the endpoint it samples for the peer mapping.

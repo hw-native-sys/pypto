@@ -843,6 +843,11 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// Drives the hidden raw dispatch-args pointer shared with the kernel wrapper.
   [[nodiscard]] bool UsesDeferredCompletion() const { return uses_deferred_completion_; }
 
+  /// Returns true when the visited body invokes an async URMA transfer. Drives
+  /// the hidden raw dispatch-args parameter shared with deferred completion and
+  /// the wrapper-defined URMA transfer adapter.
+  [[nodiscard]] bool UsesUrmaTransfer() const { return uses_urma_transfer_; }
+
   /// Returns true when the visited body invokes tile.get_block_idx or
   /// tile.get_block_num. Drives PTOCodegen's decision to append two synthetic
   /// i32 params to the emitted func.func signature; the kernel wrapper
@@ -887,6 +892,10 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
         uses_deferred_completion_ = true;
       }
+      if (!uses_urma_transfer_ &&
+          (ir::IsOp(op, "pld.tensor.put_async") || ir::IsOp(op, "pld.tensor.get_async"))) {
+        uses_urma_transfer_ = true;
+      }
       if (!uses_spmd_block_ops_ &&
           (ir::IsOp(op, "tile.get_block_idx") || ir::IsOp(op, "tile.get_block_num"))) {
         uses_spmd_block_ops_ = true;
@@ -914,6 +923,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::set<uint64_t> iter_arg_ids_;
   bool uses_sdma_workspace_ = false;
   bool uses_deferred_completion_ = false;
+  bool uses_urma_transfer_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
   bool uses_l2_bypass_load_ = false;
@@ -984,22 +994,19 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // Generate entry and GenerateFunction
 // ========================================================================
 
-std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc,
-                                 bool uses_urma) {
+std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   separate_vf_ = false;
-  return GenerateImpl(program, emit_tile_addr, emit_source_loc, uses_urma);
+  return GenerateImpl(program, emit_tile_addr, emit_source_loc);
 }
 
 PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit_tile_addr,
-                                            bool emit_source_loc, bool uses_urma) {
+                                            bool emit_source_loc) {
   separate_vf_ = true;
-  auto caller = GenerateImpl(program, emit_tile_addr, emit_source_loc, uses_urma);
+  auto caller = GenerateImpl(program, emit_tile_addr, emit_source_loc);
   return {std::move(caller), vf_helpers_};
 }
 
-std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc,
-                                     bool uses_urma) {
-  uses_urma_ = uses_urma;
+std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   vf_helpers_.clear();
   simt_functions_.clear();
   simt_effects_.clear();
@@ -1225,7 +1232,6 @@ void PTOCodegen::EmitDeferredCompletionAdapterDeclaration() {
 }
 
 std::string PTOCodegen::RegisterUrmaTransferAdapter(bool is_put, DataType dtype) {
-  CHECK(uses_urma_) << "URMA async transfer requires a communication domain with the URMA engine enabled";
   const std::string element = DataTypeToMLIR(dtype);
   CHECK(element.rfind("!pto.", 0) != 0 && element != "index" && element != "i1")
       << "URMA async transfer does not support element type '" << element << "'";
@@ -1318,7 +1324,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
   const bool uses_deferred_completion = collector.UsesDeferredCompletion();
-  const bool uses_raw_dispatch_args = uses_deferred_completion || uses_urma_;
+  const bool uses_urma_transfer = collector.UsesUrmaTransfer();
+  const bool uses_raw_dispatch_args = uses_deferred_completion || uses_urma_transfer;
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
   // A2/A3 reaches the uncached mapping of a page by adding a driver-owned

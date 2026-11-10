@@ -61,10 +61,10 @@ void BindCodegen(nb::module_& m) {
       "annotations.")
       .def(nb::init<>(), "Create a PTO code generator (backend is always PTO)")
       .def("generate_bundle", &PTOCodegen::GenerateBundle, nb::arg("program"),
-           nb::arg("emit_tile_addr") = true, nb::arg("emit_source_loc") = true, nb::arg("uses_urma") = false,
+           nb::arg("emit_tile_addr") = true, nb::arg("emit_source_loc") = true,
            "Generate an EmitC caller and separate typed-VMI helpers for A5/AIV execution.")
       .def("generate", &PTOCodegen::Generate, nb::arg("program"), nb::arg("emit_tile_addr") = true,
-           nb::arg("emit_source_loc") = true, nb::arg("uses_urma") = false,
+           nb::arg("emit_source_loc") = true,
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
            "instructions like tmul, tadd, FOR/ENDFOR, etc. When emit_tile_addr=False, pto.alloc_tile omits "
            "the "

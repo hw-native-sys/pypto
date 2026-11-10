@@ -784,7 +784,6 @@ def test_codegen_reads_explicit_domain_engines(engines):
     host = ir.Function("host_orch", [], [], body, span, level=ir.Level.HOST, role=ir.Role.Orchestrator)
     program = ir.Program([host], "explicit_engines", span)
     source = codegen.DistributedCodegen().generate(program)
-    assert pto_backend._uses_urma(program) == ("urma" in engines)
     if engines:
         expected = "workspace_engines=(" + "".join(f'"{engine}",' for engine in engines) + "),"
         assert expected in source
