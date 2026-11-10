@@ -143,6 +143,8 @@ output list. A stub with a single return of parameter names instead validates
 the annotation against those parameters in return order, including readonly
 aliases (see below). Incompatible declarations fail during specialization.
 Use Python `tuple[...]` (or `typing.Tuple[...]`) for multiple results.
+A singleton declaration such as `tuple[pl.Tensor[[16, 32], pl.FP32]]` returns
+one flat Tensor value, which can be passed directly to another kernel.
 `pl.Tuple[...]` denotes a single tuple-valued result and is rejected for externs,
 because it cannot alias the individual tensor output buffers.
 An explicit `tuple[()]` (or `typing.Tuple[()]`) declares zero results and is

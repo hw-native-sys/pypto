@@ -83,6 +83,7 @@ from pypto.pypto_core import passes as _passes
 from pypto.pypto_core.passes import runtime_kind_to_name
 
 from . import _arguments, _ast_analysis, _call_binding, _tensor_meta
+from ._signature_variants import build_contexts as _build_signature_contexts
 from ._source import cache_in_snapshot, capture_namespaces
 from .cache import CacheKey, compute_source_hash, make_cache_key
 from .specializer import (
@@ -798,9 +799,9 @@ class JITFunction:
 
         A numeric argument to a ``pl.Scalar`` parameter is a **runtime value**:
         it is dispatched as-is and never folded into the artifact, so it
-        contributes no metadata here and does not split the specialization
-        cache. A ``pl.constexpr`` parameter is the opposite -- its argument is
-        rendered to source text, leaves ``arguments`` so nothing is dispatched
+        contributes only its declared dtype here and does not split the
+        specialization cache by value. A ``pl.constexpr`` parameter is the
+        opposite -- its argument is rendered to source text, leaves ``arguments`` so nothing is dispatched
         for it, and reaches ``_get_source_hash`` so each distinct value selects
         its own artifact.
 
@@ -836,7 +837,7 @@ class JITFunction:
         param_layouts = _arguments.param_layouts(self._func, self.__name__)
         param_dtypes = _arguments.param_dtypes(self._func)
         tensor_meta: dict[str, TensorMeta] = {}
-        scalar_dtypes: dict[str, DataType] = {}
+        scalar_dtypes = _arguments.param_scalar_dtypes(self._func)
         constexpr_names = _arguments.constexpr_params(self._func)
         constexpr_values: dict[str, str] = {}
 
@@ -1655,7 +1656,17 @@ class JITFunction:
         The returned list is in leaf-first order (deps before their
         callers) so the generated source defines callees before callers.
         """
-        _, callers_by_id, callees_by_id, _ = self._get_dep_graph()
+        deps, callers_by_id, callees_by_id, _ = self._get_dep_graph()
+        if any(dep._func_type == "extern" for dep in [self, *deps]):
+            return _build_signature_contexts(
+                self,
+                tensor_meta,
+                scalar_dtypes,
+                constexpr_values,
+                per_func_dyn,
+                discover=_discover_dep_bindings,
+                allocate_names=_allocate_generated_names,
+            )
         empty_dyn: dict[str, dict[int, DynDim]] = {}
 
         # Map each Python function id → its JIT ``_func_type`` so meta

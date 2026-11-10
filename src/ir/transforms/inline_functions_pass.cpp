@@ -45,6 +45,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/signature_symbols.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -834,6 +835,9 @@ class InlineCallsMutator : public IRMutator {
       : inline_fns_(inline_fns),
         functions_(functions),
         param_bindings_(param_bindings),
+        caller_dim_symbols_(CollectParamDimSymbols(caller->params_)),
+        fold_param_dims_(IsOrchestrationLike(caller->func_type_) ||
+                         caller->func_type_ == FunctionType::Inline),
         validate_tile_args_(caller->func_type_ != FunctionType::Inline) {
     // Signature dimensions are in scope throughout the caller, including when
     // a particular inline call receives only locally allocated buffers.
@@ -1187,6 +1191,16 @@ class InlineCallsMutator : public IRMutator {
     for (const auto& param : callee->params_) {
       if (auto var = AsVarLike(seed.at(param.get()))) preserved_vars_.insert(var.get());
     }
+    // Bind dimensions only after substitution: a void inline helper may use
+    // one placeholder for different logical/padded argument extents. Each dim
+    // read must follow its own actual tensor. Preserve caller-owned LHS Vars,
+    // including scalar Out arguments, whose assignments must remain observable.
+    if (fold_param_dims_) {
+      // This mutator re-infers dependent operation types immediately afterward,
+      // so constants can fold too without leaving stale expression-based shapes.
+      renamed_body =
+          FoldSignatureDimReads(renamed_body, caller_dim_symbols_, preserved_vars_, true, &functions_);
+    }
     // Keep cloned definitions alive while this mutator's pointer-keyed maps
     // serve subsequent call sites. Process the body before wiring its returns.
     retained_.push_back(renamed_body);
@@ -1454,6 +1468,8 @@ class InlineCallsMutator : public IRMutator {
   const std::unordered_map<std::string, FunctionPtr>& inline_fns_;
   const InlineFunctionMap& functions_;
   const InlineParamBindingMap& param_bindings_;
+  const std::unordered_set<const Var*> caller_dim_symbols_;
+  bool fold_param_dims_;
   bool validate_tile_args_;
   std::unordered_set<const Var*> caller_dimensions_;
   bool changed_ = false;
@@ -1536,8 +1552,11 @@ Pass InlineFunctions() {
     auto expand = [&](const std::string& name) {
       auto& fn = current.at(name);
       InlineCallsMutator mutator(inline_fns, fn, current, param_bindings);
-      auto new_body = mutator.VisitStmt(fn->body_);
-      if (mutator.Changed()) {
+      auto folded_body = (IsOrchestrationLike(fn->func_type_) || fn->func_type_ == FunctionType::Inline)
+                             ? FoldParamDimReads(fn->params_, fn->body_, &current)
+                             : fn->body_;
+      auto new_body = mutator.VisitStmt(folded_body);
+      if (mutator.Changed() || folded_body != fn->body_) {
         auto updated = MutableCopy(fn);
         updated->body_ = new_body;
         fn = updated;

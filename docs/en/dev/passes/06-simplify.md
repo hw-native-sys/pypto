@@ -23,7 +23,7 @@ The pass runs **twice** in the `Default` strategy of `pass_manager.py`:
 
 **Invalidates**: nothing.
 
-The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/transforms/pass_properties.h`) is intentional: Simplify preserves established properties such as `SSAForm`, `NormalizedStmtStructure`, and `IncoreTileOps` while rewriting expressions, pruning dead bindings, and collapsing proven branches or pure zero-trip/single-trip loops. The constant-only helper used by InitMemRef preserves those control-flow statements and their yielded slots.
+The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/transforms/pass_properties.h`) is intentional: Simplify preserves established properties such as `SSAForm`, `NormalizedStmtStructure`, and `IncoreTileOps` while rewriting expressions, pruning dead bindings, and collapsing proven branches or pure zero-trip/single-trip loops. The constant-only helper used by InitMemRef preserves those control-flow statements and their yielded slots. It still proves branch reachability before entering constraint contexts: unreachable arms are remapped without evaluating their arithmetic or recording contradictory scalar bounds.
 
 Integer and INDEX rewrites preserve the expression's declared result dtype. If simplification selects an operand of a different integer dtype, it retains the conversion with a cast (or folds it into a typed constant). For example, an INT32 `(index + 1) - 1` becomes `cast(index, INT32)`. The printer preserves non-INDEX integer constant dtypes with `pl.const(value, dtype)`, including constants propagated into nested call arguments.
 

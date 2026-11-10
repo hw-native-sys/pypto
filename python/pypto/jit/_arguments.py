@@ -289,6 +289,21 @@ def param_dtypes(func: Any) -> dict[str, DataType]:
     return dtypes
 
 
+def param_scalar_dtypes(func: Any) -> dict[str, DataType]:
+    """Read declared runtime scalar types without specializing their values."""
+    from pypto.language.typing.scalar import Scalar  # noqa: PLC0415
+
+    sig = inspect.signature(func)
+    ann_ns = _annotation_namespace(func, sig)
+    dtypes: dict[str, DataType] = {}
+    for name, param in sig.parameters.items():
+        annotation = resolve_annotation(param.annotation, ann_ns)
+        dtype = annotation.dtype if isinstance(annotation, Scalar) else annotation
+        if isinstance(dtype, DataType):
+            dtypes[name] = dtype
+    return dtypes
+
+
 def constexpr_params(func: Any) -> list[str]:
     """Parameter names annotated ``pl.constexpr``, in declaration order.
 

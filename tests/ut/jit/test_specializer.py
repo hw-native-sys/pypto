@@ -2047,7 +2047,13 @@ class TestSpecializerExternReturnTypes:
     @pytest.mark.parametrize("one_output", [False, True])
     def test_legacy_output_inference(self, annotation, one_output):
         source = self._specialize(annotation, one_output=one_output)
-        assert "-> pl.Tensor[[16, 16], pl.INT8]:" in source
+        if one_output:
+            assert "-> pl.Tensor[[16, 16], pl.INT8]:" in source
+        else:
+            # The public legacy value remains y. The declaration now also
+            # returns z internally so callers can materialize its writeback.
+            assert "-> tuple[pl.Tensor[[16, 16], pl.INT8], pl.Tensor[[16, 1], pl.FP32]]:" in source
+            assert "'external_return_params': [y, z]" in source
 
     @pytest.mark.parametrize(
         "annotation",
