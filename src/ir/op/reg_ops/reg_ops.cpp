@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -284,6 +285,12 @@ TypePtr ScalarOperation(const Args& args, const Kwargs& kwargs, const std::strin
   return mask;
 }
 
+// A5 executes a grouped reduction natively only for these group counts, and
+// only when the count divides the source lane count. Outside that set PTOAS has
+// no layout to assign, so reject it here where the lane count is still visible
+// in DSL terms rather than letting it fail during layout assignment.
+bool GroupCount(int64_t groups) { return groups == 1 || groups == 2 || groups == 4 || groups == 8; }
+
 TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& name) {
   CHECK(args.size() == 2) << "Reduction requires source and mask";
   auto x = Vec(args[0]);
@@ -292,7 +299,20 @@ TypePtr Reduction(const Args& args, const Kwargs& kwargs, const std::string& nam
   if (name == "reduce_sum" && Float(x->dtype_)) {
     CHECK(GetKwargOr<bool>(kwargs, "reassoc", false)) << "Floating reduce_sum requires reassoc=True";
   }
-  return std::make_shared<RegType>(1, x->dtype_, RegKind::VecReg);
+  // An absent group_size means a full reduction to one lane, the original
+  // contract. Detect absence by key, not by a zero default: raw IR may pass
+  // group_size explicitly, and a bogus 0 must be rejected rather than silently
+  // degrading to a full reduction.
+  const auto entry = std::find_if(kwargs.begin(), kwargs.end(),
+                                  [](const auto& kwarg) { return kwarg.first == "group_size"; });
+  if (entry == kwargs.end()) return std::make_shared<RegType>(1, x->dtype_, RegKind::VecReg);
+  const auto group_size = AnyCast<int>(entry->second, "group_size");
+  CHECK(group_size > 0 && x->shape_ % group_size == 0)
+      << "reg." << name << " group_size must be positive and divide the " << x->shape_ << " source lanes";
+  const int64_t groups = x->shape_ / group_size;
+  CHECK(GroupCount(groups)) << "reg." << name << " supports 1, 2, 4 or 8 groups; group_size " << group_size
+                            << " over " << x->shape_ << " lanes requests " << groups;
+  return std::make_shared<RegType>(groups, x->dtype_, RegKind::VecReg);
 }
 
 TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
@@ -459,6 +479,27 @@ REGISTER_OP("reg.interpret_cast")
       CHECK(bits / target_bits <= std::numeric_limits<int>::max())
           << "Reinterpret result lane count is too large";
       return std::make_shared<RegType>(bits / target_bits, dtype, RegKind::VecReg);
+    });
+
+REGISTER_OP("reg.group_broadcast")
+    .set_op_category("RegOp")
+    .set_description("Broadcast one group-slot lane back across each logical group")
+    .set_reg_op("pto.vmi.group_broadcast")
+    .add_argument("value", "VecReg holding one lane per group")
+    .set_attr<int>("lanes")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 1) << "reg.group_broadcast expects one VecReg";
+      auto x = Vec(a[0]);
+      // The group count is the source lane count: this op consumes exactly the
+      // grouped-reduction result, so passing num_groups separately could only
+      // disagree with it. `lanes` is the width to expand back to.
+      const auto lanes = Lanes(k);
+      CHECK(GroupCount(x->shape_)) << "reg.group_broadcast source must hold 1, 2, 4 or 8 group lanes, got "
+                                   << x->shape_;
+      CHECK(lanes % x->shape_ == 0) << "reg.group_broadcast requires the " << x->shape_
+                                    << " groups to divide the " << lanes << " result lanes";
+      return std::make_shared<RegType>(lanes, x->dtype_, RegKind::VecReg);
     });
 
 REGISTER_OP("reg.create_group_mask")
@@ -698,10 +739,11 @@ static bool RegisterComputeFamilies() {
            {"reduce_sum", "vcadd"}, {"reduce_max", "vcmax"}, {"reduce_min", "vcmin"}}) {
     auto& entry = OpRegistry::GetInstance().Register("reg." + name);
     entry.set_op_category("RegOp")
-        .set_description("Masked reduction to a one-lane vector")
+        .set_description("Masked reduction to one lane, or to one lane per logical group")
         .set_reg_op("pto.vmi." + opcode)
         .add_argument("value", "VecReg")
         .add_argument("mask", "MaskReg")
+        .set_attr<int>("group_size")
         .no_arg_writes()
         .f_deduce_type([op_name = name](const Args& args, const Kwargs& kwargs) {
           return Reduction(args, kwargs, op_name);

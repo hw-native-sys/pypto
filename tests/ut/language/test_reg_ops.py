@@ -310,5 +310,89 @@ def test_index_gen_bf16_rejected_by_frontend():
                 _indices = pl.reg.index_gen(0.0, lanes=64, dtype=pl.BF16)
 
 
+def test_group_scaling_pipeline_roundtrip():
+    # The MX shape a V-side quantization kernel needs: a per-32-element amax
+    # broadcast back over its own group so each lane can scale itself. The
+    # butterfly this replaces cost ten register ops per 64 lanes.
+    @pl.function(type=pl.FunctionType.AIV)
+    def quantize(
+        src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+        dst: pl.InOut[pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]],
+    ):
+        with pl.reg_scope():
+            value = pl.reg.load(src, lanes=64)
+            mask = pl.reg.full_mask(lanes=64)
+            magnitude = pl.reg.abs(value, mask)
+            amax = pl.reg.reduce_max(magnitude, mask, group_size=32)
+            scale = pl.reg.group_broadcast(amax, lanes=64)
+            scaled = pl.reg.div(value, scale, mask)
+            out = pl.reg.store(dst, value=scaled)
+        _consumer = pl.tile.add(out, out)
+
+    printed = python_print(quantize, format=False)
+    restored = pl.parse(printed)
+    ir.assert_structural_equal(quantize, restored, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("group_size", [8, 16, 32, 64])
+def test_grouped_reduction_lane_counts(group_size):
+    # 64 lanes over these widths request 8, 4, 2 and 1 groups; all are
+    # executable A5 group counts.
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+        dst: pl.InOut[pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]],
+    ):
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=64)
+            mask = pl.reg.full_mask(lanes=64)
+            reduced = pl.reg.reduce_min(x, mask, group_size=group_size)
+            spread = pl.reg.group_broadcast(reduced, lanes=64)
+            _out = pl.reg.store(dst, value=spread)
+
+    assert kernel is not None
+
+
+@pytest.mark.parametrize(
+    ("group_size", "message"),
+    [
+        # 64 / 4 = 16 groups: beyond the 1/2/4/8 the hardware can lay out.
+        (4, "1, 2, 4 or 8 groups"),
+        # 24 does not divide 64 lanes.
+        (24, "divide"),
+    ],
+)
+def test_grouped_reduction_rejects_unexecutable_geometry(group_size, message):
+    with pytest.raises((ValueError, ParserError), match=message):
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+            dst: pl.InOut[pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]],
+        ):
+            with pl.reg_scope():
+                x = pl.reg.load(src, lanes=64)
+                mask = pl.reg.full_mask(lanes=64)
+                reduced = pl.reg.reduce_max(x, mask, group_size=group_size)
+                _out = pl.reg.store(dst, value=reduced)
+
+
+def test_group_broadcast_requires_divisible_result():
+    with pytest.raises((ValueError, ParserError), match="divide"):
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+            dst: pl.InOut[pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]],
+        ):
+            with pl.reg_scope():
+                x = pl.reg.load(src, lanes=64)
+                mask = pl.reg.full_mask(lanes=64)
+                # Two groups cannot expand into an odd lane count.
+                reduced = pl.reg.reduce_max(x, mask, group_size=32)
+                spread = pl.reg.group_broadcast(reduced, lanes=63)
+                _out = pl.reg.store(dst, value=spread)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

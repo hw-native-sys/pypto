@@ -217,15 +217,41 @@ memory. Its supported source/index lane counts depend on element storage width:
 
 | API signature | Parameters and behavior | Result | Dtypes |
 | ------------- | ----------------------- | ------ | ------ |
-| `reduce_sum(value, mask, *, reassoc=False)` | Sum active lanes. `reassoc=True` permits hardware tree reassociation and is required for floating input; integers accept either value. | One-lane VecReg, same dtype | `F + I16_32` |
-| `reduce_max(value, mask)` | Maximum of active lanes | One-lane VecReg, same dtype | `F + I16_32` |
-| `reduce_min(value, mask)` | Minimum of active lanes | One-lane VecReg, same dtype | `F + I16_32` |
+| `reduce_sum(value, mask, *, reassoc=False, group_size=None)` | Sum active lanes. `reassoc=True` permits hardware tree reassociation and is required for floating input; integers accept either value. | One-lane VecReg, or one lane per group | `F + I16_32` |
+| `reduce_max(value, mask, *, group_size=None)` | Maximum of active lanes | One-lane VecReg, or one lane per group | `F + I16_32` |
+| `reduce_min(value, mask, *, group_size=None)` | Minimum of active lanes | One-lane VecReg, or one lane per group | `F + I16_32` |
+| `group_broadcast(value, *, lanes)` | Expand a grouped result back across its groups | VecReg with `lanes` lanes, same dtype | `F + I16_32` |
 
 `value` is the source vector; required `mask` has the **source** lane count, not
 one lane. Inactive inputs contribute 0 for sum, the dtype minimum (or negative
 infinity) for max, and the dtype maximum (or positive infinity) for min. No
 implicit widening is performed. Results remain local registers; use `store` to
-write the single output element. Grouped reductions are not exposed.
+write the output elements.
+
+Omitting `group_size` reduces the whole vector to one lane. Supplying it splits
+the source into equal contiguous groups of that width and produces one lane per
+group, in group order — PTOAS `vcadd`/`vcmax`/`vcmin` with a group count. The
+group width must divide the source lane count, and the resulting **group count**
+must be 1, 2, 4 or 8: A5 has no other grouped layout, so a 16-group request is
+rejected at trace time rather than during layout assignment. MX-style group-32
+quantization over 64 lanes is therefore `group_size=32`, giving two groups.
+
+`group_broadcast` consumes exactly such a result and writes each group's value
+back across that group's lanes, so a per-group scale can divide the activations
+it came from. The group count is the source lane count — it is never passed
+separately, since it could only disagree with the operand. `lanes` is the width
+to expand back to and must be a multiple of the group count.
+
+```python
+with pl.reg_scope():
+    x = pl.reg.load(src, lanes=64)
+    mask = pl.reg.full_mask(lanes=64)
+    # One amax per 32-element MX group, then back across its own 32 lanes.
+    amax = pl.reg.reduce_max(pl.reg.abs(x, mask), mask, group_size=32)
+    scale = pl.reg.group_broadcast(amax, lanes=64)
+    scaled = pl.reg.div(x, scale, mask)
+    out = pl.reg.store(dst, value=scaled)
+```
 
 ```python
 with pl.reg_scope():

@@ -200,14 +200,36 @@ predication mask 或 `pmode`；`select` 使用两个值操作数，mask 表示�
 
 | API 签名 | 参数与行为 | 返回值 | Dtype |
 | -------- | ---------- | ------ | ----- |
-| `reduce_sum(value, mask, *, reassoc=False)` | 对激活 lane 求和。`reassoc=True` 允许硬件树形求和重结合，浮点输入必须显式开启；整数输入可使用任意布尔值。 | 同 dtype 的单 lane VecReg | `F + I16_32` |
-| `reduce_max(value, mask)` | 求激活 lane 的最大值 | 同 dtype 的单 lane VecReg | `F + I16_32` |
-| `reduce_min(value, mask)` | 求激活 lane 的最小值 | 同 dtype 的单 lane VecReg | `F + I16_32` |
+| `reduce_sum(value, mask, *, reassoc=False, group_size=None)` | 对激活 lane 求和。`reassoc=True` 允许硬件树形求和重结合，浮点输入必须显式开启；整数输入可使用任意布尔值。 | 单 lane VecReg，或每组一个 lane | `F + I16_32` |
+| `reduce_max(value, mask, *, group_size=None)` | 求激活 lane 的最大值 | 单 lane VecReg，或每组一个 lane | `F + I16_32` |
+| `reduce_min(value, mask, *, group_size=None)` | 求激活 lane 的最小值 | 单 lane VecReg，或每组一个 lane | `F + I16_32` |
+| `group_broadcast(value, *, lanes)` | 将分组归约结果广播回各自分组 | 含 `lanes` 个 lane、同 dtype 的 VecReg | `F + I16_32` |
 
 `value` 为源向量；必需的 `mask` 与**源向量**同 lane，而非单 lane。
 非激活输入对 sum 贡献 0，对 max 贡献类型最小值或负无穷，对 min 贡献类型最大值
-或正无穷。不做隐式扩宽。结果仍是局部寄存器，可用 `store` 写出单个结果元素。
-当前没有分组归约 API。
+或正无穷。不做隐式扩宽。结果仍是局部寄存器，可用 `store` 写出结果元素。
+
+省略 `group_size` 时按整个向量归约为单 lane。给出 `group_size` 时，源向量按该
+宽度切分为等长连续分组，每组产生一个 lane 并按组序排列，对应带 group count 的
+PTOAS `vcadd`/`vcmax`/`vcmin`。组宽必须整除源 lane 数，且得到的**组数**必须为
+1、2、4 或 8：A5 没有其他分组 layout，因此 16 组的请求在 trace 阶段即被拒绝，
+而不是留到 layout 分配时失败。64 lane 上的 MX group-32 量化即 `group_size=32`，
+得到两组。
+
+`group_broadcast` 正是消费这种结果，把每组的值写回该组的所有 lane，使每组的
+scale 能直接除回它来源的激活值。组数取自源 lane 数，不单独传入——单独传入只可能
+与操作数矛盾。`lanes` 是广播回的宽度，必须是组数的整数倍。
+
+```python
+with pl.reg_scope():
+    x = pl.reg.load(src, lanes=64)
+    mask = pl.reg.full_mask(lanes=64)
+    # 每 32 个元素的 MX 分组求一个 amax，再广播回该组的 32 个 lane。
+    amax = pl.reg.reduce_max(pl.reg.abs(x, mask), mask, group_size=32)
+    scale = pl.reg.group_broadcast(amax, lanes=64)
+    scaled = pl.reg.div(x, scale, mask)
+    out = pl.reg.store(dst, value=scaled)
+```
 
 ```python
 with pl.reg_scope():
