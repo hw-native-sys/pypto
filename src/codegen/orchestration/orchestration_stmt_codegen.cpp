@@ -61,7 +61,7 @@ OrchestrationStmtCodegen::OrchestrationStmtCodegen(
     return AsTensorTypeLike(param->GetType()) != nullptr;
   });
   if (first_tensor != params.end()) {
-    tensor_phi_param_init_ = GetExternalTensorName(emit_name_map_.at(first_tensor->get()));
+    tensor_phi_param_name_ = emit_name_map_.at(first_tensor->get());
   }
   // Function ``Scalar[TASK_ID]`` parameters (and lineage aliases seeded into
   // ``emit_name_map_`` before construction) are live for the whole body.

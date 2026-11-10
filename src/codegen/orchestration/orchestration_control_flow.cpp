@@ -11,7 +11,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -667,7 +666,7 @@ void OrchestrationStmtCodegen::VisitStmt_(const IfStmtPtr& if_stmt) {
   //      entry prologue or the Graph body prologue.
   //   2. A Var yielded by either branch that's already declared at
   //      if-entry (an outer iter_arg, or a prior in-body assignment).
-  std::string tensor_phi_init = tensor_phi_param_init_;
+  std::string tensor_phi_init = GetExternalTensorName(tensor_phi_param_name_);
   if (tensor_phi_init.empty()) {
     auto find_in_scope_tensor_var = [&](const StmtPtr& body) -> std::string {
       // The branch body may be wrapped in an AUTO scope by

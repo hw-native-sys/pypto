@@ -576,7 +576,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
-  std::string tensor_phi_param_init_;
+  std::string tensor_phi_param_name_;
   CodeEmitter emitter_;
   CodeEmitter* active_emitter_ = &emitter_;
   std::string current_result_var_;
