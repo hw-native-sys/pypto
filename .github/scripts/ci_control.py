@@ -308,32 +308,44 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
     return run
 
 
-def already_passed(repo: str, pr: dict[str, Any]) -> bool:
-    """Repeated comments cannot reset a verified green gate for the same revision."""
+def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
+    """Honor a verified bound run before consulting eventually indexed history."""
     statuses = pages(f"repos/{repo}/commits/{pr['head']['sha']}/status", "statuses")
     status = next((item for item in statuses if item["context"] == "ci/full"), {})
     target = re.fullmatch(
         rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
         status.get("target_url") or "",
     )
-    if status.get("state") != "success" or not target:
+    if status.get("state") not in ("pending", "success") or not target:
         return False
     run = api(f"repos/{repo}/actions/runs/{target[1]}")
     expected = f"CI full PR #{pr['number']} @{pr['head']['sha']} base:{pr['base']['sha']}"
     if (
-        run.get("display_title") != expected
+        run.get("id") != int(target[1])
+        or run.get("display_title") != expected
         or run.get("event") != "workflow_dispatch"
         or run.get("head_branch") != "main"
         or run.get("path") != WORKFLOW
         or run.get("repository", {}).get("full_name") != repo
+        or run.get("repository", {}).get("id") != pr["base"]["repo"]["id"]
         or run.get("head_repository", {}).get("id") != pr["base"]["repo"]["id"]
-        or run.get("run_attempt") != int(target[2])
-        or run.get("status") != "completed"
-        or run.get("conclusion") == "cancelled"
+        or type(run.get("run_attempt")) is not int
+        or run["run_attempt"] < int(target[2])
     ):
         return False
     workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
     if run.get("workflow_id") != workflow["id"]:
+        return False
+    if run.get("status") in UNFINISHED:
+        # The binding is available before run-list indexing. A native rerun may
+        # also have advanced beyond the attempt recorded in the status URL.
+        return True
+    if (
+        status["state"] != "success"
+        or run["run_attempt"] != int(target[2])
+        or run.get("status") != "completed"
+        or run.get("conclusion") == "cancelled"
+    ):
         return False
     jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
     finalizers = [job for job in jobs if job["name"] == "full-result"]
@@ -374,8 +386,10 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
     if os.environ.get("CI_ROUTED_HEAD") != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
-    if already_passed(repo, pr):
-        report("Full CI already passed for this PR revision; keeping the successful gate.")
+    if already_running_or_passed(repo, pr):
+        report(
+            "Full CI is already queued, running, or passed for this PR revision; keeping the existing gate."
+        )
         return
     matching_lint_run(repo, pr)
     # Metadata reads can overlap a push; revalidate before writing or dispatching.

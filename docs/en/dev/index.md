@@ -68,8 +68,10 @@ branch and dispatches `CI` from trusted `main`. It fixes the PR head, base and t
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 A conflicting PR, or one whose merge is still being computed, must be resolved
 or retried. The command's Actions summary records acceptance or rejection.
-An identical request already queued/running is not dispatched again. A verified
-successful full result for the same head and base also makes the comment a no-op,
+An identical request already queued/running is not dispatched again. The command
+validates the run linked by the current status before searching run history,
+so a bound pending request is honored even before the run list indexes it.
+A verified successful full result for the same head and base also makes the comment a no-op,
 so another commenter cannot reset a green gate. Comment
 access allows users to request device tests; it does not grant repository write
 or merge permission, and duplicate detection is not a general rate limit.

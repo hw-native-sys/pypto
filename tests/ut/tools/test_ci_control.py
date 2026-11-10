@@ -160,7 +160,7 @@ def test_changed_pr_rejected_before_checkout(control, pr):
 def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, pr, failure, association):
     event["comment"]["author_association"] = association
     monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
-    monkeypatch.setattr(control, "already_passed", lambda *args: False)
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
     writes = []
     gate = {"state": "success"}
 
@@ -649,7 +649,7 @@ def test_new_request_on_another_base_supersedes_old_run(control, publication):
 @pytest.mark.parametrize("branch", ["main", "feature", "release-tag"])
 def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch, event, pr, status, branch):
     monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
-    monkeypatch.setattr(control, "already_passed", lambda *args: False)
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
     queries = []
     writes = []
 
@@ -1520,14 +1520,14 @@ def test_lint_reuse_skipped_clang_requires_docs_only(control, pr, lint_run, file
 
 def test_comment_does_not_reset_successful_full(control, monkeypatch, pr, event):
     monkeypatch.setattr(control, "validated_request", lambda *args: pr)
-    monkeypatch.setattr(control, "already_passed", lambda *args: True)
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: True)
     monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes for an already green revision"))
     control.dispatch(REPO, event)
 
 
 def test_comment_with_failed_lint_never_writes(control, monkeypatch, pr, event):
     monkeypatch.setattr(control, "validated_request", lambda *args: pr)
-    monkeypatch.setattr(control, "already_passed", lambda *args: False)
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
 
     def fail(*args):
         raise ValueError("PR lint job pre-commit did not pass")
@@ -1564,7 +1564,113 @@ def test_already_green_requires_verified_full_revision(control, monkeypatch, pr,
         run["head_branch"] = "feature"
     elif case == "cancelled":
         run["conclusion"] = "cancelled"
-    assert control.already_passed(REPO, pr) == (case == "green")
+    assert control.already_running_or_passed(REPO, pr) == (case == "green")
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress", "requested", "waiting", "pending"])
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_consecutive_comments_honor_bound_run_before_history_indexes_it(
+    control, monkeypatch, pr, event, publication, state, attempt
+):
+    run, _, _, _ = publication
+    run.update(id=51, run_attempt=attempt, status=state, conclusion=None)
+    statuses, writes, history_reads, run_reads = [], [], [], []
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
+
+    def api(path, payload=None):
+        if payload is not None:
+            writes.append((path, payload))
+            if path == f"repos/{REPO}/statuses/{HEAD}":
+                statuses[:] = [payload]
+                return None
+            assert path == f"repos/{REPO}/actions/workflows/ci.yml/dispatches"
+            return {"workflow_run_id": 51}
+        if path == f"repos/{REPO}/actions/runs/51":
+            run_reads.append(path)
+            return run
+        if path == f"repos/{REPO}/actions/workflows/ci.yml":
+            return {"id": 99}
+        if path == f"repos/{REPO}/pulls/123":
+            return pr
+        if path == f"repos/{REPO}/git/commits/{MERGE}":
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+        assert "/actions/workflows/ci.yml/runs?" in path
+        history_reads.append(path)
+        return {"workflow_runs": []}  # Both comments see an unindexed run list.
+
+    def pages(path, key):
+        assert path == f"repos/{REPO}/commits/{HEAD}/status" and key == "statuses"
+        return statuses
+
+    monkeypatch.setattr(control, "api", api)
+    monkeypatch.setattr(control, "pages", pages)
+    control.dispatch(REPO, event)
+    assert len(writes) == 3
+    assert statuses[0]["target_url"].endswith("/runs/51/attempts/1")
+    control.dispatch(REPO, event)
+    assert len(writes) == 3, "The second comment must neither dispatch nor overwrite the binding"
+    assert len(history_reads) == 1 and len(run_reads) == 1
+
+
+@pytest.fixture
+def bound_pending(control, monkeypatch, publication):
+    run, _, _, _ = publication
+    run.update(status="queued", conclusion=None)
+    status = {
+        "context": "ci/full",
+        "state": "pending",
+        "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/2",
+    }
+
+    def pages(path, key):
+        assert path == f"repos/{REPO}/commits/{HEAD}/status" and key == "statuses"
+        return [status]
+
+    monkeypatch.setattr(control, "pages", pages)
+    return run, status
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", 51),
+        ("workflow_id", 100),
+        ("event", "pull_request"),
+        ("head_branch", "feature"),
+        ("path", ".github/workflows/other.yml"),
+        ("repository", {"id": 2, "full_name": REPO}),
+        ("repository", {"id": 1, "full_name": "other/repo"}),
+        ("head_repository", {"id": 2}),
+        ("display_title", f"CI full PR #124 @{HEAD} base:{BASE}"),
+        ("display_title", f"CI full PR #123 @{'d' * 40} base:{BASE}"),
+        ("display_title", f"CI full PR #123 @{HEAD} base:{'d' * 40}"),
+        ("run_attempt", 1),
+        ("run_attempt", "2"),
+    ],
+)
+def test_bound_pending_requires_matching_trusted_revision(control, pr, bound_pending, field, value):
+    bound_pending[0][field] = value
+    assert not control.already_running_or_passed(REPO, pr)
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "success"])
+def test_completed_pending_binding_does_not_block_retry(control, pr, bound_pending, conclusion):
+    bound_pending[0].update(status="completed", conclusion=conclusion)
+    assert not control.already_running_or_passed(REPO, pr)
+
+
+def test_unavailable_bound_run_never_dispatches(control, monkeypatch, pr, event, bound_pending):
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+
+    def unavailable(path, payload=None):
+        assert payload is None, "An unverifiable bound run must not dispatch or overwrite its status"
+        assert path == f"repos/{REPO}/actions/runs/50"
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        control.dispatch(REPO, event)
 
 
 def test_downstream_gate_cannot_be_skipped(control, needs):
