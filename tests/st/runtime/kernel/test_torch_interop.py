@@ -13,7 +13,9 @@ import ctypes
 import os
 import subprocess
 import sys
+import sysconfig
 import textwrap
+from pathlib import Path
 
 import pytest
 import torch
@@ -89,54 +91,70 @@ def test_real_npu_rejects_transposed_input(npu_context):
         signature.describe_call((value,))
 
 
-@pytest.mark.parametrize("drain", ["query", "empty_cache"])
-def test_python_queue_callback_survives_gil_held_drain(npu_context, test_config, drain):
-    """A fresh OpApi-only process must release the GIL while draining callbacks."""
+@pytest.mark.parametrize("drain", ["query", "empty_cache", "held_gil"])
+def test_native_queue_submission_survives_gil_held_drain(npu_context, test_config, tmp_path, drain):
+    """A pending native callback progresses while its Python caller holds the GIL."""
     pytest.importorskip("pypto._torch_npu")
+    from simpler_setup.environment import PROJECT_ROOT  # noqa: PLC0415
+
+    probe = tmp_path / "native_submission_probe.so"
+    subprocess.run(
+        [
+            "c++",
+            "-std=c++17",
+            "-shared",
+            "-fPIC",
+            "-pthread",
+            f"-I{sysconfig.get_path('include')}",
+            f"-I{PROJECT_ROOT / 'src/common'}",
+            str(Path(__file__).with_name("native_submission_probe.cpp")),
+            "-o",
+            str(probe),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     script = textwrap.dedent("""
+        import ctypes
         import sys
-        import threading
+        import time
         import torch
         import torch_npu
         from pypto import _torch_npu
 
+        probe = ctypes.PyDLL(sys.argv[3])
+        probe.make_gate.restype = ctypes.py_object
+        for name in ('gate_started', 'gate_finished', 'open_gate_later', 'wait_finished_with_gil'):
+            getattr(probe, name).argtypes = [ctypes.py_object]
         device = int(sys.argv[1])
         torch.npu.set_device(device)
         stream = torch.npu.current_stream()
         context = _torch_npu.borrow_context(device)
-        # The first enqueue drains the INIT queue synchronously. Complete a
-        # nonblocking OpApi callback before testing a later GIL-held drain.
-        warmed = threading.Event()
-
-        def warmup(caller_stream):
-            assert caller_stream > 0
-            warmed.set()
-
+        # INIT queue admission can execute inline; open the first gate first.
+        warmup = probe.make_gate()
+        probe.open_gate_later(warmup)
         _torch_npu.enqueue([], stream.stream_id, device, context, warmup)
-        assert warmed.wait(10)
-        started, unblock, finished = threading.Event(), threading.Event(), threading.Event()
-
-        def callback(caller_stream):
-            assert caller_stream > 0
-            started.set()
-            assert unblock.wait(10)
-            finished.set()
-
-        # No ACL-op runs first: only the adapter can enable GIL-safe queue drains.
-        _torch_npu.enqueue([], stream.stream_id, device, context, callback)
-        assert started.wait(10)
-        timer = threading.Timer(0.1, unblock.set)
-        timer.start()
-        if sys.argv[2] == "query":
+        stream.synchronize()
+        assert probe.gate_finished(warmup)
+        gate = probe.make_gate()
+        _torch_npu.enqueue([], stream.stream_id, device, context, gate)
+        deadline = time.monotonic() + 5
+        while not probe.gate_started(gate) and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert probe.gate_started(gate) and not probe.gate_finished(gate)
+        probe.open_gate_later(gate)  # Native thread, no Python timer/GIL dependency.
+        if sys.argv[2] == 'query':
             stream.query()
-        else:
+        elif sys.argv[2] == 'empty_cache':
             torch.npu.empty_cache()
-        timer.join()
-        assert finished.wait(10)
+        # PyDLL holds the GIL throughout this bounded wait, even if query returns early.
+        assert probe.wait_finished_with_gil(gate)
         stream.synchronize()
     """)
     result = subprocess.run(
-        [sys.executable, "-c", script, str(test_config.device_id), drain],
+        [sys.executable, "-c", script, str(test_config.device_id), drain, str(probe)],
         env={**os.environ, "TASK_QUEUE_ENABLE": "1", "ASCEND_LAUNCH_BLOCKING": "0"},
         capture_output=True,
         text=True,

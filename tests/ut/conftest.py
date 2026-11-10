@@ -413,6 +413,7 @@ def eager_env(monkeypatch):
         submit_error=None,
         register_error=None,
         enqueue_error=None,
+        queue_error=None,
     )
 
     class NPUTensor(torch.Tensor):
@@ -430,6 +431,8 @@ def eager_env(monkeypatch):
         env.events.append("synchronize")
         env.synchronized_streams.append(stream_id)
         run_queue()
+        if env.queue_error:
+            raise env.queue_error
 
     def stream():
         stream_id = env.stream_id
@@ -469,6 +472,58 @@ def eager_env(monkeypatch):
                 raise self.wait_error
             self.complete = self.retired = True
 
+    class PreparedSubmission:
+        def __init__(self, worker, target, args, config, caller_stream, keepalive):
+            self.worker, self.target, self.args = worker, target, args
+            self.config, self.caller_stream = config, caller_stream
+            self.keepalive = keepalive
+            self.run = None
+            self.consumed = False
+            self.cancelled = False
+            self.error = None
+            self.safe = False
+            self.cancel_error = None
+
+        native_handle = property(lambda self: self)
+        safe_to_release = property(lambda self: self.safe)
+        done = property(
+            lambda self: self.cancelled or self.error is not None or bool(self.run and self.run.done)
+        )
+
+        def consume(self):
+            if self.consumed or self.cancelled:
+                return
+            self.consumed = True
+            try:
+                self.run = self.worker.submit(
+                    self.target, self.args, self.config, caller_stream=self.caller_stream
+                )
+            except BaseException as error:
+                self.error = error
+
+        def cancel(self):
+            if self.consumed or self.cancelled:
+                return False
+            self.cancelled = True
+            if self.cancel_error:
+                raise self.cancel_error
+            self.safe = True
+            self.keepalive = ()
+            return True
+
+        def wait(self, timeout=None):
+            if self.error:
+                raise self.error
+            if self.cancelled:
+                if self.cancel_error:
+                    raise self.cancel_error
+                return
+            if self.run is None:
+                raise TimeoutError("not consumed")
+            self.run.wait()
+            self.safe = True
+            self.keepalive = ()
+
     class Worker:
         device_location = property(lambda self: self.location)
 
@@ -499,6 +554,10 @@ def eager_env(monkeypatch):
             run = RunHandle()
             env.runs.append(run)
             return run
+
+        def prepare_submission(self, target, args=None, config=None, *, caller_stream, keepalive=()):
+            env.events.append("prepare")
+            return PreparedSubmission(self, target, args, config, caller_stream, keepalive)
 
         def flush_diagnostics(self):
             pytest.fail("no implicit DFX flush")
@@ -547,6 +606,7 @@ def eager_env(monkeypatch):
         Worker=Worker,
         CallConfig=CallConfig,
         RunHandle=RunHandle,
+        PreparedSubmission=PreparedSubmission,
         Buffer=Buffer,
         TaskArgs=TaskArgs,
         Tensor=lambda buffer, **kw: SimpleNamespace(buffer=buffer, **kw),
@@ -557,23 +617,32 @@ def eager_env(monkeypatch):
     def run_queue():
         while env.queue:
             env.queue.pop(0)()
+            if env.queue_error:
+                env.queue.clear()
 
-    def enqueue(tensors, stream_id, device, context, callback):
+    def enqueue(tensors, stream_id, device, context, submission):
         assert stream_id == env.stream_id and device == env.device and context == env.context
-        # Admission must already own the callback and frame before native enqueue.
-        assert env.state._submissions[-1]._callback is callback
+        assert env.state._submissions[-1].submission is submission
         assert env.state._submissions[-1]._owners
         env.events.append("recordStream")
         if env.enqueue_error:
             raise env.enqueue_error
-        rts_stream = env.rts_stream
+
+        def consume():
+            submission.consume()
+            if submission.error:
+                env.queue_error = RuntimeError("framework submission failed")
+
         if env.queued:
-            env.queue.append(lambda: callback(rts_stream))
+            env.queue.append(consume)
         else:
-            callback(rts_stream)
+            consume()
+            if env.queue_error:
+                raise env.queue_error
 
     native = SimpleNamespace(
         enqueue=enqueue,
+        caller_stream=lambda stream, device: env.rts_stream,
         check_call=lambda stream, device: env.capture,
         borrow_context=lambda device: env.context,
         bind_context=lambda context: None,

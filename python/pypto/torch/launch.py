@@ -79,8 +79,10 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
     capturing = check_frame(frame, config)
     state = get_process_kernel_state()
     native = _load_native()
-    if not callable(getattr(native, "enqueue", None)):
-        raise NotImplementedError("Torch eager adapter requires enqueue; rebuild the optional adapter")
+    if not all(callable(getattr(native, name, None)) for name in ("enqueue", "caller_stream")):
+        raise NotImplementedError(
+            "Torch eager adapter requires native enqueue/caller_stream; rebuild the optional adapter"
+        )
     registration = (
         state.require_callable(artifact, config) if capturing else state.ensure_callable(artifact, config)
     )
@@ -91,23 +93,24 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
         arguments = BorrowedArguments(frame, session.sources, session.device_location)
 
         def enqueue(ticket: PendingTicket) -> None:
-            def submit(caller_stream: int) -> None:
-                try:
-                    if type(caller_stream) is not int or caller_stream <= 0:
-                        raise ValueError("Kernel submission requires a nonzero RTS stream handle")
-                    session.check_context()
-                    run = session.worker.submit(
-                        registration.handle, arguments.task_args, call_config, caller_stream=caller_stream
-                    )
-                    ticket.publish(run)
-                except BaseException as error:
-                    ticket.fail(error)
-                    raise  # Preserve the framework's synchronous/asynchronous error channel.
-
-            # Native callback state holds only a borrowed PyObject pointer. The
-            # process pending set already owns this ticket, including on failure.
-            ticket.retain_callback(submit)
-            native.enqueue(tensors, frame.stream.stream_id, frame.device_index, session._context, submit)
+            session.check_context()
+            caller_stream = native.caller_stream(frame.stream.stream_id, frame.device_index)
+            if type(caller_stream) is not int or caller_stream <= 0:
+                raise ValueError("Kernel submission requires a nonzero RTS stream handle")
+            ticket.submission = session.worker.prepare_submission(
+                registration.handle,
+                arguments.task_args,
+                call_config,
+                caller_stream=caller_stream,
+                keepalive=(arguments, frame),
+            )
+            native.enqueue(
+                tensors,
+                frame.stream.stream_id,
+                frame.device_index,
+                session._context,
+                ticket.submission.native_handle,
+            )
 
         return PendingTicket(
             registration,

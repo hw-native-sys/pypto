@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# Optional framework queue and lifecycle bridge, independent of Simpler native types.
+# Optional framework queue bridge; rebuild with the installed Simpler extension.
 # Use an explicit exit: PYTHONOPTIMIZE removes Python assert statements.
 execute_process(COMMAND "${Python_EXECUTABLE}" -c
     "import pathlib,torch,importlib.util,sys; sys.exit('PyPTO core requires the C++11 libstdc++ ABI') if not torch._C._GLIBCXX_USE_CXX11_ABI else None; print(torch.utils.cmake_prefix_path); print(pathlib.Path(importlib.util.find_spec('torch_npu').origin).parent)"
@@ -20,6 +20,13 @@ list(GET _torch_paths 0 _torch_cmake)
 list(GET _torch_paths 1 _torch_npu)
 list(APPEND CMAKE_PREFIX_PATH "${_torch_cmake}")
 find_package(Torch REQUIRED)
+execute_process(COMMAND "${Python_EXECUTABLE}" -c
+    "from simpler_setup.environment import PROJECT_ROOT; print(PROJECT_ROOT / 'src/common')"
+    OUTPUT_VARIABLE _simpler_worker_include OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _simpler_result)
+if(NOT _simpler_result EQUAL 0 OR NOT EXISTS "${_simpler_worker_include}/worker/native_submission.h")
+    message(FATAL_ERROR "Torch adapter requires Simpler with native submission headers; rebuild both together")
+endif()
 find_path(PYPTO_ACL_INCLUDE acl/acl.h HINTS "$ENV{ASCEND_HOME_PATH}/include")
 find_library(PYPTO_ASCENDCL ascendcl HINTS "$ENV{ASCEND_HOME_PATH}/lib64")
 if(NOT PYPTO_ACL_INCLUDE OR NOT PYPTO_ASCENDCL)
@@ -28,7 +35,8 @@ endif()
 nanobind_add_module(_torch_npu torch_npu_adapter.cpp
     "${CMAKE_SOURCE_DIR}/src/core/backtrace.cpp" "${CMAKE_SOURCE_DIR}/src/core/error.cpp")
 target_include_directories(_torch_npu PRIVATE
-    "${LIBBACKTRACE_INSTALL_DIR}/include" "${_torch_npu}/include" "${PYPTO_ACL_INCLUDE}")
+    "${LIBBACKTRACE_INSTALL_DIR}/include" "${_torch_npu}/include" "${PYPTO_ACL_INCLUDE}"
+    "${_simpler_worker_include}")
 separate_arguments(_torch_flags NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 target_compile_options(_torch_npu PRIVATE ${_torch_flags})
 target_link_libraries(_torch_npu PRIVATE libbacktrace ${TORCH_LIBRARIES}
