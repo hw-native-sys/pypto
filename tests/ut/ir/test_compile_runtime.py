@@ -23,9 +23,13 @@ users take in practice.
 
 import pypto.language as pl
 import pytest
+import torch
 from pypto.ir.compile import compile as ir_compile
 from pypto.ir.compiled_artifact import CompiledArtifact
+from pypto.ir.compiled_program import CompiledProgram, _validate_device_tensor
+from pypto.ir.param_info import block_nz_shape
 from pypto.pypto_core import passes
+from pypto.runtime import DeviceTensor
 
 DEFAULT_RUNTIME = passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
 GRAPH_EXECUTION_RUNTIME = passes.RuntimeKind.HOST_BUILD_GRAPH
@@ -259,7 +263,36 @@ def test_kernel_persists_logical_and_lowered_nz_signatures(tmp_path):
     assert isinstance(kernel, CompiledArtifact) and kernel.metadata is not None
     assert kernel.metadata.parameters[0].shape == (64, 128)
     assert kernel.metadata.lowered_parameters[0].shape == (1, 8, 4, 16, 16)
+    assert kernel.metadata.parameters[0].shape_is_lowered is False
+    assert kernel.metadata.lowered_parameters[0].shape_is_lowered is True
     assert kernel.metadata.return_aliases == (2,)
+
+
+@pytest.mark.parametrize("shape", [(2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32)])
+def test_program_preserves_high_rank_logical_nz_metadata(tmp_path, shape):
+    """Compilation and reload must keep logical provenance despite a rank-five ABI."""
+
+    @pl.program
+    class NzEntry:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, weight: pl.Tensor[shape, pl.INT8, pl.NZ]):
+            return
+
+    compiled = ir_compile(NzEntry, output_dir=str(tmp_path), skip_ptoas=True)
+    metadata = compiled._artifact.metadata
+    assert metadata is not None
+    assert metadata.parameters[0].shape == shape
+    assert metadata.parameters[0].shape_is_lowered is False
+    assert metadata.lowered_parameters[0].shape == tuple(block_nz_shape(shape, torch.int8))
+    assert metadata.lowered_parameters[0].shape_is_lowered is True
+    for program in (compiled, CompiledProgram.from_dir(tmp_path)):
+        infos, _, _ = program._get_metadata()
+        assert infos[0].shape_is_lowered is False
+        assert _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), infos[0]) is None
+        assert program._artifact.metadata is not None
+        lowered = program._artifact.metadata.lowered_parameters[0]
+        assert lowered.shape_is_lowered is True
+        assert _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), lowered) is None
 
 
 def test_kernel_multiple_returns_keep_full_parameter_indices(tmp_path):

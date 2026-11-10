@@ -45,9 +45,11 @@ metadata 区分逻辑调用签名 `params` 与 assembly 签名 `lowered_params`�
 `ParamInfo`。PROGRAM 参数绑定和输出分配使用 lowering 前的原始 `params`，
 从产物恢复以及选择多 orchestration 子入口时也保持这一行为；`lowered_params`
 仍用于 assembly ABI 校验。Torch 按逻辑 shape 校验。
-驻留张量校验也按逻辑坐标比较 rank-2/3/4 的逻辑 NZ 参数，包括堆叠张量及重新加载的
-元数据。只有分块后的 rank-5 NZ 元数据需要先转换调用者的 shape 再比较；这个形状计算
-不会重新排列底层存储。
+NZ 元数据记录 `shape_is_lowered`：原始签名为 `false`，lowering 后为 `true`。
+驻留张量和堆叠张量按原始 shape 直接比较，包括逻辑 rank 五及更高维度。
+lowering 后的元数据需要先将调用者的 shape 分块再比较；这个计算不会重新排列存储。
+该标记在元数据重新加载后保持不变。没有标记的旧记录保留原有约定：小于五维按逻辑
+shape 比较，更高维度采用分块转换。旧版高维逻辑 NZ 产物需要重新编译以记录明确的阶段信息。
 NZ lowering 按元素单位验证无 padding 的
 blocked 表示，dtype 不变，因此字节数一致。动态 NZ 支持逻辑 `[B, R, C]` 的 batch
 维度；blocked shape 不作为 Torch 的逻辑 shape。

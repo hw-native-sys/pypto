@@ -1715,7 +1715,12 @@ def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_p
     [
         (DataType.INT8, torch.int8, 32),
         (DataType.FP16, torch.float16, 16),
-        (DataType.FP8E4M3FN, torch.float8_e4m3fn, 32),
+        pytest.param(
+            DataType.FP8E4M3FN,
+            getattr(torch, "float8_e4m3fn", None),
+            32,
+            marks=pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Requires PyTorch float8"),
+        ),
     ],
 )
 def test_nz_device_tensor_shape_and_sidecar_round_trip(dtype, torch_dtype, c0):
@@ -1769,6 +1774,7 @@ def test_dynamic_batch_nz_validation_requires_logical_rank_three(stacked, reload
     ],
 )
 @pytest.mark.parametrize("reload_metadata", [False, True])
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="Requires PyTorch float8")
 def test_logical_nz_device_tensor_validation(declared, actual, reload_metadata):
     """Original NZ signatures must compare shapes before backend blocking."""
     info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.FP8E4M3FN, "NZ")
@@ -1810,6 +1816,36 @@ def test_logical_nz_stacked_tensor_validation(declared, reload_metadata):
         validate((2, actual[-1]))
     with pytest.raises(TypeError, match="expects dtype"):
         validate(actual, torch.float16)
+
+
+@pytest.mark.parametrize("declared", [(2, 3, 4, 256, 512), (2, 3, 4, 5, 256, 512), (1, 4, 16, 16, 32)])
+@pytest.mark.parametrize("reload_metadata", [False, True])
+def test_logical_high_rank_nz_validation_uses_provenance(declared, reload_metadata):
+    """Logical rank five can even look blocked; only provenance disambiguates it."""
+    info = _ParamInfo("weight", ir.ParamDirection.In, declared, DataType.INT8, "NZ", shape_is_lowered=False)
+    if reload_metadata:
+        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
+    assert info.shape_is_lowered is False
+    assert _validate_device_tensor(DeviceTensor(0x1000, declared, torch.int8), info) is None
+    shards = [DeviceTensor(0x1000 + i * 0x100000, declared[1:], torch.int8) for i in range(declared[0])]
+    assert (
+        _validate_stacked_tensor(StackedDeviceTensor(shards, declared, list(range(declared[0]))), info)
+        is None
+    )
+    with pytest.raises(TypeError, match="expects shape"):
+        _validate_device_tensor(DeviceTensor(0x1000, (*declared[:-1], declared[-1] * 2), torch.int8), info)
+    # For the last case, blocking this wrong-rank argument produces exactly
+    # the declared five extents. It must still be rejected as a logical input.
+    with pytest.raises(TypeError, match="expects rank"):
+        _validate_device_tensor(DeviceTensor(0x1000, (256, 128), torch.int8), info)
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", [], {}])
+def test_parameter_metadata_rejects_invalid_shape_provenance(value):
+    payload = _param_info_to_dict(_ParamInfo("w", ir.ParamDirection.In, [256, 512], DataType.INT8, "NZ"))
+    payload["shape_is_lowered"] = value
+    with pytest.raises(ValueError, match="shape_is_lowered"):
+        _param_info_from_dict(payload)
 
 
 @pytest.mark.parametrize("declared", [[2, 4, 256, 512], [8, 16, 16, 16, 32]])

@@ -128,11 +128,11 @@ def analyze_contract(
     if type(contract) is not ArtifactExecutionMode:
         raise TypeError(f"Expected ArtifactExecutionMode, got {contract!r}")
     if contract is ArtifactExecutionMode.KERNEL:
-        logical, _, _ = _extract_func_param_infos(entry_function(program))
+        logical, _, _ = _extract_func_param_infos(entry_function(program), shape_is_lowered=False)
         return logical, validate_kernel_program(program, logical)
     try:
         entry = entry_function(program)
-        logical, _, _ = _extract_func_param_infos(entry)
+        logical, _, _ = _extract_func_param_infos(entry, shape_is_lowered=False)
         return logical, return_aliases(program, entry)
     except (ValueError, TypeError):
         return None, None

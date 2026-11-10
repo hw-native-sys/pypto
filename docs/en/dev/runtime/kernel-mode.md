@@ -59,10 +59,13 @@ Metadata distinguishes `params` (logical caller signature) from `lowered_params`
 allocation use the original, pre-lowering `params`, including after reloading
 an artifact and when selecting a multi-orchestration child. `lowered_params`
 remains available for assembly ABI validation. Torch validates logical shapes.
-Resident tensor validation also compares logical rank-2/3/4 NZ parameters in
-logical coordinates, including stacked tensors and reloaded metadata. Only
-blocked rank-5 NZ metadata requires converting the caller's shape before
-comparison; this shape calculation does not repack the underlying storage.
+NZ metadata records `shape_is_lowered`: `false` for the original signature,
+`true` after lowering. Resident and stacked tensor validation compares original
+shapes directly, including logical rank five or higher. Lowered metadata requires
+blocking the caller's shape before comparison; this calculation does not repack
+storage. The marker survives metadata reloads. Legacy records without it retain
+the previous convention: ranks below five are logical, higher ranks use blocking.
+Recompile legacy high-rank logical NZ artifacts to record explicit provenance.
 NZ lowering is checked against the unpadded blocked representation in element
 units with unchanged dtype, preserving byte size. Dynamic NZ supports the logical
 `[B, R, C]` batch dimension. A blocked shape is never treated as a Torch shape.

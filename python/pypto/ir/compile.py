@@ -510,8 +510,8 @@ def compile(  # noqa: PLR0913
             original = program.get_function(name)
             lowered_entry = lowered_program.get_function(name)
             assert original is not None and lowered_entry is not None
-            child_logical, _, _ = _extract_func_param_infos(original)
-            child_lowered, _, returns = _extract_func_param_infos(lowered_entry)
+            child_logical, _, _ = _extract_func_param_infos(original, shape_is_lowered=False)
+            child_lowered, _, returns = _extract_func_param_infos(lowered_entry, shape_is_lowered=True)
             child_lowered = external_parameter_names(child_logical, child_lowered)
             metadata = ArtifactMetadata(
                 tuple(child_logical),
@@ -534,7 +534,9 @@ def compile(  # noqa: PLR0913
         )
 
     try:
-        lowered, _, returns = _extract_func_param_infos(entry_function(lowered_program))
+        lowered, _, returns = _extract_func_param_infos(
+            entry_function(lowered_program), shape_is_lowered=True
+        )
     except (ValueError, TypeError):
         # Standalone mixed kernels may lower to several core functions without
         # a canonical entry. Only the public program API retains this legacy
@@ -572,7 +574,9 @@ def _compile_artifact(  # pyright: ignore[reportUnusedFunction]
     result = _compile_to_files(program, contract=contract, **compile_kwargs)
     if _is_distributed(result.lowered_program):
         raise ValueError("Artifact compilation requires a single chip after lowering")
-    lowered, _, returns = _extract_func_param_infos(entry_function(result.lowered_program))
+    lowered, _, returns = _extract_func_param_infos(
+        entry_function(result.lowered_program), shape_is_lowered=True
+    )
     return _make_single_chip_artifact(result, lowered, len(returns), contract)
 
 
@@ -670,7 +674,9 @@ def _compile_to_files(  # noqa: PLR0913
         effective_runtime = pipeline.runtime
 
         if contract is ArtifactExecutionMode.KERNEL:
-            lowered, _, _ = _extract_func_param_infos(entry_function(transformed_program))
+            lowered, _, _ = _extract_func_param_infos(
+                entry_function(transformed_program), shape_is_lowered=True
+            )
             assert logical is not None
             lowered = external_parameter_names(logical, lowered)
             validate_lowered_signature(logical, lowered)

@@ -130,6 +130,9 @@ class _ParamInfo:
     # Layout describes either logical or lowered metadata; NZ/MX need not
     # already have their blocked rank-5 shape here.
     layout: str | None = None
+    # NZ signatures captured before/after lowering use different coordinates.
+    # None preserves the legacy convention for metadata without provenance.
+    shape_is_lowered: bool | None = None
 
     def __post_init__(self) -> None:
         # IR construction and passes own parameter legality. Metadata only
@@ -174,17 +177,19 @@ def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
 def arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[int]:
     """*arg_shape* in the parameter's own terms, ready to compare with ``info.shape``.
 
-    Original NZ metadata can retain the caller's logical rank-2/3/4 shape;
-    compare it directly. Blocked rank-5 metadata instead describes the backend
-    view, so the caller's logical shape must be blocked with the compiler's
-    rule before comparison. A shape that does not block at all (an odd row
-    count, say) is left alone so it is reported as the mismatch it is.
+    Original NZ metadata retains the caller's logical shape, even at rank 5
+    or higher. Lowered metadata describes the blocked backend view. Explicit
+    provenance selects the comparison coordinates; legacy metadata without it
+    retains the rank-based convention. A shape that does not block at all is
+    left alone so it is reported as the mismatch it is.
     """
     if info.layout != "NZ":
         return list(arg_shape)
-    # Layout describes storage, not the compilation stage of the metadata.
-    # Logical signatures must bypass both blocking and the blocked-batch guard.
-    if info.shape is not None and len(info.shape) < 5:
+    # Rank alone cannot identify a lowered shape: logical tensors may also
+    # have five axes, including a trailing [16, c0] pair resembling a block.
+    if info.shape_is_lowered is False:
+        return list(arg_shape)
+    if info.shape_is_lowered is None and info.shape is not None and len(info.shape) < 5:
         return list(arg_shape)
     # A dynamic blocked batch can only come from logical [B, R, C]: the NZ
     # pass rejects dynamic leading extents at rank > 3. Entry code reads B
@@ -272,6 +277,7 @@ def _param_info_to_dict(info: _ParamInfo) -> dict[str, Any]:
         "shape": list(info.shape) if info.shape is not None else None,
         "dtype": str(info.dtype),
         "layout": info.layout,
+        **({"shape_is_lowered": info.shape_is_lowered} if info.shape_is_lowered is not None else {}),
     }
 
 
@@ -329,12 +335,17 @@ def _param_info_from_dict(d: dict[str, object]) -> _ParamInfo:
     ):
         raise ValueError(f"'layout' must be null or a TensorLayout name, got {raw_layout!r}")
 
+    shape_is_lowered = d.get("shape_is_lowered")
+    if shape_is_lowered is not None and not isinstance(shape_is_lowered, bool):
+        raise ValueError(f"'shape_is_lowered' must be null or a bool, got {shape_is_lowered!r}")
+
     return _ParamInfo(
         name=name,
         direction=direction,
         shape=shape,
         dtype=_datatype_from_string(raw_dtype),
         layout=raw_layout,
+        shape_is_lowered=shape_is_lowered,
     )
 
 
@@ -365,7 +376,9 @@ def validate_l2_capacity(parameters: Sequence[ParamInfo]) -> None:
         raise ValueError("Signature exceeds L2 argument capacity")
 
 
-def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[int], list[Any]]:
+def _extract_func_param_infos(
+    func: Function, *, shape_is_lowered: bool | None = None
+) -> tuple[list[_ParamInfo], list[int], list[Any]]:
     """Extract parameter metadata from a specific IR function.
 
     Returns:
@@ -394,7 +407,14 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
             )
 
         param_infos.append(
-            _ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype, layout=layout)
+            _ParamInfo(
+                name=param.name_hint,
+                direction=direction,
+                shape=shape,
+                dtype=dtype,
+                layout=layout,
+                shape_is_lowered=shape_is_lowered if layout == "NZ" else None,
+            )
         )
 
         # Only pure Out params can be auto-allocated in return-style calls.
