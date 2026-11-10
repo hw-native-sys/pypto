@@ -8,6 +8,11 @@ A one-off compile-and-dispatch call is enough for a quick test. Production
 code instead amortizes setup — forking chip processes, assembling kernels —
 across many dispatches on a reusable `DistributedWorker`.
 
+Use `worker=` to select the logical child for a dispatch. In a HOST
+orchestrator it indexes the configured devices, and in a POD orchestrator
+it indexes HOST workers. `pld.num_workers()` returns the number of immediate
+children. HOST code can still use `device=` and `pld.world_size()`.
+
 ## DistributedWorker
 
 Obtained via `compiled.prepare()`. Setup (fork, comm bootstrap, kernel assembly)

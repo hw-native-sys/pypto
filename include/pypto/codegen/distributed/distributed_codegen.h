@@ -132,7 +132,6 @@ class DistributedCodegen : public CodegenBase {
   // Statement visitors
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
-  void VisitStmt_(const ir::ReturnStmtPtr& op) override;
   void VisitStmt_(const ir::ForStmtPtr& op) override;
   void VisitStmt_(const ir::IfStmtPtr& op) override;
   void VisitStmt_(const ir::SeqStmtsPtr& op) override;
@@ -142,6 +141,7 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::CallPtr& op) override;
   void VisitExpr_(const ir::SubmitPtr& op) override;
   void VisitExpr_(const ir::VarPtr& op) override;
+  void VisitExpr_(const ir::IterArgPtr& op) override;
   void VisitExpr_(const ir::ConstIntPtr& op) override;
   void VisitExpr_(const ir::ConstFloatPtr& op) override;
   void VisitExpr_(const ir::ConstBoolPtr& op) override;
@@ -185,8 +185,13 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
+  struct ReturnPosition {
+    ir::TypePtr type;
+    std::optional<size_t> output_param;
+  };
+  [[nodiscard]] const std::vector<ReturnPosition>& GetReturnPlan(const ir::FunctionPtr& func);
   // Code structure emission
-  void EmitImports();
+  void EmitImports(const ir::FunctionPtr& entry);
   void EmitFunction(const ir::FunctionPtr& func);
   void EmitEntryFunction();
   // Tag the emitted orchestrator/entry with a sentinel attribute so the runtime
@@ -277,7 +282,8 @@ class DistributedCodegen : public CodegenBase {
 
   ir::ProgramPtr program_;
   CodeEmitter emitter_;
-
+  std::map<const ir::Function*, std::vector<ReturnPosition>> return_plans_;
+  std::map<std::string, ir::TensorTypePtr> prepared_return_tensors_;
   // Stack of currently-open ``CommDomainScopeStmt``s, pushed on entry to
   // ``VisitStmt_(CommDomainScopeStmtPtr)`` and popped on exit. Used by
   // ``EmitCallToWorker`` to route each ``DistributedTensor`` arg to the
