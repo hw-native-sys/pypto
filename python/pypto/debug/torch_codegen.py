@@ -1153,7 +1153,12 @@ def _row_reduce_handler(method: str) -> OpHandler:
     def handler(a: list[str], kw: dict[str, Any]) -> str:
         base = f"{a[0]}.{method}(dim=-1, keepdim=True)"
         if kw.get("out_layout") == _ir.TileLayout.row_major:
-            return f"torch.nn.functional.pad({base}, (0, max(32 // {a[0]}.element_size(), 1) - 1))"
+            # A bare `max(...)` call here would resolve to an IR variable
+            # that happens to shadow the builtin (e.g. a row_max result
+            # itself named `max`) rather than the builtin function, since
+            # `_unique_name()` doesn't reserve builtin names. `or` needs no
+            # name lookup at all, so it can't collide.
+            return f"torch.nn.functional.pad({base}, (0, (32 // {a[0]}.element_size() or 1) - 1))"
         return base
 
     return handler

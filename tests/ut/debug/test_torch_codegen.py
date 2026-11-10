@@ -361,6 +361,63 @@ def test_tensor_row_reduction():
     assert ".sum(dim=-1, keepdim=True)" in code
 
 
+def test_tile_row_sum_row_major_pads_to_declared_shape_and_executes():
+    """tile.row_sum(out_layout=row_major) pads the generated expr to [rows, pad_cols] (issue #3319).
+
+    DeduceTileRowReductionType declares [rows, pad_cols] for out_layout=row_major;
+    without padding, the generated plain `.sum(dim=-1, keepdim=True)` would only
+    produce [rows, 1] and fail the TileType shape check.
+    """
+    a = _tile_var("a", [4, 48])
+    tmp = _tile_var("tmp", [4, 48])
+    out = _tile_var("out", [4, 8])
+    call = _op_call("tile.row_sum", [a, tmp], {"out_layout": ir.TileLayout.row_major})
+    body = ir.SeqStmts(
+        [ir.AssignStmt(out, call, _span()), ir.ReturnStmt([out], _span())],
+        _span(),
+    )
+    func = _simple_function("f", [a, tmp], body, [out.type])
+    code = torch_codegen(func)
+    assert "torch.nn.functional.pad(" in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    value = torch.randn(4, 48)
+    scratch = torch.zeros(4, 48)
+    result = ns["f"](value, scratch)
+    assert tuple(result.shape) == (4, 8)
+    torch.testing.assert_close(result[:, 0:1], value.sum(dim=-1, keepdim=True))
+
+
+def test_tile_row_max_row_major_survives_result_named_max():
+    """A result literally named ``max`` must not shadow the builtin used to pad it.
+
+    `_unique_name()` is free to pick any valid identifier, including one that
+    shadows a builtin -- `max = pl.tile.row_max(...)` is legal PyPTO source.
+    A bare `max(...)` call in the generated padding expression would then
+    resolve to the just-assigned local (a Tensor), not the builtin, and
+    raise instead of padding.
+    """
+    a = _tile_var("a", [4, 48])
+    tmp = _tile_var("tmp", [4, 48])
+    out = _tile_var("max", [4, 8])
+    call = _op_call("tile.row_max", [a, tmp], {"out_layout": ir.TileLayout.row_major})
+    body = ir.SeqStmts(
+        [ir.AssignStmt(out, call, _span()), ir.ReturnStmt([out], _span())],
+        _span(),
+    )
+    func = _simple_function("f", [a, tmp], body, [out.type])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    value = torch.randn(4, 48)
+    scratch = torch.zeros(4, 48)
+    result = ns["f"](value, scratch)
+    assert tuple(result.shape) == (4, 8)
+    torch.testing.assert_close(result[:, 0:1], value.amax(dim=-1, keepdim=True))
+
+
 # ---------------------------------------------------------------------------
 # Test: tile ops
 # ---------------------------------------------------------------------------
