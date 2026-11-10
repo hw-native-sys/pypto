@@ -418,6 +418,36 @@ def test_tile_row_max_row_major_survives_result_named_max():
     torch.testing.assert_close(result[:, 0:1], value.amax(dim=-1, keepdim=True))
 
 
+def test_tile_row_sum_row_major_survives_result_named_torch():
+    """A result literally named ``torch`` must not shadow the torch module.
+
+    `_unique_name()` only avoids Python keywords, not the `torch` import --
+    `torch = pl.tile.row_sum(...)` is legal PyPTO source. A bare
+    `torch.nn.functional.pad(...)` call in the generated padding expression
+    would then resolve `torch` to the just-assigned local (a Tensor) rather
+    than the module, in the very statement assigning it, and raise
+    UnboundLocalError instead of padding.
+    """
+    a = _tile_var("a", [4, 48])
+    tmp = _tile_var("tmp", [4, 48])
+    out = _tile_var("torch", [4, 8])
+    call = _op_call("tile.row_sum", [a, tmp], {"out_layout": ir.TileLayout.row_major})
+    body = ir.SeqStmts(
+        [ir.AssignStmt(out, call, _span()), ir.ReturnStmt([out], _span())],
+        _span(),
+    )
+    func = _simple_function("f", [a, tmp], body, [out.type])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    value = torch.randn(4, 48)
+    scratch = torch.zeros(4, 48)
+    result = ns["f"](value, scratch)
+    assert tuple(result.shape) == (4, 8)
+    torch.testing.assert_close(result[:, 0:1], value.sum(dim=-1, keepdim=True))
+
+
 def test_tile_row_max_row_major_pads_by_ir_dtype_not_torch_carrier():
     """Pad width comes from the IR dtype, not the (possibly wider) Torch carrier.
 

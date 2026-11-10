@@ -121,6 +121,17 @@ def _copy_region_attrs(src, dst):
     return dst
 
 
+def _pad_row_major(tile, pad_width):
+    # Underscore-prefixed so _unique_name() (which strips leading/trailing
+    # underscores from every IR-sourced hint) can never generate a variable
+    # name that collides with this one -- unlike a bare `torch.nn.functional
+    # .pad(...)` call, which a result legitimately named `torch` would shadow
+    # in the *caller's* scope. Referencing `torch` here resolves through this
+    # function's own module scope regardless of what the caller named its
+    # locals (issue #3319).
+    return torch.nn.functional.pad(tile, (0, pad_width))
+
+
 # pto-isa TileSplitAxis codes carried by the cross-core ``split`` attr:
 # 0 = no split, 1 = up/down, 2 = left/right, 3 / 4 = the same two axes over an
 # ODD extent (lane 0 takes the ceil half, lane 1 the floor one).
@@ -1865,7 +1876,10 @@ class TorchCodegen(_ir.IRVisitor):
             )
             method = _ROW_REDUCTION_METHODS[op_name]
             base = f"{arg_strs[0]}.{method}(dim=-1, keepdim=True)"
-            self._expr_result = f"torch.nn.functional.pad({base}, (0, {pad_cols.value - 1}))"
+            # _pad_row_major, not a bare torch.nn.functional.pad(...): a
+            # result legitimately named `torch` would otherwise shadow the
+            # module in *this* generated statement's own scope.
+            self._expr_result = f"_pad_row_major({base}, {pad_cols.value - 1})"
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):
