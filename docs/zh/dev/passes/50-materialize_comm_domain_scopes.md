@@ -89,7 +89,8 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
    回指：仅当重建出的类型与 Var 的类型结构相等时才采用，真正的 shape / dtype /
    view 分歧留给验证器报错。同一 alloc 被 N 次
    `pld.tensor.window` 物化的多个 view 共享同一 `shared_ptr<const WindowBuffer>`。
-   chip-orch / InCore 形参类型不动。
+   CHIP orchestrator 的未绑定形参只有在所有调用都传入同一个已知窗口时才绑定该窗口。
+   各调用点保留自己的实参窗口身份。
 
 7. **聚类成 group**。按源代码顺序遍历 alloc 列表，匹配描述符已存在的
    comm-domain scope 则追加 slot，否则新开一个。`CommDomainScopeStmt wrappers in each host_orch body` 最终

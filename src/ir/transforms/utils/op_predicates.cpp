@@ -15,11 +15,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -27,6 +30,95 @@ namespace ir {
 namespace op_predicates {
 
 using core_affinity::CrossCoreRole;
+
+std::string DistributedOpContextError(const OpPtr& op, std::optional<Level> level, std::optional<Role> role,
+                                      bool in_device_scope) {
+  if (!op) return "";
+  const bool count = IsOp(op, "pld.system.num_workers");
+  const bool world = IsOp(op, "pld.system.world_size");
+  const bool alloc = IsOp(op, "pld.tensor.alloc_window_buffer");
+  if (count || world || alloc) {
+    const bool allowed_level = level == Level::HOST || (!world && level == Level::CLUSTER_0);
+    // An unspecified role uses the orchestration level's default. Explicit
+    // SubWorkers never own a child worker pool, even when their level is HOST.
+    if (!allowed_level || role == Role::SubWorker || in_device_scope) {
+      return op->name_ + " can only be called in " + (world ? "HOST" : "HOST or CLUSTER_0") +
+             " orchestration context (role=Orchestrator, not inside InCore / SPMD scopes)";
+    }
+  }
+  // These namespaces contain communication, not window declarations or topology
+  // queries. Match families by namespace and named operations through IsOp; an
+  // alias or a separately constructed Op must not bypass the L4 restriction.
+  if (level == Level::CLUSTER_0 &&
+      (IsManagedTensorCollective(op) || op->name_.rfind("builtin.tensor.", 0) == 0 ||
+       op->name_.rfind("pld.tile.", 0) == 0 || IsOp(op, "pld.tensor.remote_store") ||
+       IsOp(op, "pld.tensor.put") || IsOp(op, "pld.tensor.get") || IsOp(op, "pld.system.notify") ||
+       IsOp(op, "pld.system.wait") || IsOp(op, "pld.system.defer_wait"))) {
+    return op->name_ +
+           " is not supported in CLUSTER_0; place communication in HOST or device "
+           "orchestration and dispatch it from CLUSTER_0";
+  }
+  return "";
+}
+
+std::vector<std::pair<std::string, Span>> DistributedOpContextErrors(const FunctionPtr& func) {
+  class ContextVisitor : public IRVisitor {
+   public:
+    std::optional<Level> level;
+    std::optional<Role> role;
+    int device_depth = 0;
+    std::vector<std::pair<std::string, Span>> errors;
+
+    void Check(const OpPtr& op, const Span& span) {
+      auto message = DistributedOpContextError(op, level, role, device_depth != 0);
+      if (!message.empty()) errors.emplace_back(std::move(message), span);
+    }
+
+    void VisitExpr_(const CallPtr& op) override {
+      Check(op->op_, op->span_);
+      IRVisitor::VisitExpr_(op);
+    }
+    void VisitExpr_(const SubmitPtr& op) override {
+      Check(op->op_, op->span_);
+      IRVisitor::VisitExpr_(op);
+    }
+    void VisitStmt_(const HierarchyScopeStmtPtr& op) override {
+      // Scope headers are evaluated by the enclosing context, not the body.
+      // Visiting only the body after changing context also avoids double-walking
+      // attrs via the base handler (and incorrectly legalizing cluster headers).
+      VisitScopeAttrs(op);
+      const auto saved_level = level;
+      const auto saved_role = role;
+      level = op->level_;
+      role = op->role_;
+      VisitStmt(op->body_);
+      level = saved_level;
+      role = saved_role;
+    }
+    void VisitStmt_(const InCoreScopeStmtPtr& op) override {
+      VisitScopeAttrs(op);
+      ++device_depth;
+      VisitStmt(op->body_);
+      --device_depth;
+    }
+    void VisitStmt_(const SpmdScopeStmtPtr& op) override {
+      VisitExpr(op->core_num_);
+      VisitScopeAttrs(op);
+      ++device_depth;
+      VisitStmt(op->body_);
+      --device_depth;
+    }
+  } visitor;
+  if (!func) return {};
+  visitor.level = func->level_;
+  visitor.role = func->role_;
+  const auto type = func->func_type_;
+  visitor.device_depth = type == FunctionType::InCore || type == FunctionType::AIC ||
+                         type == FunctionType::AIV || type == FunctionType::Group ||
+                         type == FunctionType::Spmd;
+  visitor.VisitStmt(func->body_);
+  return std::move(visitor.errors);
+}
 
 bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3) {
   if (!IsOp(call, "tile.cast") || call->args_.empty()) return false;
