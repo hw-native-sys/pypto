@@ -12,6 +12,7 @@
 import ast
 import keyword as _keyword_mod
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -42,6 +43,7 @@ from .region_context import RegionContext
 from .source_comments import SourceCommentTracker
 from .syntax_helpers import (
     is_cache_policy_marker,
+    is_dep_var_type,
     is_pl_call,
     is_self_method_call,
     spmd_body_calls,
@@ -1376,7 +1378,8 @@ class ScopeParser:
                         self.callbacks.body(stmt.body)
                         self.comments.discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                         self.services.scope_manager.exit_scope(leak_vars=True)
-                self.services.scope_manager.exit_scope(leak_vars=True)
+                bindings = self.services.scope_manager.exit_scope(leak_vars=True)
+        self.remember_graph_dispatch_tensor(scope_attrs, bindings)
 
     def parse_spmd_scope(
         self,
@@ -1534,7 +1537,7 @@ class ScopeParser:
         # ``predicate`` in particular carries live SSA Vars (the operand tensor and
         # its indices), which ConvertToSSA versions via SubstScopeAttrs.
         tid_var = self.services.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
-        self.services.scope_manager.define_var(optional_vars.id, tid_var, span=span)
+        self.bind_dispatch_capture(optional_vars.id, tid_var, span)
         scope_attrs = self.build_spmd_scope_attrs(
             dep_vars, allow_early_resolve, predicate, tid_var, dump_vars=dump_vars
         )
@@ -1545,10 +1548,7 @@ class ScopeParser:
         # ``AssignStmt(tid, TupleGetItem(ret_tmp, n_outputs))`` binding. Pop/re-push
         # pending leading comments so they land on the surviving SpmdScopeStmt, not
         # the placeholder (mirrors _parse_at_scope).
-        leading = self.services.builder.pop_pending_leading_comments()
-        placeholder_rhs = ir.create_op_call("system.task_invalid", [], {}, span)
-        self.services.builder.assign(tid_var, placeholder_rhs, span=span)
-        self.services.builder.push_pending_leading_comments(leading)
+        self.emit_scope_task_id_placeholder(scope_attrs, span)
 
         # Emit the body via the shared helper — identical shape to the plain
         # with-form, plus the task_id_var / manual_dep_edges built into scope_attrs
@@ -1919,8 +1919,8 @@ class ScopeParser:
         sync_start: bool | None = None,
         manual: bool | None = None,
         attrs: "list[tuple[str, Any]] | None" = None,
-    ) -> None:
-        """Build a scope statement from a with-statement body."""
+    ) -> list[ir.Var]:
+        """Build a scope statement and return the IR Vars exported by its body."""
         attrs = self.merge_forward_sticky_dump(attrs, scope_kind)
         # Hoist the body's ``pl.set_cache_policy`` markers onto this scope before
         # it begins — ``begin_scope`` fixes the attrs, so there is no later point
@@ -1939,17 +1939,119 @@ class ScopeParser:
             sync_start=sync_start,
             manual=manual,
             attrs=attrs,
-        ):
+        ) as scope:
             with (
                 self.regions.scope_kind_context(scope_kind),
                 self.regions.incore_user_split_context(scope_kind, split),
             ):
-                self.services.scope_manager.enter_scope("scope")
+                self.services.scope_manager.enter_scope(
+                    "graph" if scope_kind == ir.ScopeKind.Graph else "scope"
+                )
                 self.callbacks.body(stmt.body)
                 self.comments.discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
-                self.services.scope_manager.exit_scope(leak_vars=True)
+                # A recorded Definition owns its TaskIds and TaskId arrays.
+                # Tensor bindings still leak for outlining, while excluding
+                # these names preserves an outer binding shadowed by the body.
+                local_task_ids = (
+                    {
+                        name
+                        for name, value in self.services.scope_manager.scopes[-1].items()
+                        if isinstance(value, ir.Expr) and is_dep_var_type(value.type)
+                    }
+                    if scope_kind == ir.ScopeKind.Graph
+                    else None
+                )
+                bindings = self.services.scope_manager.exit_scope(
+                    leak_vars=True, exclude_names=local_task_ids
+                )
+        self.remember_graph_dispatch_tensor(attrs, bindings)
+        exported = [
+            value
+            for name, value in bindings.items()
+            if isinstance(value, ir.Var) and (local_task_ids is None or name not in local_task_ids)
+        ]
+        if local_task_ids:
+            self.restore_graph_rebinds(bindings, local_task_ids, span)
+            # A TaskId can hide an earlier assignment to a caller's tensor
+            # in the symbol table. Check the actual IR definition by identity.
+            shadowed_tensors = {
+                value.unique_id
+                for name in local_task_ids
+                if isinstance(value := self.services.scope_manager.lookup_var(name), ir.Var)
+                and isinstance(value.type, (ir.TensorType, ir.DistributedTensorType))
+            }
+            if shadowed_tensors:
+                exported.extend(
+                    var
+                    for var in ir.collect_def_vars(scope.get_result().body)
+                    if var.unique_id in shadowed_tensors
+                )
+        return exported
 
-    def parse_graph_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+    def restore_graph_rebinds(
+        self, bindings: dict[str, Any], local_task_ids: set[str], span: "ir.Span"
+    ) -> None:
+        """Restore bindings shadowed by recorded TaskIds."""
+        if self.function.jit_graph_rebinds is None:
+            return
+        manager = self.services.scope_manager
+        for name in local_task_ids:
+            captured = bindings[name]
+            outer = manager.lookup_var(name)
+            entry = outer if isinstance(outer, (ir.Var, ir.ConstInt)) else None
+            if (
+                isinstance(captured, ir.Var)
+                and (shadowed := self.capture_predecessor(captured, entry)) is not None
+            ):
+                if entry is None or not shadowed.same_as(entry):
+                    manager.define_var(name, shadowed)
+                continue
+            for previous in self.graph_rebind_predecessors(name):
+                if isinstance(previous, int):
+                    manager.define_var(name, ir.ConstInt(previous, DataType.INDEX, span))
+                    break
+                if (value := manager.lookup_var(previous)) is not None:
+                    manager.define_var(name, value)
+                    break
+
+    def graph_rebind_predecessors(self, name: str) -> Iterator[str | int]:
+        aliases = self.function.jit_graph_rebinds or {}
+        # Each generated alias points to an older name or a folded dimension.
+        for _ in aliases:
+            previous = aliases.get(name)
+            if previous is None:
+                break
+            yield previous
+            if isinstance(previous, int):
+                break
+            name = previous
+
+    def remember_graph_dispatch_tensor(
+        self, attrs: "list[tuple[str, Any]] | None", bindings: dict[str, Any]
+    ) -> None:
+        """Keep a captured dispatch's actual tensor write as its typed predecessor."""
+        if not self.function.jit_graph_rebinds or not self.regions.is_inside_scope(ir.ScopeKind.Graph):
+            return
+        tid = next((value for key, value in attrs or () if key == "task_id_var"), None)
+        if not isinstance(tid, ir.Var):
+            return
+        name = tid.name_hint
+        for binding_name, value in reversed(bindings.items()):
+            if (
+                isinstance(value, ir.Var)
+                and isinstance(value.type, (ir.TensorType, ir.DistributedTensorType))
+                and (binding_name == name or name in self.graph_rebind_predecessors(binding_name))
+            ):
+                self.function.shadowed_capture_bindings[tid.unique_id] = value
+                manager = self.services.scope_manager
+                current = manager.lookup_var(name)
+                if isinstance(current, ir.Var) and current.same_as(value):
+                    manager.define_var(name, tid)
+                break
+
+    def parse_graph_scope(
+        self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
+    ) -> None:
         """Parse ``with pl.graph("name"):`` into a GraphScopeStmt.
 
         The region name is positional and required: ``OutlineGraphScopes`` names
@@ -2013,23 +2115,25 @@ class ScopeParser:
                 span=span,
                 hint="Use 'with pl.graph(\"decoder_layer\"):'",
             )
-        # ``dumps=`` marks tensors for selective dump on the Graph task the region
-        # outlines to (codegen emits it on the graph dispatch itself, distinct from
-        # the kernel dispatches recorded inside) — the same ``dump_vars`` carrier a
-        # forward-sticky ``pl.dump_tag`` merges in, and the surface the printer
-        # emits it back as.
-        dump_vars: list[ir.Var] = []
-        seen_dumps = False
+        # Graph uses the same invocation-local dependency/capture carriers as
+        # pl.at. They belong to the outer Submit, not the recorded function's
+        # parameters or immutable Definition key. Keep all other dispatch knobs
+        # rejected: a Graph does not place a kernel or accept a predicate.
+        keywords: dict[str, ast.keyword] = {}
         for kw in context_expr.keywords:
-            if kw.arg != "dumps":
+            if kw.arg not in ("deps", "dumps"):
                 raise ParserSyntaxError(
                     f"pl.graph() got unexpected keyword argument '{kw.arg or '**kwargs'}'",
                     span=span,
-                    hint="pl.graph() takes the region name and an optional `dumps=[...]`: "
-                    "'with pl.graph(\"decoder_layer\"):'",
+                    hint="Use a region name, optional `deps=[...]` / `dumps=[...]`, "
+                    "and an optional `as done` completion capture.",
                 )
-            dump_vars = self.parse_scope_dumps_once(kw, "pl.graph", seen_dumps)
-            seen_dumps = True
+            if kw.arg in keywords:
+                raise ParserSyntaxError(
+                    f"pl.graph() got multiple values for argument '{kw.arg}'",
+                    span=self.services.span_tracker.get_span(kw),
+                )
+            keywords[kw.arg] = kw
 
         name = self.parse_scope_name_hint(context_expr.args[0], "pl.graph()")
         if not name:
@@ -2039,13 +2143,38 @@ class ScopeParser:
                 hint="The name becomes the recorded graph's symbol: 'with pl.graph(\"decoder_layer\"):'",
             )
 
-        self.parse_scope_body(
-            stmt,
-            ir.ScopeKind.Graph,
-            span,
-            name_hint=name,
-            attrs=[("dump_vars", dump_vars)] if dump_vars else None,
+        capture_name = optional_vars.id if isinstance(optional_vars, ast.Name) else None
+        previous_capture = (
+            self.services.scope_manager.lookup_var(capture_name) if capture_name is not None else None
         )
+        scope_attrs = self.parse_at_meta(
+            keywords.get("deps"),
+            None,
+            keywords.get("dumps"),
+            optional_vars,
+            False,
+            None,
+            span,
+            construct="pl.graph",
+        )
+        tid_var = self.emit_scope_task_id_placeholder(scope_attrs, span)
+        exported = self.parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name, attrs=scope_attrs)
+        if tid_var is not None and capture_name is not None:
+            if (
+                isinstance(previous_capture, ir.Var)
+                and isinstance(previous_capture.type, ir.ScalarType)
+                and previous_capture.type.dtype == DataType.TASK_ID
+                and not self.services.scope_manager.strict_ssa
+            ):
+                # Keep the placeholder separate from incoming dependencies. Only
+                # the completed Graph assigns the existing binding, so SSA can
+                # carry it through loops like an ordinary assignment.
+                self.services.scope_manager.define_var(capture_name, previous_capture, span=span)
+                tid_var = self.callbacks.assign(capture_name, tid_var, span)
+            # Bind only after parsing the recording. A same-name assignment
+            # inside the body must not write through the completion placeholder.
+            self.bind_dispatch_capture(capture_name, tid_var, span)
+            self.dispatch.record_produced_vars(exported, tid_var)
 
     def parse_at_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
@@ -2114,16 +2243,9 @@ class ScopeParser:
         # on the placeholder — they belong on the surviving scope. We pop the
         # pending-comment stack here and re-push it so the scope, emitted
         # next, absorbs them.
-        tid_var: ir.Var | None = None
-        if scope_attrs is not None:
-            for k, v in scope_attrs:
-                if k == "task_id_var":
-                    tid_var = v
-                    leading = self.services.builder.pop_pending_leading_comments()
-                    placeholder_rhs = ir.create_op_call("system.task_invalid", [], {}, span)
-                    self.services.builder.assign(v, placeholder_rhs, span=span)
-                    self.services.builder.push_pending_leading_comments(leading)
-                    break
+        tid_var = self.emit_scope_task_id_placeholder(scope_attrs, span)
+        if tid_var is not None and isinstance(optional_vars, ast.Name):
+            self.bind_dispatch_capture(optional_vars.id, tid_var, span)
 
         if not is_core_group:
             # SubWorker scopes are no longer supported as inline `with pl.at(...)`
@@ -2259,6 +2381,8 @@ class ScopeParser:
         allow_early_resolve: bool,
         predicate: "ir.Expr | None",
         span: "ir.Span",
+        *,
+        construct: str = "pl.at",
     ) -> "list[tuple[str, Any]] | None":
         """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` /
         ``no_dep_args=`` / ``dumps=`` / ``predicate=`` kwarg set and a
@@ -2292,8 +2416,10 @@ class ScopeParser:
             Expr carrying live SSA Vars (the operand tensor and its indices);
             the outliner moves it onto ``Submit::predicate_``.
 
-        The ``tid`` Var is defined in the outer scope so subsequent statements
-        (e.g. another ``pl.at(..., deps=[tid])``) can reference it.
+        Graph scopes reuse the deps/dump/capture subset. ``construct`` changes
+        diagnostic labels only; all paths use the same typed scope carriers.
+
+        The caller binds the capture Var at the scope's visibility boundary.
         """
         # ``dumps=`` is the explicit scope-level dump surface (symmetric with
         # ``deps=``) and also the print/reparse round-trip surface. The
@@ -2301,7 +2427,7 @@ class ScopeParser:
         # :meth:`ScopeParser.parse_scope_body` (the single injection point shared by the
         # ``pl.at`` and ``pl.cluster`` paths), so it is
         # not consulted here.
-        dump_vars: list[ir.Var] = self.parse_scope_dumps_kwarg(dumps_kw, "pl.at") if dumps_kw else []
+        dump_vars: list[ir.Var] = self.parse_scope_dumps_kwarg(dumps_kw, construct) if dumps_kw else []
 
         if (
             deps_kw is None
@@ -2316,7 +2442,9 @@ class ScopeParser:
         attrs: list[tuple[str, Any]] = []
 
         dep_vars = (
-            self.dispatch.parse_submit_deps_kwarg("pl.at()", [deps_kw], span) if deps_kw is not None else []
+            self.dispatch.parse_submit_deps_kwarg(f"{construct}()", [deps_kw], span)
+            if deps_kw is not None
+            else []
         )
         if dep_vars:
             # Attr keys mirror the C++ ``kAttrManualDepEdges`` /
@@ -2336,12 +2464,11 @@ class ScopeParser:
         if optional_vars is not None:
             if not isinstance(optional_vars, ast.Name):
                 raise ParserSyntaxError(
-                    "`as` target on `with pl.at(...)` must be a plain variable name",
+                    f"`as` target on `with {construct}(...)` must be a plain variable name",
                     span=span,
-                    hint="Use `with pl.at(...) as tid:` (single name; nested tuples are not allowed).",
+                    hint=f"Use `with {construct}(...) as tid:` (single name; nested tuples are not allowed).",
                 )
             tid_var = self.services.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
-            self.services.scope_manager.define_var(optional_vars.id, tid_var, span=span)
             attrs.append(("task_id_var", tid_var))
 
         # ``allow_early_resolve`` — a plain bool the outliner reads off the scope
@@ -2355,10 +2482,55 @@ class ScopeParser:
         # resolved dep list lives; ``pl.at`` accepts ``deps=`` on every form, so
         # the default ``deps_accepted=True`` hint is always the right advice.
         if predicate is not None:
-            self.dispatch.validate_predicate_deps("pl.at()", predicate, dep_vars, span)
+            self.dispatch.validate_predicate_deps(f"{construct}()", predicate, dep_vars, span)
             attrs.append(("predicate", predicate))
 
         return attrs if attrs else None
+
+    def bind_dispatch_capture(self, name: str, tid: "ir.Var", span: "ir.Span") -> None:
+        manager = self.services.scope_manager
+        if self.function.jit_graph_rebinds is not None:
+            previous = manager.lookup_var(name)
+            if isinstance(previous, (ir.Var, ir.ConstInt)) and not previous.same_as(tid):
+                self.function.shadowed_capture_bindings[tid.unique_id] = previous
+        manager.define_var(name, tid, span=span)
+
+    def capture_predecessor(
+        self,
+        capture: "ir.Var",
+        stop_at: "ir.Var | ir.ConstInt | None" = None,
+        *,
+        allow_task_array: bool = False,
+    ) -> "ir.Var | ir.ConstInt | None":
+        """Find the prior typed binding, stopping at a visible outer binding if given."""
+        predecessors = self.function.shadowed_capture_bindings
+        while (previous := predecessors.get(capture.unique_id)) is not None:
+            if (
+                isinstance(previous, ir.ConstInt)
+                or not is_dep_var_type(previous.type)
+                or (allow_task_array and isinstance(previous.type, ir.ArrayType))
+                or (stop_at is not None and previous.same_as(stop_at))
+            ):
+                return previous
+            capture = previous
+        return None
+
+    def emit_scope_task_id_placeholder(
+        self, attrs: "list[tuple[str, Any]] | None", span: "ir.Span"
+    ) -> "ir.Var | None":
+        """Give SSA a definition before dispatch; the generic outliner replaces it.
+
+        Keep this immediately before the scope. Leading comments belong to the
+        surviving scope rather than to this transient invalid-id assignment.
+        """
+        for key, value in attrs or []:
+            if key == "task_id_var":
+                leading = self.services.builder.pop_pending_leading_comments()
+                rhs = ir.create_op_call("system.task_invalid", [], {}, span)
+                self.services.builder.assign(value, rhs, span=span)
+                self.services.builder.push_pending_leading_comments(leading)
+                return value
+        return None
 
     def parse_at_no_dep_args_kwarg(self, kw: "ast.keyword") -> list[ir.Var]:
         """Resolve ``pl.at(no_dep_args=[t1, t2])`` entries to outer-scope tensor Vars.
@@ -2524,18 +2696,19 @@ class ScopeParser:
             func = context_expr.func
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
                 # ``as <target>`` binds the producer TaskId of the outlined kernel
-                # dispatch. It is meaningful on ``pl.at(...) as tid:`` (InCore /
-                # Hierarchy scope) and ``pl.spmd(...) as tid:`` (grid dispatch).
+                # dispatch. It is meaningful on at (InCore / Hierarchy), spmd
+                # (grid dispatch), and graph (whole-region completion).
                 # Reject it on every other scope construct so misuses surface at
                 # parse time rather than silently dropping the binding.
-                if optional_vars is not None and func.attr not in ("at", "spmd"):
+                if optional_vars is not None and func.attr not in ("at", "spmd", "graph"):
                     raise ParserSyntaxError(
                         f"`with pl.{func.attr}(...) as ...:` is not supported "
-                        "— the `as` clause only applies to `with pl.at(...) as tid:` and "
-                        "`with pl.spmd(...) as tid:`",
+                        "— the `as` clause only applies to `with pl.at(...) as tid:`, "
+                        "`with pl.spmd(...) as tid:` and `with pl.graph(...) as tid:`",
                         span=self.services.span_tracker.get_span(stmt),
                         hint="Drop the `as` target, or use `with pl.at(...) as tid:` / "
-                        "`with pl.spmd(...) as tid:` to capture the outlined dispatch's "
+                        "`with pl.spmd(...) as tid:` / `with pl.graph(...) as tid:` "
+                        "to capture the outlined dispatch's "
                         "producer TaskId.",
                     )
 
@@ -2571,7 +2744,7 @@ class ScopeParser:
 
                 # with pl.graph("name"): ...
                 if func.attr == "graph":
-                    self.parse_graph_scope(stmt, context_expr)
+                    self.parse_graph_scope(stmt, context_expr, optional_vars=optional_vars)
                     return
 
                 # pl.at(level=..., role=..., deps=...) [as tid]

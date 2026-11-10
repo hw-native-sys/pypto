@@ -108,36 +108,78 @@ A library of real-world models and primitive tensor functions built **on top of*
 
 **Interface with pypto:** pypto-lib programs are standard pypto programs — they use the same `@pl.program`/`@pl.function` DSL and compile through the same pipeline. No special API exists between them; pypto-lib is a consumer of the pypto framework.
 
-**Compiler CI coverage:** The `pypto-lib-compile` job compiles all formal runnable
-entries selected by pypto-lib's `.github/scripts/detect_changes.py --all`, using
-its platform ownership rules for A2/A3 and A5. Drafts and non-runnable helpers are
-excluded, including the CPU-only GLM weights round-trip, prefill reference,
-and `models/glm5_3_flash/prefill_fwd.py` weight checks; helpers are exercised
-through their callers. That GLM prefill CLI defaults to CPU weight checks and
-produces no compilation records.
-Other GLM kernel entries remain covered, including entries without a
-`--compile-only` option. Device-only entries are included because compilation
-needs no NPU. The adapter forces `golden.run` into compile-only mode, records direct compile calls, and requires PTOAS. Coverage
-includes frontend, passes, verification, codegen, and PTOAS.
+**Compiler CI coverage:** The `pypto-lib-compile` job compiles only the named
+cases in [`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json).
+Coverage focuses on selected standalone operators, split by platform:
+
+- **A5:** 10 entries under `models/deepseek_v4_1_flash/`: `compressor`,
+  `sparse_attention`, `gate`, `expert_routed`, `expert_shared`, `hc`, `o_proj`,
+  `engram`, `input_pack`, and `lm_head`.
+- **A2/A3:** 10 entries under `models/deepseek_v4_flash_lowlat/`:
+  `decode_compressor_ratio128`, `decode_compressor_ratio4`, `decode_sparse_attn_swa`,
+  `expert_routed`, `gate`, `hc_post`, `hc_pre`, `o_proj_tp`, `qkv_proj_rope`, and
+  `rmsnorm`; plus three under `models/qwen3_14b/`: `greedy_sample`,
+  `test_paged_attention_pypto`, and `topk_select`. The Qwen attention case uses
+  the runnable native PyPTO operator driver.
+
+Layer and full-model entries, composed attention/MoE blocks, MTP, DSpark, vision,
+and drafts are outside this list. New library files do not join automatically;
+add selected operator entries or parameter variants explicitly as coverage needs
+grow. Helpers are covered through their callers. Compilation needs no NPU.
+The adapter forces `golden.run` into compile-only mode, records direct compile
+calls, and requires PTOAS. Coverage includes frontend, passes, verification,
+codegen, and PTOAS.
 When an active argument parser declares `--compile-only`, the adapter supplies
 that flag to that parser. Other parsers keep their original arguments, preserving
 helper/component parsing while disabling post-compilation execution branches.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
 
-The A2/A3 compile leg runs on a CANN-equipped `npu` host and activates the
-toolkit so external CCE wrappers can resolve devkit headers at import time.
-It does not acquire or execute on an NPU. The A5 leg runs on a `cpu` host.
+To add operator coverage on either configured platform, append a case to the
+JSON list; no workflow or runner edit is needed. Save the list as UTF-8.
+For example, to compile a separate HC parameter variant:
+
+```json
+{
+  "name": "models-deepseek_v4_1_flash-hc-prefill",
+  "entry": "models/deepseek_v4_1_flash/hc.py",
+  "platforms": ["a5"],
+  "args": ["--batch", "1", "--sequence", "128"]
+}
+```
+
+- `name`: globally unique case ID, using letters, digits, `_`, `-`, or `.`,
+  starting with a letter or digit. `manifest.json` and `results.json` are reserved
+  for output artifacts. Logs and build outputs are isolated by name.
+- `entry`: exact Python script path relative to pypto-lib, under `examples/` or
+  `models/`. Directories, globs, drafts, and paths outside the library are rejected.
+- `platforms`: nonempty list of `a2a3` and/or `a5`, without duplicates. The runner
+  supplies `-p`; do not put platform arguments in `args`.
+- `args`: optional array of strings passed directly as arguments, without shell
+  expansion. Omit it to keep the entry's defaults. An explicit `-d`/`--device`
+  replaces inferred logical ranks. Compile-only enforcement remains active.
+  The adapter enables each parser's declared `--compile-only` option at parse
+  time, without injecting the flag into other components that do not accept it.
+
+Give each parameter variant a different name, even when it uses the same entry.
+The runner validates the entire configuration before compiling; duplicate names,
+unknown fields/platforms, missing files, and an empty platform selection fail the
+job. Use `--cases /path/to/cases.json` to select an alternative list locally.
+
+The A2/A3 compile leg runs on a CANN-equipped `npu` host so external wrappers
+can resolve SDK headers. It builds the A2/A3 and simulator runtime packages.
+The A5 leg runs on a `cpu` host with the simulator runtime package. Neither
+compile leg acquires or executes on an NPU.
 
 To reproduce after activating a built PyPTO environment with the pinned PTOAS:
 
 ```bash
 python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
-  --platform a2a3 --jobs 4 --output build/lib-compile-a2a3
+  --platform a5 --jobs 4 --output build/lib-compile-a5
 ```
 
-Repeat with `--platform a5`. Each entry has a 1200-second timeout (override with
-`--timeout`). Separately, each PTOAS kernel compilation defaults to 60 seconds.
+Repeat with `--platform a2a3 --output build/lib-compile-a2a3` for the A2/A3 list.
+Each entry has a 1200-second timeout (override with `--timeout`). Separately, each PTOAS kernel compilation defaults to 60 seconds.
 Set `PYPTO_PTOAS_TIMEOUT_SECONDS` to a positive integer to override that deadline;
 invalid values raise an error. The library compilation CI job sets it to `180`
 for large kernels. Use `export PYPTO_PTOAS_TIMEOUT_SECONDS=180` to match CI locally.
@@ -156,9 +198,9 @@ mode; merely declaring that option does not enable output-directory injection.
 A child failure or missing, empty, or malformed child receipt fails the entry
 even if the parent exits successfully. This interception applies to the current entry
 script launched by the same Python interpreter.
-On compilation failure, CI uploads per-entry logs, results, and a manifest
-containing the tested library revision and selected entries. Successful runs
-report results in the job log and summary without uploading artifacts.
+On compilation failure, CI uploads per-case logs, results, and a manifest
+containing the tested library revision, selected entries, named cases, and effective arguments.
+Successful runs report results in the job log and summary without uploading artifacts.
 
 ### PTOAS — PTO Assembler & Optimizer
 

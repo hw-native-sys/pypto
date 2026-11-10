@@ -11,6 +11,8 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -23,6 +25,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/simt.h"
 #include "pypto/ir/type.h"
 
@@ -96,6 +99,44 @@ TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
   }
   return std::make_shared<ScalarType>(dtype);
 }
+
+// Lane collectives depend on the active execution mask as well as their
+// explicit operands. no_arg_writes is only a storage-effect declaration: it
+// must not be interpreted as permission to hoist them across control flow.
+enum class CollectiveKind { Vote, Ballot, Shuffle, Redux };
+
+TypePtr CollectiveType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, const std::string& name,
+                       CollectiveKind kind) {
+  const bool shuffle = kind == CollectiveKind::Shuffle;
+  const size_t arity = shuffle ? 2 : 1;
+  CHECK(args.size() == arity) << name << " requires exactly " << arity << " arguments, got " << args.size();
+  const auto value = As<ScalarType>(args[0]->GetType());
+  if (kind == CollectiveKind::Vote || kind == CollectiveKind::Ballot) {
+    CHECK(value && value->dtype_ == DataType::BOOL) << name << " requires a BOOL predicate";
+    CHECK(kwargs.empty()) << name << " does not accept attributes";
+    // The ballot is an INT32 bit carrier, including bit 31, not a lane count.
+    return std::make_shared<ScalarType>(kind == CollectiveKind::Ballot ? DataType::INT32 : DataType::BOOL);
+  }
+  CHECK(value && (value->dtype_ == DataType::INT32 || value->dtype_ == DataType::FP32))
+      << name << " requires an INT32 or FP32 scalar value";
+  if (shuffle) {
+    const auto control = As<ScalarType>(args[1]->GetType());
+    CHECK(control && control->dtype_ == DataType::INT32) << name << " requires an INT32 lane control";
+    if (const auto constant = As<ConstInt>(args[1])) {
+      CHECK(constant->value_ >= std::numeric_limits<int32_t>::min() &&
+            constant->value_ <= std::numeric_limits<int32_t>::max())
+          << name << " lane control must fit INT32";
+    }
+    for (const auto& [key, attr] : kwargs) {
+      CHECK(key == "width") << name << " only accepts the width attribute";
+      const auto width = AnyCast<int>(attr, key);
+      CHECK(width == 16 || width == 32) << name << " width must be 16 or 32, got " << width;
+    }
+  } else {
+    CHECK(kwargs.empty()) << name << " does not accept attributes; signedness follows the value dtype";
+  }
+  return args[0]->GetType();
+}
 }  // namespace
 
 REGISTER_OP("simt.thread_idx")
@@ -162,5 +203,113 @@ REGISTER_OP("simt.store")
     .set_write_channel(WriteChannel::Simt)
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
       return MemoryType(args, kwargs, true);
+    });
+
+REGISTER_OP("simt.vote_all")
+    .set_description("Active-lane vote_all collective")
+    .set_op_category("SimtOp")
+    .add_argument("predicate", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.vote_all", CollectiveKind::Vote);
+    });
+REGISTER_OP("simt.vote_any")
+    .set_description("Active-lane vote_any collective")
+    .set_op_category("SimtOp")
+    .add_argument("predicate", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.vote_any", CollectiveKind::Vote);
+    });
+REGISTER_OP("simt.vote_uni")
+    .set_description("Active-lane vote_uni collective")
+    .set_op_category("SimtOp")
+    .add_argument("predicate", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.vote_uni", CollectiveKind::Vote);
+    });
+REGISTER_OP("simt.vote_ballot")
+    .set_description("Active-lane vote_ballot collective")
+    .set_op_category("SimtOp")
+    .add_argument("predicate", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.vote_ballot", CollectiveKind::Ballot);
+    });
+REGISTER_OP("simt.shuffle_idx")
+    .set_description("Active-lane shuffle_idx collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .add_argument("control", "INT32 source lane, offset or XOR mask")
+    .set_attr<int>("width")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.shuffle_idx", CollectiveKind::Shuffle);
+    });
+REGISTER_OP("simt.shuffle_up")
+    .set_description("Active-lane shuffle_up collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .add_argument("control", "INT32 source lane, offset or XOR mask")
+    .set_attr<int>("width")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.shuffle_up", CollectiveKind::Shuffle);
+    });
+REGISTER_OP("simt.shuffle_down")
+    .set_description("Active-lane shuffle_down collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .add_argument("control", "INT32 source lane, offset or XOR mask")
+    .set_attr<int>("width")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.shuffle_down", CollectiveKind::Shuffle);
+    });
+REGISTER_OP("simt.shuffle_bfly")
+    .set_description("Active-lane shuffle_bfly collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .add_argument("control", "INT32 source lane, offset or XOR mask")
+    .set_attr<int>("width")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.shuffle_bfly", CollectiveKind::Shuffle);
+    });
+REGISTER_OP("simt.redux_add")
+    .set_description("Active-lane redux_add collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.redux_add", CollectiveKind::Redux);
+    });
+REGISTER_OP("simt.redux_min")
+    .set_description("Active-lane redux_min collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.redux_min", CollectiveKind::Redux);
+    });
+REGISTER_OP("simt.redux_max")
+    .set_description("Active-lane redux_max collective")
+    .set_op_category("SimtOp")
+    .add_argument("value", "Current lane scalar")
+    .no_arg_writes()
+    .no_execution_memory_access()
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return CollectiveType(args, kwargs, "simt.redux_max", CollectiveKind::Redux);
     });
 }  // namespace pypto::ir

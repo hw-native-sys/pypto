@@ -40,7 +40,7 @@ from _orchestration_codegen_common import (
 )
 from pypto.backend import BackendType, pto_backend
 from pypto.ir.compile import compile as ir_compile
-from pypto.pypto_core import passes
+from pypto.pypto_core import codegen, passes
 
 # ``kernel_config.py`` is only written when ptoas is not skipped, but these tests
 # are about the emitted orchestration and manifest, not kernel compilation. Stub
@@ -185,9 +185,8 @@ def test_derived_scalar_is_computed_at_the_call_site(orch):
     assert entry.count("add_scalar") == 2  # layer_idx and the hoisted base
 
 
-def test_graph_result_is_not_chained(orch):
-    # rt_submit_graph yields a valid task id only on a cache hit, so the call
-    # site must not bind or depend on its result.
+def test_unused_graph_completion_is_not_captured(orch):
+    # Plain calls without dependency consumers need no completion handle.
     entry = _entry_body(orch)
     assert "= rt_submit_graph" not in entry
 
@@ -1197,6 +1196,165 @@ class PipeCapacities:
         assert capacity == per_block * core_num, (group, expression, per_block, core_num)
     assert len(allocations) == 2, orch
     _assert_orchestration_compiles(source)
+
+
+def test_graph_distributed_context_is_replay_linked(tmp_path):
+    """A new window context must reach kernels on replay, not freeze at record."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Graph)
+        def publish(self, signal: pld.DistributedTensor[[16], pl.INT32]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pld.system.notify(
+                    target=signal,
+                    peer=0,
+                    offsets=[0],
+                    value=1,
+                    op=pld.NotifyOp.AtomicAdd,
+                )
+            return signal
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[16], pl.INT32]):
+            signal = self.publish(signal)
+            return signal
+
+    orch = _compile_orch(Prog)
+    body = orch[orch.index("static void pypto_graph_publish") : orch.index("aicpu_orchestration_entry")]
+    assert "const auto signal_ctx = args.scalar(0);" in body
+    assert re.search(r"\.add_scalar\(signal_ctx\)", body)
+    # Encoding the pointer as a construction value would make every window
+    # address a distinct recording, or retain the first address on replay.
+    assert "from_u64<uint64_t>" not in body
+    cpp = tmp_path / "main.cpp"
+    cpp.write_text(orch)
+    _assert_orchestration_compiles(cpp)
+
+
+def test_graph_communication_context_alias_is_replay_linked(tmp_path):
+    # Start at the post-MaterializeDistTensorCtx boundary: each device
+    # DistributedTensor has exactly one companion CommCtx argument.
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def notify(self, signal: pld.DistributedTensor[[16], pl.INT32], signal_ctx: pld.CommCtx):
+            peer = pld.system.rank(signal_ctx)
+            pld.system.notify(signal, peer, [0], 1, op=pld.NotifyOp.AtomicAdd)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def publish(self, signal: pld.DistributedTensor[[16], pl.INT32], signal_ctx: pld.CommCtx):
+            ctx = signal_ctx
+            forwarded = ctx
+            self.notify(signal, forwarded)
+            return signal
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[16], pl.INT32], signal_ctx: pld.CommCtx):
+            signal = self.publish(signal, signal_ctx)
+            return signal
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        directed = passes.derive_call_directions()(Prog)
+        legalized = passes.legalize_graph_boundary()(directed)
+        lowered = passes.materialize_runtime_scopes()(legalized)
+        main = lowered.get_function("main")
+        assert main is not None
+        orch = codegen.generate_orchestration(lowered, main).code
+
+    body = orch[orch.index("static void pypto_graph_publish") : orch.index("aicpu_orchestration_entry")]
+    assert "const auto signal_ctx = args.scalar(0);" in body
+    assert re.search(r"\.add_scalar\(signal_ctx\)", body)
+    assert "from_u64<uint64_t>" not in body
+    cpp = tmp_path / "main.cpp"
+    cpp.write_text(orch)
+    _assert_orchestration_compiles(cpp)
+
+
+def test_graph_submit_keeps_completion_and_manual_dependency_edges(tmp_path):
+    """A manual producer, recorded Graph, and consumer chain through TaskIds.
+
+    The Graph returns an alias of caller-owned storage. Its additional submit
+    result is the OUTER completion id, including on the first recording, so no
+    recorded-internal TaskId or array escapes the region.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def increment(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.load(c, [0, 0], [128, 128])
+            return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(t, 1.0), [0, 0], c)
+            return c
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.manual_scope():
+                c, producer = pl.submit(self.increment, c)
+                c, graph_done = pl.submit(self.layer, c, deps=[producer])
+                c, _ = pl.submit(self.increment, c, deps=[graph_done])
+            return c
+
+    with (
+        mock.patch("pypto.backend.pto_backend._compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT),
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+    ):
+        ir_compile(Before, skip_ptoas=False, platform="a2a3", output_dir=str(tmp_path), dump_passes=False)
+    source = tmp_path / "orchestration/main.cpp"
+    _assert_orchestration_compiles(source)
+    entry = _entry_body(source.read_text())
+    assert "rt_submit_graph(&pypto_graph_layer" in entry
+    assert "TaskOutputTensors task_1_outs;" in entry
+    assert "task_1_outs.set_task_id(rt_submit_graph(" in entry
+    assert "params_t1.set_dependencies(" in entry
+    assert "TaskId graph_done = task_1_outs.task_id();" in entry
+
+
+@pytest.mark.parametrize("arch", ["a2a3", "a5"])
+def test_graph_scope_captures_outer_completion_and_keeps_dependencies(tmp_path, arch):
+    """Scope syntax reaches the existing Graph Submit codegen, not a new ABI."""
+
+    @pl.program
+    class ScopeChain:
+        @pl.function(type=pl.FunctionType.InCore)
+        def increment(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.load(c, [0, 0], [128, 128])
+            return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.manual_scope():
+                c, seed = pl.submit(self.increment, c)
+                with pl.graph("layer", deps=[seed]) as done:
+                    c, first = pl.submit(self.increment, c)
+                    c, second = pl.submit(self.increment, c, deps=[first])
+                c, consumer = pl.submit(self.increment, c, deps=[done])
+            return c
+
+    with (
+        mock.patch("pypto.backend.pto_backend._compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT),
+        passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH),
+    ):
+        ir_compile(
+            ScopeChain,
+            skip_ptoas=False,
+            backend_type=BackendType.Ascend910 if arch == "a2a3" else BackendType.Ascend950,
+            output_dir=str(tmp_path),
+            dump_passes=False,
+        )
+    source = tmp_path / "orchestration/main.cpp"
+    _assert_orchestration_compiles(source, arch=arch)
+    entry = _entry_body(source.read_text())
+    launch = re.search(r"GraphTaskArgs (\w+);(.*?)rt_submit_graph\(&pypto_graph_layer", entry, re.S)
+    assert launch is not None, entry
+    assert f"{launch.group(1)}.set_dependencies(" in launch.group(2), entry
+    assert re.search(r"TaskId done\w* = task_\d+_outs\.task_id\(\);", entry), entry
 
 
 if __name__ == "__main__":

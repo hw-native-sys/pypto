@@ -108,35 +108,71 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 
 **与 pypto 的接口：** pypto-lib 程序就是标准的 pypto 程序 — 使用相同的 `@pl.program`/`@pl.function` DSL，通过相同的流水线编译。两者之间没有特殊 API；pypto-lib 是 pypto 框架的使用者。
 
-**编译器 CI 覆盖：** `pypto-lib-compile` job 编译 pypto-lib 的
-`.github/scripts/detect_changes.py --all` 选出的全部正式可运行入口，
-按库的平台归属规则分别覆盖 A2/A3 和 A5。排除草稿、不可独立运行的辅助模块，
-以及仅使用 CPU 的 GLM 权重往返测试、prefill 参考实现自测和
-`models/glm5_3_flash/prefill_fwd.py` 权重检查；
-辅助模块通过调用它们的入口进行覆盖。
-该 GLM prefill CLI 默认执行 CPU 权重检查，不产生编译记录。
-其他 GLM 内核入口仍保留覆盖，包括没有 `--compile-only` 选项的入口。
-编译不需要 NPU，因此仅支持真机的入口也会纳入。
+**编译器 CI 覆盖：** `pypto-lib-compile` job 只编译
+[`tests/ci/pypto_lib_compile.json`](../../../tests/ci/pypto_lib_compile.json)
+中列出的命名用例，按平台看护精选的独立算子：
+
+- **A5：** `models/deepseek_v4_1_flash/` 下的 10 个入口：`compressor`、
+  `sparse_attention`、`gate`、`expert_routed`、`expert_shared`、`hc`、`o_proj`、
+  `engram`、`input_pack` 和 `lm_head`。
+- **A2/A3：** `models/deepseek_v4_flash_lowlat/` 下的 10 个入口：
+  `decode_compressor_ratio128`、`decode_compressor_ratio4`、`decode_sparse_attn_swa`、
+  `expert_routed`、`gate`、`hc_post`、`hc_pre`、`o_proj_tp`、`qkv_proj_rope` 和
+  `rmsnorm`；以及 `models/qwen3_14b/` 下的 3 个入口：`greedy_sample`、
+  `test_paged_attention_pypto` 和 `topk_select`。Qwen attention 使用可独立运行的
+  原生 PyPTO 算子测试入口。
+
+名单不包含 layer、整网入口、组合 attention/MoE 模块、MTP、DSpark、vision 或草稿。
+库中新增文件不会自动加入；后续按需显式添加算子入口或参数组合。
+辅助模块通过调用入口覆盖，编译不需要 NPU。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
 当实际解析参数的解析器声明 `--compile-only` 时，适配器为该解析器提供此标志。
 其他解析器保留原始参数，兼容辅助解析器和组件解析器，
 同时阻止编译完成后进入设备执行分支。
-不构建设备二进制，也不验证数值结果；
-`pypto-lib-model` 提供独立的设备冒烟测试。
+不构建设备二进制，也不验证数值结果；`pypto-lib-model` 提供独立的设备冒烟测试。
 
-A2/A3 编译分支运行在安装了 CANN 的 `npu` 主机上，并激活工具包，
-以便外部 CCE 封装在导入时解析开发套件头文件。
-该分支不申请或执行 NPU；A5 分支运行在 `cpu` 主机上。
+为已配置的任一平台增加算子覆盖时，只需在 JSON 列表中追加用例，
+无需修改 workflow 或编译脚本。
+名单使用 UTF-8 编码保存。例如，为 HC 添加独立的参数组合：
+
+```json
+{
+  "name": "models-deepseek_v4_1_flash-hc-prefill",
+  "entry": "models/deepseek_v4_1_flash/hc.py",
+  "platforms": ["a5"],
+  "args": ["--batch", "1", "--sequence", "128"]
+}
+```
+
+- `name`：全局唯一的用例 ID，以字母或数字开头，可包含字母、数字、`_`、`-`、`.`。
+  `manifest.json` 和 `results.json` 保留给输出文件使用。日志和编译产物按名称隔离。
+- `entry`：相对 pypto-lib 根目录的确切 Python 脚本路径，位于 `examples/` 或
+  `models/` 下。不接受目录、通配符、草稿或指向库外的路径。
+- `platforms`：非空且不重复的 `a2a3`、`a5` 平台列表。脚本自动注入 `-p`，
+  不要在 `args` 中指定平台参数。
+- `args`：可选的字符串数组，直接作为参数传递，不经过 shell 展开。
+  省略时保留入口默认参数；显式 `-d`/`--device` 覆盖自动推导的逻辑设备数量。
+  仅编译约束始终生效。适配器在参数解析时启用各解析器声明的 `--compile-only` 选项，
+  不会把该标志传给不支持它的其他组件。
+
+同一入口的不同参数组合使用不同名称。编译前校验整份配置；名称重复、字段或平台
+未知、文件缺失、当前平台未选出任何用例，都会使 job 失败。
+本地可用 `--cases /path/to/cases.json` 指定另一份名单。
+
+A2/A3 编译分支运行在安装了 CANN 的 `npu` 主机上，供外部封装解析 SDK 头文件，
+并构建 A2/A3 和模拟器运行时包。A5 分支运行在 `cpu` 主机上，使用模拟器运行时包。
+两个编译分支均不申请或执行 NPU。
 
 激活已构建的 PyPTO 环境并配置固定版本的 PTOAS 后，可本地复现：
 
 ```bash
 python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
-  --platform a2a3 --jobs 4 --output build/lib-compile-a2a3
+  --platform a5 --jobs 4 --output build/lib-compile-a5
 ```
 
-使用 `--platform a5` 重复测试。每个入口默认超时 1200 秒，可通过
+使用 `--platform a2a3 --output build/lib-compile-a2a3` 重复执行 A2/A3 名单。
+每个入口默认超时 1200 秒，可通过
 `--timeout` 修改。每个 PTOAS 内核编译另有默认 60 秒的超时限制。
 可将 `PYPTO_PTOAS_TIMEOUT_SECONDS` 设为正整数来覆盖该限制；非法值会报错。
 库编译 CI job 将其设为 `180`，为大型内核提供更多编译时间。
@@ -152,7 +188,7 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 因此仅声明该选项不会启用输出目录注入。
 子进程失败，或其编译记录缺失、为空、格式错误，都会使入口失败，即使父进程正常退出。
 该拦截仅作用于同一 Python 解释器启动的当前入口脚本。
-编译失败时，CI 上传逐入口日志、结果，以及记录库版本和所选入口的清单。
+编译失败时，CI 上传逐用例日志、结果，以及记录库版本、所选入口、用例名称和实际参数的清单。
 编译成功时，仅在 job 日志和汇总中报告结果，不上传附件。
 
 ### PTOAS — PTO 汇编器与优化器

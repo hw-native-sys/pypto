@@ -52,7 +52,8 @@ namespace {
  */
 class FlattenCallExprMutator : public IRMutator {
  public:
-  FlattenCallExprMutator() = default;
+  explicit FlattenCallExprMutator(bool preserve_while_conditions)
+      : preserve_while_conditions_(preserve_while_conditions) {}
 
   // Statement visitors
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
@@ -131,6 +132,7 @@ class FlattenCallExprMutator : public IRMutator {
   }
 
  private:
+  bool preserve_while_conditions_;
   int temp_var_counter_ = 0;
   std::vector<StmtPtr> pending_stmts_;
 
@@ -333,17 +335,18 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
 StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
   // Note: Don't clear pending_stmts_, preserve previous state
 
-  auto new_condition = VisitExpr(op->condition_);
-
-  // Extract calls from condition
-  if (As<Call>(new_condition)) {
-    new_condition = ExtractCallToTemp(new_condition);
+  // SIMT codegen evaluates the complete condition in scf.while's before
+  // region. Extracting any nested call here would evaluate it only once and
+  // move loop-carried IterArgs out of scope. Preserve the whole expression,
+  // including nested lane operations and scalar expressions around them.
+  auto new_condition = op->condition_;
+  if (!preserve_while_conditions_) {
+    new_condition = VisitExpr(new_condition);
+    if (As<Call>(new_condition)) new_condition = ExtractCallToTemp(new_condition);
   }
 
-  // Flatten the body through FlattenScopeBody so a single-statement
-  // (non-SeqStmts) loop body still materializes its hoisted temporaries
-  // (issue #1708). The condition's own pending stmts are preserved for the
-  // parent SeqStmts.
+  // Body temporaries still belong inside the loop, including for a bare
+  // single-statement body. Preserve any pending statements from the caller.
   auto new_body = FlattenScopeBody(op->body_);
 
   auto result = MutableCopy(op);
@@ -578,7 +581,7 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CastPtr& op) { return ProcessUn
 FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "FlattenCallExpr cannot run on null function";
 
-  FlattenCallExprMutator mutator;
+  FlattenCallExprMutator mutator(func->func_type_ == FunctionType::SIMT);
   auto new_body = mutator.FlattenFunctionBody(func->body_);
   auto result = MutableCopy(func);
   result->body_ = new_body;

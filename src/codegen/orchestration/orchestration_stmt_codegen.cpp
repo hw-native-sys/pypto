@@ -98,7 +98,9 @@ void OrchestrationStmtCodegen::SetGraphScalarParams(const std::vector<VarPtr>& p
   size_t scalar_index = 0;
   for (const auto& param : params) {
     if (AsTensorTypeLike(param->GetType())) continue;
-    if (As<ScalarType>(param->GetType())) {
+    // A materialized device communication-context pointer travels in the same
+    // replay-patched scalar ABI, although its IR type remains CommCtxType.
+    if (As<ScalarType>(param->GetType()) || As<CommCtxType>(param->GetType())) {
       graph_scalar_params_.emplace(param.get(), scalar_index);
     }
     ++scalar_index;
