@@ -335,6 +335,8 @@ class ASTParser:
         self.type_resolver.register_window_definitions(func_def)
         self.function.func_name = func_name
         self.function.func_level = func_level
+        self.regions.effective_level = func_level
+        self.regions.effective_role = func_role
         # auto_scope rides in func_attrs; absent ⇒ default True.
         self.function.func_auto_scope = bool((func_attrs or {}).get(AUTO_SCOPE_ATTR, True))
         self.function.func_type = func_type
@@ -1286,7 +1288,7 @@ class ASTParser:
         Parser-only concerns (everything else delegates to the DSL wrapper /
         IR builder / C++ deducer via :func:`invoke_dsl`):
 
-        - HOST-only, like ``world_size`` (see ``_validate_pld_op_call``): the
+        - Orchestration-only (HOST or CLUSTER_0): the
           window buffer is a host-orchestration resource, not lowerable inside
           InCore / SPMD scopes.
         - LHS must be a single ``ast.Name``.
@@ -1296,18 +1298,8 @@ class ASTParser:
         span = self.span_tracker.get_span(value)
         is_printed = _is_dump_call(value, "alloc_window_buffer")
 
-        in_device_scope = any(
-            self.regions.is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
-        )
-        if not is_printed and (self.function.func_level != ir.Level.HOST or in_device_scope):
-            raise ParserSyntaxError(
-                "pld.tensor.alloc_window_buffer() can only be called in HOST orchestration "
-                "context (not inside InCore / SPMD scopes); "
-                f"current function level: {self.function.func_level}",
-                span=span,
-                hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                "on the enclosing function and call outside any nested device-side scope",
-            )
+        # Printer paths obey the same execution-context rule as public calls.
+        self.ops.validate_distributed_op_context(ir.get_op("pld.tensor.alloc_window_buffer"), span)
 
         if not isinstance(target, ast.Name):
             raise ParserSyntaxError(
@@ -1991,6 +1983,15 @@ class ASTParser:
         return result
 
     def parse_call(self, call: ast.Call) -> ir.Expr:
+        # Each parsed call validates only its newly built root. Its argument
+        # calls were checked while parsing them; rescanning their IR subtrees
+        # here would make deeply nested source expressions quadratic.
+        result = self._parse_call_impl(call)
+        if isinstance(result, (ir.Call, ir.Submit)):
+            self.ops.validate_distributed_op_context(result.op, self.span_tracker.get_span(call))
+        return result
+
+    def _parse_call_impl(self, call: ast.Call) -> ir.Expr:
         """Parse function call.
 
         Args:

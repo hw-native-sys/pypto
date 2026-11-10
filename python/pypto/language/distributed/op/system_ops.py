@@ -45,6 +45,18 @@ from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
 
 
+def num_workers() -> Scalar:
+    """Return the immediate-child count as an INT64 Scalar.
+
+    HOST orchestrators count local devices; CLUSTER_0 orchestrators count
+    nodes. This is independent of a global communication domain's rank count.
+    Callable only in an orchestration context, outside InCore/SPMD scopes.
+    CLUSTER_0 parsing is supported; executable cluster lowering is not yet
+    available. In HOST codegen the value uses the existing world_size binding.
+    """
+    return Scalar(expr=_ir_system.num_workers())
+
+
 def world_size() -> Scalar:
     """Return the distributed world size as an ``INT64`` :class:`Scalar`.
 
@@ -207,4 +219,4 @@ def defer_wait(
     return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "num_workers", "rank", "wait", "world_size"]

@@ -1943,6 +1943,7 @@ class ScopeParser:
             with (
                 self.regions.scope_kind_context(scope_kind),
                 self.regions.incore_user_split_context(scope_kind, split),
+                self.regions.distributed_hierarchy_context(scope_kind, level, role),
             ):
                 self.services.scope_manager.enter_scope(
                     "graph" if scope_kind == ir.ScopeKind.Graph else "scope"
