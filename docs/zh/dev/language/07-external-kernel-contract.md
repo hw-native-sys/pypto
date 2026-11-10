@@ -271,3 +271,36 @@ inline helper 直接返回 extern 调用时,保留与先绑定局部变量再返
 视图和重绑定的 IR/代码生成，以及签名隔离、嵌套调用和重叠别名诊断。这些是 CPU
 编译器验证，不代表设备数值正确性或安全重叠执行。任意注册对象与可执行 wrapper 的
 连接、原生 ABI 和运行时检查仍由后续任务 34.4/34.5 完成。
+
+## TMR 桥接（任务 34.4）
+
+`pypto.backend.tmr_bridge.TMRBridge` 将 `c_pointer` ABI v1 转为 A5/CCEC 的 TMR
+任务入口。目标使用 `RuntimeTarget(runtime="tmr", version="1", ...)`；版本是内部
+runtime 接口版本，不是 runtime 软件包版本。Provider 提供可包含的、返回 `void` 的
+设备函数，不能提供 host launch stub；桥接器不导入可选 DSL。
+
+原生参数可按任意物理顺序排列；TMR 仍先传 tensor、再传 scalar。Scalar 按位传递，
+C++ 类型须匹配声明。维度、stride 和 offset 使用 1/2/4/8 字节无符号整数，并按
+声明转换元素/字节单位。数据指针指向分配基址，原生函数恰好应用一次显式传入或
+编译期固定的 offset。Tensor 对齐约束作用于该分配基址，与 offset 无关；
+不要求计算后的视图地址满足相同对齐。编译检查参数数量、类型、大小和对齐。
+
+`lower()` 返回拥有源码字节的任务及独立 host 检查器。
+`with materialize(task) as native:` 建立私有源码租约；
+`native.configure_context(context)` 校验请求，并给既有 extern 特化附加源码、include、
+契约及检查器。保持租约直到既有 runtime 完成源码编译/发布。AIC/AIV、mixed Group
+和向量 lane 数来自执行契约。注册对象接入与 CANNBotDSL 迁移仍属任务 34.5，持久化
+复用属任务 34.6。
+
+每次调用都在实际参数打包后、提交前检查 rank/dtype、固定及共享维度、正 stride、
+offset、对齐、存储/地址边界和原生元数据位宽，支持普通调用、显式 submit 及参数重排的
+SPMD/Group。写入参数未获许可的重叠按保守字节区间拒绝；支持不相交的兄弟视图及
+显式别名许可。产物缓存命中仍保留检查。调用原生函数前先关闭 atomic 模式，再保存
+CTRL，确保恢复控制状态不会重新启用继承的 atomic 模式；并在 AIC
+上清除继承的 HF32 模式；AIV 保留该控制位。设备入口返回前排空流水线、回写缓存并执行
+DDR 屏障，然后恢复控制状态并关闭 atomic 模式。
+
+明确拒绝 descriptor ABI、非 ND 布局、1–5 之外的 rank、FP16/BF16 scalar、其他
+架构/runtime、逻辑 launch context、同步/全驻留启动、runtime 新分配的输出槽及
+录制 Graph 的重放。输出须在提交前已有存储。CPU 测试用固定 runtime 头文件编译并
+执行参数转换和检查；mock 完成指令仅验证顺序，不证明设备可见性，设备验收仍属任务 34.7。

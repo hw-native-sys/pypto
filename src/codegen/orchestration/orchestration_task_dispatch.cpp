@@ -9,7 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
+#include <cctype>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -909,6 +911,26 @@ std::string OrchestrationStmtCodegen::CurrentTaskVarName() const {
   return task_var_prefix_ + "params_t" + std::to_string(task_counter_);
 }
 
+void OrchestrationStmtCodegen::AppendExternalPreflight(TaskDispatchPlan& plan,
+                                                       const FunctionPtr& kernel_func) {
+  if (!kernel_func->HasAttr(kAttrExternalPreflightSource)) return;
+  const auto symbol = kernel_func->GetAttr<std::string>(kAttrExternalPreflightSymbol, "");
+  CHECK_SPAN(!symbol.empty() && (std::isalpha(static_cast<unsigned char>(symbol[0])) || symbol[0] == '_') &&
+                 std::all_of(symbol.begin(), symbol.end(),
+                             [](unsigned char c) { return std::isalnum(c) || c == '_'; }),
+             kernel_func->span_)
+      << "External preflight requires a valid C++ checker symbol";
+  CHECK_SPAN(kernel_func->HasAttr(kAttrExternalSource), kernel_func->span_)
+      << "External preflight requires a native external source";
+  // pre_lines run after all add_* calls and before rt_submit. The checker sees
+  // exactly the tensor-first ordering dispatched to the native wrapper, even
+  // when an Spmd/Group wrapper permutes the caller's parameters.
+  const std::string check = symbol + "(" + plan.task_var + ");";
+  if (std::find(plan.pre_lines.begin(), plan.pre_lines.end(), check) == plan.pre_lines.end()) {
+    plan.pre_lines.push_back(check);
+  }
+}
+
 OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildTaskDispatchPlan(
     const std::string& comment, const CallPtr& call, std::vector<ParamEntry>&& params,
     const ExprPtr& launch_core_num, bool launch_sync_start, const std::string& submit_expr,
@@ -968,6 +990,7 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildDirect
   // Direct calls historically emit set_dependencies before the launch spec.
   plan.deps_before_launch = true;
   plan.guard_lines = BuildContiguityGuardLines(call, callee_func);
+  AppendExternalPreflight(plan, callee_func);
   return plan;
 }
 
@@ -1043,10 +1066,12 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildSpmdCa
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
   auto submit = BuildSingleKernelSubmit(core_type, kernel_func, func_id, task_var);
-  return BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call, std::move(params),
-                               launch_core_num, launch_sync_start, submit.expr,
-                               ShouldCaptureTaskOutputs(call, capture_plain_task_id),
-                               std::move(submit.pre_lines));
+  auto plan = BuildTaskDispatchPlan("// Spmd " + spmd_func->name_ + ": " + callee_name, call,
+                                    std::move(params), launch_core_num, launch_sync_start, submit.expr,
+                                    ShouldCaptureTaskOutputs(call, capture_plain_task_id),
+                                    std::move(submit.pre_lines));
+  AppendExternalPreflight(plan, kernel_func);
+  return plan;
 }
 
 OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildAivOnlyGroupDispatchPlan(
@@ -1056,15 +1081,18 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildAivOnl
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
   auto submit = BuildSingleKernelSubmit(CoreType::VECTOR, aiv_func, aiv_id, task_var);
-  return BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
-                               launch_core_num, launch_sync_start, submit.expr,
-                               ShouldCaptureTaskOutputs(call, capture_plain_task_id),
-                               std::move(submit.pre_lines));
+  auto plan = BuildTaskDispatchPlan("// Group " + group_name + ": AIV-only SPMD", call, std::move(params),
+                                    launch_core_num, launch_sync_start, submit.expr,
+                                    ShouldCaptureTaskOutputs(call, capture_plain_task_id),
+                                    std::move(submit.pre_lines));
+  AppendExternalPreflight(plan, aiv_func);
+  return plan;
 }
 
 OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildMixedGroupDispatchPlan(
     const CallPtr& call, const FunctionPtr& launch_func, const std::string& group_name, int aic_id,
-    int aiv_id, const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params, bool capture_plain_task_id) {
+    int aiv_id, const FunctionPtr& aic_func, const FunctionPtr& aiv_func, std::vector<ParamEntry>&& params,
+    bool capture_plain_task_id) {
   CheckWrapperNeedsNoContiguityGuard(aiv_func, call);
   std::string task_var = CurrentTaskVarName();
   auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
@@ -1074,9 +1102,13 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildMixedG
   std::vector<std::string> pre_lines{"MixedKernels mixed_" + std::to_string(task_counter_) + " = {" +
                                      std::to_string(aic_id) + ", " + std::to_string(aiv_id) + ", " +
                                      third_id + "};"};
-  return BuildTaskDispatchPlan("// Group " + group_name + ": MixedKernels (AIC + AIV lanes)", call,
-                               std::move(params), launch_core_num, launch_sync_start, submit_expr,
-                               ShouldCaptureTaskOutputs(call, capture_plain_task_id), std::move(pre_lines));
+  auto plan =
+      BuildTaskDispatchPlan("// Group " + group_name + ": MixedKernels (AIC + AIV lanes)", call,
+                            std::move(params), launch_core_num, launch_sync_start, submit_expr,
+                            ShouldCaptureTaskOutputs(call, capture_plain_task_id), std::move(pre_lines));
+  AppendExternalPreflight(plan, aic_func);
+  AppendExternalPreflight(plan, aiv_func);
+  return plan;
 }
 
 void OrchestrationStmtCodegen::GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var,
@@ -1251,8 +1283,8 @@ void OrchestrationStmtCodegen::GenerateGroupCallCode(const CallPtr& call, const 
   int aic_id = RegisterKernel(info.aic_name, CoreType::CUBE, params);
   int aiv_id = RegisterKernel(info.aiv_name, CoreType::VECTOR, params);
 
-  BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aiv_func, std::move(params),
-                              capture_plain_task_id)
+  BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aic_func, aiv_func,
+                              std::move(params), capture_plain_task_id)
       .Emit(*this);
 }
 

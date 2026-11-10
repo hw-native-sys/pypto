@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 
-"""Internal bridge boundary; concrete runtime adapters belong to task 34.4.
+"""Internal bridge boundary for provider-owned native kernels.
 
 A bridge must check binding-dependent constraints (alignment, strides, offset,
 aliasing and launch occupancy) on every execution, including artifact hits.
@@ -35,7 +35,6 @@ class RuntimeTarget:
 class ExternalTask:
     """Bridge-owned source plus provenance; no per-invocation addresses.
 
-    Task 34.4 supplies runtime-specific entry generation and binding checks.
     The source bundle uses the existing external-kernel entry convention.
     """
 
@@ -43,6 +42,9 @@ class ExternalTask:
     prepared: PreparedKernel
     target: RuntimeTarget
     bridge_version: str
+    # Self-contained host code is retained with the task, including on artifact hits.
+    preflight_source: str = ""
+    preflight_symbol: str = ""
 
 
 class RuntimeBridge(Protocol):

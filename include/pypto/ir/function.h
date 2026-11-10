@@ -523,6 +523,20 @@ inline constexpr const char* kAttrExternalSource = "external_source";
 inline constexpr const char* kAttrExternalReturnParams = "external_return_params";
 
 /**
+ * @brief Bridge-owned host C++ checker definition and its callable symbol (strings).
+ *
+ * Written by external task materialization on native AIC/AIV members; retained
+ * through lowering and serialization. Orchestration emits each definition once,
+ * outside extern C, and invokes it with the reordered CoreTaskArgs before every
+ * submit (including wrapper dispatch). The definition is self-contained so a
+ * cache hit cannot lose checks by releasing a provider's source directory.
+ * These are internal generated-code inputs, like external_source, not a public
+ * constraint language. No pass strips them or changes the native signature.
+ */
+inline constexpr const char* kAttrExternalPreflightSource = "external_preflight_source";
+inline constexpr const char* kAttrExternalPreflightSymbol = "external_preflight_symbol";
+
+/**
  * @brief Reserved Function attr key naming the builtin template package that
  * supplies a compiler-synthesized kernel's hand-written C++ source.
  *

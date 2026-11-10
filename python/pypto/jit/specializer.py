@@ -48,7 +48,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast, get_args, get_origin
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
-from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR, EXTERNAL_RETURN_PARAMS_ATTR
+from pypto._function_attrs import (
+    DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_PREFLIGHT_SOURCE_ATTR,
+    EXTERNAL_PREFLIGHT_SYMBOL_ATTR,
+    EXTERNAL_RETURN_PARAMS_ATTR,
+)
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR
 from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
@@ -226,6 +231,8 @@ class SpecializeContext:
     peer_func_names: Mapping[str, str | None] = field(default_factory=dict[str, str | None])
     # A shared function reached by distinct peer sets diagnoses actual imports.
     peer_func_scope_ambiguous: bool = False
+    external_preflight_source: str = ""
+    external_preflight_symbol: str = ""
 
     @property
     def source_def_name(self) -> str:
@@ -2720,9 +2727,19 @@ class Specializer:
             if dual_aiv_dispatch:
                 function_attrs.append(f'"{DUAL_AIV_DISPATCH_ATTR}": True')
             attrs = f", attrs={{{', '.join(function_attrs)}}}" if function_attrs else ""
+            preflight = (
+                [
+                    f"    pl.func_attr({{{EXTERNAL_PREFLIGHT_SOURCE_ATTR!r}: "
+                    f"{ctx.external_preflight_source!r}, "
+                    f"{EXTERNAL_PREFLIGHT_SYMBOL_ATTR!r}: {ctx.external_preflight_symbol!r}}})"
+                ]
+                if ctx.external_preflight_source
+                else []
+            )
             return [
                 f"@pl.function(type=pl.FunctionType.{core_upper}, external_source={source!r}{attrs})",
                 f"def {member_name}(self, {sig_params}){ret_ann}:",
+                *preflight,
                 *result_contract,
                 "    ...",
             ]
@@ -2735,7 +2752,9 @@ class Specializer:
             return _member(name, "AIC", ctx.external_aic_source)
         if core == "aiv":
             assert ctx.external_aiv_source is not None
-            return _member(name, "AIV", ctx.external_aiv_source)
+            return _member(
+                name, "AIV", ctx.external_aiv_source, dual_aiv_dispatch=ctx.external_dual_aiv_dispatch
+            )
 
         # Mixed: two members + a Group wrapper named after the extern so the
         # entry's ``self.<name>(...)`` call resolves to the group.

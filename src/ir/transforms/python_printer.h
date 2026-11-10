@@ -236,6 +236,23 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
+  // std::quoted does not escape control characters. Attributes can carry
+  // multiline bridge source, so use a Python literal for every string value.
+  void PrintStringLiteral(const std::string& value) {
+    stream_ << '"';
+    constexpr char kHex[] = "0123456789abcdef";
+    for (unsigned char ch : value) {
+      if (ch == '"' || ch == '\\') {
+        stream_ << '\\' << ch;
+      } else if (ch < 0x20 || ch == 0x7f) {
+        stream_ << "\\x" << kHex[ch >> 4] << kHex[ch & 0xf];
+      } else {
+        stream_ << ch;
+      }
+    }
+    stream_ << '"';
+  }
+
   // Emit the `with pl.scope(...):` header for a RuntimeScopeStmt. AUTO prints as
   // the bare `pl.scope()`; MANUAL as `pl.scope(mode=pl.ScopeMode.MANUAL)`.
   // Callers emit the leading indent themselves (it differs by call site).
@@ -244,20 +261,8 @@ class IRPythonPrinter : public IRVisitor {
     if (manual) stream_ << "mode=" << prefix_ << ".ScopeMode.MANUAL";
     if (!name_hint.empty()) {
       if (manual) stream_ << ", ";
-      stream_ << "name_hint=\"";
-      // Runtime labels do not become identifiers. Preserve arbitrary strings,
-      // including control characters that std::quoted alone does not escape.
-      constexpr char kHex[] = "0123456789abcdef";
-      for (unsigned char ch : name_hint) {
-        if (ch == '"' || ch == '\\') {
-          stream_ << '\\' << ch;
-        } else if (ch < 0x20 || ch == 0x7f) {
-          stream_ << "\\x" << kHex[ch >> 4] << kHex[ch & 0xf];
-        } else {
-          stream_ << ch;
-        }
-      }
-      stream_ << '"';
+      stream_ << "name_hint=";
+      PrintStringLiteral(name_hint);
     }
     stream_ << "):\n";
   }

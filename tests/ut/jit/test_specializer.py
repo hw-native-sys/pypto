@@ -3817,7 +3817,10 @@ def test_constexpr_branch_rebinding_survives_specialization(mode, condition, tak
     tree = BodyTransformer({}, set(), constexpr_values={"MODE": str(mode)}).visit(ast.parse(source))
     assert not any(isinstance(node, ast.If) for node in ast.walk(tree))
     namespace: dict[str, Any] = {}
-    exec(compile(ast.fix_missing_locations(tree), "<specialized>", "exec"), namespace)
+    # Specialization emits source through unparse. Its intermediate rewritten
+    # AST can retain child locations beyond newly synthesized parent ranges;
+    # Python 3.11 rejects those ranges if compiled directly.
+    exec(compile(ast.unparse(tree), "<specialized>", "exec"), namespace)
     assert namespace["select"]() == (2 if taken else 1)
 
 
