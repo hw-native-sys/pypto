@@ -1872,6 +1872,34 @@ def test_get_emits_comm_tget_with_staging_tile():
     assert "pto.barrier <PIPE_ALL>" in mlir
 
 
+def test_sync_put_get_keep_their_synchronous_lowering():
+    """V1 guardrail: the async URMA path must not change the sync put/get lowering.
+
+    The sync ops keep their PTOAS ``pto.comm.tput`` / ``pto.comm.tget`` calls
+    and never emit the URMA external helper. If a future change routes the sync
+    path through the async helper, or makes the async helper the default, this
+    test fails.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer=peer, src=src)
+            pld.tensor.get(dst, peer=peer, src=src)
+
+    mlir = _generate_mlir_a5(P)
+    assert "pto.comm.tput(" in mlir, mlir
+    assert "pto.comm.tget(" in mlir, mlir
+    assert "pypto_urma_put_async" not in mlir, mlir
+    assert "pypto_urma_get_async" not in mlir, mlir
+
+
 def test_get_subregion_uses_offset_partition_views():
     """offset get lowers dst/src subregions to matching partition views."""
 

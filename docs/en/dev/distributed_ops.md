@@ -57,8 +57,10 @@ and submits through the existing runtime entry point; it never polls.
 Completion is owned by the enclosing task: submission registers the request's
 completion condition, so a later task that consumes the destination as an input
 is released only after the transfer retires. Both endpoints must be
-window-bound, dense row-major `DistributedTensor`s. The result aliases `dst`;
-returning from the op does not imply completion.
+window-bound, dense row-major `DistributedTensor`s in the same communication
+domain: endpoints materialized into different window scopes compile but are
+rejected at runtime. The result aliases `dst`; returning from the op does not
+imply completion.
 
 Adapter symbols and C++ element types reuse the shared dtype conversions.
 
@@ -73,6 +75,69 @@ Adapter symbols and C++ element types reuse the shared dtype conversions.
   span its full extent. Dynamic extents may exceed one and are not skipped.
   Thus `[1, 32]` inside `[16, 64]` and `[1, 2, 64]` inside `[2, 4, 64]` are
   contiguous, but `[2, 32]` and `[2, 1, 64]`, respectively, are not.
+
+### Supported async transfers
+
+| Dimension | Current support | Not yet supported |
+| --------- | --------------- | ----------------- |
+| Ops | `pld.tensor.put_async` / `get_async` | native PTOAS async ops |
+| Engine | URMA only (`pld.CommEngine.URMA`); SDMA/RDMA rejected by name | URMA / SDMA / RDMA selection |
+| Target | A5 (Ascend 950) InCore/AIV body | additional targets once the helper ABI is ported |
+| Payload | one contiguous region per call; the runtime splits transfers above 256 MiB internally | multi-SGE / scatter-gather lists |
+| Completion | enclosing AIV task (normal done + registered async conditions); producer `InOut` → consumer `In` | explicit events, `wait`/`test`, per-request release |
+| Registration | both endpoints are existing window-bound `DistributedTensor`s in the same communication domain | automatic MR registration / implicit staging |
+| Source lifetime | caller must not overwrite `src` until the transfer task retires | runtime-managed lifetime |
+| Remote visibility | receiver still needs the existing cross-rank notify/wait protocol | completion-ordered remote consumption |
+
+**Usage pattern.** The transfer runs in the InCore body that owns the
+destination; a call in a host orchestration body is rejected by
+`OrchestrationReferencesResolved`. The destination is the producer's `InOut`
+output, and a later task consumes it as `In`:
+
+```python
+data = pl.store(row, [my_rank, 0], data)
+for peer in pl.range(nranks):
+    if peer != my_rank:
+        pld.tensor.put_async(
+            data,
+            peer=peer,
+            src=data,
+            dst_offsets=[my_rank, 0],
+            src_offsets=[my_rank, 0],
+            shape=[1, SIZE],
+            engine=pld.CommEngine.URMA,
+        )
+return data
+```
+
+Returning from the op does **not** mean the bytes have moved. The consumer's
+`In` dependency on `data` is the ordering point, and `src` must not be
+overwritten until that task retires. Other compute in the producer task may
+run before or after the submission, but it must not overwrite `src` while the
+transfer is outstanding. A remote consumer still needs the
+existing cross-rank notify/wait protocol: local task completion orders the
+issuer, not the peer's reads.
+
+**ABI note.** `CommContext` grew from 1056 to 1088 bytes for the workspace
+engine fields. The change is global, including A2/A3 builds, so codegen and
+the runtime must move together. The async helper reads the URMA workspace
+from `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` and requires the domain
+to request `workspace_engines=("urma",)` (the program-wide conservative
+policy).
+
+**Failure diagnostics.** The verifier rejects a non-window endpoint, a
+non-contiguous region, a missing offset/shape argument, a negative constant
+peer, an invalid engine, and a static endpoint range whose byte offset plus
+transfer size exceeds its window slot. The generated helper rejects at runtime an
+invalid peer (`peer < 0`, `peer >= nranks`, or `peer == rankId`), an
+out-of-range endpoint or window byte range, a zero/unaligned byte count, and
+a missing workspace. All failures are loud; there is no silent SDMA/RDMA
+fallback.
+
+**Compatibility.** The return type (`dst`) and completion guarantee are stable.
+Support for sessions/events, `wait`/`test`, SDMA/RDMA engines, native PTOAS
+lowering, per-request release and multi-SGE will be added incrementally; an
+existing program recompiles unchanged.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
@@ -883,7 +948,7 @@ Registers a local counter condition without `pto.comm.twait`. The kernel can ret
 release its AIV, but Simpler delays the ordinary TaskId's completion until every condition
 is ready; the kernel is never resumed.
 
-V1 accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
+The current implementation accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
 addressing, integer/index offsets and threshold, and only `WaitCmp::kGe`.
 Slices/views/SSA aliases, NZ layout, and rank-zero signals are rejected. Counter
 storage is INT32 but polling is unsigned `>=`: thresholds and published values must
