@@ -443,6 +443,12 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
             "target_url": f"https://github.com/{repo}/actions/runs/{run_id}/attempts/1",
         },
     )
+    # A GITHUB_TOKEN dispatch does not reliably emit downstream workflow_run
+    # events. Start the observer explicitly, after binding this run's ownership.
+    api(
+        f"repos/{repo}/actions/workflows/ci-full-progress.yml/dispatches",
+        {"ref": "main", "inputs": {"run_id": str(run_id)}},
+    )
     report(f"Requested full CI for PR #{number} at {head}; test merge {merge}.")
 
 

@@ -94,8 +94,13 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
 
 
 def monitor(repo: str, event: dict[str, Any]) -> None:
+    resolved = "workflow_run" not in event
+    if resolved:
+        routed = control.resolved_event(repo, event)
+        if routed is None:
+            return
+        event = routed
     source = control.verified_event_run(repo, event, require_title=False)
-    resolved = False
     deadline = time.monotonic() + MONITOR_SECONDS
     checks = None
     workflow = None

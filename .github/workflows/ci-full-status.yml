@@ -8,6 +8,10 @@ on:
         description: Existing full CI run to reconcile (does not rerun tests)
         type: string
         required: true
+      wait_for_completion:
+        description: Wait for the notifying CI job to finish before publication
+        type: boolean
+        default: false
   workflow_run:
     workflows: [CI]
     types: [requested, in_progress, completed]
@@ -21,7 +25,7 @@ jobs:
       (github.event.workflow_run.event == 'workflow_dispatch' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       key: ${{ steps.route.outputs.key }}
       event: ${{ steps.route.outputs.event }}
@@ -40,6 +44,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/ci_control.py route
+      - name: Wait for the notifying CI run to finish
+        if: github.event_name == 'workflow_dispatch' && inputs.wait_for_completion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.run_id }}
+        run: |
+          # Admission above has validated the source. Do not hold the writer
+          # queue while the source finishes its final notification steps.
+          for poll in {1..60}; do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .status)
+            if [ "$state" = completed ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Source run did not complete within five minutes" >&2
+          exit 1
 
   publish:
     needs: route

@@ -2754,7 +2754,9 @@ jobs:
   # job counts as success to GitHub rulesets, so only this explicit validation
   # may produce the full-result signal consumed by the trusted status publisher.
   full-result:
-    if: always() && github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
+    if: >-
+      always() && github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' && inputs.pr_number != ''
     needs:
       - changes
       - toolchain
@@ -2780,6 +2782,9 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # This fresh hosted job runs trusted control code only. Test jobs retain
+      # read-only tokens; explicit dispatches also run after failed-job reruns.
+      actions: write
     steps:
       - name: Checkout trusted result validator
         uses: actions/checkout@v4
@@ -2791,3 +2796,17 @@ jobs:
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: python .github/scripts/ci_control.py aggregate
+      - name: Request full status publication
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run ci-full-status.yml --repo "$GITHUB_REPOSITORY" --ref main
+          -f run_id="$GITHUB_RUN_ID" -f wait_for_completion=true
+      - name: Reconcile full job checks
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run ci-full-progress.yml --repo "$GITHUB_REPOSITORY" --ref main
+          -f run_id="$GITHUB_RUN_ID"

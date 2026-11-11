@@ -110,12 +110,18 @@ reads GitHub metadata on a GitHub-hosted runner and refreshes these checks rough
 monitor runs while waiting for a comment. Polling slows down with concurrent
 monitors and the shared API budget, reserving 200 requests for gate writers and
 other automation; transient API errors use bounded backoff. Each live monitor is bounded to five
-hours; a separate completion event reconciles final results even after a monitor
+hours; the finalizer explicitly dispatches reconciliation even after a monitor
 failure or timeout. Progress checks are informational: require `ci/full` for
 merge, not every `full / ...` check (some tests are conditional or advisory).
 
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
-updated by `CI Full Status`.
+updated by `CI Full Status`. After binding the full run ID, `CI Command` explicitly
+dispatches `CI Full Progress`. The monitor requests status publication when it
+exits; the isolated `full-result` job also dispatches both publishers, including
+after failed tests and native reruns. Its status request waits for the source
+run to complete before entering the writer queue. This avoids relying on
+`workflow_run` delivery for runs dispatched with `GITHUB_TOKEN`; those events
+remain a supplementary path. No additional token or App configuration is needed.
 It stays pending while full runs and succeeds only after the `full-result`
 job confirms all applicable tests passed. Skipped, missing, failed or cancelled
 required tests cannot satisfy it. The publisher runs on a fresh GitHub-hosted
@@ -136,7 +142,8 @@ full workflow run ID as `run_id`. This only reconciles metadata; it does not
 dispatch tests or use a device runner. It uses the same PR/head/base checks and
 writer queue, preserves newer requests, and cannot turn an obsolete or failed
 run green. This recovery entry becomes available after the updated workflow is
-merged into main.
+merged into main. Missing per-job checks can similarly be reconciled with
+**Actions → CI Full Progress → Run workflow** and the same `run_id`.
 
 Test jobs do not hold status-write or Actions-write tokens. The entire `CI`
 workflow declares `cache-mode: read`: GitHub's cache service prevents cache
@@ -149,7 +156,14 @@ retain their existing policies.
 Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
 revision is preserved; the finalizer combines successful dependencies from the
 previous attempt with rerun results. If only the finalizer is missing, rerun that
-job too. The status publisher handles rerun events and ignores superseded requests.
+job too. The finalizer explicitly requests result publication, and the publisher
+ignores superseded requests. Reruns made after the live monitor has exited
+reconcile per-job checks when the finalizer finishes; to resume live progress,
+dispatch `CI Full Progress` with the existing run ID. Rerunning an old run keeps
+its original workflow code, so runs created before this fix still need the
+manual recovery entry. A previously successful run may retain its green status
+during a native rerun if no start event is delivered; use a new PR revision when
+a fresh merge-gating evaluation is required.
 If the router's run lookup fails but the event's origin and full PR title can
 still be verified, it queues a failure-only update so an old green gate cannot
 survive that lookup failure. This path preserves verified newer writers and

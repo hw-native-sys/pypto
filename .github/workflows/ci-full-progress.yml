@@ -1,6 +1,12 @@
 name: CI Full Progress
 
 on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Existing full CI run to monitor (does not rerun tests)
+        type: string
+        required: true
   workflow_run:
     workflows: [CI]
     types: [in_progress, completed]
@@ -10,19 +16,20 @@ permissions: {}
 jobs:
   progress:
     if: >-
-      github.event.workflow_run.event == 'workflow_dispatch' &&
-      github.event.workflow_run.head_branch == 'main'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 310
     concurrency:
-      # A completion event retries/reconciles after the live monitor exits.
+      # Completion notifications reconcile after the live monitor exits.
       # Serialize attempts too, so they cannot create checks concurrently.
-      group: ci-full-progress-${{ github.event.workflow_run.id }}
+      group: ci-full-progress-${{ inputs.run_id || github.event.workflow_run.id }}
       queue: max
       cancel-in-progress: false
     permissions:
       contents: read
-      actions: read
+      actions: write
       pull-requests: read
       statuses: read
       checks: write
@@ -37,3 +44,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/ci_progress.py
+      - name: Reconcile the merge gate after monitoring
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.run_id || github.event.workflow_run.id }}
+        run: >-
+          gh workflow run ci-full-status.yml --repo "$GITHUB_REPOSITORY" --ref main
+          -f run_id="$SOURCE_RUN"

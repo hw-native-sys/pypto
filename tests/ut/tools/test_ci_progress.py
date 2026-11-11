@@ -78,7 +78,7 @@ def harness(progress, monkeypatch, event):
         if "/runs/50/attempts/" in path:
             return {**copy.deepcopy(run), "run_attempt": event["workflow_run"]["run_attempt"]}
         if path.endswith("/workflows/ci.yml"):
-            return {"id": 99}
+            return {"id": 99, "path": ".github/workflows/ci.yml"}
         if path.endswith("/pulls/123"):
             return pr
         raise AssertionError(path)
@@ -318,6 +318,28 @@ def test_progress_resolves_static_or_missing_webhook_title(progress, event, harn
     assert len(writes) == 1
     assert writes[0][1]["head_sha"] == HEAD
     assert writes[0][1]["conclusion"] == "success"
+
+
+def test_explicit_dispatch_mirrors_existing_results(progress, monkeypatch, harness):
+    run, _, jobs, writes, _ = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    progress.monitor(REPO, {"inputs": {"run_id": "50"}})
+    assert len(writes) == 1
+    path, payload, _ = writes[0]
+    assert path == f"repos/{REPO}/check-runs"
+    assert payload["head_sha"] == HEAD
+    assert payload["conclusion"] == "success"
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/main", ""])
+def test_explicit_progress_dispatch_rejects_untrusted_ref(progress, monkeypatch, ref):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", ref)
+    with pytest.raises(progress.control.UntrustedRunError, match="must run from main"):
+        progress.monitor(REPO, {"inputs": {"run_id": "50"}})
 
 
 if __name__ == "__main__":

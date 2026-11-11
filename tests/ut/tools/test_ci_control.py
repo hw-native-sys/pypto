@@ -155,7 +155,7 @@ def test_changed_pr_rejected_before_checkout(control, pr):
         control.verify_merge(REPO, pr, HEAD, BASE, MERGE)
 
 
-@pytest.mark.parametrize("failure", ["", "pending", "dispatch", "bind", "ack"])
+@pytest.mark.parametrize("failure", ["", "pending", "dispatch", "bind", "ack", "observer"])
 @pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "MEMBER", "OWNER"])
 def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, pr, failure, association):
     event["comment"]["author_association"] = association
@@ -173,6 +173,8 @@ def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, 
             else:
                 assert gate["state"] == "pending", "Dispatch must not leave the old success visible"
                 if failure == "dispatch":
+                    raise subprocess.CalledProcessError(1, ["gh", "api"])
+                if failure == "observer" and "ci-full-progress.yml" in path:
                     raise subprocess.CalledProcessError(1, ["gh", "api"])
             writes.append((path, payload))
             if path.endswith("/dispatches"):
@@ -195,7 +197,7 @@ def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, 
         with pytest.raises(error):
             control.dispatch(REPO, event)
         assert gate["state"] == ("success" if failure == "pending" else "pending")
-        assert len(writes) == {"pending": 0, "dispatch": 1, "bind": 2, "ack": 2}[failure]
+        assert len(writes) == {"pending": 0, "dispatch": 1, "bind": 2, "ack": 2, "observer": 3}[failure]
         if failure in {"pending", "dispatch"}:
             assert all("/dispatches" not in path for path, _ in writes)
         return
@@ -226,6 +228,10 @@ def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, 
                 "description": "Full CI dispatched; waiting for results",
                 "target_url": f"https://github.com/{REPO}/actions/runs/51/attempts/1",
             },
+        ),
+        (
+            f"repos/{REPO}/actions/workflows/ci-full-progress.yml/dispatches",
+            {"ref": "main", "inputs": {"run_id": "51"}},
         ),
     ]
 
@@ -1584,6 +1590,9 @@ def test_consecutive_comments_honor_bound_run_before_history_indexes_it(
             if path == f"repos/{REPO}/statuses/{HEAD}":
                 statuses[:] = [payload]
                 return None
+            if path == f"repos/{REPO}/actions/workflows/ci-full-progress.yml/dispatches":
+                assert payload == {"ref": "main", "inputs": {"run_id": "51"}}
+                return None
             assert path == f"repos/{REPO}/actions/workflows/ci.yml/dispatches"
             return {"workflow_run_id": 51}
         if path == f"repos/{REPO}/actions/runs/51":
@@ -1606,10 +1615,10 @@ def test_consecutive_comments_honor_bound_run_before_history_indexes_it(
     monkeypatch.setattr(control, "api", api)
     monkeypatch.setattr(control, "pages", pages)
     control.dispatch(REPO, event)
-    assert len(writes) == 3
+    assert len(writes) == 4
     assert statuses[0]["target_url"].endswith("/runs/51/attempts/1")
     control.dispatch(REPO, event)
-    assert len(writes) == 3, "The second comment must neither dispatch nor overwrite the binding"
+    assert len(writes) == 4, "The second comment must neither dispatch nor overwrite the binding"
     assert len(history_reads) == 1 and len(run_reads) == 1
 
 
@@ -1951,6 +1960,31 @@ def test_progress_resolution_keeps_api_failure_for_retry(control, monkeypatch, p
     monkeypatch.setattr(control, "api", unavailable)
     with pytest.raises(subprocess.CalledProcessError):
         control.resolved_event(REPO, publication_event)
+
+
+def test_full_finalizer_explicitly_notifies_publishers_even_after_failure():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    finalizer = jobs["full-result"]
+    assert finalizer["runs-on"] == "ubuntu-latest"
+    assert finalizer["permissions"]["actions"] == "write"
+    assert "github.ref == 'refs/heads/main'" in finalizer["if"]
+    notifications = finalizer["steps"][-2:]
+    for step, workflow in zip(notifications, ["ci-full-status.yml", "ci-full-progress.yml"]):
+        assert step["if"] == "always()"
+        assert f"gh workflow run {workflow}" in step["run"]
+        assert "--ref main" in step["run"]
+        assert 'run_id="$GITHUB_RUN_ID"' in step["run"]
+    assert "wait_for_completion=true" in notifications[0]["run"]
+    status = yaml.safe_load((ROOT / ".github/workflows/ci-full-status.yml").read_text())
+    route_steps = status["jobs"]["route"]["steps"]
+    assert route_steps[-2]["run"].endswith("ci_control.py route")
+    assert "inputs.wait_for_completion" in route_steps[-1]["if"]
+    assert "concurrency" not in status["jobs"]["route"]
+    progress = yaml.safe_load((ROOT / ".github/workflows/ci-full-progress.yml").read_text())
+    assert progress[True]["workflow_dispatch"]["inputs"]["run_id"]["required"]
+    reconcile = progress["jobs"]["progress"]["steps"][-1]
+    assert reconcile["if"] == "always()"
+    assert "gh workflow run ci-full-status.yml" in reconcile["run"]
 
 
 if __name__ == "__main__":
