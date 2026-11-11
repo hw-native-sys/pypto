@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -1077,14 +1078,98 @@ using ExprBinding = std::unordered_map<const Var*, ExprPtr>;
   return nullptr;
 }
 
+/// The async-transfer-relevant slice of one function: its SSA-local bindings,
+/// its async calls and its call sites. Collecting the slice once per function
+/// keeps a callee shared by many call sites from being rewalked for each of
+/// them; only the cheap call-site expansion is repeated per incoming binding.
+///
+/// Declared ahead of ``ResolveThroughBinding`` (rather than beside its
+/// collector below) so endpoint resolution can look a ``GlobalVar`` callee's
+/// ``Function`` up by name -- see ``UserCallAliasedArgIndex``.
+struct FunctionIndex {
+  FunctionPtr func;
+  ExprBinding local_binding;
+  std::vector<std::pair<CallPtr, std::string>> async_calls;
+  std::vector<std::pair<GlobalVarPtr, std::vector<ExprPtr>>> call_sites;
+};
+
+using FunctionIndexMap = std::unordered_map<std::string, FunctionIndex>;
+
+/// Shared, per-verification-run state threaded through the whole async-transfer
+/// window-bounds check. Both caches make the check's total cost bounded by the
+/// IR size rather than by the number of call-chain paths through it
+/// (pass-complexity.md):
+///  - ``return_param_cache`` memoizes a ``GlobalVar`` callee's
+///    ``ExplicitReturnedParamIndices`` by name, so a callee referenced from
+///    many call sites has its return contract read once.
+///  - ``visited_bindings`` dedupes (callee, resolved-argument-identity) pairs
+///    already expanded by ``CheckAsyncTransfersInFunction``, so a
+///    diamond-shaped call graph -- the same callee reached through many
+///    wrapper paths that forward the same arguments -- is walked once rather
+///    than once per path.
+struct AsyncCheckContext {
+  const FunctionIndexMap& indices;
+  std::unordered_map<std::string, std::vector<std::optional<size_t>>>& return_param_cache;
+  std::unordered_set<std::string>& visited_bindings;
+};
+
+/// Memoized wrapper over ``return_lineage::ExplicitReturnedParamIndices``: a
+/// 1-to-1 structural read of @p func's own ``ReturnStmt`` (valid once
+/// ``NormalizeReturnOrder`` has run, i.e. once ``IRProperty::ReturnParamsExplicit``
+/// holds for @p func's kind), cached per callee name since a shared callee is
+/// otherwise re-read once per call site.
+[[nodiscard]] const std::vector<std::optional<size_t>>& CachedExplicitReturnedParamIndices(
+    const FunctionPtr& func, AsyncCheckContext& ctx) {
+  auto [it, inserted] = ctx.return_param_cache.try_emplace(func->name_);
+  if (inserted) it->second = return_lineage::ExplicitReturnedParamIndices(func);
+  return it->second;
+}
+
+/// Aliased-parameter index for one declared return position of a call to a
+/// user-defined function (a ``GlobalVar`` callee, which ``ResultAliasedArgIndex``
+/// never matches: it only looks up registered operators via ``LookupOpEntry``).
+/// @p position selects which declared return slot to consult: 0 for a direct
+/// (non-tuple) result, or a ``TupleGetItemExpr`` index for a multi-result callee.
+///
+/// This is deliberately best-effort: when the callee's ``Function`` is not
+/// indexed, its return contract is not yet explicit (``ReturnParamsExplicit``
+/// has not been established for it), or the selected position is not a plain
+/// parameter writeback, this reports "unknown" rather than guessing. The
+/// endpoint check then silently skips, exactly as it did before this helper
+/// existed -- it can only improve coverage, never introduce a false positive.
+[[nodiscard]] std::optional<size_t> UserCallAliasedArgIndex(const CallPtr& call, size_t position,
+                                                            AsyncCheckContext& ctx) {
+  if (!call || !call->op_) return std::nullopt;
+  auto gvar = As<GlobalVar>(call->op_);
+  if (!gvar) return std::nullopt;
+  auto it = ctx.indices.find(gvar->name_);
+  if (it == ctx.indices.end() || !it->second.func) return std::nullopt;
+  const auto& returned = CachedExplicitReturnedParamIndices(it->second.func, ctx);
+  if (position >= returned.size() || !returned[position]) return std::nullopt;
+  if (*returned[position] >= call->args_.size()) return std::nullopt;
+  return returned[position];
+}
+
 /// Resolve through the function's indexed locals and the call site's parameter
 /// bindings. Both maps are borrowed so a call site never copies the callee's
 /// whole local map; a kernel with no async calls costs O(1) per invocation.
+///
+/// Follows three kinds of rebind: a plain SSA/parameter binding (``outer`` /
+/// ``local``), a registered operator's declared result alias
+/// (``ResultAliasedArgIndex``, e.g. ``tensor.write``), and a user helper that
+/// returns one of its own parameters unchanged (``UserCallAliasedArgIndex``,
+/// including through a ``TupleGetItemExpr`` projection of a multi-result
+/// helper) -- for example ``filled = fill_src(..., src); get(filled, ...)``
+/// resolves ``filled`` back to ``src`` so the window-slot check below still
+/// applies. Each distinct Call/TupleGetItemExpr node is visited at most once
+/// per call (``seen_calls`` / ``seen_tuple_gets``) so a malformed cyclic chain
+/// cannot loop forever.
 [[nodiscard]] ExprPtr ResolveThroughBinding(const ExprPtr& expr, const ExprBinding* outer,
-                                            const ExprBinding* local) {
+                                            const ExprBinding* local, AsyncCheckContext& ctx) {
   ExprPtr cur = expr;
   std::unordered_set<const Var*> seen_vars;
   std::unordered_set<const Call*> seen_calls;
+  std::unordered_set<const TupleGetItemExpr*> seen_tuple_gets;
   while (cur) {
     if (auto var = AsVarLike(cur)) {
       if (!seen_vars.insert(var.get()).second) return cur;
@@ -1093,10 +1178,27 @@ using ExprBinding = std::unordered_map<const Var*, ExprPtr>;
       cur = *bound;
       continue;
     }
+    if (auto tuple_get = As<TupleGetItemExpr>(cur)) {
+      if (!seen_tuple_gets.insert(tuple_get.get()).second) return cur;
+      if (tuple_get->index_ < 0) return cur;
+      const auto index = static_cast<size_t>(tuple_get->index_);
+      if (auto tuple = As<MakeTuple>(tuple_get->tuple_)) {
+        if (index >= tuple->elements_.size()) return cur;
+        cur = tuple->elements_[index];
+        continue;
+      }
+      auto tuple_call = As<Call>(tuple_get->tuple_);
+      if (!tuple_call || !seen_calls.insert(tuple_call.get()).second) return cur;
+      auto aliased = UserCallAliasedArgIndex(tuple_call, index, ctx);
+      if (!aliased || *aliased >= tuple_call->args_.size()) return cur;
+      cur = tuple_call->args_[*aliased];
+      continue;
+    }
     auto call = As<Call>(cur);
     if (!call) return cur;
     if (!seen_calls.insert(call.get()).second) return cur;
     auto aliased = ResultAliasedArgIndex(call);
+    if (!aliased) aliased = UserCallAliasedArgIndex(call, 0, ctx);
     if (!aliased || *aliased >= call->args_.size()) return cur;
     cur = call->args_[*aliased];
   }
@@ -1107,9 +1209,9 @@ using ExprBinding = std::unordered_map<const Var*, ExprPtr>;
 /// resolved type carries a ``WindowBuffer`` and the transfer/window sizes are
 /// static, compare the endpoint's byte range with the window slot.
 void CheckAsyncEndpoint(const CallPtr& call, size_t arg_index, const ExprBinding* outer,
-                        const ExprBinding* local, const std::string& op_name,
+                        const ExprBinding* local, const std::string& op_name, AsyncCheckContext& ctx,
                         std::vector<Diagnostic>& diagnostics) {
-  auto resolved = ResolveThroughBinding(call->args_[arg_index], outer, local);
+  auto resolved = ResolveThroughBinding(call->args_[arg_index], outer, local, ctx);
   auto type = As<DistributedTensorType>(resolved->GetType());
   if (!type || !type->window_buffer_) return;
   auto range = EndpointTransferRange(call, arg_index, type);
@@ -1160,19 +1262,6 @@ void CollectLoopBindings(const std::vector<IterArgPtr>& iter_args, const std::ve
     binding[return_vars[i].get()] = std::move(carried);
   }
 }
-
-/// The async-transfer-relevant slice of one function: its SSA-local bindings,
-/// its async calls and its call sites. Collecting the slice once per function
-/// keeps a callee shared by many call sites from being rewalked for each of
-/// them; only the cheap call-site expansion is repeated per incoming binding.
-struct FunctionIndex {
-  FunctionPtr func;
-  ExprBinding local_binding;
-  std::vector<std::pair<CallPtr, std::string>> async_calls;
-  std::vector<std::pair<GlobalVarPtr, std::vector<ExprPtr>>> call_sites;
-};
-
-using FunctionIndexMap = std::unordered_map<std::string, FunctionIndex>;
 
 class FunctionIndexCollector : public IRVisitor {
  public:
@@ -1231,19 +1320,44 @@ class FunctionIndexCollector : public IRVisitor {
   return indices;
 }
 
+/// Exact dedup key for one callee invocation: the callee name plus each
+/// resolved argument's identity. ``callee_binding``'s values are already
+/// ``ResolveThroughBinding`` results, canonicalized through SSA rebinds, loop
+/// carries and alias chains, so two call sites that resolve to identical
+/// per-position expressions are guaranteed to make identical recursive calls
+/// and emit identical diagnostics. Keying on the raw resolved pointers (rather
+/// than a structural comparison) keeps this O(params) per call site with no
+/// risk of a hash collision merging two genuinely different bindings: the key
+/// encodes the full address, not a digest of it.
+[[nodiscard]] std::string CalleeBindingKey(const std::string& callee_name, const ExprBinding& callee_binding,
+                                           const std::vector<VarPtr>& callee_params) {
+  std::string key = callee_name;
+  for (const auto& param : callee_params) {
+    auto it = callee_binding.find(param.get());
+    key += '|';
+    key +=
+        std::to_string(reinterpret_cast<uintptr_t>(it == callee_binding.end() ? nullptr : it->second.get()));
+  }
+  return key;
+}
+
 /// Check one function against an incoming parameter binding and recurse into
 /// its call sites. The statement walk already happened in
 /// ``BuildFunctionIndices``; the function's indexed locals stay in their own map
 /// and are consulted first during resolution, so no per-invocation copy of the
 /// local map is made. Call sites are expanded per binding because the
 /// caller-side window type is what makes the check possible. ``active`` is the
-/// current call stack (cycle guard).
+/// current call stack (cycle guard); ``ctx.visited_bindings`` is a separate,
+/// never-cleared guard against re-expanding a callee already reached through a
+/// different path with an identical resolved binding (see ``CalleeBindingKey``)
+/// -- without it, a diamond-shaped call graph makes this recursion exponential
+/// in the number of wrapper call sites even though the underlying IR is linear.
 void CheckAsyncTransfersInFunction(const FunctionPtr& func, const ExprBinding& binding,
-                                   const FunctionIndexMap& indices, std::unordered_set<std::string>& active,
+                                   AsyncCheckContext& ctx, std::unordered_set<std::string>& active,
                                    std::vector<Diagnostic>& diagnostics) {
   if (!func || !func->body_) return;
-  auto index_it = indices.find(func->name_);
-  if (index_it == indices.end()) return;
+  auto index_it = ctx.indices.find(func->name_);
+  if (index_it == ctx.indices.end()) return;
   if (!active.insert(func->name_).second) return;
   const FunctionIndex& index = index_it->second;
 
@@ -1251,21 +1365,25 @@ void CheckAsyncTransfersInFunction(const FunctionPtr& func, const ExprBinding& b
   // merged into a fresh map per call site; resolution checks them before the
   // incoming parameter binding.
   for (const auto& [call, op_name] : index.async_calls) {
-    CheckAsyncEndpoint(call, 0, &binding, &index.local_binding, op_name, diagnostics);
-    CheckAsyncEndpoint(call, 2, &binding, &index.local_binding, op_name, diagnostics);
+    CheckAsyncEndpoint(call, 0, &binding, &index.local_binding, op_name, ctx, diagnostics);
+    CheckAsyncEndpoint(call, 2, &binding, &index.local_binding, op_name, ctx, diagnostics);
   }
 
   for (const auto& [callee_gvar, args] : index.call_sites) {
-    auto callee_it = indices.find(callee_gvar->name_);
-    if (callee_it == indices.end()) continue;
+    auto callee_it = ctx.indices.find(callee_gvar->name_);
+    if (callee_it == ctx.indices.end()) continue;
     const auto& callee = callee_it->second.func;
     ExprBinding callee_binding;
     const size_t bound = std::min(callee->params_.size(), args.size());
     for (size_t i = 0; i < bound; ++i) {
       callee_binding[callee->params_[i].get()] =
-          ResolveThroughBinding(args[i], &binding, &index.local_binding);
+          ResolveThroughBinding(args[i], &binding, &index.local_binding, ctx);
     }
-    CheckAsyncTransfersInFunction(callee, callee_binding, indices, active, diagnostics);
+    if (!ctx.visited_bindings.insert(CalleeBindingKey(callee->name_, callee_binding, callee->params_))
+             .second) {
+      continue;
+    }
+    CheckAsyncTransfersInFunction(callee, callee_binding, ctx, active, diagnostics);
   }
 
   active.erase(func->name_);
@@ -1277,6 +1395,9 @@ void CheckAsyncTransfersInFunction(const FunctionPtr& func, const ExprBinding& b
 /// would rewalk each call-chain suffix and make the verifier O(N^2) on the program.
 void CheckAsyncTransferWindowBounds(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
   auto indices = BuildFunctionIndices(program);
+  std::unordered_map<std::string, std::vector<std::optional<size_t>>> return_param_cache;
+  std::unordered_set<std::string> visited_bindings;
+  AsyncCheckContext ctx{indices, return_param_cache, visited_bindings};
   std::unordered_set<std::string> callees;
   for (const auto& entry : indices) {
     for (const auto& site : entry.second.call_sites) callees.insert(site.first->name_);
@@ -1286,7 +1407,7 @@ void CheckAsyncTransferWindowBounds(const ProgramPtr& program, std::vector<Diagn
     if (!func || callees.count(func->name_)) continue;
     ExprBinding empty;
     std::unordered_set<std::string> active;
-    CheckAsyncTransfersInFunction(func, empty, indices, active, diagnostics);
+    CheckAsyncTransfersInFunction(func, empty, ctx, active, diagnostics);
   }
 }
 

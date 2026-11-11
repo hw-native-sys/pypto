@@ -2786,5 +2786,151 @@ def test_verifier_resolves_layered_locals_per_call_site(op_name):
         _apply(_build_async_layered_binding_program(op_name))
 
 
+def _build_async_through_user_call_alias_program(op_name: str) -> ir.Program:
+    """The ``src`` endpoint is rebound through a host helper that returns its
+    own parameter unchanged (``filled = self.fill_src(src)``). ``fill_src`` is
+    a ``GlobalVar`` call that ``ResultAliasedArgIndex`` never matches (it only
+    looks up registered operators), so the byte-count check must follow the
+    helper's declared return contract instead of stopping at the unresolved
+    call."""
+    return pl.parse_program(
+        textwrap.dedent(
+            f"""
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                    peer: pl.Scalar[pl.INT32],
+                ):
+                    pld.tensor.{op_name}(dst, peer, src)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def fill_src(
+                    self, x: pld.DistributedTensor[[16], pl.FP32]
+                ) -> pld.DistributedTensor[[16], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    filled = self.fill_src(src)
+                    self.kernel(dst, filled, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    a = pld.alloc_window_buffer(64)
+                    b = pld.alloc_window_buffer(60)
+                    dst = pld.window(a, [16], dtype=pl.FP32)
+                    src = pld.window(b, [16], dtype=pl.FP32)
+                    self.chip(dst, src, device=0)
+            """
+        )
+    )
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_verifier_follows_user_call_return_alias(op_name):
+    """A host helper returning one of its own parameters unchanged must not
+    hide an undersized window slot from the byte-count check (review finding,
+    P1: ``ResultAliasedArgIndex`` only handles registered operators)."""
+    with pytest.raises(pypto.Error, match="src transfer of 64 bytes exceeds window slot"):
+        _apply(_build_async_through_user_call_alias_program(op_name))
+
+
+def _build_async_diamond_shared_callee_program(op_name: str) -> ir.Program:
+    """Each wrapper layer calls the next layer twice with the same forwarded
+    arguments -- the duplicate-call-site shape the dedup in
+    ``CheckAsyncTransfersInFunction`` targets (review finding, P2). Without
+    memoizing by (callee, resolved binding), re-expanding every path through N
+    such layers costs O(2**N) recursive calls even though the IR itself is
+    linear in N: 5 layers here would be 2**5 = 32 naive re-expansions of the
+    leaf kernel. After the fix, each (callee, binding) pair the traversal
+    reaches is expanded exactly once."""
+    return pl.parse_program(
+        textwrap.dedent(
+            f"""
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                    peer: pl.Scalar[pl.INT32],
+                ):
+                    pld.tensor.{op_name}(dst, peer, src)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def layer4(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.kernel(dst, src, 0)
+                    self.kernel(dst, src, 0)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def layer3(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.layer4(dst, src)
+                    self.layer4(dst, src)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def layer2(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.layer3(dst, src)
+                    self.layer3(dst, src)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def layer1(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.layer2(dst, src)
+                    self.layer2(dst, src)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.layer1(dst, src)
+                    self.layer1(dst, src)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    a = pld.alloc_window_buffer(64)
+                    b = pld.alloc_window_buffer(60)
+                    dst = pld.window(a, [16], dtype=pl.FP32)
+                    src = pld.window(b, [16], dtype=pl.FP32)
+                    self.chip(dst, src, device=0)
+            """
+        )
+    )
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_verifier_dedupes_diamond_shared_callee_expansion(op_name):
+    """Many equivalent paths to the same callee are expanded once instead of
+    once per path, and still catch the undersized window at the bottom
+    (review finding, P2)."""
+    with pytest.raises(pypto.Error, match="src transfer of 64 bytes exceeds window slot"):
+        _apply(_build_async_diamond_shared_callee_program(op_name))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
