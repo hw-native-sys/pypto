@@ -1,0 +1,39 @@
+name: CI Full Progress
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [in_progress, completed]
+
+permissions: {}
+
+jobs:
+  progress:
+    if: >-
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    concurrency:
+      # A completion event retries/reconciles after the live monitor exits.
+      # Serialize attempts too, so they cannot create checks concurrently.
+      group: ci-full-progress-${{ github.event.workflow_run.id }}
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: read
+      checks: write
+    steps:
+      - name: Checkout trusted progress publisher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Mirror full-test jobs onto the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/ci_progress.py

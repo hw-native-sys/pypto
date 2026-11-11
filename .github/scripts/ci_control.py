@@ -31,8 +31,7 @@ UNFINISHED = ("queued", "in_progress", "requested", "waiting", "pending")
 REQUIRED = {
     "changes",
     "toolchain",
-    "pre-commit",
-    "clang-tidy",
+    "lint-gate",
     "unit-tests",
     "examples-tests",
     "codegen-tests",
@@ -44,7 +43,7 @@ REQUIRED = {
     "onboard-tests-a5",
     "system-tests-a5sim",
 }
-OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github"}
+OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
 CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
 
 
@@ -52,11 +51,11 @@ class UntrustedRunError(ValueError):
     """Reject unrelated runs without granting them permission to write statuses."""
 
 
-def api(path: str, payload: dict[str, Any] | None = None) -> Any:
+def api(path: str, payload: dict[str, Any] | None = None, *, method: str = "POST") -> Any:
     """Use gh's token handling and pass JSON through stdin, never the shell."""
     command = ["gh", "api", "-H", "X-GitHub-Api-Version: 2022-11-28", path]
     if payload is not None:
-        command += ["--method", "POST", "--input", "-"]
+        command += ["--method", method, "--input", "-"]
     result = subprocess.run(
         command,
         input=json.dumps(payload) if payload is not None else None,
@@ -238,20 +237,130 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
     return False
 
 
-def authorized_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
+def effective_jobs(repo: str, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Overlay attempts by job name, preserving dependencies omitted by a rerun."""
+    attempt = run["run_attempt"]
+    if type(attempt) is not int or not 1 <= attempt <= 100:
+        raise ValueError("Cannot reconstruct CI jobs: invalid or excessive attempt count")
+    latest: dict[str, dict[str, Any]] = {}
+    for number in range(1, attempt + 1):
+        jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{number}/jobs", "jobs")
+        names = [job["name"] for job in jobs]
+        if len(set(names)) != len(names):
+            raise ValueError("CI job names must be unique within an attempt")
+        latest.update({job["name"]: job for job in jobs})
+    return list(latest.values())
+
+
+def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
+    """Reuse only the latest automatic run for this exact PR/head/base snapshot."""
+    head, base = pr["head"]["sha"], pr["base"]["sha"]
+    title = f"CI lint PR #{pr['number']} @{head} base:{base}"
+    workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+    runs = pages(
+        f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request&head_sha={head}", "workflow_runs"
+    )
+    candidates = [
+        run
+        for run in runs
+        if run.get("display_title") == title
+        and run.get("event") == "pull_request"
+        and run.get("path") == WORKFLOW
+        and run.get("workflow_id") == workflow["id"]
+        and run.get("head_sha") == head
+        and run.get("repository", {}).get("full_name") == repo
+        and run.get("head_repository", {}).get("id") == pr["head"]["repo"]["id"]
+    ]
+    if not candidates:
+        raise ValueError("No matching PR lint run; update the PR branch and wait for lint before /ci full")
+    run = max(candidates, key=lambda item: item["run_number"])
+    # Wait for the attempt to finish so not-yet-indexed rerun jobs cannot make
+    # an earlier success look reusable while that check is actually rerunning.
+    if run["status"] != "completed":
+        raise ValueError("PR lint run is still running; wait before /ci full")
+    jobs = effective_jobs(repo, run)
+    for name in ("changes", "pre-commit", "clang-tidy"):
+        selected = [job for job in jobs if job["name"] == name]
+        if len(selected) != 1 or selected[0]["status"] != "completed":
+            raise ValueError(f"PR lint job {name} is missing or still running; wait before /ci full")
+        result = selected[0]["conclusion"]
+        if name == "clang-tidy" and result == "skipped":
+            files = pages(f"repos/{repo}/pulls/{pr['number']}/files")
+            # Match the workflow's docs-only exemption, including rename sources.
+            # The PR files API caps at 3,000; never accept truncated classification.
+            paths = [
+                value
+                for file in files
+                for value in (file["filename"], file.get("previous_filename"))
+                if value
+            ]
+            if (
+                files
+                and len(files) < 3000
+                and all(
+                    path.startswith("docs/") or path.endswith(".md") or path == "mkdocs.yml" for path in paths
+                )
+            ):
+                continue
+        if result != "success":
+            raise ValueError(f"PR lint job {name} did not pass; fix or rerun lint before /ci full")
+    report(f"Reusing lint from https://github.com/{repo}/actions/runs/{run['id']}")
+    return run
+
+
+def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
+    """Honor a verified bound run before consulting eventually indexed history."""
+    statuses = pages(f"repos/{repo}/commits/{pr['head']['sha']}/status", "statuses")
+    status = next((item for item in statuses if item["context"] == "ci/full"), {})
+    target = re.fullmatch(
+        rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+        status.get("target_url") or "",
+    )
+    if status.get("state") not in ("pending", "success") or not target:
+        return False
+    run = api(f"repos/{repo}/actions/runs/{target[1]}")
+    expected = f"CI full PR #{pr['number']} @{pr['head']['sha']} base:{pr['base']['sha']}"
+    if (
+        run.get("id") != int(target[1])
+        or run.get("display_title") != expected
+        or run.get("event") != "workflow_dispatch"
+        or run.get("head_branch") != "main"
+        or run.get("path") != WORKFLOW
+        or run.get("repository", {}).get("full_name") != repo
+        or run.get("repository", {}).get("id") != pr["base"]["repo"]["id"]
+        or run.get("head_repository", {}).get("id") != pr["base"]["repo"]["id"]
+        or type(run.get("run_attempt")) is not int
+        or run["run_attempt"] < int(target[2])
+    ):
+        return False
+    workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+    if run.get("workflow_id") != workflow["id"]:
+        return False
+    if run.get("status") in UNFINISHED:
+        # The binding is available before run-list indexing. A native rerun may
+        # also have advanced beyond the attempt recorded in the status URL.
+        return True
+    if (
+        status["state"] != "success"
+        or run["run_attempt"] != int(target[2])
+        or run.get("status") != "completed"
+        or run.get("conclusion") == "cancelled"
+    ):
+        return False
+    jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
+    finalizers = [job for job in jobs if job["name"] == "full-result"]
+    return len(finalizers) == 1 and finalizers[0]["conclusion"] == "success"
+
+
+def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
     if (
         event.get("action") != "created"
         or "pull_request" not in event.get("issue", {})
         or event.get("comment", {}).get("body", "").strip() != "/ci full"
     ):
         return
-    comment = event["comment"]
-    actor = comment["user"]["login"]
-    # author_association is not a repository permission check: a contributor may
-    # have no write access, and membership alone must not spend device capacity.
-    permission = api(f"repos/{repo}/collaborators/{actor}/permission")["permission"]
-    if permission not in {"write", "maintain", "admin"}:
-        raise ValueError("Only collaborators with write, maintain or admin permission may request full CI")
+    # Anyone who can comment may request full CI, including external contributors.
+    # Validate the live PR and merge revision both before queueing and dispatching.
     number = int(event["issue"]["number"])
     pr = pull(repo, number)
     if pr.get("mergeable") is not True or not pr.get("merge_commit_sha"):
@@ -262,21 +371,29 @@ def authorized_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def command_route(repo: str, event: dict[str, Any]) -> None:
-    """Authorize before allowing a comment to join the shared writer queue."""
-    pr = authorized_request(repo, event)
+    """Validate the PR revision before joining the shared writer queue."""
+    pr = validated_request(repo, event)
     if pr is not None:
         head = pr["head"]["sha"]
         output({"key": f"{pr['number']}-{head}", "head": head})
 
 
 def dispatch(repo: str, event: dict[str, Any]) -> None:
-    pr = authorized_request(repo, event)
+    pr = validated_request(repo, event)
     if pr is None:
         return
     number = pr["number"]
     head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
     if os.environ.get("CI_ROUTED_HEAD") != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
+    if already_running_or_passed(repo, pr):
+        report(
+            "Full CI is already queued, running, or passed for this PR revision; keeping the existing gate."
+        )
+        return
+    matching_lint_run(repo, pr)
+    # Metadata reads can overlap a push; revalidate before writing or dispatching.
+    verify_merge(repo, pull(repo, number), head, base, merge)
     title = f"CI full PR #{number} @{head} base:{base}"
     # A full request cannot predate its PR. Fix the upper bound for pagination;
     # never filter by mutable run status, which can move between queries.
@@ -332,7 +449,9 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     kind = os.environ["GITHUB_EVENT_NAME"]
     inputs: dict[str, str] = event.get("inputs") or {}
     number = inputs.get("pr_number", "")
-    full = kind != "pull_request" or os.environ.get("CI_COMMENT_TIERS_ENABLED") != "true"
+    # Fork PR runs can have an empty vars context. The event alone selects the
+    # tier so missing configuration cannot launch device tests automatically.
+    full = kind != "pull_request"
     checkout = sha(os.environ["GITHUB_SHA"])
     if number:
         if kind != "workflow_dispatch" or os.environ["GITHUB_REF"] != "refs/heads/main":
@@ -341,10 +460,11 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             raise ValueError("Expected a positive PR number")
         pr = pull(repo, int(number))
         verify_merge(repo, pr, inputs["head_sha"], inputs["base_sha"], inputs["merge_sha"])
+        matching_lint_run(repo, pr)
         checkout = inputs["merge_sha"]
     elif any(inputs.get(key) for key in ("head_sha", "base_sha", "merge_sha")):
         raise ValueError("PR revision inputs require pr_number")
-    output({"full": str(full).lower(), "checkout_sha": checkout})
+    output({"full": str(full).lower(), "checkout_sha": checkout, "reuse_lint": str(bool(number)).lower()})
 
 
 def aggregate(needs: dict[str, Any]) -> None:
@@ -364,7 +484,7 @@ def aggregate(needs: dict[str, Any]) -> None:
     report("All required full CI jobs passed. Wheel warm-up jobs are advisory.")
 
 
-def verified_event_run(repo: str, event: dict[str, Any]) -> dict[str, Any]:
+def verified_event_run(repo: str, event: dict[str, Any], *, require_title: bool = True) -> dict[str, Any]:
     """Validate event provenance for routing or invalidation, never to pass a gate."""
     try:
         run, workflow, repository = event["workflow_run"], event["workflow"], event["repository"]
@@ -379,7 +499,7 @@ def verified_event_run(repo: str, event: dict[str, Any]) -> dict[str, Any]:
             or run["repository"]["full_name"] != repo
             or run["repository"]["id"] != repository["id"]
             or run["head_repository"]["id"] != repository["id"]
-            or not FULL_TITLE.fullmatch(run["display_title"])
+            or (require_title and not FULL_TITLE.fullmatch(run.get("display_title", "")))
             or any(
                 type(run[key]) is not int or run[key] <= 0
                 for key in ("id", "workflow_id", "run_number", "run_attempt")
@@ -393,23 +513,113 @@ def verified_event_run(repo: str, event: dict[str, Any]) -> dict[str, Any]:
     return run
 
 
+def resolved_event(
+    repo: str, event: dict[str, Any], *, allow_failure_route: bool = False
+) -> dict[str, Any] | None:
+    """Resolve routing metadata from REST, not the webhook's display title."""
+    routing_failed = False
+    if "workflow_run" not in event:
+        if (
+            os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or os.environ.get("GITHUB_REF") != "refs/heads/main"
+        ):
+            raise UntrustedRunError("Status reconciliation must run from main")
+        run_id = (event.get("inputs") or {}).get("run_id", "")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[1-9][0-9]*", run_id):
+            raise ValueError("Expected a positive workflow run ID")
+        run = api(f"repos/{repo}/actions/runs/{run_id}")
+        if run["id"] != int(run_id):
+            raise UntrustedRunError("Unexpected reconciliation run ID")
+        workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+        event = {
+            "action": "completed",
+            "repository": run["repository"],
+            "workflow": workflow,
+            "workflow_run": run,
+        }
+        verified_event_run(repo, event)
+    else:
+        source = verified_event_run(repo, event, require_title=False)
+        # Resolve the event's exact attempt. A delayed event must not select a
+        # later attempt for progress; the status writer separately reads live state.
+        try:
+            run = api(f"repos/{repo}/actions/runs/{source['id']}/attempts/{source['run_attempt']}")
+        except subprocess.CalledProcessError:
+            if not allow_failure_route:
+                raise
+            # Event provenance and a complete PR title can identify which old
+            # gate to invalidate, but can never establish a successful result.
+            run = verified_event_run(repo, event)
+            routing_failed = True
+            report("Run lookup failed; routing the verified event for failure-only publication.")
+        resolved = {**event, "workflow_run": run}
+        verified_event_run(repo, resolved, require_title=False)
+        for key in ("id", "workflow_id", "run_number", "run_attempt", "head_sha"):
+            if run.get(key) != source.get(key):
+                raise UntrustedRunError(f"Workflow event and API disagree on {key}")
+        if not FULL_TITLE.fullmatch(run.get("display_title", "")):
+            report("Ignoring a main CI run without PR full inputs.")
+            return None
+        event = resolved
+    # Pass only routing identity between trusted jobs. Do not carry commit
+    # messages or other bulky repository content in Actions job outputs.
+    repository = {key: run["repository"][key] for key in ("id", "full_name")}
+    identity = {
+        key: run[key]
+        for key in (
+            "id",
+            "workflow_id",
+            "run_number",
+            "run_attempt",
+            "path",
+            "event",
+            "head_branch",
+            "display_title",
+        )
+    }
+    identity.update(repository=repository, head_repository={"id": run["head_repository"]["id"]})
+    return {
+        "action": event["action"],
+        "repository": repository,
+        "workflow": {key: event["workflow"][key] for key in ("id", "path")},
+        "workflow_run": identity,
+        "routing_failed": routing_failed,
+    }
+
+
 def route(repo: str, event: dict[str, Any]) -> None:
     """Reject unrelated events before they can join the status writer queue."""
+    routed = resolved_event(repo, event, allow_failure_route=True)
+    if routed is None:
+        return
+    event = routed
     run = verified_event_run(repo, event)
     match = FULL_TITLE.fullmatch(run["display_title"])
     assert match is not None  # Already validated along with workflow identity.
-    output({"key": f"{match[1]}-{match[2]}"})
+    output({"key": f"{match[1]}-{match[2]}", "event": json.dumps(event)})
+
+
+def publication_run(repo: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Read the live attempt, or return verified identity that can only invalidate."""
+    if routed := os.environ.get("CI_ROUTED_EVENT"):
+        # Produced by the read-only router on a separate trusted runner. This
+        # also preserves failure invalidation when the live API is unavailable.
+        event = json.loads(routed)
+        verified_event_run(repo, event)
+        if event.get("routing_failed") is True:
+            # Retain the failed event's attempt for newer-writer protection. A
+            # delayed failed route cannot invalidate a later successful attempt.
+            return event["workflow_run"], True
+    # Success requires the live attempt: a delayed completion event may describe
+    # a previous successful attempt while a native rerun is already in progress.
+    try:
+        return api(f"repos/{repo}/actions/runs/{int(event['workflow_run']['id'])}"), False
+    except (ValueError, subprocess.CalledProcessError):
+        return verified_event_run(repo, event), True
 
 
 def publish(repo: str, event: dict[str, Any]) -> None:
-    # Success requires the live attempt: a delayed completion event may describe
-    # a previous successful attempt while a native rerun is already in progress.
-    live_lookup_failed = False
-    try:
-        run = api(f"repos/{repo}/actions/runs/{int(event['workflow_run']['id'])}")
-    except (ValueError, subprocess.CalledProcessError):
-        run = verified_event_run(repo, event)
-        live_lookup_failed = True
+    run, lookup_failed = publication_run(repo, event)
     match = FULL_TITLE.fullmatch(run.get("display_title", ""))
     if not match or run["event"] != "workflow_dispatch":
         return
@@ -425,7 +635,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
     # Lookup failures and obsolete PR revisions invalidate old green statuses;
     # untrusted workflow origins never write.
     try:
-        if live_lookup_failed:
+        if lookup_failed:
             raise ValueError("Cannot read the live CI attempt; event data cannot prove success")
         workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
         if run["workflow_id"] != workflow["id"]:

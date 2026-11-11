@@ -33,6 +33,7 @@ def control(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("CI_ROUTED_EVENT", raising=False)
     monkeypatch.setenv("CI_ROUTED_HEAD", HEAD)
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("Unexpected subprocess"))
     return module
@@ -56,7 +57,7 @@ def event():
     return {
         "action": "created",
         "issue": {"number": 123, "pull_request": {}},
-        "comment": {"body": "/ci full", "user": {"login": "maintainer"}},
+        "comment": {"body": "/ci full", "user": {"login": "external-user"}, "author_association": "NONE"},
     }
 
 
@@ -110,22 +111,32 @@ def test_failed_matrix_blocks_merge(control, needs):
 
 
 @pytest.mark.parametrize(
-    "kind,enabled,expected",
+    "kind,expected",
     [
-        ("pull_request", "true", "false"),
-        ("pull_request", "", "true"),
-        ("push", "true", "true"),
-        ("workflow_dispatch", "true", "true"),
+        ("pull_request", "false"),
+        ("push", "true"),
+        ("workflow_dispatch", "true"),
     ],
 )
-def test_rollout_preserves_legacy_and_main_runs(control, monkeypatch, tmp_path, kind, enabled, expected):
+@pytest.mark.parametrize("enabled", [None, "", "false", "true"])
+@pytest.mark.parametrize("fork", [False, True])
+def test_event_selects_tier_without_repository_variables(
+    control, monkeypatch, tmp_path, pr, kind, expected, enabled, fork
+):
     target = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(target))
     monkeypatch.setenv("GITHUB_EVENT_NAME", kind)
     monkeypatch.setenv("GITHUB_SHA", MERGE)
-    monkeypatch.setenv("CI_COMMENT_TIERS_ENABLED", enabled)
-    control.prepare(REPO, {})
-    assert target.read_text() == f"full={expected}\ncheckout_sha={MERGE}\n"
+    # Fork runs supplied an empty value even with the base repository switch
+    # enabled. Missing or stale rollout settings must never opt a PR into full.
+    if enabled is None:
+        monkeypatch.delenv("CI_COMMENT_TIERS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("CI_COMMENT_TIERS_ENABLED", enabled)
+    if not fork:
+        pr["head"]["repo"] = pr["base"]["repo"]
+    control.prepare(REPO, {"pull_request": pr} if kind == "pull_request" else {})
+    assert target.read_text() == f"full={expected}\ncheckout_sha={MERGE}\nreuse_lint=false\n"
 
 
 @pytest.mark.parametrize("parents", [[BASE, HEAD], [HEAD, BASE], [BASE, "d" * 40]])
@@ -145,7 +156,11 @@ def test_changed_pr_rejected_before_checkout(control, pr):
 
 
 @pytest.mark.parametrize("failure", ["", "pending", "dispatch", "bind", "ack"])
-def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr, failure):
+@pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "MEMBER", "OWNER"])
+def test_any_commenter_can_dispatch_pinned_fork_pr(control, monkeypatch, event, pr, failure, association):
+    event["comment"]["author_association"] = association
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
     writes = []
     gate = {"state": "success"}
 
@@ -162,8 +177,6 @@ def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr, f
             writes.append((path, payload))
             if path.endswith("/dispatches"):
                 return None if failure == "ack" else {"workflow_run_id": 51}
-        elif path.endswith("/permission"):
-            return {"permission": "write"}
         elif "/actions/workflows/ci.yml/runs?" in path:
             return {"workflow_runs": []}
         elif "/pulls/" in path:
@@ -217,30 +230,23 @@ def test_dispatch_authorizes_and_pins_fork_pr(control, monkeypatch, event, pr, f
     ]
 
 
-@pytest.mark.parametrize("permission", ["write", "read"])
+@pytest.mark.parametrize("association", ["NONE", "CONTRIBUTOR", "MEMBER", "OWNER"])
 @pytest.mark.parametrize("body", ["/ci full", "/ci full extra"])
-def test_command_queue_admission_requires_authorization(
-    control, monkeypatch, event, pr, tmp_path, permission, body
-):
+def test_command_queue_admits_any_commenter(control, monkeypatch, event, pr, tmp_path, association, body):
     output_file = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
     event["comment"]["body"] = body
+    event["comment"]["author_association"] = association
 
     def request(path):
-        if path.endswith("/permission"):
-            return {"permission": permission}
         if "/pulls/" in path:
             return pr
         assert path.endswith(f"/git/commits/{MERGE}")
         return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
 
     monkeypatch.setattr(control, "api", request)
-    if body == "/ci full" and permission == "read":
-        with pytest.raises(ValueError, match="Only collaborators"):
-            control.command_route(REPO, event)
-    else:
-        control.command_route(REPO, event)
-    if permission == "write" and body == "/ci full":
+    control.command_route(REPO, event)
+    if body == "/ci full":
         assert output_file.read_text() == f"key=123-{HEAD}\nhead={HEAD}\n"
     else:
         assert not output_file.exists()
@@ -249,18 +255,43 @@ def test_command_queue_admission_requires_authorization(
 @pytest.mark.parametrize("routed_head", ["", "d" * 40])
 def test_dispatch_cannot_write_outside_admitted_head(control, monkeypatch, event, pr, routed_head):
     monkeypatch.setenv("CI_ROUTED_HEAD", routed_head)
-    monkeypatch.setattr(control, "authorized_request", lambda *args: pr)
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
     monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes outside the admitted queue"))
     with pytest.raises(ValueError, match="head changed after queue admission"):
         control.dispatch(REPO, event)
 
 
-def test_contributor_association_does_not_grant_full_access(control, monkeypatch, event):
-    event["issue"]["pull_request"] = {"url": "unused"}
-    event["comment"]["author_association"] = "CONTRIBUTOR"
-    monkeypatch.setattr(control, "api", lambda path: {"permission": "read"})
-    with pytest.raises(ValueError, match="Only collaborators"):
-        control.dispatch(REPO, event)
+@pytest.mark.parametrize("command", ["command_route", "dispatch"])
+@pytest.mark.parametrize("invalid", ["closed", "other-branch", "other-repo", "deleted-fork"])
+def test_any_commenter_still_requires_valid_pr(control, monkeypatch, event, pr, command, invalid):
+    # Opening comment access must not broaden which PRs the trusted workflow runs.
+    if invalid == "closed":
+        pr["state"] = "closed"
+    elif invalid == "other-branch":
+        pr["base"]["ref"] = "release"
+    elif invalid == "other-repo":
+        pr["base"]["repo"]["full_name"] = "other/repo"
+    else:
+        pr["head"]["repo"] = None
+
+    def request(path):
+        assert path == f"repos/{REPO}/pulls/123"
+        return pr
+
+    monkeypatch.setattr(control, "api", request)
+    with pytest.raises(ValueError, match="open PR targeting this repository's main branch"):
+        getattr(control, command)(REPO, event)
+
+
+@pytest.mark.parametrize("command", ["command_route", "dispatch"])
+@pytest.mark.parametrize("invalid", ["edited", "deleted", "issue"])
+def test_only_new_pr_comments_are_accepted(control, monkeypatch, event, command, invalid):
+    if invalid == "issue":
+        del event["issue"]["pull_request"]
+    else:
+        event["action"] = invalid
+    monkeypatch.setattr(control, "api", lambda *a: pytest.fail("Unexpected API call"))
+    getattr(control, command)(REPO, event)
 
 
 @pytest.mark.parametrize("body", ["please /ci full", "/ci full extra", "/ci full\necho injected"])
@@ -297,7 +328,7 @@ def publication(control, monkeypatch, pr):
         elif path.endswith("/actions/runs/50"):
             return run
         elif path.endswith("/workflows/ci.yml"):
-            return {"id": 99}
+            return {"id": 99, "path": control.WORKFLOW}
         elif path.endswith("/pulls/123"):
             return pr
         elif "event=workflow_dispatch" in path:
@@ -491,7 +522,7 @@ def test_workflow_wiring_covers_every_full_job(control):
     assert set(jobs["full-result"]["needs"]) == set(jobs) - {"full-result"}
     assert set(jobs["full-result"]["needs"]) == control.REQUIRED | control.OPTIONAL | set(control.CONDITIONAL)
     for name, job in jobs.items():
-        if name not in {"changes", "toolchain", "pre-commit", "clang-tidy", "full-result"}:
+        if name not in {"changes", "toolchain", "pre-commit", "clang-tidy", "lint-gate", "full-result"}:
             assert "needs.changes.outputs.full == 'true'" in job["if"]
         for step in job.get("steps", []):
             if step.get("uses", "").startswith("actions/checkout@"):
@@ -503,8 +534,8 @@ def test_workflow_wiring_covers_every_full_job(control):
                 )
                 if name == "changes":
                     expected = (
-                        "github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' "
-                        "&& github.event.pull_request.base.sha || github.workflow_sha"
+                        "github.event_name == 'pull_request' && "
+                        "github.event.pull_request.base.sha || github.workflow_sha"
                     )
                 assert options["ref"] == "${{ " + expected + " }}"
                 assert options["persist-credentials"] is False
@@ -533,8 +564,6 @@ def test_unavailable_merge_never_dispatches(control, monkeypatch, event, pr, con
     pr["mergeable"] = conflicting
 
     def request(path):
-        if path.endswith("/permission"):
-            return {"permission": "write"}
         assert path.endswith("/pulls/123")
         return pr
 
@@ -557,10 +586,11 @@ def test_prepare_full_pins_merge_not_main(control, monkeypatch, tmp_path, pr):
         return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
 
     monkeypatch.setattr(control, "api", request)
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
     control.prepare(
         REPO, {"inputs": {"pr_number": "123", "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE}}
     )
-    assert target.read_text() == f"full=true\ncheckout_sha={MERGE}\n"
+    assert target.read_text() == f"full=true\ncheckout_sha={MERGE}\nreuse_lint=true\n"
 
 
 def test_manual_full_on_untrusted_branch_is_rejected(control, monkeypatch):
@@ -618,6 +648,8 @@ def test_new_request_on_another_base_supersedes_old_run(control, publication):
 @pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending", "completed"])
 @pytest.mark.parametrize("branch", ["main", "feature", "release-tag"])
 def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch, event, pr, status, branch):
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
     queries = []
     writes = []
 
@@ -625,8 +657,6 @@ def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch
         if payload is not None:
             writes.append(payload)
             return {"workflow_run_id": 51} if path.endswith("/dispatches") else None
-        if path.endswith("/permission"):
-            return {"permission": "write"}
         if path.endswith("/pulls/123"):
             return pr
         if path.endswith(f"/git/commits/{MERGE}"):
@@ -850,7 +880,7 @@ def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tm
     def fail(*args):
         if cli_error:
             raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="Forbidden <detail> secret-token")
-        raise ValueError("Only collaborators may request full CI")
+        raise ValueError("PR changed; post /ci full again for the new revision")
 
     monkeypatch.setattr(control, "dispatch", fail)
     with pytest.raises(SystemExit) as error:
@@ -862,7 +892,7 @@ def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tm
         assert "Forbidden &lt;detail&gt; [REDACTED]" in text
         assert "secret-token" not in text
     else:
-        assert "Only collaborators" in text
+        assert "PR changed" in text
 
 
 def test_pr_jobs_cannot_write_github_caches():
@@ -895,6 +925,12 @@ def test_full_rerun_concurrency_is_scoped_to_original_request():
     route_job = publisher["jobs"]["route"]
     assert "concurrency" not in route_job
     assert "github.event.workflow_run.head_branch == 'main'" in route_job["if"]
+    assert "display_title" not in route_job["if"]
+    assert route_job["permissions"]["actions"] == "read"
+    assert publisher[True]["workflow_dispatch"]["inputs"]["run_id"]["required"] is True
+    assert publisher["jobs"]["publish"]["steps"][-1]["env"]["CI_ROUTED_EVENT"] == (
+        "${{ needs.route.outputs.event }}"
+    )
     assert route_job["steps"][0]["with"]["ref"] == "${{ github.workflow_sha }}"
     assert route_job["steps"][1]["run"] == "python .github/scripts/ci_control.py route"
     assert publisher["jobs"]["publish"]["needs"] == "route"
@@ -918,11 +954,15 @@ def test_tiered_pr_controller_uses_trusted_base_without_changing_trigger():
     assert "pull_request" in workflow[True]
     controller = workflow["jobs"]["changes"]["steps"][0]["with"]
     assert controller["ref"] == (
-        "${{ github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' "
-        "&& github.event.pull_request.base.sha || github.workflow_sha }}"
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.base.sha || github.workflow_sha }}"
     )
     assert controller["sparse-checkout"] == ".github/scripts"
     assert controller["persist-credentials"] is False
+    # The trusted base may still contain the old flag-based prepare helper.
+    # It must also select lint before this PR merges, without a vars lookup.
+    prepare = workflow["jobs"]["changes"]["steps"][1]
+    assert prepare["env"]["CI_COMMENT_TIERS_ENABLED"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -1081,14 +1121,23 @@ def test_verified_event_routes_all_attempts_and_bases_to_same_head(
 ):
     output_file = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
-    monkeypatch.setattr(control, "api", lambda *args: pytest.fail("Routing uses only event provenance"))
+
+    def lookup(path):
+        assert path == (
+            f"repos/{REPO}/actions/runs/50/attempts/{publication_event['workflow_run']['run_attempt']}"
+        )
+        return copy.deepcopy(publication_event["workflow_run"])
+
+    monkeypatch.setattr(control, "api", lookup)
     publication_event["action"] = action
     control.route(REPO, publication_event)
     publication_event["workflow_run"].update(
         run_attempt=2, display_title=f"CI full PR #123 @{HEAD} base:{'d' * 40}"
     )
     control.route(REPO, publication_event)
-    assert output_file.read_text() == f"key=123-{HEAD}\n" * 2
+    lines = output_file.read_text().splitlines()
+    assert lines[::2] == [f"key=123-{HEAD}"] * 2
+    assert all(json.loads(line.removeprefix("event="))["workflow_run"]["id"] == 50 for line in lines[1::2])
 
 
 @pytest.mark.parametrize("action", ["requested", "in_progress", "completed"])
@@ -1134,7 +1183,6 @@ def test_live_lookup_failure_invalidates_event_success(
         (("workflow_run", "event"), "pull_request"),
         (("workflow_run", "repository", "full_name"), "unrelated/repo"),
         (("workflow_run", "head_repository", "id"), 2),
-        (("workflow_run", "display_title"), "Unrelated run"),
         (("workflow_run", "run_attempt"), 0),
         (("workflow_run", "run_number"), "8"),
         (("workflow_run", "workflow_id"), None),
@@ -1362,6 +1410,547 @@ def test_duplicate_scan_propagates_api_failure(control, monkeypatch):
     monkeypatch.setattr(control, "api", unavailable)
     with pytest.raises(subprocess.CalledProcessError):
         control.unfinished_request_exists(REPO, "Full request", point, point)
+
+
+@pytest.fixture
+def lint_run(control, monkeypatch, pr):
+    run = {
+        "id": 40,
+        "run_number": 4,
+        "run_attempt": 1,
+        "status": "completed",
+        "display_title": f"CI lint PR #123 @{HEAD} base:{BASE}",
+        "event": "pull_request",
+        "path": control.WORKFLOW,
+        "workflow_id": 99,
+        "head_sha": HEAD,
+        "repository": {"full_name": REPO},
+        "head_repository": {"id": 2},
+    }
+    jobs = [
+        {"name": name, "status": "completed", "conclusion": "success"}
+        for name in ("changes", "pre-commit", "clang-tidy")
+    ]
+    runs = [run]
+    files = [{"filename": "docs/en/dev/index.md"}]
+
+    def api(path, payload=None):
+        assert payload is None, "Lint reuse cannot write to GitHub"
+        assert path == f"repos/{REPO}/actions/workflows/ci.yml"
+        return {"id": 99}
+
+    def pages(path, key=None):
+        if path == f"repos/{REPO}/actions/workflows/ci.yml/runs?event=pull_request&head_sha={HEAD}":
+            return runs
+        if path == f"repos/{REPO}/actions/runs/40/attempts/1/jobs":
+            return jobs
+        assert path == f"repos/{REPO}/pulls/123/files"
+        return files
+
+    monkeypatch.setattr(control, "api", api)
+    monkeypatch.setattr(control, "pages", pages)
+    return run, runs, jobs, files
+
+
+def test_lint_reuse_accepts_matching_revision(control, pr, lint_run):
+    assert control.matching_lint_run(REPO, pr)["id"] == 40
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("display_title", f"CI lint PR #123 @{HEAD} base:{'d' * 40}"),
+        ("display_title", f"CI lint PR #124 @{HEAD} base:{BASE}"),
+        ("event", "push"),
+        ("path", ".github/workflows/other.yml"),
+        ("workflow_id", 100),
+        ("head_sha", "d" * 40),
+        ("head_repository", {"id": 3}),
+        ("repository", {"full_name": "other/repo"}),
+    ],
+)
+def test_lint_reuse_rejects_unrelated_runs(control, pr, lint_run, field, value):
+    lint_run[0][field] = value
+    with pytest.raises(ValueError, match="No matching PR lint run"):
+        control.matching_lint_run(REPO, pr)
+
+
+@pytest.mark.parametrize("name", ["changes", "pre-commit", "clang-tidy"])
+@pytest.mark.parametrize("result", ["failure", "cancelled", "timed_out", "in_progress", "missing"])
+def test_lint_reuse_requires_complete_success(control, pr, lint_run, name, result):
+    jobs = lint_run[2]
+    job = next(job for job in jobs if job["name"] == name)
+    if result == "missing":
+        jobs.remove(job)
+    elif result == "in_progress":
+        job["status"] = result
+    else:
+        job["conclusion"] = result
+    with pytest.raises(ValueError, match="PR lint job"):
+        control.matching_lint_run(REPO, pr)
+
+
+def test_lint_reuse_does_not_fall_back_to_old_green(control, pr, lint_run):
+    lint_run[1].append({**lint_run[0], "run_number": 3, "id": 39})
+    lint_run[2][1]["conclusion"] = "failure"
+    with pytest.raises(ValueError, match="pre-commit did not pass"):
+        control.matching_lint_run(REPO, pr)
+
+
+@pytest.mark.parametrize(
+    "files,accepted",
+    [
+        ([{"filename": "README.md"}, {"filename": "mkdocs.yml"}], True),
+        ([{"filename": "docs/new.md", "previous_filename": "src/deleted.cpp"}], False),
+        ([{"filename": "docs/new.md", "previous_filename": "docs/old.md"}], True),
+        ([{"filename": "python/changed.py"}], False),
+        ([], False),
+        ([{"filename": "docs/page.md"}] * 3000, False),
+    ],
+)
+def test_lint_reuse_skipped_clang_requires_docs_only(control, pr, lint_run, files, accepted):
+    lint_run[2][2]["conclusion"] = "skipped"
+    lint_run[3][:] = files
+    if accepted:
+        assert control.matching_lint_run(REPO, pr)["id"] == 40
+    else:
+        with pytest.raises(ValueError, match="clang-tidy did not pass"):
+            control.matching_lint_run(REPO, pr)
+
+
+def test_comment_does_not_reset_successful_full(control, monkeypatch, pr, event):
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: True)
+    monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes for an already green revision"))
+    control.dispatch(REPO, event)
+
+
+def test_comment_with_failed_lint_never_writes(control, monkeypatch, pr, event):
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+    monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
+
+    def fail(*args):
+        raise ValueError("PR lint job pre-commit did not pass")
+
+    monkeypatch.setattr(control, "matching_lint_run", fail)
+    monkeypatch.setattr(control, "api", lambda *args: pytest.fail("No writes before lint passes"))
+    with pytest.raises(ValueError, match="did not pass"):
+        control.dispatch(REPO, event)
+
+
+@pytest.mark.parametrize("case", ["green", "changed-base", "failed", "rerunning", "untrusted", "cancelled"])
+def test_already_green_requires_verified_full_revision(control, monkeypatch, pr, publication, case):
+    run, jobs, _, _ = publication
+    monkeypatch.setattr(
+        control,
+        "pages",
+        lambda path, key: jobs
+        if key == "jobs"
+        else [
+            {
+                "context": "ci/full",
+                "state": "success",
+                "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/2",
+            }
+        ],
+    )
+    if case == "changed-base":
+        pr["base"]["sha"] = "d" * 40
+    elif case == "failed":
+        jobs[0]["conclusion"] = "failure"
+    elif case == "rerunning":
+        run["run_attempt"] = 3
+    elif case == "untrusted":
+        run["head_branch"] = "feature"
+    elif case == "cancelled":
+        run["conclusion"] = "cancelled"
+    assert control.already_running_or_passed(REPO, pr) == (case == "green")
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress", "requested", "waiting", "pending"])
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_consecutive_comments_honor_bound_run_before_history_indexes_it(
+    control, monkeypatch, pr, event, publication, state, attempt
+):
+    run, _, _, _ = publication
+    run.update(id=51, run_attempt=attempt, status=state, conclusion=None)
+    statuses, writes, history_reads, run_reads = [], [], [], []
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+    monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
+
+    def api(path, payload=None):
+        if payload is not None:
+            writes.append((path, payload))
+            if path == f"repos/{REPO}/statuses/{HEAD}":
+                statuses[:] = [payload]
+                return None
+            assert path == f"repos/{REPO}/actions/workflows/ci.yml/dispatches"
+            return {"workflow_run_id": 51}
+        if path == f"repos/{REPO}/actions/runs/51":
+            run_reads.append(path)
+            return run
+        if path == f"repos/{REPO}/actions/workflows/ci.yml":
+            return {"id": 99}
+        if path == f"repos/{REPO}/pulls/123":
+            return pr
+        if path == f"repos/{REPO}/git/commits/{MERGE}":
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+        assert "/actions/workflows/ci.yml/runs?" in path
+        history_reads.append(path)
+        return {"workflow_runs": []}  # Both comments see an unindexed run list.
+
+    def pages(path, key):
+        assert path == f"repos/{REPO}/commits/{HEAD}/status" and key == "statuses"
+        return statuses
+
+    monkeypatch.setattr(control, "api", api)
+    monkeypatch.setattr(control, "pages", pages)
+    control.dispatch(REPO, event)
+    assert len(writes) == 3
+    assert statuses[0]["target_url"].endswith("/runs/51/attempts/1")
+    control.dispatch(REPO, event)
+    assert len(writes) == 3, "The second comment must neither dispatch nor overwrite the binding"
+    assert len(history_reads) == 1 and len(run_reads) == 1
+
+
+@pytest.fixture
+def bound_pending(control, monkeypatch, publication):
+    run, _, _, _ = publication
+    run.update(status="queued", conclusion=None)
+    status = {
+        "context": "ci/full",
+        "state": "pending",
+        "target_url": f"https://github.com/{REPO}/actions/runs/50/attempts/2",
+    }
+
+    def pages(path, key):
+        assert path == f"repos/{REPO}/commits/{HEAD}/status" and key == "statuses"
+        return [status]
+
+    monkeypatch.setattr(control, "pages", pages)
+    return run, status
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", 51),
+        ("workflow_id", 100),
+        ("event", "pull_request"),
+        ("head_branch", "feature"),
+        ("path", ".github/workflows/other.yml"),
+        ("repository", {"id": 2, "full_name": REPO}),
+        ("repository", {"id": 1, "full_name": "other/repo"}),
+        ("head_repository", {"id": 2}),
+        ("display_title", f"CI full PR #124 @{HEAD} base:{BASE}"),
+        ("display_title", f"CI full PR #123 @{'d' * 40} base:{BASE}"),
+        ("display_title", f"CI full PR #123 @{HEAD} base:{'d' * 40}"),
+        ("run_attempt", 1),
+        ("run_attempt", "2"),
+    ],
+)
+def test_bound_pending_requires_matching_trusted_revision(control, pr, bound_pending, field, value):
+    bound_pending[0][field] = value
+    assert not control.already_running_or_passed(REPO, pr)
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "success"])
+def test_completed_pending_binding_does_not_block_retry(control, pr, bound_pending, conclusion):
+    bound_pending[0].update(status="completed", conclusion=conclusion)
+    assert not control.already_running_or_passed(REPO, pr)
+
+
+def test_unavailable_bound_run_never_dispatches(control, monkeypatch, pr, event, bound_pending):
+    monkeypatch.setattr(control, "validated_request", lambda *args: pr)
+
+    def unavailable(path, payload=None):
+        assert payload is None, "An unverifiable bound run must not dispatch or overwrite its status"
+        assert path == f"repos/{REPO}/actions/runs/50"
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        control.dispatch(REPO, event)
+
+
+def test_downstream_gate_cannot_be_skipped(control, needs):
+    needs["lint-gate"]["result"] = "skipped"
+    with pytest.raises(ValueError, match="lint-gate"):
+        control.aggregate(needs)
+
+
+def test_full_workflow_reuses_lint_without_running_it():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    assert "reuse_lint != 'true'" in jobs["pre-commit"]["if"]
+    assert "reuse_lint != 'true'" in jobs["clang-tidy"]["if"]
+    for name in ("unit-tests", "system-tests", "system-tests-direct", "prebuild-wheels-github"):
+        assert "lint-gate" in jobs[name]["needs"]
+        assert "pre-commit" not in jobs[name]["needs"]
+        assert "clang-tidy" not in jobs[name]["needs"]
+
+
+@pytest.mark.parametrize(
+    "reuse,docs,pre,clang,accepted",
+    [
+        ("true", "false", "skipped", "skipped", True),
+        ("true", "false", "success", "skipped", False),
+        ("true", "false", "skipped", "failure", False),
+        ("false", "false", "success", "success", True),
+        ("false", "true", "success", "skipped", True),
+        ("false", "false", "success", "skipped", False),
+        ("false", "true", "failure", "skipped", False),
+        ("false", "false", "success", "failure", False),
+    ],
+)
+def test_lint_gate_shell_rejects_unjustified_skips(reuse, docs, pre, clang, accepted):
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    result = subprocess.run(
+        ["bash", "-e", "-c", jobs["lint-gate"]["steps"][0]["run"]],
+        check=False,
+        env={**os.environ, "REUSE_LINT": reuse, "DOCS_ONLY": docs, "PRE_COMMIT": pre, "CLANG_TIDY": clang},
+        capture_output=True,
+    )
+    assert (result.returncode == 0) == accepted
+
+
+def test_lint_reuse_waits_for_rerun_attempt(control, pr, lint_run):
+    lint_run[0]["status"] = "in_progress"
+    with pytest.raises(ValueError, match="still running"):
+        control.matching_lint_run(REPO, pr)
+
+
+def test_effective_jobs_preserves_successful_dependencies(control, monkeypatch):
+    attempts = {
+        1: [
+            {"name": "pre-commit", "id": 1, "conclusion": "success"},
+            {"name": "clang-tidy", "id": 2, "conclusion": "failure"},
+        ],
+        2: [{"name": "clang-tidy", "id": 3, "conclusion": "success"}],
+    }
+
+    def pages(path, key):
+        assert key == "jobs"
+        number = int(path.split("/attempts/")[1].split("/")[0])
+        return attempts[number]
+
+    monkeypatch.setattr(control, "pages", pages)
+    jobs = control.effective_jobs(REPO, {"id": 40, "run_attempt": 2})
+    assert {job["name"]: job["id"] for job in jobs} == {"pre-commit": 1, "clang-tidy": 3}
+
+
+def test_every_downstream_job_explicitly_tolerates_skipped_lint_ancestors():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    for name, job in jobs.items():
+        if name == "full-result" or "lint-gate" not in job.get("needs", []):
+            continue
+        condition = job["if"]
+        assert "!cancelled()" in condition, name
+        assert "needs.lint-gate.result == 'success'" in condition, name
+        assert "needs.changes.result == 'success'" in condition, name
+        if "toolchain" in job["needs"]:
+            assert "needs.toolchain.result == 'success'" in condition, name
+
+
+@pytest.mark.parametrize("title", [None, "", "CI", f"CI full PR #456 @{'d' * 40} base:{BASE}"])
+def test_router_resolves_webhook_title_from_exact_api_attempt(
+    control, monkeypatch, publication, publication_event, tmp_path, title
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    source = publication_event["workflow_run"]
+    actual = copy.deepcopy(source)
+    if title is None:
+        source.pop("display_title")
+    else:
+        source["display_title"] = title
+
+    def api(path):
+        assert path == f"repos/{REPO}/actions/runs/50/attempts/1"
+        return actual
+
+    monkeypatch.setattr(control, "api", api)
+    control.route(REPO, publication_event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    routed = json.loads(outputs["event"])
+    assert routed["workflow_run"]["display_title"] == actual["display_title"]
+    assert control.verified_event_run(REPO, routed)["run_attempt"] == 1
+
+
+@pytest.mark.parametrize("field", ["id", "workflow_id", "run_number", "run_attempt"])
+def test_router_rejects_api_identity_mismatch(control, monkeypatch, publication_event, tmp_path, field):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    actual = copy.deepcopy(publication_event["workflow_run"])
+    actual[field] += 1
+    monkeypatch.setattr(control, "api", lambda path: actual)
+    with pytest.raises(control.UntrustedRunError):
+        control.route(REPO, publication_event)
+    assert not target.exists()
+
+
+def test_router_ignores_manual_main_ci_without_pr_inputs(control, monkeypatch, publication_event, tmp_path):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    actual = {**publication_event["workflow_run"], "display_title": "CI workflow_dispatch main"}
+    monkeypatch.setattr(control, "api", lambda path: actual)
+    control.route(REPO, publication_event)
+    assert not target.exists()
+
+
+def test_reconciliation_publishes_existing_result_without_dispatching(
+    control, monkeypatch, publication, tmp_path
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    event = {"inputs": {"run_id": "50"}}
+    control.route(REPO, event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+    control.publish(REPO, event)
+    assert len(publication[3]) == 1
+    path, payload = publication[3][0]
+    assert path == f"repos/{REPO}/statuses/{HEAD}"
+    assert payload["state"] == "success"
+    assert payload["target_url"].endswith("/runs/50/attempts/2")
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/main", ""])
+def test_reconciliation_requires_main(control, monkeypatch, ref):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", ref)
+    with pytest.raises(control.UntrustedRunError, match="must run from main"):
+        control.route(REPO, {"inputs": {"run_id": "50"}})
+
+
+@pytest.mark.parametrize("run_id", ["", "0", "-1", "1/attempts/2", "1\n", 50])
+def test_reconciliation_rejects_invalid_run_id(control, monkeypatch, run_id):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    with pytest.raises(ValueError, match="positive workflow run ID"):
+        control.route(REPO, {"inputs": {"run_id": run_id}})
+
+
+def test_routed_identity_invalidates_result_on_api_failure(control, monkeypatch, publication, tmp_path):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    event = {"inputs": {"run_id": "50"}}
+    control.route(REPO, event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+
+    def unavailable(path, payload=None):
+        if payload is not None:
+            publication[3].append((path, payload))
+            return None
+        assert path.endswith("/actions/runs/50")
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    control.publish(REPO, event)
+    assert publication[3][0][1]["state"] == "failure"
+
+
+@pytest.mark.parametrize("action", ["in_progress", "completed"])
+def test_failed_route_reaches_failure_only_publisher(
+    control, monkeypatch, publication, publication_event, tmp_path, action
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    publication_event["action"] = action
+    publication_event["workflow_run"]["run_attempt"] = 2
+    reads = []
+
+    def api(path, payload=None):
+        if payload is not None:
+            publication[3].append((path, payload))
+            return None
+        reads.append(path)
+        assert path == f"repos/{REPO}/actions/runs/50/attempts/2"
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", api)
+    control.route(REPO, publication_event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    assert json.loads(outputs["event"])["routing_failed"] is True
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+    control.publish(REPO, publication_event)
+    assert len(reads) == 1, "A failed route cannot be upgraded to success by a later lookup"
+    assert len(publication[3]) == 1
+    path, payload = publication[3][0]
+    assert path == f"repos/{REPO}/statuses/{HEAD}"
+    assert payload["state"] == "failure"
+    assert payload["target_url"].endswith("/runs/50/attempts/2")
+
+
+@pytest.mark.parametrize("newer", ["run", "attempt", "unbound"])
+def test_failed_route_preserves_newer_status_owner(
+    control, monkeypatch, publication, publication_event, tmp_path, newer
+):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    candidate = copy.deepcopy(publication[0])
+    if newer == "run":
+        candidate.update(id=51, run_number=9)
+    status = {
+        "context": "ci/full",
+        "state": "success",
+        "target_url": f"https://github.com/{REPO}/actions/runs/{candidate['id']}/attempts/2",
+    }
+    if newer == "unbound":
+        status.update(
+            state="pending",
+            description="Full CI requested; waiting for dispatch",
+            target_url=f"https://github.com/{REPO}/pull/123",
+        )
+
+    def api(path, payload=None):
+        assert payload is None, "A delayed failure-only route must preserve the newer writer"
+        if path == f"repos/{REPO}/actions/runs/50/attempts/1":
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        expected = "51" if newer == "run" else "50/attempts/2"
+        assert path == f"repos/{REPO}/actions/runs/{expected}"
+        return candidate
+
+    monkeypatch.setattr(control, "api", api)
+    monkeypatch.setattr(control, "pages", lambda *args: [status])
+    control.route(REPO, publication_event)
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    monkeypatch.setenv("CI_ROUTED_EVENT", outputs["event"])
+    control.publish(REPO, publication_event)
+
+
+@pytest.mark.parametrize("title", [None, "", "CI"])
+def test_failed_route_cannot_invent_pr_identity(control, monkeypatch, publication_event, tmp_path, title):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    if title is None:
+        publication_event["workflow_run"].pop("display_title")
+    else:
+        publication_event["workflow_run"]["display_title"] = title
+
+    def unavailable(path):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(control.UntrustedRunError):
+        control.route(REPO, publication_event)
+    assert not target.exists()
+
+
+def test_progress_resolution_keeps_api_failure_for_retry(control, monkeypatch, publication_event):
+    def unavailable(path):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "api", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        control.resolved_event(REPO, publication_event)
 
 
 if __name__ == "__main__":
