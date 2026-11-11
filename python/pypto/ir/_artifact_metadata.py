@@ -12,7 +12,7 @@
 import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -24,6 +24,7 @@ from .param_info import (
     _param_info_from_dict,
     _param_info_to_dict,
     _ParamInfo,
+    block_nz_shape,
     validate_parameter_names,
     validate_return_aliases,
 )
@@ -265,6 +266,23 @@ def _load_meta(
     }
 
 
+def _legacy_lowered_parameters(parameters: Sequence[_ParamInfo]) -> tuple[_ParamInfo, ...]:
+    """Supply NZ storage shapes when no separate lowered signature was captured.
+
+    Legacy direct wrappers (including their schema-3 sidecars) and schema-1/2
+    sidecars used one signature for both binding and validation.
+    Preserve their rank-five blocked convention; other
+    ranks are necessarily logical and can be normalized once at this boundary.
+    New compilations already carry the pass-produced lowered signature.
+    """
+    lowered: list[_ParamInfo] = []
+    for param in parameters:
+        if param.layout == "NZ" and param.shape is not None and len(param.shape) != 5:
+            param = replace(param, shape=block_nz_shape(param.shape, param.dtype))
+        lowered.append(param)
+    return tuple(lowered)
+
+
 @dataclass(frozen=True)
 class ArtifactMetadata:
     """Logical caller signature and lowered assembly signature of one entry.
@@ -354,8 +372,17 @@ class ArtifactMetadata:
                         raise ValueError("lowered_params entries must be objects")
                     lowered_params.append(_param_info_from_dict(item))
                 lowered = tuple(lowered_params)
+                # Old direct wrappers wrote the input signature twice, without
+                # return analysis. Normalize only that PROGRAM-only form; a
+                # distinct lowered signature or kernel ABI remains authoritative.
+                if (
+                    aliases is None
+                    and meta["execution_capabilities"].modes == (ArtifactExecutionMode.PROGRAM,)
+                    and lowered == tuple(meta["param_infos"])
+                ):
+                    lowered = _legacy_lowered_parameters(lowered)
             else:
-                aliases, lowered = None, tuple(meta["param_infos"])
+                aliases, lowered = None, _legacy_lowered_parameters(meta["param_infos"])
             platform = meta["platform"]
             if platform is None:
                 from pypto.pypto_core import backend  # noqa: PLC0415

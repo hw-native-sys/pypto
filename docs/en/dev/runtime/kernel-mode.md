@@ -58,7 +58,22 @@ Metadata distinguishes `params` (logical caller signature) from `lowered_params`
 (assembly signature); both use `ParamInfo`. PROGRAM argument binding and output
 allocation use the original, pre-lowering `params`, including after reloading
 an artifact and when selecting a multi-orchestration child. `lowered_params`
-remains available for assembly ABI validation. Torch validates logical shapes.
+provides the expected NZ shape for resident-tensor and packed-FP4 argument
+validation: block the caller's logical shape and compare it with the compiler's
+rank-five shape. Runtime NZ blocking derives C0 from the IR dtype's bit width,
+including when that dtype has no mapping in the installed Torch version.
+For unmapped NZ dtypes, resident carriers must match the IR storage width.
+Ordinary and already-lowered compilation inputs use the same
+comparison; no shape-stage flag or sidecar format change is needed. Static NZ
+shapes that block identically are storage-compatible, even if their logical ranks
+or leading-axis decompositions differ. Dynamic NZ still requires logical rank
+three because entry code reads the batch from the first axis.
+Legacy direct wrappers and schema-1/2 sidecars without a separate lowered
+signature normalize non-five-dimensional NZ shapes at the metadata boundary.
+Schema-3 PROGRAM-only direct-wrapper sidecars with no return-alias analysis and
+identical `params`/`lowered_params` use the same normalization.
+They retain the old blocked convention for five-dimensional shapes; recompile
+ambiguous legacy logical rank-five artifacts. Torch interop validates logical shapes.
 NZ lowering is checked against the unpadded blocked representation in element
 units with unchanged dtype, preserving byte size. Dynamic NZ supports the logical
 `[B, R, C]` batch dimension. A blocked shape is never treated as a Torch shape.

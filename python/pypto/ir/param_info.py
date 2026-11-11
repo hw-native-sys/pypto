@@ -147,7 +147,7 @@ _NZ_C0_BYTES = 32
 _NZ_FRACTAL_ROWS = 16
 
 
-def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
+def block_nz_shape(shape: Sequence[int], dtype: torch.dtype | DataType) -> list[int]:
     """The blocked rank-5 shape an NZ parameter of logical *shape* is compiled to.
 
     ``[..., R, C]`` becomes ``[prod(lead), C/c0, R/16, 16, c0]``: every leading
@@ -159,7 +159,15 @@ def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
     if len(shape) < 2:
         raise ValueError(f"an NZ shape needs a trailing [R, C] pair, got {tuple(shape)}")
     rows, cols = shape[-2], shape[-1]
-    c0 = _NZ_C0_BYTES // torch.empty((), dtype=dtype).element_size()
+    # Runtime metadata carries the IR dtype even when Torch has no equivalent
+    # (HF8, or optional dtypes on older Torch). Use its bit width exactly as
+    # NzC0Elems does; packed FP4 x2 carriers already report eight bits.
+    bits = dtype.get_bit() if isinstance(dtype, DataType) else torch.empty((), dtype=dtype).element_size() * 8
+    if bits < 8 or (_NZ_C0_BYTES * 8) % bits:
+        raise ValueError(
+            f"an NZ dtype must be whole-byte and divide a 32-byte C0 line, got {dtype} ({bits} bits)"
+        )
+    c0 = (_NZ_C0_BYTES * 8) // bits
     if rows % _NZ_FRACTAL_ROWS or cols % c0:
         raise ValueError(
             f"an NZ shape needs {_NZ_FRACTAL_ROWS}-row fractals and whole C0 lines of {c0} "
@@ -192,11 +200,8 @@ def arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[in
             f"Parameter {info.name!r} with a dynamic NZ batch expects logical rank 3 "
             f"(shape [B, R, C]); got shape {tuple(arg_shape)}"
         )
-    expected_dtype = _to_torch_dtype(info.dtype)
-    if expected_dtype is None:
-        return list(arg_shape)
     try:
-        return block_nz_shape(arg_shape, expected_dtype)
+        return block_nz_shape(arg_shape, info.dtype)
     except ValueError:
         return list(arg_shape)
 

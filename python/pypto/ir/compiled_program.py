@@ -36,6 +36,7 @@ writer reads back — that cycle is gone: it lives in the ``param_info`` leaf no
 import ctypes
 import os
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -70,6 +71,7 @@ from ._artifact_metadata import (  # noqa: F401 -- compatibility re-exports for 
     _drop_foreign_build_markers,
     _is_obj_list,
     _is_str_dict,
+    _legacy_lowered_parameters,
     _load_meta,
     _meta_error,
     _remove_meta,
@@ -128,6 +130,28 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
         )
 
 
+def _validate_resident_dtype(arg: DeviceTensor | StackedDeviceTensor, info: _ParamInfo) -> None:
+    """Check the mapped dtype, or the storage width of an unmapped NZ carrier."""
+    expected_dtype = _to_torch_dtype(info.dtype)
+    if expected_dtype is not None:
+        if not _matches_torch_dtype(info.dtype, arg.dtype):
+            raise TypeError(
+                f"Parameter {info.name!r} expects dtype {expected_dtype}; "
+                f"got {type(arg).__name__} dtype {arg.dtype}"
+            )
+    elif info.layout == "NZ":
+        # NZ blocking uses the IR element width even without a Torch mapping.
+        # A raw carrier must occupy the same bytes per element; matching shape
+        # alone cannot establish compatibility with the compiled storage view.
+        expected_bits = info.dtype.get_bit()
+        actual_bits = torch.empty((), dtype=arg.dtype).element_size() * 8
+        if actual_bits != expected_bits:
+            raise TypeError(
+                f"Parameter {info.name!r} with NZ dtype {info.dtype} expects {expected_bits}-bit storage; "
+                f"got {type(arg).__name__} dtype {arg.dtype} ({actual_bits}-bit storage)"
+            )
+
+
 def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     """Check a ``DeviceTensor`` arg against IR parameter metadata.
 
@@ -137,8 +161,8 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     Rank is always enforced. Each static dim in ``info.shape`` is
     checked individually, so partially-dynamic signatures like
     ``[128, -1]`` still reject a tensor with the wrong leading
-    dimension. Dynamic dims (``-1``) are skipped. Dtypes that the
-    runtime can't map to torch are also skipped.
+    dimension. Dynamic dims (``-1``) are skipped. NZ dtypes without a Torch
+    mapping still require the carrier's storage width to match the IR dtype.
     """
     if info.shape is not None:
         blocked_arg_shape = _arg_shape_as_declared(arg.shape, info)
@@ -154,11 +178,7 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
                     f"got DeviceTensor shape {arg.shape}"
                 )
     _validate_fp4_carrier_shape(arg.shape, info)
-    expected_dtype = _to_torch_dtype(info.dtype)
-    if expected_dtype is not None and not _matches_torch_dtype(info.dtype, arg.dtype):
-        raise TypeError(
-            f"Parameter {info.name!r} expects dtype {expected_dtype}; got DeviceTensor dtype {arg.dtype}"
-        )
+    _validate_resident_dtype(arg, info)
 
 
 def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None:
@@ -187,12 +207,7 @@ def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None
                     f"got StackedDeviceTensor full_shape {arg.full_shape}"
                 )
     _validate_fp4_carrier_shape(arg.full_shape, info)
-    expected_dtype = _to_torch_dtype(info.dtype)
-    if expected_dtype is not None and not _matches_torch_dtype(info.dtype, arg.dtype):
-        raise TypeError(
-            f"Parameter {info.name!r} expects dtype {expected_dtype}; "
-            f"got StackedDeviceTensor dtype {arg.dtype}"
-        )
+    _validate_resident_dtype(arg, info)
 
 
 def _build_full_args(
@@ -232,6 +247,7 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
     return_types: list[Any],
     *,
     caller_name: str,
+    lowered_param_infos: Sequence[_ParamInfo] | None = None,
 ) -> "tuple[list[torch.Tensor | DeviceTensor | ctypes._SimpleCData[Any]], bool]":
     """Validate user-provided args against IR metadata and coerce them.
 
@@ -262,7 +278,14 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
         )
 
     coerced: list[torch.Tensor | DeviceTensor | ctypes._SimpleCData[Any]] = []
-    for info, arg in zip(param_infos, all_args, strict=True):
+    for index, (info, arg) in enumerate(zip(param_infos, all_args, strict=True)):
+        if info.layout == "NZ" and lowered_param_infos is not None:
+            # Binding and output allocation above use the caller signature.
+            # NZ validation blocks the argument, so its expected shape must
+            # come from the same external slot in the lowered signature.
+            if index >= len(lowered_param_infos) or lowered_param_infos[index].name != info.name:
+                raise ValueError(f"Missing lowered NZ parameter {info.name!r}; recompile via ir.compile()")
+            info = replace(info, shape=lowered_param_infos[index].shape)
         if info.shape is None:
             if isinstance(arg, torch.Tensor):
                 raise TypeError(f"Parameter {info.name!r} is a scalar ({info.dtype}); got torch.Tensor")
@@ -320,6 +343,7 @@ def _invoke_compiled(
     config: Any,
     caller_name: str,
     artifact_runtime: Any = None,
+    lowered_param_infos: Sequence[_ParamInfo] | None = None,
 ) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
     """Shared dispatch: coerce args, call the runtime, pack outputs.
 
@@ -335,7 +359,12 @@ def _invoke_compiled(
     the runtime's ``[STRACE]`` log markers (simpler PR #1177).
     """
     coerced, return_style = _coerce_args(
-        args, param_infos, output_indices, return_types, caller_name=caller_name
+        args,
+        param_infos,
+        output_indices,
+        return_types,
+        caller_name=caller_name,
+        lowered_param_infos=lowered_param_infos,
     )
 
     # Lazy import from outside the overlay scope; its precision lives there.
@@ -508,6 +537,12 @@ class _RuntimeFacade:
             [i for i, p in enumerate(params) if p.direction == ParamDirection.Out],
             [None] * metadata.num_return_types,
         )
+
+    @property
+    def _lowered_param_infos(self) -> tuple[_ParamInfo, ...]:
+        """Assembly signature used for NZ argument shape validation."""
+        assert self._artifact.metadata is not None
+        return self._artifact.metadata.lowered_parameters
 
     @property
     def param_names(self) -> list[str]:
@@ -757,7 +792,11 @@ class CompiledProgram(_RuntimeFacade):
                 _remove_meta(sub_dir)
                 continue
             metadata = ArtifactMetadata(
-                tuple(params), tuple(params), len(returns), self.platform, self.backend_type
+                tuple(params),
+                _legacy_lowered_parameters(params),
+                len(returns),
+                self.platform,
+                self.backend_type,
             )
             metadata.write(sub_dir)
             self._sub_artifacts[name] = CompiledArtifact(sub_dir, self.platform, metadata)
@@ -957,7 +996,12 @@ class CompiledProgram(_RuntimeFacade):
             )
         param_infos, output_indices, return_types = self._get_metadata()
         coerced, return_style = _coerce_args(
-            args, param_infos, output_indices, return_types, caller_name="CompiledProgram"
+            args,
+            param_infos,
+            output_indices,
+            return_types,
+            caller_name="CompiledProgram",
+            lowered_param_infos=self._lowered_param_infos,
         )
         if worker is None:
             raise TypeError(
@@ -1039,7 +1083,11 @@ class CompiledProgram(_RuntimeFacade):
                 )
             params, _, returns = _extract_param_infos(self._program)
             self._artifact.metadata = ArtifactMetadata(
-                tuple(params), tuple(params), len(returns), self.platform, self.backend_type
+                tuple(params),
+                _legacy_lowered_parameters(params),
+                len(returns),
+                self.platform,
+                self.backend_type,
             )
         return super()._get_metadata()
 
@@ -1142,6 +1190,7 @@ class CompiledProgram(_RuntimeFacade):
             args=args,
             config=config,
             caller_name="CompiledProgram",
+            lowered_param_infos=self._lowered_param_infos,
             artifact_runtime=getattr(self, "_artifact_runtime", None),
         )
 
@@ -1181,7 +1230,7 @@ class _SubChipCallable(_RuntimeFacade):
                 platform,
                 ArtifactMetadata(
                     tuple(param_infos),
-                    tuple(param_infos),
+                    _legacy_lowered_parameters(param_infos),
                     len(return_types),
                     platform,
                     _parse_platform(platform)[0],
@@ -1208,6 +1257,7 @@ class _SubChipCallable(_RuntimeFacade):
             output_indices,
             return_types,
             caller_name=f"orchestration {self._name!r}",
+            lowered_param_infos=self._lowered_param_infos,
         )
         if worker is None:
             raise TypeError(
@@ -1256,6 +1306,7 @@ class _SubChipCallable(_RuntimeFacade):
             args=args,
             config=config,
             caller_name=f"orchestration {self._name!r}",
+            lowered_param_infos=self._lowered_param_infos,
         )
 
 

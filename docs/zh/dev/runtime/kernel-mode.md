@@ -44,9 +44,20 @@ HBG Host Tensor 数据读写被拒绝，设备 submit predicate 保留原语义�
 metadata 区分逻辑调用签名 `params` 与 assembly 签名 `lowered_params`，均使用
 `ParamInfo`。PROGRAM 参数绑定和输出分配使用 lowering 前的原始 `params`，
 从产物恢复以及选择多 orchestration 子入口时也保持这一行为；`lowered_params`
-仍用于 assembly ABI 校验。Torch 按逻辑 shape 校验；NZ lowering 按元素单位验证无 padding 的
-blocked 表示，dtype 不变，因此字节数一致。动态 NZ 支持逻辑 `[B, R, C]` 的 batch
-维度；blocked shape 不作为 Torch 的逻辑 shape。
+为驻留张量和 packed FP4 参数校验提供预期的 NZ shape：将输入的逻辑 shape 转为
+blocked 表示，再与编译器生成的五维 shape 比较。运行时 NZ blocking 根据 IR dtype
+的位宽计算 C0，因此当前 Torch 版本缺少对应 dtype 映射时也能校验；此时驻留 carrier
+的存储位宽必须与 IR dtype 一致。普通编译输入和已经 lowering 的编译
+输入使用同一比较方式，无需 shape 阶段标记或修改 sidecar 格式。静态 NZ shape 只要
+转换后的 blocked shape 一致，就具有兼容的存储表示，允许逻辑 rank 或前导维度的
+拆分方式不同。动态 NZ 仍要求逻辑三维，因为入口代码从第一维读取 batch。
+旧的直接包装方式及缺少独立 lowered 签名的 schema 1/2 sidecar，在 metadata 边界
+将非五维 NZ shape 转为 blocked 表示；五维 shape 保留原有的 blocked 约定。
+schema 3 中仅支持 PROGRAM、没有返回别名分析且 `params` 与 `lowered_params` 完全相同
+的旧直接包装 sidecar，也使用相同的归一化处理。
+旧产物中的逻辑五维存在歧义，需要重新编译。Torch interop 按逻辑 shape 校验。
+NZ lowering 按元素单位验证无 padding 的 blocked 表示，dtype 不变，因此字节数一致。
+动态 NZ 支持逻辑 `[B, R, C]` 的 batch 维度；blocked shape 不作为 Torch 的逻辑 shape。
 
 `compiled_meta.json` schema 3 保存两种签名、返回数量、别名、平台/backend 和已验证
 执行能力。生产者仅声明本次请求的能力，不自动声明双模式兼容。schema 1/2 旧 program

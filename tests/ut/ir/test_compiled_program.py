@@ -1771,6 +1771,154 @@ def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path):
         assert _validate_device_tensor(DeviceTensor(0x1000, (2, 4, 256, 512), torch.int8), infos[0]) is None
 
 
+@pytest.mark.parametrize(
+    "schema,legacy_duplicate",
+    [(1, False), (2, False), (_COMPILED_META_SCHEMA, False), (_COMPILED_META_SCHEMA, True)],
+)
+@pytest.mark.parametrize("declared_shape", [(32, 64), (1, 4, 2, 16, 16)])
+@pytest.mark.parametrize(
+    "dtype,torch_dtype", [(DataType.FP16, torch.float16), (DataType.UINT16, torch.int16)]
+)
+def test_legacy_nz_wrapper_normalizes_only_lowered_metadata(
+    tmp_path, monkeypatch, schema, legacy_duplicate, declared_shape, dtype, torch_dtype
+):
+    if dtype == DataType.UINT16:
+        # Legacy normalization also needs to work on Torch versions without
+        # an unsigned dtype mapping. The carrier uses the same storage width.
+        monkeypatch.delitem(param_info._DATATYPE_TO_TORCH, str(dtype), raising=False)
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType(list(declared_shape), dtype, None, ir.TensorView(layout=ir.TensorLayout.NZ))
+    param = ir.Var("weight", tensor_type, span)
+    func = ir.Function("main", [param], [], ir.ReturnStmt([], span), span, ir.FunctionType.Orchestration)
+    live = CompiledProgram(ir.Program([func], "Nz", span), str(tmp_path), platform="a2a3sim")
+    path = tmp_path / _COMPILED_META_FILENAME
+    record = json.loads(path.read_text())
+    record["schema"] = schema
+    if schema < _COMPILED_META_SCHEMA:
+        record.pop("lowered_params")
+        record.pop("return_aliases")
+    elif legacy_duplicate:
+        # Pre-change schema-3 direct wrappers copied params into lowered_params,
+        # even when the source NZ signature was still logical.
+        record["lowered_params"] = record["params"]
+    path.write_text(json.dumps(record))
+    for program in (live, CompiledProgram.from_dir(tmp_path)):
+        metadata = program._artifact.metadata
+        assert metadata is not None
+        assert metadata.parameters[0].shape == declared_shape
+        assert metadata.lowered_parameters[0].shape == (1, 4, 2, 16, 16)
+        with patch("pypto.runtime.runner._execute_compiled") as execute:
+            assert program(DeviceTensor(0x1000, (32, 64), torch_dtype)) is None
+            execute.assert_called_once()
+
+
+@pytest.mark.parametrize("mode", ["program", "kernel"])
+def test_schema3_nz_normalization_preserves_analyzed_signatures(tmp_path, mode):
+    info = _ParamInfo("weight", ir.ParamDirection.In, [32, 64], DataType.FP16, "NZ")
+    record = ArtifactMetadata((info,), (info,), 0, "a2a3sim", BackendType.Ascend910).record()
+    # An analyzed signature does not have the legacy direct-wrapper contract,
+    # even when its shape values happen to be duplicated.
+    record["return_aliases"] = []
+    record["supported_execution_modes"] = [mode]
+    (tmp_path / _COMPILED_META_FILENAME).write_text(json.dumps(record))
+    if mode == "kernel":
+        with pytest.raises(ValueError, match="Lowering changed external storage"):
+            ArtifactMetadata.read(tmp_path)
+    else:
+        restored = ArtifactMetadata.read(tmp_path)
+        assert restored.lowered_parameters[0].shape == (32, 64)
+        assert restored.return_aliases == ()
+
+
+def test_schema3_nz_normalization_preserves_distinct_lowered_signature(tmp_path):
+    info = _ParamInfo("weight", ir.ParamDirection.In, [32, 64], DataType.FP16, "NZ")
+    record = ArtifactMetadata((info,), (info,), 0, "a2a3sim", BackendType.Ascend910).record()
+    record["lowered_params"][0]["shape"] = [64, 32]
+    (tmp_path / _COMPILED_META_FILENAME).write_text(json.dumps(record))
+    restored = CompiledProgram.from_dir(tmp_path)
+    assert restored._artifact.metadata is not None
+    assert restored._artifact.metadata.lowered_parameters[0].shape == (64, 32)
+    with patch("pypto.runtime.runner._execute_compiled") as execute:
+        with pytest.raises(TypeError, match="expects rank"):
+            restored(DeviceTensor(0x1000, (32, 64), torch.float16))
+        execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "dtype,carrier_dtype,c0", [(DataType.HF8, torch.uint8, 32), (DataType.UINT16, torch.int16, 16)]
+)
+def test_unmapped_nz_stacked_tensor_requires_matching_carrier_width(monkeypatch, dtype, carrier_dtype, c0):
+    monkeypatch.delitem(param_info._DATATYPE_TO_TORCH, str(dtype), raising=False)
+    info = _ParamInfo("weight", ir.ParamDirection.In, [2, 64 // c0, 2, 16, c0], dtype, "NZ")
+
+    def stacked(torch_dtype):
+        shards = [DeviceTensor(0x1000 + i * 0x10000, (32, 64), torch_dtype) for i in range(2)]
+        return StackedDeviceTensor(shards, (2, 32, 64), [0, 1])
+
+    assert _validate_stacked_tensor(stacked(carrier_dtype), info) is None
+    wrong_dtype = torch.float16 if c0 == 32 else torch.uint8
+    with pytest.raises(TypeError, match=f"expects {256 // c0}-bit storage"):
+        _validate_stacked_tensor(stacked(wrong_dtype), info)
+
+
+@pytest.mark.parametrize("dtype", [DataType.INT4, DataType.UINT4, DataType.HF4, DataType.BOOL])
+def test_block_nz_shape_rejects_sub_byte_ir_dtypes(dtype):
+    # get_byte() rounds these dtypes up; NZ lowering requires whole-byte
+    # elements and must use get_bit() instead of accepting that rounding.
+    with pytest.raises(ValueError, match="whole-byte"):
+        param_info.block_nz_shape((32, 64), dtype)
+
+
+@pytest.mark.parametrize(
+    "dtype,torch_dtype,c0", [(DataType.FP16, torch.float16, 16), (DataType.FP4E2M1X2, torch.uint8, 32)]
+)
+def test_nz_lowered_validation_preserves_logical_output_allocation(dtype, torch_dtype, c0):
+    params = [
+        _ParamInfo("weight", ir.ParamDirection.In, [32, 64], dtype, "NZ"),
+        _ParamInfo("result", ir.ParamDirection.Out, [32, 64], dtype, "NZ"),
+    ]
+    lowered = [
+        _ParamInfo(info.name, info.direction, [1, 64 // c0, 2, 16, c0], dtype, "NZ") for info in params
+    ]
+    arg = DeviceTensor(0x1000, (32, 64), torch_dtype)
+    coerced, return_style = _coerce_args(
+        (arg,), params, [1], [None], caller_name="program", lowered_param_infos=lowered
+    )
+    assert return_style
+    assert coerced[0] is arg
+    output = coerced[1]
+    assert isinstance(output, torch.Tensor)
+    assert output.shape == (32, 64)
+    with pytest.raises(TypeError, match="expects shape"):
+        _coerce_args(
+            (DeviceTensor(0x1000, (16, 128), torch_dtype),),
+            params,
+            [1],
+            [None],
+            caller_name="program",
+            lowered_param_infos=lowered,
+        )
+
+
+def test_dynamic_nz_lowered_validation_keeps_runtime_batch_contract():
+    params = [_ParamInfo("weight", ir.ParamDirection.In, [-1, 32, 64], DataType.FP16, "NZ")]
+    lowered = [_ParamInfo("weight", ir.ParamDirection.In, [-1, 4, 2, 16, 16], DataType.FP16, "NZ")]
+    arg = DeviceTensor(0x1000, (8, 32, 64), torch.float16)
+    assert _coerce_args((arg,), params, [], [], caller_name="program", lowered_param_infos=lowered) == (
+        [arg],
+        False,
+    )
+    with pytest.raises(TypeError, match="logical rank 3"):
+        _coerce_args(
+            (DeviceTensor(0x1000, (2, 4, 32, 64), torch.float16),),
+            params,
+            [],
+            [],
+            caller_name="program",
+            lowered_param_infos=lowered,
+        )
+
+
 @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
 def test_packed_fp4_raw_carrier_metadata_round_trip(dtype, tmp_path):
     info = _ParamInfo("packed", ir.ParamDirection.In, [4, 32], dtype)
