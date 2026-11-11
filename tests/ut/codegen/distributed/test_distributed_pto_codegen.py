@@ -2314,6 +2314,33 @@ def test_put_async_dynamic_subregion_guards_each_dimension():
     assert "arith.select" in mlir, mlir
 
 
+def test_put_async_above_urma_chunk_limit_emits_one_full_extent_call():
+    """A15: PyPTO emits one helper call with the full byte count.
+
+    The URMA runtime chunks transfers above ``kUrmaMaxWqeTransferBytes``
+    (256 MiB); PyPTO does not. This pins the boundary: a 256 MiB + 4 KiB
+    static transfer still lowers to a single ``func.call`` carrying the full
+    extent, not a compile-time chunk loop.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[65537, 1024], pl.FP32],
+            src: pld.DistributedTensor[[65537, 1024], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(dst, peer, src)
+
+    mlir = _generate_mlir_a5(P)
+    assert mlir.count("func.call @pypto_urma_put_async_f32") == 1, mlir
+    # 65537 x 1024 x 4 = 268,439,552 bytes = 256 MiB + 4 KiB.
+    assert "arith.constant 268439552 : i64" in mlir, mlir
+    assert "pto.comm.tput" not in mlir, mlir
+
+
 def test_put_async_rejects_non_a5_backend():
     """The URMA adapter is A5-only; a2a3 must fail here, not in device C++."""
 
