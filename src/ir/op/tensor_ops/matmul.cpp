@@ -344,8 +344,8 @@ TypePtr DeduceTensorMatMulMxType(const std::vector<ExprPtr>& args,
       << kOpName << " requires oriented 2D data and scale tensors";
   CHECK_SPAN(!lhs->dtype_.IsPackedFp4() && !rhs->dtype_.IsPackedFp4(), span)
       << kOpName
-      << " native FP4 matmul is unavailable because PTOAS v0.67 emits inconsistent packed "
-         "FP4E2M1X2/FP4E1M2X2 operand and accumulator dimensions";
+      << " native FP4 matmul requires the tile API; load packed operands into Mat and use "
+         "pl.tile.matmul_mx with explicit Left/Right placement";
   CHECK_SPAN(lhs->dtype_ == DataType::FP8E4M3FN && rhs->dtype_ == DataType::FP8E4M3FN, span)
       << kOpName << " requires FP8E4M3FN data tensors";
   CHECK_SPAN(lhs_scale->dtype_ == DataType::FP8E8M0 && rhs_scale->dtype_ == DataType::FP8E8M0, span)

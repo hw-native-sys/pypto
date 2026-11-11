@@ -47,7 +47,7 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | 操作 | 支持范围 |
 | ---- | -------- |
 | 打包 GM 视图与 load/store | 两种格式均支持 ND/DN 载体维度、步长和偏移；宽度为一个载体时仍保持 ND；PTOAS v0.67 负责 DMA 描述符转换 |
-| 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同、连续且带地址的二维行主序 Vec 存储；使用 PYPTO 或 DSA_RP 内存规划器 |
+| 任一打包格式 ↔ UINT8/INT8 别名 | shape 相同的编排层 GM 别名；连续且带地址的二维行主序 Vec 别名使用 PYPTO 或 DSA_RP 内存规划器 |
 | 任一打包格式 ↔ BF16 转换 | 无分块 Vec 上的原生 TCVT；ND 列或完整静态连续 DN 行按 2:1 展开或收缩 |
 | 任一打包格式 → FP8E4M3FN/FP8E5M2 转换 | 经 BF16 和 FP32 合法化，并发出警告；也可使用主机参考实现或查找表 |
 | E2M1↔E1M2 转换 | 经 BF16 进行数值转换，载体 shape 不变 |
@@ -58,7 +58,7 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | `fillpad`、`fillpad_expand`、`fillpad_inplace` | 两种格式的 ND Vec；零值、最小值和最大值填充均保留有效载体矩形 |
 | DN 数值转换 | 完整静态连续的二维 BF16↔打包或打包↔打包转换；使用 PYPTO/DSA_RP 静态地址；部分有效、带填充及分块布局均被拒绝 |
 | 直接对打包类型执行 `reshape` 或 `transpose` | 不支持；在现有别名契约允许时，先对字节别名执行 reshape |
-| 原生打包 FP4 `matmul_mx` | 固定版本 PTOAS 的维度契约不支持；先把 ND 操作数转换为 FP8 |
+| 原生打包 FP4 `matmul_mx` | Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要 PTOAS v0.72 的 Cube 逻辑维度约定 |
 | MXFP4 `quant_mx` | 仅 E2M1，输入为 FP16/BF16，支持 OCP 和 axis0 上受支持的 NV 路径；使用 PYPTO/DSA_RP 静态分配 |
 | `pl.tile.quant_mx_raw` | 显式提供工作区，返回原生 E2M1 数据（MXFP8 返回 INT8）及原始 UINT8 指数；支持静态部分有效区域和 axis0 交错 |
 | Ascend910/A2A3 上执行打包 FP4 | 不支持 |
@@ -66,6 +66,19 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 PTO GM 视图保留载体坐标。底层指令所用数值维度的转换由 PTOAS 负责；若 PyPTO
 再次缩放 GM shape，会把行跨度加倍。物理 tile 仍须满足 ISA 对齐要求，包括 ND Vec
 的 32 字节行跨度；较窄的载体窗口应使用带填充的存储，并通过 `valid_shape` 指定有效区域。
+
+原生 FP4 矩阵操作数在 GM 和 Mat 中保持载体维度。对于逻辑
+`[M, K] @ [K, N]`，Left 载体 shape 为 `[M/2, K]`，Right 为 `[K, N/2]`；
+scale 保持 `[M, K/32]`、`[K/32, N]`，Acc 为 FP32 `[M, N]`。
+Mat→Left/Right 搬运随布局切换打包轴，不进行数值转换。直接从 GM 加载到 Mat
+可避开尚不支持的混合核 Vec 搬运。编排层 FP4/字节别名保留 buffer 标识、偏移、
+步长及依赖关系；其他编排层 dtype 重新解释仍会被拒绝。
+
+PTOAS v0.72 已包含 [Cube 逻辑维度修复](https://gitcode.com/cann/pto-as/pull/381)。
+PyPTO 保留上述载体 ABI，在输出 PTO 时扩展 Mat/Left/Right 的打包轴物理和有效维度。
+GM 和 Vec 描述符仍使用载体维度，分配字节数不变。生成可执行代码前会探测所选汇编器的
+操作数、累加器和 scale 逻辑维度。可通过 `PTOAS_ROOT` 选择正式 v0.72 或兼容的新版本/补丁构建；
+旧的 Cube 载体维度开发构建不兼容。仅生成 IR（`skip_ptoas=True`）仍可用于检查。
 
 ## 数值转换限制
 
@@ -117,7 +130,7 @@ def decode_bytes(
 非连续 UB 切片（包括其间接别名和 reshape）以及无地址输入会被拒绝。
 GM 加载偏移可为非零或动态值，它不同于 UB 偏移。显式别名 shape 必须与源相同；
 需要 reshape 时，应先单独变形字节视图，再重新创建别名。
-InCore tensor 别名降低为相同的 tile 路径；编排层 tensor 别名仍不支持。
+InCore tensor 别名降低为相同的 tile 路径；编排层 tensor 别名仅支持 shape 相同的打包 FP4 ↔ UINT8/INT8 别名。
 
 PYPTO 和 DSA_RP 内存规划器生成带地址别名。PTOAS 内存规划器的 `treshape`
 拒绝打包 FP4 类型，因此不支持此路径。别名保留比特，不会将一种 FP4 格式数值转换为另一种。
@@ -143,7 +156,8 @@ FP16/BF16 OCP 缩放工作区容量将组数向上取整到 128 个元素。
 支持静态部分有效区域；axis1 要求物理列数等于有效列数，且 FP4 物理列数为 64 的倍数。
 axis0 每 32 个有效行分组；`interleave=True` 要求 FP16/BF16 的物理行数和有效行数
 均为 64 的倍数。量化入口见[算子目录](../user/ops/01-catalog.md)。
-原生打包 FP4 `matmul_mx` 仍不支持；量化结果本身不会建立原生矩阵计算路径。
+原生 FP4 矩阵乘通过 tile API 提供；`tensor.matmul_mx` 仍仅支持 FP8。
+量化结果仍受通用混合核 FP4 Vec→Mat 搬运限制。
 
 ## 另见
 

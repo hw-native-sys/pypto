@@ -492,8 +492,9 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
-  std::string row_off = codegen.GetExprAsCode(dst_off->elements_[0]);
-  std::string col_off = codegen.GetExprAsCode(dst_off->elements_[1]);
+  const auto pto_dst_offset = codegen::GetPtoTileCoordinates(*dst_tile_type, dst_off->elements_);
+  std::string row_off = codegen.GetExprAsCode(pto_dst_offset[0]);
+  std::string col_off = codegen.GetExprAsCode(pto_dst_offset[1]);
 
   // Build the destination subview type from the accumulator's tile type, with the
   // per-row shape/valid.
@@ -537,10 +538,19 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // would emit a second, identical arith.index_cast into the kernel body for a
   // runtime extent.
   const std::vector<std::string> xfer_codes = GetSizeCodes(xfer_elems, codegen);
+  // Cube FP4 subview operands must use the same logical units as its type.
+  // Keep the GM partition in carrier units; non-FP4/Vec paths reuse the
+  // original SSA extents and avoid redundant casts.
+  const auto pto_valid = codegen::GetPtoTileCoordinates(*dst_tile_type, xfer_elems);
+  const auto dst_valid_codes = pto_valid == xfer_elems ? xfer_codes : GetSizeCodes(pto_valid, codegen);
+  const auto pto_shape = codegen::GetPtoTileCoordinates(
+      *dst_tile_type, {std::make_shared<ir::ConstInt>(phys_rows, DataType::INDEX, op->span_),
+                       std::make_shared<ir::ConstInt>(phys_cols, DataType::INDEX, op->span_)});
   std::string dst_view = codegen.NewNamedTemp("gather_row_view");
   std::ostringstream sv;
-  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes [" << phys_rows
-     << ", " << phys_cols << "] valid [" << xfer_codes[0] << ", " << xfer_codes[1] << "]";
+  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes ["
+     << ir::As<ir::ConstInt>(pto_shape[0])->value_ << ", " << ir::As<ir::ConstInt>(pto_shape[1])->value_
+     << "] valid [" << dst_valid_codes[0] << ", " << dst_valid_codes[1] << "]";
   if (!dst_type.empty() && !view_type.empty()) {
     sv << " : " << dst_type << " -> " << view_type;
   }
@@ -1310,8 +1320,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
         << "tile.slice offset tuple must have at least 2 elements (row, col), got "
         << offset_tuple->elements_.size();
-    std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
-    std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+    const auto pto_offsets = codegen::GetPtoTileCoordinates(*source_tile_type, offset_tuple->elements_);
+    std::string row_off = codegen.GetExprAsCode(pto_offsets[0]);
+    std::string col_off = codegen.GetExprAsCode(pto_offsets[1]);
 
     auto shape_tuple = ir::As<ir::MakeTuple>(op->args_[1]);
     INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "tile.slice shape must be a literal tuple";
@@ -1321,6 +1332,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     auto cols_const = ir::As<ir::ConstInt>(shape_tuple->elements_[1]);
     INTERNAL_CHECK_SPAN(rows_const && cols_const, op->span_)
         << "tile.slice shape must be compile-time constant for pto.subview sizes attribute";
+    const auto pto_shape = codegen::GetPtoTileCoordinates(*source_tile_type, shape_tuple->elements_);
 
     std::string valid_row;
     std::string valid_col;
@@ -1332,8 +1344,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       INTERNAL_CHECK_SPAN(valid_tuple, op->span_) << "tile.slice valid_shape must be a literal tuple";
       INTERNAL_CHECK_SPAN(valid_tuple->elements_.size() >= 2, op->span_)
           << "tile.slice valid_shape must have at least 2 elements";
-      valid_row = codegen.GetExprAsCode(valid_tuple->elements_[0]);
-      valid_col = codegen.GetExprAsCode(valid_tuple->elements_[1]);
+      const auto pto_valid = codegen::GetPtoTileCoordinates(*source_tile_type, valid_tuple->elements_);
+      valid_row = codegen.GetExprAsCode(pto_valid[0]);
+      valid_col = codegen.GetExprAsCode(pto_valid[1]);
     }
 
     std::string result_target = codegen.GetCurrentResultTarget();
@@ -1379,7 +1392,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string view_ssa = codegen.NewNamedTemp("slice_view");
     std::ostringstream oss;
     oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
-        << rows_const->value_ << ", " << cols_const->value_ << "]";
+        << ir::As<ir::ConstInt>(pto_shape[0])->value_ << ", " << ir::As<ir::ConstInt>(pto_shape[1])->value_
+        << "]";
     if (has_explicit_valid_shape) {
       oss << " valid [" << valid_row << ", " << valid_col << "]";
     }
@@ -1813,8 +1827,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return ssa;
     };
 
-    std::string vr = emit_index_arg(op->args_[1]);
-    std::string vc = emit_index_arg(op->args_[2]);
+    const auto valid_dims = codegen::GetPtoTileCoordinates(*tile_type, {op->args_[1], op->args_[2]});
+    std::string vr = emit_index_arg(valid_dims[0]);
+    std::string vc = emit_index_arg(valid_dims[1]);
 
     codegen.RegisterTileBufType(tile_buf, tile_buf_type);
     codegen.SetCurrentResultBuf(tile_buf);

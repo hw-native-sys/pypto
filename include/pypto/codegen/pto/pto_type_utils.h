@@ -12,9 +12,11 @@
 #ifndef PYPTO_CODEGEN_PTO_PTO_TYPE_UTILS_H_
 #define PYPTO_CODEGEN_PTO_PTO_TYPE_UTILS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
@@ -45,7 +47,17 @@ std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type);
 /// Convert TileLayout to its string name (e.g., row_major -> "row_major")
 const char* TileLayoutToStr(ir::TileLayout layout);
 
+/// Packed axis expanded from carrier units to PTOAS v0.72 Cube logical units.
+/// Vec and GM remain in carrier units at the PTO boundary.
+std::optional<size_t> GetPtoFp4LogicalAxis(const std::string& loc, const std::string& dtype_str,
+                                           ir::TileLayout blayout);
+
+/// Convert a tile's carrier shape, validity, or offsets to PTO coordinate units.
+std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
+                                               const std::vector<ir::ExprPtr>& coordinates);
+
 /// Format a complete !pto.tile_buf<...> type string from individual components.
+/// All dimensions use IR units; packed Cube carriers are expanded for PTOAS.
 /// v_row/v_col are the valid shape dimensions (may differ from rows/cols).
 std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                     int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,

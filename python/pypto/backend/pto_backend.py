@@ -53,6 +53,7 @@ from pypto._function_attrs import (
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
 from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
 from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
+from pypto.backend._ptoas_fp4 import check_native_fp4_mx_support, uses_native_fp4_mx
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -2527,6 +2528,8 @@ def _generate_pto_bundle(
     emit_tile_addr = memory_planner != _passes.MemoryPlanner.PTOAS
     if skip_ptoas:
         return generator.generate(program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc), ()
+    if uses_native_fp4_mx(program):
+        check_native_fp4_mx_support()
     bundle = generator.generate_bundle(
         program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
     )

@@ -46,7 +46,7 @@ def _verify(prog):
     return passes.PropertyVerifierRegistry.verify(props, prog)
 
 
-def _matmul_acc_program(acc_rows, lhs_valid_rows, acc_compact):
+def _matmul_acc_program(acc_rows, lhs_valid_rows, acc_compact, *, fp4=False):
     """One AIC function accumulating *lhs_valid_rows* rows into an [acc_rows, COLS] Acc."""
     span = ir.Span.unknown()
     rows = ir.ConstInt(acc_rows, pl.INDEX, span)
@@ -56,28 +56,43 @@ def _matmul_acc_program(acc_rows, lhs_valid_rows, acc_compact):
 
     acc_type = ir.TileType(
         [rows, cols],
-        pl.INT32,
+        pl.FP32 if fp4 else pl.INT32,
         None,
         ir.TileView(valid_shape=[valid_rows, cols], compact=acc_compact),
         ir.MemorySpace.Acc,
     )
     lhs_type = ir.TileType(
-        [rows, k_dim],
-        pl.INT8,
+        [acc_rows // 2, K] if fp4 else [rows, k_dim],
+        pl.fp4e2m1x2 if fp4 else pl.INT8,
         None,
-        ir.TileView(valid_shape=[valid_rows, k_dim], compact=ir.CompactMode.normal),
+        ir.TileView(
+            valid_shape=[lhs_valid_rows // 2, K] if fp4 else [valid_rows, k_dim],
+            blayout=ir.TileLayout.col_major,
+            compact=ir.CompactMode.normal,
+        ),
         ir.MemorySpace.Left,
     )
-    rhs_type = ir.TileType([k_dim, cols], pl.INT8, None, None, ir.MemorySpace.Right)
+    rhs_type = ir.TileType(
+        [K, COLS // 2] if fp4 else [k_dim, cols],
+        pl.fp4e2m1x2 if fp4 else pl.INT8,
+        None,
+        None,
+        ir.MemorySpace.Right,
+    )
 
     acc = ir.Var("acc", acc_type, span)
     lhs = ir.Var("lhs", lhs_type, span)
     rhs = ir.Var("rhs", rhs_type, span)
     result = ir.Var("result", acc_type, span)
-    call = ir.Call(ir.Op("tile.matmul_acc"), [acc, lhs, rhs], acc_type, span)
+    args = [acc, lhs, rhs]
+    if fp4:
+        sa = ir.Var("sa", ir.TileType([acc_rows, K // 32], pl.FP8E8M0), span)
+        sb = ir.Var("sb", ir.TileType([K // 32, COLS], pl.FP8E8M0), span)
+        args = [acc, lhs, sa, rhs, sb]
+    call = ir.Call(ir.get_op("tile.matmul_mx_acc" if fp4 else "tile.matmul_acc"), args, acc_type, span)
     func = ir.Function(
         "acc_chain",
-        [(acc, ir.ParamDirection.InOut), (lhs, ir.ParamDirection.In), (rhs, ir.ParamDirection.In)],
+        [(acc, ir.ParamDirection.InOut), *((v, ir.ParamDirection.In) for v in args[1:])],
         [],
         ir.SeqStmts([ir.AssignStmt(result, call, span)], span),
         span,
@@ -109,6 +124,14 @@ def _vec_tile_program(compact):
         ir.FunctionType.AIV,
     )
     return ir.Program([func], "vec_consumer_program", span)
+
+
+@pytest.mark.parametrize(("valid_rows", "needs_compact"), [(64, False), (56, False), (48, True)])
+def test_fp4_accumulator_pitch_uses_logical_rows(valid_rows, needs_compact):
+    # L0A has valid_rows/2 carrier rows; FP32 L0C uses the full logical M.
+    diags = _verify(_matmul_acc_program(64, valid_rows, ir.CompactMode.null, fp4=True))
+    assert bool(diags) == needs_compact
+    assert _verify(_matmul_acc_program(64, valid_rows, ir.CompactMode.normal, fp4=True)) == []
 
 
 def test_row_narrowed_non_compact_accumulator_is_rejected():
