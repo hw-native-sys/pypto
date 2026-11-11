@@ -2184,6 +2184,10 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) 
     body_stmts.push_back(func->body_);
   }
 
+  if (!is_aiv) {
+    return {nullptr, std::move(body_stmts)};
+  }
+
   std::unordered_set<std::string> used_names;
   for (const auto& p : func->params_) {
     used_names.insert(p->name_hint_);
@@ -2192,10 +2196,6 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) 
   transform_utils::CollectDefVars(func->body_, def_vars);
   for (const auto& v : def_vars) {
     used_names.insert(v->name_hint_);
-  }
-
-  if (!is_aiv) {
-    return {nullptr, std::move(body_stmts), std::move(used_names)};
   }
 
   auto idx_type = std::make_shared<ScalarType>(DataType::INDEX);
@@ -2209,43 +2209,7 @@ SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) 
   auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
   auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
   body_stmts.insert(body_stmts.begin(), assign_stmt);
-  return {subblock_idx_var, std::move(body_stmts), std::move(used_names)};
-}
-
-SubblockInjectionResult InjectSubblockIdxIntoStmts(const std::vector<StmtPtr>& region_stmts,
-                                                   const std::unordered_set<std::string>& used_names) {
-  // An empty region (DCE-emptied, or a ``pass``-only body whose sole binding was
-  // dropped) carries no compute to localize, so there is nothing to inject a
-  // per-lane index for. Return a no-op result (null index, empty body) the caller
-  // splices as nothing — i.e. it erases the region rather than crashing.
-  if (region_stmts.empty()) {
-    return {nullptr, {}, used_names};
-  }
-  std::vector<StmtPtr> body_stmts = region_stmts;
-
-  // Seed the name set with the caller-supplied names plus the region's own def
-  // vars so the injected subblock index never clashes with an existing binding.
-  std::unordered_set<std::string> names = used_names;
-  for (const auto& s : region_stmts) {
-    std::vector<VarPtr> def_vars;
-    transform_utils::CollectDefVars(s, def_vars);
-    for (const auto& v : def_vars) {
-      names.insert(v->name_hint_);
-    }
-  }
-
-  const Span& span = region_stmts.front()->span_;
-  auto idx_type = std::make_shared<ScalarType>(DataType::INDEX);
-  std::string subblock_var_name = ReserveFreshName(names, "subblock_idx");
-
-  auto& op_reg = OpRegistry::GetInstance();
-  auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
-  auto subblock_call = std::make_shared<Call>(
-      subblock_op, std::vector<ExprPtr>{}, std::vector<std::pair<std::string, std::any>>{}, idx_type, span);
-  auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, span);
-  auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, span);
-  body_stmts.insert(body_stmts.begin(), assign_stmt);
-  return {subblock_idx_var, std::move(body_stmts), std::move(names)};
+  return {subblock_idx_var, std::move(body_stmts)};
 }
 
 namespace {

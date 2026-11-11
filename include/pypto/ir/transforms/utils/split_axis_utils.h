@@ -17,7 +17,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -240,14 +239,11 @@ void CheckGatherPartition(const CallPtr& call, const std::unordered_map<const Va
  * For AIV functions, ``InjectSubblockIdx`` prepends an assignment binding a
  * fresh ``subblock_idx`` var to ``tile.get_subblock_idx()``; ``subblock_idx_expr``
  * references that var. For non-AIV functions it is null and no statement is
- * prepended. ``used_names`` is the seeded name set (params + def vars, plus the
- * freshly reserved subblock name) so callers can keep generating collision-free
- * names.
+ * prepended. The binding name is reserved against parameters and body definitions.
  */
 struct SubblockInjectionResult {
   ExprPtr subblock_idx_expr;
   std::vector<StmtPtr> body_stmts;
-  std::unordered_set<std::string> used_names;
 };
 
 /**
@@ -258,24 +254,6 @@ struct SubblockInjectionResult {
  * @return The (possibly prepended) body statements plus the subblock-idx expr.
  */
 SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv);
-
-/**
- * @brief Inject the per-subblock index binding at the head of a region body.
- *
- * Region-scoped analogue of ``InjectSubblockIdx`` for the explicit
- * ``SplitAivScopeStmt`` consumer in LowerAutoVectorSplit (pass 23). Prepends a
- * fresh ``subblock_idx = tile.get_subblock_idx()`` binding to ``region_stmts``
- * (a region is always an AIV lane, so the index is always injected) and returns
- * the rewritten body plus the index expr. ``used_names`` seeds the collision-free
- * name set (caller-supplied names plus the region's own def vars are added) so the
- * injected name never clashes with an existing binding.
- *
- * @param region_stmts The flattened statements of the region body.
- * @param used_names Externally-reserved names to avoid colliding with.
- * @return The prepended body statements plus the subblock-idx expr.
- */
-SubblockInjectionResult InjectSubblockIdxIntoStmts(const std::vector<StmtPtr>& region_stmts,
-                                                   const std::unordered_set<std::string>& used_names);
 
 /**
  * @brief A tile.transpose that swaps the split axis on a non-singleton source.
@@ -295,8 +273,8 @@ struct TransposeSplitHazard {
  * a transpose that moves the split axis migrates the per-lane data to the other
  * dimension and cannot be split correctly. A source that is statically singleton
  * on the split axis carries no split data and is safe. Shared by ExpandMixedKernel
- * (AUTO whole-function check) and LowerAutoVectorSplit (explicit per-region check);
- * each caller builds its own actionable diagnostic from the result.
+ * (function-level check) and LowerAutoVectorSplit (per-region and function-level
+ * checks); each caller builds its own actionable diagnostic from the result.
  *
  * @param body The statement tree to scan.
  * @param split_dim The partitioned tile dimension (see SplitDimension).
