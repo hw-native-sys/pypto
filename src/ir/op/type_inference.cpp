@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/cube_operand_types.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -570,7 +571,21 @@ void CheckMatmulTf32Mode(const std::vector<std::pair<std::string, std::any>>& kw
 }
 
 DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs) {
+  if (const auto* pair = backend::FindCubeOperandPair(backend::CubeOpFamily::kMatmul, lhs, rhs)) {
+    return pair->accumulator;
+  }
   return (lhs.IsFloat() && rhs.IsFloat()) ? DataType::FP32 : DataType::INT32;
+}
+
+DataType ValidateMatmulOperandDataTypes(DataType lhs, DataType rhs, const std::string& op_name) {
+  // Second arm: the legacy same-dtype contract. Narrowing it to the table alone
+  // would reject pairs that reach PTOAS today (e.g. INT32 x INT32), so the
+  // tightening is deliberately left out of the mixed-FP8 change.
+  CHECK(backend::FindCubeOperandPair(backend::CubeOpFamily::kMatmul, lhs, rhs) != nullptr || lhs == rhs)
+      << "The operator " << op_name << " requires identical lhs and rhs data types, or one of the mixed "
+      << "pairs the Cube multiplies (" << backend::DescribeCubeOperandPairs(backend::CubeOpFamily::kMatmul)
+      << "), but got " << lhs.ToString() << " and " << rhs.ToString();
+  return MatmulAccumulatorDataType(lhs, rhs);
 }
 
 bool CubeWritebackSupportsDataType(DataType accumulator, DataType out) {

@@ -6588,5 +6588,419 @@ class TestB03TriAndGatherCodegen:
             self._generate_mlir(Prog)
 
 
+class TestA5MixedFp8MatmulCodegen:
+    """`pto.tmatmul` family with the A5 mixed FP8 operand pairs.
+
+    PTOAS v0.72 accepts any (E4M3FN | E5M2) operand pair with an f32 destination
+    on A5 (`verifyMatmulTypeTriple`), and rejects every FP8 operand on A2/A3. The
+    operand dtypes therefore have to reach the emitted instruction unchanged, and
+    the target-dependent half of the contract is enforced at codegen.
+
+    Physical K is 64: an 8-bit Left/Right box packs 32 bytes along K, so K must be
+    a multiple of 32.
+    """
+
+    # (lhs, rhs) -> emitted PTOAS dtype spellings
+    _MIXED_PAIRS = [
+        (pl.FP8E4M3FN, pl.FP8E5M2, "f8E4M3FN", "f8E5M2"),
+        (pl.FP8E5M2, pl.FP8E4M3FN, "f8E5M2", "f8E4M3FN"),
+        (pl.FP8E5M2, pl.FP8E5M2, "f8E5M2", "f8E5M2"),
+    ]
+
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend950) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    @staticmethod
+    def _matmul_program(lhs_dtype, rhs_dtype, form):
+        """One kernel per matmul form, sharing the mixed FP8 operand pair.
+
+        The form is selected here, outside the kernel bodies: a `str` closure
+        variable is not a type the DSL parser can capture.
+        """
+        if form == "base":
+
+            @pl.program
+            class Base:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[32, 64], lhs_dtype],
+                    b: pl.Tensor[[64, 32], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                ) -> pl.Tensor[[32, 32], pl.FP32]:
+                    lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                        a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                    )
+                    rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                        b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul(lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Base
+
+        if form == "acc":
+
+            @pl.program
+            class Acc:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[32, 64], lhs_dtype],
+                    b: pl.Tensor[[64, 32], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+                ) -> pl.Tensor[[32, 32], pl.FP32]:
+                    lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                        a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                    )
+                    rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                        b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    seed: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul(lhs, rhs)
+                    product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul_acc(seed, lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Acc
+
+        @pl.program
+        class Bias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 64], lhs_dtype],
+                b: pl.Tensor[[64, 32], rhs_dtype],
+                bias: pl.Tensor[[1, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                lhs: pl.Tile[[32, 64], lhs_dtype] = pl.load(
+                    a, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat
+                )
+                rhs: pl.Tile[[64, 32], rhs_dtype] = pl.load(
+                    b, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat
+                )
+                bias_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(
+                    bias, [0, 0], [1, 32], target_memory=pl.MemorySpace.Mat
+                )
+                product: pl.Tile[[32, 32], pl.FP32] = pl.tile.matmul_bias(lhs, rhs, bias_tile)
+                return pl.store(product, [0, 0], out)
+
+        return Bias
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _MIXED_PAIRS)
+    @pytest.mark.parametrize(
+        "form,pto_op", [("base", "pto.tmatmul "), ("acc", "pto.tmatmul.acc"), ("bias", "pto.tmatmul.bias")]
+    )
+    def test_mixed_fp8_operand_dtypes_reach_the_instruction(
+        self, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op
+    ):
+        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
+        line = next(line for line in mlir.splitlines() if pto_op in line)
+        # Each operand keeps its own dtype: the lhs box is col_major/row_major in
+        # left, the rhs row_major/col_major in right, and dst is the f32 Acc tile.
+        assert f"loc=left, dtype={lhs_text}" in line
+        assert f"loc=right, dtype={rhs_text}" in line
+        assert "loc=acc, dtype=f32" in line
+
+    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _MIXED_PAIRS)
+    @pytest.mark.parametrize(
+        "form,isa_macro",
+        [("base", "TMATMUL("), ("acc", "TMATMUL_ACC("), ("bias", "TMATMUL_BIAS(")],
+    )
+    def test_mixed_fp8_matmul_compiles_with_native_ptoas(
+        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, isa_macro
+    ):
+        """The real assembler, not just our own expectation of it, accepts the pair."""
+        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert isa_macro in cpp
+
+    @pytest.mark.parametrize("form", ["base", "acc", "bias"])
+    def test_mixed_fp8_matmul_is_rejected_on_a2a3(self, form):
+        """A2/A3 has no FP8 Cube operand, so the pair must fail before PTOAS."""
+        with pytest.raises(ValueError, match="not supported on the 'a2a3' backend"):
+            self._generate_mlir(self._matmul_program(pl.FP8E4M3FN, pl.FP8E5M2, form), BackendType.Ascend910)
+
+
+class TestA5GemvCodegen:
+    """`pto.tgemv` family on A5: the FP8 / HF8 operand pairs and the Acc bridge.
+
+    GEMV is the `M == 1` Cube matmul and shares its operand-pair contract: all
+    three `pto.tgemv*` ops verify element types through PTOAS v0.72's
+    `verifyMatmulTypeTriple` (reached via `verifyMatmulOrGemv` for
+    `pto.tgemv`/`.acc` and `verifyMatBiasCommon` for `.bias`), and their a5
+    TileLib templates carry the matmul `MATMUL_*_DTYPES` signature lists. So the
+    operand dtypes must reach the emitted instruction unchanged, and the
+    target-dependent half of the contract is enforced at codegen.
+
+    The wide dtypes ride along on purpose. Until the static-valid Acc bridge
+    (`EmitStaticValidGemvAccView`) landed, PTOAS v0.72 rejected *every* ordinary
+    `pto.tgemv*` for a5 at *every* dtype -- `verifyGemvTileOperandsA5` chains into
+    `verifyMatTileOperandsA2A3`, whose "static matmul tile shapes lhs[M,K],
+    rhs[K,N], and dst[M,N]" rule reads `getMatmulLogicalShapeVec`, which falls
+    back to the physical extent when the type's valid is dynamic, and a GEMV dst
+    is a 16-row Acc box. So FP16 / FP32 / INT8 are the regression guard for the
+    bridge itself, not just context for the new pairs.
+
+    Physical K is 128: an 8-bit Left/Right box packs 32 bytes along K, so K must
+    be a multiple of 32.
+    """
+
+    # (lhs, rhs) -> emitted PTOAS dtype spellings. HF8 pairs only with itself.
+    _FP8_PAIRS = [
+        (pl.FP8E4M3FN, pl.FP8E4M3FN, "f8E4M3FN", "f8E4M3FN"),
+        (pl.FP8E4M3FN, pl.FP8E5M2, "f8E4M3FN", "f8E5M2"),
+        (pl.FP8E5M2, pl.FP8E4M3FN, "f8E5M2", "f8E4M3FN"),
+        (pl.FP8E5M2, pl.FP8E5M2, "f8E5M2", "f8E5M2"),
+        # HF8 lowers to the PTOAS dialect type `!pto.hif8`, not a bare MLIR f8.
+        (pl.HF8, pl.HF8, "!pto.hif8", "!pto.hif8"),
+    ]
+
+    # The pairs A5 always had. INT8 accumulates in INT32, so it carries its own
+    # output dtype; the rest accumulate in FP32.
+    _WIDE_PAIRS = [
+        (pl.FP16, pl.FP32, "f16"),
+        (pl.BF16, pl.FP32, "bf16"),
+        (pl.FP32, pl.FP32, "f32"),
+        (pl.INT8, pl.INT32, "i8"),
+    ]
+
+    def _generate_mlir(self, program_cls, backend_type=BackendType.Ascend950) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    @staticmethod
+    def _gemv_program(lhs_dtype, rhs_dtype, form, out_dtype=None):
+        """One kernel per GEMV form, sharing the operand pair.
+
+        The form is selected here, outside the kernel bodies: a `str` closure
+        variable is not a type the DSL parser can capture.
+        """
+        odt = out_dtype or pl.FP32
+        if form == "base":
+
+            @pl.program
+            class Base:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[1, 128], lhs_dtype],
+                    b: pl.Tensor[[128, 64], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[1, 64], odt]],
+                ) -> pl.Tensor[[1, 64], odt]:
+                    lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                    rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                    product = pl.tile.gemv(lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Base
+
+        if form == "acc":
+
+            @pl.program
+            class Acc:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[1, 128], lhs_dtype],
+                    b: pl.Tensor[[128, 64], rhs_dtype],
+                    out: pl.Out[pl.Tensor[[1, 64], odt]],
+                ) -> pl.Tensor[[1, 64], odt]:
+                    lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                    rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                    seed = pl.tile.gemv(lhs, rhs)
+                    product = pl.tile.gemv_acc(seed, lhs, rhs)
+                    return pl.store(product, [0, 0], out)
+
+            return Acc
+
+        @pl.program
+        class Bias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[1, 128], lhs_dtype],
+                b: pl.Tensor[[128, 64], rhs_dtype],
+                bias: pl.Tensor[[1, 64], odt],
+                out: pl.Out[pl.Tensor[[1, 64], odt]],
+            ) -> pl.Tensor[[1, 64], odt]:
+                lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                bias_tile = pl.load(bias, [0, 0], [1, 64], target_memory=pl.MemorySpace.Mat)
+                product = pl.tile.gemv_bias(lhs, rhs, bias_tile)
+                return pl.store(product, [0, 0], out)
+
+        return Bias
+
+    _FORMS = [
+        ("base", "pto.tgemv ", "TGEMV("),
+        ("acc", "pto.tgemv.acc", "TGEMV_ACC("),
+        ("bias", "pto.tgemv.bias", "TGEMV_BIAS("),
+    ]
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype", "lhs_text", "rhs_text"), _FP8_PAIRS)
+    @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
+    def test_fp8_operand_dtypes_reach_the_instruction(
+        self, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op, isa_macro
+    ):
+        mlir = self._generate_mlir(self._gemv_program(lhs_dtype, rhs_dtype, form))
+        line = next(line for line in mlir.splitlines() if pto_op in line)
+        # Each operand keeps its own dtype: the lhs row vector in left, the rhs
+        # matrix in right, and dst is the f32 Acc tile GEMV always produces.
+        assert f"loc=left, dtype={lhs_text}" in line
+        assert f"loc=right, dtype={rhs_text}" in line
+        assert "loc=acc, dtype=f32" in line
+
+    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype", "lhs_text", "rhs_text"), _FP8_PAIRS)
+    @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
+    def test_fp8_gemv_compiles_with_native_ptoas(
+        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op, isa_macro
+    ):
+        """The real assembler, not just our own expectation of it, accepts the pair."""
+        mlir = self._generate_mlir(self._gemv_program(lhs_dtype, rhs_dtype, form))
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert isa_macro in cpp
+
+    @pytest.mark.parametrize(("dtype", "out_dtype", "dtype_text"), _WIDE_PAIRS)
+    @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
+    def test_wide_gemv_compiles_with_native_ptoas(
+        self, tmp_path, dtype, out_dtype, dtype_text, form, pto_op, isa_macro
+    ):
+        """The dtypes A5 always had, which the Acc bridge unblocked along with the new ones.
+
+        Before `EmitStaticValidGemvAccView`, every one of these was rejected by
+        PTOAS v0.72 for a5 with "expects static matmul tile shapes lhs[M,K],
+        rhs[K,N], and dst[M,N]" -- the same message the FP8 pairs got, because the
+        trigger is the 16-row dst Acc box and not the operand dtype.
+        """
+        mlir = self._generate_mlir(self._gemv_program(dtype, dtype, form, out_dtype))
+        line = next(line for line in mlir.splitlines() if pto_op in line)
+        assert f"loc=left, dtype={dtype_text}" in line
+        assert f"loc=right, dtype={dtype_text}" in line
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert isa_macro in cpp
+
+    @staticmethod
+    def _captured(pattern: str, text: str) -> str:
+        """First capture group of `pattern` in `text`, or fail naming both.
+
+        `re.search` returns `Match | None`, so an unchecked `.group(1)` is both a
+        pyright error and a bad failure message: when the emitted shape changes,
+        the test should say which pattern stopped matching, not raise
+        AttributeError on None.
+        """
+        match = re.search(pattern, text)
+        assert match, f"no match for {pattern!r} in:\n{text}"
+        return match.group(1)
+
+    @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
+    def test_a5_gemv_retypes_the_accumulator_through_a_treshape(self, form, pto_op, isa_macro):
+        """The bridge itself: a static-valid Acc view, used only by the instruction.
+
+        The accumulator's own `pto.alloc_tile` keeps the generic dynamic-valid
+        type (`v_row=?`, live extent in the `valid_row` operand), and the
+        downstream `pto.tstore` keeps reading that original SSA. Only the GEMV's
+        `outs()` -- and, for `.acc`, its `ins()` accumulator, which must stay the
+        same SSA as `outs()` -- sees the re-typed `pto.treshape` view.
+        """
+        mlir = self._generate_mlir(self._gemv_program(pl.FP8E4M3FN, pl.FP8E5M2, form))
+        gemv = next(line for line in mlir.splitlines() if pto_op in line)
+        # The view named in outs() is the one this instruction uses. `.acc` emits
+        # two gemv instructions, each with its own view, so pick by the SSA the
+        # instruction under test actually references rather than by temp name
+        # (`NewNamedTemp` falls back to `%<n>` once a hint is taken).
+        view_ssa = self._captured(r"outs\((%[\w.$]+)", gemv)
+        view = next(
+            line for line in mlir.splitlines() if line.lstrip().startswith(f"{view_ssa} = pto.treshape")
+        )
+        src_ty, dst_ty = view.split(" -> ")
+        assert "loc=acc" in src_ty and "v_row=?" in src_ty, "the view's SOURCE is the dynamic-valid Acc tile"
+        assert "v_row=1" in dst_ty, "the view's RESULT states the single valid row"
+        # The physical box is unchanged -- this re-types, it does not re-shape.
+        assert "rows=16, cols=64" in src_ty and "rows=16, cols=64" in dst_ty
+
+        acc_ssa = self._captured(r"pto\.treshape (%[\w.$]+)", view)
+        if form == "acc":
+            # ins() acc_in and outs() dst must stay the same SSA value.
+            assert gemv.split("ins(")[1].startswith(view_ssa)
+        store = next(line for line in mlir.splitlines() if "pto.tstore" in line)
+        assert acc_ssa in store, "the store must keep reading the original accumulator SSA"
+        assert view_ssa not in store.split("outs(")[0], "the store must not read through the view"
+
+    @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
+    def test_a2a3_gemv_keeps_the_dynamic_valid_accumulator(self, form, pto_op, isa_macro):
+        """A2/A3 must be untouched: it reaches `verifyGemvValidShapes`, which compares
+        valid rows only, so a dynamic-valid Acc type was never a problem there and the
+        bridge must not fire."""
+        mlir = self._generate_mlir(self._gemv_program(pl.FP16, pl.FP16, form), BackendType.Ascend910)
+        assert not [ln for ln in mlir.splitlines() if "pto.treshape" in ln and "loc=acc" in ln]
+        gemv = next(line for line in mlir.splitlines() if pto_op in line)
+        assert "loc=acc, dtype=f32, rows=16, cols=64, v_row=?" in gemv.split("outs(")[1]
+
+    def test_a5_gemv_skips_the_bridge_for_a_narrowed_n(self):
+        """A partially-valid N must NOT take the bridge -- it would introduce a mismatch.
+
+        The matmul shape rule the bridge satisfies has three clauses, and making the
+        dst's logical shape static turns on a second one:
+        `rhs logical N == dst logical N`. The rhs type's valid stays dynamic (PyPTO's
+        generic `alloc_tile` carries it in a `valid_col` operand), so
+        `getMatmulLogicalShapeVec` reads the rhs's *physical* N -- 64 here -- against
+        a static dst N of 40. So the bridge declines, leaving a narrowed-N GEMV
+        exactly as unassemblable for a5 as it was before, rather than trading one
+        rejection for another. Unblocking it needs every GEMV operand re-typed.
+        """
+
+        @pl.program
+        class NarrowN:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[1, 128], pl.FP8E4M3FN],
+                b: pl.Tensor[[128, 64], pl.FP8E5M2],
+                out: pl.Out[pl.Tensor[[1, 40], pl.FP32]],
+            ) -> pl.Tensor[[1, 40], pl.FP32]:
+                lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                rhs = pl.load(
+                    b,
+                    [0, 0],
+                    [128, 64],
+                    valid_shape=[128, 40],
+                    target_memory=pl.MemorySpace.Mat,
+                    clamp=True,
+                )
+                return pl.store(pl.tile.gemv(lhs, rhs), [0, 0], out)
+
+        mlir = self._generate_mlir(NarrowN)
+        assert not [ln for ln in mlir.splitlines() if "pto.treshape" in ln and "loc=acc" in ln]
+        gemv = next(line for line in mlir.splitlines() if "pto.tgemv " in line)
+        assert "v_row=?" in gemv.split("outs(")[1], "the accumulator keeps its dynamic-valid type"
+
+    @pytest.mark.parametrize("form", ["base", "acc", "bias"])
+    def test_fp8_gemv_is_rejected_on_a2a3(self, form):
+        """A2/A3 has no FP8 Cube operand, so the pair must fail before PTOAS."""
+        with pytest.raises(ValueError, match="not supported on the 'a2a3' backend"):
+            self._generate_mlir(self._gemv_program(pl.FP8E4M3FN, pl.FP8E5M2, form), BackendType.Ascend910)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

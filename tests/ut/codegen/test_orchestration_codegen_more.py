@@ -1284,6 +1284,42 @@ int main() {{
         assert "make_tensor_external(nullptr, row_ci_shapes, 2, DataType::FLOAT32)" not in code
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" not in code
 
+    def test_fp8e5m2_runtime_tensor_uses_uint8_byte_carrier(self):
+        """The runtime has no E5M2 enum, so orchestration descriptors use the UINT8 carrier."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class E5M2Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def copy_row(
+                self,
+                x: pl.Tensor[[4, 32], pl.FP8E5M2],
+                out: pl.Out[pl.Tensor[[1, 32], pl.FP8E5M2]],
+            ) -> pl.Tensor[[1, 32], pl.FP8E5M2]:
+                row_tile: pl.Tile[[1, 32], pl.FP8E5M2] = pl.load(x, [0, 0], [1, 32])
+                out_1: pl.Tensor[[1, 32], pl.FP8E5M2] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_e5m2(
+                self,
+                x: pl.Tensor[[4, 32], pl.FP8E5M2],
+                out: pl.Out[pl.Tensor[[4, 32], pl.FP8E5M2]],
+            ) -> pl.Tensor[[4, 32], pl.FP8E5M2]:
+                row: pl.Tensor[[1, 32], pl.FP8E5M2] = pl.create_tensor([1, 32], dtype=pl.FP8E5M2)
+                row = self.copy_row(x, row)
+                # Two consumers keep ``row`` a standalone runtime tensor (no view fast path).
+                out = pl.assemble(out, row, [0, 0])
+                out = pl.assemble(out, row, [1, 0])
+                return out
+
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(E5M2Program)
+        code = _generate_orch_code(transformed)
+
+        assert "TensorCreateInfo row_ci(row_ci_shapes, 2, DataType::UINT8);" in code
+        assert "DataType::FP8E5M2" not in code
+
     def test_tensor_assemble_slice_source_does_not_require_view_fast_path(self):
         """tensor.assemble should stay codegenable when the source is not a rewritten tensor.create."""
 

@@ -264,6 +264,107 @@ exact physical M/N/K box compatibility while allowing the accumulator's valid
 M/N rectangle and the rhs valid K extent to contain the smaller rectangle PTO
 computes from lhs M/K and rhs N.
 
+#### Cube operand dtype pairs
+
+The element types the Cube multiplies are a hardware table, not a symmetry rule:
+`backend::kCubeOperandPairs` (`include/pypto/backend/common/cube_operand_types.h`)
+is PyPTO's copy of PTOAS `verifyMatmulTypeTriple` and pto-isa `npu/a5/TMatmul.hpp`.
+
+| lhs x rhs | Accumulator | A2/A3 | A5 | Families |
+| --------- | ----------- | ----- | -- | -------- |
+| INT8 x INT8 | INT32 | yes | yes | matmul, gemv |
+| FP16 x FP16 | FP32 | yes | yes | matmul, gemv |
+| BF16 x BF16 | FP32 | yes | yes | matmul, gemv |
+| FP32 x FP32 | FP32 | yes | yes | matmul, gemv |
+| FP8E4M3FN x FP8E4M3FN | FP32 | no | yes | matmul, gemv, mx |
+| FP8E4M3FN x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| FP8E5M2 x FP8E4M3FN | FP32 | no | yes | matmul, gemv |
+| FP8E5M2 x FP8E5M2 | FP32 | no | yes | matmul, gemv |
+| HF8 x HF8 | FP32 | no | yes | matmul, gemv |
+
+So on Ascend950 `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`,
+`tile.batch_matmul*`, `tensor.matmul`, and `tensor.matmul_acc` accept **mixed FP8
+operands in either order**; the accumulator, the `matmul_acc` input, and the
+`matmul_bias` bias stay FP32. `tf32_mode` remains FP32-only, so an FP8 operand
+pair rejects it.
+
+The ordinary GEMV family — `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias` — is the
+`M == 1` specialization of that matmul and shares the table: `pto.tgemv`,
+`pto.tgemv.acc` and `pto.tgemv.bias` all verify their element types through the
+same `verifyMatmulTypeTriple`, and their a5 TileLib templates carry the matmul
+`MATMUL_*_DTYPES` signature lists. So the FP8 and HF8 pairs are available there
+too, with the same FP32 result, FP32 `gemv_acc` accumulator and FP32 `gemv_bias`
+bias. The **MX** GEMV ops are a different instruction with a different table and
+are not covered by these rows.
+
+GEMV's dtype check (`ValidateGemvInputDtypes`, `src/ir/op/tile_ops/matmul.cpp`)
+is a *closed* allow-list, unlike matmul's: GEMV never had the historical
+same-dtype escape hatch, so an unlisted pair is rejected in type deduction rather
+than passed down to PTOAS. It writes its pairs out longhand instead of querying
+`FindCubeOperandPair`, and a `static_assert` in the same file
+(`HandWrittenGemvListMatchesCubeTable`) holds the two descriptions to each other
+in both directions, with the accumulator dtype.
+
+That assertion is load-bearing, not tidiness. The `gemv` family bits on the five
+FP8 / HF8 rows have one remaining reader — codegen's `CheckMatmulOperandArch`,
+which looks the operand pair up in the `kGemv` rows and **returns without
+checking when it finds none**. A pair the longhand list accepted but the table
+did not carry would therefore lose its "FP8 needs the a5 backend" rejection
+silently and reach PTOAS on hardware that cannot multiply it, so that drift
+direction is pinned at compile time rather than left to review.
+
+##### A5 GEMV: the static-valid accumulator bridge
+
+An ordinary GEMV on Ascend950 also needs its accumulator **re-typed at the
+instruction**, independently of the operand dtype. PTOAS v0.72's
+`verifyGemvTileOperandsA5` chains into the *matmul* operand verifier to pick up
+the A5 layout rules, and inherits its shape rule — "static matmul tile shapes
+lhs[M,K], rhs[K,N], and dst[M,N]". That rule compares `getMatmulLogicalShapeVec`,
+which falls back to the *physical* extent whenever the type's valid is dynamic.
+PyPTO's generic `pto.alloc_tile` emits `v_row=?, v_col=?` and carries the live
+extent in separate `valid_row` / `valid_col` operands, and a GEMV result is the
+mandatory 16-row FP32 Acc box holding one logical row — so the rule compared lhs
+rows 1 against dst rows 16 and rejected every `pto.tgemv*` for a5, at every
+dtype. A2/A3 never reaches that rule: `verifyGemvTileOperandsA2A3` uses
+`verifyGemvValidShapes`, which compares *valid* rows only.
+
+`EmitStaticValidGemvAccView` (`src/backend/common/pto_ops_elementwise.cpp`)
+therefore emits, on a5 only, a zero-copy `pto.treshape` whose *result type*
+carries the accumulator's static valid extents — the same bridge `pto.tquant.mx`
+uses — and points the GEMV's `outs()` (and, for `.acc`, its `ins()` accumulator)
+at that view. The accumulator's own allocation and the downstream `pto.tstore`
+are untouched, and the emitted A2/A3 instruction is byte-for-byte unchanged.
+
+Two cases decline the bridge, both deliberately:
+
+| Case | Why |
+| ---- | --- |
+| Accumulator valid extents not compile-time constants | There is no static type to offer; PTOAS reports it rather than codegen inventing a constant |
+| Accumulator valid N narrower than its physical N | A static dst N turns on the rule's `rhs logical N == dst logical N` clause, and the rhs type's valid stays dynamic, so that clause would read the rhs's *physical* N — a fresh mismatch. A partially-valid N needs every GEMV operand re-typed, not just the accumulator |
+
+Physical K for a GEMV lhs is a function of the operand dtype: the Mat-to-Left
+extract (`TExtractToAVector`, pto-isa `npu/a5/TExtractCommon.hpp`) requires
+`Cols % (512 / sizeof(dtype)) == 0`, i.e. a whole 512-byte K block — K = 512 for a
+1-byte operand, 256 for 2-byte, 128 for 4-byte.
+
+The contract is split across two layers, because the legal set depends on the
+compilation target while type deduction does not see one. Type deduction
+(`ValidateMatmulOperandDataTypes`, `src/ir/op/type_inference.cpp`) accepts a pair
+that is in the table **or** whose operands share one dtype — the second arm
+preserves the historical "identical lhs and rhs" contract, so dtypes PTOAS would
+reject anyway still reach the backend as they always have. Matmul codegen
+(`CheckMatmulOperandArch`, `src/backend/common/pto_ops_elementwise.cpp`) then
+rejects a table pair the configured target lacks (an FP8 or HF8 operand on
+`a2a3`) before PTOAS sees it; pairs outside the table are left to PTOAS, unchanged.
+
+`tensor.matmul` defaults an omitted `out_dtype` to the accumulator whenever either
+operand is FP8 or HF8: dtype promotion would answer FP8, which the unscaled
+FIXPIPE writeback cannot produce, and for a mixed pair the answer would depend on
+operand order. Wider operand pairs keep their promoted default.
+
+Physical K must stay a multiple of 32 for a 1-byte operand (the Left/Right
+fractal packs 32 bytes along K); valid K carries no such restriction.
+
 For rank-2 FP32 operands on Ascend950, `matmul`, `matmul_acc`, and
 `tile.matmul_bias` accept keyword-only `tf32_mode="round_even"` or
 `tf32_mode="round_away"`. Both round inputs to HF32 (e8m10) and accumulate in
