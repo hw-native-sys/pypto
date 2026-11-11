@@ -552,11 +552,14 @@ std::string PTOCodegen::EmitCastToIndex(const ir::ExprPtr& expr, const std::stri
   return mlir_name;
 }
 
-std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name) {
+std::string PTOCodegen::EmitCastToInt(const ir::ExprPtr& expr, const std::string& mlir_name,
+                                      unsigned target_bits, const char* api_name) {
+  const DataType target_dtype = target_bits == 64 ? DataType::INT64 : DataType::INT32;
+  const std::string target_type = target_bits == 64 ? "i64" : "i32";
   if (auto scalar_type = As<ScalarType>(expr->GetType())) {
-    CHECK(!scalar_type->dtype_.IsFloat()) << "EmitCastToI32 does not support floating-point types (got "
+    CHECK(!scalar_type->dtype_.IsFloat()) << api_name << " does not support floating-point types (got "
                                           << GetTypeString(scalar_type->dtype_) << ")";
-    if (scalar_type->dtype_ != DataType::INT32) {
+    if (scalar_type->dtype_ != target_dtype) {
       const bool is_unsigned = scalar_type->dtype_.IsUnsignedInt();
       std::string source_name = mlir_name;
       std::string src_type = GetTypeString(scalar_type->dtype_);
@@ -565,31 +568,39 @@ std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string
         std::string signless_type = src_type.substr(1);  // "uiN" -> "iN"
         Emit(signless_name + " = builtin.unrealized_conversion_cast " + source_name + " : " + src_type +
              " to " + signless_type);
-        if (scalar_type->dtype_.GetBit() == 32) {
+        if (scalar_type->dtype_.GetBit() == target_bits) {
           return signless_name;
         }
         source_name = signless_name;
         src_type = signless_type;
       }
 
-      std::string i32_name = NewTemp();
-      // Use arith.index_cast for index→i32, arith.trunci/extsi/extui for int→int.
+      std::string result_name = NewTemp();
+      // Use arith.index_cast for index→iN, arith.trunci/extsi/extui for int→int.
       // MLIR arithmetic casts require signless integer operands, so unsigned
       // inputs are bridged to iN above before any width conversion.
       std::string mlir_op;
       if (scalar_type->dtype_ == DataType::INDEX) {
         mlir_op = "arith.index_cast";
-      } else if (scalar_type->dtype_.GetBit() > 32) {
+      } else if (scalar_type->dtype_.GetBit() > target_bits) {
         mlir_op = "arith.trunci";
       } else {
         // BOOL is not an unsigned integer dtype, but still represents 0/1.
         mlir_op = (is_unsigned || scalar_type->dtype_ == DataType::BOOL) ? "arith.extui" : "arith.extsi";
       }
-      Emit(i32_name + " = " + mlir_op + " " + source_name + " : " + src_type + " to i32");
-      return i32_name;
+      Emit(result_name + " = " + mlir_op + " " + source_name + " : " + src_type + " to " + target_type);
+      return result_name;
     }
   }
   return mlir_name;
+}
+
+std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name) {
+  return EmitCastToInt(expr, mlir_name, /*target_bits=*/32, "EmitCastToI32");
+}
+
+std::string PTOCodegen::EmitCastToI64(const ir::ExprPtr& expr, const std::string& mlir_name) {
+  return EmitCastToInt(expr, mlir_name, /*target_bits=*/64, "EmitCastToI64");
 }
 
 // ========================================================================

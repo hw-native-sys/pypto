@@ -2410,6 +2410,77 @@ class TestGenerateKernelWrapper:
         assert ") + signal_tensor->start_offset;" in wrapper
         assert "deferred_kernel(signal, expected, args);" in wrapper
 
+    def test_urma_transfer_wrapper_injects_adapter_and_forwards_raw_args(self):
+        @pl.program
+        class UrmaWrapperProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        func = UrmaWrapperProgram.get_function("kernel")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+
+        assert '#include "backend/urma/urma_completion_kernel.h"' in wrapper
+        assert '#include "platform_comm/comm_context.h"' in wrapper
+        assert "static __aicore__ void pypto_urma_put_async_f16(" in wrapper
+        assert "pypto_urma_transfer_impl<half, true>" in wrapper
+        assert "comm_workspace<CommWorkspaceKind::URMA>" in wrapper
+        assert "UrmaTput(" in wrapper
+        assert "pipe_barrier(PIPE_ALL)" in wrapper
+        # Dynamic subregions are bounded against each endpoint tensor's extent,
+        # not only against the whole communication window.
+        assert "int64_t dst_extent, int64_t src_extent" in wrapper
+        assert "bytes > local_extent - local_off" in wrapper
+        assert "bytes > remote_extent - remote_view_off" in wrapper
+        # The kernel wrapper forwards the raw dispatch args required by the ABI.
+        assert ", args);" in wrapper
+        assert "pypto_register_counter_completion" not in wrapper
+
+    @pytest.mark.parametrize(
+        "dtype,suffix,cpp_type",
+        [
+            (pl.FP32, "f32", "float"),
+            (pl.FP16, "f16", "half"),
+            (pl.BF16, "bf16", "bfloat16_t"),
+            (pl.INT8, "i8", "int8_t"),
+            (pl.UINT8, "ui8", "uint8_t"),
+            (pl.INT16, "i16", "int16_t"),
+            (pl.UINT16, "ui16", "uint16_t"),
+            (pl.INT32, "i32", "int32_t"),
+            (pl.UINT32, "ui32", "uint32_t"),
+            (pl.INT64, "i64", "int64_t"),
+            (pl.UINT64, "ui64", "uint64_t"),
+            (pl.FP8E4M3FN, "f8E4M3FN", "float8_e4m3_t"),
+            (pl.FP8E5M2, "f8E5M2", "float8_e5m2_t"),
+        ],
+    )
+    def test_urma_transfer_adapter_element_types(self, dtype, suffix, cpp_type):
+        """Shared dtype conversions preserve every supported helper ABI."""
+
+        @pl.program
+        class TransferProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], dtype],
+                src: pld.DistributedTensor[[16, 64], dtype],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        func = TransferProgram.get_function("kernel")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+
+        assert f"static __aicore__ void pypto_urma_put_async_{suffix}(" in wrapper
+        assert f"pypto_urma_transfer_impl<{cpp_type}, true>" in wrapper
+
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)

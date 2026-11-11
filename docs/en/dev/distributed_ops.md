@@ -31,8 +31,8 @@ There are **seventeen ops** and **five ABI enums**:
 | `pld.tensor.remote_store` | push (write local tensor-level value → peer); lowered 1:1 to `pld.tile.remote_store` | `Unknown` (side effect) | TSTORE |
 | `pld.tensor.get` | pull (read peer → local GM) | `Unknown` (side effect) | TGET |
 | `pld.tensor.put` | push (write local → peer) | `Unknown` (side effect) | TPUT |
-| `pld.tensor.get_async` | asynchronous pull (peer → local GM) | aliases `dst` | URMA; IR/DSL only |
-| `pld.tensor.put_async` | asynchronous push (local → peer GM) | aliases `dst` | URMA; IR/DSL only |
+| `pld.tensor.get_async` | asynchronous pull (peer → local GM) | aliases `dst` | URMA (A5); external helper + adapter |
+| `pld.tensor.put_async` | asynchronous push (local → peer GM) | aliases `dst` | URMA (A5); external helper + adapter |
 | `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.barrier` | synchronise visibility of window data across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.broadcast` | replicate root rank's data to all ranks | `DistributedTensorType` (same as src) | builtin collective |
@@ -49,10 +49,17 @@ exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 ## Async transfer validation
 
-`pld.tensor.put_async` and `pld.tensor.get_async` currently expose the IR/DSL
-contract only; device lowering and task-completion integration are pending.
-Both endpoints must be window-bound, dense row-major `DistributedTensor`s.
-The result aliases `dst`; returning from the op does not imply completion.
+`pld.tensor.put_async` and `pld.tensor.get_async` lower on the A5 backend to a
+dtype-suffixed external helper call (`pypto_urma_{put,get}_async_<dtype>`). The
+helper validates the request against both endpoint tensor extents and the
+communication window, requests the URMA workspace from the IR `engines` field,
+and submits through the existing runtime entry point; it never polls. Task
+completion integration (the enclosing task releasing the consumer) is still
+pending. Both endpoints must be window-bound, dense row-major
+`DistributedTensor`s. The result aliases `dst`; returning from the op does not
+imply completion.
+
+Adapter symbols and C++ element types reuse the shared dtype conversions.
 
 - Python builders require `engine=pld.CommEngine.URMA` (also the default).
   Integers, floats, booleans, strings, and unrelated enums are rejected before

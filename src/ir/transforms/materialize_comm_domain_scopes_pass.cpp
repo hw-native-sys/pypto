@@ -897,7 +897,8 @@ Pass MaterializeCommDomainScopes() {
       void Record(const OpPtr& op) {
         // LowerL2TensorCollectives may already have replaced the registered op
         // with a synthesized builtin function (not a registry operator).
-        if (op && (IsOp(op, "pld.tensor.indexed_all_to_all_v") ||
+        if (op && (IsOp(op, "pld.tensor.indexed_all_to_all_v") || IsOp(op, "pld.tensor.put_async") ||
+                   IsOp(op, "pld.tensor.get_async") ||
                    op->name_.rfind("__builtin_indexed_all_to_all_v__", 0) == 0)) {
           uses_urma = true;
         }
