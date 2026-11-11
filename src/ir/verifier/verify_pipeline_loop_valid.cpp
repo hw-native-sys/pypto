@@ -19,6 +19,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -64,6 +65,19 @@ class PipelineLoopValidChecker : public IRVisitor {
   }
 
   void VisitExpr_(const CallPtr& op) override {
+    if (in_pipeline_ && core_affinity::IsPipeBarrier(op)) {
+      // An operand-free barrier gets no ordering edge, so CanonicalizeIOOrder
+      // can hoist it above the store it was authored after. See the matching
+      // CHECK in pipeline_loop_utils.cpp.
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "PipelineLoopValid", 2,
+                                "pl.system.barrier in function '" + func_name_ +
+                                    "' cannot be used inside pl.pipeline: pipeline scheduling does not "
+                                    "preserve its source order, so the barrier can be scheduled before "
+                                    "the transfer it was written to follow. "
+                                    "Use pl.range for manual barriers until pipeline scheduling supports "
+                                    "them.",
+                                op->span_);
+    }
     if (in_pipeline_ && (IsOp(op, "system.set_flag") || IsOp(op, "system.wait_flag"))) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "PipelineLoopValid", 2,
                                 "Explicit set_flag/wait_flag in function '" + func_name_ +

@@ -134,6 +134,30 @@ REGISTER_OP("system.wait_flag")
       return DeducePipelineFlagType(args, kwargs, "system.wait_flag");
     });
 
+/// Deduce `system.bar_*`: operand-free, with an optional `core_type` naming one lane.
+///
+/// `.no_argument()` records the arity for documentation but does not enforce it on a
+/// functional-style `create_op_call`, and `set_attr` validates only the value's TYPE,
+/// not its contents. Without this, `create_op_call("system.bar_v", {operand}, {{"core_type",
+/// "bogus"}})` builds happily and then fails much later -- a bad `core_type` falls through
+/// ClassifyCallAffinity's lane arms to SHARED, silently duplicating the barrier onto both
+/// kernels, and the printer hits an INTERNAL_CHECK with no user-facing span.
+TypePtr DeduceBarrierType(const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs, const char* name) {
+  CHECK(args.empty()) << name << " takes no operands, got " << args.size();
+  bool has_core_type = false;
+  for (const auto& [key, value] : kwargs) {
+    CHECK(key == "core_type") << name << " accepts only the core_type kwarg, got '" << key << "'";
+    CHECK(!has_core_type) << name << " has duplicate core_type";
+    has_core_type = true;
+    const auto core_type = AnyCast<std::string>(value, key);
+    CHECK(core_type == "aic" || core_type == "aiv")
+        << name << R"( core_type must be "aic" or "aiv", got ")" << core_type
+        << R"(". Omit it to leave the barrier on both lanes)";
+  }
+  return DeduceUnknownType(args, kwargs);
+}
+
 // Register system.bar_mte1 (MTE1 Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_mte1")
@@ -141,7 +165,9 @@ REGISTER_OP("system.bar_mte1")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_mte1");
+    });
 
 // Register system.bar_mte2 (MTE2 Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -150,7 +176,9 @@ REGISTER_OP("system.bar_mte2")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_mte2");
+    });
 
 // Register system.bar_mte3 (MTE3 Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -159,7 +187,9 @@ REGISTER_OP("system.bar_mte3")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_mte3");
+    });
 
 // Register system.bar_m (Matrix Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -168,7 +198,9 @@ REGISTER_OP("system.bar_m")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_m");
+    });
 
 // Register system.bar_v (Vector Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -177,7 +209,9 @@ REGISTER_OP("system.bar_v")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_v");
+    });
 
 // Register system.bar_s (Scalar Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -186,7 +220,9 @@ REGISTER_OP("system.bar_s")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_s");
+    });
 
 // Register system.bar_fix (FIX Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -195,7 +231,9 @@ REGISTER_OP("system.bar_fix")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_fix");
+    });
 
 // Register system.bar_all (Global Barrier)
 // Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
@@ -204,7 +242,9 @@ REGISTER_OP("system.bar_all")
     .set_op_category("SyncOp")
     .set_attr<std::string>("core_type")
     .no_argument()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBarrierType(args, kwargs, "system.bar_all");
+    });
 
 // Register system.fence (Memory Barrier)
 // Attributes: None

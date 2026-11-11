@@ -50,7 +50,6 @@ def scale(
         out[:] = pl.mul(x, 2.0)
     return out
 
-
 out = torch.zeros(256, 128, dtype=torch.float32)
 scale(X, out, config=CFG)
 torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
@@ -122,7 +121,6 @@ def spmd_add(
             out,
         )
     return out
-
 
 out = torch.zeros(256, 128, dtype=torch.float32)
 spmd_add(X, Y, out, config=CFG)
@@ -360,7 +358,7 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 
 | 原语 | 定序对象 | 作用范围 | 占事件槽 | 适用场景 |
 | ---- | -------- | -------- | -------- | -------- |
-| `barrier(pipe=...)` | 排空一条硬件流水：该流水上已发出的全部工作完成后，其后的工作才开始 | 单核、单流水 | 否 | 需要粗粒度的「这条流水已完成」栅栏 —— 跨在途搬运复用缓冲区，或分隔同一流水上的两个阶段 |
+| `barrier(pipe=...)` | 排空一条硬件流水：该流水上已发出的全部工作完成后，其后的工作才开始 | 单核、单流水 | 否 | 需要粗粒度的「这条流水已完成」栅栏，且待定序的依赖*就在这条流水上* |
 | `barrier(pipe=pl.PipeType.ALL)` | 排空当前核的所有流水 | 单核、全流水 | 否 | 两个阶段涉及多条流水，又不想逐条列举 |
 | `set_flag` / `wait_flag` | 两条流水之间一次有向的生产者 → 消费者交接 | 单核、两条流水 | 是（0-7） | 只想为**单个**依赖定序而不阻塞整条流水 —— 运行时开销严格低于 barrier，事件槽开销严格高于 barrier |
 | `sync_set` / `sync_wait` | cube 与 vector **核之间**一个有向事件 | 跨核、单向 | 是 | 两个 lane 需要显式交接，且协议由你自己编写 |
@@ -369,10 +367,21 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 
 有两组区别值得记清楚：
 
-- **barrier 与 flag 配对。** barrier 按流水生效且不占槽；flag 配对按依赖生效，占用八个事件槽之一。
-  依赖很窄而流水很忙时优先用 flag 配对；否则宁可在阶段边界上用 barrier，不要把槽耗光。
+- **barrier 与 flag 配对 —— 不可互相替代。** barrier 排空的是*一条流水*；flag 配对定序的是
+  *两条流水之间一次生产者 → 消费者的依赖*。因此在跨流水交接上,barrier **不能**直接替换
+  flag 配对:排空 MTE3 只说明此前发出的搬出已完成,它本身并不拦住一个向量消费者。
+  单条流水的阶段边界用 barrier,跨流水交接用 flag 配对(或 `ALL`)。在已经含有静态 flag 的
+  函数里尤其要注意 —— 那里 PTOAS 会跳过自动同步,你写的顺序就是唯一的顺序。
 - **`barrier(ALL)` 与 `syncall`。** `ALL` 是*单核、所有流水*；`syncall` 是*所有核、仅到达*。
   两者互不蕴含，且都不保证 GM 写入可见 —— 那是 `fence()` 加 cache 维护的职责。
+
+`PipeType.S` 为完整性而接受，但实际上不建立任何顺序：PTOAS 的两个同步分配器在所有架构上
+都把标量到标量的配对视为已定序，即标量流水自己保证自身操作的顺序。它可以写、也会出现在
+最终代码里，只是不会带来任何额外保证。
+
+barrier 在 **`pl.pipeline` 内被拒绝**,与显式 flag 一致:barrier 没有操作数,流水线调度
+缺少依赖边把它固定住,可能将其排到它本该跟随的那次搬运之前。需要在循环内放置时,请用
+`pl.range`。
 
 ### 混合核中的 barrier
 

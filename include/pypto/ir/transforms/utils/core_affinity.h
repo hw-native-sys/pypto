@@ -50,6 +50,15 @@ CVDirection ClassifyMoveDirection(const CallPtr& call);
 /// placement override below and the AivSplitValid verifier's check (e) leave
 /// such calls alone. A GlobalVar callee (cross-function Call / Submit) is not an
 /// operator and states nothing.
+/// True when `call` is one of the zero-operand pipe barriers (`system.bar_*`).
+///
+/// They share two properties no other op has: each drains ONE hardware pipeline
+/// (so a mixed kernel may pin one to a lane with `core_type`, rule 2b-bis), and
+/// each carries no operand, so nothing in the def-use graph orders it against
+/// the transfer it was written to follow. The second property is why pipeline
+/// scheduling rejects them, exactly as it rejects explicit flags.
+bool IsPipeBarrier(const CallPtr& call);
+
 bool HasStatedLane(const CallPtr& call);
 
 /// Intrinsic lane from the operator, kwargs and operand/result memory spaces.

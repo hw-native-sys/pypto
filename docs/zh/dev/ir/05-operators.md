@@ -598,23 +598,21 @@ UINT32 + INT32 → INT32 (signed precedence)
 **位置**：`src/ir/op/sync_ops/` —— `sync.cpp`（屏障）、`task.cpp`（TaskId）、`launch.cpp`（启动形状查询）
 **Python API**：`from pypto.ir.op import system`
 
-公开 Python 屏障接口为 `pl.system.barrier(*, pipe)`，接受 `pl.PipeType` 的
-全部成员。它构造下表中的零操作数 IR
-算子，不新增 `system.barrier` IR 算子或 `pipe` IR 属性。Python IR printer 根据对应枚举成员，统一打印为
+公开 Python 屏障接口为 `pl.system.barrier(*, pipe, core_type=None)`，接受
+`pl.PipeType` 的全部成员。它构造下表中的无操作数 IR
+算子，不新增 `system.barrier` IR 算子或 `pipe` IR 属性。每个 `system.bar_*`
+算子注册一个可选字符串 kwarg `core_type`（`"aic"` / `"aiv"`），用于在
+ExpandMixedKernel 拆分混合 InCore 函数时把屏障钉到单个 lane；省略则保持
+SHARED，两个 kernel 中都会出现。屏障在 **`pl.pipeline` 内被拒绝** —— 它没有
+操作数，流水线调度缺少 def-use 边把它固定住，可能将其排到它本该跟随的那次
+搬运之前；`set_flag` / `wait_flag` 早已受同样的限制。Python IR printer 根据对应枚举成员，统一打印为
 `pl.system.barrier(pipe=...)` 的写法。原有 `bar_v()`、`bar_m()`、
 `bar_all()` Python 接口已移除。屏障不占用事件槽；`ALL` 为当前核
 所有流水线建立顺序，不等待其他核到达。
 
 | 操作 | 描述 | Kwargs |
 | ---- | ---- | ------ |
-| `system.bar_all` | 当前核所有流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.ALL)`（下降为 `pto.barrier <PIPE_ALL>`） | 无 |
-| `system.bar_v` | 向量流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.V)`（下降为 `pto.barrier <PIPE_V>`） | 无 |
-| `system.bar_m` | 矩阵流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.M)`（下降为 `pto.barrier <PIPE_M>`） | 无 |
-| `system.bar_mte2` | MTE2（GM → UB 搬入）流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.MTE2)`（下降为 `pto.barrier <PIPE_MTE2>`） | 无 |
-| `system.bar_mte3` | MTE3（UB → GM 搬出）流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.MTE3)`（下降为 `pto.barrier <PIPE_MTE3>`） | 无 |
-| `system.bar_mte1` | MTE1（L1 → L0A/L0B）流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.MTE1)`（下降为 `pto.barrier <PIPE_MTE1>`） | 无 |
-| `system.bar_s` | 标量流水线屏障；Python 接口为 `barrier(pipe=pl.PipeType.S)`（下降为 `pto.barrier <PIPE_S>`） | 无 |
-| `system.bar_fix` | Fix 流水（L0C 写回）屏障；Python 接口为 `barrier(pipe=pl.PipeType.FIX)`（下降为 `pto.barrier <PIPE_FIX>`） | 无 |
+| `system.bar_*` | 排空一条硬件流水（`pto.barrier <PIPE_*>`）。每个 `PipeType` 一个算子：`bar_mte1` MTE1（L1 → L0A/L0B）、`bar_mte2` MTE2（GM → UB 搬入）、`bar_mte3` MTE3（UB → GM 搬出）、`bar_m` 矩阵、`bar_v` 向量、`bar_s` 标量、`bar_fix` Fix（L0C 写回）、`bar_all` 当前核全部流水 | `core_type`（`"aic"` \| `"aiv"`，可选）—— 把屏障钉到混合核的单个 lane；省略则保持 SHARED，两边都有 |
 | `system.fence` | 全局内存屏障（下降为 `pto.fence.barrier_all #pto.fence_scope<gm>`） | 无 |
 | `system.cacheinvalid` | 使 tensor 子区域基地址所在的那一条 cache line 失效。参数：`tensor`、`shapes`（N 维）、`offsets`（N 维）。任意区域大小（包括单个元素）都下降为 `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`；`shapes` 不会让它遍历区域内的所有 cache line。无参数形式使全部 GM cache 失效。 | 无 |
 | `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。属性 `mode` 取 `"hard"`（FFTS，无 operand）或 `"soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |

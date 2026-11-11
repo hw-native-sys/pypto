@@ -402,8 +402,12 @@ def barrier(*, pipe: PipeType, core_type: KernelType | None = None, span: Span |
     Args:
         pipe: The pipeline to drain, or ``PipeType.ALL`` for every pipeline on
             the current core. A single-pipe barrier orders that pipeline's
-            preceding and following work without spending an event slot, which
-            is what distinguishes it from a ``set_flag`` / ``wait_flag`` pair.
+            preceding and following work and spends no event slot. It is NOT a
+            drop-in replacement for a ``set_flag`` / ``wait_flag`` pair: a
+            barrier drains one pipe, where a flag pair orders one producer ->
+            consumer dependency BETWEEN two pipes. Use a flag pair (or ``ALL``)
+            for a cross-pipeline handoff, which matters most in a function
+            carrying static flags, where PTOAS skips automatic synchronization.
         core_type: Which kernel the barrier lands in when a mixed InCore
             function is expanded into an AIC and an AIV kernel. The two lanes
             own different pipelines -- FIX and MTE1 are cube-side, V is
@@ -414,6 +418,14 @@ def barrier(*, pipe: PipeType, core_type: KernelType | None = None, span: Span |
 
     Returns:
         Barrier call expression with no result value.
+
+    ``PipeType.S`` is accepted for completeness but orders nothing in practice:
+    both of PTOAS's synchronization allocators treat a scalar-to-scalar pair as
+    already ordered on every architecture.
+
+    A barrier is rejected inside ``pl.pipeline``, as explicit flags are: it has
+    no operand, so pipeline scheduling has no dependency edge to hold it in
+    place and could order it before the transfer it was written to follow.
 
     Raises:
         TypeError: If pipe is not a PipeType member, or core_type is not a

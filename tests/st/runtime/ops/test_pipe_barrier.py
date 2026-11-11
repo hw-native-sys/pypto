@@ -7,17 +7,20 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""On-device load/compute/store ordered by pipeline barriers instead of flags.
+"""On-device coverage for authored pipeline barriers.
 
-A barrier drains one pipeline, so the same load -> vector -> store handoffs that
-``test_set_wait_flag.py`` authors as ``set_flag`` / ``wait_flag`` pairs can be
-authored as single barriers, without spending an intra-core event slot. The MTE
-pipes carry the two halves of that chain: ``MTE2`` drains the GM -> UB load and
-``MTE3`` the UB -> GM store.
+A barrier drains one hardware pipeline: ``MTE2`` the GM -> UB loads, ``MTE3`` the
+UB -> GM stores, ``FIX`` the L0C writeback. These kernels place one at each phase
+boundary of a load -> vector -> store chain and check that the result is still
+correct and that each barrier reached the backend with the right pipe, in the
+authored order, on the intended lane.
 
-Each test checks the numerical result, which exercises the handoffs, and then the
-saved PTO, which checks that the authored barriers reached the backend with the
-right pipe and in the authored order.
+**Scope.** These compile with PTOAS automatic synchronization enabled (the
+default), so they do NOT establish that the barriers alone order the handoffs --
+PTOAS inserts the flag pairs that do. A barrier is not a substitute for a
+``set_flag`` / ``wait_flag`` pair on a cross-pipeline handoff; see
+``test_set_wait_flag.py`` for the flag-authored form, which disables automatic
+synchronization. What is guarded here is placement and lane assignment.
 """
 
 import re
@@ -36,7 +39,7 @@ def mte_barrier_double(
     x: pl.Tensor[[ROWS, COLS], pl.FP32],
     out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
 ):
-    """Order each handoff with the barrier for the pipe that produced the data."""
+    """One barrier per phase boundary, on the pipe that produced the data."""
     for _ in pl.spmd(1):
         loaded: pl.Tile[[ROWS, COLS], pl.FP32, pl.Mem.Vec] = pl.load(x, [0, 0], [ROWS, COLS])
         pl.system.barrier(pipe=pl.PipeType.MTE2)
@@ -70,7 +73,7 @@ def _saved_pto(tmp_path) -> str:
 
 @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
 def test_mte_barriers_order_load_compute_store_on_device(test_config, tmp_path):
-    """Per-pipe barriers preserve data across the load and store handoffs."""
+    """Each authored barrier reaches the backend with the right pipe, in order."""
     config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
     x = torch.randn(ROWS, COLS, dtype=torch.float32)
     out = torch.zeros_like(x)

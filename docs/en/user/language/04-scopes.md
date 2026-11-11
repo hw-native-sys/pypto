@@ -58,7 +58,6 @@ def scale(
         out[:] = pl.mul(x, 2.0)
     return out
 
-
 out = torch.zeros(256, 128, dtype=torch.float32)
 scale(X, out, config=CFG)
 torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
@@ -130,7 +129,6 @@ def spmd_add(
             out,
         )
     return out
-
 
 out = torch.zeros(256, 128, dtype=torch.float32)
 spmd_add(X, Y, out, config=CFG)
@@ -410,7 +408,7 @@ different thing, and only two of them cost an event slot.
 
 | Primitive | What it orders | Scope | Event slot | Use it when |
 | --------- | -------------- | ----- | ---------- | ----------- |
-| `barrier(pipe=...)` | Drains one hardware pipeline: everything already issued on that pipe completes before anything after it | One core, one pipe | No | You need a coarse "this pipe is done" fence — reusing a buffer across an in-flight transfer, or separating two phases on the same pipe |
+| `barrier(pipe=...)` | Drains one hardware pipeline: everything already issued on that pipe completes before anything after it | One core, one pipe | No | You need a coarse "this pipe is done" fence, and the dependency you are ordering is *on that pipe* |
 | `barrier(pipe=pl.PipeType.ALL)` | Drains every pipeline on the current core | One core, all pipes | No | The phases touch several pipes and you do not want to enumerate them |
 | `set_flag` / `wait_flag` | One directed producer → consumer handoff between two pipes | One core, two pipes | Yes (0-7) | You want to order *one* dependency without stalling the whole pipe — strictly cheaper at runtime than a barrier, strictly more expensive in slots |
 | `sync_set` / `sync_wait` | A directed event between the cube and vector **cores** | Cross-core, one direction | Yes | Two lanes must hand off explicitly and you are writing the protocol yourself |
@@ -419,13 +417,27 @@ different thing, and only two of them cost an event slot.
 
 Two distinctions are worth keeping straight:
 
-- **Barrier vs. flag pair.** A barrier is pipe-scoped and free; a flag pair is
-  dependency-scoped and costs one of the eight event slots. Prefer a flag pair when the
-  dependency is narrow and the pipe is busy, a barrier when you would otherwise burn
-  slots on a phase boundary.
+- **Barrier vs. flag pair — not interchangeable.** A barrier drains *one pipe*; a flag
+  pair orders *one producer → consumer dependency between two pipes*. A barrier is
+  therefore **not** a drop-in replacement for a flag pair on a cross-pipeline handoff:
+  draining MTE3 says the stores issued so far have completed, it does not by itself gate
+  a vector consumer. Reach for a barrier at a phase boundary on a single pipe, a flag
+  pair (or `ALL`) for a cross-pipeline handoff. This matters most in a function that
+  already contains static flags, where PTOAS skips automatic synchronization and your
+  explicit ordering is the only ordering.
 - **`barrier(ALL)` vs. `syncall`.** `ALL` is *one core, every pipe*. `syncall` is *every
   core, arrival only*. Neither implies the other, and neither makes GM writes visible —
   that is `fence()` plus cache maintenance.
+
+`PipeType.S` is accepted for completeness but orders nothing in practice: both of
+PTOAS's synchronization allocators treat a scalar-to-scalar pair as already ordered
+on every architecture, so the scalar pipe sequences its own operations. It is
+expressible and reaches the emitted code; it just buys you nothing.
+
+Barriers are **rejected inside `pl.pipeline`**, exactly as explicit flags are: a barrier
+has no operand, so pipeline scheduling has no dependency edge to hold it in place and
+could order it before the transfer it was written to follow. Use `pl.range` when you need
+to place one inside a loop.
 
 ### Barriers inside a mixed kernel
 

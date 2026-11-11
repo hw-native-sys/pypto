@@ -274,6 +274,28 @@ class Before:
         assert f"pl.system.barrier(pipe=pl.PipeType.{pipe}, core_type=pl.KernelType.{kernel})" in printed
         ir.assert_structural_equal(before, pl.parse_program(printed))
 
+    def test_barrier_raw_ir_rejects_malformed_calls(self):
+        """The op contract is enforced at construction, not left to a later pass.
+
+        `.no_argument()` documents the arity but does not enforce it on a functional
+        `create_op_call`, and `set_attr` validates only the value's type. Without the
+        barrier deducer a bogus `core_type` falls through ClassifyCallAffinity's lane
+        arms to SHARED -- silently duplicating the barrier onto both kernels -- and an
+        operand surfaces much later as an internal error with no user-facing span.
+        """
+        span = ir.Span("barrier.py", 1, 1)
+        operand = _ir_core.Var("e", _ir_core.ScalarType(DataType.INT32), span)
+
+        with pytest.raises(ValueError, match="takes no operands"):
+            _ir_core.create_op_call("system.bar_v", [operand], {}, span)
+        with pytest.raises(ValueError, match=r'core_type must be "aic" or "aiv"'):
+            _ir_core.create_op_call("system.bar_v", [], {"core_type": "bogus"}, span)
+
+        # The valid spellings still build and keep the kwarg.
+        for lane in ("aic", "aiv"):
+            call = _ir_core.create_op_call("system.bar_fix", [], {"core_type": lane}, span)
+            assert call.kwargs["core_type"] == lane
+
     @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
     def test_barrier_accepts_every_pipe_type(self, barrier_api):
         """Every PipeType member maps to a registered operator.

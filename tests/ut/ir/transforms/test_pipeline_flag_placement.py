@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Reject explicit flags before software-pipeline scheduling can reorder them."""
+"""Reject explicit flags and barriers before pipeline scheduling can reorder them."""
 
 import pypto
 import pypto.language as pl
@@ -66,6 +66,56 @@ class FlaggedPipeline:
     with passes.PassContext([], passes.VerificationLevel.NONE):
         with pytest.raises(ValueError, match="cannot be used inside pl.pipeline"):
             passes.canonicalize_io_order()(program)
+
+
+@pytest.mark.parametrize("pipe", ["MTE3", "V", "FIX", "ALL"])
+def test_barriers_inside_pipeline_rejected_before_scheduling(pipe):
+    """A barrier has no operand, so nothing holds it in its authored position.
+
+    Measured before this guard: authoring `store(...); barrier(pipe=MTE3)` in a
+    pipeline loop emitted both barriers BEFORE both stores, because CategorizeStmt
+    files the operand-free barrier as compute while the store takes the store tier,
+    and the def-use graph supplies no edge between them. The barrier then drained
+    ahead of the transfer it was written to follow. Same defect as the flags above,
+    so it gets the same treatment until pipeline scheduling can preserve the order.
+    """
+    program = pl.parse_program(f"""
+@pl.program
+class BarrieredPipeline:
+    @pl.function(strict_ssa=True)
+    def main(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+        for i in pl.pipeline(0, 4, stage=1):
+            tile = pl.tile.load(x, [0, 0], [16, 16])
+            pl.tile.store(tile, [0, 0], out)
+            pl.system.barrier(pipe=pl.PipeType.{pipe})
+""")
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.PipelineLoopValid)
+    diagnostics = passes.PropertyVerifierRegistry.verify(properties, program)
+    assert len(diagnostics) == 1
+    assert diagnostics[0].rule_name == "PipelineLoopValid"
+
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(ValueError, match="cannot be used inside pl.pipeline"):
+            passes.canonicalize_io_order()(program)
+
+
+@pytest.mark.parametrize("pipe", ["MTE3", "FIX"])
+def test_barriers_in_ordinary_loop_are_allowed(pipe):
+    """pl.range keeps source order, so a barrier is fine there -- that is the workaround."""
+    program = pl.parse_program(f"""
+@pl.program
+class OrdinaryLoop:
+    @pl.function(strict_ssa=True)
+    def main(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+        for i in pl.range(4):
+            tile = pl.tile.load(x, [0, 0], [16, 16])
+            pl.tile.store(tile, [0, 0], out)
+            pl.system.barrier(pipe=pl.PipeType.{pipe})
+""")
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.PipelineLoopValid)
+    assert passes.PropertyVerifierRegistry.verify(properties, program) == []
 
 
 def test_flags_in_ordinary_loop_are_allowed():
