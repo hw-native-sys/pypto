@@ -403,6 +403,50 @@ spelling for all three forms, with the same internal IR and native barriers.
 `ALL` does not synchronize different cores; cross-core arrival uses
 `pl.system.syncall(...)` as described below.
 
+### Choosing a synchronization primitive
+
+`pl.system` exposes five mechanisms. They are not interchangeable — each orders a
+different thing, and only two of them cost an event slot.
+
+| Primitive | What it orders | Scope | Event slot | Use it when |
+| --------- | -------------- | ----- | ---------- | ----------- |
+| `barrier(pipe=...)` | Drains one hardware pipeline: everything already issued on that pipe completes before anything after it | One core, one pipe | No | You need a coarse "this pipe is done" fence — reusing a buffer across an in-flight transfer, or separating two phases on the same pipe |
+| `barrier(pipe=pl.PipeType.ALL)` | Drains every pipeline on the current core | One core, all pipes | No | The phases touch several pipes and you do not want to enumerate them |
+| `set_flag` / `wait_flag` | One directed producer → consumer handoff between two pipes | One core, two pipes | Yes (0-7) | You want to order *one* dependency without stalling the whole pipe — strictly cheaper at runtime than a barrier, strictly more expensive in slots |
+| `sync_set` / `sync_wait` | A directed event between the cube and vector **cores** | Cross-core, one direction | Yes | Two lanes must hand off explicitly and you are writing the protocol yourself |
+| `syncall(...)` | Arrival of every participating core | Cross-core, all participants | No | All cores must reach the same point; note it orders *arrival only*, not data visibility |
+| `fence()` | Makes global-memory writes visible | One core, GM | No | A GM buffer is written by one lane and read by another; pair it with cache maintenance |
+
+Two distinctions are worth keeping straight:
+
+- **Barrier vs. flag pair.** A barrier is pipe-scoped and free; a flag pair is
+  dependency-scoped and costs one of the eight event slots. Prefer a flag pair when the
+  dependency is narrow and the pipe is busy, a barrier when you would otherwise burn
+  slots on a phase boundary.
+- **`barrier(ALL)` vs. `syncall`.** `ALL` is *one core, every pipe*. `syncall` is *every
+  core, arrival only*. Neither implies the other, and neither makes GM writes visible —
+  that is `fence()` plus cache maintenance.
+
+### Barriers inside a mixed kernel
+
+A mixed InCore function is expanded into two kernels, an AIC and an AIV one, and the two
+lanes own different pipelines: FIX and MTE1 are cube-side, V is vector-side. A barrier
+carries no operand, so nothing in it says which lane it belongs to — by default it is
+duplicated into **both** kernels, and the lane that does not own the pipe executes a
+barrier for a pipe it never uses.
+
+Pin it with `core_type`, the same keyword `set_flag` / `wait_flag` take:
+
+```python
+pl.system.barrier(pipe=pl.PipeType.FIX, core_type=pl.KernelType.AIC)   # cube lane only
+pl.system.barrier(pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)     # vector lane only
+```
+
+Omit `core_type` in a function already typed `AIC` or `AIV`: there is only one kernel to
+land in, so there is nothing to disambiguate. `KernelType.MIX` is rejected — it names a
+participant set, which is meaningful for `syncall` but not for a single-core pipe drain;
+omitting the keyword is how a barrier reaches both lanes.
+
 AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
 is what the transfer is — but nothing orders a cube-lane write against a vector-lane read
 of the same **GM buffer**. Publish the producer's cache lines and issue a GM fence, place a

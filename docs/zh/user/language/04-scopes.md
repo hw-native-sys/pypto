@@ -354,6 +354,44 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 及原生屏障保持相同。`ALL` 不表示跨核同步；跨核到达同步使用下文的
 `pl.system.syncall(...)`。
 
+### 如何选择同步原语
+
+`pl.system` 提供五类机制。它们不可互换 —— 各自定序的对象不同，其中只有两类会占用事件槽。
+
+| 原语 | 定序对象 | 作用范围 | 占事件槽 | 适用场景 |
+| ---- | -------- | -------- | -------- | -------- |
+| `barrier(pipe=...)` | 排空一条硬件流水：该流水上已发出的全部工作完成后，其后的工作才开始 | 单核、单流水 | 否 | 需要粗粒度的「这条流水已完成」栅栏 —— 跨在途搬运复用缓冲区，或分隔同一流水上的两个阶段 |
+| `barrier(pipe=pl.PipeType.ALL)` | 排空当前核的所有流水 | 单核、全流水 | 否 | 两个阶段涉及多条流水，又不想逐条列举 |
+| `set_flag` / `wait_flag` | 两条流水之间一次有向的生产者 → 消费者交接 | 单核、两条流水 | 是（0-7） | 只想为**单个**依赖定序而不阻塞整条流水 —— 运行时开销严格低于 barrier，事件槽开销严格高于 barrier |
+| `sync_set` / `sync_wait` | cube 与 vector **核之间**一个有向事件 | 跨核、单向 | 是 | 两个 lane 需要显式交接，且协议由你自己编写 |
+| `syncall(...)` | 所有参与核的到达 | 跨核、全体参与者 | 否 | 所有核必须到达同一个点；注意它只定序**到达**，不保证数据可见 |
+| `fence()` | 使全局内存写入可见 | 单核、GM | 否 | 一个 lane 写 GM、另一个 lane 读；需与 cache 维护配合使用 |
+
+有两组区别值得记清楚：
+
+- **barrier 与 flag 配对。** barrier 按流水生效且不占槽；flag 配对按依赖生效，占用八个事件槽之一。
+  依赖很窄而流水很忙时优先用 flag 配对；否则宁可在阶段边界上用 barrier，不要把槽耗光。
+- **`barrier(ALL)` 与 `syncall`。** `ALL` 是*单核、所有流水*；`syncall` 是*所有核、仅到达*。
+  两者互不蕴含，且都不保证 GM 写入可见 —— 那是 `fence()` 加 cache 维护的职责。
+
+### 混合核中的 barrier
+
+混合 InCore 函数会被展开成 AIC 和 AIV 两个 kernel，而两个 lane 拥有不同的流水：FIX、MTE1
+属于 cube 侧，V 属于 vector 侧。barrier 不带任何操作数，其本身无法表明归属哪个 lane ——
+默认它会被**同时复制到两个 kernel**，于是不拥有该流水的那个 lane 也会执行一条它从不使用的
+流水的 barrier。
+
+用 `core_type` 把它钉住，关键字与 `set_flag` / `wait_flag` 一致：
+
+```python
+pl.system.barrier(pipe=pl.PipeType.FIX, core_type=pl.KernelType.AIC)   # 仅 cube lane
+pl.system.barrier(pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)     # 仅 vector lane
+```
+
+在已显式声明为 `AIC` 或 `AIV` 的函数中请省略 `core_type`：那里只有一个 kernel 可落，无需区分。
+`KernelType.MIX` 会被拒绝 —— 它表示参与者集合，对 `syncall` 有意义，对单核的流水排空没有意义；
+要让 barrier 覆盖两个 lane，省略该关键字即可。
+
 AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定序 —— 这正是这次传输的含义 ——
 但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序。先发布 producer
 的 cache line 并执行 GM fence，再在阶段之间放置跨核 barrier，最后在 consumer 读之前使其 cache

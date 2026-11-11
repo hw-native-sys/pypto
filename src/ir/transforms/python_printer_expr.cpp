@@ -617,8 +617,13 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Keep the existing barrier IR while presenting its parameterized public
   // API. The native ops have no operands or kwargs; retain the legacy call
   // spelling for noncanonical calls rather than silently dropping metadata.
+  // `core_type` is part of the public barrier spelling, so it does NOT make the
+  // call noncanonical; any other kwarg does, and falls through to generic Call
+  // printing rather than being silently dropped.
+  const bool barrier_kwargs_canonical =
+      op->kwargs_.empty() || (op->kwargs_.size() == 1 && op->HasKwarg("core_type"));
   const char* barrier_pipe = nullptr;
-  if (op->args_.empty() && op->kwargs_.empty()) {
+  if (op->args_.empty() && barrier_kwargs_canonical) {
     // Each arm names the PipeType member `pl.system.barrier` takes to build this op.
     if (IsOp(op, "system.bar_mte1")) {
       barrier_pipe = "MTE1";
@@ -724,6 +729,12 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
   if (barrier_pipe) {
     stream_ << "pipe=" << prefix_ << ".PipeType." << barrier_pipe;
+    if (op->HasKwarg("core_type")) {
+      const auto core = op->GetKwarg<std::string>("core_type");
+      const char* member = CoreTypeToKernelMember(core, /*is_syncall=*/false);
+      INTERNAL_CHECK_SPAN(member, op->span_) << "Internal error: barrier has invalid core_type " << core;
+      stream_ << ", core_type=" << prefix_ << ".KernelType." << member;
+    }
     print_serialized_attrs(/*need_comma=*/true);
     stream_ << ")";
     return;

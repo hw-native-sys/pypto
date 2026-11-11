@@ -175,15 +175,20 @@ def _create_sync_op(
     return _ir_core.create_op_call(op_name, [], kwargs, actual_span)
 
 
-def _create_barrier_op(op_name: str, *, span: Span | None) -> Call:
+def _create_barrier_op(op_name: str, *, core_type_attr: str | None = None, span: Span | None) -> Call:
     """Create a barrier synchronization operation.
 
     Args:
         op_name: Operation name (e.g., "system.bar_v")
+        core_type_attr: Already-validated IR spelling of the kernel to pin the
+            barrier to (``"aic"`` / ``"aiv"``); ``None`` leaves it in both.
+            Validated by the caller, which knows the public API name to blame
+            -- these ops are reached as ``system.barrier``, not by op name.
         span: Optional source span for debugging
     """
     actual_span = _get_span_or_capture(span, frame_offset=2)
-    return _ir_core.create_op_call(op_name, [], {}, actual_span)
+    kwargs: dict[str, Any] = {} if core_type_attr is None else {"core_type": core_type_attr}
+    return _ir_core.create_op_call(op_name, [], kwargs, actual_span)
 
 
 def sync_src(
@@ -384,7 +389,7 @@ def sync_wait(
     )
 
 
-def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
+def barrier(*, pipe: PipeType, core_type: KernelType | None = None, span: Span | None = None) -> Call:
     """Order work on one pipeline, or across all of them, on one core.
 
     Every ``PipeType`` member is accepted. A barrier is pipe-scoped rather than
@@ -399,13 +404,22 @@ def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
             the current core. A single-pipe barrier orders that pipeline's
             preceding and following work without spending an event slot, which
             is what distinguishes it from a ``set_flag`` / ``wait_flag`` pair.
+        core_type: Which kernel the barrier lands in when a mixed InCore
+            function is expanded into an AIC and an AIV kernel. The two lanes
+            own different pipelines -- FIX and MTE1 are cube-side, V is
+            vector-side -- so a mixed kernel should pin a single-pipe barrier to
+            the lane that owns the pipe. Omit it to leave the barrier in both,
+            which is what an explicitly typed AIC/AIV function wants.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
         Barrier call expression with no result value.
 
     Raises:
-        TypeError: If pipe is not a PipeType member.
+        TypeError: If pipe is not a PipeType member, or core_type is not a
+            KernelType member.
+        ValueError: If core_type is KernelType.MIX, which names a participant
+            set rather than one kernel; omit it to reach both lanes.
     """
     # Preserve the established IR and native PTO barrier lowering. Barriers
     # have no event ID and must not allocate or consume pipeline event slots.
@@ -422,7 +436,18 @@ def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
         PipeType.ALL: "system.bar_all",
     }
     _check_enum(pipe, PipeType, "pipe", "system.barrier", allowed=tuple(op_names))
-    return _create_barrier_op(op_names[pipe], span=span)
+    core_type_attr = None
+    if core_type is not None:
+        _check_enum(
+            core_type,
+            KernelType,
+            "core_type",
+            "system.barrier",
+            allowed=_SYNC_EVENT_KERNELS,
+            hint=_SYNC_EVENT_MIX_HINT,
+        )
+        core_type_attr = _SYNC_EVENT_CORE_TYPE[core_type]
+    return _create_barrier_op(op_names[pipe], core_type_attr=core_type_attr, span=span)
 
 
 def fence(*, span: Span | None = None) -> Call:

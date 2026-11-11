@@ -17,6 +17,7 @@ from pypto import ir
 from pypto.ir.op import system_ops
 from pypto.ir.utils import use_parser_span
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir_core
 
 
 class TestSystemOpsParsing:
@@ -234,6 +235,44 @@ class TestSystemOpsParsing:
     def test_barrier_rejects_non_enum_pipe(self, barrier_api, pipe):
         with pytest.raises(TypeError, match="pipe must be a PipeType member"):
             barrier_api(pipe=pipe)
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    @pytest.mark.parametrize("core_type, attr", [(pl.KernelType.AIC, "aic"), (pl.KernelType.AIV, "aiv")])
+    def test_barrier_core_type_pins_one_kernel(self, barrier_api, core_type, attr):
+        """core_type reaches the IR as the kwarg ExpandMixedKernel dispatches on."""
+        call = barrier_api(pipe=pl.PipeType.FIX, core_type=core_type)
+        assert call.op.name == _ir_core.get_op("system.bar_fix").name
+        assert call.kwargs["core_type"] == attr
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_omitted_core_type_leaves_no_kwarg(self, barrier_api):
+        """The default stays a bare call, so existing barrier IR is unchanged."""
+        assert "core_type" not in barrier_api(pipe=pl.PipeType.FIX).kwargs
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_rejects_mix_core_type(self, barrier_api):
+        """MIX names a participant set; a single-core pipe drain has no such notion."""
+        with pytest.raises(ValueError, match="system.barrier core_type must be one of"):
+            barrier_api(pipe=pl.PipeType.FIX, core_type=pl.KernelType.MIX)
+
+    @pytest.mark.parametrize("pipe", ["MTE1", "V", "FIX", "ALL"])
+    @pytest.mark.parametrize("kernel", ["AIC", "AIV"])
+    def test_barrier_core_type_round_trip(self, pipe, kernel):
+        """The canonical spelling keeps core_type through print -> parse."""
+        source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        pl.system.barrier(pipe=pl.PipeType.{pipe}, core_type=pl.KernelType.{kernel})
+        return x
+"""
+        before = pl.parse_program(source)
+        printed = before.as_python()
+        assert f"pl.system.barrier(pipe=pl.PipeType.{pipe}, core_type=pl.KernelType.{kernel})" in printed
+        ir.assert_structural_equal(before, pl.parse_program(printed))
 
     @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
     def test_barrier_accepts_every_pipe_type(self, barrier_api):

@@ -83,6 +83,18 @@ bool IsNoDuplicateCall(const CallPtr& call) {
   return registry.GetEntry(opnode->name_).IsNoDuplicate();
 }
 
+/// True when `call` is one of the zero-operand pipe barriers (`system.bar_*`).
+///
+/// They share a lane rule: each drains ONE hardware pipeline, and the two lanes
+/// of a mixed kernel own different pipelines, so an author may pin one with
+/// `core_type`. Listed by name because they carry no operand or memory spec to
+/// infer a lane from.
+bool IsPipeBarrier(const CallPtr& call) {
+  return IsOp(call, "system.bar_mte1") || IsOp(call, "system.bar_mte2") || IsOp(call, "system.bar_mte3") ||
+         IsOp(call, "system.bar_m") || IsOp(call, "system.bar_v") || IsOp(call, "system.bar_s") ||
+         IsOp(call, "system.bar_fix") || IsOp(call, "system.bar_all");
+}
+
 bool HasStatedLane(const CallPtr& call) {
   if (!call || !call->op_) return false;
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
@@ -93,6 +105,11 @@ bool HasStatedLane(const CallPtr& call) {
   // The core_type-dispatched control ops (rules 2a / 2b below). Their lane is
   // author-written, so it is as explicit as a registry declaration even though
   // it is decided per call rather than per op.
+  // A pipe barrier states its lane only when the author actually wrote
+  // `core_type`. Without it the barrier is SHARED, and that IS the unstated
+  // default -- reporting it as stated would exempt every existing barrier from
+  // the split_aiv placement override and the AivSplitValid verifier.
+  if (IsPipeBarrier(call)) return call->HasKwarg("core_type");
   return IsOp(call, "system.syncall") || IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait") ||
          IsOp(call, "system.set_flag") || IsOp(call, "system.wait_flag");
 }
@@ -149,6 +166,24 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   // target so ExpandMixedKernel retains the set/wait on only that lane.
   if (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") || IsOp(op, "system.set_flag") ||
       IsOp(op, "system.wait_flag")) {
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key != "core_type") continue;
+      const auto core_type = AnyCast<std::string>(value, "core_type");
+      if (core_type == "aic") return CoreAffinity::CUBE;
+      if (core_type == "aiv") return CoreAffinity::VECTOR;
+    }
+    return CoreAffinity::SHARED;
+  }
+
+  // 2b-bis. Pipe barriers (system.bar_*) drain ONE hardware pipeline, and the
+  // two lanes of a mixed kernel own different pipelines -- FIX and MTE1 are
+  // cube-side, V is vector-side. Without a stated lane a barrier falls through
+  // to SHARED below (no operands, no memory spec), so ExpandMixedKernel
+  // duplicates it onto both kernels and the lane that does not own the pipe
+  // executes a barrier for it. `core_type` lets the author pin it, exactly as
+  // rule 2b does for the event ops. Omitting it stays SHARED, which is what an
+  // already typed AIC/AIV function wants: there is only one kernel to land in.
+  if (IsPipeBarrier(call)) {
     for (const auto& [key, value] : call->kwargs_) {
       if (key != "core_type") continue;
       const auto core_type = AnyCast<std::string>(value, "core_type");

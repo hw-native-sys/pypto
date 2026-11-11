@@ -135,66 +135,74 @@ REGISTER_OP("system.wait_flag")
     });
 
 // Register system.bar_mte1 (MTE1 Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_mte1")
     .set_description("MTE1 (L1 -> L0A/L0B) pipeline barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_mte2 (MTE2 Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_mte2")
     .set_description("MTE2 (GM -> UB load) pipeline barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_mte3 (MTE3 Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_mte3")
     .set_description("MTE3 (UB -> GM store) pipeline barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_m (Matrix Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_m")
     .set_description("Matrix unit barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_v (Vector Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_v")
     .set_description("Vector unit barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_s (Scalar Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_s")
     .set_description("Scalar unit pipeline barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_fix (FIX Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_fix")
     .set_description("Fix pipe (L0C writeback) barrier")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.bar_all (Global Barrier)
-// Attributes: None
+// Attributes: core_type (optional; pins the barrier to one lane of a mixed kernel)
 REGISTER_OP("system.bar_all")
     .set_description("Global barrier synchronization")
     .set_op_category("SyncOp")
+    .set_attr<std::string>("core_type")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
