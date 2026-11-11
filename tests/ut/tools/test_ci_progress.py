@@ -272,7 +272,8 @@ def test_poll_budget_wakes_at_reset_when_no_write_fits(progress, monkeypatch, re
     assert progress.poll_budget(REPO, attempt) == (3601, 0)
 
 
-def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event, harness):
+@pytest.mark.parametrize("manual", [False, True])
+def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event, harness, manual):
     real_api = progress.control.api
     failed = False
     waits = []
@@ -287,9 +288,32 @@ def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event
 
     monkeypatch.setattr(progress.control, "api", api)
     monkeypatch.setattr(progress.time, "sleep", waits.append)
+    if manual:
+        # The first REST read resolves the run ID, before any monitoring poll.
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        event = {"inputs": {"run_id": "50"}}
     progress.monitor(REPO, event)
     assert waits == [60]
     assert harness[3]
+
+
+def test_manual_resolution_stops_after_bounded_retries(progress, monkeypatch):
+    reads = []
+    waits = []
+
+    def unavailable(path):
+        reads.append(path)
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(progress.control, "api", unavailable)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    with pytest.raises(subprocess.CalledProcessError):
+        progress.monitor(REPO, {"inputs": {"run_id": "50"}})
+    assert len(reads) == 5
+    assert waits == [60, 120, 240, 300]
 
 
 def test_completion_reconciles_jobs_across_write_budget(progress, monkeypatch, event, harness):

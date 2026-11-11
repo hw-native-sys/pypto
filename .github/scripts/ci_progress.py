@@ -94,13 +94,8 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
 
 
 def monitor(repo: str, event: dict[str, Any]) -> None:
-    resolved = "workflow_run" not in event
-    if resolved:
-        routed = control.resolved_event(repo, event)
-        if routed is None:
-            return
-        event = routed
-    source = control.verified_event_run(repo, event, require_title=False)
+    resolved = False
+    source = control.verified_event_run(repo, event, require_title=False) if "workflow_run" in event else None
     deadline = time.monotonic() + MONITOR_SECONDS
     checks = None
     workflow = None
@@ -108,6 +103,15 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
     while time.monotonic() < deadline:
         delay = INTERVAL_SECONDS
         try:
+            # Manual dispatch has no webhook identity. Resolve it within the
+            # same bounded retry window as later REST reads, before using it.
+            if source is None:
+                routed = control.resolved_event(repo, event)
+                if routed is None:
+                    return
+                event = routed
+                source = event["workflow_run"]
+                resolved = True
             delay, max_writes = poll_budget(repo, source["run_attempt"])
             if max_writes == 0:
                 time.sleep(min(delay, max(0, deadline - time.monotonic())))
@@ -126,18 +130,20 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
             control.verified_event_run(repo, {**event, "workflow_run": run})
             # A delayed event may belong to an old attempt. Never project it onto a
             # later attempt or allow an unrelated run to select the PR check target.
-            for key in (
-                "id",
-                "workflow_id",
-                "run_number",
-                "run_attempt",
-                "display_title",
-                "path",
-                "event",
-                "head_branch",
+            if any(
+                run.get(key) != source.get(key)
+                for key in (
+                    "id",
+                    "workflow_id",
+                    "run_number",
+                    "run_attempt",
+                    "display_title",
+                    "path",
+                    "event",
+                    "head_branch",
+                )
             ):
-                if run.get(key) != source.get(key):
-                    return
+                return
             if workflow is None:
                 workflow = control.api(f"repos/{repo}/actions/workflows/ci.yml")
             if run["workflow_id"] != workflow["id"]:

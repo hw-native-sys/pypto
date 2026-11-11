@@ -2805,6 +2805,8 @@ jobs:
           -f run_id="$GITHUB_RUN_ID" -f wait_for_completion=true
       - name: Reconcile full job checks
         if: always()
+        # Progress is informational; its dispatch cannot invalidate passing tests.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-

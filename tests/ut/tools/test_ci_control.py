@@ -684,8 +684,10 @@ def test_only_main_unfinished_runs_block_duplicate_dispatch(control, monkeypatch
     monkeypatch.setattr(control, "api", request)
     control.dispatch(REPO, event)
     assert len(queries) == 1
-    assert len(writes) == (0 if branch == "main" and status != "completed" else 3)
+    assert len(writes) == (0 if branch == "main" and status != "completed" else 4)
     if writes:
+        # An accepted full request also starts its informational progress monitor.
+        assert writes[-1] == {"ref": "main", "inputs": {"run_id": "51"}}
         assert writes[0]["state"] == "pending"
         assert writes[1]["ref"] == "main"
 
@@ -1975,6 +1977,7 @@ def test_full_finalizer_explicitly_notifies_publishers_even_after_failure():
         assert "--ref main" in step["run"]
         assert 'run_id="$GITHUB_RUN_ID"' in step["run"]
     assert "wait_for_completion=true" in notifications[0]["run"]
+    assert notifications[1]["continue-on-error"] is True
     status = yaml.safe_load((ROOT / ".github/workflows/ci-full-status.yml").read_text())
     route_steps = status["jobs"]["route"]["steps"]
     assert route_steps[-2]["run"].endswith("ci_control.py route")
@@ -1985,6 +1988,42 @@ def test_full_finalizer_explicitly_notifies_publishers_even_after_failure():
     reconcile = progress["jobs"]["progress"]["steps"][-1]
     assert reconcile["if"] == "always()"
     assert "gh workflow run ci-full-status.yml" in reconcile["run"]
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_status_completion_poll_retries_api_errors_without_unbounded_wait(tmp_path, monkeypatch, recovers):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-full-status.yml").read_text())
+    script = workflow["jobs"]["route"]["steps"][-1]["run"]
+    counter = tmp_path / "polls"
+    counter.write_text("0")
+    monkeypatch.setenv("CI_TEST_POLL_COUNT", str(counter))
+    monkeypatch.setenv("CI_TEST_RECOVERS", str(int(recovers)))
+    # Execute the real workflow shell with Actions' errexit behavior. The
+    # command substitution runs in a subshell, so keep its counter in a file.
+    fake_api = """
+gh() {
+  count=$(cat "$CI_TEST_POLL_COUNT")
+  count=$((count + 1))
+  echo "$count" > "$CI_TEST_POLL_COUNT"
+  if [ "$CI_TEST_RECOVERS" = 1 ] && [ "$count" -ge 3 ]; then
+    echo completed
+  elif [ "$CI_TEST_RECOVERS" = 1 ] && [ "$count" = 2 ]; then
+    echo in_progress
+  else
+    return 1
+  fi
+}
+sleep() { :; }
+"""
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake_api + script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == (0 if recovers else 1), result.stderr
+    assert int(counter.read_text()) == (3 if recovers else 60)
 
 
 if __name__ == "__main__":

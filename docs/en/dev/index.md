@@ -109,7 +109,8 @@ The PR keeps its original lint checks and displays each downstream job as
 reads GitHub metadata on a GitHub-hosted runner and refreshes these checks roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
 monitor runs while waiting for a comment. Polling slows down with concurrent
 monitors and the shared API budget, reserving 200 requests for gate writers and
-other automation; transient API errors use bounded backoff. Each live monitor is bounded to five
+other automation; transient API errors, including initial run-ID resolution,
+use bounded backoff. Each live monitor is bounded to five
 hours; the finalizer explicitly dispatches reconciliation even after a monitor
 failure or timeout. Progress checks are informational: require `ci/full` for
 merge, not every `full / ...` check (some tests are conditional or advisory).
@@ -119,7 +120,9 @@ updated by `CI Full Status`. After binding the full run ID, `CI Command` explici
 dispatches `CI Full Progress`. The monitor requests status publication when it
 exits; the isolated `full-result` job also dispatches both publishers, including
 after failed tests and native reruns. Its status request waits for the source
-run to complete before entering the writer queue. This avoids relying on
+run to complete before entering the writer queue, retrying failed status reads
+within its five-minute polling window. Failure to dispatch informational job
+checks does not change the test result. This avoids relying on
 `workflow_run` delivery for runs dispatched with `GITHUB_TOKEN`; those events
 remain a supplementary path. No additional token or App configuration is needed.
 It stays pending while full runs and succeeds only after the `full-result`

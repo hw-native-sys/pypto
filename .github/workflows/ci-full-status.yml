@@ -53,8 +53,9 @@ jobs:
           # Admission above has validated the source. Do not hold the writer
           # queue while the source finishes its final notification steps.
           for poll in {1..60}; do
-            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .status)
-            if [ "$state" = completed ]; then
+            # A transient API failure must not abort the publisher under -e.
+            if state=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .status) &&
+               [ "$state" = completed ]; then
               exit 0
             fi
             sleep 5
