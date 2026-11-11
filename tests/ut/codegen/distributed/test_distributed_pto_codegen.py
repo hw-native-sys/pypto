@@ -2308,6 +2308,9 @@ def test_put_async_dynamic_subregion_guards_each_dimension():
 
     assert "arith.cmpi sge" in mlir, mlir
     assert "arith.cmpi sle" in mlir, mlir
+    # The bounds check is `extent <= limit - off`, not `off + extent <= limit`:
+    # the sum can wrap for large runtime coordinates and pass the check.
+    assert "arith.subi" in mlir, mlir
     assert "arith.select" in mlir, mlir
 
 
@@ -2327,6 +2330,24 @@ def test_put_async_rejects_non_a5_backend():
 
     with pytest.raises(ValueError, match="requires the A5 backend"):
         _generate_mlir(P)
+
+
+def test_put_async_rejects_subbyte_element_type_before_byte_offset_codegen():
+    """BOOL must fail at the async transfer boundary, before byte arithmetic."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.BOOL],
+            src: pld.DistributedTensor[[16, 64], pl.BOOL],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(dst, peer, src)
+
+    with pytest.raises(RuntimeError, match="byte-sized element types"):
+        _generate_mlir_a5(P)
 
 
 if __name__ == "__main__":
