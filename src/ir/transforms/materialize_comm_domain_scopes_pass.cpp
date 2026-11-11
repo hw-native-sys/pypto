@@ -1145,9 +1145,14 @@ struct AsyncCheckContext {
   auto it = ctx.indices.find(gvar->name_);
   if (it == ctx.indices.end() || !it->second.func) return std::nullopt;
   const auto& returned = CachedExplicitReturnedParamIndices(it->second.func, ctx);
-  if (position >= returned.size() || !returned[position]) return std::nullopt;
-  if (*returned[position] >= call->args_.size()) return std::nullopt;
-  return returned[position];
+  if (position >= returned.size()) return std::nullopt;
+  // Bind the element once: indexing `returned[position]` again on a second line
+  // reads a fresh vector element as far as the optional-access checker is
+  // concerned, so re-subscripting after the guard trips
+  // bugprone-unchecked-optional-access even though it is safe here.
+  const std::optional<size_t>& param_index = returned[position];
+  if (!param_index || *param_index >= call->args_.size()) return std::nullopt;
+  return param_index;
 }
 
 /// Resolve through the function's indexed locals and the call site's parameter
