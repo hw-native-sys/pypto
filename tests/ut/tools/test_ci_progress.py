@@ -23,6 +23,7 @@ HEAD, BASE = "a" * 40, "b" * 40
 
 @pytest.fixture
 def progress(monkeypatch):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
     spec = importlib.util.spec_from_file_location("ci_progress", ROOT / ".github/scripts/ci_progress.py")
     assert spec and spec.loader
@@ -298,7 +299,7 @@ def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event
     assert harness[3]
 
 
-def test_manual_resolution_stops_after_bounded_retries(progress, monkeypatch):
+def test_manual_resolution_stops_after_bounded_retries(progress, monkeypatch, tmp_path):
     reads = []
     waits = []
 
@@ -310,10 +311,49 @@ def test_manual_resolution_stops_after_bounded_retries(progress, monkeypatch):
     monkeypatch.setattr(progress.time, "sleep", waits.append)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     with pytest.raises(subprocess.CalledProcessError):
         progress.monitor(REPO, {"inputs": {"run_id": "50"}})
     assert len(reads) == 5
     assert waits == [60, 120, 240, 300]
+    assert not output.exists(), "An unresolved run must not trigger status publication"
+
+
+def test_non_full_main_ci_does_not_request_status_publication(
+    progress, monkeypatch, event, harness, tmp_path
+):
+    run, _, _, writes, _ = harness
+    run["display_title"] = "CI workflow_dispatch main"
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    progress.monitor(REPO, event)
+    assert not output.exists()
+    assert not writes
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_identified_full_source_keeps_fallback_after_monitor_failure(
+    progress, monkeypatch, event, harness, tmp_path, manual
+):
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    if manual:
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        event = {"inputs": {"run_id": "50"}}
+
+    def unavailable(*args):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    waits = []
+    monkeypatch.setattr(progress, "poll_budget", unavailable)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    with pytest.raises(subprocess.CalledProcessError):
+        progress.monitor(REPO, event)
+    assert output.read_text() == "source_run=50\n"
+    assert waits == [60, 120, 240, 300]
+    assert not harness[3]
 
 
 def test_completion_reconciles_jobs_across_write_budget(progress, monkeypatch, event, harness):

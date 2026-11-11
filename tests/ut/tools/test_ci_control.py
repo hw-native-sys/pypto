@@ -15,6 +15,7 @@ import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -59,6 +60,19 @@ def event():
         "issue": {"number": 123, "pull_request": {}},
         "comment": {"body": "/ci full", "user": {"login": "external-user"}, "author_association": "NONE"},
     }
+
+
+@pytest.fixture
+def merge_clock(control, monkeypatch):
+    elapsed = [0.0]
+    waits = []
+
+    def sleep(seconds):
+        waits.append(seconds)
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(control, "time", SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep))
+    return waits
 
 
 @pytest.fixture
@@ -566,7 +580,7 @@ def test_composite_checkout_retries_keep_the_pinned_revision():
 
 
 @pytest.mark.parametrize("conflicting", [False, None])
-def test_unavailable_merge_never_dispatches(control, monkeypatch, event, pr, conflicting):
+def test_unavailable_merge_never_dispatches(control, monkeypatch, event, pr, merge_clock, conflicting):
     pr["mergeable"] = conflicting
 
     def request(path):
@@ -574,8 +588,92 @@ def test_unavailable_merge_never_dispatches(control, monkeypatch, event, pr, con
         return pr
 
     monkeypatch.setattr(control, "api", request)
-    with pytest.raises(ValueError, match="conflicting or still being computed"):
+    with pytest.raises(ValueError, match="merge conflicts" if conflicting is False else "60 seconds"):
         control.dispatch(REPO, event)
+    assert merge_clock == ([] if conflicting is False else [5] * 12)
+
+
+@pytest.mark.parametrize("pending", ["unknown", "missing-merge", "stale-parents"])
+def test_command_waits_for_consistent_merge_without_authorizing_another_revision(
+    control, monkeypatch, event, pr, merge_clock, pending
+):
+    current = copy.deepcopy(pr)
+    reads = []
+    new_merge = "d" * 40
+
+    def request(path):
+        reads.append(path)
+        if path.endswith("/pulls/123"):
+            if not merge_clock:
+                if pending == "unknown":
+                    current["mergeable"] = None
+                elif pending == "missing-merge":
+                    current["merge_commit_sha"] = None
+            else:
+                current.update(mergeable=True, merge_commit_sha=new_merge)
+            return copy.deepcopy(current)
+        if path.endswith(f"/git/commits/{MERGE}"):
+            # Reproduce #3321: the PR already names the new base, but the
+            # synthetic merge still has the previous base as its first parent.
+            assert pending == "stale-parents"
+            return {"parents": [{"sha": "e" * 40}, {"sha": HEAD}]}
+        assert path.endswith(f"/git/commits/{new_merge}")
+        return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+
+    monkeypatch.setattr(control, "api", request)
+    result = control.validated_request(REPO, event)
+    assert result["head"]["sha"] == HEAD and result["base"]["sha"] == BASE
+    assert result["merge_commit_sha"] == new_merge
+    assert merge_clock == [5]
+    assert reads.count(f"repos/{REPO}/pulls/123") == 2
+
+
+@pytest.mark.parametrize("change", ["head", "base", "closed", "conflict"])
+def test_merge_wait_stops_when_request_is_no_longer_valid(
+    control, monkeypatch, event, pr, merge_clock, change
+):
+    def request(path):
+        assert path.endswith("/pulls/123"), "Rejected revisions must not dispatch or write status"
+        current = copy.deepcopy(pr)
+        current["mergeable"] = None
+        if merge_clock:
+            if change in {"head", "base"}:
+                current[change]["sha"] = "d" * 40
+            elif change == "closed":
+                current["state"] = "closed"
+            else:
+                current["mergeable"] = False
+        return current
+
+    monkeypatch.setattr(control, "api", request)
+    with pytest.raises(ValueError, match="changed while waiting|open PR|merge conflicts"):
+        control.dispatch(REPO, event)
+    assert merge_clock == [5]
+
+
+def test_inconsistent_merge_parents_exhaust_wait_without_dispatch(
+    control, monkeypatch, event, pr, merge_clock
+):
+    def request(path):
+        if path.endswith("/pulls/123"):
+            return pr
+        assert path.endswith(f"/git/commits/{MERGE}")
+        return {"parents": [{"sha": "d" * 40}, {"sha": HEAD}]}
+
+    monkeypatch.setattr(control, "api", request)
+    with pytest.raises(ValueError, match="60 seconds"):
+        control.dispatch(REPO, event)
+    assert merge_clock == [5] * 12
+
+
+def test_merge_wait_does_not_retry_api_access_failures(control, monkeypatch, event, merge_clock):
+    def denied(path):
+        raise subprocess.CalledProcessError(1, ["gh", "api"], stderr="HTTP 403")
+
+    monkeypatch.setattr(control, "api", denied)
+    with pytest.raises(subprocess.CalledProcessError):
+        control.validated_request(REPO, event)
+    assert not merge_clock
 
 
 def test_prepare_full_pins_merge_not_main(control, monkeypatch, tmp_path, pr):
@@ -883,6 +981,8 @@ def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tm
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("GH_TOKEN", "secret-token")
+    output_file = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
     monkeypatch.setattr(control.sys, "argv", ["ci_control.py", "dispatch"])
 
     def fail(*args):
@@ -895,12 +995,75 @@ def test_expected_errors_reach_summary_and_exit_nonzero(control, monkeypatch, tm
         control.main()
     assert error.value.code == 1
     text = summary.read_text()
+    public_error = json.loads(output_file.read_text().strip().split("=", 1)[1])
+    assert "secret-token" not in public_error
     assert "dispatch failed:" in text
     if cli_error:
         assert "Forbidden &lt;detail&gt; [REDACTED]" in text
         assert "secret-token" not in text
+        assert "GitHub API validation or dispatch failed" in public_error
     else:
         assert "PR changed" in text
+        assert "PR changed" in public_error
+
+
+@pytest.mark.parametrize(
+    "reason", [None, "PR has merge conflicts; update the branch", "<unsafe>\nsecond line"]
+)
+@pytest.mark.parametrize("previous_author", [None, "github-actions[bot]", "external-user"])
+def test_failed_command_feedback_links_logs_and_deduplicates_its_own_attempt(
+    control, monkeypatch, event, reason, previous_author
+):
+    monkeypatch.setenv("GITHUB_RUN_ID", "50")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("CI_COMMAND_ERROR", json.dumps(reason) if reason is not None else "")
+    marker = "<!-- ci-command-feedback:50:2 -->"
+    existing = [] if previous_author is None else [{"user": {"login": previous_author}, "body": marker}]
+    monkeypatch.setattr(control, "pages", lambda path: existing)
+    writes = []
+    monkeypatch.setattr(control, "api", lambda path, payload: writes.append((path, payload)))
+    control.command_feedback(REPO, event)
+    if previous_author == "github-actions[bot]":
+        assert not writes
+    else:
+        assert len(writes) == 1 and writes[0][0] == f"repos/{REPO}/issues/123/comments"
+        body = writes[0][1]["body"]
+        assert marker in body and f"https://github.com/{REPO}/actions/runs/50/attempts/2" in body
+        assert "could not be completed" in body
+        assert "<unsafe>" not in body
+        if reason == "<unsafe>\nsecond line":
+            assert "&lt;unsafe&gt;\nsecond line" in body
+
+
+@pytest.mark.parametrize("invalid", ["edited", "issue", "other-command"])
+def test_feedback_ignores_non_commands(control, monkeypatch, event, invalid):
+    if invalid == "edited":
+        event["action"] = "edited"
+    elif invalid == "issue":
+        del event["issue"]["pull_request"]
+    else:
+        event["comment"]["body"] = "/ci full extra"
+    monkeypatch.setattr(control, "pages", lambda *args: pytest.fail("No comment reads"))
+    control.command_feedback(REPO, event)
+
+
+def test_command_feedback_permission_is_separate_from_routing_and_dispatch():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-command.yml").read_text())
+    jobs = workflow["jobs"]
+    feedback = jobs["feedback"]
+    assert feedback["needs"] == ["route", "dispatch"]
+    assert "always()" in feedback["if"]
+    assert "needs.route.result == 'failure'" in feedback["if"]
+    assert "needs.dispatch.result == 'failure'" in feedback["if"]
+    assert feedback["permissions"] == {"contents": "read", "pull-requests": "write"}
+    assert feedback["runs-on"] == "ubuntu-latest"
+    assert feedback["steps"][0]["with"]["ref"] == "${{ github.workflow_sha }}"
+    assert feedback["steps"][-1]["run"].endswith("ci_control.py command-feedback")
+    assert "CI_COMMAND_ERROR" in feedback["steps"][-1]["env"]
+    for name in ("route", "dispatch"):
+        assert "issues" not in jobs[name]["permissions"]
+        assert jobs[name]["permissions"]["pull-requests"] == "read"
+        assert jobs[name]["outputs"]["error"] == f"${{{{ steps.{name}.outputs.command_error }}}}"
 
 
 def test_pr_jobs_cannot_write_github_caches():
@@ -1986,7 +2149,8 @@ def test_full_finalizer_explicitly_notifies_publishers_even_after_failure():
     progress = yaml.safe_load((ROOT / ".github/workflows/ci-full-progress.yml").read_text())
     assert progress[True]["workflow_dispatch"]["inputs"]["run_id"]["required"]
     reconcile = progress["jobs"]["progress"]["steps"][-1]
-    assert reconcile["if"] == "always()"
+    assert reconcile["if"] == "always() && steps.monitor.outputs.source_run != ''"
+    assert reconcile["env"]["SOURCE_RUN"] == "${{ steps.monitor.outputs.source_run }}"
     assert "gh workflow run ci-full-status.yml" in reconcile["run"]
 
 

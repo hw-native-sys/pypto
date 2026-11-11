@@ -105,17 +105,6 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
         try:
             # Manual dispatch has no webhook identity. Resolve it within the
             # same bounded retry window as later REST reads, before using it.
-            if source is None:
-                routed = control.resolved_event(repo, event)
-                if routed is None:
-                    return
-                event = routed
-                source = event["workflow_run"]
-                resolved = True
-            delay, max_writes = poll_budget(repo, source["run_attempt"])
-            if max_writes == 0:
-                time.sleep(min(delay, max(0, deadline - time.monotonic())))
-                continue
             if not resolved:
                 routed = control.resolved_event(repo, event)
                 if routed is None:
@@ -123,6 +112,17 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
                 event = routed
                 source = event["workflow_run"]
                 resolved = True
+                # The always() fallback may publish only an identified PR-full
+                # source. Ordinary manual main CI is intentionally ignored.
+                # Record this before polling so subsequent failures still get
+                # a status reconciliation request.
+                if os.environ.get("GITHUB_OUTPUT"):
+                    control.output({"source_run": str(source["id"])})
+            assert source is not None
+            delay, max_writes = poll_budget(repo, source["run_attempt"])
+            if max_writes == 0:
+                time.sleep(min(delay, max(0, deadline - time.monotonic())))
+                continue
             match = control.FULL_TITLE.fullmatch(source["display_title"])
             assert match is not None
             number, head = int(match[1]), match[2]

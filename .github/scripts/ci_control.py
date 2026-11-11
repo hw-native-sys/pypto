@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -46,10 +47,16 @@ REQUIRED = {
 }
 OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
 CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
+MERGE_WAIT_SECONDS = 60
+MERGE_POLL_SECONDS = 5
 
 
 class UntrustedRunError(ValueError):
     """Reject unrelated runs without granting them permission to write statuses."""
+
+
+class MergePendingError(ValueError):
+    """The current PR snapshot and GitHub's test merge are not consistent yet."""
 
 
 def api(path: str, payload: dict[str, Any] | None = None, *, method: str = "POST") -> Any:
@@ -200,7 +207,7 @@ def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str
         raise ValueError("merge_sha is not the PR's current test merge; post /ci full again")
     commit = api(f"repos/{repo}/git/commits/{merge}")
     if [parent["sha"] for parent in commit["parents"]] != [base, head]:
-        raise ValueError("Test merge does not have the authorized base and head parents")
+        raise MergePendingError("Test merge does not have the authorized base and head parents")
 
 
 def unfinished_request_exists(repo: str, title: str, start: datetime, end: datetime) -> bool:
@@ -353,22 +360,86 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
     return len(finalizers) == 1 and finalizers[0]["conclusion"] == "success"
 
 
+def is_full_command(event: dict[str, Any]) -> bool:
+    return (
+        event.get("action") == "created"
+        and "pull_request" in event.get("issue", {})
+        and event.get("comment", {}).get("body", "").strip() == "/ci full"
+    )
+
+
 def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
-    if (
-        event.get("action") != "created"
-        or "pull_request" not in event.get("issue", {})
-        or event.get("comment", {}).get("body", "").strip() != "/ci full"
+    if not is_full_command(event):
+        return None
+    # Anyone who can comment may request full CI. Keep the first head/base
+    # fixed while GitHub refreshes its synthetic merge; never authorize a push
+    # that arrives during this wait or while joining the writer queue.
+    number = int(event["issue"]["number"])
+    deadline = time.monotonic() + MERGE_WAIT_SECONDS
+    pr = pull(repo, number)
+    head, base = pr["head"]["sha"], pr["base"]["sha"]
+    routed_head = os.environ.get("CI_ROUTED_HEAD")
+    if routed_head and routed_head != head:
+        raise ValueError("PR head changed after queue admission; post /ci full again")
+    while True:
+        if pr["head"]["sha"] != head or pr["base"]["sha"] != base:
+            raise ValueError(
+                "PR head or base changed while waiting; wait for matching lint and post /ci full again"
+            )
+        if pr.get("mergeable") is False:
+            raise ValueError(
+                "PR has merge conflicts; update the branch, wait for lint and post /ci full again"
+            )
+        if pr.get("mergeable") is True and pr.get("merge_commit_sha"):
+            try:
+                verify_merge(repo, pr, head, base, pr["merge_commit_sha"])
+                return pr
+            except MergePendingError:
+                # The PR endpoint can report the new base before its merge
+                # commit is rebuilt. Retry that inconsistency, not bad SHAs,
+                # access failures, closed PRs, or genuine merge conflicts.
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError(
+                "GitHub merge information did not become consistent within 60 seconds; retry /ci full later"
+            )
+        report("Waiting for GitHub to refresh this PR's test merge.")
+        time.sleep(min(MERGE_POLL_SECONDS, remaining))
+        pr = pull(repo, number)
+
+
+def command_feedback(repo: str, event: dict[str, Any]) -> None:
+    """Report command failures from a separate job with comment-only writes."""
+    if not is_full_command(event):
+        return
+    number = int(event["issue"]["number"])
+    run_id, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
+    if not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run_id, attempt)):
+        raise ValueError("Expected positive command run and attempt IDs")
+    marker = f"<!-- ci-command-feedback:{run_id}:{attempt} -->"
+    comments = pages(f"repos/{repo}/issues/{number}/comments")
+    if any(
+        item.get("user", {}).get("login") == "github-actions[bot]" and marker in item.get("body", "")
+        for item in comments
     ):
         return
-    # Anyone who can comment may request full CI, including external contributors.
-    # Validate the live PR and merge revision both before queueing and dispatching.
-    number = int(event["issue"]["number"])
-    pr = pull(repo, number)
-    if pr.get("mergeable") is not True or not pr.get("merge_commit_sha"):
-        raise ValueError("PR merge is conflicting or still being computed; retry /ci full when ready")
-    head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
-    verify_merge(repo, pr, head, base, merge)
-    return pr
+    # Checkout failures and runner failures may produce no script output.
+    reason = json.loads(
+        os.environ.get("CI_COMMAND_ERROR")
+        or '"Command validation or dispatch failed; see the logs for details."'
+    )
+    if not isinstance(reason, str):
+        raise ValueError("Expected a command failure message")
+    url = f"https://github.com/{repo}/actions/runs/{run_id}/attempts/{attempt}"
+    api(
+        f"repos/{repo}/issues/{number}/comments",
+        {
+            "body": f"{marker}\nYour `/ci full` request could not be completed.\n\n"
+            f"<pre>{escape(reason[:2000])}</pre>\n\n[CI Command logs]({url}). "
+            "Check whether a full run was already created before retrying."
+        },
+    )
 
 
 def command_route(repo: str, event: dict[str, Any]) -> None:
@@ -719,6 +790,7 @@ def main() -> None:
         repo = os.environ["GITHUB_REPOSITORY"]
         commands = {
             "command-route": command_route,
+            "command-feedback": command_feedback,
             "dispatch": dispatch,
             "prepare": prepare,
             "route": route,
@@ -734,6 +806,16 @@ def main() -> None:
         for key in ("GH_TOKEN", "GITHUB_TOKEN"):
             if token := os.environ.get(key):
                 detail = detail.replace(token, "[REDACTED]")
+        if command in {"command-route", "dispatch"} and os.environ.get("GITHUB_OUTPUT"):
+            # Only send a public error to the comment job; raw API stderr may
+            # include repository-controlled text or authentication diagnostics.
+            reason = (
+                "GitHub API validation or dispatch failed; "
+                "check the logs and any existing full run before retrying."
+                if isinstance(error, subprocess.CalledProcessError)
+                else detail
+            )
+            output({"command_error": json.dumps(reason)})
         print(f"{command} failed:\n" + "\n".join(f"  {line}" for line in detail.splitlines()))
         if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
             with Path(summary).open("a") as stream:

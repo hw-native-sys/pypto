@@ -41,14 +41,15 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Mirror full-test jobs onto the PR
+        id: monitor
         env:
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/ci_progress.py
       - name: Reconcile the merge gate after monitoring
-        if: always()
+        if: always() && steps.monitor.outputs.source_run != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN: ${{ inputs.run_id || github.event.workflow_run.id }}
+          SOURCE_RUN: ${{ steps.monitor.outputs.source_run }}
         run: >-
           gh workflow run ci-full-status.yml --repo "$GITHUB_REPOSITORY" --ref main
           -f run_id="$SOURCE_RUN"

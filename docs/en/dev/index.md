@@ -66,8 +66,21 @@ repository write access, can post exactly this comment in the PR conversation:
 The `CI Command` workflow requires an open PR targeting this repository's `main`
 branch and dispatches `CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
-A conflicting PR, or one whose merge is still being computed, must be resolved
-or retried. The command's Actions summary records acceptance or rejection.
+When GitHub is still computing the merge or reports merge parents that do not
+match the current PR snapshot, the command polls every five seconds within a
+60-second retry window on a GitHub-hosted runner. It keeps the initial head and
+base fixed: a changed revision, closed PR, invalid target or confirmed merge
+conflict stops the request. A conflict requires updating the branch, waiting for
+lint and posting `/ci full` again. API errors and invalid revisions are not treated
+as pending merge computation.
+If validation or dispatch fails, a separate job replies in the PR with the
+reason and a link to the command run's logs. Only that job has comment-write
+permission; the admission job remains read-only. The reply is deduplicated for
+each command run attempt. If failure occurs before the script can report a
+reason, the reply points to the logs. The Actions summary also records the error.
+After a timeout, post a new `/ci full` comment; editing an existing comment does
+not trigger the command. Check whether dispatch already created a full run before
+retrying an API failure.
 An identical request already queued/running is not dispatched again. The command
 validates the run linked by the current status before searching run history,
 so a bound pending request is honored even before the run list indexes it.
@@ -118,7 +131,10 @@ merge, not every `full / ...` check (some tests are conditional or advisory).
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
 updated by `CI Full Status`. After binding the full run ID, `CI Command` explicitly
 dispatches `CI Full Progress`. The monitor requests status publication when it
-exits; the isolated `full-result` job also dispatches both publishers, including
+exits after identifying a trusted PR-full source; ordinary manual main CI does
+not request a PR status publisher. The source ID is retained if later monitoring
+fails, so that failure still requests reconciliation. The isolated `full-result`
+job also dispatches both publishers, including
 after failed tests and native reruns. Its status request waits for the source
 run to complete before entering the writer queue, retrying failed status reads
 within its five-minute polling window. Failure to dispatch informational job
