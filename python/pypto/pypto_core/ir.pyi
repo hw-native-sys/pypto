@@ -2966,6 +2966,12 @@ def _without_type_memref(type: Type) -> Type:
     """Remove allocation annotations from shaped and tuple value types."""
     ...
 
+def _rebind_window_buffers(
+    program: Program, replacements: Sequence[tuple[WindowBuffer, WindowBuffer]]
+) -> Program:
+    """Finalize explicit parser window identities using their owners’ variable bindings."""
+    ...
+
 def verify_structural_bindings(node: IRNode) -> None:
     """Verify local definition uniqueness and lexical visibility; allow open captures."""
     ...
