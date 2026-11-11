@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +30,24 @@ API_RESERVE = 200
 POLL_REQUESTS_PER_HOUR = 500
 MONITOR_SECONDS = 5 * 60 * 60
 HIDDEN_JOBS = {"changes", "toolchain", "lint-gate", "pre-commit", "clang-tidy", "full-result"}
+CHECK_ID = re.compile(r"ci-full:([1-9][0-9]*):([1-9][0-9]*):(.+)")
+
+
+def reusable_checks(run: dict[str, Any], existing: list[dict[str, Any]]) -> dict[str, Any]:
+    """Index this run's latest display records by job, across all attempts."""
+    latest: dict[str, Any] = {}
+    versions: dict[str, tuple[int, int]] = {}
+    for item in existing:
+        match = CHECK_ID.fullmatch(item.get("external_id") or "")
+        if match is None or int(match[1]) != run["id"] or item.get("app", {}).get("slug") != "github-actions":
+            continue
+        name = match[3]
+        version = (int(match[2]), item["id"])
+        # Older publishers created one record per attempt. Reuse the latest
+        # one deterministically even when REST pages arrive in another order.
+        if name not in versions or version > versions[name]:
+            latest[name], versions[name] = item, version
+    return latest
 
 
 def sync_jobs(
@@ -49,7 +68,9 @@ def sync_jobs(
         }
         if status == "completed":
             payload["conclusion"] = job["conclusion"] or "failure"
-        previous = checks.get(key)
+        # Attempt remains provenance, not display identity. Failed-job reruns
+        # update the same record, including jobs retained from older attempts.
+        previous = checks.get(job["name"])
         if previous is not None and all(previous.get(k) == v for k, v in payload.items()):
             continue
         if writes >= max_writes:
@@ -58,7 +79,7 @@ def sync_jobs(
             result = control.api(f"repos/{repo}/check-runs", {**payload, "head_sha": head})
         else:
             result = control.api(f"repos/{repo}/check-runs/{previous['id']}", payload, method="PATCH")
-        checks[key] = {**payload, "id": result["id"]}
+        checks[job["name"]] = {**payload, "id": result["id"]}
         writes += 1
     return True
 
@@ -155,18 +176,21 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
                 return
             if checks is None:
                 existing = control.pages(f"repos/{repo}/commits/{head}/check-runs?filter=all", "check_runs")
-                prefix = f"ci-full:{run['id']}:{run['run_attempt']}:"
-                checks = {
-                    item["external_id"]: item
-                    for item in existing
-                    if (item.get("external_id") or "").startswith(prefix)
-                    and item.get("app", {}).get("slug") == "github-actions"
-                }
+                checks = reusable_checks(run, existing)
+                # A newer projection also invalidates a stale REST snapshot.
+                # Never overwrite it or create a competing older record.
+                if any(
+                    int(item["external_id"].split(":", 3)[2]) > run["run_attempt"] for item in checks.values()
+                ):
+                    return
             synced = sync_jobs(repo, head, run, checks, max_writes=max_writes)
             if run["status"] == "completed" and synced:
                 return
             errors = 0
         except subprocess.CalledProcessError:
+            # A create may have succeeded before its response was lost. Read
+            # back persisted records before retrying instead of creating again.
+            checks = None
             errors += 1
             if errors >= 5:
                 raise

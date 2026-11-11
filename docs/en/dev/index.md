@@ -133,6 +133,12 @@ hours; the finalizer explicitly dispatches reconciliation even after a monitor
 failure or timeout. Progress checks are informational: require `ci/full` for
 merge, not every `full / ...` check (some tests are conditional or advisory).
 
+Native reruns update the existing `full / ...` records for the same full run,
+including results retained from earlier attempts. They do not append another
+set of checks. The full workflow retains the execution history and each record
+links to its effective job. Records duplicated by older publishers remain in
+history; reconciliation reuses the latest record for each job.
+
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
 updated by `CI Full Status`. After binding the full run ID, `CI Command` explicitly
 dispatches `CI Full Progress`. The monitor requests status publication when it

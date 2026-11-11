@@ -73,7 +73,9 @@ def harness(progress, monkeypatch, event):
     def api(path, payload=None, **kwargs):
         if payload is not None:
             writes.append((path, payload.copy(), kwargs))
-            return {"id": 200 + len(writes)}
+            return {
+                "id": int(path.rsplit("/", 1)[1]) if kwargs.get("method") == "PATCH" else 200 + len(writes)
+            }
         if path.endswith("/runs/50"):
             return copy.deepcopy(run)
         if "/runs/50/attempts/" in path:
@@ -215,10 +217,14 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
         {"id": 101, "name": "system-tests", "status": "completed", "conclusion": "failure"},
     ]
     new_jobs = [{"id": 102, "name": "system-tests", "status": "completed", "conclusion": "success"}]
+    existing = [
+        {"id": 900, "external_id": "ci-full:50:1:unit-tests", "app": {"slug": "github-actions"}},
+        {"id": 901, "external_id": "ci-full:50:1:system-tests", "app": {"slug": "github-actions"}},
+    ]
 
     def pages(path, key):
         if key == "check_runs":
-            return []
+            return existing
         assert key == "jobs"
         if path.endswith("/attempts/1/jobs"):
             return old_jobs
@@ -230,6 +236,122 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
     assert {payload["name"] for _, payload, _ in writes} == {"full / unit-tests", "full / system-tests"}
     assert all(payload["conclusion"] == "success" for _, payload, _ in writes)
     assert all(payload["external_id"].startswith("ci-full:50:2:") for _, payload, _ in writes)
+    assert {path for path, _, _ in writes} == {f"repos/{REPO}/check-runs/900", f"repos/{REPO}/check-runs/901"}
+    assert all(kwargs == {"method": "PATCH"} for _, _, kwargs in writes)
+
+
+def test_repeated_reruns_keep_record_id_through_running_and_completed_states(
+    progress, monkeypatch, event, harness
+):
+    run, _, jobs, writes, checks = harness
+    original_api = progress.control.api
+
+    def api(path, payload=None, **kwargs):
+        result = original_api(path, payload, **kwargs)
+        if payload is not None:
+            record = {**payload, "id": result["id"], "app": {"slug": "github-actions"}}
+            if kwargs.get("method") == "PATCH":
+                assert result["id"] == checks[0]["id"]
+                checks[0] = record
+            else:
+                checks.append(record)
+        return result
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.control, "effective_jobs", lambda *args: jobs)
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="failure")
+    progress.monitor(REPO, event)
+    original_id = checks[0]["id"]
+
+    # Each restart reads every historical record, as the Actions page does.
+    # A latest-per-name API response would hide the original duplicate bug.
+    for attempt in (2, 3):
+        event["workflow_run"]["run_attempt"] = attempt
+        run.update(run_attempt=attempt, status="in_progress")
+        jobs[0].update(id=101 + attempt, status="in_progress", conclusion=None)
+
+        def complete(seconds):
+            assert checks[0]["status"] == "in_progress"
+            assert checks[0].get("conclusion") is None
+            run["status"] = "completed"
+            jobs[0].update(status="completed", conclusion="success")
+
+        monkeypatch.setattr(progress.time, "sleep", complete)
+        progress.monitor(REPO, event)
+        assert len(checks) == 1
+        assert checks[0]["id"] == original_id
+        assert checks[0]["external_id"] == f"ci-full:50:{attempt}:system-tests"
+        assert checks[0]["conclusion"] == "success"
+        assert checks[0]["details_url"].endswith(f"/job/{101 + attempt}")
+    assert len(writes) == 5
+    assert all(kwargs == {"method": "PATCH"} for _, _, kwargs in writes[1:])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_legacy_duplicates_reuse_latest_record_independent_of_page_order(progress, reverse):
+    records = [
+        {
+            "id": check_id,
+            "external_id": f"ci-full:50:{attempt}:matrix (a:b)",
+            "app": {"slug": "github-actions"},
+        }
+        for check_id, attempt in [(999, 1), (800, 2), (801, 2)]
+    ]
+    if reverse:
+        records.reverse()
+    selected = progress.reusable_checks({"id": 50}, records)
+    assert selected["matrix (a:b)"]["id"] == 801
+
+
+@pytest.mark.parametrize(
+    "external_id,app",
+    [
+        ("ci-full:51:1:system-tests", "github-actions"),
+        ("ci-full:50:1:system-tests", "another-app"),
+        ("ci-full:50:0:system-tests", "github-actions"),
+        ("ci-full:50:no-attempt:system-tests", "github-actions"),
+        ("native-action-job", "github-actions"),
+        (None, "github-actions"),
+    ],
+)
+def test_check_reuse_ignores_unrelated_or_malformed_records(progress, external_id, app):
+    assert (
+        progress.reusable_checks({"id": 50}, [{"id": 900, "external_id": external_id, "app": {"slug": app}}])
+        == {}
+    )
+
+
+def test_future_check_attempt_prevents_stale_projection(progress, event, harness):
+    run, _, _, writes, checks = harness
+    run["status"] = "completed"
+    checks.append({"id": 900, "external_id": "ci-full:50:2:system-tests", "app": {"slug": "github-actions"}})
+    progress.monitor(REPO, event)
+    assert not writes
+
+
+def test_lost_create_response_is_read_back_before_retry(progress, monkeypatch, event, harness):
+    run, _, jobs, writes, checks = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    original_api = progress.control.api
+    failed = False
+
+    def api(path, payload=None, **kwargs):
+        nonlocal failed
+        result = original_api(path, payload, **kwargs)
+        if payload is not None and not failed:
+            failed = True
+            checks.append({**payload, "id": result["id"], "app": {"slug": "github-actions"}})
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        return result
+
+    waits = []
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    progress.monitor(REPO, event)
+    assert waits == [60]
+    assert len(writes) == 1
 
 
 @pytest.mark.parametrize("active", [1, 2, 10])
