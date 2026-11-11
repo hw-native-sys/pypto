@@ -75,7 +75,7 @@ def compiled() -> Exception | None:
         save_kernels_dir=str(DUMP_DIR),
     )
     try:
-        split_aiv_none_pipe(torch.randn(T, N), torch.empty(T, N), config=cfg)
+        split_aiv_none_pipe.compile(torch.randn(T, N), torch.empty(T, N), config=cfg)
     except Exception as e:  # noqa: BLE001 - see docstring
         return e
     return None

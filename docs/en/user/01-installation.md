@@ -275,8 +275,9 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 [Distributed](distributed/index.md).
 
 **Most of these dispatch to hardware, not just compile.** `beginner/01_hello_world.py`,
-`intermediate/02_softmax.py`, and `models/01_ffn.py` all end by calling their kernel with
-`config=RunConfig()`, which assembles through ptoas and runs it — so they need the
+`intermediate/02_softmax.py`, and `models/01_ffn.py` compile their kernels explicitly,
+then call the returned programs with `config=RunConfig()`, assembling through ptoas
+and running them — so they need the
 runtime and a device or simulator platform, not only the `pip install` above:
 
 ```bash

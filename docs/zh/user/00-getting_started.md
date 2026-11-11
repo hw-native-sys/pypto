@@ -178,6 +178,7 @@ def kernel(
         pl.store(pl.add(pl.load(x, [0, 0], [BLOCK, BLOCK]), scale), [0, 0], out)
     return out
 
+# Eager calls require pypto.torch.init() and NPU tensors x/out.
 kernel(x, out, scale=1.0, BLOCK=16)
 kernel(x, out, scale=2.0, BLOCK=16)   # 同一份产物——只有标量变了
 kernel(x, out, scale=2.0, BLOCK=32)   # 第二份产物
@@ -201,6 +202,7 @@ kernel(x, out, scale=2.0, BLOCK=32)   # 第二份产物
 `constexpr` 适用于"配置本该属于调用"的场景：
 
 ```python
+# Eager calls require pypto.torch.init() and NPU tensors x/out.
 # 之前：一个配置一个工厂，调用方还要自己管理这些 kernel 对象。
 def build(block: int):
     BLOCK = block

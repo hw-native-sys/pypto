@@ -114,7 +114,8 @@ values[0, 8:12] = torch.tensor([1 << 20, 1 << 24, (1 << 24) + 1, 1 << 25])   # p
 values[0, 12:16] = torch.tensor([-65504, -65519, -65520, -70000])            # the same boundary, negative
 
 out = torch.zeros(ROWS, COLS, dtype=torch.float16)
-to_fp16(values, out, config=CFG)
+compiled = to_fp16.compile(values, out, config=CFG)
+compiled(values, out, config=CFG)
 
 # Bit-for-bit against torch's conversion of the same integers.
 expected = values.to(torch.float16)

@@ -34,7 +34,8 @@ next one assumes.
 ```python
 from pypto.runtime import RunConfig
 
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
+compiled = kernel.compile(a, b, out, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
+compiled(a, b, out, config=RunConfig(platform="a2a3sim", enable_dep_gen=True))
 ```
 
 Then render it:
@@ -58,7 +59,8 @@ readings worth having:
 A parallel graph does not guarantee parallel execution. The swimlane shows per-task timing:
 
 ```python
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
+compiled = kernel.compile(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
+compiled(a, b, out, config=RunConfig(platform="a2a3sim", enable_chip_swimlane=True))
 ```
 
 > **Simulator caveat:** on `*sim` platforms this is single-pass and emits only
@@ -76,7 +78,8 @@ The runtime holds in-flight tasks in rings. If one is saturating, adding paralle
 graph buys nothing:
 
 ```python
-kernel(a, b, out, config=RunConfig(platform="a2a3sim", enable_scope_stats=True))
+compiled = kernel.compile(a, b, out, config=RunConfig(platform="a2a3sim", enable_scope_stats=True))
+compiled(a, b, out, config=RunConfig(platform="a2a3sim", enable_scope_stats=True))
 ```
 
 ```bash
