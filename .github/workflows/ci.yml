@@ -2515,6 +2515,73 @@ jobs:
         with:
           checkout-path: a5-checkout
 
+  onboard-tests-a5-distributed:
+    timeout-minutes: 110
+    # Bootstrap the trusted main-branch job before adding hardware acceptance
+    # tests. /ci full loads this workflow from main, so a PR cannot introduce
+    # and exercise a new job in the same dispatched run. The placeholder only
+    # checks pytest execution; it does not validate A5 or distributed transfers.
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.full == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, npu-a5]
+    defaults:
+      run:
+        working-directory: a5-dist-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/a5-dist-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+      TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: a5-dist-checkout
+          checkout-ref: ${{ needs.changes.outputs.checkout_sha }}
+          needs-device: 'true'
+          pip-cache-name: pip-a5
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          runtime-targets: build_package_a5
+          # Keep runner-specific ring settings out of this job's environment.
+          unset-ring: 'true'
+          toolchain: bundle
+
+      - name: Run placeholder test
+        run: |
+          source activate.sh
+          python -m pytest tests/lint/test_ci_placeholder.py -v \
+            --junitxml=ci-placeholder-junit.xml
+
+      - name: Upload placeholder test result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a5-distributed-placeholder-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: a5-dist-checkout/ci-placeholder-junit.xml
+
   system-tests-a5sim:
     permissions:
       contents: read
@@ -2675,6 +2742,7 @@ jobs:
       - docs-examples
       - examples-tests
       - onboard-tests-a5
+      - onboard-tests-a5-distributed
       - prebuild-wheels
       - prebuild-wheels-github
       - pypto-lib-compile
