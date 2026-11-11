@@ -2843,6 +2843,77 @@ def test_verifier_follows_user_call_return_alias(op_name):
         _apply(_build_async_through_user_call_alias_program(op_name))
 
 
+def _apply_basic(program: ir.Program) -> ir.Program:
+    """Like ``_apply``, but forces ``VerificationLevel.BASIC``.
+
+    A ``pl.submit`` task launch's tuple-temp lowering does not survive a
+    print->parse roundtrip check (see the equivalent note in
+    ``test_materialize_runtime_scopes.py::test_manual_scope_with_submit_suppresses_inner_for_wrap``);
+    that gap is unrelated to what a Submit-involving test here exercises.
+    """
+    with passes.PassContext([], passes.VerificationLevel.BASIC):
+        return _apply(program)
+
+
+def _build_async_through_submit_alias_program(op_name: str) -> ir.Program:
+    """The ``src`` endpoint is forwarded through a ``pl.submit`` task launch
+    that returns one of its own parameters unchanged (``produced, tid =
+    pl.submit(self.stage, src)``). ``Submit`` is a first-class node distinct
+    from ``Call`` (``pass-submit-awareness.md``); the resolver must follow a
+    Submit's ``TupleGetItemExpr`` projection the same way it already follows
+    a plain user-function Call's."""
+    return pl.parse_program(
+        textwrap.dedent(
+            f"""
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                    peer: pl.Scalar[pl.INT32],
+                ):
+                    pld.tensor.{op_name}(dst, peer, src)
+
+                @pl.function(type=pl.FunctionType.InCore)
+                def stage(
+                    self, x: pld.DistributedTensor[[16], pl.FP32]
+                ) -> pld.DistributedTensor[[16], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    with pl.manual_scope():
+                        produced, tid = pl.submit(self.stage, src)
+                    self.kernel(dst, produced, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    a = pld.alloc_window_buffer(64)
+                    b = pld.alloc_window_buffer(60)
+                    dst = pld.window(a, [16], dtype=pl.FP32)
+                    src = pld.window(b, [16], dtype=pl.FP32)
+                    self.chip(dst, src, device=0)
+            """
+        )
+    )
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_verifier_follows_submit_return_alias(op_name):
+    """A ``pl.submit`` task launch returning one of its own parameters
+    unchanged must not hide an undersized window slot from the byte-count
+    check (review finding: ``Submit`` is call-like but distinct from
+    ``Call``, see ``pass-submit-awareness.md``)."""
+    with pytest.raises(pypto.Error, match="src transfer of 64 bytes exceeds window slot"):
+        _apply_basic(_build_async_through_submit_alias_program(op_name))
+
+
 def _build_async_diamond_shared_callee_program(op_name: str) -> ir.Program:
     """Each wrapper layer calls the next layer twice with the same forwarded
     arguments -- the duplicate-call-site shape the dedup in
