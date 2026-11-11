@@ -71,6 +71,9 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 `SupportsRuntimeBoundLocalSoftwarePipeline()` 默认返回 `false`，在后端启用这条降低
 路径前保留既有循环回退行为。该查询独立于跨核传输，不表示硬件是否支持相关事件。
 
+当前固定版本的 A2/A3 `tile.rem(high_precision=True)` 也会兑现选择器。
+其发射器检查高精度路径所需的更大临时空间，并省略该算子的精度忽略告警。
+
 ## 注册算子规则
 
 `tile.sel`、`tile.sels` 和 `tile.cast` 通过 `f_plan_scratch` 注册临时空间规则。

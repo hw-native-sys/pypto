@@ -146,16 +146,19 @@ def rem(
 
     Computes lhs % rhs element-wise. Maps to the TREM hardware intrinsic.
     On A2/A3, every INT32 input element must be in ``[-2**24, 2**24]``.
+    INT32 source tiles must not overlap because the ISA converts both in place.
 
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
         tmp: Same-dtype 2D scratch tile. On A2/A3 its physical and valid
-            capacity must provably provide at least two rows and cover every
-            ``lhs`` column, and it must not overlap either source.
+            capacity must provide at least two rows and enough columns for
+            the candidate, packed mask, address buffer and selected precision
+            workspace. For 64 physical source columns, use 80 scratch columns
+            by default or 272 for high precision. It must not overlap either source.
         span: Optional source span for debugging (auto-captured if not provided)
         high_precision: Whether to select PTOAS's high-precision TREM mode.
-            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
+            This mode is defined only for FP32.
 
     Returns:
         Call expression for element-wise remainder
@@ -176,8 +179,9 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
         tmp: Same-dtype 2D scratch tile. On A2/A3 its physical and valid
-            capacity must provably provide at least one row and cover every
-            ``lhs`` column, and it must not overlap ``lhs``.
+            capacity must provide at least one row and ``C + 8*ceil(C/256) + 8``
+            columns for physical source width ``C`` (candidate, packed mask and
+            address buffer). It must not overlap ``lhs``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

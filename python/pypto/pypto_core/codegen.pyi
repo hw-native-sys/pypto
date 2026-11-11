@@ -114,7 +114,7 @@ class OrchestrationResult:
 
     @property
     def orchestration_signature(self) -> list[str]:
-        """Orchestration entry per-tensor ArgDirection names (scalars excluded), in orch_args tensor order."""
+        """Tensor ArgDirection names in orch_args order, followed by scalar payload SCALAR entries."""
         ...
 
 class BuiltinNextLevelSpec:

@@ -88,6 +88,11 @@ for borrowed device storage. Scalar values and types use the public
 `TaskArgs` typed scalar interface, leaving ABI encoding to Simpler.
 `ScalarArgument` retains the validated value and dtype without encoding it.
 
+The orchestration `ChipCallable` signature lists tensor directions first,
+followed by one `SCALAR` per scalar payload slot. This preserves Program tensor
+indices and supplies both counts required by native Kernel invocation admission.
+Leaf `CoreCallable` registrations retain their tensor-only direction lists.
+
 Runtime capability checks run at explicit Torch kernel initialization. The lifecycle
 layer supports Worker initialization, callable registration and eager submission.
 Public operator registration and DFX windows remain separate migration steps.

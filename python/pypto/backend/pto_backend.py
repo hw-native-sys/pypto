@@ -1232,13 +1232,14 @@ def _generate_config_file(
     directions. Scalars are excluded from runtime tensor signatures.
 
     ``orchestration_signature`` is the orchestration entry's per-tensor
-    ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order
-    (scalars excluded). When present, the ``ORCHESTRATION`` dict gains a
-    ``"signature"`` field so the runtime builds a non-empty ChipCallable
+    ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order,
+    followed by one "SCALAR" per scalar payload slot. When present, the
+    ``ORCHESTRATION`` dict gains a ``"signature"`` field so the runtime builds a non-empty ChipCallable
     signature, indexed by the orch tensor index in
     ``bind_callable_to_runtime_impl``. This lets read-only IN tensors skip the
     wasteful D2H copy-back and pure-OUT tensors take the on-device memset fast
-    path. Without it the signature is empty and every tensor is conservatively
+    path. The scalar suffix also supplies Kernel invocation admission counts.
+    Without it the signature is empty and every tensor is conservatively
     copied back (the pre-existing behavior).
 
     ``func_name_to_external_include_dirs`` maps external kernel names to their

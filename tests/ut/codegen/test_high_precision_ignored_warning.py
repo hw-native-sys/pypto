@@ -12,7 +12,7 @@
 The request survives every layer below the DSL: PyPTO writes ``precisionType``
 into the PTO IR and PTOAS keeps it as a ``HIGH_PRECISION`` template argument.
 Only PTO-ISA decides whether to read it, and Ascend910's ``TDIV_IMPL`` /
-``TLOG_IMPL`` / ``TREM_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
+``TLOG_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
 without ever branching on it — the op computes the default result and nothing
 downstream says so. Ascend950 selects a separate compensated algorithm.
 
@@ -25,6 +25,8 @@ the backend that ignores it.
 ``high_precision=True`` flag requires scratch and emits the selector for A5;
 Ascend910 honours the request through its scratch overload, so it must stay
 silent even though that backend ignores the selector itself.
+The pinned A2/A3 TREM now implements its selector and validates a larger
+workspace; its silent precision path is covered by the remainder codegen tests.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.

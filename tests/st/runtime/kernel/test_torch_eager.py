@@ -13,6 +13,7 @@ Run with --platform=a2a3 and a built optional pypto._torch_npu adapter.
 The codegen smoke test also runs without an NPU; execution cases skip there.
 """
 
+import atexit
 import importlib.util
 import os
 import subprocess
@@ -25,6 +26,7 @@ import pypto.torch
 import pytest
 import torch
 from pypto.pypto_core import passes
+from pypto.runtime.kernel.context import KernelState, get_process_kernel_state
 
 _RUNTIME_KINDS = {
     "tensormap_and_ringbuffer": passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
@@ -91,6 +93,20 @@ _CASES = {
 
 
 def _run_eager_case(case: str, device: int, runtime: str, stream_kind: str) -> None:
+    state = get_process_kernel_state()
+
+    def require_safe_shutdown():
+        if state.state is KernelState.UNINITIALIZED:
+            return
+        if state.state is not KernelState.CLOSED:
+            print(f"Kernel shutdown left state {state.state.value}", file=sys.stderr, flush=True)
+            # Exceptions in atexit callbacks do not fail a Python process.
+            os._exit(1)
+        print("PYPTO_KERNEL_SHUTDOWN_PASS", flush=True)
+
+    # Register before torch_npu so its automatic shutdown runs before this
+    # observer. Child backend autoload is disabled below to preserve that order.
+    atexit.register(require_safe_shutdown)
     # Initialize only in the fresh child: other STs must not claim its mode.
     torch_npu = importlib.import_module("torch_npu")
 
@@ -129,6 +145,8 @@ def eager_npu(test_config):
 @pytest.mark.parametrize("case", list(_CASES))
 def test_torch_eager_execution(eager_npu, runtime, stream_kind, case, task_queue):
     # exec a fresh interpreter rather than fork an already initialized runtime.
+    root = Path(__file__).resolve().parents[4]
+    python_paths = [root / "python", root / "runtime" / "python", root / "runtime"]
     script = (
         "import runpy, sys; "
         "namespace = runpy.run_path(sys.argv[1]); "
@@ -147,9 +165,13 @@ def test_torch_eager_execution(eager_npu, runtime, stream_kind, case, task_queue
         ],
         env={
             **os.environ,
-            # Preserve paths supplied by the ST harness, including the runtime submodule.
-            "PYTHONPATH": os.pathsep.join(sys.path),
+            # Forward project imports, not this interpreter's standard library.
+            # PTOAS may use another Python version and inherits this environment.
+            "PYTHONPATH": os.pathsep.join(
+                [str(path) for path in python_paths if path.is_dir()] + [os.environ.get("PYTHONPATH", "")]
+            ),
             "TASK_QUEUE_ENABLE": task_queue,
+            "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
             "ASCEND_LAUNCH_BLOCKING": "0",
             "PYTHONOPTIMIZE": "0",  # Keep child assertions enabled outside pytest's rewriting.
         },
@@ -161,6 +183,7 @@ def test_torch_eager_execution(eager_npu, runtime, stream_kind, case, task_queue
     if result.returncode == 77:
         pytest.skip("torch_npu reports no available NPU in the child process")
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "PYPTO_KERNEL_SHUTDOWN_PASS" in result.stdout, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("runtime", list(_RUNTIME_KINDS))

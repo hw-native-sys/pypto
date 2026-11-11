@@ -66,6 +66,10 @@ Torch adapter 通过公开 Worker 接口提交 `TaskArgs`，使用 `Buffer.wrap`
 typed scalar 接口传入，由 Simpler 完成 ABI 编码。
 `ScalarArgument` 仅保留校验后的值和 dtype，不执行编码。
 
+Orchestration 的 `ChipCallable` 签名先列 Tensor 方向，再为每个 Scalar payload
+槽位追加一个 `SCALAR`。这保留 Program 的 Tensor 索引，同时提供 native Kernel
+调用准入所需的两类参数数量。叶子 `CoreCallable` 注册仍只记录 Tensor 方向。
+
 Runtime 能力检查在显式 Torch kernel 初始化时执行。生命周期层支持 Worker 初始化和
 callable 注册及 eager 提交；公开算子注册和 DFX 窗口留待后续迁移。
 
