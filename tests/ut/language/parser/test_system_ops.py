@@ -134,7 +134,10 @@ class TestSystemOpsParsing:
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
-    @pytest.mark.parametrize("pipe", [pl.PipeType.V, pl.PipeType.M, pl.PipeType.ALL])
+    @pytest.mark.parametrize(
+        "pipe",
+        [pl.PipeType.V, pl.PipeType.M, pl.PipeType.MTE2, pl.PipeType.MTE3, pl.PipeType.ALL],
+    )
     def test_barrier_round_trip(self, pipe):
         """The unified spelling round-trips without changing the barrier IR."""
 
@@ -149,7 +152,10 @@ class TestSystemOpsParsing:
         assert f"pl.system.barrier(pipe=pl.PipeType.{pipe.name})" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
-    @pytest.mark.parametrize("pipe", [pl.PipeType.V, pl.PipeType.M, pl.PipeType.ALL])
+    @pytest.mark.parametrize(
+        "pipe",
+        [pl.PipeType.V, pl.PipeType.M, pl.PipeType.MTE2, pl.PipeType.MTE3, pl.PipeType.ALL],
+    )
     def test_barrier_printer_respects_custom_prefix(self, pipe):
         """Both the canonical operation and its pipe enum use the requested alias."""
         call = system_ops.barrier(pipe=pipe)
@@ -161,6 +167,8 @@ class TestSystemOpsParsing:
         [
             (pl.PipeType.V, "system.bar_v"),
             (pl.PipeType.M, "system.bar_m"),
+            (pl.PipeType.MTE2, "system.bar_mte2"),
+            (pl.PipeType.MTE3, "system.bar_mte3"),
             (pl.PipeType.ALL, "system.bar_all"),
         ],
     )
@@ -207,11 +215,13 @@ class TestSystemOpsParsing:
             barrier_api(pipe=pipe)
 
     @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
-    @pytest.mark.parametrize(
-        "pipe", [pl.PipeType.MTE1, pl.PipeType.MTE2, pl.PipeType.MTE3, pl.PipeType.S, pl.PipeType.FIX]
-    )
+    @pytest.mark.parametrize("pipe", [pl.PipeType.MTE1, pl.PipeType.S, pl.PipeType.FIX])
     def test_barrier_rejects_unsupported_pipe(self, barrier_api, pipe):
-        with pytest.raises(ValueError, match=r"PipeType\.V.*PipeType\.M.*PipeType\.ALL"):
+        """Only the pipes with a registered system.bar_* operator are accepted."""
+        with pytest.raises(
+            ValueError,
+            match=r"PipeType\.V.*PipeType\.M.*PipeType\.MTE2.*PipeType\.MTE3.*PipeType\.ALL",
+        ):
             barrier_api(pipe=pipe)
 
     @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
@@ -221,7 +231,7 @@ class TestSystemOpsParsing:
         with pytest.raises(TypeError, match="positional"):
             barrier_api(pl.PipeType.V)
 
-    @pytest.mark.parametrize("pipe", ["V", "M", "ALL"])
+    @pytest.mark.parametrize("pipe", ["V", "M", "MTE2", "MTE3", "ALL"])
     def test_barrier_compiler_attrs_round_trip(self, pipe):
         """Canonical barrier printing preserves attrs attached by compiler passes."""
         source = f"""
@@ -240,7 +250,7 @@ class Before:
         assert f'pl.system.barrier(pipe=pl.PipeType.{pipe}, attrs={{"barrier_marker": 7}})' in printed
         ir.assert_structural_equal(before, pl.parse_program(printed))
 
-    @pytest.mark.parametrize("name", ["bar_v", "bar_m", "bar_all"])
+    @pytest.mark.parametrize("name", ["bar_v", "bar_m", "bar_mte2", "bar_mte3", "bar_all"])
     def test_removed_barrier_names(self, name):
         """Only the parameterized barrier API is exposed at either Python layer."""
         assert not hasattr(pl.system, name)

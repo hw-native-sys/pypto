@@ -1455,6 +1455,8 @@ def _register_ops() -> None:  # noqa: PLR0915
         "system.set_ffts",
         "system.bar_v",
         "system.bar_m",
+        "system.bar_mte2",
+        "system.bar_mte3",
         "system.bar_all",
         "system.fence",
         "system.cacheinvalid",

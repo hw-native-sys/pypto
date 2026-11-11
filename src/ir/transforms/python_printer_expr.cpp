@@ -619,10 +619,15 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // spelling for noncanonical calls rather than silently dropping metadata.
   const char* barrier_pipe = nullptr;
   if (op->args_.empty() && op->kwargs_.empty()) {
+    // Each arm names the PipeType member `pl.system.barrier` takes to build this op.
     if (IsOp(op, "system.bar_v")) {
       barrier_pipe = "V";
     } else if (IsOp(op, "system.bar_m")) {
       barrier_pipe = "M";
+    } else if (IsOp(op, "system.bar_mte2")) {
+      barrier_pipe = "MTE2";
+    } else if (IsOp(op, "system.bar_mte3")) {
+      barrier_pipe = "MTE3";
     } else if (IsOp(op, "system.bar_all")) {
       barrier_pipe = "ALL";
     }

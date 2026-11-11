@@ -150,6 +150,22 @@ REGISTER_OP("system.bar_m")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
+// Register system.bar_mte2 (MTE2 Barrier)
+// Attributes: None
+REGISTER_OP("system.bar_mte2")
+    .set_description("MTE2 (GM -> UB load) pipeline barrier")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .f_deduce_type(DeduceUnknownType);
+
+// Register system.bar_mte3 (MTE3 Barrier)
+// Attributes: None
+REGISTER_OP("system.bar_mte3")
+    .set_description("MTE3 (UB -> GM store) pipeline barrier")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .f_deduce_type(DeduceUnknownType);
+
 // Register system.bar_all (Global Barrier)
 // Attributes: None
 REGISTER_OP("system.bar_all")

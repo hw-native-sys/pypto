@@ -383,6 +383,8 @@ pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=
 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 pl.system.barrier(pipe=pl.PipeType.V)     # Vector pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.M)     # Matrix pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.MTE2)  # GM -> UB load pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.MTE3)  # UB -> GM store pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.ALL)   # All pipelines on the current core
 
 # Cross-core operations (TPUSH/TPOP protocol)
@@ -405,7 +407,8 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
 
-`pl.system.barrier(*, pipe)` requires a `pl.PipeType.V`, `M`, or `ALL` member.
+`pl.system.barrier(*, pipe)` requires a `pl.PipeType.V`, `M`, `MTE2`, `MTE3`,
+or `ALL` member.
 It orders preceding and following work on the selected pipeline(s), without
 using an event slot. `ALL` covers the current core, not other cores; use
 `pl.system.syncall(...)` for a cross-core barrier. The old `bar_v()`,
