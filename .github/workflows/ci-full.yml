@@ -2530,7 +2530,9 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-a5
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
-          runtime-targets: build_package_a5
+          # Match onboard-tests-a5 and daily A5 CI so this lane can reuse their
+          # runtime wheel; the exact target list is part of the cache key.
+          runtime-targets: build_package_a5;build_package_sim
           # Keep runner-specific ring settings out of this job's environment.
           unset-ring: 'true'
           toolchain: bundle
