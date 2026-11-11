@@ -1100,7 +1100,7 @@ using ExprBinding = std::unordered_map<const Var*, ExprPtr>;
 ///
 /// Declared ahead of ``ResolveThroughBinding`` (rather than beside its
 /// collector below) so endpoint resolution can look a ``GlobalVar`` callee's
-/// ``Function`` up by name -- see ``UserCallAliasedArgIndex``.
+/// ``Function`` up by name -- see ``CallLikeAliasedArgIndex``.
 struct FunctionIndex {
   FunctionPtr func;
   ExprBinding local_binding;
@@ -1140,34 +1140,62 @@ struct AsyncCheckContext {
   return it->second;
 }
 
-/// Aliased-parameter index for one declared return position of a call to a
-/// user-defined function (a ``GlobalVar`` callee, which ``ResultAliasedArgIndex``
-/// never matches: it only looks up registered operators via ``LookupOpEntry``).
-/// @p position selects which declared return slot to consult: 0 for a direct
-/// (non-tuple) result, or a ``TupleGetItemExpr`` index for a multi-result callee.
+/// Aliased-parameter index for one declared return position of a call-like
+/// node (``Call`` or ``Submit``) whose callee is a user-defined function (a
+/// ``GlobalVar``, which ``ResultAliasedArgIndex`` never matches: it only looks
+/// up registered operators via ``LookupOpEntry``). @p position selects which
+/// declared return slot to consult: 0 for a direct (non-tuple) result, or a
+/// ``TupleGetItemExpr`` index for a multi-result callee.
 ///
-/// This is deliberately best-effort: when the callee's ``Function`` is not
-/// indexed, its return contract is not yet explicit (``ReturnParamsExplicit``
-/// has not been established for it), or the selected position is not a plain
-/// parameter writeback, this reports "unknown" rather than guessing. The
-/// endpoint check then silently skips, exactly as it did before this helper
-/// existed -- it can only improve coverage, never introduce a false positive.
-[[nodiscard]] std::optional<size_t> UserCallAliasedArgIndex(const CallPtr& call, size_t position,
-                                                            AsyncCheckContext& ctx) {
-  if (!call || !call->op_) return std::nullopt;
-  auto gvar = As<GlobalVar>(call->op_);
+/// @p args maps to the callee's ``params_`` by position identity only while
+/// coverage is full (``args.size() == params_.size()``) -- guaranteed for
+/// ``Call``, but only sometimes true for ``Submit``: a trailing ``pl.Out``
+/// param the caller never supplies (accepted straight from user source, see
+/// ``Submit::args_`` in ``include/pypto/ir/expr.h``) or a later-materialized
+/// CommCtx suffix both shift the identity mapping by a gap
+/// (``pass-submit-awareness.md`` rule 5). Rather than re-deriving that
+/// mapping here, this declines (returns nullopt) whenever coverage isn't
+/// full -- best-effort like the rest of this resolver: it can only improve
+/// coverage, never read the wrong argument.
+[[nodiscard]] std::optional<size_t> CallLikeAliasedArgIndex(const OpPtr& op, const std::vector<ExprPtr>& args,
+                                                            size_t position, AsyncCheckContext& ctx) {
+  if (!op) return std::nullopt;
+  auto gvar = As<GlobalVar>(op);
   if (!gvar) return std::nullopt;
   auto it = ctx.indices.find(gvar->name_);
   if (it == ctx.indices.end() || !it->second.func) return std::nullopt;
-  const auto& returned = CachedExplicitReturnedParamIndices(it->second.func, ctx);
+  const auto& callee = it->second.func;
+  if (args.size() != callee->params_.size()) return std::nullopt;
+  const auto& returned = CachedExplicitReturnedParamIndices(callee, ctx);
   if (position >= returned.size()) return std::nullopt;
   // Bind the element once: indexing `returned[position]` again on a second line
   // reads a fresh vector element as far as the optional-access checker is
   // concerned, so re-subscripting after the guard trips
   // bugprone-unchecked-optional-access even though it is safe here.
   const std::optional<size_t>& param_index = returned[position];
-  if (!param_index || *param_index >= call->args_.size()) return std::nullopt;
+  if (!param_index || *param_index >= args.size()) return std::nullopt;
   return param_index;
+}
+
+/// Follow only the Var -> binding chain (no Call/Submit alias steps),
+/// stopping at the first non-Var expression; shares @p seen_vars with the
+/// caller so total visits stay bounded across one ``ResolveThroughBinding``
+/// run. Used to resolve a ``TupleGetItemExpr``'s tuple source down to the
+/// concrete ``MakeTuple``/``Call``/``Submit`` it names: the parser always
+/// binds a multi-result call's tuple to a temporary ``Var`` before projecting
+/// from it (``call_parser.py``'s ``submit_var``), so the tuple source as
+/// written is virtually always a bare ``Var``, never the producing
+/// expression inline.
+[[nodiscard]] ExprPtr ResolveVarChain(const ExprPtr& expr, const ExprBinding* outer, const ExprBinding* local,
+                                      std::unordered_set<const Var*>& seen_vars) {
+  ExprPtr cur = expr;
+  while (auto var = AsVarLike(cur)) {
+    if (!seen_vars.insert(var.get()).second) return cur;
+    const ExprPtr* bound = FindBinding(var.get(), outer, local);
+    if (!bound) return cur;
+    cur = *bound;
+  }
+  return cur;
 }
 
 /// Resolve through the function's indexed locals and the call site's parameter
@@ -1176,19 +1204,22 @@ struct AsyncCheckContext {
 ///
 /// Follows three kinds of rebind: a plain SSA/parameter binding (``outer`` /
 /// ``local``), a registered operator's declared result alias
-/// (``ResultAliasedArgIndex``, e.g. ``tensor.write``), and a user helper that
-/// returns one of its own parameters unchanged (``UserCallAliasedArgIndex``,
+/// (``ResultAliasedArgIndex``, e.g. ``tensor.write``), and a user helper --
+/// a ``Call`` or a ``Submit`` task launch (``pl.submit(...)``) alike -- that
+/// returns one of its own parameters unchanged (``CallLikeAliasedArgIndex``,
 /// including through a ``TupleGetItemExpr`` projection of a multi-result
-/// helper) -- for example ``filled = fill_src(..., src); get(filled, ...)``
-/// resolves ``filled`` back to ``src`` so the window-slot check below still
-/// applies. Each distinct Call/TupleGetItemExpr node is visited at most once
-/// per call (``seen_calls`` / ``seen_tuple_gets``) so a malformed cyclic chain
-/// cannot loop forever.
+/// helper, e.g. ``produced, _ = pl.submit(stage, dst)``) -- for example
+/// ``filled = fill_src(..., src); get(filled, ...)`` resolves ``filled`` back
+/// to ``src`` so the window-slot check below still applies. Each distinct
+/// Call/Submit/TupleGetItemExpr node is visited at most once per call
+/// (``seen_calls`` / ``seen_submits`` / ``seen_tuple_gets``) so a malformed
+/// cyclic chain cannot loop forever.
 [[nodiscard]] ExprPtr ResolveThroughBinding(const ExprPtr& expr, const ExprBinding* outer,
                                             const ExprBinding* local, AsyncCheckContext& ctx) {
   ExprPtr cur = expr;
   std::unordered_set<const Var*> seen_vars;
   std::unordered_set<const Call*> seen_calls;
+  std::unordered_set<const Submit*> seen_submits;
   std::unordered_set<const TupleGetItemExpr*> seen_tuple_gets;
   while (cur) {
     if (auto var = AsVarLike(cur)) {
@@ -1202,25 +1233,44 @@ struct AsyncCheckContext {
       if (!seen_tuple_gets.insert(tuple_get.get()).second) return cur;
       if (tuple_get->index_ < 0) return cur;
       const auto index = static_cast<size_t>(tuple_get->index_);
-      if (auto tuple = As<MakeTuple>(tuple_get->tuple_)) {
+      ExprPtr tuple_source = ResolveVarChain(tuple_get->tuple_, outer, local, seen_vars);
+      if (auto tuple = As<MakeTuple>(tuple_source)) {
         if (index >= tuple->elements_.size()) return cur;
         cur = tuple->elements_[index];
         continue;
       }
-      auto tuple_call = As<Call>(tuple_get->tuple_);
-      if (!tuple_call || !seen_calls.insert(tuple_call.get()).second) return cur;
-      auto aliased = UserCallAliasedArgIndex(tuple_call, index, ctx);
-      if (!aliased || *aliased >= tuple_call->args_.size()) return cur;
-      cur = tuple_call->args_[*aliased];
+      if (auto tuple_call = As<Call>(tuple_source)) {
+        if (!seen_calls.insert(tuple_call.get()).second) return cur;
+        auto aliased = CallLikeAliasedArgIndex(tuple_call->op_, tuple_call->args_, index, ctx);
+        if (!aliased || *aliased >= tuple_call->args_.size()) return cur;
+        cur = tuple_call->args_[*aliased];
+        continue;
+      }
+      if (auto tuple_submit = As<Submit>(tuple_source)) {
+        if (!seen_submits.insert(tuple_submit.get()).second) return cur;
+        auto aliased = CallLikeAliasedArgIndex(tuple_submit->op_, tuple_submit->args_, index, ctx);
+        if (!aliased || *aliased >= tuple_submit->args_.size()) return cur;
+        cur = tuple_submit->args_[*aliased];
+        continue;
+      }
+      return cur;
+    }
+    if (auto call = As<Call>(cur)) {
+      if (!seen_calls.insert(call.get()).second) return cur;
+      auto aliased = ResultAliasedArgIndex(call);
+      if (!aliased) aliased = CallLikeAliasedArgIndex(call->op_, call->args_, 0, ctx);
+      if (!aliased || *aliased >= call->args_.size()) return cur;
+      cur = call->args_[*aliased];
       continue;
     }
-    auto call = As<Call>(cur);
-    if (!call) return cur;
-    if (!seen_calls.insert(call.get()).second) return cur;
-    auto aliased = ResultAliasedArgIndex(call);
-    if (!aliased) aliased = UserCallAliasedArgIndex(call, 0, ctx);
-    if (!aliased || *aliased >= call->args_.size()) return cur;
-    cur = call->args_[*aliased];
+    if (auto submit = As<Submit>(cur)) {
+      if (!seen_submits.insert(submit.get()).second) return cur;
+      auto aliased = CallLikeAliasedArgIndex(submit->op_, submit->args_, 0, ctx);
+      if (!aliased || *aliased >= submit->args_.size()) return cur;
+      cur = submit->args_[*aliased];
+      continue;
+    }
+    return cur;
   }
   return cur;
 }
