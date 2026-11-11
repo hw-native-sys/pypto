@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize("has_suite", [False, True])
@@ -31,6 +31,8 @@ def test_distributed_job_routes_and_propagates_failure(
     checkout.mkdir()
     (checkout / "activate.sh").touch()
     if has_suite:
+        # Simulate a future test checkout; this file exists only under tmp_path.
+        # The recording task-submit below never executes its empty contents.
         suite = checkout / "tests/st/distributed/test_l3_urma_async.py"
         suite.parent.mkdir(parents=True)
         suite.touch()
