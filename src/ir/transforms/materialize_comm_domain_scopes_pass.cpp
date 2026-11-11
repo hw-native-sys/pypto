@@ -13,6 +13,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -23,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -41,6 +43,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -968,7 +971,16 @@ Pass MaterializeCommDomainScopes() {
 // asserts: (a) ``slots_`` is non-empty (an empty domain would emit
 // ``window_size=0`` and the runtime would reject it); (b) every slot is
 // non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
-// scope program-wide (cross-scope identity uniqueness).
+// scope program-wide (cross-scope identity uniqueness); (d) every static-size
+// async transfer fits both endpoint window slots.
+//
+// (d) is the IR-level half of the V1 byte-count contract. The op deducer cannot
+// perform it because ``DistributedTensorType::window_buffer_`` is still
+// ``nullopt`` when the type is deduced: the WindowBuffer and its ``size_`` are
+// materialized by this pass afterwards. Checking here, before codegen, keeps a
+// too-large transfer from reaching the adapter, whose ``comm->winSize`` check
+// remains as defense-in-depth. Dynamic transfer extents and symbolic window
+// sizes are runtime-bounded and skipped.
 // ============================================================================
 
 class CommDomainScopeCollector : public IRVisitor {
@@ -979,6 +991,319 @@ class CommDomainScopeCollector : public IRVisitor {
     if (op->body_) VisitStmt(op->body_);
   }
 };
+
+/// Returns ``product(shape) * dtype_bytes`` when every dimension is a positive
+/// static ``ConstInt`` and the product fits in ``int64_t``; ``nullopt`` for a
+/// dynamic or non-positive extent (runtime-bounded, not statically checkable).
+[[nodiscard]] std::optional<int64_t> StaticTransferBytes(const std::vector<ExprPtr>& shape,
+                                                         const DataType& dtype) {
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  int64_t elements = 1;
+  for (const auto& dim : shape) {
+    auto c = As<ConstInt>(dim);
+    if (!c || c->value_ <= 0) return std::nullopt;
+    if (elements > kMax / c->value_) return std::nullopt;
+    elements *= c->value_;
+  }
+  const auto dtype_bytes = static_cast<int64_t>(dtype.GetByte());
+  if (dtype_bytes <= 0 || elements > kMax / dtype_bytes) return std::nullopt;
+  return elements * dtype_bytes;
+}
+
+/// Byte range of one endpoint's transfer: the endpoint/view byte offset plus
+/// the region byte count. The offset matters because the adapter checks the
+/// concatenated communication-domain window, so a subregion starting late can
+/// spill into a following slot even when its own size fits.
+struct TransferRange {
+  int64_t offset_bytes;
+  int64_t nbytes;
+};
+
+/// Byte offset of a static dense row-major subregion, relative to its endpoint
+/// view. Returns nullopt for dynamic/non-positive dims or offsets.
+[[nodiscard]] std::optional<int64_t> StaticByteOffset(const ExprPtr& offsets,
+                                                      const std::vector<ExprPtr>& shape,
+                                                      const DataType& dtype) {
+  auto tuple = As<MakeTuple>(offsets);
+  if (!tuple || tuple->elements_.size() != shape.size()) return std::nullopt;
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  int64_t stride = 1;
+  int64_t linear = 0;
+  for (size_t i = shape.size(); i-- > 0;) {
+    auto dim = As<ConstInt>(shape[i]);
+    auto off = As<ConstInt>(tuple->elements_[i]);
+    if (!dim || dim->value_ <= 0 || !off || off->value_ < 0) return std::nullopt;
+    if (off->value_ != 0 && stride > kMax / off->value_) return std::nullopt;
+    const int64_t term = off->value_ * stride;
+    if (linear > kMax - term) return std::nullopt;
+    linear += term;
+    if (i > 0) {
+      if (stride > kMax / dim->value_) return std::nullopt;
+      stride *= dim->value_;
+    }
+  }
+  const auto dtype_bytes = static_cast<int64_t>(dtype.GetByte());
+  if (dtype_bytes <= 0 || linear > kMax / dtype_bytes) return std::nullopt;
+  return linear * dtype_bytes;
+}
+
+/// Byte range of one endpoint's transfer: use the `shape` region for the
+/// subregion form, or the endpoint's own shape for the full-slice form.
+[[nodiscard]] std::optional<TransferRange> EndpointTransferRange(const CallPtr& call, size_t arg_index,
+                                                                 const DistributedTensorTypePtr& type) {
+  std::optional<int64_t> nbytes;
+  std::optional<int64_t> offset = int64_t{0};
+  if (call->args_.size() == 6) {
+    auto region = As<MakeTuple>(call->args_[5]);
+    if (!region) return std::nullopt;
+    nbytes = StaticTransferBytes(region->elements_, type->dtype_);
+    const size_t offsets_index = arg_index == 0 ? 3 : 4;
+    if (call->args_.size() <= offsets_index) return std::nullopt;
+    offset = StaticByteOffset(call->args_[offsets_index], type->shape_, type->dtype_);
+  } else if (call->args_.size() == 3) {
+    nbytes = StaticTransferBytes(type->shape_, type->dtype_);
+  } else {
+    return std::nullopt;
+  }
+  if (!nbytes || !offset) return std::nullopt;
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  if (*offset > kMax - *nbytes) return std::nullopt;
+  return TransferRange{*offset, *nbytes};
+}
+
+/// Parameter binding for one call site: callee param -> caller-side expression,
+/// already resolved through the caller's own binding. The async op lives in an
+/// InCore kernel, so its endpoint types do not carry a ``WindowBuffer``; only
+/// the host_orch view passed down the call chain does. Following the binding is
+/// what makes the byte-count check possible without a new type-propagation pass.
+using ExprBinding = std::unordered_map<const Var*, ExprPtr>;
+
+/// Locals shadow the incoming parameters (their keys are disjoint, but checking
+/// the smaller local map first is also the cheaper order).
+[[nodiscard]] const ExprPtr* FindBinding(const Var* var, const ExprBinding* outer, const ExprBinding* local) {
+  if (local) {
+    auto it = local->find(var);
+    if (it != local->end()) return &it->second;
+  }
+  if (outer) {
+    auto it = outer->find(var);
+    if (it != outer->end()) return &it->second;
+  }
+  return nullptr;
+}
+
+/// Resolve through the function's indexed locals and the call site's parameter
+/// bindings. Both maps are borrowed so a call site never copies the callee's
+/// whole local map; a kernel with no async calls costs O(1) per invocation.
+[[nodiscard]] ExprPtr ResolveThroughBinding(const ExprPtr& expr, const ExprBinding* outer,
+                                            const ExprBinding* local) {
+  ExprPtr cur = expr;
+  std::unordered_set<const Var*> seen_vars;
+  std::unordered_set<const Call*> seen_calls;
+  while (cur) {
+    if (auto var = AsVarLike(cur)) {
+      if (!seen_vars.insert(var.get()).second) return cur;
+      const ExprPtr* bound = FindBinding(var.get(), outer, local);
+      if (!bound) return cur;
+      cur = *bound;
+      continue;
+    }
+    auto call = As<Call>(cur);
+    if (!call) return cur;
+    if (!seen_calls.insert(call.get()).second) return cur;
+    auto aliased = ResultAliasedArgIndex(call);
+    if (!aliased || *aliased >= call->args_.size()) return cur;
+    cur = call->args_[*aliased];
+  }
+  return cur;
+}
+
+/// Resolve one async endpoint to its caller-side expression and, when both the
+/// resolved type carries a ``WindowBuffer`` and the transfer/window sizes are
+/// static, compare the endpoint's byte range with the window slot.
+void CheckAsyncEndpoint(const CallPtr& call, size_t arg_index, const ExprBinding* outer,
+                        const ExprBinding* local, const std::string& op_name,
+                        std::vector<Diagnostic>& diagnostics) {
+  auto resolved = ResolveThroughBinding(call->args_[arg_index], outer, local);
+  auto type = As<DistributedTensorType>(resolved->GetType());
+  if (!type || !type->window_buffer_) return;
+  auto range = EndpointTransferRange(call, arg_index, type);
+  if (!range) return;
+  const auto& window = *type->window_buffer_;
+  auto window_bytes = As<ConstInt>(window->size_);
+  if (!window_bytes || window_bytes->value_ < 0) return;
+  const int64_t end = range->offset_bytes + range->nbytes;
+  if (end > window_bytes->value_) {
+    std::string size = " transfer of " + std::to_string(range->nbytes) + " bytes";
+    if (range->offset_bytes != 0) {
+      size += " at offset " + std::to_string(range->offset_bytes) + " bytes";
+    }
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
+                             op_name + (arg_index == 0 ? " dst" : " src") + size + " exceeds window slot '" +
+                                 window->name_hint_ + "' of " + std::to_string(window_bytes->value_) +
+                                 " bytes",
+                             call->span_);
+  }
+}
+
+/// Terminating yield of a loop body. The SSA form puts a single ``YieldStmt`` at
+/// the end of the body (possibly nested in ``SeqStmts``); it carries the values
+/// that become the loop's return variables.
+[[nodiscard]] YieldStmtPtr FindBodyYield(const StmtPtr& stmt) {
+  if (!stmt) return nullptr;
+  if (auto yield = As<YieldStmt>(stmt)) return yield;
+  auto seq = As<SeqStmts>(stmt);
+  if (!seq || seq->stmts_.empty()) return nullptr;
+  return FindBodyYield(seq->stmts_.back());
+}
+
+/// Record the SSA loop carries: an ``IterArg`` starts at its init value and a
+/// loop return variable holds the value yielded by the body. Resolving the
+/// yielded value follows the aliased argument of a carried ``store`` back to the
+/// init value, which is enough to type-check an endpoint because a loop cannot
+/// change a buffer's window slot.
+void CollectLoopBindings(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars,
+                         const StmtPtr& body, ExprBinding& binding) {
+  auto yield = FindBodyYield(body);
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    const auto& iter_arg = iter_args[i];
+    if (!iter_arg) continue;
+    if (iter_arg->initValue_) binding[iter_arg.get()] = iter_arg->initValue_;
+    if (i >= return_vars.size() || !return_vars[i]) continue;
+    ExprPtr carried = iter_arg;
+    if (yield && i < yield->value_.size() && yield->value_[i]) carried = yield->value_[i];
+    binding[return_vars[i].get()] = std::move(carried);
+  }
+}
+
+/// The async-transfer-relevant slice of one function: its SSA-local bindings,
+/// its async calls and its call sites. Collecting the slice once per function
+/// keeps a callee shared by many call sites from being rewalked for each of
+/// them; only the cheap call-site expansion is repeated per incoming binding.
+struct FunctionIndex {
+  FunctionPtr func;
+  ExprBinding local_binding;
+  std::vector<std::pair<CallPtr, std::string>> async_calls;
+  std::vector<std::pair<GlobalVarPtr, std::vector<ExprPtr>>> call_sites;
+};
+
+using FunctionIndexMap = std::unordered_map<std::string, FunctionIndex>;
+
+class FunctionIndexCollector : public IRVisitor {
+ public:
+  explicit FunctionIndexCollector(FunctionIndex& index) : index_(index) {}
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (op && op->op_) {
+      if (IsOp(op, "pld.tensor.put_async")) {
+        index_.async_calls.emplace_back(op, "pld.tensor.put_async");
+      } else if (IsOp(op, "pld.tensor.get_async")) {
+        index_.async_calls.emplace_back(op, "pld.tensor.get_async");
+      } else if (auto gvar = As<GlobalVar>(op->op_)) {
+        index_.call_sites.emplace_back(gvar, op->args_);
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    if (op && op->op_) {
+      if (auto gvar = As<GlobalVar>(op->op_)) index_.call_sites.emplace_back(gvar, op->args_);
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op && op->var_ && op->value_) index_.local_binding[op->var_.get()] = op->value_;
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (op) CollectLoopBindings(op->iter_args_, op->return_vars_, op->body_, index_.local_binding);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    if (op) CollectLoopBindings(op->iter_args_, op->return_vars_, op->body_, index_.local_binding);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  FunctionIndex& index_;
+};
+
+[[nodiscard]] FunctionIndexMap BuildFunctionIndices(const ProgramPtr& program) {
+  FunctionIndexMap indices;
+  for (const auto& entry : program->functions_) {
+    const auto& func = entry.second;
+    if (!func || !func->body_) continue;
+    FunctionIndex index;
+    index.func = func;
+    FunctionIndexCollector collector(index);
+    collector.VisitStmt(func->body_);
+    indices.emplace(func->name_, std::move(index));
+  }
+  return indices;
+}
+
+/// Check one function against an incoming parameter binding and recurse into
+/// its call sites. The statement walk already happened in
+/// ``BuildFunctionIndices``; the function's indexed locals stay in their own map
+/// and are consulted first during resolution, so no per-invocation copy of the
+/// local map is made. Call sites are expanded per binding because the
+/// caller-side window type is what makes the check possible. ``active`` is the
+/// current call stack (cycle guard).
+void CheckAsyncTransfersInFunction(const FunctionPtr& func, const ExprBinding& binding,
+                                   const FunctionIndexMap& indices, std::unordered_set<std::string>& active,
+                                   std::vector<Diagnostic>& diagnostics) {
+  if (!func || !func->body_) return;
+  auto index_it = indices.find(func->name_);
+  if (index_it == indices.end()) return;
+  if (!active.insert(func->name_).second) return;
+  const FunctionIndex& index = index_it->second;
+
+  // The indexed locals (SSA assignments and loop carries) are borrowed, not
+  // merged into a fresh map per call site; resolution checks them before the
+  // incoming parameter binding.
+  for (const auto& [call, op_name] : index.async_calls) {
+    CheckAsyncEndpoint(call, 0, &binding, &index.local_binding, op_name, diagnostics);
+    CheckAsyncEndpoint(call, 2, &binding, &index.local_binding, op_name, diagnostics);
+  }
+
+  for (const auto& [callee_gvar, args] : index.call_sites) {
+    auto callee_it = indices.find(callee_gvar->name_);
+    if (callee_it == indices.end()) continue;
+    const auto& callee = callee_it->second.func;
+    ExprBinding callee_binding;
+    const size_t bound = std::min(callee->params_.size(), args.size());
+    for (size_t i = 0; i < bound; ++i) {
+      callee_binding[callee->params_[i].get()] =
+          ResolveThroughBinding(args[i], &binding, &index.local_binding);
+    }
+    CheckAsyncTransfersInFunction(callee, callee_binding, indices, active, diagnostics);
+  }
+
+  active.erase(func->name_);
+}
+
+/// (d) Check each static-size async transfer against both endpoint window slots.
+/// Index every function once, then start only at functions that are not callees
+/// (host entries and standalone device kernels); starting at every function
+/// would rewalk each call-chain suffix and make the verifier O(N^2) on the program.
+void CheckAsyncTransferWindowBounds(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
+  auto indices = BuildFunctionIndices(program);
+  std::unordered_set<std::string> callees;
+  for (const auto& entry : indices) {
+    for (const auto& site : entry.second.call_sites) callees.insert(site.first->name_);
+  }
+  for (const auto& entry : program->functions_) {
+    const auto& func = entry.second;
+    if (!func || callees.count(func->name_)) continue;
+    ExprBinding empty;
+    std::unordered_set<std::string> active;
+    CheckAsyncTransfersInFunction(func, empty, indices, active, diagnostics);
+  }
+}
 
 class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier {
  public:
@@ -1022,6 +1347,7 @@ class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier
         }
       }
     }
+    CheckAsyncTransferWindowBounds(program, diagnostics);
   }
 };
 
