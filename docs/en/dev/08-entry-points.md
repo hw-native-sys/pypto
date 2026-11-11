@@ -29,7 +29,7 @@ into loadable binaries. It is internal and has no supported entry point.
 
 | You have | You want | Use |
 | -------- | -------- | --- |
-| A `@pl.jit` kernel and torch tensors | The result | `kernel(*args, config=...)` |
+| A `@pl.jit` kernel and NPU tensors | Eager enqueue | `pypto.torch.init()` then `kernel(*args, config=...)` |
 | A `@pl.jit` kernel | The artifact, to dispatch repeatedly | `kernel.compile(*args, config=...)` |
 | A `@pl.jit` kernel | The IR, without codegen | `kernel.lower(*args)` |
 | A `@pl.program` class | The artifact | `ir.compile(program, ...)` |
@@ -39,11 +39,21 @@ into loadable binaries. It is internal and has no supported entry point.
 | A build directory on disk | One dispatch, no recompile | `CompiledProgram.from_dir(work_dir)(*args, config=...)` |
 | A `CompiledProgram` | Timed dispatches | `benchmark(compiled, args, ...)` |
 
-## Internal torch adaptation
+## Torch eager execution
 
-The [kernel-mode integration foundation](runtime/kernel-mode.md) validates NPU
-metadata and captures per-call frames. It does not change the public entry
-points above or provide a kernel launch interface.
+Direct `kernel(*args, config=CompileOptions(...))` requires successful
+`pypto.torch.init()` before binding or compilation and enqueues onto the current
+Torch NPU stream. All Out/InOut buffers must be supplied; return values alias
+caller tensors. Omitting config selects onboard compilation. `RunConfig` is not
+accepted by direct calls; process initialization owns runtime settings.
+
+`kernel.compile(..., config=RunConfig(...))` retains program semantics and needs
+no kernel initialization. Use its returned `CompiledProgram` for explicit program
+execution, including host tensors, simulation or distributed execution. PROGRAM
+and KERNEL share the compiler/cache implementation but have distinct capability
+keys. Capture/replay is unsupported even after warmup. See
+[Torch eager kernel execution](runtime/kernel-mode.md) for queue ordering,
+resource lifetime and verification boundaries.
 
 ## Compile
 

@@ -35,7 +35,8 @@ struct OrchestrationResult {
   std::string code;
   std::vector<KernelRegistration> kernel_registrations;
   /// Orchestration entry's per-tensor runtime ArgDirection names ("IN"/"OUT"/
-  /// "INOUT"), in orch_args tensor order (declaration order, scalars skipped).
+  /// "INOUT"), in orch_args tensor order, followed by one "SCALAR" per scalar
+  /// payload slot. Kernel admission uses both counts.
   /// This matches the orch tensor index the runtime uses in
   /// bind_callable_to_runtime_impl (orch_args.tensor(i)), letting it set the
   /// ChipCallable signature so read-only IN tensors skip the D2H copy-back and

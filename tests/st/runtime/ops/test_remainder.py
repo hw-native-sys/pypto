@@ -15,10 +15,9 @@ current pinned PTO-ISA contract:
 
 * TREM/TREMS: FP32 and INT32;
 * TFMOD/TFMODS: FP32;
-* TREM uses a same-dtype scratch tile with two valid rows;
-* TREMS uses a same-dtype scratch tile with one valid row.
-* TREM/TFMOD cover default and ``high_precision`` PTOAS attributes; A2/A3
-  accepts but ignores the high-precision selection, as specified by PTO-ISA.
+* TREM/TREMS scratch includes the candidate, packed mask and address buffer;
+  FP32 high-precision TREM additionally needs the digit-peeling workspace.
+* TREM/TFMOD cover default and ``high_precision`` PTOAS attributes.
 * For A2/A3 INT32 TREM/TREMS, every source element and scalar must stay in
   the inclusive PTO-ISA domain ``[-2**24, 2**24]``.
 * INT32 TREM/TREMS store their source tiles again after the instruction to
@@ -109,6 +108,9 @@ def _make_program(
 ):
     pl_dtype = _PL_DT[dtype]
     valid = list(valid_shape)
+    # The N=64 default path needs 64+8+8 columns. The HP TREM cap=1
+    # path needs 192+8+8+64 columns, even for a column-tail input.
+    scratch_cols = 272 if high_precision else 80
 
     if op_name == "rem":
         if dtype == DataType.INT32:
@@ -130,8 +132,8 @@ def _make_program(
                 ]:
                     lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
                     rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shape=valid)
-                    tmp: pl.Tile[[2, N], pl_dtype] = pl.tile.create(
-                        [2, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, scratch_cols], pl_dtype] = pl.tile.create(
+                        [2, scratch_cols], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     out = pl.store(result, [0, 0], out)
@@ -169,8 +171,8 @@ def _make_program(
             ) -> pl.Tensor[[M, N], pl_dtype]:
                 lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
                 rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shape=valid)
-                tmp: pl.Tile[[2, N], pl_dtype] = pl.tile.create(
-                    [2, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[2, scratch_cols], pl_dtype] = pl.tile.create(
+                    [2, scratch_cols], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                 )
                 result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                 return pl.store(result, [0, 0], out)
@@ -201,8 +203,8 @@ def _make_program(
                     lhs_after: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
                 ) -> tuple[pl.Tensor[[M, N], pl_dtype], pl.Tensor[[M, N], pl_dtype]]:
                     lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
-                    tmp: pl.Tile[[1, N], pl_dtype] = pl.tile.create(
-                        [1, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[1, scratch_cols], pl_dtype] = pl.tile.create(
+                        [1, scratch_cols], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rems(lhs_tile, scalar, tmp)
                     out = pl.store(result, [0, 0], out)
@@ -230,8 +232,8 @@ def _make_program(
                 out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
             ) -> pl.Tensor[[M, N], pl_dtype]:
                 lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
-                tmp: pl.Tile[[1, N], pl_dtype] = pl.tile.create(
-                    [1, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[1, scratch_cols], pl_dtype] = pl.tile.create(
+                    [1, scratch_cols], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                 )
                 result = pl.tile.rems(lhs_tile, scalar, tmp)
                 return pl.store(result, [0, 0], out)

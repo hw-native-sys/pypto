@@ -48,7 +48,8 @@ def test_flags_order_load_compute_store_on_device(test_config, tmp_path):
     x = torch.randn(ROWS, COLS, dtype=torch.float32)
     out = torch.zeros_like(x)
 
-    explicit_flags_double(x, out, config=config)
+    compiled = explicit_flags_double.compile(x, out, config=config)
+    compiled(x, out, config=config)
 
     assert torch.equal(out, x + x)
     pto_sources = [path.read_text() for path in tmp_path.rglob("*.pto")]

@@ -8,9 +8,18 @@
 
 ## 概念
 
-`CompiledProgram` 是一个句柄：指向编译产物，外加运行时启动它们所需的元数据。`ChipWorker` 持有设备连接与那些注册；派发要么是隐式的 —— 在 `@pl.jit` 函数上直接 `kernel(*args)` —— 要么是显式的，经由 worker，适用于库代码需要把 worker 传来传去、或服务化运行时想预注册许多 kernel 的场合。
+`CompiledProgram` 是一个句柄：指向编译产物，外加运行时启动它们所需的元数据。
+`ChipWorker` 持有设备连接与注册。program 执行先通过
+`compiled = kernel.compile(*args, config=cfg)` 取得句柄，再调用
+`compiled(*args, config=cfg)`；库代码需要显式 worker 或服务化运行时预注册 kernel 时，
+也可以使用 `worker.run(compiled, *args)`。
 
-早点搞清楚的一件事是：每次 launch 有什么东西跨过了 PCIe。默认每个张量实参都会 H2D 拷进去、再 D2H 拷回来。`DeviceTensor` 让一块 buffer 同时免掉这两次拷贝 —— 常驻权重或 KV cache 能成立，靠的就是它。
+program 执行按参数方向传输主机 Tensor；`DeviceTensor` 跳过这些传输，使常驻权重和
+KV cache 成为可能。直接 `kernel(*args)` 使用独立的 eager 路径：要求先调用
+`pypto.torch.init()` 并传入真实 NPU Tensor，在当前 Torch stream 上借用其 storage，
+使用 KERNEL 契约/缓存，与 `.compile()` 的 PROGRAM 契约/缓存分开。
+它不提供主机 Tensor 或模拟器的 program 派发。eager 前置条件见
+[kernel 模式](../../dev/runtime/kernel-mode.md)。
 
 ## 快速上手：把权重留在设备上
 
@@ -123,7 +132,7 @@ finally:
 | 现象 | 原因 | 修法 |
 | ---- | ---- | ---- |
 | **worker 在首次派发前就拒绝该程序** | 产物的 `platform` 与 worker 不一致 | 用你要派发的平台去编译 |
-| **`missing inferred tensor metadata for parameter`** | 把 `DeviceTensor` 传给了 `@pl.jit` 入口 | 派发**已编译**的程序；特化器读不到它的 shape/dtype |
+| **JIT 入口拒绝 `DeviceTensor`** | eager 调用要求真实 Torch NPU Tensor；`.compile()` 无法从 `DeviceTensor` 推断 shape/dtype | 使用主机 metadata 样本或完整注解编译，再派发已编译的 program |
 | **设备内存随 launch 增长** | `DeviceTensor` 没释放 | `free_tensor`，或用 `with` 圈住 worker |
 | **派发不给 host/device 拆分** | `execution_time` 是整段墙上时间 | 用 `pypto.runtime.benchmark` 取 `device_wall_us` / `host_wall_us` |
 

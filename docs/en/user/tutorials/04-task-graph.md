@@ -50,7 +50,8 @@ torch.manual_seed(0)
 x = torch.randn(128, 128)
 scratch = torch.zeros(128, 128)
 out = torch.zeros(128, 128)
-inferred(x, scratch, out, config=RunConfig(platform="a2a3sim"))
+compiled = inferred.compile(x, scratch, out, config=RunConfig(platform="a2a3sim"))
+compiled(x, scratch, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, (x + x) + (x + x), rtol=1e-5, atol=1e-5)
 ```
 

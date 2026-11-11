@@ -83,7 +83,8 @@ A = torch.randn(ROWS, TC, dtype=torch.float32)
 
 def check(kernel, cfg):
     out = torch.zeros(ROWS, TC, dtype=torch.float32)
-    kernel(A, out, config=cfg)
+    compiled = kernel.compile(A, out, config=cfg)
+    compiled(A, out, config=cfg)
     torch.testing.assert_close(out, A * 2.0 + 1.0, rtol=1e-4, atol=1e-4)
 ```
 

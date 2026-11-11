@@ -339,6 +339,43 @@ class TestOrchestration:
         assert len(signature) == 2
         assert all(d in {"IN", "OUT", "INOUT"} for d in signature)
 
+    def test_orchestration_signature_counts_runtime_scalars_after_tensors(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                bias: pl.Scalar[pl.FP32],
+                extra: pl.Scalar[pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile = pl.load(x, [0, 0], [16, 16])
+                value = pl.add(tile, bias)
+                value = pl.add(value, extra)
+                return pl.store(value, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                bias: pl.Scalar[pl.FP32],
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                extra: pl.Scalar[pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out = self.kernel(x, bias, extra, out)
+                return out
+
+        result = _generate_orch_result(Program)
+        # TaskArgs has separate tensor/scalar pools. The tensor prefix must
+        # retain its indices while Kernel admission also sees both scalars.
+        assert list(result.orchestration_signature) == ["IN", "OUT", "SCALAR", "SCALAR"]
+        assert list(result.kernel_registrations[0].signature) == ["IN", "OUT"]
+        assert "orch_args.scalar<float>(0)" in result.code and "orch_args.scalar<float>(1)" in result.code
+
     def test_independent_tasks(self):
         """Test codegen with independent tasks (no dependencies needed)."""
         backend.reset_for_testing()

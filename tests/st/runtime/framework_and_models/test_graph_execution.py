@@ -259,7 +259,8 @@ class TestGraphExecution:
         a = torch.full((ROWS, COLS), 3.0, dtype=torch.float32)
         out = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        single_launch(a, out, config=test_config)
+        compiled = single_launch.compile(a, out, config=test_config)
+        compiled(a, out, config=test_config)
 
         expected = a * 2
         assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
@@ -276,7 +277,8 @@ class TestGraphExecution:
         w = _banded_weights()
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        per_layer_accumulate(w, acc, config=test_config)
+        compiled = per_layer_accumulate.compile(w, acc, config=test_config)
+        compiled(w, acc, config=test_config)
 
         expected = torch.full((ROWS, COLS), _band_total())
         assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
@@ -294,7 +296,8 @@ class TestGraphExecution:
         w = _banded_weights()
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        no_graph_per_layer_accumulate(w, acc, config=test_config)
+        compiled = no_graph_per_layer_accumulate.compile(w, acc, config=test_config)
+        compiled(w, acc, config=test_config)
 
         expected = torch.full((ROWS, COLS), _band_total())
         assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
@@ -312,7 +315,8 @@ class TestGraphExecution:
         w = _banded_weights()
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        scope_form_accumulate(w, acc, config=test_config)
+        compiled = scope_form_accumulate.compile(w, acc, config=test_config)
+        compiled(w, acc, config=test_config)
 
         expected = torch.full((ROWS, COLS), _band_total())
         assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
@@ -325,7 +329,8 @@ class TestGraphExecution:
         w = _banded_weights()
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        boundary_view_accumulate(w, acc, config=test_config)
+        compiled = boundary_view_accumulate.compile(w, acc, config=test_config)
+        compiled(w, acc, config=test_config)
 
         expected = torch.full((ROWS, COLS), _band_total())
         assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
@@ -337,7 +342,8 @@ class TestGraphExecution:
         a = torch.full((ROWS, COLS), 1.5, dtype=torch.float32)
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        region_alloc_accumulate(a, acc, config=test_config)
+        compiled = region_alloc_accumulate.compile(a, acc, config=test_config)
+        compiled(a, acc, config=test_config)
 
         expected = a * 2 * LAYERS
         assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
@@ -349,7 +355,8 @@ class TestGraphExecution:
         a = torch.full((ROWS, COLS), 1.0, dtype=torch.float32)
         acc = torch.zeros((ROWS, COLS), dtype=torch.float32)
 
-        two_distinct_graphs(a, acc, config=test_config)
+        compiled = two_distinct_graphs.compile(a, acc, config=test_config)
+        compiled(a, acc, config=test_config)
 
         expected = torch.zeros((ROWS, COLS), dtype=torch.float32)
         for _ in range(LAYERS):
@@ -369,10 +376,12 @@ class TestGraphExecution:
         w = _banded_weights()
 
         first = torch.zeros((ROWS, COLS), dtype=torch.float32)
-        per_layer_accumulate(w, first, config=test_config)
+        compiled = per_layer_accumulate.compile(w, first, config=test_config)
+        compiled(w, first, config=test_config)
 
         second = torch.full((ROWS, COLS), 100.0, dtype=torch.float32)
-        per_layer_accumulate(w, second, config=test_config)
+        compiled = per_layer_accumulate.compile(w, second, config=test_config)
+        compiled(w, second, config=test_config)
 
         assert torch.allclose(first, torch.full((ROWS, COLS), _band_total()), rtol=1e-5, atol=1e-5)
         assert torch.allclose(
@@ -520,7 +529,8 @@ class TestMoeGraphPredicate:
         x, w_gate, w_up, w_down = self._inputs()
         out = torch.zeros((moe.EXPERTS * moe.D, moe.D), dtype=torch.float32)
 
-        moe.moe_decode(x, w_gate, w_up, w_down, counts, out, config=test_config)
+        compiled = moe.moe_decode.compile(x, w_gate, w_up, w_down, counts, out, config=test_config)
+        compiled(x, w_gate, w_up, w_down, counts, out, config=test_config)
 
         want = moe.expected_bands(x, w_gate, w_up, w_down, counts)
         for e in range(moe.EXPERTS):
@@ -592,7 +602,8 @@ def test_explicit_graph_dependency_chain(test_config, graph_runtime, enabled):
     With the guard disabled, only the seed and final consumer run (two).
     """
     c = torch.zeros((128, 128), dtype=torch.float32)
-    explicit_graph_dependency_chain(c, enabled, config=test_config)
+    compiled = explicit_graph_dependency_chain.compile(c, enabled, config=test_config)
+    compiled(c, config=test_config)
     torch.testing.assert_close(c, torch.full_like(c, 10.0 if enabled else 2.0))
 
 
@@ -620,7 +631,8 @@ def zero_trip_graph_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
 def test_zero_trip_graph_capture_keeps_latest_dependency(test_config, graph_runtime):
     """An unexecuted capture preserves the second producer's completion."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    zero_trip_graph_capture_chain(c, config=test_config)
+    compiled = zero_trip_graph_capture_chain.compile(c, config=test_config)
+    compiled(c, config=test_config)
     torch.testing.assert_close(c, torch.full_like(c, 3.0))
 
 
@@ -646,7 +658,8 @@ def branch_local_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], enab
 def test_branch_local_capture_keeps_last_dependency(test_config, graph_runtime, enabled):
     """The merged TaskId orders the final consumer after the last enabled task."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    branch_local_capture_chain(c, enabled, config=test_config)
+    compiled = branch_local_capture_chain.compile(c, enabled, config=test_config)
+    compiled(c, config=test_config)
     # Manual scope makes the final explicit edge responsible for ordering.
     torch.testing.assert_close(c, torch.full_like(c, 1111.0 if enabled else 1001.0))
 
@@ -674,7 +687,8 @@ def recording_shadow_capture_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
 def test_recorded_local_shadow_keeps_outer_completion(test_config, graph_runtime):
     """Local shadowing cannot replace the caller's whole-invocation completion."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    recording_shadow_capture_chain(c, config=test_config)
+    compiled = recording_shadow_capture_chain.compile(c, config=test_config)
+    compiled(c, config=test_config)
     # Two first-Graph tasks, four second invocations, then the consumer: 2+8+10.
     torch.testing.assert_close(c, torch.full_like(c, 20.0))
 
@@ -698,7 +712,8 @@ def recording_direct_alias_chain(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]):
 def test_recorded_direct_alias_keeps_outer_completion(test_config, graph_runtime):
     """The local alias orders an inner task; the outer name orders the whole Graph."""
     c = torch.zeros((128, 128), dtype=torch.float32)
-    recording_direct_alias_chain(c, config=test_config)
+    compiled = recording_direct_alias_chain.compile(c, config=test_config)
+    compiled(c, config=test_config)
     torch.testing.assert_close(c, torch.full_like(c, 1111.0))
 
 

@@ -84,8 +84,8 @@ void BindCodegen(nb::module_& m) {
       .def_ro("kernel_registrations", &OrchestrationResult::kernel_registrations,
               "Runtime registrations keyed by code, core type and final tensor signature")
       .def_ro("orchestration_signature", &OrchestrationResult::orchestration_signature,
-              "Orchestration entry per-tensor ArgDirection name list (scalars excluded), in "
-              "orch_args tensor order; sets the ChipCallable signature");
+              "Orchestration entry ArgDirection names in orch_args tensor order, followed by "
+              "SCALAR entries for the scalar payload; sets the ChipCallable signature");
 
   // Free functions for orchestration codegen (backend-agnostic)
   codegen_module.def("generate_orchestration", &GenerateOrchestration, nb::arg("program"), nb::arg("func"),

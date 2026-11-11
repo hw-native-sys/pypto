@@ -504,6 +504,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
+  // ChipCallable admission counts both payload pools. Keep the tensor prefix
+  // indexed by orch_args.tensor(i), then describe the separate scalar pool.
+  orchestration_signature.insert(orchestration_signature.end(), scalar_params.size(), "SCALAR");
+
   std::unordered_map<std::string, std::string> dist_param_to_ctx_param;
   INTERNAL_CHECK(dist_tensor_param_names.size() == comm_ctx_param_names.size())
       << "Materialized orchestration signature has " << dist_tensor_param_names.size()

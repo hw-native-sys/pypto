@@ -75,6 +75,10 @@ to global state.
 the existing loop fallback until a backend enables this lowering. It is
 independent of cross-core transport and does not describe hardware event support.
 
+The pinned A2/A3 `tile.rem(high_precision=True)` implementation also honours
+its selector. Its emitter validates the larger precision workspace and omits
+the ignored-precision warning for this operator.
+
 ## Registered operator rules
 
 `tile.sel` and `tile.sels` register their scratch planners in
