@@ -356,8 +356,11 @@ pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=
 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 pl.system.barrier(pipe=pl.PipeType.V)     # Vector pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.M)     # Matrix pipeline barrier
-pl.system.barrier(pipe=pl.PipeType.MTE2)  # GM -> UB load pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.S)     # Scalar pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.MTE1)  # L1 -> L0A/L0B operand feed
+pl.system.barrier(pipe=pl.PipeType.MTE2)  # GM -> UB/L1 load pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.MTE3)  # UB -> GM store pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.FIX)   # L0C writeback pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.ALL)   # All pipelines on the current core
 
 # Cross-core operations (TPUSH/TPOP protocol)
@@ -379,8 +382,7 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
 
-`pl.system.barrier(*, pipe)` 要求传入 `pl.PipeType.V`、`M`、`MTE2`、`MTE3`
-或 `ALL` 成员。
+`pl.system.barrier(*, pipe)` 要求传入 `pl.PipeType` 成员，全部成员均被接受。
 它为所选流水线的前后工作建立顺序，不占用事件槽。`ALL` 只覆盖当前核；跨核屏障
 使用 `pl.system.syncall(...)`。原有 `bar_v()`、`bar_m()`、`bar_all()` 包装接口
 已移除，Python IR printer 统一打印为对应的 `barrier(pipe=...)` 写法。内部 IR

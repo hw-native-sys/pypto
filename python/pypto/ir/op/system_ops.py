@@ -12,7 +12,7 @@
 System operations handle hardware synchronization and cross-core communication:
 - sync_src / sync_dst: Set/Wait flag-based synchronization between pipes
 - set_ffts / sync_set / sync_wait: Explicit Cube/Vector cross-core event synchronization
-- barrier: Barrier synchronization for one pipeline (vector, matrix, MTE2, MTE3) or all of them on one core
+- barrier: Barrier synchronization for any one hardware pipeline, or all of them, on one core
 - tpush_to_aiv / tpush_to_aic: Push tile data across cores
 - tpop_from_aic / tpop_from_aiv: Pop tile data from cross-core pipe
 - aic_initialize_pipe / aiv_initialize_pipe: Initialize cross-core pipes
@@ -387,14 +387,18 @@ def sync_wait(
 def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
     """Order work on one pipeline, or across all of them, on one core.
 
+    Every ``PipeType`` member is accepted. A barrier is pipe-scoped rather than
+    operation-scoped: it drains whatever was issued on that pipe, so the pipe a
+    transfer rides decides which barrier orders it. On A5 that mapping is
+    ``Backend::InferTransferPipe`` -- GM <-> UB and GM -> L1 ride MTE2/MTE3,
+    UB -> L1 also rides MTE3, L1 -> L0A/L0B rides MTE1, and the L0C writeback
+    rides FIX.
+
     Args:
-        pipe: ``PipeType.V``, ``PipeType.M``, ``PipeType.MTE2``,
-            ``PipeType.MTE3``, or ``PipeType.ALL``. A single-pipe barrier orders
-            that pipeline's preceding and following work -- ``MTE2`` drains the
-            GM -> UB load path and ``MTE3`` the UB -> GM store path, so a
-            kernel that reuses a buffer across a manual DMA can order it without
-            spending an event slot on a set/wait flag pair. ALL waits for
-            preceding work across all pipelines on the current core.
+        pipe: The pipeline to drain, or ``PipeType.ALL`` for every pipeline on
+            the current core. A single-pipe barrier orders that pipeline's
+            preceding and following work without spending an event slot, which
+            is what distinguishes it from a ``set_flag`` / ``wait_flag`` pair.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
@@ -402,15 +406,19 @@ def barrier(*, pipe: PipeType, span: Span | None = None) -> Call:
 
     Raises:
         TypeError: If pipe is not a PipeType member.
-        ValueError: If pipe is not V, M, MTE2, MTE3, or ALL.
     """
     # Preserve the established IR and native PTO barrier lowering. Barriers
     # have no event ID and must not allocate or consume pipeline event slots.
+    # Keep this table exhaustive over PipeType: a member without an entry would
+    # raise KeyError below rather than the TypeError the signature promises.
     op_names = {
-        PipeType.V: "system.bar_v",
-        PipeType.M: "system.bar_m",
+        PipeType.MTE1: "system.bar_mte1",
         PipeType.MTE2: "system.bar_mte2",
         PipeType.MTE3: "system.bar_mte3",
+        PipeType.M: "system.bar_m",
+        PipeType.V: "system.bar_v",
+        PipeType.S: "system.bar_s",
+        PipeType.FIX: "system.bar_fix",
         PipeType.ALL: "system.bar_all",
     }
     _check_enum(pipe, PipeType, "pipe", "system.barrier", allowed=tuple(op_names))

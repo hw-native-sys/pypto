@@ -620,14 +620,20 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const char* barrier_pipe = nullptr;
   if (op->args_.empty() && op->kwargs_.empty()) {
     // Each arm names the PipeType member `pl.system.barrier` takes to build this op.
-    if (IsOp(op, "system.bar_v")) {
-      barrier_pipe = "V";
-    } else if (IsOp(op, "system.bar_m")) {
-      barrier_pipe = "M";
+    if (IsOp(op, "system.bar_mte1")) {
+      barrier_pipe = "MTE1";
     } else if (IsOp(op, "system.bar_mte2")) {
       barrier_pipe = "MTE2";
     } else if (IsOp(op, "system.bar_mte3")) {
       barrier_pipe = "MTE3";
+    } else if (IsOp(op, "system.bar_m")) {
+      barrier_pipe = "M";
+    } else if (IsOp(op, "system.bar_v")) {
+      barrier_pipe = "V";
+    } else if (IsOp(op, "system.bar_s")) {
+      barrier_pipe = "S";
+    } else if (IsOp(op, "system.bar_fix")) {
+      barrier_pipe = "FIX";
     } else if (IsOp(op, "system.bar_all")) {
       barrier_pipe = "ALL";
     }

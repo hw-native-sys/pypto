@@ -378,11 +378,13 @@ preserve their authored order, so PyPTO rejects either flag in such a loop.
 Use `pl.range` when manually synchronizing work inside a loop.
 
 For a pipeline barrier, use `pl.system.barrier(*, pipe)`. The required keyword
-accepts only `pl.PipeType.V`, `M`, `MTE2`, `MTE3`, or `ALL`. A single-pipe
-barrier orders preceding and following work on that pipeline — `MTE2` drains
-the GM → UB load path and `MTE3` the UB → GM store path, which is the cheap
-way to order a buffer reuse against an in-flight DMA without spending an event
-slot. `ALL` waits for preceding work
+accepts any `pl.PipeType` member. A single-pipe barrier orders preceding and
+following work on that pipeline, which is the cheap way to order a buffer reuse
+against an in-flight transfer without spending an event slot. A barrier drains
+a *pipe*, not an operation, so pick the pipe your transfer rides: `MTE2` for
+GM → UB/L1 loads, `MTE3` for UB → GM stores (and the A5 UB → L1 route), `MTE1`
+for the L1 → L0A/L0B operand feed, `FIX` for the L0C writeback. `ALL` waits for
+preceding work
 across all pipelines on the current core. For example, an `ALL` barrier after
 both loads above would wait for `b` as well as `a` before vector computation.
 Barriers neither allocate nor consume event slots; an outstanding `set_flag`
