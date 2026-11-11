@@ -17,14 +17,17 @@ import typing
 import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import backend
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import PartialCodegenError
 from pypto.ir import python_print
+from pypto.jit import decorator
 from pypto.jit._specialize_body import BodyTransformer
 from pypto.jit._specialize_values import layout_str, render_free_value
 from pypto.jit.specializer import (
@@ -43,6 +46,7 @@ from pypto.jit.specializer import (
     specialize,
     tile_annotation_fingerprints,
 )
+from pypto.language.parser.ast_parser import ASTParser
 from pypto.language.parser.diagnostics import UndefinedVariableError
 from pypto.pypto_core import DataType, ir, passes
 from pypto.runtime.runner import ExecutionMode, RunConfig
@@ -379,15 +383,7 @@ class TestBodyTransformer:
             tensor_meta=tensor_meta,
             dep_names=dep_names or set(),
         )
-        new_body = []
-        for stmt in func_def.body:
-            result = transformer.visit(stmt)
-            if result is None:
-                continue
-            if isinstance(result, list):
-                new_body.extend(result)
-            else:
-                new_body.append(result)
+        new_body = transformer.transform_body(func_def.body)
         new_func = ast.FunctionDef(
             name="f",
             args=func_def.args,
@@ -595,15 +591,7 @@ class TestBodyTransformer:
             dep_names=set(),
             py_globals=py_globals,
         )
-        new_body = []
-        for stmt in func_def.body:
-            result = transformer.visit(stmt)
-            if result is None:
-                continue
-            if isinstance(result, list):
-                new_body.extend(result)
-            else:
-                new_body.append(result)
+        new_body = transformer.transform_body(func_def.body)
         new_func = ast.FunctionDef(
             name="f",
             args=func_def.args,
@@ -1385,6 +1373,14 @@ class TestSpecializerIntegration:
 class TestVariableRebinding:
     """Tests for alpha-renaming of variable rebindings in BodyTransformer."""
 
+    @staticmethod
+    def _verify_ssa(program: ir.Program) -> ir.Program:
+        converted = passes.convert_to_ssa()(program)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        passes.run_verifier(properties)(converted)
+        return converted
+
     def _transform(self, src: str, tensor_meta: dict | None = None) -> str:
         src = textwrap.dedent(src)
         tree = ast.parse(src)
@@ -1401,15 +1397,7 @@ class TestVariableRebinding:
             param_names=param_names,
             initial_used_names=all_defined,
         )
-        new_body = []
-        for stmt in func_def.body:
-            result = transformer.visit(stmt)
-            if result is None:
-                continue
-            if isinstance(result, list):
-                new_body.extend(result)
-            else:
-                new_body.append(result)
+        new_body = transformer.transform_body(func_def.body)
         new_func = ast.FunctionDef(
             name="f",
             args=func_def.args,
@@ -1471,6 +1459,2052 @@ class TestVariableRebinding:
         out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
         assert "x =" in out
         assert "x_v1 =" in out
+
+    @pytest.mark.parametrize(
+        "body, expected",
+        [
+            ("x = 1; x = x + 1; x, y = (10, 20); return x, y", (10, 20)),
+            ("x = 1; x = x + 1; x, y = (10, 20); x = x + 5; return x, y", (15, 20)),
+            ("x = 1; x = x + 1; x, x = (10, 20); return x", 20),
+            ("x = 1; x = x + 1; y = 3; y = y + 1; x, y = y, x; return x, y", (4, 2)),
+            ("x = 1; x = x + 1; x, (y, z) = (10, (20, 30)); return x, y, z", (10, 20, 30)),
+            ("x_v2 = 99; x = 1; x = x + 1; x, y = (10, 20); return x, x_v2", (10, 99)),
+        ],
+        ids=["read", "subsequent-rebind", "repeated-target", "swap", "nested", "alias-collision"],
+    )
+    def test_tuple_rebind_preserves_python_values(self, body, expected):
+        """Unpacking must replace an active alias after evaluating the whole RHS."""
+        transformed = self._transform("def f():\n    " + body)
+        namespace = {}
+        exec(transformed, namespace)
+        assert namespace["f"]() == expected
+
+    def test_tuple_first_assignment_is_tracked(self):
+        """A later type-changing rebind needs a fresh name after tuple initialization."""
+        transformed = self._transform("""
+            def f():
+                x, y = (1, 2)
+                x = 3.0
+                return x, y
+        """)
+        assert "x_v1 = 3.0" in transformed
+        namespace = {}
+        exec(transformed, namespace)
+        assert namespace["f"]() == (3.0, 2)
+
+    def test_tuple_rebind_evaluates_rhs_once(self):
+        """A tuple-producing call sees the old binding and executes only once."""
+        transformed = self._transform("""
+            def f():
+                x = 1
+                x = x + 1
+                x, y = pair(x)
+                return x, y
+        """)
+        calls = []
+
+        def pair(value):
+            calls.append(value)
+            return value + 10, value + 20
+
+        namespace = {"pair": pair}
+        exec(transformed, namespace)
+        assert namespace["f"]() == (12, 22)
+        assert calls == [2]
+
+    @pytest.mark.parametrize("count", [0, 3])
+    def test_tuple_rebind_in_loop_updates_incoming_alias(self, count):
+        """Loop writes must keep updating the incoming binding on every iteration."""
+        transformed = self._transform("""
+            def f(count):
+                x = 1
+                x = x + 1
+                y = 0
+                for i in range(count):
+                    x, y = (x + 1, y + 2)
+                return x, y
+        """)
+        namespace = {}
+        exec(transformed, namespace)
+        assert namespace["f"](count) == (2 + count, 2 * count)
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_tuple_rebind_in_branch_updates_incoming_alias(self, flag):
+        """Branch writes cannot introduce a version undefined on the other path."""
+        transformed = self._transform("""
+            def f(flag):
+                x = 1
+                x = x + 1
+                if flag:
+                    x, y = (10, 20)
+                else:
+                    x, y = (30, 40)
+                return x, y
+        """)
+        namespace = {}
+        exec(transformed, namespace)
+        assert namespace["f"](flag) == ((10, 20) if flag else (30, 40))
+
+    def test_tuple_rebind_invalidates_inlined_shapes(self):
+        """An unpack target must shadow an earlier folded shape constant."""
+        transformed = self._transform(
+            """
+                def f(a):
+                    rows, cols = a.shape
+                    with scope():
+                        rows, cols = (10, 20)
+                        observed = (rows, cols)
+                    return observed
+            """,
+            tensor_meta={"a": TensorMeta((64, 32), DataType.FP32)},
+        )
+        namespace = {"scope": nullcontext}
+        exec(transformed, namespace)
+        assert namespace["f"](None) == (10, 20)
+
+    @pytest.mark.parametrize("count", [0, 3])
+    @pytest.mark.parametrize("rebound", [False, True])
+    def test_review_tuple_while_updates_condition(self, count, rebound):
+        """Bound the probe so a stale loop-condition binding fails without hanging."""
+        initialization = "x = 0; x = x + 0; y = 0" if rebound else "x, y = (0, 0)"
+        transformed = self._transform(f"""
+            def f(count):
+                {initialization}
+                while x < count and tick():
+                    x, y = (x + 1, y + 2)
+                return x, y
+        """)
+        ticks = []
+
+        def tick():
+            ticks.append(None)
+            assert len(ticks) <= count, "while condition kept reading the incoming value"
+            return True
+
+        namespace = {"tick": tick}
+        exec(transformed, namespace)
+        assert namespace["f"](count) == (count, count * 2)
+        assert len(ticks) == count
+
+    @pytest.mark.parametrize("active", [False, True])
+    @pytest.mark.parametrize("scope", ["if flag", "for i in range(count)", "while count > 0 and tick()"])
+    @pytest.mark.parametrize("unpack_shape", [False, True])
+    def test_review_conditional_tuple_retains_shape_predecessor(self, active, scope, unpack_shape):
+        """Untaken branches and zero-trip loops still need the suppressed shape initialization."""
+        initialization = "rows, cols = a.shape" if unpack_shape else "rows = a.shape[0]; cols = a.shape[1]"
+        transformed = self._transform(
+            f"""
+                def f(a, flag, count):
+                    {initialization}
+                    {scope}:
+                        rows, cols = (rows // 2, cols // 2)
+                        count = 0
+                    return rows, cols
+            """,
+            tensor_meta={"a": TensorMeta((64, 32), DataType.FP32)},
+        )
+        ticks = []
+
+        def tick():
+            ticks.append(None)
+            assert len(ticks) <= 1, "while condition kept reading the incoming count"
+            return True
+
+        namespace = {"tick": tick}
+        exec(transformed, namespace)
+        assert namespace["f"](None, active, int(active)) == ((32, 16) if active else (64, 32))
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_review_value_preserving_tuple_keeps_shape(self, flag):
+        """Even writing back the same shape must preserve the false path's initial value."""
+        transformed = self._transform(
+            """
+                def f(a, flag):
+                    rows, cols = a.shape
+                    if flag:
+                        rows, cols = (rows, cols)
+                    return rows, cols
+            """,
+            tensor_meta={"a": TensorMeta((64, 32), DataType.FP32)},
+        )
+        namespace = {}
+        exec(transformed, namespace)
+        assert namespace["f"](None, flag) == (64, 32)
+
+    @pytest.mark.parametrize(
+        "scope",
+        [
+            "for i in pl.range(0):\n    rows = 2\n",
+            "for i in pl.range(-1):\n    rows = 2\n",
+            "for i in pl.unroll(0):\n    rows = 2\n",
+            "if flag > 0:\n    for i in pl.range(0):\n        rows = 2\n",
+        ],
+    )
+    def test_empty_loop_retains_literal_shape_bound(self, scope):
+        """An unreachable write cannot turn a later static unroll into a runtime bound."""
+        source = (
+            "def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):\n"
+            "    rows = a.shape[0]\n"
+            + textwrap.indent(scope, "    ")
+            + "    for j in pl.unroll(rows):\n        copied = a\n    return a\n"
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        specialized = specialize("EmptyLoopShape", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    def test_empty_loop_local_does_not_constrain_later_tensor_binding(self):
+        """A dead scalar binding cannot fix the type of a later tensor local."""
+        source = textwrap.dedent("""
+            def f(a: pl.Tensor):
+                for i in pl.range(0):
+                    scratch = 0
+                scratch = a
+                return scratch
+        """)
+        ctx = _make_ctx("f", source, param_names=["a"], tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)})
+        self._verify_ssa(pl.parse_program(specialize("EmptyLoopLocal", [ctx])))
+
+    @pytest.mark.parametrize("iterator", ["range", "unroll"])
+    def test_empty_loop_induction_shadows_tensor_alias_and_restores_it(self, iterator):
+        """A retained empty body sees its scalar index and preserves the outer tensor."""
+        source = textwrap.dedent(f"""
+            def f(i: pl.Tensor):
+                i, spare = (i, i)
+                for i in pl.{iterator}(0):
+                    scratch = pl.create_tensor([i], dtype=pl.FP32)
+                return i
+        """)
+        ctx = _make_ctx("f", source, param_names=["i"], tensor_meta={"i": TensorMeta((4, 8), DataType.FP32)})
+        specialized = specialize("EmptyInduction", [ctx])
+        assert "pl.create_tensor([i], dtype=pl.FP32)" in specialized
+        program = self._verify_ssa(pl.parse_program(specialized))
+        function = program.get_function("f")
+        assert function is not None and len(function.return_types) == 1
+        ir.assert_structural_equal(function.return_types[0], ir.TensorType([4, 8], DataType.FP32))
+        assert isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt) and isinstance(returned.value[0], ir.Var)
+        assert returned.value[0].name_hint.startswith("i_v1")
+
+    def test_empty_explicit_carry_preserves_conditional_shape_predecessor(self):
+        """A zero-trip carry still publishes a result on the taken branch."""
+        source = textwrap.dedent("""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):
+                rows = a.shape[0]
+                if flag > 0:
+                    for i, (carry,) in pl.range(0, init_values=(2,)):
+                        rows, = pl.yield_(carry + 1)
+                return rows
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        program = pl.parse_program(specialize("EmptyCarryShapePredecessor", [ctx]))
+        function = program.get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        predecessor, conditional, _ = function.body.stmts
+        assert isinstance(predecessor, ir.AssignStmt)
+        assert isinstance(predecessor.value, ir.ConstInt) and predecessor.value.value == 4
+        assert isinstance(conditional, ir.IfStmt)
+        body = conditional.then_body
+        loop = body.stmts[0] if isinstance(body, ir.SeqStmts) else body
+        assert isinstance(loop, ir.ForStmt)
+        assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == 0
+        assert len(loop.iter_args) == 1
+        initial = loop.iter_args[0].initValue
+        assert isinstance(initial, ir.ConstInt) and initial.value == 2
+
+    @pytest.mark.parametrize("terminator", ["return out", "break", "continue"])
+    def test_nonjoining_branch_retains_fallthrough_tensor_metadata(self, terminator):
+        """Only a branch reaching the following shape consumer supplies its descriptor."""
+        body = (
+            "if flag > 0:\n    x = a\n    x, spare = (a, a)\n"
+            f"    {terminator}\n"
+            "else:\n    x = b\n    x, spare = (b, b)\n"
+            "for j in pl.unroll(x.shape[0]):\n    copied = x\n"
+        )
+        if terminator != "return out":
+            body = "for iteration in pl.range(1):\n" + textwrap.indent(body, "    ")
+        source = (
+            "def f(a: pl.Tensor, b: pl.Tensor, out: pl.Tensor, flag: pl.Scalar[pl.INT32]):\n"
+            + textwrap.indent(body, "    ")
+            + "    return out\n"
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "b", "out", "flag"],
+            tensor_meta={
+                "a": TensorMeta((4, 8), DataType.FP32),
+                "b": TensorMeta((8, 16), DataType.BF16),
+                "out": TensorMeta((4, 8), DataType.FP32),
+            },
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        specialized = specialize("JoiningDescriptor", [ctx])
+        assert "pl.unroll(8)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize(
+        ("break_body", "fallthrough", "expected"),
+        [
+            ("x = a\nx, spare = (a, a)\n", "b", (4, 8)),
+            ("x = a\nwith pl.scope():\n    x = unknown(b)\n", "a", (8, 4)),
+        ],
+        ids=["known-descriptor", "unknown-scoped-write"],
+    )
+    def test_break_branch_descriptor_is_rejoined_at_owning_loop_exit(self, break_body, fallthrough, expected):
+        """A known fallthrough descriptor cannot conceal a different break predecessor."""
+        transformed = self._transform(
+            "def f(a, b, flag):\n    for i in pl.range(1):\n        if flag:\n"
+            + textwrap.indent(break_body, "            ")
+            + "            break\n        else:\n"
+            + f"            x = {fallthrough}\n            x, spare = ({fallthrough}, {fallthrough})\n"
+            + "    return x.shape[0]\n",
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32), "b": TensorMeta((8, 16), DataType.BF16)},
+        )
+        namespace = {
+            "pl": SimpleNamespace(
+                range=range, scope=nullcontext, tensor=SimpleNamespace(dim=lambda value, i: value.shape[i])
+            ),
+            "unknown": lambda value: value,
+        }
+        exec(transformed, namespace)
+        a, b = SimpleNamespace(shape=(4, 8)), SimpleNamespace(shape=(8, 16))
+        assert namespace["f"](a, b, True) == expected[0]
+        assert namespace["f"](a, b, False) == expected[1]
+
+    @pytest.mark.parametrize("scope", ["with pl.scope()", "if 1 < 2", "for i in pl.range(1)"])
+    def test_review_outer_rebind_after_nested_tuple_changes_type(self, scope):
+        """A nested tuple's binding depth cannot pin later outer writes to one scalar type."""
+        source = textwrap.dedent(f"""
+            def f():
+                {scope}:
+                    x, y = (1, 2)
+                x = 3
+                x = 4.0
+                return x
+        """)
+        program = pl.parse_program(specialize("OuterRebind", [_make_ctx("f", source, auto_scope=False)]))
+        function = program.get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        assert isinstance(returned.value[0].type, ir.ScalarType)
+        assert returned.value[0].type.dtype == DataType.FP32
+        passes.convert_to_ssa()(program)
+
+    @pytest.mark.parametrize("iterator", ["range", "unroll"])
+    @pytest.mark.parametrize("output", ["x", "result"])
+    def test_final_review_explicit_range_carry_shadows_outer_alias(self, iterator, output):
+        """Every iteration reads the carried value, while distinct outputs restore x."""
+        source = textwrap.dedent(f"""
+            def f():
+                x, spare = (0, 0)
+                x, spare = (1, 0)
+                for i, (x,) in pl.{iterator}(3, init_values=(x,)):
+                    {output}, = pl.yield_(x + 1)
+                return x, {output}
+        """)
+        carry = []
+
+        def explicit_range(count, *, init_values):
+            carry[:] = init_values
+            for i in range(count):
+                yield i, tuple(carry)
+
+        def yield_value(value):
+            carry[:] = [value]
+            return (value,)
+
+        namespace = {"pl": SimpleNamespace(**{iterator: explicit_range}, yield_=yield_value)}
+        transformed = self._transform(source)
+        # A Python loop updates its yield-LHS eagerly, unlike the DSL's
+        # post-loop result. Check that the DSL yield reads its header carry.
+        assert "pl.yield_(x + 1)" in transformed
+        exec(transformed, namespace)
+        assert namespace["f"]() == ((4, 4) if output == "x" else (1, 4))
+        self._verify_ssa(pl.parse_program(specialize("ExplicitRangeCarry", [_make_ctx("f", source)])))
+
+    @pytest.mark.parametrize("assignment", ["x, y = (VALUE, VALUE + 1)", "x = VALUE; y = VALUE + 1"])
+    def test_final_review_definite_branch_kills_partial_binding(self, assignment):
+        """The first partial value is dead; either later arm initializes both results."""
+        then_body = assignment.replace("VALUE", "3")
+        else_body = assignment.replace("VALUE", "5")
+        source = textwrap.dedent(f"""
+            def f(a, b):
+                if a > 0:
+                    x, y = (1, 2)
+                if b > 0:
+                    {then_body}
+                else:
+                    {else_body}
+                return x, y
+        """)
+        namespace = {}
+        exec(self._transform(source), namespace)
+        for a in [0, 1]:
+            for b in [0, 1]:
+                assert namespace["f"](a, b) == ((3, 4) if b else (5, 6))
+        source = source.replace("def f(a, b):", "def f(a: pl.Scalar[pl.INDEX], b: pl.Scalar[pl.INDEX]):")
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "b"], scalar_dtypes={"a": DataType.INDEX, "b": DataType.INDEX}
+        )
+        self._verify_ssa(pl.parse_program(specialize("KilledPartial", [ctx])))
+
+    @pytest.mark.parametrize("control", ["for i in pl.unroll(1)", "while count > 0"])
+    def test_final_review_loop_local_survives_sibling_conditional(self, control):
+        """The untaken sibling branch retains a value initialized by the preceding loop."""
+        source = textwrap.dedent(f"""
+            def f(flag):
+                count = 1
+                {control}:
+                    x, y = (1, 2)
+                    count = count - 1
+                if flag > 0:
+                    x, y = (3, 4)
+                return x, y
+        """)
+        namespace = {"pl": SimpleNamespace(unroll=range)}
+        exec(self._transform(source), namespace)
+        for flag in [0, 1]:
+            assert namespace["f"](flag) == ((3, 4) if flag else (1, 2))
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INDEX]):")
+        ctx = _make_ctx("f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INDEX})
+        # Loop-local live-outs without an incoming value remain pre-SSA here;
+        # native execution checks the alias, and parsing checks DSL acceptance.
+        pl.parse_program(specialize("LoopLocalExport", [ctx]))
+
+    @pytest.mark.parametrize("control", ["while flag > 0", "for j in pl.range(flag)"])
+    @pytest.mark.parametrize("initial_alias", [False, True])
+    def test_sibling_zero_trip_loop_retains_active_tuple_alias(self, control, initial_alias):
+        """A later loop retains the preceding tuple value when it takes zero trips."""
+        initial = "x = 1\n                    x, y = (2, 3)" if initial_alias else "x, y = (1, 2)"
+        source = textwrap.dedent(f"""
+            def f(flag):
+                for i in pl.unroll(1):
+                    {initial}
+                {control}:
+                    x = 3
+                    x, y = (4, 5)
+                    flag = flag - flag
+                return x
+        """)
+        namespace = {"pl": SimpleNamespace(unroll=range, range=range)}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](0) == (2 if initial_alias else 1)
+        assert namespace["f"](1) == 4
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx("f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INT32})
+        # The initial live-out is defined by an unrolled body, so native Python
+        # execution checks the value and parsing checks the emitted DSL scope.
+        pl.parse_program(specialize("SiblingLoopAlias", [ctx]))
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for i in pl.range(flag)"])
+    def test_implicit_first_out_survives_unknown_scoped_rebinding(self, control):
+        """A no-return entry keeps its original output despite an unknown scoped RHS."""
+        source = textwrap.dedent(f"""
+            def f(out: pl.Out[pl.Tensor], flag: pl.Scalar[pl.INT32]):
+                {control}:
+                    out = pl.create_tensor([4, 8], dtype=pl.FP32)
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["out", "flag"],
+            tensor_meta={"out": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        program = self._verify_ssa(pl.parse_program(specialize("ImplicitOutput", [ctx])))
+        function = program.get_function("f")
+        assert function is not None and len(function.return_types) == 1
+        assert isinstance(function.body, ir.SeqStmts)
+        saved = next(
+            stmt
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint.startswith("pypto_implicit_out")
+        )
+        assert isinstance(saved.value, ir.Var)
+        assert saved.value.unique_id == function.params[0].unique_id
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        assert isinstance(returned.value[0], ir.Var)
+        assert returned.value[0].unique_id == saved.var.unique_id
+
+    @pytest.mark.parametrize(
+        "assignment,scoped,expected_rows,expected_dtype",
+        [
+            ("x, spare = (x, x)", False, 4, "pl.FP32"),
+            ("x = x; x, spare = (x, x)", False, 4, "pl.FP32"),
+            ("x, y = (y, x)", False, 8, "pl.BF16"),
+            ("x, spare = (x, x)", True, 4, "pl.FP32"),
+        ],
+        ids=["duplicate", "existing-alias", "swap", "scoped-copy"],
+    )
+    def test_final_review_tuple_operand_metadata_snapshot(
+        self, assignment, scoped, expected_rows, expected_dtype
+    ):
+        """Known operands keep shape/dtype; a swap snapshots both before either target changes."""
+        binding = "with pl.scope():\n    " + assignment if scoped else assignment
+        source = (
+            "def f(x: pl.Tensor, y: pl.Tensor):\n"
+            + textwrap.indent(binding, "    ")
+            + "\n    rows, cols = x.shape\n    old_rows, old_cols = y.shape\n"
+            "    total = 0\n    for i in pl.unroll(rows):\n        total = total + 1\n"
+            "    return pl.create_tensor([total, cols], dtype=x.dtype)\n"
+        )
+        meta = {"x": TensorMeta((4, 16), DataType.FP32), "y": TensorMeta((8, 32), DataType.BF16)}
+        specialized = specialize(
+            "TupleMetadata",
+            [_make_ctx("f", source, param_names=["x", "y"], tensor_meta=meta, auto_scope=not scoped)],
+        )
+        assert f"pl.unroll({expected_rows})" in specialized
+        assert f"dtype={expected_dtype}" in specialized
+        assert f"pl.unroll({expected_rows})" in self._transform(
+            source.replace("pl.unroll(rows)", "pl.unroll(x.shape[0])"), tensor_meta=meta
+        )
+        # The swap must preserve the original x metadata for its second RHS
+        # operand even after the first target acquires y's metadata.
+        expected_old_rows = 4 if expected_rows == 8 else 8
+        transformed = self._transform(source, tensor_meta=meta)
+        assert "old_rows" not in transformed
+        assert f"pl.unroll({expected_old_rows})" in self._transform(
+            source.replace("pl.unroll(rows)", "pl.unroll(old_rows)"), tensor_meta=meta
+        )
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)"])
+    @pytest.mark.parametrize(
+        "nested",
+        ["if False:\n    rows = 2", "if True:\n    pass\nelse:\n    rows = 2", "if 1 > 2:\n    rows = 2"],
+        ids=["false", "true-else", "literal-comparison"],
+    )
+    def test_final_review_dead_nested_shape_write_keeps_unroll_constant(self, control, nested):
+        """Pruned writes must not materialize a runtime alias for a static bound."""
+        source = (
+            "def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]):\n    rows = a.shape[0]\n"
+            f"    {control}:\n"
+            + textwrap.indent(nested, "        ")
+            + "\n    total = 0\n    for i in pl.unroll(rows):\n        total = total + 1\n    return total\n"
+        )
+        meta = {"a": TensorMeta((4, 16), DataType.FP32)}
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "flag"], tensor_meta=meta, scalar_dtypes={"flag": DataType.INDEX}
+        )
+        specialized = specialize("DeadShapeWrite", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize(
+        "expression,expected",
+        [
+            ("[tids[k] for k in range(4)]", [10, 11, 12, 13]),
+            ("[tids[k] for k in range(4) if k != 1]", [10, 12, 13]),
+            ("{tids[k] for k in range(4)}", {10, 11, 12, 13}),
+            ("{k: tids[k] for k in range(4)}", {0: 10, 1: 11, 2: 12, 3: 13}),
+            ("tuple(tids[k] for k in range(4))", (10, 11, 12, 13)),
+            ("[(k, j) for k in range(k) for j in range(k + 1)]", [(0, 0), (1, 0), (1, 1)]),
+            ("[(k, j) for k, j in [(2, 3), (4, 5)]]", [(2, 3), (4, 5)]),
+            ("[[k for k in range(k)] for k in range(3)]", [[], [0], [0, 1]]),
+        ],
+        ids=["list", "filter", "set", "dict", "generator", "multiple", "unpacking", "nested"],
+    )
+    def test_ai_review_comprehension_shadows_tuple_alias(self, expression, expected):
+        """Comprehension binders shadow outer aliases and restore them after evaluation."""
+        transformed = self._transform(f"""
+            def f(tids):
+                k, spare = (0, 0)
+                k, spare = (2, 0)
+                result = {expression}
+                return result, k
+        """)
+        namespace = {}
+        exec(transformed, namespace)
+        assert namespace["f"]([10, 11, 12, 13]) == (expected, 2)
+
+    @pytest.mark.parametrize("filtered", [False, True])
+    def test_ai_review_dependency_comprehension_keeps_each_producer(self, filtered):
+        """The parser must substitute the binder into every producer slot, including filters."""
+        condition = " if k != 1" if filtered else ""
+        transformed = self._transform(f"""
+            def f(tids):
+                k, spare = (0, 0)
+                k, spare = (1, 0)
+                consume(deps=[tids[k] for k in range(4){condition}])
+        """)
+        comp = next(node for node in ast.walk(ast.parse(transformed)) if isinstance(node, ast.ListComp))
+        parser = ASTParser("<dependency regression>", [])
+        entries = parser.dispatch.unroll_deps_comprehension(comp, "submit", ir.Span.unknown())
+        assert [ast.unparse(entry) for entry in entries] == [
+            f"tids[{index}]" for index in range(4) if not filtered or index != 1
+        ]
+
+    @pytest.mark.parametrize("binding", ["shape", "tensor"])
+    def test_ai_review_comprehension_shadows_metadata(self, binding):
+        """A binder cannot inherit a same-named tensor's metadata or a folded dimension."""
+        setup = "k = a.shape[0]" if binding == "shape" else "k = a"
+        expression = "[k for k in range(3)]" if binding == "shape" else "[k.shape[0] for k in items]"
+        source = f"""
+            def f(a, items):
+                {setup}
+                result = {expression}
+                return result, k
+        """
+        transformed = self._transform(source, tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)})
+        namespace = {
+            "pl": SimpleNamespace(tensor=SimpleNamespace(dim=lambda value, index: value.shape[index]))
+        }
+        exec(transformed, namespace)
+        tensor = SimpleNamespace(shape=(4, 8))
+        result, outer = namespace["f"](tensor, [SimpleNamespace(shape=(7,)), SimpleNamespace(shape=(9,))])
+        assert result == ([0, 1, 2] if binding == "shape" else [7, 9])
+        assert outer == (4 if binding == "shape" else tensor)
+
+    @pytest.mark.parametrize("iterator", ["range", "unroll", "while_"])
+    @pytest.mark.parametrize("count", [0, 3])
+    @pytest.mark.parametrize("transparent", [False, True])
+    def test_ai_review_explicit_loop_result_survives_sibling_branch(self, iterator, count, transparent):
+        """Owned yield results have an initialized value even when the loop takes zero trips."""
+        header = (
+            f"for (carry,) in pl.while_(init_values=(0,)):\n    pl.cond(carry < {count})"
+            if iterator == "while_"
+            else f"for i, (carry,) in pl.{iterator}({count}, init_values=(0,)):"
+        )
+        loop_body = "out, = pl.yield_(carry + 1)"
+        if transparent:
+            loop_body = "with pl.scope():\n    " + loop_body
+        source = (
+            "def f(flag: pl.Scalar[pl.INDEX]):\n"
+            + textwrap.indent(header, "    ")
+            + "\n"
+            + textwrap.indent(loop_body, "        ")
+            + "\n    if flag > 0:\n        out, spare = (9, 0)\n    return out\n"
+        )
+        transformed = self._transform(source)
+        assert "out_v1" not in transformed
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["flag"],
+            scalar_dtypes={"flag": DataType.INDEX},
+            auto_scope=not transparent,
+        )
+        self._verify_ssa(pl.parse_program(specialize("ExplicitLoopExport", [ctx])))
+
+    @pytest.mark.parametrize("constant_kind", ["constexpr", "free"])
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)"])
+    @pytest.mark.parametrize("condition", ["enabled", "not enabled", "enabled == True"])
+    def test_ai_review_nested_static_dead_write_keeps_shape(self, constant_kind, control, condition):
+        """Pre-scanning nested writes must fold external constants before materializing shapes."""
+        enabled = condition == "not enabled"
+        signature = ", enabled: pl.constexpr" if constant_kind == "constexpr" else ""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]{signature}):
+                rows = a.shape[0]
+                {control}:
+                    if {condition}:
+                        rows = 2
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+        )
+        if constant_kind == "constexpr":
+            ctx.param_names.append("enabled")
+            ctx.constexpr_values = {"enabled": str(enabled)}
+        else:
+            ctx.py_globals = {"enabled": enabled}
+        specialized = specialize("NestedStaticWrite", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("constant_kind", ["constexpr", "free"])
+    def test_ai_review_nested_static_condition_respects_loop_shadow(self, constant_kind):
+        """A same-named loop binder is runtime data, even if the outer constant is false."""
+        source = textwrap.dedent("""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX], enabled: pl.constexpr):
+                rows = a.shape[0]
+                if flag > 0:
+                    for enabled in pl.range(3):
+                        if enabled > 0:
+                            rows = 2
+                return rows
+        """)
+        if constant_kind == "free":
+            source = source.replace(", enabled: pl.constexpr", "")
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+        )
+        if constant_kind == "constexpr":
+            ctx.param_names.append("enabled")
+            ctx.constexpr_values = {"enabled": "False"}
+        else:
+            ctx.py_globals = {"enabled": False}
+        if constant_kind == "constexpr":
+            with pytest.raises(ValueError, match="compile-time constant and cannot be assigned"):
+                specialize("ShadowedStaticWrite", [ctx])
+            return
+        specialized = specialize("ShadowedStaticWrite", [ctx])
+        assert "rows_v1 = 4" in specialized
+        assert "rows_v1 = 2" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize(
+        "assignment,expected_rows,expected_dtype",
+        [
+            ("x, spare = [x, x]", 4, "pl.FP32"),
+            ("x = x; x, spare = [x, x]", 4, "pl.FP32"),
+            ("x, y = [y, x]", 8, "pl.BF16"),
+        ],
+        ids=["duplicate", "existing-alias", "swap"],
+    )
+    def test_ai_review_list_operand_metadata_snapshot(self, assignment, expected_rows, expected_dtype):
+        """List-valued unpacking has the same operand snapshot contract as tuple-valued unpacking."""
+        source = textwrap.dedent(f"""
+            def f(x: pl.Tensor, y: pl.Tensor):
+                {assignment}
+                rows, cols = x.shape
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return pl.create_tensor([total, cols], dtype=x.dtype)
+        """)
+        meta = {"x": TensorMeta((4, 16), DataType.FP32), "y": TensorMeta((8, 32), DataType.BF16)}
+        ctx = _make_ctx("f", source, param_names=["x", "y"], tensor_meta=meta)
+        specialized = specialize("ListMetadata", [ctx])
+        assert f"pl.unroll({expected_rows})" in specialized
+        assert f"dtype={expected_dtype}" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    def test_ai_review_nested_list_metadata_snapshot(self):
+        """Nested unpacking is handled by the transformer; the parser accepts flat targets only."""
+        transformed = self._transform(
+            """
+                def f(x, y):
+                    x, (y, spare) = [y, [x, x]]
+                    return x.shape[0], y.shape[0], spare.shape[0]
+            """,
+            tensor_meta={"x": TensorMeta((4, 16), DataType.FP32), "y": TensorMeta((8, 32), DataType.BF16)},
+        )
+        returned = next(node for node in ast.walk(ast.parse(transformed)) if isinstance(node, ast.Return))
+        assert isinstance(returned.value, ast.Tuple)
+        assert [ast.literal_eval(element) for element in returned.value.elts] == [8, 4, 4]
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for i in pl.range(flag)"])
+    def test_ai_review_list_shape_identity_keeps_unroll_constant(self, control):
+        """List operands that write back the same folded dimensions need no runtime predecessor."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]):
+                rows, cols = a.shape
+                {control}:
+                    rows, cols = [rows, cols]
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+        )
+        specialized = specialize("ListShapeIdentity", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for i in pl.range(flag)"])
+    def test_followup_dynamic_shape_unpack_reuses_incoming_tuple(self, control):
+        """An untaken shape write preserves both initialized dimensions."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]):
+                rows, cols = (7, 8)
+                {control}:
+                    rows, cols = a.shape
+                return rows, cols
+        """)
+        meta = {"a": TensorMeta((DynDim("M", "M", 32), 8), DataType.FP32)}
+        transformed = self._transform(
+            source.replace("a: pl.Tensor, flag: pl.Scalar[pl.INDEX]", "a, flag"), tensor_meta=meta
+        )
+        namespace = {"pl": SimpleNamespace(range=range, tensor=SimpleNamespace(dim=lambda a, i: a.shape[i]))}
+        exec(transformed, namespace)
+        for flag in [0, 1]:
+            assert namespace["f"](SimpleNamespace(shape=(5, 8)), flag) == ((5, 8) if flag else (7, 8))
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "flag"], tensor_meta=meta, scalar_dtypes={"flag": DataType.INDEX}
+        )
+        self._verify_ssa(pl.parse_program(specialize("DynamicShapeWrite", [ctx])))
+
+    @pytest.mark.parametrize("wrapper", ["True", "enabled", "1 < 2"])
+    def test_followup_pruned_branch_exports_initialized_loop(self, wrapper):
+        """Flattening a selected branch must also publish the loop's owned results."""
+        source = textwrap.dedent(f"""
+            def f(flag: pl.Scalar[pl.INDEX], enabled: pl.constexpr):
+                if {wrapper}:
+                    for i, (carry,) in pl.range(0, init_values=(0,)):
+                        out, = pl.yield_(carry + 1)
+                if flag > 0:
+                    out, spare = (9, 0)
+                return out
+        """)
+        ctx = _make_ctx("f", source, param_names=["flag", "enabled"], scalar_dtypes={"flag": DataType.INDEX})
+        ctx.constexpr_values = {"enabled": "True"}
+        specialized = specialize("PrunedLoopExport", [ctx])
+        assert "out_v1" not in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("count", [0, 3])
+    def test_followup_explicit_loop_is_definite_branch_write(self, count):
+        """Explicit loop outputs initialize a complete branch even on zero trips."""
+        source = textwrap.dedent(f"""
+            def f(early: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.INDEX]):
+                if early > 0:
+                    out, spare = (1, 0)
+                if flag > 0:
+                    for i, (carry,) in pl.range({count}, init_values=(0,)):
+                        out, = pl.yield_(carry + 1)
+                else:
+                    out = 9
+                return out
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["early", "flag"],
+            scalar_dtypes={"early": DataType.INDEX, "flag": DataType.INDEX},
+        )
+        self._verify_ssa(pl.parse_program(specialize("DefiniteLoopExport", [ctx])))
+
+    @pytest.mark.parametrize("condition", ["a.shape[0] > 8", "a.shape[1] < 4"])
+    def test_followup_shape_condition_prunes_dead_write(self, condition):
+        """Write analysis must apply the same safe descriptor folding as the emitted body."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]):
+                rows = a.shape[0]
+                if flag > 0:
+                    if {condition}:
+                        rows = 2
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+        )
+        specialized = specialize("ShapeCondition", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    def test_followup_comprehension_store_does_not_materialize_outer_shape(self):
+        """Dependency-comprehension binders cannot invalidate an enclosing folded dimension."""
+        source = textwrap.dedent("""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]):
+                rows = a.shape[0]
+                ready = pl.system.task_invalid()
+                if flag > 0:
+                    pl.system.task_dummy(deps=[ready for rows in range(3)])
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+        )
+        specialized = specialize("ComprehensionStores", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("count", [0, 3])
+    @pytest.mark.parametrize("output", ["x", "result"])
+    def test_followup_explicit_tensor_carry_keeps_identity_metadata(self, count, output):
+        """Identity carries preserve init/yield metadata for all published output spellings."""
+        source = textwrap.dedent(f"""
+            def f(x: pl.Tensor):
+                for i, (x,) in pl.range({count}, init_values=(x,)):
+                    {output}, = pl.yield_(x)
+                return pl.create_tensor([1, {output}.shape[1]], dtype={output}.dtype)
+        """)
+        ctx = _make_ctx("f", source, param_names=["x"], tensor_meta={"x": TensorMeta((4, 8), DataType.FP32)})
+        specialized = specialize("TensorCarryMetadata", [ctx])
+        assert "dtype=pl.FP32" in specialized
+        assert "pl.create_tensor([1, 8]" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    def test_followup_changing_tensor_carry_does_not_fold_initial_shape(self):
+        """Later iterations can see a different descriptor than the initial tensor."""
+        transformed = self._transform(
+            """
+                def f(x, other):
+                    for i, (x,) in pl.range(3, init_values=(x,)):
+                        consume(x.shape[0])
+                        result, = pl.yield_(other)
+                    return result
+            """,
+            tensor_meta={"x": TensorMeta((4, 8), DataType.FP32), "other": TensorMeta((16, 8), DataType.FP32)},
+        )
+        assert "consume(4)" not in transformed
+        assert "pl.tensor.dim(x, 0)" in transformed
+
+    def test_followup_shape_condition_respects_rebound_tensor(self):
+        """An incoming descriptor cannot prune a test after its source was overwritten."""
+        source = """
+            def f(a, other, flag):
+                rows = a.shape[0]
+                if flag > 0:
+                    a = other
+                    if a.shape[0] > 8:
+                        rows = 2
+                return rows
+        """
+        transformed = self._transform(
+            source,
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32), "other": TensorMeta((16, 8), DataType.FP32)},
+        )
+        namespace = {
+            "pl": SimpleNamespace(tensor=SimpleNamespace(dim=lambda tensor, axis: tensor.shape[axis]))
+        }
+        exec(transformed, namespace)
+        for flag in [0, 1]:
+            assert namespace["f"](SimpleNamespace(shape=(4, 8)), SimpleNamespace(shape=(16, 8)), flag) == (
+                2 if flag else 4
+            )
+
+    @pytest.mark.parametrize("rhs", ["(y, x)", "[y, x]"])
+    def test_latest_review_return_signature_uses_emitted_tensor_meta(self, rhs):
+        """A rebound return has its operand's descriptor, rather than its old parameter's ABI."""
+        source = textwrap.dedent(f"""
+            def f(x: pl.Tensor, y: pl.Tensor):
+                x, spare = {rhs}
+                return x
+        """)
+        meta = {"x": TensorMeta((4, 8), DataType.FP32), "y": TensorMeta((8, 16), DataType.BF16)}
+        ctx = _make_ctx("f", source, param_names=["x", "y"], tensor_meta=meta)
+        specialized = specialize("ReboundReturn", [ctx])
+        assert "-> pl.Tensor[[8, 16], pl.BF16]" in specialized
+        program = pl.parse_program(specialized)
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for i in pl.range(flag)"])
+    @pytest.mark.parametrize("restore", ["rows = a.shape[0]", "rows, cols = a.shape"])
+    def test_latest_review_direct_shape_restore_retains_literal_bound(self, control, restore):
+        """Only values escaping the region require a runtime shape predecessor."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX]):
+                rows = a.shape[0]
+                {control}:
+                    rows = 2
+                    {restore}
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INDEX},
+        )
+        specialized = specialize("DirectShapeRestore", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("count", [0, 3])
+    def test_latest_review_equal_descriptor_carry_keeps_static_meta(self, count):
+        """Different tensor names can have the same invariant descriptor across a backedge."""
+        source = textwrap.dedent(f"""
+            def f(x: pl.Tensor, other: pl.Tensor):
+                for i, (x,) in pl.range({count}, init_values=(x,)):
+                    x, = pl.yield_(other)
+                rows, cols = x.shape
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return pl.create_tensor([total, cols], dtype=x.dtype)
+        """)
+        meta = {name: TensorMeta((4, 8), DataType.FP32) for name in ["x", "other"]}
+        ctx = _make_ctx("f", source, param_names=["x", "other"], tensor_meta=meta)
+        specialized = specialize("EqualCarryDescriptor", [ctx])
+        assert "pl.unroll(4)" in specialized
+        assert "dtype=pl.FP32" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    def test_latest_review_restore_after_break_keeps_escaping_value(self):
+        """An unreachable restore cannot erase the value carried by an earlier loop exit."""
+        transformed = self._transform(
+            """
+                def f(a, count):
+                    rows = a.shape[0]
+                    for i in pl.range(count):
+                        rows = 2
+                        if i > 0:
+                            break
+                        rows = a.shape[0]
+                    total = 0
+                    for j in pl.unroll(rows):
+                        total = total + 1
+                    return total
+            """,
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)},
+        )
+        namespace = {"pl": SimpleNamespace(range=range, unroll=range)}
+        exec(transformed, namespace)
+        for count in [0, 1, 3]:
+            assert namespace["f"](None, count) == (2 if count == 3 else 4)
+
+    @pytest.mark.parametrize("parameter", ["pl.Tensor", "pl.Out[pl.Tensor]"])
+    def test_review_unknown_tuple_result_does_not_inherit_parameter_abi(self, parameter):
+        """An unannotated result must be deduced from its body at dependency calls."""
+        meta = {"x": TensorMeta((4, 8), DataType.FP32)}
+        helper = _make_ctx(
+            "helper",
+            f"def helper(x: {parameter}):\n"
+            "    x, spare = (pl.create_tensor([8, 16], dtype=pl.BF16), x)\n"
+            "    return x\n",
+            func_type="incore",
+            param_names=["x"],
+            tensor_meta=meta,
+        )
+        caller = _make_ctx(
+            "f",
+            "def f(x: pl.Tensor):\n    x = helper(x)\n    return x\n",
+            param_names=["x"],
+            tensor_meta=meta,
+            dep_names=["helper"],
+        )
+        source = specialize("UnknownTupleResult", [helper, caller])
+        program = pl.parse_program(source)
+        function = program.get_function("f")
+        assert function is not None
+        assert isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        result = returned.value[0].type
+        expected = ir.TensorType([8, 16], DataType.BF16)
+        ir.assert_structural_equal(result, expected)
+        for name in ["helper", "f"]:
+            declared = program.get_function(name)
+            assert declared is not None and len(declared.return_types) == 1
+            ir.assert_structural_equal(declared.return_types[0], expected)
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "x, y = y, x",
+            "x, y = [y, x]",
+            "x, y = helper(x, True, y)",
+            "x, y = helper(y=y, enabled=True, x=x)",
+        ],
+    )
+    def test_review_tuple_swap_propagates_tensor_kinds(self, binding):
+        """Simultaneous rebinding carries both operands' descriptor and object kind."""
+        meta = {"x": TensorMeta((4, 8), DataType.FP32), "y": TensorMeta((8, 16), DataType.BF16)}
+        helper = _make_ctx(
+            "helper",
+            "def helper(x: pld.DistributedTensor, enabled: pl.constexpr, y: pl.Tensor):\n"
+            "    if enabled:\n        return y, x\n    else:\n        return x, y\n",
+            func_type="incore",
+            param_names=["x", "enabled", "y"],
+            tensor_meta=meta,
+        )
+        helper.constexpr_values = {"enabled": "True"}
+        ctx = _make_ctx(
+            "f",
+            f"def f(x: pld.DistributedTensor, y: pl.Tensor):\n    {binding}\n    return x, y\n",
+            param_names=["x", "y"],
+            tensor_meta=meta,
+            dep_names=["helper"],
+        )
+        source = specialize("TupleTensorKinds", [helper, ctx])
+        assert "-> tuple[pl.Tensor[[8, 16], pl.BF16], pld.DistributedTensor[[4, 8], pl.FP32]]" in source
+        program = pl.parse_program(source)
+        function = program.get_function("f")
+        assert function is not None
+        plain, distributed = function.return_types
+        assert isinstance(plain, ir.TensorType) and not isinstance(plain, ir.DistributedTensorType)
+        assert isinstance(distributed, ir.DistributedTensorType)
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize("condition", ["False", "1 > 2", "enabled"])
+    def test_review_dead_successor_does_not_merge_branch_temporary(self, condition):
+        """A read removed by static pruning cannot require a cross-type branch export."""
+        ctx = _make_ctx(
+            "f",
+            textwrap.dedent(f"""
+                def f(flag: pl.Scalar[pl.INT32], enabled: pl.constexpr):
+                    if flag > 0:
+                        scratch = 0
+                        scratch, spare = (2.0, 0)
+                    else:
+                        scratch, spare = (4, 0)
+                    if {condition}:
+                        unused = scratch
+                    return flag
+            """),
+            param_names=["flag", "enabled"],
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        ctx.constexpr_values = {"enabled": "False"}
+        self._verify_ssa(pl.parse_program(specialize("DeadSuccessor", [ctx])))
+
+    @pytest.mark.parametrize("later_write", ["", "a = b"])
+    def test_dead_descriptor_successor_does_not_merge_branch_temporary(self, later_write):
+        """Descriptor pruning precedes liveness, including a test before a later write."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, b: pl.Tensor, flag: pl.Scalar[pl.INT32]):
+                if flag > 0:
+                    scratch = 0
+                    scratch, spare = (2.0, 0)
+                else:
+                    scratch, spare = (4, 0)
+                if a.shape[0] > 8:
+                    unused = scratch
+                {later_write}
+                return flag
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "b", "flag"],
+            tensor_meta={"a": TensorMeta((4, 8), DataType.FP32), "b": TensorMeta((16, 8), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        self._verify_ssa(pl.parse_program(specialize("DeadDescriptorSuccessor", [ctx])))
+
+    def test_liveness_descriptor_preview_respects_prior_writes(self):
+        """A descriptor changed before a test cannot use the parameter's original shape."""
+        source = textwrap.dedent("""
+            def f(a, b, flag):
+                result = 0
+                if flag > 0:
+                    scratch = 0
+                    scratch, spare = (2, 0)
+                else:
+                    scratch, spare = (4, 0)
+                a = b
+                if a.shape[0] > 8:
+                    result = scratch
+                return result
+        """)
+        meta = {"a": TensorMeta((4, 8), DataType.FP32), "b": TensorMeta((16, 8), DataType.FP32)}
+        namespace = {}
+        exec(self._transform(source, tensor_meta=meta), namespace)
+        assert namespace["f"](SimpleNamespace(shape=(4, 8)), SimpleNamespace(shape=(16, 8)), 1) == 2
+        assert namespace["f"](SimpleNamespace(shape=(4, 8)), SimpleNamespace(shape=(16, 8)), 0) == 4
+
+    @pytest.mark.parametrize("initial_rows", [4, 16])
+    @pytest.mark.parametrize("control", ["", "for i in pl.range(2):", "while flag > 0:"])
+    def test_liveness_preview_tracks_copied_descriptors_and_invariant_loops(self, initial_rows, control):
+        """A known RHS descriptor controls pruning after copies and on unchanged backedges."""
+        successor = "if a.shape[0] > 8:\n    unused = scratch\n"
+        if control:
+            successor = control + "\n" + textwrap.indent(successor + "flag = flag - flag\n", "    ")
+        source = (
+            "def f(a: pl.Tensor, b: pl.Tensor, flag: pl.Scalar[pl.INT32]):\n"
+            "    if flag > 0:\n        scratch = 0\n        scratch = 2.0\n"
+            "    else:\n        scratch = 4\n"
+            "    a = b\n" + textwrap.indent(successor, "    ") + "    return flag\n"
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "b", "flag"],
+            tensor_meta={
+                "a": TensorMeta((initial_rows, 8), DataType.FP32),
+                "b": TensorMeta((4, 8), DataType.FP32),
+            },
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        self._verify_ssa(pl.parse_program(specialize("KnownDescriptorLiveness", [ctx])))
+
+    @pytest.mark.parametrize("submitted", [False, True])
+    def test_liveness_preview_preserves_dependency_variant_identity(self, submitted):
+        """Two constexpr variants of one helper must retain distinct returned operands."""
+        meta = {"a": TensorMeta((16, 8), DataType.FP32), "b": TensorMeta((4, 8), DataType.FP32)}
+        helpers = []
+        for index, enabled in enumerate([True, False]):
+            helper = _make_ctx(
+                f"choose_v{index}",
+                "def choose(a: pl.Tensor, b: pl.Tensor, enabled: pl.constexpr):\n"
+                "    if enabled:\n        return a\n    else:\n        return b\n",
+                func_type="incore",
+                param_names=["a", "b", "enabled"],
+                tensor_meta=meta,
+            )
+            helper.source_func_name = "choose"
+            helper.constexpr_values = {"enabled": str(enabled)}
+            helpers.append(helper)
+        calls = (
+            "    first, first_done = pl.submit(choose, a, b, True)\n"
+            "    second, done = pl.submit(choose, a, b, False)\n"
+            if submitted
+            else "    first = choose(a, b, True)\n    second = choose(a, b, False)\n"
+        )
+        ctx = _make_ctx(
+            "f",
+            "def f(a: pl.Tensor, b: pl.Tensor, flag: pl.Scalar[pl.INT32]):\n"
+            "    if flag > 0:\n        scratch = 0\n        scratch = 2.0\n"
+            "    else:\n        scratch = 4\n"
+            + calls
+            + "    if second.shape[0] > 8:\n        unused = scratch\n    return flag\n",
+            param_names=["a", "b", "flag"],
+            tensor_meta=meta,
+            scalar_dtypes={"flag": DataType.INT32},
+            dep_names=["choose"],
+        )
+        ctx.dep_func_names = {"choose": "choose_v0"}
+        ctx.dep_call_variants = {("choose", index): f"choose_v{index}" for index in range(2)}
+        self._verify_ssa(pl.parse_program(specialize("VariantDescriptorLiveness", [*helpers, ctx])))
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "x, done = pl.submit(forward, x, True)",
+            "x, done = pl.spmd_submit(forward, enabled=True, value=x, core_num=1)",
+        ],
+    )
+    def test_submit_identity_result_retains_tensor_metadata(self, binding):
+        """Submit result packing preserves identity metadata and constexpr argument binding."""
+        meta = {"value": TensorMeta((4, 8), DataType.FP32)}
+        helper = _make_ctx(
+            "forward",
+            "def forward(value: pl.Tensor, enabled: pl.constexpr):\n    return value\n",
+            func_type="incore",
+            param_names=["value", "enabled"],
+            tensor_meta=meta,
+        )
+        helper.constexpr_values = {"enabled": "True"}
+        ctx = _make_ctx(
+            "f",
+            "def f(x: pl.Tensor):\n"
+            f"    {binding}\n"
+            "    for i in pl.unroll(x.shape[0]):\n"
+            "        copied = pl.create_tensor([4, 8], dtype=x.dtype)\n"
+            "    return x\n",
+            param_names=["x"],
+            tensor_meta={"x": meta["value"]},
+            dep_names=["forward"],
+        )
+        source = specialize("SubmitIdentity", [helper, ctx])
+        assert "pl.unroll(4)" in source
+        assert "dtype=pl.FP32" in source
+        self._verify_ssa(pl.parse_program(source))
+
+    def test_submit_rewritten_multi_result_preserves_operand_snapshot(self):
+        """A rewritten callee retains nested Submit packing and simultaneous metadata."""
+        meta = {"x": TensorMeta((4, 8), DataType.FP32), "y": TensorMeta((8, 16), DataType.BF16)}
+        helper = _make_ctx(
+            "swap",
+            "def swap(x: pl.Tensor, y: pl.Tensor):\n    return y, x\n",
+            func_type="incore",
+            param_names=["x", "y"],
+            tensor_meta=meta,
+        )
+        ctx = _make_ctx(
+            "f",
+            "def f(x: pl.Tensor, y: pl.Tensor):\n"
+            "    (x, y), done = pl.submit(self.swap, x, y)\n"
+            "    for i in pl.unroll(x.shape[0]):\n        first = x\n"
+            "    for j in pl.unroll(y.shape[0]):\n        second = y\n"
+            "    return x, y\n",
+            param_names=["x", "y"],
+            tensor_meta=meta,
+            dep_names=["swap"],
+        )
+        source = specialize("SubmitSwap", [helper, ctx])
+        assert "pl.unroll(8)" in source and "pl.unroll(4)" in source
+        program = self._verify_ssa(pl.parse_program(source))
+        function = program.get_function("f")
+        assert function is not None and len(function.return_types) == 2
+        ir.assert_structural_equal(function.return_types[0], ir.TensorType([8, 16], DataType.BF16))
+        ir.assert_structural_equal(function.return_types[1], ir.TensorType([4, 8], DataType.FP32))
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for i in pl.range(flag)"])
+    @pytest.mark.parametrize("identity_first", [False, True])
+    @pytest.mark.parametrize(
+        "identity", ["a = a\n", "a: pl.Tensor[[4, 8], pl.FP32] = a\n", "a, spare = (same, 0)\n"]
+    )
+    def test_review_descriptor_shadowing_follows_source_order(self, control, identity_first, identity):
+        """An identity write cannot shadow a descriptor test before or after it."""
+        test = "if a.shape[0] > 8 or rows > 8:\n    rows = 2\n"
+        body = identity + test if identity_first else test + identity
+        source = (
+            "def f(a: pl.Tensor, same: pl.Tensor, flag: pl.Scalar[pl.INT32]):\n"
+            "    rows = a.shape[0]\n"
+            f"    {control}:\n"
+            + textwrap.indent(body, "        ")
+            + "    total = 0\n    for j in pl.unroll(rows):\n        total = total + 1\n"
+            "    return total\n"
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "same", "flag"],
+            tensor_meta={name: TensorMeta((4, 8), DataType.FP32) for name in ["a", "same"]},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        specialized = specialize("OrderedDescriptorShadows", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize(
+        "body,count,expected",
+        [
+            ("rows = 2\nif rows > 8:\n    cols = 2", 1, 8),
+            ("rows = 9\nif rows > 8:\n    cols = 2", 1, 2),
+            ("rows = count\nif rows > 8:\n    cols = 2", 10, 2),
+            (
+                "if rows == 4:\n    cols = 2\nif i > 0:\n    rows = 8\nelse:\n    rows = 2",
+                1,
+                2,
+            ),
+            ("for rows in pl.range(10):\n    if rows > 8:\n        cols = 2", 1, 2),
+        ],
+        ids=[
+            "dead-emitted-arm",
+            "crossing-threshold",
+            "unknown-write",
+            "non-monotone-comparison",
+            "scoped-induction",
+        ],
+    )
+    def test_literal_shape_bounds_keep_possible_writes_live(self, body, count, expected):
+        """Unknown values, equality, and shadowed induction variables cannot prune live writes."""
+        source = (
+            "def f(a, count):\n    rows, cols = a.shape\n    for i in pl.range(count):\n"
+            + textwrap.indent(body, "        ")
+            + "\n    return cols\n"
+        )
+        transformed = self._transform(source, tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)})
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(transformed, namespace)
+        assert namespace["f"](None, count) == expected
+
+    @pytest.mark.parametrize("incoming_alias", [False, True])
+    @pytest.mark.parametrize("transparent_scope", [False, True])
+    def test_review_tuple_yield_uses_common_branch_names(self, incoming_alias, transparent_scope):
+        """Branch-local aliases are operands, not distinct IfStmt output contracts."""
+        initialization = "x = 0; x = x + 1; y = 0; y = y + 1" if incoming_alias else "pass"
+        then_body = "x = 2\ny = 3\nx = x + 1\ny = y + 1\nx, y = pl.yield_(x, y)"
+        else_body = "x = 4\ny = 5\nx = x + 1\ny = y + 1\nx, y = pl.yield_(x, y)"
+        if transparent_scope:
+            then_body = "with pl.scope():\n" + textwrap.indent(then_body, "    ")
+            else_body = "with pl.scope():\n" + textwrap.indent(else_body, "    ")
+        source = (
+            "def f(flag: pl.Scalar[pl.INT32]):\n"
+            + textwrap.indent(initialization, "    ")
+            + "\n    if flag > 0:\n"
+            + textwrap.indent(then_body, "        ")
+            + "\n    else:\n"
+            + textwrap.indent(else_body, "        ")
+            + "\n    return x, y\n"
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["flag"],
+            scalar_dtypes={"flag": DataType.INT32},
+            auto_scope=not transparent_scope,
+        )
+        program = pl.parse_program(specialize("TupleYield", [ctx]))
+        function = program.get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+        assert len(branch.return_vars) == 2
+        # SSA conversion verifies the return-variable/yield arity and references.
+        passes.convert_to_ssa()(program)
+
+    def test_graph_tuple_task_id_shadow_preserves_folded_shape(self):
+        """The Graph must restore the folded predecessor after a tuple TaskId write."""
+        source = textwrap.dedent("""
+            def f(c: pl.InOut[pl.Tensor]):
+                width = c.shape[1]
+                with pl.manual_scope():
+                    with pl.graph("recording"):
+                        local_ready = pl.system.task_dummy(deps=[])
+                        width, unused = (local_ready, 0)
+                        pl.system.task_dummy(deps=[width])
+                return pl.create_tensor([128, width], dtype=pl.FP32)
+        """)
+        ctx = _make_ctx(
+            "f", source, param_names=["c"], tensor_meta={"c": TensorMeta((128, 64), DataType.FP32)}
+        )
+        function = pl.parse_program(specialize("Before", [ctx])).get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        (value,) = returned.value
+        result = value.type
+        assert isinstance(result, ir.TensorType)
+        assert isinstance(result.shape[1], ir.ConstInt) and result.shape[1].value == 64
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    @pytest.mark.parametrize("unpack", [False, True])
+    def test_followup_constexpr_shape_write_keeps_unroll_bound(self, enabled, unpack):
+        """A selected shape write must remain a literal accepted by pl.unroll."""
+        initialization = "rows, cols = a.shape" if unpack else "rows = a.shape[0]"
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, enabled: pl.constexpr):
+                {initialization}
+                if enabled:
+                    rows, cols = a.shape
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "enabled"], tensor_meta={"a": TensorMeta((4, 8), DataType.FP32)}
+        )
+        ctx.constexpr_values = {"enabled": str(enabled)}
+        program = pl.parse_program(specialize("ConstexprShape", [ctx]))
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize("flag", [False, True])
+    @pytest.mark.parametrize(
+        "then_body,else_body,expected_true,expected_false",
+        [
+            ("x = 1; x, y = (2, 3)", "x, y = (4, 5)", (2, 3), (4, 5)),
+            (
+                "x, y = (1, 2); x, y = (x + 10, y + 20)",
+                "x, y = (3, 4); x, y = (x + 30, y + 40)",
+                (11, 22),
+                (33, 44),
+            ),
+            ("x, y = (1, 2); x, y = (3.0, 4)", "x, y = (5, 6); x, y = (7.0, 8)", (3.0, 4), (7.0, 8)),
+        ],
+        ids=["one-rebind", "both-rebind", "type-changing"],
+    )
+    def test_followup_tuple_branch_exports(self, flag, then_body, else_body, expected_true, expected_false):
+        """The chosen arm must export its last tuple result, not its first assignment."""
+        source = (
+            f"def f(flag):\n    if flag > 0:\n        {then_body}\n"
+            f"    else:\n        {else_body}\n    return x, y\n"
+        )
+        namespace = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](flag) == (expected_true if flag else expected_false)
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx("f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INT32})
+        self._verify_ssa(pl.parse_program(specialize("BranchExports", [ctx])))
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_followup_dead_branch_temporaries_do_not_merge_types(self, flag):
+        """A later overwrite kills scratch; only x and y need a branch export."""
+        source = textwrap.dedent("""
+            def f(flag):
+                if flag > 0:
+                    scratch = 0
+                    scratch, tmp = (2.0, 0)
+                    x = 1
+                    x, y = (2, 3)
+                else:
+                    scratch = 0
+                    scratch, tmp = (4, 0)
+                    x, y = (4, 5)
+                scratch = 0
+                x = x + 10
+                return x, y, scratch
+        """)
+        namespace = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](flag) == ((12, 3, 0) if flag else (14, 5, 0))
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx("f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INT32})
+        self._verify_ssa(pl.parse_program(specialize("DeadTemporaries", [ctx])))
+
+    def test_followup_split_aiv_keeps_enclosing_yield_names(self):
+        """split_aiv owns a transparent scope rather than a new yield contract."""
+        source = textwrap.dedent("""
+            def f(flag: pl.Scalar[pl.INT32]):
+                if flag > 0:
+                    x = 1
+                    y = 2
+                    x = x + 1
+                    y = y + 1
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                        x, y = pl.yield_(x, y)
+                else:
+                    x = 3
+                    y = 4
+                    x = x + 1
+                    y = y + 1
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                        x, y = pl.yield_(x, y)
+                return x, y
+        """)
+        ctx = _make_ctx(
+            "f", source, func_type="incore", param_names=["flag"], scalar_dtypes={"flag": DataType.INT32}
+        )
+        program = pl.parse_program(specialize("SplitYield", [ctx]))
+        function = program.get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        branch = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+        assert len(branch.return_vars) == 2
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)"])
+    def test_followup_graph_conditional_shape_has_predecessor(self, control):
+        """A Graph consumer needs an incoming scalar on the untaken/zero-trip path."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.InOut[pl.Tensor], flag: pl.Scalar[pl.INT32]):
+                rows = a.shape[0]
+                with pl.manual_scope():
+                    with pl.graph("recording"):
+                        {control}:
+                            rows, tmp = (rows, 0)
+                        for i in pl.range(rows):
+                            with pl.at(level=pl.Level.CORE_GROUP):
+                                pl.store(pl.load(a, [i, 0], [1, 4]), [i, 0], a)
+                return a
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        program = pl.parse_program(specialize("GraphShape", [ctx]))
+        passes.outline_graph_scopes()(self._verify_ssa(program))
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)"])
+    def test_followup_graph_task_id_shadow_keeps_shape_predecessor(self, control):
+        """A private TaskId shadow must not mutate an integer runtime predecessor."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):
+                rows = a.shape[0]
+                with pl.manual_scope():
+                    with pl.graph("recording"):
+                        {control}:
+                            ready = pl.system.task_dummy(deps=[])
+                            rows, tmp = (ready, 0)
+                            pl.system.task_dummy(deps=[rows])
+                return pl.create_tensor([rows, 4], dtype=pl.FP32)
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        program = pl.parse_program(specialize("TaskShape", [ctx]))
+        function = program.get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        shape = returned.value[0].type
+        assert isinstance(shape, ir.TensorType)
+        assert isinstance(shape.shape[0], ir.ConstInt) and shape.shape[0].value == 4
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)", "while flag > 0"])
+    def test_followup_runtime_identity_shape_write_keeps_unroll_bound(self, control):
+        """Writing the identical static shape does not require a runtime scalar."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):
+                rows, cols = a.shape
+                {control}:
+                    rows, cols = a.shape
+                    flag = pl.cast(0, pl.INT32)
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        self._verify_ssa(pl.parse_program(specialize("IdentityShape", [ctx])))
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_followup_rebound_shape_source_keeps_incoming_dimensions(self, flag):
+        """An entry-shape snapshot cannot prove a write after the source is rebound."""
+        source = textwrap.dedent("""
+            def f(a, flag):
+                rows, cols = a.shape
+                if flag > 0:
+                    a = pl.reshape(a, [4, 4])
+                    rows, cols = a.shape
+                return rows, cols
+        """)
+        meta = {"a": TensorMeta((4, 4), DataType.FP32)}
+        namespace = {"pl": SimpleNamespace(reshape=lambda value, shape: value)}
+        exec(self._transform(source, tensor_meta=meta), namespace)
+        assert namespace["f"](SimpleNamespace(shape=(4, 4)), flag) == (4, 4)
+        source = source.replace("def f(a, flag):", "def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "flag"], tensor_meta=meta, scalar_dtypes={"flag": DataType.INT32}
+        )
+        self._verify_ssa(pl.parse_program(specialize("ReboundShape", [ctx])))
+
+    @pytest.mark.parametrize("first", [False, True])
+    @pytest.mark.parametrize("second", [False, True])
+    def test_next_review_sequential_if_promotes_common_binding(self, first, second):
+        """A second conditional updates the value joined by the first one."""
+        source = textwrap.dedent("""
+            def f(first, second):
+                if first > 0:
+                    x, y = (2, 3)
+                else:
+                    x, y = (4, 5)
+                if second > 0:
+                    x, y = (6, 7)
+                return x, y
+        """)
+        namespace = {}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](first, second) == ((6, 7) if second else ((2, 3) if first else (4, 5)))
+        source = source.replace(
+            "def f(first, second):", "def f(first: pl.Scalar[pl.INT32], second: pl.Scalar[pl.INT32]):"
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["first", "second"],
+            scalar_dtypes={"first": DataType.INT32, "second": DataType.INT32},
+        )
+        self._verify_ssa(pl.parse_program(specialize("SequentialBranches", [ctx])))
+
+    @pytest.mark.parametrize("unpack", [False, True])
+    @pytest.mark.parametrize("annotated", [False, True])
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)", "while flag > 0"])
+    def test_next_review_dead_shape_write_keeps_restored_unroll_bound(self, unpack, annotated, control):
+        """An unconditional shape restore kills the earlier conditional write."""
+        shape = "rows, cols = a.shape" if unpack else "rows = a.shape[0]"
+        write = "rows: pl.Scalar[pl.INDEX] = 2" if annotated else "rows = 2"
+        source = textwrap.dedent(f"""
+            def f(a, flag):
+                {shape}
+                total = 0
+                {control}:
+                    {write}
+                    total = rows
+                    flag = flag - flag
+                {shape}
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        meta = {"a": TensorMeta((4, 4), DataType.FP32)}
+        namespace = {"pl": SimpleNamespace(range=range, unroll=range)}
+        transformed = self._transform(source, tensor_meta=meta)
+        exec(transformed, namespace)
+        for flag in [0, 1]:
+            assert namespace["f"](SimpleNamespace(shape=(4, 4)), flag) == (6 if flag else 4)
+        source = source.replace("def f(a, flag):", "def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "flag"], tensor_meta=meta, scalar_dtypes={"flag": DataType.INT32}
+        )
+        specialized = specialize("RestoredShape", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("flag", [False, True])
+    @pytest.mark.parametrize("terminator", ["break", "continue"])
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_next_review_branch_exports_before_loop_exit(self, flag, terminator, nested):
+        """A loop exit exports its current tuple, including before a later write."""
+        exit_body = (
+            f"if flag > 0:\n                {terminator}\n            x, y = (6, 7)" if nested else terminator
+        )
+        source = (
+            "def f(flag):\n    for iteration in pl.range(1):\n        if flag > 0:\n"
+            "            x = 1\n            x, y = (2, 3)\n"
+            f"            {exit_body}\n        else:\n            x, y = (4, 5)\n"
+            "        x, y = (8, 9)\n    return x, y\n"
+        )
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](flag) == ((2, 3) if flag else (8, 9))
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx("f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INT32})
+        # Native execution checks the exit value. Raw-program SSA separately
+        # rejects loop locals escaping without an incoming initialization.
+        assert isinstance(pl.parse_program(specialize("LoopExitExports", [ctx])), ir.Program)
+
+    def test_loop_exit_liveness_ignores_dead_cross_type_temporary(self):
+        """Exit exports retain live values without merging a dead cross-type local."""
+        source = textwrap.dedent("""
+            def f(flag):
+                x, y = (0, 0)
+                for iteration in pl.range(1):
+                    if flag > 0:
+                        scratch = 0
+                        scratch = 2.0
+                        x, y = (2, 3)
+                        break
+                    else:
+                        scratch = 4
+                        x, y = (4, 5)
+                    x, y = (6, 7)
+                return x, y
+        """)
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](0) == (6, 7)
+        assert namespace["f"](1) == (2, 3)
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx("f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INT32})
+        self._verify_ssa(pl.parse_program(specialize("LoopExitDeadTemporary", [ctx])))
+
+    @pytest.mark.parametrize("control", ["if flag > 0", "for iteration in pl.range(flag)", "while flag > 0"])
+    def test_next_review_graph_identity_tuple_keeps_caller_shape(self, control):
+        """An identity tuple keeps a caller-only shape consumer compile-time constant."""
+        source = textwrap.dedent(f"""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):
+                rows = a.shape[0]
+                with pl.manual_scope():
+                    with pl.graph("recording"):
+                        pl.system.task_dummy(deps=[])
+                        {control}:
+                            rows, unused = (rows, 0)
+                            flag = flag - flag
+                return pl.create_tensor([rows, 4], dtype=pl.FP32)
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        program = pl.parse_program(specialize("CallerShape", [ctx]))
+        function = program.get_function("f")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        result = returned.value[0].type
+        assert isinstance(result, ir.TensorType)
+        assert isinstance(result.shape[0], ir.ConstInt) and result.shape[0].value == 4
+        passes.outline_graph_scopes()(self._verify_ssa(program))
+
+    @pytest.mark.parametrize("scope", ["manual_scope", "scope"])
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_comment_sibling_scope_exports_tuple_binding(self, scope, flag):
+        """A later conditional retains a tuple bound in an earlier with scope."""
+        source = textwrap.dedent(f"""
+            def f(flag):
+                with pl.{scope}():
+                    x, y = (1, 2)
+                if flag > 0:
+                    x, y = (3, 4)
+                return x, y
+        """)
+        namespace = {"pl": SimpleNamespace(manual_scope=nullcontext, scope=nullcontext)}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](flag) == ((3, 4) if flag else (1, 2))
+        source = source.replace("def f(flag):", "def f(flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx(
+            "f", source, param_names=["flag"], scalar_dtypes={"flag": DataType.INT32}, auto_scope=False
+        )
+        self._verify_ssa(pl.parse_program(specialize("SiblingScopes", [ctx])))
+
+    @pytest.mark.parametrize("increment", [0, 1])
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_comment_shape_identity_observes_prior_operand_write(self, increment, flag):
+        """An operand's old shape fold cannot prove an identity after a scalar write."""
+        source = textwrap.dedent(f"""
+            def f(a, flag):
+                rows, cols = a.shape
+                if flag > 0:
+                    cols = cols + {increment}
+                    rows, unused = (cols, 0)
+                return rows
+        """)
+        meta = {"a": TensorMeta((4, 4), DataType.FP32)}
+        namespace = {}
+        exec(self._transform(source, tensor_meta=meta), namespace)
+        assert namespace["f"](SimpleNamespace(shape=(4, 4)), flag) == 4 + (increment if flag else 0)
+        source = source.replace("def f(a, flag):", "def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):")
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "flag"], tensor_meta=meta, scalar_dtypes={"flag": DataType.INT32}
+        )
+        self._verify_ssa(pl.parse_program(specialize("WrittenOperand", [ctx])))
+
+    def test_comment_shape_identity_ignores_later_operand_write(self):
+        """A later scalar write cannot invalidate an earlier, genuinely identical tuple."""
+        source = textwrap.dedent("""
+            def f(a: pl.Tensor, flag: pl.Scalar[pl.INT32]):
+                rows, cols = a.shape
+                if flag > 0:
+                    rows, unused = (cols, 0)
+                    cols = cols + 1
+                total = 0
+                for i in pl.unroll(rows):
+                    total = total + 1
+                return total
+        """)
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag"],
+            tensor_meta={"a": TensorMeta((4, 4), DataType.FP32)},
+            scalar_dtypes={"flag": DataType.INT32},
+        )
+        specialized = specialize("LaterWrite", [ctx])
+        assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    @pytest.mark.parametrize("count", [0, 2])
+    def test_comment_shape_identity_observes_prior_loop_iterations(self, count):
+        """A write later in the body changes the operand seen by the next iteration."""
+        source = textwrap.dedent("""
+            def f(a, count):
+                rows, cols = a.shape
+                for iteration in pl.range(count):
+                    rows, unused = (cols, 0)
+                    cols = cols + 1
+                return rows
+        """)
+        meta = {"a": TensorMeta((4, 4), DataType.FP32)}
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source, tensor_meta=meta), namespace)
+        assert namespace["f"](SimpleNamespace(shape=(4, 4)), count) == (4 if count == 0 else 5)
+        source = source.replace("def f(a, count):", "def f(a: pl.Tensor, count: pl.Scalar[pl.INDEX]):")
+        ctx = _make_ctx(
+            "f", source, param_names=["a", "count"], tensor_meta=meta, scalar_dtypes={"count": DataType.INDEX}
+        )
+        self._verify_ssa(pl.parse_program(specialize("CarriedOperand", [ctx])))
+
+    @pytest.mark.parametrize("count", [0, 1, 3])
+    def test_comment_for_target_rebinds_tuple_alias(self, count):
+        """Body reads follow the scoped target; the caller alias is restored."""
+        source = textwrap.dedent("""
+            def f(count):
+                i, y = (1, 2)
+                i, y = (3, 4)
+                total = 0
+                for i in pl.range(count):
+                    total = total + i
+                return i, total
+        """)
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source), namespace)
+        assert namespace["f"](count) == (3, sum(range(count)))
+        source = source.replace("def f(count):", "def f(count: pl.Scalar[pl.INDEX]):")
+        ctx = _make_ctx("f", source, param_names=["count"], scalar_dtypes={"count": DataType.INDEX})
+        self._verify_ssa(pl.parse_program(specialize("TupleCounter", [ctx])))
+
+    def test_comment_nested_loop_target_restores_parent_identity(self):
+        """A scoped induction assignment preserves the caller's operand fold."""
+        source = textwrap.dedent("""
+            def f(a, flag, count):
+                rows, cols = a.shape
+                if flag > 0:
+                    for cols in pl.range(count):
+                        pass
+                    rows, unused = (cols, 0)
+                return rows
+        """)
+        meta = {"a": TensorMeta((4, 4), DataType.FP32)}
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source, tensor_meta=meta), namespace)
+        for flag in [0, 1]:
+            for count in [0, 1]:
+                assert namespace["f"](SimpleNamespace(shape=(4, 4)), flag, count) == 4
+        source = source.replace(
+            "def f(a, flag, count):",
+            "def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX], count: pl.Scalar[pl.INDEX]):",
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag", "count"],
+            tensor_meta=meta,
+            scalar_dtypes={"flag": DataType.INDEX, "count": DataType.INDEX},
+        )
+        self._verify_ssa(pl.parse_program(specialize("NestedTarget", [ctx])))
+
+    def test_comment_for_target_body_reassignment_does_not_change_iterator(self):
+        """Body reassignment leaves iteration and the caller binding intact."""
+        source = textwrap.dedent("""
+            def f():
+                i, y = (1, 2)
+                i, y = (3, 4)
+                total = 0
+                for i in pl.range(2):
+                    i = 10
+                    total = total + i
+                return i, total
+        """)
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source), namespace)
+        assert namespace["f"]() == (3, 20)
+        self._verify_ssa(pl.parse_program(specialize("AssignedCounter", [_make_ctx("f", source)])))
+
+    @pytest.mark.parametrize("restored", [False, True])
+    @pytest.mark.parametrize("control", ["for iteration in pl.range(count)", "while count > 0"])
+    def test_comment_nested_shape_write_uses_child_liveness(self, control, restored):
+        """An inner write killed by a body-local restore is dead at loop exit."""
+        restore = "rows = a.shape[0]" if restored else "pass"
+        source = textwrap.dedent(f"""
+            def f(a, flag, count):
+                rows = a.shape[0]
+                {control}:
+                    if flag > 0:
+                        rows = 2
+                    {restore}
+                    count = count - 1
+                return rows
+        """)
+        meta = {"a": TensorMeta((4, 4), DataType.FP32)}
+        namespace = {"pl": SimpleNamespace(range=range)}
+        exec(self._transform(source, tensor_meta=meta), namespace)
+        for count in [0, 2]:
+            for flag in [0, 1]:
+                expected = 2 if count and flag and not restored else 4
+                assert namespace["f"](SimpleNamespace(shape=(4, 4)), flag, count) == expected
+        if restored:
+            source = source.replace(
+                "    return rows\n",
+                "    total = 0\n    for i in pl.unroll(rows):\n        total = total + 1\n    return total\n",
+            )
+        source = source.replace(
+            "def f(a, flag, count):",
+            "def f(a: pl.Tensor, flag: pl.Scalar[pl.INDEX], count: pl.Scalar[pl.INDEX]):",
+        )
+        ctx = _make_ctx(
+            "f",
+            source,
+            param_names=["a", "flag", "count"],
+            tensor_meta=meta,
+            scalar_dtypes={"flag": DataType.INDEX, "count": DataType.INDEX},
+        )
+        specialized = specialize("NestedRestore", [ctx])
+        if restored:
+            assert "pl.unroll(4)" in specialized
+        self._verify_ssa(pl.parse_program(specialized))
+
+    def test_comment_metadata_preview_runs_liveness_before_dependency(self):
+        """A restored unary-plus shape must retain metadata for a JIT dependency."""
+
+        @pl.jit.inline
+        def keep(a: pl.Tensor):
+            return a
+
+        @pl.jit
+        def entry(src: pl.Tensor[[1, 128], pl.FP32], flag: pl.Scalar[pl.INDEX]):
+            if TYPE_CHECKING:
+                assert src.shape is not None
+            rows = src.shape[1]
+            if flag > 0:
+                rows = 2
+            rows = src.shape[1]
+            reshaped = pl.reshape(src, [+rows])
+            return keep(reshaped)
+
+        program = entry.specialize()
+        helper = next(function for function in program.functions.values() if function.name.startswith("keep"))
+        assert isinstance(helper.params[0].type, ir.TensorType)
+        assert isinstance(helper.params[0].type.shape[0], ir.ConstInt)
+        assert helper.params[0].type.shape[0].value == 128
+        self._verify_ssa(program)
+
+    @pytest.mark.parametrize(
+        "use_ptoas",
+        [False, pytest.param(True, marks=pytest.mark.ptoas_compile)],
+        ids=["diagnostic", "executable"],
+    )
+    def test_register_tuple_rebind_reaches_store(self, tmp_path, monkeypatch, use_ptoas):
+        """The store must use the intlv projection, rather than the earlier add."""
+        if use_ptoas:
+            if find_ptoas_binary() is None:
+                pytest.skip("PTOAS is unavailable")
+        else:
+            monkeypatch.setattr(decorator, "_ptoas_available", lambda: False)
+
+        @pl.jit.aiv
+        def register_rebind(source: pl.Tensor[[1, 64], pl.FP32], output: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+            src = pl.load(source, [0, 0], [1, 64], target_memory=pl.MemorySpace.Vec)
+            dst = pl.tile.full([1, 64], dtype=pl.FP32, value=0.0)
+            src = pl.reshape(src, [64])
+            dst = pl.reshape(dst, [64])
+            with pl.reg_scope():
+                mask = pl.reg.full_mask(lanes=64)
+                value = pl.reg.load(src, lanes=64)
+                value = pl.reg.add(value, value)
+                value, unused = pl.reg.intlv(value, value, mask)
+                dst = pl.reg.store(dst, value=value)
+            dst = pl.reshape(dst, [1, 64])
+            pl.store(dst, [0, 0], output)
+            return output
+
+        @pl.jit
+        def entry(source: pl.Tensor[[1, 64], pl.FP32], output: pl.Out[pl.Tensor[[1, 64], pl.FP32]]):
+            return register_rebind(source, output)
+
+        assignments = []
+
+        class Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, op):
+                assignments.append(op)
+                super().visit_assign_stmt(op)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        try:
+            Collector().visit_program(entry.specialize())
+            projection = next(
+                op for op in assignments if isinstance(op.value, ir.TupleGetItemExpr) and op.value.index == 0
+            )
+            store = next(
+                op.value
+                for op in assignments
+                if isinstance(op.value, ir.Call) and op.value.op.name == ir.get_op("reg.store").name
+            )
+            assert store.args[2] is projection.var
+            entry.compile(
+                config=RunConfig(
+                    backend_type=BackendType.Ascend950,
+                    execution_mode=ExecutionMode.ONBOARD,
+                    save_kernels_dir=str(tmp_path),
+                )
+            )
+            assert list(tmp_path.rglob("*.pto"))
+        finally:
+            backend.reset_for_testing()
 
     def test_rebind_rhs_references_prior_alias(self):
         src = """

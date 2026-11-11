@@ -55,7 +55,11 @@ from pypto._function_attrs import (
     EXTERNAL_RETURN_PARAMS_ATTR,
 )
 from pypto.language.parser.expr_evaluator import ExprEvaluator
-from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
+from pypto.language.parser.parser_state import (
+    JIT_GRAPH_REBINDS_ATTR,
+    JIT_INFERRED_RETURN_ARITY,
+    JIT_SUBMIT_RETURNS_ATTR,
+)
 from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
@@ -1672,6 +1676,35 @@ def _validate_extern_return_mapping(
             )
 
 
+def _return_annotation_resolver(
+    py_globals: Mapping[str, Any],
+    constexpr_values: Mapping[str, str] | None,
+) -> Callable[[ast.expr | None, Any], Any]:
+    """Prepare one namespace for resolving only needed return annotation fields."""
+    from . import _arguments  # noqa: PLC0415 - annotation helpers import this module
+
+    canonical = {
+        "pl": importlib.import_module("pypto.language"),
+        "pld": importlib.import_module("pypto.language.distributed"),
+        "tuple": tuple,
+    }
+    bindings = constexpr_values or {}
+    namespace = {**canonical, **py_globals}
+    namespace.update({name: _eval_annotation(text, canonical) for name, text in bindings.items()})
+
+    def resolve(annotation: ast.expr | None, eager_annotation: Any) -> Any:
+        return _arguments.resolve_call_annotation(annotation, eager_annotation, namespace, bindings)
+
+    return resolve
+
+
+def _return_annotation_names(tensor_meta: Mapping[str, TensorMeta]) -> set[str]:
+    """Names available to a generated return annotation, independent of factory locals."""
+    return {"pl", "pld", "tuple"} | {
+        dim.name for meta in tensor_meta.values() for dim in meta.shape if isinstance(dim, DynDim)
+    }
+
+
 def _infer_expression_return_type(  # noqa: PLR0913
     annotation: ast.expr | None,
     tensor_meta: Mapping[str, TensorMeta],
@@ -1685,23 +1718,11 @@ def _infer_expression_return_type(  # noqa: PLR0913
     if not emit_declared_contract:
         return None
     if isinstance(eager_annotation, _LangTensor) or _tuple_annotation_elements(eager_annotation) is not None:
-        from . import _arguments  # noqa: PLC0415 - annotation helpers import this module
-
-        canonical = {
-            "pl": importlib.import_module("pypto.language"),
-            "pld": importlib.import_module("pypto.language.distributed"),
-            "tuple": tuple,
-        }
-        bindings = constexpr_values or {}
-        namespace = {**canonical, **py_globals}
-        namespace.update({name: _eval_annotation(text, canonical) for name, text in bindings.items()})
-        resolved = _arguments.resolve_call_annotation(annotation, eager_annotation, namespace, bindings)
+        resolved = _return_annotation_resolver(py_globals, constexpr_values)(annotation, eager_annotation)
         rendered = _extern_annotation_source(resolved)
     else:
         rendered = _render_complete_return_annotation(annotation, py_globals, constexpr_values)
-    known_names = {"pl", "pld", "tuple"} | {
-        dim.name for meta in tensor_meta.values() for dim in meta.shape if isinstance(dim, DynDim)
-    }
+    known_names = _return_annotation_names(tensor_meta)
     # Annotation-only factory locals have no closure cells. A spelling that
     # still contains their names is not a contract the generated module can use.
     if rendered is not None and _annotation_names(ast.parse(rendered, mode="eval").body) <= known_names:
@@ -1716,6 +1737,9 @@ def _infer_tuple_return_type(  # noqa: PLR0913
     dist_set: set[str],
     py_globals: Mapping[str, Any],
     return_metas: tuple[TensorMeta | None, ...] | None,
+    *,
+    eager_annotation: Any = None,
+    constexpr_values: Mapping[str, str] | None = None,
 ) -> str | None:
     """Combine specialized tensor elements with declared scalar or opaque slots."""
     explicit_elements: list[ast.expr] | None = None
@@ -1743,6 +1767,9 @@ def _infer_tuple_return_type(  # noqa: PLR0913
 
     elt_annotations: list[str] = []
     has_bare_element = False
+    eager_elements = _tuple_annotation_elements(eager_annotation)
+    resolve = None
+    known_names = _return_annotation_names(tensor_meta)
     for index, elt in enumerate(return_elts):
         inferred = return_metas[index] if return_metas and len(return_metas) == len(return_elts) else None
         if inferred is not None:
@@ -1758,10 +1785,26 @@ def _infer_tuple_return_type(  # noqa: PLR0913
                 )
             )
         elif explicit_elements is not None and isinstance(explicit_elements[index], ast.Subscript):
-            # Complete explicit element; fold module int constants in its shape
-            # to literals so the emitted source carries concrete extents.
-            folded = _fold_const_names(explicit_elements[index], py_globals)
-            elt_annotations.append(ast.unparse(folded))
+            # Factory-only shape/dtype names need not have closure cells. Use
+            # their evaluated annotation fields, while retaining call-owned
+            # constexpr substitution and known emitted-value precedence above.
+            eager = (
+                eager_elements[index]
+                if eager_elements is not None and len(eager_elements) == len(return_elts)
+                else None
+            )
+            if isinstance(eager, _LangTensor) or _tuple_annotation_elements(eager) is not None:
+                if resolve is None:
+                    resolve = _return_annotation_resolver(py_globals, constexpr_values)
+                eager = resolve(explicit_elements[index], eager)
+            resolved = _extern_annotation_source(eager)
+            if resolved is not None and not (
+                _annotation_names(ast.parse(resolved, mode="eval").body) <= known_names
+            ):
+                resolved = None
+            elt_annotations.append(
+                resolved or ast.unparse(_fold_const_names(explicit_elements[index], py_globals))
+            )
         elif explicit_elements is not None:
             # Un-inferrable element with a bare (shapeless) explicit annotation.
             elt_annotations.append(ast.unparse(explicit_elements[index]))
@@ -1863,7 +1906,14 @@ def _infer_return_type(  # noqa: PLR0913
             return None
         if isinstance(value, ast.Tuple):
             return _infer_tuple_return_type(
-                value.elts, annotation, tensor_meta, dist_set, py_globals or {}, return_metas
+                value.elts,
+                annotation,
+                tensor_meta,
+                dist_set,
+                py_globals or {},
+                return_metas,
+                eager_annotation=eager_annotation,
+                constexpr_values=constexpr_values,
             )
 
     # A TASK_ID (or another explicit Scalar) has no TensorMeta entry. Preserve
@@ -1904,8 +1954,10 @@ def _infer_return_type(  # noqa: PLR0913
         name = return_node.value.id
         return _build_tensor_annotation(tensor_meta[name], is_out=False, is_distributed=name in dist_set)
 
-    # Fallback: first Out param's tensor type (legacy single-return convention).
-    if out_params and out_params[0] in tensor_meta:
+    # The legacy first-Out convention only applies without an explicit return.
+    # An unknown returned value must be deduced from the body at its call site,
+    # rather than acquiring an unrelated output parameter's descriptor.
+    if return_node is None and out_params and out_params[0] in tensor_meta:
         name = out_params[0]
         return _build_tensor_annotation(tensor_meta[name], is_out=False, is_distributed=name in dist_set)
 
@@ -2245,6 +2297,7 @@ class Specializer:
         self._dep_constexpr_params: dict[str, set[str]] = {
             ctx.func_name: set(ctx.constexpr_values) for ctx in contexts
         }
+        self._dep_parameter_returns: dict[str, tuple[str | None, ...]] = {}
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
@@ -2289,6 +2342,8 @@ class Specializer:
         self._graph_rebinds = {}
         self._needs_pld_import = False
         self._external_calls = {}
+        self._dep_parameter_returns = {}
+        self._submit_return_arities = {}
 
         # Specialize bodies first so per-context state (DynVars,
         # _needs_pld_import) is fully populated before assembling the preamble.
@@ -2398,7 +2453,14 @@ class Specializer:
         distributed_params: set[str],
         tensor_meta: dict[str, TensorMeta],
         implicit_out: str | None,
+        implicit_distributed: bool,
     ) -> str | None:
+        if implicit_out is not None and implicit_out in ctx.tensor_meta:
+            # A no-return CHIP entry saves and returns its original first Out.
+            # Its ABI belongs to the signature, not an unknown scoped result.
+            return _build_tensor_annotation(
+                ctx.tensor_meta[implicit_out], is_out=False, is_distributed=implicit_distributed
+            )
         ret_type = _infer_return_type(
             func_def,
             tensor_meta,
@@ -2410,8 +2472,14 @@ class Specializer:
             emit_expression_contract=ctx.requires_return_contract and implicit_out is None,
             return_metas=ctx.return_metas,
         )
-        if ret_type is None and ctx.requires_return_contract and ctx.return_metas:
-            self._submit_return_arities[ctx.func_name] = len(ctx.return_metas)
+        if ret_type is None:
+            if ctx.requires_return_contract and ctx.return_metas:
+                self._submit_return_arities[ctx.func_name] = len(ctx.return_metas)
+            elif any(isinstance(node, ast.Return) and node.value is not None for node in ast.walk(func_def)):
+                # A typed body return must also become a Function declaration.
+                # Do not substitute the old Out parameter for an unknown RHS;
+                # let the parser publish the actual expression types instead.
+                self._submit_return_arities[ctx.func_name] = JIT_INFERRED_RETURN_ARITY
         return ret_type
 
     def _specialize_function(self, ctx: SpecializeContext) -> list[str]:
@@ -2579,7 +2647,8 @@ class Specializer:
                 else {}
             ),
         )
-        new_body = [transformer.visit(stmt) for stmt in func_def.body]
+        transformer.initialize_tensor_bindings(distributed_params, self._dep_parameter_returns)
+        flat_body: list[ast.stmt] = transformer.transform_body(func_def.body)
         self._graph_rebinds[ctx.func_name] = (
             transformer.graph_rebinds if transformer.graph_rebinds or transformer.has_scope_capture else None
         )
@@ -2590,15 +2659,6 @@ class Specializer:
         # accurate than a global override.
         for alias, original in transformer.rename_map.items():
             self._rename_map.setdefault(alias, original)
-        # Filter out None (deleted statements) and flatten lists
-        flat_body: list[ast.stmt] = []
-        for item in new_body:
-            if item is None:
-                continue
-            if isinstance(item, list):
-                flat_body.extend(cast("list[ast.stmt]", item))
-            else:
-                flat_body.append(item)
 
         if not flat_body:
             flat_body = [ast.Pass()]
@@ -2608,26 +2668,44 @@ class Specializer:
         # discovery and call-site binding above.
         return_def = copy.copy(func_def)
         return_def.body = flat_body
-        # Reassigned output parameters can appear under generated aliases.
-        # Keep their original parameter type contract for return inference.
-        aliases = transformer.rename_map
-        return_meta = ctx.tensor_meta | {
-            alias: ctx.tensor_meta[name] for alias, name in aliases.items() if name in ctx.tensor_meta
-        }
-        return_distributed = distributed_params | {
-            alias for alias, name in aliases.items() if name in distributed_params
-        }
+        # Descriptor and object kind belong to the emitted value, including
+        # plain/distributed tensor swaps. Unknown results must not fall back
+        # to the target parameter's old ABI; call parsing derives their types
+        # from the actual returned expressions instead. Keep Submit's return
+        # contract and arity handling on the same inferred bindings.
+        return_meta = transformer.known_tensor_meta
+        return_distributed = transformer.known_distributed_tensors
+        implicit_out = _implicit_entry_output_name(func_def, ctx.func_type, out_params)
         ret_type = self._specialize_return_annotation(
             return_def,
             ctx,
             out_params,
             return_distributed,
             return_meta,
-            _implicit_entry_output_name(func_def, ctx.func_type, out_params),
+            implicit_out,
+            implicit_out in distributed_params,
         )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
+        # Only a formal parameter returned under its unchanged spelling proves
+        # identity. Require agreement at every return, and use the caller's
+        # actual operand metadata rather than the callee's dimension symbols.
+        parameter_returns: list[tuple[str | None, ...]] = []
+        returnable_params = set(all_param_names) & return_meta.keys()
+        for node in ast.walk(return_def):
+            if isinstance(node, ast.Return):
+                elements = node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]
+                parameter_returns.append(
+                    tuple(
+                        element.id
+                        if isinstance(element, ast.Name) and element.id in returnable_params
+                        else None
+                        for element in elements
+                    )
+                )
+        if parameter_returns and all(result == parameter_returns[0] for result in parameter_returns):
+            self._dep_parameter_returns[ctx.func_name] = parameter_returns[0]
         flat_body = normalize_calls(flat_body, self._external_calls, all_param_names)
         remap_peer_references(
             flat_body, ctx.peer_func_names, ctx.py_globals, ambiguous_scope=ctx.peer_func_scope_ambiguous

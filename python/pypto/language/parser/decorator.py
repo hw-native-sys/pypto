@@ -35,7 +35,7 @@ from .diagnostics import (
     concise_error_message,
 )
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
-from .parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
+from .parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_INFERRED_RETURN_ARITY, JIT_SUBMIT_RETURNS_ATTR
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
 from .type_semantics import ParameterReturnDims, derive_return_types_from_body
 
@@ -1127,19 +1127,33 @@ def inline(func: Callable[..., Any]) -> InlineFunction:
     )
 
 
-def _bind_jit_submit_returns(ir_func: ir.Function, arity: int | None) -> ir.Function:
-    """Publish typed JIT Submit results after the ordinary body parser resolves them."""
+def _bind_jit_inferred_returns(ir_func: ir.Function, arity: int | None) -> ir.Function:
+    """Publish generated JIT return contracts after body expressions are typed.
+
+    Ordinary wrappers need this declaration just as submitted functions do:
+    call-site inference alone does not update the callee's Function ABI. A
+    planned Submit arity may flatten a result tuple; an unplanned ordinary
+    return retains the body's own packing. Handwritten programs have no marker.
+    """
     if arity is None:
         return ir_func
     return_types = derive_return_types_from_body(ir_func.body)
+    infer_arity = arity == JIT_INFERRED_RETURN_ARITY
+    if infer_arity:
+        arity = len(return_types)
     if arity > 1 and len(return_types) == 1 and isinstance(return_types[0], ir.TupleType):
         return_types = list(return_types[0].types)
     if len(return_types) == arity:
         dims = ParameterReturnDims(ir_func)
         return_types = [dims.return_type(typ) for typ in return_types]
         if dims.unresolved:
+            if infer_arity:
+                # Ordinary calls already infer body types at the call site.
+                # Preserve that path for runtime-local extents which cannot
+                # form a declaration in parameter dimension symbols.
+                return ir_func
             raise ParserTypeError(
-                f"Cannot express JIT Submit results of '{ir_func.name}' in its parameter dimensions",
+                f"Cannot express JIT results of '{ir_func.name}' in its parameter dimensions",
                 span=ir_func.span,
                 hint="Express returned tensor extents using parameter dimensions and scalar arithmetic.",
             )
@@ -1398,7 +1412,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         hint="Check your function definition for errors",
                     ) from e
 
-                ir_func = _bind_jit_submit_returns(ir_func, submit_return_arities.get(ir_func.name))
+                ir_func = _bind_jit_inferred_returns(ir_func, submit_return_arities.get(ir_func.name))
                 functions.append(ir_func)
                 # Update gvar_to_func map so subsequent functions can use this function's return type
                 gvar = global_vars[ir_func.name]
