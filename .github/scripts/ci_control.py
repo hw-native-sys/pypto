@@ -41,6 +41,7 @@ REQUIRED = {
     "pypto-lib-compile",
     "pypto-lib-model",
     "onboard-tests-a5",
+    "onboard-tests-a5-distributed",
     "system-tests-a5sim",
 }
 OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
