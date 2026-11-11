@@ -8,6 +8,9 @@
 # -----------------------------------------------------------------------------------------------------------
 """Authorize comment CI, pin test revisions, and publish a trusted full status.
 
+Comment requests reuse lint verified for the same PR head and base before
+dispatching downstream tests.
+
 Only control jobs run this helper. The publisher reads GitHub job metadata, never
 PR files, caches or artifacts. Run titles carry routing data, not authorization:
 workflow identity, event, default branch and the current PR are verified too.
