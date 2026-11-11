@@ -1213,10 +1213,12 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
 
     Two dispatch modes:
 
-    * **Data-parallel** (``UP_DOWN`` / ``LEFT_RIGHT``): the region's vector
-      compute is **halved** on the split axis (rows / cols), so each lane
-      processes one half of every tile.
-    * **Task-parallel** (``NONE``): **no halving** — both lanes run the *full*
+    * **Data-parallel** (``UP_DOWN`` / ``LEFT_RIGHT``): explicit
+      ``pl.aiv_shard`` / ``pl.aic_gather`` split/join cross-core data along
+      rows / columns. The body is already per lane: author its compute shapes,
+      input slices and output offsets explicitly using ``aiv_id``. The compiler
+      never halves the body implicitly, including regions without a crossing.
+    * **Task-parallel** (``NONE``): boundary shapes stay unchanged; both lanes run the *full*
       body for disjoint work the author dispatches via ``aiv_id`` (e.g. an
       ``aiv_id``-strided loop). Use this when the tiles cannot be halved
       (unit dims) or a reduction must stay full-width. ``pl.aiv_shard`` /
@@ -1348,8 +1350,8 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
         n: The AIV sub-core count. Positional; hardware-fixed at 2 (the two AIV
             lanes of one AICore). Any other value is rejected by the parser.
         mode: Required dispatch mode, no silent default. ``pl.SplitMode.NONE``
-            (task-parallel, no halving), ``pl.SplitMode.UP_DOWN`` or
-            ``pl.SplitMode.LEFT_RIGHT`` (data-parallel halving).
+            (task-parallel, boundary shapes unchanged), ``pl.SplitMode.UP_DOWN`` or
+            ``pl.SplitMode.LEFT_RIGHT`` (explicit data-parallel boundaries).
 
     Returns:
         Loop iterator for the explicit AIV-split region.

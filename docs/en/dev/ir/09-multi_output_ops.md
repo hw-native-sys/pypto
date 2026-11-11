@@ -153,15 +153,15 @@ element offsets, and `tile.store` uses the valid region rather than writing the
 padding. The tensor-level count shape remains `[1, rows]`: extra Vec capacity
 does not add logical counts or enlarge the caller's tensor.
 
-Automatic vector splitting must preserve the operator-deduced type of every
-tuple element, including its valid region. Physical capacity and logical
-partition stride are independent: splitting ten source rows gives each lane a
-`[1, 8]` count tile with five valid entries, and lane 1 stores at column five.
-The split facts must follow both bound and inline tuple projections and their
-consumers; inferring a stride of eight from the aligned capacity would expose
-padding and misplace the second lane's counts.
+Explicit per-lane computation preserves each tuple element's operator-deduced
+type and valid region. Physical capacity and logical partition stride remain
+independent: if the author splits ten source rows into five rows per lane, each
+lane's count tile has physical shape `[1, 8]` with five valid entries. The author
+must store lane 1's counts at column five, not at the aligned capacity of eight.
+Mixed-kernel lowering preserves these authored shapes and offsets; it does not
+infer or propagate a new partition through tuple projections and consumers.
 See [LowerAutoVectorSplit](../passes/25-lower_auto_vector_split.md)
-for partition tracking, consumer validation, and control-flow propagation.
+for explicit boundary preparation.
 
 ## Codegen
 

@@ -1279,5 +1279,83 @@ def test_fp32_to_fp8_register_conversion_preserves_compact_bytes(tmp_path, round
     compile_review_pto(source, tmp_path)
 
 
+def mx_quantize_kernel():
+    """A V-side MX scaling scope: per-group amax, broadcast back, then divide."""
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def quantize(
+        src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+        dst: pl.InOut[pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]],
+    ):
+        with pl.reg_scope():
+            value = pl.reg.load(src, lanes=64)
+            mask = pl.reg.full_mask(lanes=64)
+            magnitude = pl.reg.abs(value, mask)
+            amax = pl.reg.reduce_max(magnitude, mask, group_size=32)
+            scale = pl.reg.group_broadcast(amax, lanes=64)
+            scaled = pl.reg.div(value, scale, mask)
+            _out = pl.reg.store(dst, value=scaled)
+
+    return ir.Program([quantize], "MxQuantize", SPAN)
+
+
+def test_mx_quantize_emits_typed_vmi():
+    # The grouped maximum replaces a five-step rotate-and-max butterfly over
+    # gather_lanes. The attribute PTOAS reads is the group COUNT, not the group
+    # width, and the result carries one lane per group.
+    with passes.PassContext([]):
+        lowered = passes.flatten_tile_nd_to_2d()(mx_quantize_kernel())
+        lowered = passes.init_mem_ref()(lowered)
+    mlir = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    assert "{group = 2} : !pto.vmi.vreg<64xf32>" in mlir
+    assert "-> !pto.vmi.vreg<2xf32>" in mlir
+    assert "pto.vmi.group_broadcast %amax {num_groups = 2}" in mlir
+
+
+def test_grouped_sum_combines_group_and_reassoc_attributes():
+    # Both attributes land on the same reduction; neither may overwrite the
+    # other, and the floating sum still requires reassoc.
+    @pl.function(type=pl.FunctionType.AIV)
+    def grouped_sum(
+        src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+        dst: pl.InOut[pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]],
+    ):
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=64)
+            mask = pl.reg.full_mask(lanes=64)
+            totals = pl.reg.reduce_sum(x, mask, reassoc=True, group_size=8)
+            spread = pl.reg.group_broadcast(totals, lanes=64)
+            _out = pl.reg.store(dst, value=spread)
+
+    with passes.PassContext([]):
+        lowered = passes.flatten_tile_nd_to_2d()(ir.Program([grouped_sum], "GroupedSum", SPAN))
+        lowered = passes.init_mem_ref()(lowered)
+    mlir = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    assert "pto.vmi.vcadd %x, %mask {group = 8, reassoc}" in mlir
+
+
+@pytest.mark.ptoas_compile
+def test_mx_quantize_compiles_with_vpto(tmp_path):
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    with passes.PassContext([]):
+        lowered = passes.flatten_tile_nd_to_2d()(mx_quantize_kernel())
+        lowered = passes.init_mem_ref()(lowered)
+        lowered = passes.allocate_memory_addr()(lowered)
+    source = tmp_path / "mx_quantize.pto"
+    source.write_text(codegen.PTOCodegen().generate(lowered, emit_source_loc=False))
+    output = tmp_path / "mx_quantize.vpto"
+    result = subprocess.run(
+        [compiler, str(source), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pto.vecscope" in output.read_text()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

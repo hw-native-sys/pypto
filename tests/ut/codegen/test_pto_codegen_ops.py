@@ -4587,13 +4587,13 @@ class TestTileMoveAccAddressInvariant:
 
         Reproduces the Qwen3-32B gate_up_silu shape that triggered the bug: two
         independent accumulators (gate, up) built with prolog-then-pipeline
-        matmul_acc under ``pl.at(CORE_GROUP, optimizations=[pl.split(UP_DOWN)])``.
+        matmul_acc under a CORE_GROUP scope with explicit UP_DOWN regions.
 
         Why this shape triggers it:
         - Mat-resident inputs + K_CHUNK=128/N=256 make AutoTileMatmulL0 insert an
           inner K-loop (K_L0=64) with a fresh ``_l0_c`` accumulator IterArg.
         - pl.pipeline(stage=2) replicates the loop body, nesting that IterArg.
-        - split=UP_DOWN forces the AIC/AIV split, so MemoryReuse runs on the AIC
+        - Explicit UP_DOWN shard boundaries create the AIC/AIV split, so MemoryReuse runs on the AIC
           function where gate is consumed before up, so up *reuses* gate's freed
           Acc buffer.
 
@@ -4625,7 +4625,6 @@ class TestTileMoveAccAddressInvariant:
                 out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
                 with pl.at(
                     level=pl.Level.CORE_GROUP,
-                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
                     name_hint="gate_up_pipeline_acc",
                 ):
                     x0 = pl.slice(x, [BATCH, K_CHUNK], [0, 0])
@@ -4645,7 +4644,9 @@ class TestTileMoveAccAddressInvariant:
                         )
                     # Consume gate (to Vec) before the up pipeline so up reuses
                     # gate's freed Acc buffer — the condition that exposed #1352.
-                    gate_fp32 = pl.add(gate_acc, 0.0)
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        gate_half = pl.aiv_shard(gate_acc)
+                        gate_fp32 = pl.add(gate_half, 0.0)
                     up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
                     up_acc = pl.matmul_acc(up_acc, x1, wu1)
                     for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
@@ -4655,12 +4656,14 @@ class TestTileMoveAccAddressInvariant:
                             pl.slice(x, [BATCH, K_CHUNK], [0, k0]),
                             pl.slice(wu, [K_CHUNK, N], [k0, 0]),
                         )
-                    combined = pl.mul(gate_fp32, up_acc)
-                    out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [0, 0])
+                    for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        up_half = pl.aiv_shard(up_acc)
+                        combined = pl.mul(gate_fp32, up_half)
+                        out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [lane * (BATCH // 2), 0])
                 out = pl.assemble(out, out_tile, [0, 0])
                 return out
 
-        # Guard: assert split=UP_DOWN actually produced split InCore kernels.
+        # Guard: assert explicit UP_DOWN regions produced split InCore kernels.
         # The acc→acc regression only exists on the AIC side after the AIC/AIV
         # split, so without this guard a split-lowering regression would make
         # the test pass vacuously and stop covering #1352.
@@ -4669,7 +4672,7 @@ class TestTileMoveAccAddressInvariant:
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PipelineGateUpProg)
         incore = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
         assert len(incore) >= 2, (
-            f"Expected split=UP_DOWN to produce split InCore variants for #1352, "
+            f"Expected explicit UP_DOWN regions to produce split InCore variants for #1352, "
             f"got {len(incore)} InCore function(s)"
         )
 

@@ -39,11 +39,11 @@ def _call(name: str, args: list[ir.Expr], **kwargs: Any) -> ir.Call:
     return ir.create_op_call(f"reg.{name}", args, kwargs, _get_span_or_capture())
 
 
-def _lanes(value: object) -> int:
+def _lanes(value: object, name: str = "lanes") -> int:
     if isinstance(value, ir.ConstInt):
         value = value.value
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f"lanes must be a positive static integer, got {value}")
+        raise ValueError(f"{name} must be a positive static integer, got {value}")
     return value
 
 
@@ -416,23 +416,46 @@ def gather_lanes(value: Reg | ir.Expr, indices: Reg | ir.Expr) -> Reg:
     return Reg(_call("gather_lanes", [_expr(value), _expr(indices)]))
 
 
-def reduce_sum(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool = False) -> Reg:
-    """Reduce active lanes to a one-lane VecReg of the same dtype.
+def _reduction(
+    name: str, value: Reg | ir.Expr, mask: Reg | ir.Expr, group_size: int | None, **kwargs: Any
+) -> Reg:
+    if group_size is not None:
+        kwargs["group_size"] = _lanes(group_size, "group_size")
+    return Reg(_call(name, [_expr(value), _expr(mask)], **kwargs))
+
+
+def reduce_sum(
+    value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool = False, group_size: int | None = None
+) -> Reg:
+    """Reduce active lanes to one lane, or to one lane per group.
 
     Floating sums require reassoc=True to allow the hardware reduction tree.
     Inactive input lanes contribute zero. No implicit widening is performed.
+    With group_size, the source splits into equal contiguous groups and the
+    result holds one lane per group in group order; see group_broadcast.
     """
-    return Reg(_call("reduce_sum", [_expr(value), _expr(mask)], reassoc=reassoc))
+    return _reduction("reduce_sum", value, mask, group_size, reassoc=reassoc)
 
 
-def reduce_max(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
-    """Reduce to one lane; inactive inputs contribute the dtype minimum or -inf."""
-    return Reg(_call("reduce_max", [_expr(value), _expr(mask)]))
+def reduce_max(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None) -> Reg:
+    """Reduce to one lane, or one lane per group; inactive inputs give the dtype minimum or -inf."""
+    return _reduction("reduce_max", value, mask, group_size)
 
 
-def reduce_min(value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Reg:
-    """Reduce to one lane; inactive inputs contribute the dtype maximum or +inf."""
-    return Reg(_call("reduce_min", [_expr(value), _expr(mask)]))
+def reduce_min(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None) -> Reg:
+    """Reduce to one lane, or one lane per group; inactive inputs give the dtype maximum or +inf."""
+    return _reduction("reduce_min", value, mask, group_size)
+
+
+def group_broadcast(value: Reg | ir.Expr, *, lanes: int) -> Reg:
+    """Expand a grouped reduction result back across its groups.
+
+    The source holds one lane per group, as returned by a reduction with
+    group_size; lanes is the width to expand back to and must be a multiple of
+    that group count. Result lane i takes the source lane of group
+    i // (lanes // groups).
+    """
+    return Reg(_call("group_broadcast", [_expr(value)], lanes=_lanes(lanes)))
 
 
 def _pair(name: str, args: list[ir.Expr], **kwargs: Any) -> tuple[Reg, Reg]:

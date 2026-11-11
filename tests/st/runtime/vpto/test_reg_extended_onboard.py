@@ -48,9 +48,20 @@ CASES = (
     "histogram128",
     "histogram256",
     "reinterpret",
+    "mx_quant",
 )
 FLOAT_OPS = ("expdif", "axpy", "mula", "lrelu", "prelu")
 INTEGER_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
+MX_OPS = ("reduce_max", "reduce_sum", "group_broadcast")
+# PyPTO operation name -> PTOAS mnemonic, for the ops whose mnemonic is not the
+# name with a `v` prefix. The reductions share one opcode with their grouped
+# form, and the grouped broadcast carries no prefix at all.
+MNEMONICS = {
+    "reduce_max": "vcmax",
+    "reduce_sum": "vcadd",
+    "create_group_mask": "create_group_mask",
+    "group_broadcast": "group_broadcast",
+}
 
 
 def _histogram_body(bins):
@@ -184,6 +195,58 @@ def _indexed_body(dtype):
     return body
 
 
+def _mx_quant_body():
+    """MX group scaling entirely in registers: grouped amax, broadcast, divide.
+
+    This is the shape that could not be expressed before. The per-group maximum
+    had no in-register form at all: `reduce_max` collapses to one lane, and a
+    one-lane result cannot be re-spread, because binary ops require matching
+    lane counts and 32-bit `gather_lanes` is restricted to 64 lanes. The only
+    alternative was a five-step rotate-and-max butterfly, ten register ops per
+    64 lanes in the innermost loop of every MX-quantized kernel.
+    """
+
+    @pl.jit.incore
+    def body(
+        src: pl.Tensor[[1, 256], pl.FP32],
+        out: pl.InOut[pl.Tensor[[1, 1024], pl.FP32]],
+        n: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[1, 1024], pl.FP32]:
+        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
+        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            value = pl.reg.load(a, lanes=64)
+            full = pl.reg.full_mask(lanes=64)
+            idx = pl.reg.index_gen(0, lanes=64, dtype=pl.INT32)
+            limit = pl.reg.broadcast(n, lanes=64, dtype=pl.INT32)
+            active = pl.reg.compare(idx, limit, full, predicate="lt")
+            magnitude = pl.reg.abs(value, full)
+            # The MX geometry: 64 lanes in groups of 32, hence two groups. Both
+            # reductions run under a full mask, because an empty group's
+            # identity (-inf or the dtype minimum) is deliberately not part of
+            # the contract this test pins down.
+            amax = pl.reg.reduce_max(magnitude, full, group_size=32)
+            total = pl.reg.reduce_sum(value, full, reassoc=True, group_size=32)
+            scale = pl.reg.group_broadcast(amax, lanes=64)
+            sums = pl.reg.group_broadcast(total, lanes=64)
+            # Only the scaling is masked, so inactive lanes leave an exact zero
+            # and the reduction results stay independent of the active count.
+            scaled = pl.reg.div(value, scale, active)
+            c = pl.reg.store(c, offset=64, value=value)
+            c = pl.reg.store(c, offset=128, value=scale)
+            c = pl.reg.store(c, offset=192, value=scaled)
+            c = pl.reg.store(c, offset=256, value=sums)
+            # Two lanes, not 64: a grouped reduction holds one lane per group in
+            # group order. A bug that broadcast lane 0 over the whole register
+            # could satisfy the stores above but not this one.
+            c = pl.reg.store(c, offset=320, value=amax)
+        c = pl.reshape(c, [1, 1024])
+        pl.store(c, [0, 0], out)
+        return out
+
+    return body
+
+
 def _program(case):
     dtype = {
         "integer_u32": pl.UINT32,
@@ -231,6 +294,8 @@ def _program(case):
         body = _histogram_body(bins)
     elif case == "reinterpret":
         body = _reinterpret_body()
+    elif case == "mx_quant":
+        body = _mx_quant_body()
     elif case.startswith("integer_"):
 
         @pl.jit.incore
@@ -332,11 +397,18 @@ def _build(output):
             if case.startswith("histogram")
             else ("interpret_cast", "create_group_mask")
             if case == "reinterpret"
+            else MX_OPS
+            if case == "mx_quant"
             else ("gather", "scatter")
         )
         for op in ops:
-            mnemonic = op if op == "create_group_mask" else f"v{op}"
+            mnemonic = MNEMONICS.get(op, f"v{op}")
             assert any(f"pto.vmi.{mnemonic}" in helper for helper in helpers), (case, op)
+        if case == "mx_quant":
+            # The grouped forms must carry the group COUNT, not the group width,
+            # and the reduction result must be narrowed to one lane per group.
+            assert any("{group = 2" in helper for helper in helpers), case
+            assert any("vreg<2xf32>" in helper for helper in helpers), case
         if case.startswith("indexed_"):
             assert all('pto.mem_bar "VV_ALL"' not in helper for helper in helpers)
         evidence = Path(tempfile.mkdtemp(prefix="compilation-", dir=directory))
@@ -355,6 +427,18 @@ def _build(output):
 
 
 def _inputs(case, repeat):
+    if case == "mx_quant":
+        # Dyadic values, so every quotient below is exact and the golden stays
+        # an equality check. The two groups have DIFFERENT maxima (8.0 and 1.0):
+        # a broadcast that wrongly spread lane 0 across all 64 lanes would still
+        # satisfy a single-maximum input. Rolling by repeat permutes each group
+        # without changing its multiset, so the expected maxima and sums stay
+        # the same while the data layout differs.
+        pattern = np.array([8.0, -4.0, 2.0, -1.0, 0.0, 6.0, -5.0, 3.0], dtype=np.float32)
+        values = np.zeros(256, dtype=np.float32)
+        values[:32] = np.resize(np.roll(pattern, repeat), 32)
+        values[32:64] = np.resize(np.roll(pattern / 8.0, repeat), 32)
+        return values
     if case.startswith("histogram"):
         patterns = np.array([0, 1, 126, 127, 128, 129, 254, 255], dtype=np.uint8)
         return np.resize(np.roll(patterns, repeat), 256)
@@ -392,6 +476,21 @@ def _initial(case, data):
 
 def _golden(case, data, n):
     expected = _initial(case, data)
+    if case == "mx_quant":
+        lane = np.arange(64)
+        first_group = lane < 32
+        # Group 0 holds the pattern, group 1 the same pattern scaled by 1/8, so
+        # the maxima are 8.0 and 1.0 and the sums 4 * 9.0 and 4 * 1.125. Every
+        # value is exactly representable, so a reassociated sum is exact too.
+        scale = np.where(first_group, 8.0, 1.0).astype(np.float32)
+        sums = np.where(first_group, 36.0, 4.5).astype(np.float32)
+        expected[64:128] = data[:64]
+        expected[128:192] = scale
+        # Inactive lanes carry an exact zero, because the div is masked.
+        expected[192:256] = np.where(lane < n, data[:64] / scale, 0.0)
+        expected[256:320] = sums
+        expected[320:322] = (8.0, 1.0)
+        return expected
     if case.startswith("histogram"):
         bins = 128 if case == "histogram128" else 256
         active = (np.arange(256) % 64 < 37) & (np.arange(256) < n * 4)

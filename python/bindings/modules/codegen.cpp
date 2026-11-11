@@ -20,6 +20,7 @@
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 
 namespace nb = nanobind;
 
@@ -34,6 +35,9 @@ void BindCodegen(nb::module_& m) {
   // Create a new 'codegen' submodule
   nb::module_ codegen_module =
       m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
+
+  codegen_module.def("data_type_to_mlir", &DataTypeToMLIR, nb::arg("dtype"),
+                     "Return the PTO MLIR spelling of an element data type.");
 
   nb::class_<VFHelper>(codegen_module, "VFHelper")
       .def_ro("kind", &VFHelper::kind)

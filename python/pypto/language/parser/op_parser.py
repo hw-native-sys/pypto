@@ -87,6 +87,14 @@ class OpParser:
     def parse_simt_op(self, name: str, call: ast.Call) -> ir.Expr:
         """Parse the public and canonical SIMT operation spellings."""
         if name in {
+            "atomic_add",
+            "atomic_min",
+            "atomic_max",
+            "atomic_exch",
+            "atomic_cas",
+            "syncthreads",
+            "threadfence",
+            "threadfence_block",
             "vote_all",
             "vote_any",
             "vote_uni",

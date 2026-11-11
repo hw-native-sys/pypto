@@ -19,6 +19,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any, TypeVar, cast
 
 from pypto.language.parser.ast_parser import ASTParser
+from pypto.language.parser.control_flow_parser import ControlFlowParser
 from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import arith, ir
 
@@ -39,7 +40,7 @@ def _restore_bindings(
             current.pop(name, None)
 
 
-def _scope_call_name(value: ast.expr) -> str | None:
+def _scope_call_name(value: ast.expr | None) -> str | None:
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
         return value.func.attr
     return None
@@ -274,9 +275,8 @@ class BodyTransformer(ast.NodeTransformer):
                 new_node = ast.Assign(
                     targets=[ast.Name(id=new_name, ctx=ast.Store())],
                     value=visited_value,
-                    lineno=node.lineno,
-                    col_offset=node.col_offset,
                 )
+                ast.copy_location(new_node, node)
                 ast.fix_missing_locations(new_node)
                 return new_node
             # Deeper scope: if the variable has an active rename (from a bridge
@@ -517,9 +517,8 @@ class BodyTransformer(ast.NodeTransformer):
                     annotation=node.annotation,
                     value=node.value,
                     simple=node.simple,
-                    lineno=node.lineno,
-                    col_offset=node.col_offset,
                 )
+                ast.copy_location(new_node, node)
                 ast.fix_missing_locations(new_node)
                 return new_node
             current_name = self._var_renames.get(var_name, var_name)
@@ -892,6 +891,16 @@ class BodyTransformer(ast.NodeTransformer):
             bridges.append(bridge)
         return bridges
 
+    @classmethod
+    def _loop_yield_targets(cls, statements: list[ast.stmt]) -> set[str]:
+        """Collect outputs using the parser's yield ownership boundaries."""
+        names: set[str] = set()
+        for stmt in ControlFlowParser.iter_yield_assignments(statements):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            for target in targets:
+                names.update(cls._names_by_ctx(target, ast.Store))
+        return names
+
     def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
         """Visit For loop, incrementing scope depth for its body.
 
@@ -904,21 +913,62 @@ class BodyTransformer(ast.NodeTransformer):
         neither bridged nor renamed.
         """
         node.iter = self.visit(node.iter)
-        self._scope_depth += 1
-        carried, fresh = self._classify_loop_locals(node.body)
-        self._scope_depth -= 1
-        # Carried names: bridge + rename so the carried value threads across.
-        bridges = self._make_bridge_assignments(carried)
-        # Fresh names: forget the same-depth sibling binding so the body's
-        # assignment is treated as a first binding (no rename, no bridge).
-        for name in fresh:
+        # Range-like iterators bind an induction variable; pl.while_ binds only
+        # carries. Both shadow incoming aliases/folds inside the body, but the
+        # parser publishes assignment-form yield targets as post-loop results.
+        is_explicit_while = _scope_call_name(node.iter) == "while_"
+        target = node.target
+        if isinstance(target, ast.Tuple) and target.elts:
+            target = target.elts[0]
+        induction_names: set[str] = (
+            {target.id} if isinstance(target, ast.Name) and not is_explicit_while else set()
+        )
+        scoped_names = self._names_by_ctx(node.target, ast.Store) if is_explicit_while else induction_names
+        yielded_names = self._loop_yield_targets(node.body)
+        saved = (
+            {name: self._meta[name] for name in scoped_names if name in self._meta},
+            {name: self._shape_inlined[name] for name in scoped_names if name in self._shape_inlined},
+            {name: self._assign_count[name] for name in scoped_names if name in self._assign_count},
+            {name: self._assign_depth[name] for name in scoped_names if name in self._assign_depth},
+            {name: self._var_renames[name] for name in scoped_names if name in self._var_renames},
+        )
+        outer_depth = self._scope_depth
+        for name in scoped_names:
             self._forget_rename_bookkeeping(name)
-        self._scope_depth += 1
-        node.body = self._visit_scoped_body(node.body)
-        self._scope_depth -= 1
-        if bridges:
-            return bridges + [node]
-        return node
+            self._shape_inlined.pop(name, None)
+            self._var_renames[name] = name  # Also shadows constexpr/free-name folding.
+            self._assign_count[name] = 1
+            # Carry updates belong to the loop's incoming binding. Marking
+            # them body-local would alpha-rename the yield target unnecessarily.
+            self._assign_depth[name] = outer_depth if is_explicit_while else outer_depth + 1
+        try:
+            self._scope_depth += 1
+            carried, fresh = self._classify_loop_locals(node.body)
+            carried = [name for name in carried if name not in scoped_names]
+            fresh = [name for name in fresh if name not in scoped_names]
+            self._scope_depth -= 1
+            # Carried names: bridge + rename so the carried value threads across.
+            bridges = self._make_bridge_assignments(carried)
+            # Fresh names: forget the same-depth sibling binding so the body's
+            # assignment is treated as a first binding (no rename, no bridge).
+            for name in fresh:
+                self._forget_rename_bookkeeping(name)
+            self._scope_depth += 1
+            node.body = self._visit_scoped_body(node.body)
+            self._scope_depth -= 1
+            if bridges:
+                return bridges + [node]
+            return node
+        finally:
+            self._scope_depth = outer_depth
+            # A yield-LHS is an output definition even when it reuses a target
+            # name. Only unpublished loop-local bindings restore the outer value.
+            restore_names = scoped_names - yielded_names
+            _restore_bindings(self._meta, saved[0], restore_names)
+            _restore_bindings(self._shape_inlined, saved[1], restore_names)
+            _restore_bindings(self._assign_count, saved[2], restore_names)
+            _restore_bindings(self._assign_depth, saved[3], restore_names)
+            _restore_bindings(self._var_renames, saved[4], restore_names)
 
     def visit_While(self, node: ast.While) -> ast.stmt:
         """Keep SIMT while-body updates on the incoming private binding."""

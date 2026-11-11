@@ -77,7 +77,7 @@ struct CVBoundaryMove {
   // see split_axis::ShardSplitCode / GatherSplitCode.
   int split = 0;
   // Partition stride the halving used, from the originating op's optional
-  // `lane_stride` attr (see split_axis::ResolveLaneStride). 0 = the default box
+  // `lane_stride` attr (explicit partition stride). 0 = the default box
   // partition, where the stride is the tile's own physical half.
   int lane_stride = 0;
 };

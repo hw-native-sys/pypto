@@ -136,10 +136,10 @@ Its sibling `pld.system.wait` stays **unmarked**, and deliberately so: TWAIT
 vector lane would let the matmul race past the peer data it waits on. Read the
 flag as "must not run on a second core", not as "not idempotent".
 
-`IsNoDuplicate()` reads the axis. Its only consumer is `LowerAutoVectorSplit`'s
-`pl.split_aiv` region placement stamp (pass 23), which pins exactly the
-no-duplicate calls inside a region to the AIV lane. No verifier rejects anything
-on this axis.
+`IsNoDuplicate()` reads the axis. During explicit-region consumption,
+`ExpandMixedKernel` pins core-agnostic no-duplicate calls inside a `pl.split_aiv`
+region to the AIV lane. Software-pipeline analysis also treats these calls as
+non-replicable. No verifier rejects calls solely on this axis.
 
 An op pinned to one lane by `set_core_affinity(...)` is never duplicated in the
 first place and needs no flag. The flag exists precisely for the core-agnostic

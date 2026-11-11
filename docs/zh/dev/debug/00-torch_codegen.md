@@ -127,9 +127,10 @@ preamble 中的辅助函数，为所有累加型 matmul 共用，因此它们都
 - 非法或不可解析取值：抛出 `ValueError`（fail fast）
 
 奇数 code 按 tile 的**运行时** valid extent 校验，而非物理 box：偶数 box 配奇数 valid
-extent（box 16、`valid_shape` 15）正是它们存在的场景。只有
-[LowerAutoVectorSplit](../passes/25-lower_auto_vector_split.md) 对 ragged 边界做了均分时
-才会带上 `lane_stride`，此时运行时按该步长切分而不是按 box 折半。`push_to_aic` /
+extent（box 16、`valid_shape` 15）正是它们存在的场景。显式提供的 `lane_stride`
+决定传输分区，替代物理 box 的半宽。
+[LowerAutoVectorSplit](../passes/25-lower_auto_vector_split.md) 保留该分区，
+不会对 ragged body 重新均分。`push_to_aic` /
 `pop_from_aiv` 拒绝奇数 code，与 PTO codegen 一致——pto-isa 没有奇数的 Vector→Cube 传输。
 
 ## Tile/Tensor 边界与有效区语义

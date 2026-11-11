@@ -1,7 +1,7 @@
 # MaterializeDistTensorCtx Pass
 
 Materializes one explicit `CommCtxType` parameter and argument for each
-`DistributedTensorType` function parameter.
+`DistributedTensorType` function parameter, except in SIMT helpers.
 
 ## Overview
 
@@ -13,7 +13,11 @@ through task args, and L1 PTO codegen uses it to lower `pld.system.rank`,
 Older codegen paths synthesized those ctx values independently at several
 sites. This pass makes the ctx flow explicit in IR instead:
 
-1. For every function with `DistributedTensorType` parameters, append matching
+SIMT helpers only borrow the rank-local GM pointer and cannot perform
+communication operations. They retain their local pointer ABI; their enclosing
+device kernels still receive the explicit communication context.
+
+1. For every non-SIMT function with `DistributedTensorType` parameters, append matching
    `CommCtxType` parameters at the tail of the signature, in distributed-tensor
    parameter order. The appended parameters are `ParamDirection::In`.
 2. For every `Call` / `Submit` to such a function, append matching ctx args.
@@ -30,6 +34,9 @@ sites. This pass makes the ctx flow explicit in IR instead:
    (`tensor.view`, `tile.slice`, `tensor.reshape`, ...), whose result type
    propagates `DistributedTensorType::window_buffer_` from `args[0]`.
    Tensor aliases carried through `ForStmt` / `WhileStmt` are tracked as well.
+   Writable `SimtLaunchStmt` results inherit the context of their mapped storage
+   argument, so a context query or dispatch after an atomic update keeps the
+   same window context despite the fresh SSA name.
    In host orchestration only, if the lineage cannot be resolved, bind
    `pld.system.get_comm_ctx(dist)` immediately before the call and pass that
    result. Chip orchestration and device functions must resolve an explicit

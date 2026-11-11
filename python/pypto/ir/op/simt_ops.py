@@ -220,3 +220,152 @@ def redux_max(value: Expr, span: Span | None = None) -> Call:
     This operation does not provide a memory fence.
     """
     return _ir_core.create_op_call("simt.redux_max", [value], {}, _get_span_or_capture(span))
+
+
+def atomic_add(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically add one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_add",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_min(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically min one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    INT32 comparison is signed; FP32 special values follow the target rules.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_min",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_max(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically max one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    INT32 comparison is signed; FP32 special values follow the target rules.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_max",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_exch(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically exch one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_exch",
+        [storage, _to_make_tuple(indices, span), value],
+        kwargs,
+        span,
+    )
+
+
+def atomic_cas(
+    storage: Expr,
+    indices: Sequence[int | Expr],
+    compare: Expr,
+    value: Expr,
+    *,
+    l2cache: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Atomically cas one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    Comparison is bitwise, including FP32 NaN payloads and signed zeros.
+    Replace only on a match; the result is the observed old value.
+    """
+    span = _get_span_or_capture(span)
+    kwargs = {"l2cache": l2cache} if l2cache is not None else {}
+    return _ir_core.create_op_call(
+        "simt.atomic_cas",
+        [storage, _to_make_tuple(indices, span), compare, value],
+        kwargs,
+        span,
+    )
+
+
+def syncthreads(span: Span | None = None) -> Call:
+    """Synchronize all threads in the current SIMT entry and order their memory effects.
+
+    Must be reached unconditionally by all threads. Nested control flow is
+    conservatively rejected. This is not an outer MTE/Vector pipeline barrier."""
+    return _ir_core.create_op_call("simt.syncthreads", [], {}, _get_span_or_capture(span))
+
+
+def threadfence(span: Span | None = None) -> Call:
+    """Issue the target workitem memory fence for the calling thread.
+
+    Does not wait for other threads or provide cross-AIV rendezvous.
+    Ordering and visibility follow the native target fence contract."""
+    return _ir_core.create_op_call("simt.threadfence", [], {}, _get_span_or_capture(span))
+
+
+def threadfence_block(span: Span | None = None) -> Call:
+    """Issue the target block-scoped memory fence for the calling thread.
+
+    Does not wait for other threads; use syncthreads for a rendezvous.
+    This does not replace outer MTE/Vector pipeline synchronization."""
+    return _ir_core.create_op_call("simt.threadfence_block", [], {}, _get_span_or_capture(span))

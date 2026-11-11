@@ -693,16 +693,10 @@ def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
 def lower_auto_vector_split() -> Pass:
-    """Lower AUTO ``pl.split`` mixed InCore functions into the explicit ``split_aiv`` form.
+    """Preserve explicit AIV regions and localize boundary valid extents.
 
-    Inserts ``tile.aiv_shard`` at C->V boundaries and ``tile.aic_gather`` at V->C
-    boundaries, halves only the vector sub-region (affinity-gated), injects
-    ``get_subblock_idx``, and stamps ``split`` + ``split_aiv`` — all BEFORE
-    ExpandMixedKernel folds the reshape ops into split-stamped tpush/tpop.
-
-    This is the live auto-split lowering path: it always runs immediately before
-    ExpandMixedKernel, so SplitVectorKernel only stamps attrs for the resulting
-    ``split_aiv`` functions.
+    Mixed function-level AUTO splitting is rejected. User computation shapes
+    and addresses remain unchanged. The public name is retained for compatibility.
     """
 
 def inject_gm_pipe_buffer() -> Pass:

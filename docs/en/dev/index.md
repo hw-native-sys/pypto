@@ -38,42 +38,48 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 
 ## Comment-triggered full CI
 
-After rollout, PR creation and updates run `changes`, `toolchain`, `pre-commit`
-and `clang-tidy`. The separate `Docs / build` check also runs. Documentation-only
+PR creation and updates run `changes`, `toolchain`, `pre-commit`
+and `clang-tidy`, followed by a lightweight `lint-gate`. The separate `Docs / build` check also runs. Documentation-only
 PRs retain the automatic `clang-tidy` exemption. No device tests or wheel builds
 start automatically for PRs.
 
-With tiered CI enabled, the automatic PR run loads its controller from the
-trusted PR base SHA. Editing `ci_control.py` in the PR therefore does not change
-tier selection. Before activation, it uses the workflow revision so this change
-can be tested before the helper exists on main.
+Automatic PR runs, including forks, always select lint and load their controller
+from the trusted PR base SHA. Editing `ci_control.py` in the PR therefore does
+not change tier selection. The helper must already exist on main. Tier selection
+does not depend on repository variables, which can be empty in fork PR runs.
 
 This is a scheduling convention for the existing `pull_request` flow, not a
 complete protection against malicious runner use. A PR can still modify its
 workflow, remove a job condition, or add a job that targets an available runner.
-The `/ci full` command checks permissions, and its result publisher verifies
-the trusted dispatch, but neither restricts arbitrary PR-authored workflows.
+The `/ci full` command validates the PR revision, and its result publisher
+verifies the trusted dispatch, but neither restricts arbitrary PR-authored workflows.
 Enforcing that boundary requires separate GitHub runner access policies and
 trusted workflow restrictions. Those administrative settings are unchanged.
 
-A collaborator with repository **write**, **maintain** or **admin** permission
-can post exactly this comment in the PR conversation:
+Anyone who can comment on a PR, including external contributors without
+repository write access, can post exactly this comment in the PR conversation:
 
 ```text
 /ci full
 ```
 
-The `CI Command` workflow checks current repository permissions and dispatches
-`CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
+The `CI Command` workflow requires an open PR targeting this repository's `main`
+branch and dispatches `CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 A conflicting PR, or one whose merge is still being computed, must be resolved
 or retried. The command's Actions summary records acceptance or rejection.
-An identical request already queued/running is not dispatched again.
-After authorization and revision checks, the command writes `ci/full=pending`
+An identical request already queued/running is not dispatched again. The command
+validates the run linked by the current status before searching run history,
+so a bound pending request is honored even before the run list indexes it.
+A verified successful full result for the same head and base also makes the comment a no-op,
+so another commenter cannot reset a green gate. Comment
+access allows users to request device tests; it does not grant repository write
+or merge permission, and duplicate detection is not a general rate limit.
+After PR and revision checks, the command writes `ci/full=pending`
 before dispatching, clearing any previous success while the publisher is queued.
-A read-only admission job authorizes the comment and pins the head before joining
-the publisher's PR/head queue. Inside that queue, the command checks permission
-and the head again, writes pending, dispatches, and binds the pending status to
+A read-only admission job validates the PR and pins the head before joining
+the publisher's PR/head queue. Inside that queue, the command checks the PR
+and its revision again, writes pending, dispatches, and binds the pending status to
 the returned run ID. A moved head is rejected rather than written under the wrong lock.
 If the initial status write fails, no run is dispatched. If dispatch or run-ID
 binding fails, the unbound pending marker is retained and older publishers cannot
@@ -81,13 +87,32 @@ clear it. Retry `/ci full`; if a run was accepted despite a lost response, wait 
 that run to finish before retrying. Publishers preserve the bound newer run even
 when run-history searches have not yet indexed it.
 
-Full includes lint, wheel warm-up, unit, example, codegen, system, distributed,
+The comment opens the downstream test stage after `pre-commit` and `clang-tidy`
+have passed in the latest matching automatic PR run. Matching includes the PR
+number, head SHA, base SHA, workflow identity and fork identity. A docs-only PR
+may reuse a skipped `clang-tidy` after its changed paths are verified. Missing,
+running or failed lint rejects the request; it does not reserve a runner while
+waiting. Pushes or base changes require matching lint again.
+
+The downstream run skips both lint jobs. A lightweight gate verifies their
+reuse before tests start; revision checks and toolchain preparation still run.
+Full includes the reused lint result, wheel warm-up, unit, example, codegen, system, distributed,
 pypto-lib and A5/simulator tests. Core tests execute even for documentation-only
 PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
 when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
+
+The PR keeps its original lint checks and displays each downstream job as
+`full / <job name>`, including matrix legs and links to job logs. `CI Full Progress`
+reads GitHub metadata on a GitHub-hosted runner and refreshes these checks roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
+monitor runs while waiting for a comment. Polling slows down with concurrent
+monitors and the shared API budget, reserving 200 requests for gate writers and
+other automation; transient API errors use bounded backoff. Each live monitor is bounded to five
+hours; a separate completion event reconciles final results even after a monitor
+failure or timeout. Progress checks are informational: require `ci/full` for
+merge, not every `full / ...` check (some tests are conditional or advisory).
 
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
 updated by `CI Full Status`.
@@ -96,11 +121,23 @@ job confirms all applicable tests passed. Skipped, missing, failed or cancelled
 required tests cannot satisfy it. The publisher runs on a fresh GitHub-hosted
 runner, reads GitHub metadata, and never executes PR code or downloads artifacts.
 Before joining the status writer concurrency group, the router validates the
-event's main branch, workflow identity, repository and full-run title. Unrelated
+event's main branch, workflow identity and repository, then reads its exact run
+attempt through REST to resolve the full-run title. Webhook display titles are
+not used as job-level filters. The router passes the validated identity to the
+writer, which re-reads live state before publishing. Unrelated
 runs cannot displace a pending publisher. Commands and publishers use the same
 `queue: max` concurrency group, so older events cannot replace an already queued
 completion writer. GitHub permits 100 waiting jobs per group; excess arrivals are
 cancelled, and a cancelled command or completion publisher must be retried.
+
+If tests passed but `ci/full` remains pending because publication was missed,
+run **Actions → CI Full Status → Run workflow** on `main`, supplying the existing
+full workflow run ID as `run_id`. This only reconciles metadata; it does not
+dispatch tests or use a device runner. It uses the same PR/head/base checks and
+writer queue, preserves newer requests, and cannot turn an obsolete or failed
+run green. This recovery entry becomes available after the updated workflow is
+merged into main.
+
 Test jobs do not hold status-write or Actions-write tokens. The entire `CI`
 workflow declares `cache-mode: read`: GitHub's cache service prevents cache
 writes, including direct API calls from PR code. Hosted wheel sharing uses
@@ -113,6 +150,11 @@ Use **Re-run failed jobs** on the full run in GitHub Actions. The original test
 revision is preserved; the finalizer combines successful dependencies from the
 previous attempt with rerun results. If only the finalizer is missing, rerun that
 job too. The status publisher handles rerun events and ignores superseded requests.
+If the router's run lookup fails but the event's origin and full PR title can
+still be verified, it queues a failure-only update so an old green gate cannot
+survive that lookup failure. This path preserves verified newer writers and
+cannot grant success from event data. Events without a verifiable PR identity
+are rejected; per-job progress retains its API retry behavior.
 If publication finds that the PR has moved to another head, closed, or changed
 its target, it invalidates the original tested head unless a verified newer request owns its
 status. Resetting or reopening the PR cannot revive an old green rerun result.
@@ -123,8 +165,8 @@ creation-time ranges at GitHub’s search limit. Moving between unfinished statu
 cannot hide an existing request from that scan.
 A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances
-before result publication, the old-base result fails and requires `/ci full`
-again. This check is made at publication time; an already published success
+before result publication, the old-base result fails. Update the PR branch,
+wait for matching lint and post `/ci full` again. This check is made at publication time; an already published success
 is not automatically invalidated by a later main push. Requiring an up-to-date
 branch at merge time is a separate ruleset policy, unchanged by this PR.
 Changed-path classification compares the pinned base and head SHAs, so later
@@ -150,26 +192,32 @@ leave all four empty to run CI against main.
 
 ### Operator rollout
 
-The repository variable `CI_COMMENT_TIERS_ENABLED` is an activation switch.
-Unset or false preserves existing automatic full CI while the required checks
-are migrated. No GitHub App secret, public webhook endpoint or service update
-is needed.
+The old repository variable `CI_COMMENT_TIERS_ENABLED` is no longer used as an
+activation switch. PR runs always use lint; setting, clearing or changing that
+variable does not enable automatic full CI. No GitHub App secret, public webhook
+endpoint or service update is needed.
 
-1. Merge the workflows and helper onto `main`, leaving the switch unset.
-2. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
+1. Ensure the main ruleset requires `ci/full`, keeping `pre-commit`, `clang-tidy`
+   and existing review requirements. Select the GitHub Actions source where
+   available. Keep the former heavy-test requirements until the checks below
+   pass. The comment handler and controller must already be installed on main
+   so the rollout PR can satisfy `ci/full` before merging.
+2. Merge the updated workflows and helpers onto `main`.
+   Update the test PR branch to include this version and let its automatic lint
+   finish. Older runs without the PR/head/base lint title cannot be reused.
+3. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
    **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm
-   unauthorized comments and stale-head results cannot launch or approve full.
-3. Add `ci/full` to the main ruleset's required status checks, selecting the
-   GitHub Actions source where available. Keep `pre-commit`, `clang-tidy` and
-   existing review requirements. Do not require the dispatch job `full-result`
+   external commenters can trigger full, invalid PRs cannot launch it, and
+   stale-head results cannot approve a newer revision.
+   Do not require the dispatch job `full-result`
    itself: it belongs to the main workflow revision, not the PR head.
 4. Once `ci/full` is required, remove the former individual heavy-test contexts
    from the required list, including the `unit-tests` matrix context. They may
    be skipped or absent in lint runs; coverage is now enforced by `ci/full`.
-5. Set `CI_COMMENT_TIERS_ENABLED=true`. Subsequent PR runs use lint by default.
 
-For rollback, unset the switch to restore automatic tests; keep the `ci/full`
-requirement until the previous heavy-test requirements have been restored.
+For rollback, restore automatic full CI in the workflow/controller code; clearing
+the old variable has no effect. Keep the `ci/full` requirement until the previous
+heavy-test requirements have been restored and verified on a new run.
 This implementation targets the current PR merge flow, not merge queues;
 `merge_group` support is required before enabling a merge queue.
 

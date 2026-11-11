@@ -3398,6 +3398,29 @@ class TestConstantIfCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_materialized_subblock_index_preserves_result_bound(self):
+        """A call's result range still simplifies the ragged split-AIV extent."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[1], pl.INDEX]):
+                lane: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                extent: pl.Scalar[pl.INDEX] = pl.min(pl.max(5 - lane * 8, 0), 8)
+                pl.tensor.write(out, [0], extent)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[1], pl.INDEX]):
+                lane: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                extent: pl.Scalar[pl.INDEX] = pl.max(5 - lane * 8, 0)
+                pl.tensor.write(out, [0], extent)
+
+        # The query stays at its original site. Only the later expression uses
+        # its nonnegative result contract to remove the redundant upper clamp.
+        ir.assert_structural_equal(passes.simplify()(Before), Expected)
+
     def test_leaf_index_parameter_keeps_its_guard(self):
         """A leaf INDEX *parameter* is not non-negative, so its guard survives.
 

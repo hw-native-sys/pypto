@@ -205,3 +205,77 @@ def test_vote_accepts_python_bool_predicate(name, predicate):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+ATOMICS = ("atomic_add", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas")
+
+
+@pytest.mark.parametrize("name", ATOMICS)
+@pytest.mark.parametrize("storage_type", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
+@pytest.mark.parametrize("dtype", [DataType.INT32, DataType.FP32])
+def test_atomic_types_effects_and_round_trip(name, storage_type, dtype):
+    storage = ir.Var(
+        "target", storage_type([ir.ConstInt(d, DataType.INDEX, SPAN) for d in (4, 8)], dtype), SPAN
+    )
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    args = [storage, [1, 2], value] + ([value] if name == "atomic_cas" else [])
+    call = getattr(simt, name)(*args)
+    assert call.type.dtype == dtype
+    assert ir.get_op_arg_effect(call.op.name, 0) == ir.ArgEffect.ReadWrite
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    ir.assert_structural_equal(call, getattr(pl.simt, name)(*args).unwrap())
+    helper = ir.Function(
+        "atomic",
+        [(storage, ir.ParamDirection.InOut), value],
+        [],
+        ir.EvalStmt(call, SPAN),
+        SPAN,
+        ir.FunctionType.SIMT,
+    )
+    access = ir.analyze_simt_access(helper)
+    assert access[0].reads and access[0].writes
+    assert not access[1].reads and not access[1].writes
+
+
+@pytest.mark.parametrize("name", ATOMICS)
+@pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT32, DataType.FP16, DataType.BOOL])
+def test_atomic_rejects_unsupported_types(name, dtype):
+    storage = ir.Var("target", ir.TensorType([8], dtype), SPAN)
+    value = ir.Var("value", ir.ScalarType(dtype), SPAN)
+    with pytest.raises(ValueError, match="INT32 or FP32|byte-addressable"):
+        getattr(simt, name)(storage, [0], *([value] * (2 if name == "atomic_cas" else 1)))
+
+
+@pytest.mark.parametrize("name", ATOMICS)
+@pytest.mark.parametrize("arity", [0, 1, 2, 5])
+def test_atomic_checks_arity_before_accessing_arguments(name, arity):
+    with pytest.raises(ValueError, match="requires exactly"):
+        ir.create_op_call(f"simt.{name}", [simt.lane_id()] * arity, {}, SPAN)
+
+
+def test_atomic_validation_and_cache():
+    storage = ir.Var("gm", ir.TensorType([8], DataType.INT32), SPAN)
+    tile = ir.Var("ub", ir.TileType([8], DataType.INT32), SPAN)
+    integer = simt.lane_id()
+    floating = ir.ConstFloat(1.0, DataType.FP32, SPAN)
+    with pytest.raises(ValueError, match="value dtype"):
+        simt.atomic_add(storage, [0], floating)
+    with pytest.raises(ValueError, match="compare dtype"):
+        simt.atomic_cas(storage, [0], floating, integer)
+    with pytest.raises(ValueError, match="one index per"):
+        simt.atomic_add(storage, [0, 0], integer)
+    with pytest.raises(ValueError, match="only to GM"):
+        simt.atomic_add(tile, [0], integer, l2cache="nmfv")
+    with pytest.raises(ValueError, match="l2cache"):
+        simt.atomic_add(storage, [0], integer, l2cache="nmpref")
+    assert simt.atomic_add(storage, [0], integer, l2cache="nmfv").kwargs["l2cache"] == "nmfv"
+
+
+@pytest.mark.parametrize("name", ["syncthreads", "threadfence", "threadfence_block"])
+def test_synchronization_void_and_round_trip(name):
+    call = getattr(simt, name)()
+    assert isinstance(call.type, ir.VoidType)
+    ir.assert_structural_equal(call, getattr(pl.simt, name)())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    with pytest.raises(ValueError, match="no arguments"):
+        ir.create_op_call(f"simt.{name}", [simt.lane_id()], {}, SPAN)

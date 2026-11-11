@@ -53,7 +53,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 22 | [InferTileMemorySpace](22-infer_tile_memory_space.md) | 推断每个 tile 的片上 `MemorySpace`，并插入 `tile.move` 消解残留不匹配 |
 | 23 | [InsertMxScaleAddr](23-insert_mx_scale_addr.md) | 在 memory space 解析完成后，于 MX matmul 消费者前插入 `tile.tget_scale_addr` |
 | 24 | [ResolveBackendOpLayouts](24-resolve_backend_op_layouts.md) | 修正逐元素算子所需的后端 tile layout |
-| 25 | [LowerAutoVectorSplit](25-lower_auto_vector_split.md) | 把 AUTO `pl.split` 的混合 InCore 函数转换为显式 `split_aiv` 形式 |
+| 25 | [LowerAutoVectorSplit](25-lower_auto_vector_split.md) | 准备用户编写的 `split_aiv` 区域，并拒绝混合 kernel 的隐式拆半 |
 | 26 | [ExpandMixedKernel](26-expand_mixed_kernel.md) | 把混合 InCore 函数拆分为独立的 AIC（Cube）与 AIV（Vector）kernel |
 | 27 | [InjectGMPipeBuffer](27-inject_gm_pipe_buffer.md) | 为经 GM 路由的跨核 pipe 注入 `__gm_pipe_buffer` workspace（Ascend910） |
 | 28 | [SplitVectorKernel](28-split_vector_kernel.md) | 标记 split 属性并处理不拆分的双 AIV 路径 |

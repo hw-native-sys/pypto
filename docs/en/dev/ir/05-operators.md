@@ -986,3 +986,7 @@ Warp collectives include `vote_all/any/uni`, `vote_ballot`,
 `shuffle_idx/up/down/bfly` and `redux_add/min/max`. See the
 [collective contracts](11-simt.md#warp-collectives) for active-lane participation,
 supported types and shuffle widths.
+
+Atomics `atomic_add/min/max/exch/cas` return the old INT32/FP32 value from
+initialized GM/UB storage. `syncthreads`, `threadfence` and `threadfence_block`
+return void. See [atomic and synchronization contracts](11-simt.md#atomics-and-synchronization).

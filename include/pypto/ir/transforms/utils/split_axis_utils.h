@@ -65,43 +65,6 @@ int SplitDimension(SplitMode mode);
 ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size);
 
 /**
- * @brief The per-lane partition stride for an AUTO-split body, or null.
- *
- * The split partitions the split axis between the two AIV lanes: lane L owns
- * ``[L * S, L * S + S)`` of it, where ``S`` is this stride. Two partitions are
- * possible, and they differ only when the boundary tile is ragged:
- *
- * | Partition | ``S`` | Lane extents for a `[16, ...]` box valid to 13 |
- * | --------- | ----- | ---------------------------------------------- |
- * | box (default) | ``ceil(box / 2)`` = 8 | 8 and 5 |
- * | valid (this)  | ``ceil(V / 2)`` = 7   | 7 and 6 |
- *
- * The box partition is universal — it works for every tile in the region
- * whatever its valid extent — but pto-isa can only place lane 1's FIFO band at
- * its own extent (even codes) or one past it (odd codes), so lanes 8 and 5 have
- * no expressible transport. Balancing the VALID region instead makes the two
- * lanes differ by at most one by construction, which is exactly what the codes
- * express — and it splits the real work evenly rather than leaving lane 1 the
- * remainder.
- *
- * It is only sound when the whole body agrees on one logical row space, so this
- * returns null (keep the box partition) unless:
- *
- * - the body has at least one Cube -> Vector boundary and they all agree on the
- *   same static ``(box, valid)`` on the split axis;
- * - no Vector -> Cube boundary is present (the gather re-joins the lanes
- *   positionally at their own extents, which only abut when they are equal);
- * - every other split-axis tile in the body is derived from that boundary — a
- *   tile with an independent origin (a `tile.load`, a generator) spans the FULL
- *   box, which the balanced partition would not cover.
- *
- * @param stmts The pre-lowering body statements.
- * @param split_dim The partitioned tile dimension (see SplitDimension).
- * @return The balanced stride as a ConstInt, or null to keep the box partition.
- */
-ExprPtr ResolveLaneStride(const std::vector<StmtPtr>& stmts, int split_dim);
-
-/**
  * @brief The pto-isa split code a Cube -> Vector boundary op must carry.
  *
  * pto-isa derives lane 1's band inside the FIFO slot from the popped tile's own
@@ -130,8 +93,7 @@ ExprPtr ResolveLaneStride(const std::vector<StmtPtr>& stmts, int split_dim);
  * lays its rows at their box positions, so lane 1's band sits at the box half and
  * the even code points there whatever the extent turns out to be.
  * LocalizeExplicitBoundaryValid establishes that pairing for a ``pl.split_aiv``
- * region and DeferAutoRuntimeShardExtents for a ``pl.split`` body
- * (WithFullSplitAxisValid); the lane's own extent is carried by the boundary's
+ * region (WithFullSplitAxisValid); the lane's own extent is carried by the boundary's
  * consumers. A hand-written
  * ``tile.tpop_from_aic`` keeps its declared per-lane extent and is still
  * misplaced for such a boundary — see RebuildTpopWithHalvedShape.
@@ -139,7 +101,7 @@ ExprPtr ResolveLaneStride(const std::vector<StmtPtr>& stmts, int split_dim);
  * @param mode The split mode (``None`` yields ``kSplitNone``).
  * @param full_type The PRE-split (full-width) boundary tile type.
  * @param split_dim The partitioned tile dimension (see SplitDimension).
- * @param lane_stride The body's partition stride (see ResolveLaneStride); null
+ * @param lane_stride The body's partition stride (when supplied explicitly); null
  *        for the default box partition, where ``S = ceil(box / 2)``.
  * @param op_name Op name for diagnostics.
  * @param span Span for diagnostics.
@@ -249,7 +211,7 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim);
  * extent to re-localize their split-dim offsets. ``half_dim_size`` is that
  * capacity (which may remain unchanged when the operator rounds allocation).
  * How far apart the two lanes' data sits is the
- * partition stride instead (see ResolveLaneStride), which equals this half
+ * partition stride instead (when supplied explicitly), which equals this half
  * unless the body was rebalanced onto a ragged boundary's valid region.
  */
 struct TileInfo {
@@ -271,19 +233,6 @@ struct TileInfo {
 /// the per-lane physical extent expected by the existing gather transport.
 void CheckGatherPartition(const CallPtr& call, const std::unordered_map<const Var*, TileInfo>& tile_vars,
                           const std::unordered_map<const Var*, VarPtr>& var_replacements);
-
-/// Admission facts for a lowered data-parallel body. Broadcast roots remain
-/// neutral: allowing a replicated producer does not prove its consumers split.
-struct SplitBodyAnalysis {
-  std::unordered_set<const Var*> half_tiles;
-  std::unordered_set<const Var*> lane_scalars;
-  std::vector<std::string> full_width_vec_ops;  ///< Operator names without proven per-lane dataflow.
-  std::vector<std::string> carry_mismatches;    ///< Carry names whose backedge loses an entry shard fact.
-};
-
-SplitBodyAnalysis AnalyzeSplitBody(const std::vector<StmtPtr>& stmts, int split_dim,
-                                   const std::unordered_map<const Var*, TileInfo>& known_tiles = {},
-                                   const std::unordered_map<const Var*, VarPtr>& replacements = {});
 
 /**
  * @brief Result of injecting the per-subblock index at the top of a body.
@@ -373,7 +322,7 @@ TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim
  * @param is_aiv Whether this is an AIV lane (gates per-op halving).
  * @param subblock_idx The per-subblock index expr (null for non-AIV).
  * @param var_replacements In/out map of original vars to their rebuilt versions.
- * @param lane_stride The body's partition stride (see ResolveLaneStride); null
+ * @param lane_stride The body's partition stride (when supplied explicitly); null
  *        keeps the default box partition.
  * @return The rewritten statement list.
  */
@@ -511,33 +460,6 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
  */
 std::vector<StmtPtr> LocalizeExplicitBoundaryValid(const std::vector<StmtPtr>& stmts, int split_dim,
                                                    const Span& region_span);
-
-/**
- * @brief Give an AUTO-halved body's runtime-extent Cube -> Vector shards the full per-lane box.
- *
- * The AUTO halving types each ``tile.aiv_shard`` with its lane's own split-axis
- * extent, which pto-isa reads to place lane 1's band. That is exact only for
- * compile-time lane extents; a runtime extent must leave the shard at the full
- * box (``WithFullSplitAxisValid``), the pairing ``LocalizeExplicitBoundaryValid``
- * establishes for the explicit form.
- *
- * Unlike that walk, nothing downstream is retyped: the halving already typed
- * every consumer and loop carry from its own pre-split type. What remains is
- * (1) retyping each such shard, (2) guarding a store whose stored tile has a
- * lane-dependent, possibly-zero valid extent and whose result nothing reads (a
- * zero-row store is outside the ISA contract; a read result would be left
- * conditionally defined, so that store stays unguarded, as before), and (3) rejecting the
- * direct uses a full-box shard cannot serve: a store, a pad fill, a loop carry,
- * a branch result or a return. A body with no runtime-extent shard is returned
- * unchanged.
- *
- * @param stmts The lowered body, including the ``tile.get_subblock_idx`` binding.
- * @param split_dim The partitioned tile dimension (see SplitDimension).
- * @param span Span for the rebuilt sequence.
- * @return The rewritten statement list (input order preserved).
- */
-std::vector<StmtPtr> DeferAutoRuntimeShardExtents(const std::vector<StmtPtr>& stmts, int split_dim,
-                                                  const Span& span);
 
 /**
  * @brief Replace a shard result type's split-axis valid extent with the lane's own.

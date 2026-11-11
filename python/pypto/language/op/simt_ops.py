@@ -199,3 +199,121 @@ def shuffle_bfly(value: Scalar | ir.Expr, mask: int | Scalar | ir.Expr, *, width
     """
     control = _shuffle_control(mask)
     return Scalar(expr=_simt.shuffle_bfly(_unwrap(value), control, width=width))
+
+
+def atomic_add(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically add one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_add(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_min(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically min one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    INT32 comparison is signed; FP32 special values follow the target rules.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_min(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_max(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically max one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    INT32 comparison is signed; FP32 special values follow the target rules.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_max(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_exch(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically exch one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(expr=_simt.atomic_exch(_unwrap(storage), coordinates, _unwrap(value), l2cache=l2cache))
+
+
+def atomic_cas(
+    storage: Tensor | Tile | ir.Expr,
+    indices: Sequence[int | Scalar | ir.Expr],
+    compare: Scalar | ir.Expr,
+    value: Scalar | ir.Expr,
+    *,
+    l2cache: str | None = None,
+) -> Scalar:
+    """Atomically cas one initialized INT32/FP32 element and return its old value.
+
+    Operands must match the storage dtype. Indices use the storage logical layout.
+    The update is retained when the result is unused. No additional ordering or
+    rendezvous is implied; l2cache is available only for GM storage.
+    Comparison is bitwise, including FP32 NaN payloads and signed zeros.
+    Replace only on a match; the result is the observed old value.
+    """
+    coordinates = [index if isinstance(index, int) else _unwrap(index) for index in indices]
+    return Scalar(
+        expr=_simt.atomic_cas(
+            _unwrap(storage), coordinates, _unwrap(compare), _unwrap(value), l2cache=l2cache
+        )
+    )
+
+
+def syncthreads() -> ir.Call:
+    """Synchronize all threads in the current SIMT entry and order their memory effects.
+
+    Must be reached unconditionally by all threads. Nested control flow is
+    conservatively rejected. This is not an outer MTE/Vector pipeline barrier."""
+    return _simt.syncthreads()
+
+
+def threadfence() -> ir.Call:
+    """Issue the target workitem memory fence for the calling thread.
+
+    Does not wait for other threads or provide cross-AIV rendezvous.
+    Ordering and visibility follow the native target fence contract."""
+    return _simt.threadfence()
+
+
+def threadfence_block() -> ir.Call:
+    """Issue the target block-scoped memory fence for the calling thread.
+
+    Does not wait for other threads; use syncthreads for a rendezvous.
+    This does not replace outer MTE/Vector pipeline synchronization."""
+    return _simt.threadfence_block()

@@ -429,6 +429,6 @@ load、分配和 transpose 复用同一个结果分配辅助函数；通用操�
 ## SIMT 辅助函数
 
 此 pass 同时展平 ND Tile 参数、调用者 launch 实参及结果，并改写
-`simt.load`/`simt.store` 索引。前导坐标按行主序合并。初始支持要求隐式
+`simt.load`/`simt.store` 及五种 `simt.atomic_*` 的索引。前导坐标按行主序合并。初始支持要求隐式
 紧凑布局和静态正数前导维度；显式 ND Tile 视图会被拒绝。GM Tensor 索引
 保留原秩。

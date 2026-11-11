@@ -76,7 +76,7 @@ def test_local_depth_covers_retained_pops_on_bidirectional_pipe(tmp_path: Path, 
         "    @pl.function(type=pl.FunctionType.InCore)\n"
         "    def main(self, a: pl.Tensor[[32, 32], pl.FP16], b: pl.Tensor[[32, 32], pl.FP16], "
         "out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]) -> pl.Tensor[[32, 32], pl.FP32]:\n"
-        "        pl.func_attr({'split': pl.SplitMode.UP_DOWN, 'slot_num': 4, "
+        "        pl.func_attr({'slot_num': 4, "
         f"'local_slot_num': {local_depth}}})\n"
         "        av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)\n"
         "        bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)\n"

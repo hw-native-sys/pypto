@@ -70,6 +70,17 @@ def _generate_mlir(program_cls) -> str:
     return codegen.PTOCodegen().generate(optimized)
 
 
+def _generate_mlir_a5(program_cls) -> str:
+    """Generate PTO MLIR with the A5 backend, the only target with URMA."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    try:
+        return _generate_mlir(program_cls)
+    finally:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+
+
 def _generate_outlined_waiter_mlir(program_cls) -> str:
     """Run production waiter outlining before the fully instrumented pipeline.
 
@@ -2145,6 +2156,177 @@ def test_remote_load_fp16_tail_padding_widens_the_peer_view_not_its_strides():
     # Row stride stays the logical width — widening the declared extent must
     # not relocate row 1.
     assert "strides = [%c17_index, %c1_index]" in peer_view, peer_view
+
+
+# ---------------------------------------------------------------------------
+# V1 asynchronous URMA transfer: pld.tensor.put_async / get_async
+# ---------------------------------------------------------------------------
+
+
+def test_put_async_emits_urma_helper_call():
+    """PUT lowers to one external helper call, with no staging tile.
+
+    V1 deliberately does not lower the async op through
+    ``ConvertTensorToTileOps``: the transfer must not allocate UB or emit a
+    native ``pto.comm.tput``. The whole lowering is a private ``func.call``
+    whose body the Python backend generates per dtype, carrying the base
+    pointers, byte offsets, byte count and peer index.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(dst, peer, src)
+
+    mlir = _generate_mlir_a5(P)
+
+    # Declared once per module, and called once per op.
+    declaration = next(
+        line for line in mlir.splitlines() if "func.func private @pypto_urma_put_async_f16" in line
+    )
+    assert "(!pto.ptr<i64>, !pto.ptr<i64>, !pto.ptr<f16>, !pto.ptr<f16>" in declaration, declaration
+    assert "i64, i64, i64, i64, i64, i64)" in declaration, declaration
+
+    call = next(line for line in mlir.splitlines() if "func.call @pypto_urma_put_async_f16" in line)
+    assert call.count(",") >= 9, call
+    signature = (
+        ") : (!pto.ptr<i64>, !pto.ptr<i64>, !pto.ptr<f16>, !pto.ptr<f16>, i64, i64, i64, i64, i64, i64) -> ()"
+    )
+    assert signature in call, call
+
+    # The full-slice byte count is rows x cols x element bytes = 16 * 64 * 2.
+    assert "arith.constant 2048 : i64" in mlir, mlir
+
+    # Async means no native transfer and no staging: the V1 contract forbids
+    # both, and either would silently reintroduce synchronous completion.
+    assert "pto.comm.tput" not in mlir, mlir
+    assert "pto.alloc_tile" not in mlir, mlir
+
+
+def test_get_async_uses_the_get_symbol_and_element_bytes():
+    """GET shares the emitter but must select the get helper and its own dtype."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[8, 32], pl.FP32],
+            src: pld.DistributedTensor[[8, 32], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.get_async(dst, peer, src)
+
+    mlir = _generate_mlir_a5(P)
+
+    assert "func.func private @pypto_urma_get_async_f32" in mlir, mlir
+    call = next(line for line in mlir.splitlines() if "func.call @pypto_urma_get_async_f32" in line)
+    assert "!pto.ptr<f32>" in call, call
+    # 8 * 32 * 4 bytes.
+    assert "arith.constant 1024 : i64" in mlir, mlir
+    assert "pto.comm.tget" not in mlir, mlir
+
+
+def test_put_async_subregion_offsets_are_bytes_not_elements():
+    """Subregion coordinates become byte offsets through the logical strides.
+
+    Row offset 2 of a ``[16, 64]`` f16 window is element 128, i.e. 256 bytes —
+    the helper divides by ``sizeof(T)`` itself, so codegen must send bytes.
+    The transfer itself is 4 rows x 64 columns = 512 bytes.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(
+                dst,
+                peer,
+                src,
+                dst_offsets=[2, 0],
+                src_offsets=[6, 0],
+                shape=[4, 64],
+            )
+
+    mlir = _generate_mlir_a5(P)
+
+    assert "arith.constant 256 : i64" in mlir, mlir  # dst: 2 rows x 64 x 2 B
+    assert "arith.constant 768 : i64" in mlir, mlir  # src: 6 rows x 64 x 2 B
+    assert "arith.constant 512 : i64" in mlir, mlir  # transfer: 4 * 64 * 2 B
+
+    # The adapter bounds the subregion against each endpoint's full span, so
+    # the call also carries 16 * 64 * 2 = 2048 bytes for both tensors.
+    call = next(line for line in mlir.splitlines() if "func.call @pypto_urma_put_async_f16" in line)
+    assert "i64, i64, i64, i64, i64, i64) -> ()" in call, call
+    # Both extents are the 2048-byte span of a full [16, 64] f16 tensor.
+    assert call.count("%c2048_i64"), call
+
+    # Static coordinates are already IR-verified; the runtime per-dimension
+    # guard is emitted for the general dynamic case.
+    assert "arith.cmpi sge" in mlir, mlir
+    assert "arith.cmpi sle" in mlir, mlir
+
+
+def test_put_async_dynamic_subregion_guards_each_dimension():
+    """A dynamic coordinate must be bounded per dimension, not only flattened.
+
+    A 32-wide row slice at a runtime column can be contiguous in bytes yet
+    cross into the next row; the guard collapses such a region to a zero byte
+    count so the helper rejects it instead of transferring the wrong elements.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP32],
+            src: pld.DistributedTensor[[16, 64], pl.FP32],
+            col: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(
+                dst,
+                1,
+                src,
+                dst_offsets=[0, 0],
+                src_offsets=[0, col],
+                shape=[1, 32],
+            )
+
+    mlir = _generate_mlir_a5(P)
+
+    assert "arith.cmpi sge" in mlir, mlir
+    assert "arith.cmpi sle" in mlir, mlir
+    assert "arith.select" in mlir, mlir
+
+
+def test_put_async_rejects_non_a5_backend():
+    """The URMA adapter is A5-only; a2a3 must fail here, not in device C++."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put_async(dst, peer, src)
+
+    with pytest.raises(ValueError, match="requires the A5 backend"):
+        _generate_mlir(P)
 
 
 if __name__ == "__main__":

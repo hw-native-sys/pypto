@@ -2,6 +2,8 @@ name: CI
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
       && format('CI full PR #{0} @{1} base:{2}', inputs.pr_number, inputs.head_sha, inputs.base_sha)
+      || github.event_name == 'pull_request'
+      && format('CI lint PR #{0} @{1} base:{2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.event.pull_request.base.sha)
       || format('CI {0} {1}', github.event_name, github.ref_name) }}
 
 on:
@@ -42,8 +44,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # PR pushes run lint after CI_COMMENT_TIERS_ENABLED is enabled. Until then,
-  # preserve legacy behavior so rulesets can be migrated without a merge gap.
+  # Every PR push runs lint, including forks with no repository variables.
   # /ci full dispatches trusted main with immutable PR head/base/merge inputs.
   # Dispatched PR full runs deliberately disable the docs-only exemption for
   # core tests. docs-examples and serving-guard retain their applicability gates.
@@ -54,8 +55,10 @@ jobs:
       # controller comes from trusted main and never executes the PR checkout.
       contents: read
       pull-requests: read
+      actions: read
     outputs:
       full: ${{ steps.target.outputs.full }}
+      reuse_lint: ${{ steps.target.outputs.reuse_lint }}
       checkout_sha: ${{ steps.target.outputs.checkout_sha }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
       docs_changed: ${{ steps.classify.outputs.docs_changed }}
@@ -64,17 +67,19 @@ jobs:
       - name: Checkout CI controller
         uses: actions/checkout@v4
         with:
-          # Once enabled, PR edits to ci_control.py cannot select the tier.
-          # The flag stays off until this helper has been installed on main.
+          # PR edits to ci_control.py cannot select the tier. The helper must
+          # already exist on main; repository variables may be absent on forks.
           # PR workflow edits themselves still require runner-policy controls.
-          ref: ${{ github.event_name == 'pull_request' && vars.CI_COMMENT_TIERS_ENABLED == 'true' && github.event.pull_request.base.sha || github.workflow_sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.workflow_sha }}
           sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Validate and pin the test revision
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_COMMENT_TIERS_ENABLED: ${{ vars.CI_COMMENT_TIERS_ENABLED }}
+          # Older base revisions still use the rollout flag in prepare. Pin
+          # it on until those helpers are retired; never read it from vars.
+          CI_COMMENT_TIERS_ENABLED: 'true'
         run: python .github/scripts/ci_control.py prepare
       - name: Classify changed paths
         id: classify
@@ -331,6 +336,7 @@ jobs:
   # concurrently with the gate instead.
   # ---------------------------------------------------------------------------
   pre-commit:
+    if: needs.changes.outputs.reuse_lint != 'true'
     needs: changes
     runs-on: ubuntu-latest
 
@@ -373,7 +379,7 @@ jobs:
     # Docs-only gate (see the `changes` job) — a prose-only PR touches no C++, and
     # skipping the gate here keeps the scarce cpu pool free.
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
+    if: needs.changes.outputs.reuse_lint != 'true' && needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
@@ -456,6 +462,29 @@ jobs:
           python tests/lint/clang_tidy.py --strict-version --jobs=$(nproc)
         fi
 
+  lint-gate:
+    needs: [changes, pre-commit, clang-tidy]
+    if: always() && !cancelled() && needs.changes.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require fresh or verified reusable lint
+        env:
+          REUSE_LINT: ${{ needs.changes.outputs.reuse_lint }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          PRE_COMMIT: ${{ needs.pre-commit.result }}
+          CLANG_TIDY: ${{ needs.clang-tidy.result }}
+        run: |
+          if [ "$REUSE_LINT" = 'true' ]; then
+            # changes verified the exact prior PR/head/base lint run via GitHub.
+            test "$PRE_COMMIT" = 'skipped' && test "$CLANG_TIDY" = 'skipped'
+          else
+            test "$PRE_COMMIT" = 'success' && {
+              test "$CLANG_TIDY" = 'success' || {
+                test "$DOCS_ONLY" = 'true' && test "$CLANG_TIDY" = 'skipped'
+              }
+            }
+          fi
+
   prebuild-wheels:
     # Build the pypto and simpler wheels ONCE PER MACHINE, into that host's
     # wheel cache, so the eight jobs below install them instead of each
@@ -465,20 +494,9 @@ jobs:
     # would turn a helper into a hard gate — a saturated CPU pool would then
     # stall the whole workflow instead of just leaving the cache cold.
     #
-    # The point is WHEN it runs, not that it runs. On run 32452961616 the heavy
-    # jobs could not start until 06:10:38 because clang-tidy (in-house cpu,
-    # 5m15) had to finish, and then each spent another ~3 min building. This job
-    # starts as soon as pre-commit is green (06:07:25 on that run) and has the
-    # wheels published before the gate opens, so the consumers install in
-    # seconds and start testing ~3 minutes earlier.
-    #
-    # Gated on pre-commit but deliberately NOT on clang-tidy. The lint gate's
-    # rule is "don't spend a scarce in-house slot on a tree that doesn't lint";
-    # pre-commit is the cheap half of it (GitHub-hosted, ~2 min) and keeps that
-    # promise, while waiting for clang-tidy would consume the entire head start
-    # this job exists to create. Cost of the exception: a tree that passes
-    # pre-commit but fails clang-tidy burns one cpu slot per architecture for
-    # one build — against the seven builds it removes from every green run.
+    # The shared lint gate accepts fresh automatic lint or verified lint from
+    # the same PR/head/base. Comment-triggered full runs reuse it without
+    # spending another CPU slot on clang-tidy.
     #
     # One leg per architecture, because the cache it fills is the host's own
     # disk and the self-hosted fleet is no longer one machine. The `cpu` and
@@ -503,8 +521,14 @@ jobs:
     # The wheel key already carries the architecture (abi_tag comes from
     # EXT_SUFFIX), so the two legs cannot collide even if they somehow shared a
     # cache root: they write different slots.
-    needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     strategy:
@@ -585,8 +609,13 @@ jobs:
     # `toolchain` is deliberately absent from `needs`: nothing here reads a
     # pinned version. simpler resolves its own pto-isa from
     # runtime/pto_isa.pin at build time, and no ptoas is installed.
-    needs: [changes, pre-commit]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # `packages: read` is not decoration. Declaring a `permissions:` block at
     # all narrows GITHUB_TOKEN to exactly what it lists, and pulling the job
     # container is an authenticated ghcr.io read — so `contents: read` alone
@@ -728,7 +757,7 @@ jobs:
     env:
       PIP_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
       PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
-    # Lint gate (see the pre-commit job) — don't spend a runner on a tree that
+    # Lint gate (see the lint-gate job) — don't spend a runner on a tree that
     # doesn't lint.
     #
     # Docs-only gate (see the `changes` job) — THE ONE JOB THAT IS NOT SKIPPED
@@ -747,9 +776,8 @@ jobs:
     # extension or running pytest. The runner is GitHub-hosted, so this costs
     # none of the scarce in-house capacity the gate exists to protect.
     #
-    # The `if` must tolerate a *skipped* `clang-tidy` (a skipped dependency
-    # otherwise skips its dependents, which would reintroduce the bug above),
-    # while still refusing to run when lint actually failed.
+    # lint-gate handles docs-only and reused-lint skips explicitly. Require its
+    # success even when the advisory wheel build fails or is skipped.
     #
     # `prebuild-wheels-github` is in `needs` for ordering only, and the `if`
     # says nothing about its result on purpose. A failed prebuild must not skip
@@ -757,12 +785,12 @@ jobs:
     # so gating on it would let a tree merge with its unit tests never run. The
     # install step falls back to building in place instead, which is what this
     # job did before the prebuild existed.
-    needs: [changes, pre-commit, clang-tidy, prebuild-wheels-github]
+    needs: [changes, lint-gate, prebuild-wheels-github]
     if: >-
-      needs.changes.outputs.full == 'true' &&
-      !cancelled()
-      && needs.pre-commit.result == 'success'
-      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.changes.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -846,8 +874,14 @@ jobs:
     #
     # Gated on docs_changed rather than !docs_only: a code-only PR gets the same
     # blocks run inside examples-tests, against the code it changed.
-    needs: [changes, toolchain, pre-commit]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_changed == 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_changed == 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, cpu]
@@ -900,8 +934,14 @@ jobs:
     # setup-ci-job as codegen-tests / pypto-lib-model, so the ptoas / pto-isa /
     # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
     # instead of rebuilding in an ephemeral container on every PR.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1017,11 +1057,17 @@ jobs:
     # land under ./codegen-checkout so they don't collide with other jobs' trees
     # on the shared self-hosted host.
     #
-    # Lint gate (see the pre-commit job) — shares the self-hosted cpu pool with
+    # Lint gate (see the lint-gate job) — shares the self-hosted cpu pool with
     # clang-tidy, so it must not start until that pool's lint job is green.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, pre-commit, clang-tidy, toolchain]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, lint-gate, toolchain]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, cpu]
     defaults:
       run:
@@ -1112,11 +1158,17 @@ jobs:
     # Checkout / install happen under ./st-checkout so they don't collide with
     # other jobs' workspaces.
     #
-    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
+    # Lint gate (see the lint-gate job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1252,11 +1304,17 @@ jobs:
     # collides with system-tests' ./st-checkout on the shared self-hosted host,
     # and cleans up its own orphaned task-submit tasks.
     #
-    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
+    # Lint gate (see the lint-gate job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1481,11 +1539,17 @@ jobs:
     # with system-tests' workspace (which is owned by container root and
     # would EACCES our ci-runner cleanup).
     #
-    # Lint gate (see the pre-commit job) — never claim NPU slots for a tree that
+    # Lint gate (see the lint-gate job) — never claim NPU slots for a tree that
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1637,8 +1701,14 @@ jobs:
   pypto-lib-compile:
     # Compile selected DeepSeek and Qwen operator cases without device execution.
     # A2/A3 extern wrappers need CANN headers from the npu runner.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
@@ -1735,11 +1805,17 @@ jobs:
     # caller's environment (per daily_ci.yml `a5-system-tests`), so sourcing
     # activate.sh before the wrap is enough — the child inherits the venv + env.
     #
-    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
+    # Lint gate (see the lint-gate job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -1940,8 +2016,12 @@ jobs:
     # the pin moves. `workflow_dispatch` forces it (see the `changes` job).
     #
     # Lint gate + docs-only gate, as every other device job here.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
+    needs: [changes, toolchain, lint-gate]
     if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
       needs.changes.outputs.full == 'true' &&
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.ptoas_version_changed == 'true'
@@ -2255,10 +2335,16 @@ jobs:
     # Checkout / install land under ./a5-checkout so they never collide with the
     # other jobs' trees on a shared self-hosted host.
     #
-    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree that
+    # Lint gate (see the lint-gate job) — never claim an NPU slot for a tree that
     # doesn't lint. Docs-only gate (see the `changes` job) — prose cannot break a build.
-    needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.docs_only != 'true'
+    needs: [changes, toolchain, lint-gate]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
+      needs.changes.outputs.full == 'true' &&
+      needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -2433,7 +2519,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
+    # Lint gate (see the lint-gate job); `toolchain` is ungated and runs
     # alongside it.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     #
@@ -2443,14 +2529,14 @@ jobs:
     # skipped required context reads as satisfied. Lint still gates it exactly
     # as before; the prebuild only decides whether the install step has a wheel
     # to use.
-    needs: [changes, toolchain, pre-commit, clang-tidy, prebuild-wheels-github]
+    needs: [changes, toolchain, lint-gate, prebuild-wheels-github]
     if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.lint-gate.result == 'success' &&
+      needs.toolchain.result == 'success' &&
       needs.changes.outputs.full == 'true' &&
-      !cancelled()
-      && needs.changes.outputs.docs_only != 'true'
-      && needs.pre-commit.result == 'success'
-      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
-      && needs.toolchain.result == 'success'
+      needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
@@ -2583,6 +2669,7 @@ jobs:
       - toolchain
       - pre-commit
       - clang-tidy
+      - lint-gate
       - codegen-tests
       - dist-system-tests
       - docs-examples

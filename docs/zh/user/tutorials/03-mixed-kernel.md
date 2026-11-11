@@ -29,7 +29,7 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="vector_only"):
 
 ## 第 1 步：一个作用域，加 split
 
-把两个运算放进同一个作用域，并标记为 split：
+把 cube 计算和显式分片的 vector 计算放进同一个作用域：
 
 ```python
 import pypto.language as pl
@@ -45,11 +45,14 @@ def mixed(
 ):
     with pl.at(
         level=pl.Level.CORE_GROUP,
-        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=1)],
+        optimizations=[pl.cross_core_slot(slot_num=1)],
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
-        out[:] = pl.add(acc, bias)        # vector (AIV)
+        for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+            half = pl.aiv_shard(acc)
+            row = lane * 64
+            out[row:row + 64, :] = pl.add(half, bias[row:row + 64, :])
     return out
 
 torch.manual_seed(0)
@@ -61,10 +64,12 @@ mixed(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 ```
 
-`pl.split(mode)` 把作用域标记为混合，而 mode 指的是 **vector** 子区域沿哪个轴对半。cube 子区域保持全尺寸：split 把 vector 的工作分摊到两个 AIV 通道上，编译器则插入在两个单元间搬运结果的跨核传输（cube→vector 边界上的 `aiv_shard`，回程的 `aic_gather`）。重叠来自 cube 与 vector 并发执行，而不是各拿同一个 tile 的一半。
+`pl.split_aiv(mode=...)` 绑定 AIV lane 并提供边界模式，`pl.aiv_shard(acc)` 显式
+分片 cube 结果。用户编写每 lane 的 bias 切片和输出偏移；编译器不再拆半 body。
+cube 计算保持完整尺寸。mixed 函数级 `pl.split` AUTO 拆半已移除。
 
-| 模式 | vector 子区域沿哪个方向对半 |
-| ---- | --------------------------- |
+| 模式 | 显式边界分片轴 |
+| ---- | -------------- |
 | `pl.SplitMode.UP_DOWN` | 行（高度） |
 | `pl.SplitMode.LEFT_RIGHT` | 列（宽度） |
 | `pl.SplitMode.NONE` | 不 split |
@@ -97,7 +102,7 @@ assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 ```python
 with pl.at(
     level=pl.Level.CORE_GROUP,
-    optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
+    optimizations=[pl.cross_core_slot(slot_num=2)],
     name_hint="mixed",
 ):
 ```
@@ -112,26 +117,19 @@ tile that crosses the cube/vector boundary
 
 真遇到时有两个杠杆：缩小 tile，或缩短环。**在装得下的前提下选最大的深度**。
 
-## 第 3 步：编译器插进去了什么
+## 第 3 步：传输降低
 
-`pl.split` 是自动路径。底下，跨核数据流是显式算子，你也可以自己写：
+编译器将显式 `aiv_shard`/`aic_gather` 降低为管道 setup、`tpush/tpop` 和对应
+`tfree`。region mode 选择分片轴，`NONE` 传输但不改变形状。使用这些显式边界
+算子时，用户无需手写管道配对。
 
-| 算子 | 角色 |
-| ---- | ---- |
-| `pl.aic_initialize_pipe` / `pl.aiv_initialize_pipe` | 建立管道 |
-| `pl.tpush_to_aiv` / `pl.tpush_to_aic` | 把 tile 推给对端核 |
-| `pl.tpop_from_aic` / `pl.tpop_from_aiv` | 弹出对端推来的 tile |
-| `pl.tfree_to_aic` / `pl.tfree_to_aiv` | 把弹出的槽释放回生产者 |
-| `pl.aiv_shard` / `pl.aic_gather` | 在 AIV 通道间分片 / 在 AIC 上聚回 |
-| `pl.split_aiv(n, mode=...)` | split 的显式区域形式 |
+手写低层 pipe 时，每次 push 要配对 pop，每次 pop 要配对 free。边界只为它搬运的
+值定序；用户管理的 GM 共享和一次性副作用仍需遵守
+[作用域与放置](../language/04-scopes.md) 的顺序和 lane 所有权规则。
 
-**每次 push 必须与一次 pop 配对，每次 pop 必须与一次 `tfree` 配对。** 漏掉 `tfree` 不会报错 —— 它泄漏一个环槽，等环满了生产者就卡住。
-
-**显式写法还把跨 lane 的定序也交给了你。** 边界算子只为它所搬运的那一个值定序；没有任何东西会为 cube lane 的写与 vector lane 对**同一块 GM 缓冲区**的读定序。先发布 producer 的写并执行 fence，再在两个阶段之间放置跨核 `pl.system.syncall`，最后在 consumer 读之前使其 cache 失效；barrier 本身只同步到达。可能部分占用时使用 soft 形式，buffer 可能跨多条 cache line 时使用全 GM cache 维护。上面的 `pl.split` 路径不需要这组序列 —— 传输由编译器插入，结果也与 torch 对拍过。规则见 [作用域与放置](../language/04-scopes.md)。
-
-当 `pl.split` 表达不了所需形状时才动用显式形式：逐通道寻址、只有某一个通道算得出的 gather、或者一个混合了 split 与非 split 工作的区域。`tests/st/codegen/dsl/test_split_aiv_gather_row_codegen.py` 是一个实例。其余情况留在 `pl.split` 上 —— 它插入的是同样的算子，而且配对不会错。
-
-机器级契约见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md)；pass 做了什么见 [ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md)。
+普通未拆分 mix 保留现有全幅隐式通信；本次删除隐式拆半，不删除这条通信路径。
+参见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 和
+[ExpandMixedKernel](../../dev/passes/26-expand_mixed_kernel.md)。
 
 ## 边界情况
 
@@ -140,9 +138,9 @@ tile that crosses the cube/vector boundary
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
 | **`Vec buffer usage ... exceeds platform limit`** | 环加上 tile 超出片上预算 | 调低 `pl.cross_core_slot(slot_num=N)`，或缩小跨越的 tile |
-| **`pl.split` 没带来加速** | 一侧占主导，对半分无从重叠 | 检查这份工作是否真的是 cube 接 vector |
+| **显式分片没有带来加速** | 一侧占主导，对半分无从重叠 | 检查这份工作是否真的是 cube 接 vector |
 | **生产者跑一阵后卡住** | 弹出的槽从未 `tfree` | 让每次 pop 都配一次 `tfree` |
-| **作用域上的 split 被拒** | 区域体混合了 split 与普通全宽 vector 算子 | 改用显式的 `pl.split_aiv` 区域形式 |
+| **Implicit AIV splitting is no longer supported** | 混合 kernel 的旧式函数级 AUTO split 已不受支持 | 使用 `pl.split_aiv`、显式 shard/gather，并编写每 lane 的形状和偏移 |
 
 ## 真实模型里的同一形状
 

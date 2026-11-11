@@ -783,3 +783,77 @@ def test_view_expression_carries_preserve_storage_permissions(kind, position, so
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("op", ["add", "min", "max", "exch", "cas"])
+@pytest.mark.parametrize("direction", ["In", "Out", "InOut"])
+def test_atomic_capture_permissions_and_ignored_return(op, direction):
+    compare = "pl.const(0.0, pl.FP32), " if op == "cas" else ""
+    target = "src" if direction == "In" else "dst"
+    before = program(
+        f"""
+with pl.simt_scope(dims=(32, 1, 1)):
+    pl.simt.atomic_{op}({target}, (0, 0), {compare}pl.const(1.0, pl.FP32))
+return dst
+""",
+        direction="InOut" if direction == "In" else direction,
+    )
+    if direction != "InOut":
+        with pytest.raises((Error, ValueError), match="enclosing In parameter|initialized storage"):
+            passes.outline_simt_scopes()(before)
+        return
+    after = passes.simplify()(passes.convert_to_ssa()(passes.outline_simt_scopes()(before)))
+    assert len(launches(after)) == 1
+    assert launches(after)[0].result_param_indices == [0]
+    assert f"simt.atomic_{op}" in str(after)
+
+
+@pytest.mark.parametrize("initialize", [False, True])
+def test_simt_atomic_out_needs_full_overwrite(initialize):
+    initial = (
+        "value = pl.tile.load(src, [0, 0], [1, 32])\ndst = pl.tile.store(value, [0, 0], dst)"
+        if initialize
+        else ""
+    )
+    before = program(
+        f"""
+{initial}
+with pl.simt_scope(dims=(32, 1, 1)):
+    pl.simt.atomic_exch(dst, (0, 0), pl.const(1.0, pl.FP32))
+return dst
+""",
+        direction="Out",
+    )
+    if initialize:
+        assert len(launches(passes.outline_simt_scopes()(before))) == 1
+    else:
+        with pytest.raises((Error, ValueError), match="initialized storage"):
+            passes.outline_simt_scopes()(before)
+
+
+@pytest.mark.parametrize("control", ["if tid < 16:", "for i in pl.range(2):", "while tid < 16:"])
+def test_barrier_rejects_nested_control_flow(control):
+    before = program(f"""
+with pl.simt_scope(dims=(32, 1, 1)):
+    tid = pl.simt.thread_idx(pl.simt.Axis.X)
+    {control}
+        pl.simt.syncthreads()
+return dst
+""")
+    with pytest.raises((Error, ValueError), match="syncthreads must be unconditional"):
+        passes.outline_simt_scopes()(before)
+
+
+def test_fences_allow_divergence_and_barrier_after_reconvergence():
+    before = program("""
+with pl.simt_scope(dims=(32, 1, 1)):
+    tid = pl.simt.thread_idx(pl.simt.Axis.X)
+    if tid < 16:
+        pl.simt.threadfence_block()
+        pl.simt.threadfence()
+    pl.simt.syncthreads()
+return dst
+""")
+    after = passes.simplify()(passes.convert_to_ssa()(passes.outline_simt_scopes()(before)))
+    assert "simt.syncthreads" in str(after)
+    assert "simt.threadfence_block" in str(after) and "simt.threadfence()" in str(after)

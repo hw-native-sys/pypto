@@ -430,3 +430,25 @@ def test_python_visitor_and_mutator_dispatch():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("exit_kind", ["return", "break", "continue"])
+def test_barrier_rejects_unstructured_exits(exit_kind):
+    exits = {
+        "return": ir.ReturnStmt([], SPAN),
+        "break": ir.BreakStmt(SPAN),
+        "continue": ir.ContinueStmt(SPAN),
+    }
+    # Canonical IR must reject bypassing a later barrier too, even when the
+    # public scope parser was not involved in constructing the helper.
+    branch = ir.IfStmt(ir.ConstBool(True, SPAN), exits[exit_kind], None, [], SPAN)
+    helper = ir.Function(
+        "barrier",
+        [],
+        [],
+        ir.SeqStmts([branch, ir.EvalStmt(simt.syncthreads(), SPAN)], SPAN),
+        SPAN,
+        ir.FunctionType.SIMT,
+    )
+    diagnostics = verify(ir.Program([helper], "Barrier", SPAN))
+    assert any("without early return" in diagnostic.message for diagnostic in diagnostics)

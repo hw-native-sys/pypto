@@ -129,6 +129,10 @@ class LocalNameCollector : public IRVisitor {
 [[nodiscard]] FunctionCtxPlan BuildFunctionCtxPlan(const FunctionPtr& func) {
   FunctionCtxPlan plan;
   if (!func) return plan;
+  // SIMT helpers borrow only the rank-local GM pointer. Their verified scalar
+  // subset cannot query communication contexts or perform distributed ops,
+  // and SimtLaunchStmt does not carry the runtime kernel's CommCtx ABI.
+  if (func->func_type_ == FunctionType::SIMT) return plan;
   plan.returned_param_indices = return_lineage::ExplicitReturnedParamIndices(func);
   std::unordered_set<std::string> used_names;
   for (const auto& param : func->params_) {
@@ -242,6 +246,20 @@ class DistParamAliasCollector : public IRVisitor {
   std::unordered_map<const Var*, std::vector<VarPtr>> tuple_to_ctx;
 
  protected:
+  void VisitStmt_(const SimtLaunchStmtPtr& op) override {
+    // A writable GM launch result is a new SSA name for the same allocation.
+    // Follow the explicit result-to-argument mapping so later context queries
+    // and dispatches retain the window's context, including successive launches.
+    for (size_t i = 0; i < op->results_.size(); ++i) {
+      const auto& result = op->results_[i];
+      if (!As<DistributedTensorType>(result->GetType())) continue;
+      if (auto ctx = LookupCtx(op->args_[op->result_param_indices_[i]])) {
+        alias_to_ctx[result.get()] = std::move(ctx);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op && op->var_ && As<DistributedTensorType>(op->var_->GetType())) {
       if (auto ctx = LookupCtx(op->value_)) {

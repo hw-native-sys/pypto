@@ -26,8 +26,8 @@ buffer 的 signal credit。同一个 buffer 内共享缓存行的多个 view 仍
 | `pld.tensor.remote_store` | push（写本地 tensor 级值 → peer）；1:1 下降为 `pld.tile.remote_store` | `Unknown`（副作用） | TSTORE |
 | `pld.tensor.get` | pull（读 peer → 本地 GM） | `Unknown`（副作用） | TGET |
 | `pld.tensor.put` | push（写本地 → peer） | `Unknown`（副作用） | TPUT |
-| `pld.tensor.get_async` | 异步拉取（peer → 本地 GM） | 与 `dst` 别名 | URMA；仅 IR/DSL |
-| `pld.tensor.put_async` | 异步推送（本地 → peer GM） | 与 `dst` 别名 | URMA；仅 IR/DSL |
+| `pld.tensor.get_async` | 异步拉取（peer → 本地 GM） | 与 `dst` 别名 | URMA（A5）；外部 helper + adapter |
+| `pld.tensor.put_async` | 异步推送（本地 → peer GM） | 与 `dst` 别名 | URMA（A5）；外部 helper + adapter |
 | `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.barrier` | 跨 rank 同步窗口数据可见性 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.broadcast` | 将 root rank 的数据复制到所有 rank | `DistributedTensorType`（同 src） | builtin collective |
@@ -45,10 +45,14 @@ SSA 值而存在。
 
 ## 异步传输校验（Async Transfer Validation）
 
-`pld.tensor.put_async` 和 `pld.tensor.get_async` 当前仅提供 IR/DSL 契约；
-设备下降（device lowering）和任务完成集成尚待实现。
+`pld.tensor.put_async` 和 `pld.tensor.get_async` 在 A5 后端下降为按 dtype 后缀命名的
+外部 helper 调用（`pypto_urma_{put,get}_async_<dtype>`）。helper 会同时校验两端张量的
+范围与通信窗口，通过 IR `engines` 字段申请 URMA workspace，并复用现有运行时入口提交；
+它从不轮询。任务完成集成（由所属任务释放消费者）尚待实现。
 两端都必须是窗口绑定、稠密行主序（dense row-major）的 `DistributedTensor`。
 结果与 `dst` 共用存储；算子返回不代表传输完成。
+
+adapter 符号与 C++ 元素类型复用公共 dtype 转换。
 
 - Python builder 要求 `engine=pld.CommEngine.URMA`（也是默认值）。
   整数、浮点数、布尔值、字符串及其他枚举在整数转换前即被拒绝。
@@ -111,10 +115,10 @@ SSA 值而存在。
 `pld.system.wait` 刻意不加标记，原因并非 TWAIT 幂等：它会*阻塞*，出现在 cube 通路
 上是有实际作用的 —— 把它钉在向量通路上，会让 matmul 越过它本应等待的对端数据。
 
-该标记与亲和性正交（它约束的是复制而非放置位置）。它唯一的消费者是
-`LowerAutoVectorSplit` 的 `pl.split_aiv` 区域放置标记：该 pass 把区域内的
-no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md` 与
-`docs/zh/dev/passes/25-lower_auto_vector_split.md`。
+该标记与亲和性正交（它约束的是复制而非放置位置）。`ExpandMixedKernel` 在消费
+`pl.split_aiv` 区域时，将区域内核无关的 no-duplicate 调用固定在 AIV 通路上。
+软件流水分析也将这些调用视为不可复制；参见 `docs/zh/dev/ir/05-operators.md` 与
+`docs/zh/dev/passes/26-expand_mixed_kernel.md`。
 
 **写在所有区域之外的通信算子仍然会被复制到两条通路上，且没有任何诊断会提示这一点。**
 把通信阶段放进 `pl.split_aiv` 区域是作者的职责；参见

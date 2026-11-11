@@ -9,7 +9,11 @@
 # pylint: disable=unused-argument
 """Code generation module for converting IR to PTO assembly (PTOCodegen)."""
 
+from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
+
+def data_type_to_mlir(dtype: DataType) -> str:
+    """Return the PTO MLIR spelling of an element data type."""
 
 class VFHelper:
     """No-Bridge VF/SIMT helper and adapter with ordered storage effects."""
@@ -208,6 +212,7 @@ def collect_tensor_shape_dyn_vars(func: Function) -> list[Var]:
     """Return ordered trailing shape arguments, excluding explicit scalar parameters."""
 
 __all__ = [
+    "data_type_to_mlir",
     "PTOCodegen",
     "BuiltinNextLevelSpec",
     "DistributedCodegen",

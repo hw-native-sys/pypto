@@ -402,3 +402,20 @@ def simplify() -> Pass:
 - Constant propagation in loops, branches, and SPMD scopes, including typed call arguments and pinned MemRef slot indices.
 - Dead branch guards folded via loop-affine scalar `ConstIntBound`s.
 - Conservative scalar DCE — dropped only when every use is foldable.
+
+## Observable nested calls
+
+Expressions containing `Call` or `Submit` are not algebraically rewritten:
+`atomic_add(...) - atomic_add(...)` must evaluate twice, and multiplying an
+atomic result by zero must retain its update. Pure child expressions can still
+fold. Such expressions also cannot prove branch reachability, loop trip counts,
+or scalar bounds, and their predicates are not reused as branch constraints.
+For a direct call assigned to a scalar, the analyzer still records bounds
+guaranteed by the builtin's result contract, such as `get_subblock_idx() >= 0`.
+This only constrains the already evaluated result; it does not rewrite the call.
+The pass caches call presence over immutable expressions in linear time, with
+Var/IterArg uses treated as already evaluated values.
+
+Calls stay at their original control-flow position until `FlattenCallExpr`
+materializes them. SIMT while conditions retain nested calls so they execute
+on every condition evaluation, including the final false evaluation.

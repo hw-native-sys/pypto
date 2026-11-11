@@ -93,6 +93,43 @@ class ScalarSubsetChecker : public IRVisitor {
 };
 }  // namespace
 
+void PTOCodegen::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
+  if (!inside_simt_function_) {
+    ir::IRVisitor::VisitExpr_(op);
+    return;
+  }
+  // FlattenCallExpr leaves SIMT while conditions in place. Evaluate the tuple
+  // eagerly inside scf.while's before region, including the final false check.
+  // Retain emitted SSA values so selecting an earlier slot never repeats its
+  // effects after later slots. Each occurrence is visited once, left to right.
+  struct EvaluatedValue {
+    std::string scalar;
+    std::vector<EvaluatedValue> elements;
+  };
+  auto evaluate = [this](auto&& self, const ir::ExprPtr& expr) -> EvaluatedValue {
+    if (auto tuple = ir::As<ir::MakeTuple>(expr)) {
+      EvaluatedValue value;
+      value.elements.reserve(tuple->elements_.size());
+      for (const auto& element : tuple->elements_) {
+        value.elements.push_back(self(self, element));
+      }
+      return value;
+    }
+    if (auto item = ir::As<ir::TupleGetItemExpr>(expr)) {
+      auto tuple = self(self, item->tuple_);
+      INTERNAL_CHECK_SPAN(item->index_ >= 0 && static_cast<size_t>(item->index_) < tuple.elements.size(),
+                          item->span_)
+          << "SIMT tuple projection requires a resolved tuple with a valid index";
+      return std::move(tuple.elements[static_cast<size_t>(item->index_)]);
+    }
+    INTERNAL_CHECK_SPAN(!ir::IsA<ir::TupleType>(expr->GetType()), expr->span_)
+        << "SIMT tuple operands must be resolved before scalar codegen";
+    VisitExpr(expr);
+    return {fs_.current_expr_value, {}};
+  };
+  fs_.current_expr_value = evaluate(evaluate, op).scalar;
+}
+
 std::string PTOCodegen::SimtParameterType(const ir::TypePtr& type) {
   if (auto scalar = ir::As<ir::ScalarType>(type)) {
     CheckScalar(scalar->dtype_, ir::Span::unknown());
@@ -283,6 +320,8 @@ std::string PTOCodegen::SimtElementOffset(const ir::ExprPtr& storage, const ir::
   INTERNAL_CHECK_SPAN(tile || tensor, storage->span_)
       << "Internal error: SIMT addressing requires borrowed storage";
   const auto& shape = tile ? tile->shape_ : tensor->shape_;
+  INTERNAL_CHECK_SPAN(indices && indices->elements_.size() == shape.size(), storage->span_)
+      << "Internal error: SIMT indices must match the storage rank after flattening";
   std::vector<ir::ExprPtr> strides;
   ir::ExprPtr origin;
   bool column_major = false;
@@ -324,9 +363,11 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
   if (!entry || entry->GetOpCategory() != "SimtOp") return false;
   INTERNAL_CHECK_SPAN(inside_simt_function_, call->span_) << "Internal error: SIMT op outside helper";
   const bool store = ir::IsOp(call, "simt.store");
-  if (store || ir::IsOp(call, "simt.load")) {
-    INTERNAL_CHECK_SPAN(call->args_.size() == (store ? 3 : 2), call->span_)
-        << "Internal error: SIMT memory arity";
+  const bool atomic =
+      entry->HasDeclaredArgEffect(0) && entry->GetArgEffect(0, call->kwargs_) == ir::ArgEffect::ReadWrite;
+  if (store || atomic || ir::IsOp(call, "simt.load")) {
+    const size_t arity = ir::IsOp(call, "simt.atomic_cas") ? 4 : (store || atomic ? 3 : 2);
+    INTERNAL_CHECK_SPAN(call->args_.size() == arity, call->span_) << "Internal error: SIMT memory arity";
     const auto& storage = call->args_[0];
     const auto indices = ir::As<ir::MakeTuple>(call->args_[1]);
     INTERNAL_CHECK_SPAN(indices, call->span_) << "Internal error: SIMT indices must be a tuple";
@@ -342,7 +383,22 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
         policy += " " + std::string(key) + "(" + value + ")";
       }
     }
-    if (store) {
+    if (atomic) {
+      // addptr uses element offsets, including the affine view's physical stride.
+      const auto address = NewTemp();
+      const auto ptr_body = "<" + element + (gm ? ", gm>" : ", ub>");
+      Emit(address + " = pto.addptr " + pointer + ", " + offset + " : " + ptr_body + " -> " + ptr_body);
+      auto operands = address;
+      for (size_t i = 2; i < call->args_.size(); ++i) operands += ", " + GetExprAsCode(call->args_[i]);
+      if ((ir::IsOp(call, "simt.atomic_min") || ir::IsOp(call, "simt.atomic_max")) &&
+          shaped->dtype_ == DataType::INT32) {
+        policy += " signed";
+      }
+      const auto result = NewTemp();
+      Emit(result + " = pto." + call->op_->name_.substr(5) + " " + operands + policy + " : " + type + ", " +
+           element + " -> " + element);
+      fs_.current_expr_value = result;
+    } else if (store) {
       const auto value = GetExprAsCode(call->args_[2]);
       Emit(std::string(gm ? "pto.stg " : "pto.store ") + value + ", " + pointer + "[" + offset + "]" +
            policy + " : " + type + ", " + element);
@@ -353,6 +409,12 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
            type + " -> " + element);
       fs_.current_expr_value = result;
     }
+    return true;
+  }
+  if (ir::IsOp(call, "simt.syncthreads") || ir::IsOp(call, "simt.threadfence") ||
+      ir::IsOp(call, "simt.threadfence_block")) {
+    Emit("pto." + call->op_->name_.substr(5));
+    fs_.current_expr_value.clear();
     return true;
   }
   // Keep the collective at its original control-flow location: its implicit

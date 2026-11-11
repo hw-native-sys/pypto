@@ -110,9 +110,9 @@ AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放�
 通路上是有实际作用的。把它钉在向量通路上，会让 matmul 越过它本应等待的对端数据。
 请把该标记读作「不得在第二个核上运行」，而不是「不幂等」。
 
-读取该维度的查询是 `IsNoDuplicate()`。它唯一的消费者是 `LowerAutoVectorSplit`
-（pass 23）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
-钉在 AIV 通路上。没有任何 verifier 在这个维度上做拒绝。
+读取该维度的查询是 `IsNoDuplicate()`。消费显式区域时，`ExpandMixedKernel`
+将 `pl.split_aiv` 区域内核无关的 no-duplicate 调用固定在 AIV 通路上。
+软件流水分析也将这些调用视为不可复制。没有 verifier 仅因该维度而拒绝调用。
 
 被 `set_core_affinity(...)` 固定在单条通路上的算子本来就不会被复制，因此无需该标记。
 这个标记正是为核无关（core-agnostic）的算子准备的 —— 对它们而言，没有任何 affinity

@@ -52,7 +52,9 @@ TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
   CHECK(args.size() == expected_args) << "simt." << (store ? "store" : "load") << " requires exactly "
                                       << expected_args << " arguments, got " << args.size();
   const auto tile = As<TileType>(args[0]->GetType());
-  const auto tensor = As<TensorType>(args[0]->GetType());
+  // A distributed window is this rank's local GM slice, with the same
+  // addressing and permission contract as an ordinary Tensor.
+  const auto tensor = AsTensorTypeLike(args[0]->GetType());
   CHECK(tile || tensor) << "SIMT memory access requires Tile (UB) or Tensor (GM) storage";
   if (tile) {
     CHECK(!tile->memory_space_ || tile->memory_space_ == MemorySpace::Vec)
@@ -98,6 +100,27 @@ TypePtr MemoryType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool 
     return GetVoidType();
   }
   return std::make_shared<ScalarType>(dtype);
+}
+
+// Atomics reuse logical scalar addressing, but are always RMW, including Exch:
+// the returned old value reads storage even when the caller discards it.
+TypePtr AtomicType(const std::vector<ExprPtr>& args, const Kwargs& kwargs, bool cas) {
+  const size_t arity = cas ? 4 : 3;
+  CHECK(args.size() == arity) << "SIMT atomic requires exactly " << arity << " arguments";
+  MemoryType({args[0], args[1], args.back()}, kwargs, true);
+  const auto value = As<ScalarType>(args.back()->GetType());
+  CHECK(value->dtype_ == DataType::INT32 || value->dtype_ == DataType::FP32)
+      << "SIMT atomic requires INT32 or FP32 storage and values";
+  if (cas) {
+    const auto compare = As<ScalarType>(args[2]->GetType());
+    CHECK(compare && compare->dtype_ == value->dtype_) << "SIMT CAS compare dtype must match storage";
+  }
+  return args.back()->GetType();
+}
+
+TypePtr SynchronizationType(const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+  CHECK(args.empty() && kwargs.empty()) << "SIMT synchronization takes no arguments or attributes";
+  return GetVoidType();
 }
 
 // Lane collectives depend on the active execution mask as well as their
@@ -312,4 +335,97 @@ REGISTER_OP("simt.redux_max")
     .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
       return CollectiveType(args, kwargs, "simt.redux_max", CollectiveKind::Redux);
     });
+REGISTER_OP("simt.atomic_add")
+    .set_description("Atomic add on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false);
+    });
+REGISTER_OP("simt.atomic_min")
+    .set_description("Atomic min on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false);
+    });
+REGISTER_OP("simt.atomic_max")
+    .set_description("Atomic max on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false);
+    });
+REGISTER_OP("simt.atomic_exch")
+    .set_description("Atomic exch on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, false);
+    });
+REGISTER_OP("simt.atomic_cas")
+    .set_description("Atomic cas on one initialized UB or GM element; return its old value")
+    .set_op_category("SimtOp")
+    .add_argument("storage", "Initialized borrowed UB Tile or GM Tensor")
+    .add_argument("indices", "Logical element coordinates")
+    .add_argument("compare", "Expected old value")
+    .add_argument("value", "Scalar update value")
+    .set_attr<std::string>("l2cache")
+    .set_arg_effect(0, ArgEffect::ReadWrite)
+    .set_write_channel(WriteChannel::Simt)
+    // Partial destination access intentionally retains Unknown execution-memory metadata.
+    .f_deduce_type([](const std::vector<ExprPtr>& args, const Kwargs& kwargs) {
+      return AtomicType(args, kwargs, true);
+    });
+REGISTER_OP("simt.syncthreads")
+    .set_description("Explicit SIMT syncthreads synchronization effect")
+    .set_op_category("SimtOp")
+    .set_output_arity(0)
+    .no_argument()
+    // No explicit storage arguments; this does not imply purity. Calls remain
+    // ordered effects, and Unknown execution-memory metadata is conservative.
+    .no_arg_writes()
+    .f_deduce_type(SynchronizationType);
+REGISTER_OP("simt.threadfence")
+    .set_description("Explicit SIMT threadfence synchronization effect")
+    .set_op_category("SimtOp")
+    .set_output_arity(0)
+    .no_argument()
+    // No explicit storage arguments; this does not imply purity. Calls remain
+    // ordered effects, and Unknown execution-memory metadata is conservative.
+    .no_arg_writes()
+    .f_deduce_type(SynchronizationType);
+REGISTER_OP("simt.threadfence_block")
+    .set_description("Explicit SIMT threadfence_block synchronization effect")
+    .set_op_category("SimtOp")
+    .set_output_arity(0)
+    .no_argument()
+    // No explicit storage arguments; this does not imply purity. Calls remain
+    // ordered effects, and Unknown execution-memory metadata is conservative.
+    .no_arg_writes()
+    .f_deduce_type(SynchronizationType);
 }  // namespace pypto::ir

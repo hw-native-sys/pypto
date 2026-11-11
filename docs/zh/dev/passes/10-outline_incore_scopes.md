@@ -440,17 +440,16 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 
 如果 IR 不是 SSA 形式，**请先运行 ConvertToSSA**。
 
-**互斥的 AIV 拆分机制**：函数级 AUTO split（`optimizations=[pl.split(mode)]`，
-承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
-作用域共存（outliner 会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
-`pl.split` 静默冲突）。幸存机制如何下降见
-[`LowerAutoVectorSplit`](25-lower_auto_vector_split.md)。
+**混合 kernel 使用显式 AIV 分片**：函数级
+`optimizations=[pl.split(UP_DOWN/LEFT_RIGHT)]` 会被
+[`LowerAutoVectorSplit`](25-lower_auto_vector_split.md) 拒绝。应编写
+`pl.split_aiv` 区域、显式 shard/gather 以及每 lane 的形状与偏移。
+独立 AIV/AIC 函数的分片仍受支持。
 
-**任何** `pl.split(...)` 都会被拒绝，包括 `SplitMode.NONE`（RFC #1820）。NONE 本身不
-携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动
-拆分"。此前之所以对它豁免，只是因为跨核槽位数除了 `pl.split(..., slot_num=N)` 之外没有
-别的承载方式；现在它有了自己的条目——`optimizations=[pl.cross_core_slot(slot_num=N)]`，
-与拆分正交，可自由地与区域共存。
+含显式区域的作用域还会拒绝**任何** `pl.split(...)` 注解，包括 `SplitMode.NONE`：
+outliner 从区域派生函数级代表元数据，第二份作用域级注解会与之冲突。
+使用 `optimizations=[pl.cross_core_slot(slot_num=N)]` 设置 pipe 槽位数；
+它独立于分片，可与显式区域共存。
 
 **拒绝发生在哪一层**：`InCoreScopeStmt::split_` 对"不切分"只有一种编码
 （`SplitMode::None`），因此字面写出的 `pl.split(pl.SplitMode.NONE)` 对本 Pass 不可见
@@ -462,8 +461,8 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 
 | 标注 | 含义 |
 | ---- | ---- |
-| `optimizations=[pl.split(MODE)]` | AUTO 拆分——由编译器划分向量计算 |
-| `for aiv_id in pl.split_aiv(2, mode=...)` | 手动拆分——由作者按区域划分 |
+| `optimizations=[pl.split(MODE)]` | 旧式函数级分片；混合 kernel 的 UP_DOWN 和 LEFT_RIGHT 模式会被拒绝 |
+| `for aiv_id in pl.split_aiv(2, mode=...)` | 显式区域——作者编写 shard/gather 和每 lane 的计算 |
 | `optimizations=[pl.cross_core_slot(slot_num=N)]` | 都不是——仅决定跨核 pipe 的大小 |
 
 **函数级 `split` 属性对"不切分"只有一种编码：不存在该键。** 当被外提的函数体中含有

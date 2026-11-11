@@ -76,7 +76,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -222,7 +222,7 @@ class TestSpmdScopeTaskIdCodegen:
         )
 
     def test_mixed_spmd_in_equals_out_aliases_shared_buffer(self):
-        """A MIXED (split=) ``pl.spmd`` dispatch passing one buffer as both an
+        """A MIXED (cube+vector) ``pl.spmd`` dispatch passing one buffer as both an
         input AND the output must codegen — and both lanes of the aliased buffer
         must resolve to the SAME external tensor.
 
@@ -240,7 +240,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -301,7 +301,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -350,7 +350,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -411,7 +411,6 @@ class TestSpmdScopeTaskIdCodegen:
                 bias: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                pl.func_attr({"split": pl.SplitMode.UP_DOWN})
                 left = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
                 right = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
                 product = pl.matmul(
@@ -501,7 +500,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -675,7 +674,7 @@ class TestSpmdScopeTaskIdCodegen:
         assert "ext_signal_ctx" not in code, code
 
     def test_mixed_spmd_dist_tensor_threads_comm_ctx_through_group_bridge(self):
-        """A MIXED (``split=``) ``pl.spmd`` dispatch carrying a ``DistributedTensor``
+        """A MIXED (cube+vector) ``pl.spmd`` dispatch carrying a ``DistributedTensor``
         threads the CommContext scalar through the Spmd-wrapped-Group bridge too
         (issue #1913).
 
@@ -689,7 +688,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         @pl.program
         class P:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],

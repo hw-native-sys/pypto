@@ -11,8 +11,9 @@
 
 The test rewrites the compiled V2CUD AIC block from:
 
-1. ``tpop0, alloc0, use0, tfree0``
-2. ``tpop1, alloc1, use1, tfree1``
+1. ``tpop0, tpop1``
+2. ``alloc0, use0, tfree0``
+3. ``alloc1, use1, tfree1``
 
 into:
 
@@ -46,7 +47,7 @@ from pypto.runtime.device_runner import (
     validate_golden,
 )
 
-from tests.st.runtime.cross_core.test_cross_core import V2CUDProgram
+from tests.st.runtime.cross_core.test_cross_core import v2c_ud
 
 _DEFAULT_PLATFORM = "a2a3"
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -107,7 +108,7 @@ def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
 
     try:
         func_start = next(
-            i for i, line in enumerate(lines) if line.startswith("  func.func @main_incore_0_aic(")
+            i for i, line in enumerate(lines) if line.startswith("  func.func @v2c_ud_incore_0_aic(")
         )
     except StopIteration as exc:
         raise AssertionError(f"AIC function not found in {pto_path}") from exc
@@ -131,9 +132,9 @@ def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
     original_block = lines[tpop_indices[0] : tfree_indices[1] + 1]
     assert len(original_block) == 8, (
         "Expected the V2CUD AIC cross-core block to contain exactly 8 lines "
-        f"(tpop/alloc/tmov/tfree x2), got {len(original_block)}"
+        f"(two pops followed by alloc/tmov/tfree x2), got {len(original_block)}"
     )
-    pop0, alloc0, use0, free0, pop1, alloc1, use1, free1 = original_block
+    pop0, pop1, alloc0, use0, free0, alloc1, use1, free1 = original_block
     assert use0.strip().startswith("pto.tmov ins("), use0
     assert use1.strip().startswith("pto.tmov ins("), use1
     assert _op_text(free0) == "pto.tfree_from_aiv {split = 1}", free0
@@ -180,8 +181,8 @@ def _replace_ptoas_function_body(wrapper_text: str, new_ptoas_text: str, func_na
 
 
 def _rebuild_consecutive_tpop_tfree_artifact(work_dir: Path) -> None:
-    pto_path = work_dir / "ptoas" / "main_incore_0.pto"
-    cpp_path = work_dir / "ptoas" / "main_incore_0.cpp"
+    pto_path = work_dir / "ptoas" / "v2c_ud_incore_0.pto"
+    cpp_path = work_dir / "ptoas" / "v2c_ud_incore_0.cpp"
 
     _rewrite_consecutive_tpop_tfree_pto(pto_path)
     _run_ptoas(
@@ -195,7 +196,7 @@ def _rebuild_consecutive_tpop_tfree_artifact(work_dir: Path) -> None:
     for kernel in kernel_config.KERNELS:
         wrapper_path = Path(kernel["source"])
         wrapper_text = wrapper_path.read_text(encoding="utf-8")
-        rewritten_wrapper = _replace_ptoas_function_body(wrapper_text, new_body, "main_incore_0_aic")
+        rewritten_wrapper = _replace_ptoas_function_body(wrapper_text, new_body, "v2c_ud_incore_0_aic")
         wrapper_path.write_text(
             rewritten_wrapper,
             encoding="utf-8",
@@ -228,13 +229,15 @@ class TestCrossCoreGroupedTpopTfree:
 
         try:
             ir.compile(
-                V2CUDProgram,
+                v2c_ud.specialize(),
                 output_dir=str(work_dir),
                 strategy=test_config.strategy,
                 backend_type=backend_type,
                 dump_passes=test_config.dump_passes,
             )
             _rebuild_consecutive_tpop_tfree_artifact(work_dir)
+            if test_config.codegen_only:
+                return
 
             kernel_config = _load_kernel_config(work_dir)
             runtime_cfg = getattr(kernel_config, "RUNTIME_CONFIG", {})

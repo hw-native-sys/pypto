@@ -393,11 +393,37 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
     if (!attrs.empty()) attrs += "}";
   }
 
+  // A grouped reduction keeps the same VMI opcode as a full one and selects the
+  // grouped form with `group`, which PTOAS reads as the group COUNT, not the
+  // group width. `reassoc` can accompany it on reduce_sum, so build both here
+  // instead of letting the generic attribute loop below overwrite one.
+  if (ir::IsOp(call, "reg.reduce_sum") || ir::IsOp(call, "reg.reduce_max") ||
+      ir::IsOp(call, "reg.reduce_min")) {
+    std::vector<std::string> attributes;
+    const auto group_size = call->GetKwarg<int>("group_size", 0);
+    if (group_size > 0) {
+      auto source = ir::As<ir::RegType>(args[0]->GetType());
+      INTERNAL_CHECK_SPAN(source, call->span_) << "Internal error: reduction source must be a register";
+      attributes.push_back("group = " + std::to_string(source->shape_ / group_size));
+    }
+    if (call->GetKwarg<bool>("reassoc", false)) attributes.emplace_back("reassoc");
+    for (const auto& attr : attributes) {
+      attrs += attrs.empty() ? " {" : ", ";
+      attrs += attr;
+    }
+    if (!attrs.empty()) attrs += "}";
+  }
+  if (ir::IsOp(call, "reg.group_broadcast")) {
+    // num_groups is the source lane count; the schema derives it there too.
+    auto source = ir::As<ir::RegType>(args[0]->GetType());
+    INTERNAL_CHECK_SPAN(source, call->span_) << "Internal error: group_broadcast source must be a register";
+    attrs = " {num_groups = " + std::to_string(source->shape_) + "}";
+  }
+
   // Only schemas with a pmode attribute may emit it. Carry operations have
   // a mandatory governing mask but no pmode, unlike ordinary arithmetic.
-  for (const auto& [key, value] : call->kwargs_) {
-    if (key == "pmode") attrs = " {pmode = \"zero\"}";
-    if (key == "reassoc" && std::any_cast<bool>(value)) attrs = " {reassoc}";
+  for (const auto& kwarg : call->kwargs_) {
+    if (kwarg.first == "pmode") attrs = " {pmode = \"zero\"}";
   }
   if (auto tuple = ir::As<ir::TupleType>(validated->GetType())) {
     std::vector<std::string> names;

@@ -105,14 +105,14 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | 形式 | Scope 类型 | 说明 |
 | ---- | ---------- | ---- |
 | `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | CORE_GROUP 级固定边界 outline |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | InCore + 跨核 split 提示 |
+| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | 旧式 split 元数据；混合 kernel 的非 NONE 分片会被拒绝 |
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.cross_core_slot(slot_num=N)])` | `InCore` | InCore + 跨核 pipe 槽位数 |
 | `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
 | `pl.graph("name", deps=[...]) as done` | `Graph` | 可录制的编排区域；deps/capture 是可选的外层任务元数据，必填名字标识提取函数 —— 见 [OutlineGraphScopes](../passes/09-outline_graph_scopes.md) |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd`（for-form 内嵌 `InCore`） | SPMD 多 block 派发——见 [pl.spmd](#plspmd-多-block-派发) |
-| `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
-| `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
+| `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | 旧式 split 元数据作用于内层 InCore；混合 kernel 的非 NONE 分片会被拒绝 |
+| `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与显式 `pl.split_aiv` 区域组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
 | `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/54-materialize_runtime_scopes.md) |
 
@@ -141,19 +141,21 @@ IR 结构相等和哈希契约，因此不会被规范化删除。与提取作�
 已有的内容，不执行初始化。参见
 [LegalizeSpmdLaunches](../passes/45-legalize_spmd_launches.md)。
 
-可选 `optimizations=[...]`。各条目彼此正交，可在同一列表中组合
-（例如 `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`）：
+可选 `optimizations=[...]`。混合 kernel 使用 `pl.split_aiv` 区域、显式
+shard/gather 和用户编写的每 lane 计算；通过
+`optimizations=[pl.cross_core_slot(slot_num=4)]` 独立设置 pipe 容量：
 
 | 条目 | 适用形式 | 作用 |
 | ---- | -------- | ---- |
-| `pl.split(MODE)` | 两种均适用 | 给内层 InCore 设置 `split_` 字段（跨核数据搬运提示，由 `ExpandMixedKernel` / `MemoryReuse` 消费）。with-form 会在原 call 外多包一层 `InCoreScopeStmt` 来承载该字段。 |
+| `pl.split(MODE)` | 两种均适用 | 设置旧式内层 InCore split 元数据。混合 kernel 的 UP_DOWN/LEFT_RIGHT 会被拒绝；独立 AIV/AIC 分片仍受支持。即使 MODE=NONE，也不能与显式分片区域共存。 |
 | `pl.cross_core_slot(slot_num=N)` | 两种均适用 | 给内层 InCore 设置 `slot_num` 属性——自动跨核 pipe 的槽位数（环深），由 `ExpandMixedKernel` 消费。它只决定数据通道大小，**不**划分计算，因此可与 `pl.split_aiv` 区域共存（而 `pl.split(...)` 不能）。省略时沿用默认深度：每个活跃方向 2 个槽位。 |
 
 `pl.cross_core_slot(slot_num=N, local_slot_num=L)` 还可设置 A2/A3 本地消费者深度
 （`1 <= L <= N`）。省略 `L` 时，reserve 仍按环深度分配。A5 不支持显式本地深度。
 详见 [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md)。
 
-> `pl.split(MODE, slot_num=N)` 是该槽位数的已废弃别名，会发出警告——参见
+> `pl.split(MODE, slot_num=N)` 已废弃，且不会恢复混合 kernel 的隐式分片。
+> 使用 `pl.cross_core_slot(slot_num=N)`——参见
 > [ExpandMixedKernel](../passes/26-expand_mixed_kernel.md#覆盖槽位数slot_num)。
 
 示例参见 [作用域与放置](../../user/language/04-scopes.md)。
