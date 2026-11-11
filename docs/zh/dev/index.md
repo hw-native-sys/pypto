@@ -36,7 +36,7 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 
 ## 评论触发完整 CI
 
-创建或更新 PR 自动运行 `changes`、`toolchain`、`pre-commit` 和
+PR 专用 `CI` 工作流（`ci.yml`）在创建或更新时自动运行 `changes`、`toolchain`、`pre-commit` 和
 `clang-tidy`，随后运行轻量 `lint-gate`；独立的 `Docs / build` 检查也会运行。纯文档 PR 保留自动跳过
 `clang-tidy` 的规则。PR 不再自动启动设备测试或 wheel 构建。
 
@@ -58,7 +58,7 @@ PR 仍可以修改自己的 workflow、删除任务条件，或新增使用可�
 ```
 
 `CI Command` 工作流要求 PR 处于打开状态且目标为本仓库的 `main` 分支，
-从受信任的 `main` 调度 `CI`。
+从受信任的 `main` 调度 `CI Full`。
 它固定 PR head、base 和测试合并提交（test merge）的 SHA，并在测试开始前
 验证其 SHA 与 GitHub 当前测试合并提交一致，并验证父节点。支持 fork PR。
 GitHub 尚未完成合并计算，或返回的合并父节点与当前 PR 版本不一致时，命令在
@@ -91,9 +91,21 @@ pending 请求。同一 head 和 base
 
 后续运行跳过两个 lint 任务，轻量门禁确认复用有效后再启动测试；版本校验和工具链
 准备仍会执行。Full 包括复用的 lint 结果、wheel 预热、单元、示例、代码生成、系统、分布式、pypto-lib
-以及 A5/模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
+以及 A5（含分布式）/模拟器测试。纯文档 PR 也执行核心测试。`docs-examples` 仅在文档变更
 时适用；`serving-guard` 仅在 `PTOAS_VERSION` 变更时适用。Wheel 预热失败不单独
 阻止合入，因为测试任务可以自行构建；所有适用测试都必须成功。
+
+重测试仅定义在 `CI Full`（`ci-full.yml`）中，因此自动 PR 运行不会再创建整排重测试的
+skipped 检查。公共准备和 lint 任务以 `ci-full.yml` 为源，运行
+`python tests/lint/generate_ci_lint.py --write` 生成 PR 工作流；pre-commit 检查生成结果是否同步，
+保证 PR 和 main 使用相同的 lint 实现。
+
+发布器同时接受拆分前 `ci.yml` 和拆分后 `ci-full.yml` 创建的 full 运行，并校验各自的
+工作流 ID。旧 run ID 仍可补写状态，原生 rerun 继续使用原工作流。跨工作流的新旧请求
+按原始创建时间比较，不使用互相独立的运行序号。自动 lint 运行不能发布 full 成功状态。
+main push 和不填写 PR 输入的手动运行使用 `CI Full`；Daily CI 和 Codex Review 的策略不变。
+已生成的历史 skipped 检查不会被删除，新运行使用拆分后的清晰列表。`ci.yml` 的身份和 lint
+任务名称保持不变，使部署这个拆分的 PR 也能通过旧版 main 控制器复用 lint。
 
 ### 结果与重跑
 
@@ -132,7 +144,7 @@ ID 填入 `run_id`。该操作仅同步元数据，不调度测试或占用设�
 运行改为成功。更新后的工作流合入 main 后，该入口才可使用。逐项检查缺失时，
 同样可在 **Actions → CI Full Progress → Run workflow** 中填写该 `run_id` 进行恢复。
 
-测试任务不持有写入状态或修改 Actions 的 token。整个 `CI` 工作流声明
+测试任务不持有写入状态或修改 Actions 的 token。`CI` 和 `CI Full` 两个工作流均声明
 `cache-mode: read`，由 GitHub 缓存服务阻止写入，包括 PR 代码直接调用缓存 API。
 托管 runner 通过同一次运行的附件共享 wheel，每次构建尝试使用独立名称。
 附件过期或缺失时回退到本地构建。这也使 CI 的主分支运行只读 GitHub 缓存；

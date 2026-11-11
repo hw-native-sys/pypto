@@ -38,10 +38,15 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 
 ## Comment-triggered full CI
 
-PR creation and updates run `changes`, `toolchain`, `pre-commit`
+The PR-only `CI` workflow (`ci.yml`) runs `changes`, `toolchain`, `pre-commit`
 and `clang-tidy`, followed by a lightweight `lint-gate`. The separate `Docs / build` check also runs. Documentation-only
 PRs retain the automatic `clang-tidy` exemption. No device tests or wheel builds
-start automatically for PRs.
+start automatically for PRs. Heavy jobs are defined only in `CI Full`
+(`ci-full.yml`), so automatic PR runs do not create skipped heavy-test checks.
+The shared preparation and lint job definitions live in `ci-full.yml`;
+`python tests/lint/generate_ci_lint.py --write` regenerates the PR workflow.
+Pre-commit verifies that the generated file is current, preserving identical
+lint behavior for PRs and main without maintaining two implementations.
 
 Automatic PR runs, including forks, always select lint and load their controller
 from the trusted PR base SHA. Editing `ci_control.py` in the PR therefore does
@@ -64,7 +69,7 @@ repository write access, can post exactly this comment in the PR conversation:
 ```
 
 The `CI Command` workflow requires an open PR targeting this repository's `main`
-branch and dispatches `CI` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
+branch and dispatches `CI Full` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 When GitHub is still computing the merge or reports merge parents that do not
 match the current PR snapshot, the command polls every five seconds within a
@@ -110,7 +115,7 @@ waiting. Pushes or base changes require matching lint again.
 The downstream run skips both lint jobs. A lightweight gate verifies their
 reuse before tests start; revision checks and toolchain preparation still run.
 Full includes the reused lint result, wheel warm-up, unit, example, codegen, system, distributed,
-pypto-lib and A5/simulator tests. Core tests execute even for documentation-only
+pypto-lib and A5 tests (including the distributed lane), plus simulator tests. Core tests execute even for documentation-only
 PRs. `docs-examples` applies when documentation changes; `serving-guard` applies
 when `PTOAS_VERSION` changes. A failed wheel warm-up is advisory because test
 jobs build locally if necessary; every applicable test must succeed.
@@ -164,8 +169,8 @@ run green. This recovery entry becomes available after the updated workflow is
 merged into main. Missing per-job checks can similarly be reconciled with
 **Actions → CI Full Progress → Run workflow** and the same `run_id`.
 
-Test jobs do not hold status-write or Actions-write tokens. The entire `CI`
-workflow declares `cache-mode: read`: GitHub's cache service prevents cache
+Test jobs do not hold status-write or Actions-write tokens. Both `CI` and `CI Full`
+workflows declare `cache-mode: read`: GitHub's cache service prevents cache
 writes, including direct API calls from PR code. Hosted wheel sharing uses
 artifacts from the same run, with separate names for each producer attempt.
 Expired/missing artifacts fall back to building locally. This also makes CI's
@@ -219,9 +224,14 @@ create a recent request with a small history window.
 The external `pr-rerun` service remains unchanged: it can still rerun eligible
 ordinary PR CI, but does not discover/authorize these dispatched full runs.
 
-`main` pushes, manual CI runs without PR inputs, Daily CI and Codex Review keep
-their existing policies. Manual PR inputs are intended for the comment handler;
-leave all four empty to run CI against main.
+`main` pushes and manual full runs without PR inputs execute `CI Full`.
+Daily CI and Codex Review keep their existing policies. Manual PR inputs are
+intended for the comment handler; leave all four empty to run CI against main.
+Publishers accept full runs created in either `ci-full.yml` or the former
+combined `ci.yml`, verifying each path against its workflow ID. Older run IDs
+remain recoverable, and native reruns keep their original workflow. Newer-run
+ordering across the split uses original creation times, not the independent
+workflow run counters. Automatic lint runs can never publish full success.
 
 ### Operator rollout
 
@@ -237,7 +247,10 @@ endpoint or service update is needed.
    so the rollout PR can satisfy `ci/full` before merging.
 2. Merge the updated workflows and helpers onto `main`.
    Update the test PR branch to include this version and let its automatic lint
-   finish. Older runs without the PR/head/base lint title cannot be reused.
+   finish. Older runs without the PR/head/base lint title cannot be reused. Existing
+   historical skipped checks are not deleted; the clean job list applies to new
+   runs using the split workflows. The `ci.yml` identity and lint job names stay
+   unchanged, allowing the rollout PR to reuse lint through the old main controller.
 3. On a test PR, post `/ci full`. Validate fork checkout, an actual failing test,
    **Re-run failed jobs**, and the resulting `ci/full` commit status. Confirm
    external commenters can trigger full, invalid PRs cannot launch it, and

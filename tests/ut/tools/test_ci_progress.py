@@ -43,7 +43,7 @@ def event():
         "workflow_id": 99,
         "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
         "event": "workflow_dispatch",
-        "path": ".github/workflows/ci.yml",
+        "path": ".github/workflows/ci-full.yml",
         "head_branch": "main",
         "repository": repository,
         "head_repository": repository,
@@ -78,8 +78,8 @@ def harness(progress, monkeypatch, event):
             return copy.deepcopy(run)
         if "/runs/50/attempts/" in path:
             return {**copy.deepcopy(run), "run_attempt": event["workflow_run"]["run_attempt"]}
-        if path.endswith("/workflows/ci.yml"):
-            return {"id": 99, "path": ".github/workflows/ci.yml"}
+        if path.endswith("/workflows/ci-full.yml"):
+            return {"id": 99, "path": ".github/workflows/ci-full.yml"}
         if path.endswith("/pulls/123"):
             return pr
         raise AssertionError(path)
@@ -404,6 +404,25 @@ def test_explicit_progress_dispatch_rejects_untrusted_ref(progress, monkeypatch,
     monkeypatch.setenv("GITHUB_REF", ref)
     with pytest.raises(progress.control.UntrustedRunError, match="must run from main"):
         progress.monitor(REPO, {"inputs": {"run_id": "50"}})
+
+
+def test_progress_reconciles_legacy_full_run(progress, monkeypatch, event, harness):
+    run, _, jobs, writes, _ = harness
+    for source in (event["workflow_run"], run):
+        source["path"] = progress.control.LINT_WORKFLOW
+    event["workflow"]["path"] = progress.control.LINT_WORKFLOW
+    original = progress.control.api
+
+    def api(path, payload=None, **kwargs):
+        if path.endswith("/workflows/ci.yml"):
+            return {"id": 99, "path": progress.control.LINT_WORKFLOW}
+        return original(path, payload, **kwargs)
+
+    monkeypatch.setattr(progress.control, "api", api)
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    progress.monitor(REPO, event)
+    assert writes[-1][1]["conclusion"] == "success"
 
 
 if __name__ == "__main__":

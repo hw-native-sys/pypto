@@ -13,7 +13,8 @@ on:
         type: boolean
         default: false
   workflow_run:
-    workflows: [CI]
+    # CI covers full runs created before the lint/full workflow split.
+    workflows: [CI, CI Full]
     types: [requested, in_progress, completed]
 
 permissions: {}

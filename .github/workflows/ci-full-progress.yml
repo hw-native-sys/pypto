@@ -8,7 +8,8 @@ on:
         type: string
         required: true
   workflow_run:
-    workflows: [CI]
+    # CI covers full runs created before the lint/full workflow split.
+    workflows: [CI, CI Full]
     types: [in_progress, completed]
 
 permissions: {}

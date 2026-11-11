@@ -145,7 +145,7 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
             ):
                 return
             if workflow is None:
-                workflow = control.api(f"repos/{repo}/actions/workflows/ci.yml")
+                workflow = control.full_workflow(repo, run)
             if run["workflow_id"] != workflow["id"]:
                 raise control.UntrustedRunError("Unexpected full CI workflow identity")
             pr = control.pull(repo, number)
