@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 numerical acceptance for extended register and logical channel operations.
+"""A5 numerical acceptance for extended registers, scalar bases and unmasked rearrangements.
 
 Build with --build OUTPUT in a task-submit --no-device job. Execute the saved
 artifacts with --worker OUTPUT DEVICE in a task-submit --device auto job, using
@@ -53,8 +53,6 @@ CASES = (
     "mx_quant",
     "unmasked_f32",
     "unmasked_bf16",
-    "channels_f32",
-    "channels_bf16_fp8",
 )
 FLOAT_OPS = ("expdif", "axpy", "mula", "lrelu", "prelu")
 INTEGER_OPS = ("mull", "addc", "subc", "addcs", "subcs", "intlv", "dintlv")
@@ -67,9 +65,6 @@ MNEMONICS = {
     "reduce_sum": "vcadd",
     "create_group_mask": "create_group_mask",
     "group_broadcast": "group_broadcast",
-    "channel_split": "channel_split",
-    "channel_merge": "channel_merge",
-    "convert": "vcvt",
 }
 
 
@@ -330,74 +325,6 @@ def _unmasked_body(dtype):
     return body
 
 
-def _channels_body():
-    @pl.jit.incore
-    def body(
-        src: pl.Tensor[[1, 256], pl.FP32],
-        out: pl.InOut[pl.Tensor[[1, 1024], pl.FP32]],
-        n: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[1, 1024], pl.FP32]:
-        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
-        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
-        with pl.reg_scope():
-            source = pl.reg.load(a, lanes=128)
-            even, odd = pl.reg.channel_split(source)
-            c = pl.reg.store(c, offset=64, value=even)
-            c = pl.reg.store(c, offset=128, value=odd)
-            # Independently loaded inputs keep split/merge permutations from
-            # cancelling each other and hiding a reversed channel contract.
-            x0 = pl.reg.load(a, offset=0, lanes=64)
-            x1 = pl.reg.load(a, offset=64, lanes=64)
-            x2 = pl.reg.load(a, offset=128, lanes=64)
-            x3 = pl.reg.load(a, offset=192, lanes=64)
-            pair = pl.reg.channel_merge(x0, x1)
-            four = pl.reg.channel_merge(x0, x1, x2, x3)
-            c = pl.reg.store(c, offset=256, value=pair)
-            c = pl.reg.store(c, offset=512, value=four)
-        c = pl.reshape(c, [1, 1024])
-        pl.store(c, [0, 0], out)
-        return out
-
-    return body
-
-
-def _channels_bf16_fp8_body():
-    @pl.jit.incore
-    def body(
-        src: pl.Tensor[[1, 256], pl.UINT16],
-        out: pl.InOut[pl.Tensor[[1, 1024], pl.UINT8]],
-        n: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[1, 1024], pl.UINT8]:
-        a = pl.reshape(pl.load(src, [0, 0], [1, 256], target_memory=pl.MemorySpace.Vec), [256])
-        c = pl.reshape(pl.load(out, [0, 0], [1, 1024], target_memory=pl.MemorySpace.Vec), [1024])
-        with pl.reg_scope():
-            first_bits = pl.reg.load(a, lanes=128)
-            second_bits = pl.reg.load(a, offset=128, lanes=128)
-            first = pl.reg.interpret_cast(first_bits, dtype=pl.BF16)
-            second = pl.reg.interpret_cast(second_bits, dtype=pl.BF16)
-            even, odd = pl.reg.dintlv(first, second)
-            even_float = pl.reg.convert(even, dtype=pl.FP32)
-            odd_float = pl.reg.convert(odd, dtype=pl.FP32)
-            x0, x2 = pl.reg.channel_split(even_float)
-            x1, x3 = pl.reg.channel_split(odd_float)
-            full = pl.reg.full_mask(lanes=64)
-            # Distinct scales expose channel swaps before the merged FP8 byte
-            # payload is checked against an independent CPU conversion.
-            y0 = pl.reg.muls(x0, 0.5, full)
-            y1 = pl.reg.muls(x1, 1.0, full)
-            y2 = pl.reg.muls(x2, 2.0, full)
-            y3 = pl.reg.muls(x3, -1.0, full)
-            restored = pl.reg.channel_merge(y0, y1, y2, y3)
-            quantized = pl.reg.convert(restored, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
-            carrier = pl.reg.interpret_cast(quantized, dtype=pl.UINT8)
-            c = pl.reg.store(c, offset=256, value=carrier)
-        c = pl.reshape(c, [1, 1024])
-        pl.store(c, [0, 0], out)
-        return out
-
-    return body
-
-
 def _program(case):
     dtype = {
         "integer_u32": pl.UINT32,
@@ -410,11 +337,8 @@ def _program(case):
         "histogram256": pl.UINT8,
         "reinterpret": pl.UINT32,
         "unmasked_bf16": pl.UINT16,
-        "channels_bf16_fp8": pl.UINT16,
     }.get(case, pl.FP32)
     output_dtype = pl.UINT16 if case.startswith("histogram") else dtype
-    if case == "channels_bf16_fp8":
-        output_dtype = pl.UINT8
     bins = 128 if case == "histogram128" else 256
     if case == "float32":
 
@@ -455,10 +379,6 @@ def _program(case):
         body = _mx_quant_body()
     elif case.startswith("unmasked_"):
         body = _unmasked_body(dtype)
-    elif case == "channels_f32":
-        body = _channels_body()
-    elif case == "channels_bf16_fp8":
-        body = _channels_bf16_fp8_body()
     elif case.startswith("indexed_base_"):
         body = _indexed_base_body(dtype)
     elif case.startswith("integer_"):
@@ -566,10 +486,6 @@ def _build(output):
             if case == "mx_quant"
             else ("intlv", "dintlv")
             if case.startswith("unmasked_")
-            else ("channel_split", "channel_merge")
-            if case == "channels_f32"
-            else ("dintlv", "channel_split", "channel_merge", "convert", "interpret_cast")
-            if case == "channels_bf16_fp8"
             else ("gather", "scatter")
         )
         for op in ops:
@@ -605,14 +521,7 @@ def _inputs(case, repeat):
         bits = (0x3E00 + np.arange(256, dtype=np.uint16) * 13).astype(np.uint16)
         bits[::3] |= np.uint16(0x8000)
         return np.roll(bits, repeat * 37)
-    if case == "channels_bf16_fp8":
-        values = (((np.arange(256) * 37) % 223 - 111) * 0.5).astype(np.float32)
-        values = np.roll(values, repeat * 37)
-        # All values are exactly representable in BF16, including the smallest
-        # FP8 subnormal and normal values and signs at the channel boundaries.
-        values[0:8] = (0.0, -0.0, 2**-9, -(2**-9), 2**-6, -(2**-6), 1.0, -1.0)
-        return (values.view(np.uint32) >> 16).astype(np.uint16)
-    if case in ("unmasked_f32", "channels_f32"):
+    if case == "unmasked_f32":
         return (np.arange(256, dtype=np.float32) * 0.25 - 31.75 + repeat * 0.125).astype(np.float32)
     if case.startswith("indexed_base_"):
         dtype = np.float16 if case.endswith("f16") else np.float32
@@ -656,8 +565,6 @@ def _inputs(case, repeat):
 
 
 def _initial(case, data):
-    if case == "channels_bf16_fp8":
-        return np.full(1024, 0xA5, dtype=np.uint8)
     if case == "unmasked_bf16":
         return np.full(1024, 0xA55A, dtype=np.uint16)
     if case.startswith("histogram"):
@@ -677,18 +584,6 @@ def _golden(case, data, n):
         expected[192:320] = interleaved[128:]
         expected[448:576] = data[::2]
         expected[576:704] = data[1::2]
-        return expected
-    if case == "channels_f32":
-        expected[64:128] = data[:128:2]
-        expected[128:192] = data[1:128:2]
-        expected[256:384] = data[:128].reshape(2, 64).T.reshape(-1)
-        expected[512:768] = data.reshape(4, 64).T.reshape(-1)
-        return expected
-    if case == "channels_bf16_fp8":
-        values = (data.astype(np.uint32) << 16).view(np.float32)
-        scales = np.resize(np.array([0.5, 1.0, 2.0, -1.0], dtype=np.float32), 256)
-        quantized = torch.from_numpy(values * scales).to(torch.float8_e4m3fn)
-        expected[256:512] = quantized.view(torch.uint8).numpy()
         return expected
     if case.startswith("indexed_base_"):
         offsets = 127 - np.arange(64) * 2

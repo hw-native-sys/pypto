@@ -588,26 +588,6 @@ def dintlv(
     return _pair("dintlv", args, pmode=pmode)
 
 
-def channel_split(value: Reg | ir.Expr) -> tuple[Reg, Reg]:
-    """Split alternating logical lanes into two half-length channels.
-
-    Result 0 takes source lanes 0, 2, 4, ...; result 1 takes 1, 3, 5, ... .
-    Unlike dintlv, each result has half the source lane count, without copies
-    of the second input. The lane count must be even; dtype is preserved.
-    """
-    return _pair("channel_split", [_expr(value)])
-
-
-def channel_merge(*values: Reg | ir.Expr) -> Reg:
-    """Interleave two or four equal-length logical channels into one register.
-
-    For C inputs with N lanes, result[C * i + c] = values[c][i]. All inputs
-    must share dtype and lane count. The result has C * N lanes; no numeric
-    conversion, masking or physical PART selection is performed by this API.
-    """
-    return Reg(_call("channel_merge", [_expr(value) for value in values]))
-
-
 def addc(
     lhs: Reg | ir.Expr,
     rhs: Reg | ir.Expr,

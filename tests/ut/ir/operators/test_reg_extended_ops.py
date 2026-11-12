@@ -317,37 +317,3 @@ def test_unmasked_rearrangement_types(name, dtype):
     assert first.unwrap().type.shape == 128
     with pytest.raises(ValueError, match="lane shape"):
         getattr(pl.reg, name)(vec(dtype, 128), vec(dtype, 64))
-
-
-@pytest.mark.parametrize("dtype", [DataType.FP32, DataType.BF16, DataType.UINT16])
-def test_channel_split_and_merge_types(dtype):
-    even, odd = pl.reg.channel_split(vec(dtype, 128))
-    even_expr, odd_expr = even.unwrap(), odd.unwrap()
-    assert isinstance(even_expr, ir.TupleGetItemExpr)
-    assert isinstance(odd_expr, ir.TupleGetItemExpr)
-    assert even_expr.tuple is odd_expr.tuple
-    assert isinstance(even_expr.type, ir.RegType)
-    assert isinstance(odd_expr.type, ir.RegType)
-    assert even_expr.type.shape == 64
-    assert odd_expr.type.dtype == dtype
-    for channels in [2, 4]:
-        result = pl.reg.channel_merge(*[vec(dtype, 64) for _ in range(channels)]).unwrap()
-        assert isinstance(result.type, ir.RegType)
-        assert result.type.shape == 64 * channels
-        assert result.type.dtype == dtype
-
-
-def test_channels_reject_invalid_contracts():
-    with pytest.raises(ValueError, match="even lane"):
-        pl.reg.channel_split(vec(lanes=7))
-    with pytest.raises(ValueError, match="VecReg"):
-        pl.reg.channel_split(mask())
-    for channels in [0, 1, 3, 5]:
-        with pytest.raises(ValueError, match="two or four"):
-            pl.reg.channel_merge(*[vec() for _ in range(channels)])
-    with pytest.raises(ValueError, match="lane shape"):
-        pl.reg.channel_merge(vec(lanes=64), vec(lanes=128))
-    with pytest.raises(ValueError, match="dtype mismatch"):
-        pl.reg.channel_merge(vec(DataType.FP32), vec(DataType.INT32))
-    with pytest.raises(ValueError, match="overflows"):
-        pl.reg.channel_merge(vec(lanes=2**62), vec(lanes=2**62))
