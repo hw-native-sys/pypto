@@ -622,7 +622,11 @@ PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_mater
  * (a) every scope's ``slots_`` is non-empty (an empty domain would emit
  * ``window_size=0`` and the runtime would reject it); (b) every slot is
  * non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
- * scope program-wide. ``DistributedCodegen`` relies on this shared_ptr-identity
+ * scope program-wide; (d) every ``DistributedTensorType`` carrying a
+ * ``window_buffer_`` has an accessible byte span (stride gaps included) no
+ * larger than that slot's logical size. Host-side derived views of a window are
+ * rejected by materialization; kernel-side views preserve or shrink the span.
+ * ``DistributedCodegen`` relies on this shared_ptr-identity
  * uniqueness to route each Submit's per-arg ``device_ctx`` handle to the
  * correct domain; a duplicate slot would misroute communication traffic at
  * runtime. The ``MaterializeCommDomainScopes`` pass enforces this invariant by

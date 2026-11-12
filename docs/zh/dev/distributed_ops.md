@@ -110,15 +110,19 @@ return data
 URMA workspace，并要求通信域申请 `workspace_engines=("urma",)`（目前为程序级
 保守策略）。
 
-**失败诊断。** verifier 拒绝非窗口端点、非连续区域、缺少 offset/shape 参数、
-负的常量 peer、非法 engine，以及字节偏移与传输大小之和超出其窗口槽位的静态端点范围。生成的 helper 在运行时拒绝非法 peer
-（`peer < 0`、`peer >= nranks` 或 `peer == rankId`）、越界的端点或窗口字节
-范围、为零/未对齐的字节数以及缺失的 workspace。所有失败都是显式的；不存在
-静默的 SDMA/RDMA 回退。
+**失败诊断。** 容量按 `分配 >= 窗口视图 >= 传输区域` 传递地约束。窗口具化时，
+其可访问字节跨度（含 stride 间隙）必须不超过分配的逻辑大小；即使程序只访问前缀，
+过大的视图也会被拒绝。槽位的物理 cache-line 对齐填充不能通过视图访问。verifier
+还拒绝非窗口端点、非连续区域、缺少 offset/shape 参数、负的常量 peer、非法 engine，
+以及不满足其端点视图的传输区域。符号化的视图或槽位大小在 dispatch 前由 host 侧检查。
+生成的 helper 在运行时拒绝非法 peer（`peer < 0`、`peer >= nranks` 或
+`peer == rankId`）、越界的端点或窗口字节范围、为零/未对齐的字节数以及缺失的
+workspace。所有失败都是显式的；不存在静默的 SDMA/RDMA 回退。
 
-**兼容性。** 返回类型（`dst`）与完成保证保持稳定。对 session/event、`wait`/`test`、
-SDMA/RDMA 引擎、PTOAS 原生下降、按请求释放和多 SGE 的支持将以增量方式加入；
-现有程序可原样重新编译。
+**兼容性。** 返回类型（`dst`）与完成保证保持稳定。容量校验不改变生成 kernel 的
+ABI；符号化的视图/槽位大小在 host orchestration 中检查。对 session/event、
+`wait`/`test`、SDMA/RDMA 引擎、PTOAS 原生下降、按请求释放和多 SGE 的支持将以
+增量方式加入；现有程序可原样重新编译。
 
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 

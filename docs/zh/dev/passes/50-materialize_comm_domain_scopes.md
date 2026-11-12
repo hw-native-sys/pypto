@@ -101,6 +101,8 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
 
 - 某 alloc 没有任何 `pld.tensor.window` 物化（dead alloc）。
 - 某 alloc 有 view 但没有 chip-orch dispatch 消费它。
+- `pld.tensor.window` 视图的可访问字节跨度（含 stride 间隙）超过分配的逻辑大小。
+  槽位的物理 cache-line 对齐填充不能通过视图访问。
 - dispatch 的 `device=` 既不是 `ConstInt`、也不是已识别的 `pl.range`
   归纳变量。
 - 同一 comm-domain scope 内 `name_hint_` 重名（parser 已在程序范围内做了唯一性
@@ -118,6 +120,11 @@ pass 运行之后：
 - 每个 `pld.tensor.window` 结果 Var 的类型是 `DistributedTensorType`，
   `window_buffer_` 字段指向对应的 `WindowBuffer`；定义它的 Call 带同一个类型——
   赋值两侧一致。
+- 每个携带 `window_buffer_` 的 `DistributedTensorType` 的可访问字节跨度都不超过
+  该 slot 的逻辑大小。`host_orch` 中窗口的派生视图（`tensor.slice`、
+  `tensor.view`、`tensor.assemble`）会被拒绝，因为 host codegen 无法表示其
+  offset；请在 InCore kernel 内对窗口做 slice/view。kernel 内的 view/slice/
+  reinterpret 只会保持或缩小字节跨度。
 - comm-domain 分析和 `LowerHostTensorCollectives` 看到的每个 host-level
   `pld.tensor.allreduce` 都已经有两个位置参数（在
   [`SynthesizeAllReduceSignals`](49-synthesize_allreduce_signals.md) 运行之后）。

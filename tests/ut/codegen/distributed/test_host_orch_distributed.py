@@ -237,6 +237,70 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
     # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
     # namespaces the per-rank DFX ``output_prefix``), passing the rank last.
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, \w+\)", code), code
+    # Static, fitting views keep the direct wire-tensor form; no host guard call.
+    assert "make_comm_window_tensor(" not in code, code
+
+
+def test_symbolic_window_slot_emits_capacity_guard():
+    """A symbolic slot size defers capacity to a host check before dispatch."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            out: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            data: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return out
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            outputs: pl.Out[pl.Tensor[[2, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[2, SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                out_r = outputs[r]
+                self.chip_orch(out_r, data, device=r)
+            return outputs
+
+    code = _lower(Prog)
+    assert "make_comm_window_tensor(" in code, code
+    assert re.search(r"slot_nbytes=\([^\n]*world_size[^\n]*\)", code), code
+    compile(code, "<host_orch>", "exec")
+
+
+def test_symbolic_window_guard_is_emitted_at_each_site():
+    """Every dispatch site gets its own guard, independent of control flow."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            out: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            data: pld.DistributedTensor[[SIZE], pl.FP32],
+        ) -> pl.Tensor[[SIZE], pl.FP32]:
+            return out
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            outputs: pl.Out[pl.Tensor[[4, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[4, SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            out0 = outputs[0]
+            out1 = outputs[1]
+            self.chip_orch(out0, data, device=0)
+            self.chip_orch(out1, data, device=1)
+            return outputs
+
+    code = _lower(Prog)
+    assert code.count("make_comm_window_tensor(") == 2, code
+    compile(code, "<host_orch>", "exec")
 
 
 def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():

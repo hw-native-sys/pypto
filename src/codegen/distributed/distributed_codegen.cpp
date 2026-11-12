@@ -43,6 +43,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/window_view_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -267,7 +268,7 @@ void DistributedCodegen::EmitImports() {
   emitter_.EmitLine(
       "from simpler.task_interface import "
       "CallConfig, CommBufferSpec, DataType, TaskArgs, TensorArgType");
-  emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
+  emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg, make_comm_window_tensor");
   // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
@@ -1212,9 +1213,6 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
           << "DistributedTensorType arg must have window_buffer_ populated by N4 pass";
       const auto& window_buffer = dist_type->window_buffer_.value();
-      const std::string name = SanitizeName(window_buffer->name_hint_);
-      const std::string shape = FormatShapeTuple(dist_type->shape_);
-      const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(dist_type->dtype_);
       std::string tag = "TensorArgType.INOUT";
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
@@ -1226,8 +1224,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         comm_arg_scopes.push_back(owning_scope);
       }
       const std::string handle_var = HandleVarForScope(owning_scope);
-      emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
-                        "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
+      emitter_.EmitLine(ta_var + ".add_tensor(" +
+                        EmitCommWindowTensor(dist_type, window_buffer, handle_var, rank_expr, call->span_) +
+                        ", " + tag + ")");
       continue;
     }
 
@@ -1847,6 +1846,36 @@ std::string DistributedCodegen::FormatShapeTuple(const std::vector<ir::ExprPtr>&
   if (shape.size() == 1) oss << ",";
   oss << ")";
   return oss.str();
+}
+
+std::string DistributedCodegen::EmitCommWindowTensor(const ir::DistributedTensorTypePtr& type,
+                                                     const ir::WindowBufferPtr& window,
+                                                     const std::string& handle_var,
+                                                     const std::string& rank_expr, const ir::Span& span) {
+  INTERNAL_CHECK_SPAN(type && window, span)
+      << "DistributedCodegen: comm-window wire tensor requires a DistributedTensorType and WindowBuffer";
+  const std::string name = SanitizeName(window->name_hint_);
+  const std::string shape = FormatShapeTuple(type->shape_);
+  const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(type->dtype_);
+  std::string plain = handle_var + "[" + rank_expr + "].buffers[\"" + name + "\"].tensor(shapes=" + shape +
+                      ", dtype=" + dtype_enum + ")";
+
+  const auto fit = ir::EvaluateWindowViewFit(*type, *window);
+  INTERNAL_CHECK_SPAN(fit.fit != ir::WindowViewFit::kViolation, span)
+      << "DistributedCodegen: " << ir::DescribeWindowViewFit("", *window, fit);
+  if (fit.fit == ir::WindowViewFit::kFits) return plain;
+
+  const std::string strides = type->tensor_view_ && !type->tensor_view_->stride.empty()
+                                  ? FormatShapeTuple(type->tensor_view_->stride)
+                                  : std::string();
+
+  std::string guarded = "make_comm_window_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
+                        "\"], name=\"" + name + "\", shapes=" + shape + ", dtype=" + dtype_enum +
+                        ", element_bytes=" + std::to_string(type->dtype_.GetByte()) + ", slot_nbytes=(" +
+                        GetCommSlotSizeAsCode(window->size_) + ")";
+  if (!strides.empty()) guarded += ", strides=" + strides;
+  guarded += ")";
+  return guarded;
 }
 
 // ========================================================================

@@ -196,3 +196,51 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
         object.__setattr__(arg, _WIRE_TENSOR_ATTR, wire)
         return wire
     return torch_interop.make_tensor_arg(worker, arg)
+
+
+def make_comm_window_tensor(
+    buffer: Any,
+    *,
+    name: str,
+    shapes: Any,
+    dtype: Any,
+    element_bytes: int,
+    slot_nbytes: int,
+    strides: Any = None,
+) -> Any:
+    """Build a wire tensor for a comm-window view and enforce its slot capacity.
+
+    ``pld.window`` views are validated statically when their shape and the
+    allocation size are known. A symbolic shape or slot size is checked here,
+    in the generated host orchestration, immediately before dispatch: the
+    view's accessible byte span (including stride gaps) must fit the slot's
+    logical byte count. Python integers are arbitrary precision, so the
+    comparison cannot overflow.
+    """
+    if strides is None:
+        elements = 1
+        for dim in shapes:
+            if int(dim) <= 0:
+                raise ValueError(f"window view '{name}' has a non-positive dimension: {int(dim)}")
+            elements *= int(dim)
+    else:
+        if len(strides) != len(shapes):
+            raise ValueError(
+                f"window view '{name}' has {len(shapes)} shape dimensions but {len(strides)} strides"
+            )
+        elements = 1
+        for dim, stride in zip(shapes, strides):
+            if int(dim) <= 0 or int(stride) < 0:
+                raise ValueError(
+                    f"window view '{name}' has an invalid dynamic dimension/stride: "
+                    f"shape={int(dim)}, stride={int(stride)}"
+                )
+            elements += (int(dim) - 1) * int(stride)
+
+    nbytes = elements * int(element_bytes)
+    slot_bytes = int(slot_nbytes)
+    if nbytes > slot_bytes:
+        raise ValueError(
+            f"window view '{name}' of {nbytes} bytes exceeds its backing window slot of {slot_bytes} bytes"
+        )
+    return buffer.tensor(shapes=shapes, dtype=dtype)

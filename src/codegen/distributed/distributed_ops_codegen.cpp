@@ -187,12 +187,10 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
       INTERNAL_CHECK_SPAN(arg_handle == *handle_var, call->span_)
           << "Internal error: builtin tensor collective window args must share the same comm-domain scope";
-      const std::string name = codegen.SanitizeName(window_buffer->name_hint_);
-      const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
-      const std::string dtype_enum =
-          "DataType." + DistributedCodegen::DataTypeToSimplerEnum(dist_type->dtype_);
-      codegen.Emit(ta_var + ".add_tensor(" + arg_handle + "[" + rank_expr + "].buffers[\"" + name +
-                   "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
+      codegen.Emit(
+          ta_var + ".add_tensor(" +
+          codegen.EmitCommWindowTensor(dist_type, window_buffer, arg_handle, rank_expr, call->span_) + ", " +
+          tag + ")");
       continue;
     }
     if (ir::As<ir::TileType>(call->args_[i]->GetType())) {

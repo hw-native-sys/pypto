@@ -2112,7 +2112,7 @@ def test_verifier_flags_duplicate_slot_across_scopes():
 
 
 # ---------------------------------------------------------------------------
-# CommDomainScopesMaterialized verifier: async transfer byte counts
+# CommDomainScopesMaterialized verifier: window-view capacity
 # ---------------------------------------------------------------------------
 
 
@@ -2128,21 +2128,14 @@ def _build_async_window_program(
     op_name: str,
     dst_window_bytes: int,
     src_window_bytes: int,
-    *,
-    subregion: bool = False,
 ) -> ir.Program:
-    """``host_orch -> chip_orch -> InCore kernel`` carrying one async transfer.
+    """``host_orch -> chip_orch -> InCore kernel`` with two window views.
 
-    The async op lives in the InCore kernel, so its endpoint types do not carry
-    a ``WindowBuffer``; the verifier must resolve them through the call chain to
-    the host_orch window views. The program is parsed from a source string so
-    the op name and byte counts can be parameters (the DSL parser does not
-    accept a closure string in a function body).
+    The parsed source lets the op name and byte counts be parameters. The
+    window-view capacity invariant is checked at materialization, independent of
+    which op (sync or async) consumes the views.
     """
-    if subregion:
-        call = f"pld.tensor.{op_name}(dst, peer, src, dst_offsets=[0], src_offsets=[0], shape=[8])"
-    else:
-        call = f"pld.tensor.{op_name}(dst, peer, src)"
+    call = f"pld.tensor.{op_name}(dst, peer, src)"
     return pl.parse_program(
         textwrap.dedent(
             f"""
@@ -2175,134 +2168,6 @@ def _build_async_window_program(
             """
         )
     )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_accepts_async_transfer_that_fits(op_name):
-    """Window slots exactly the transfer size are accepted."""
-    program = _apply(_build_async_window_program(op_name, 64, 64))
-    assert _comm_domain_errors(program) == []
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-@pytest.mark.parametrize("endpoint", ["dst", "src"])
-def test_verifier_rejects_async_transfer_larger_than_window(op_name, endpoint):
-    """A static 16 x FP32 (64-byte) transfer in a 60-byte slot is rejected."""
-    dst_bytes, src_bytes = (60, 64) if endpoint == "dst" else (64, 60)
-    with pytest.raises(pypto.Error, match=f"{endpoint} transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_window_program(op_name, dst_bytes, src_bytes))
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_checks_async_subregion_bytes(op_name):
-    """The subregion byte count is taken from ``shape``, not the endpoint view."""
-    with pytest.raises(pypto.Error) as excinfo:
-        _apply(_build_async_window_program(op_name, 24, 24, subregion=True))
-    message = str(excinfo.value)
-    assert "dst transfer of 32 bytes" in message
-    assert "src transfer of 32 bytes" in message
-
-
-def test_verifier_skips_dynamic_window_sizes():
-    """A symbolic window size is runtime-bounded; the verifier does not guess."""
-    program = pl.parse_program(
-        textwrap.dedent(
-            """
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.put_async(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.kernel(dst, src, 1)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self, n: pl.Scalar[pl.INDEX]):
-                    a = pld.alloc_window_buffer(n)
-                    b = pld.alloc_window_buffer(n)
-                    x = pld.window(a, [16], dtype=pl.FP32)
-                    y = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(x, y, device=0)
-            """
-        )
-    )
-    program = _apply(program)
-    assert _comm_domain_errors(program) == []
-
-
-def test_verifier_skips_dynamic_transfer_extents():
-    """A dynamic subregion extent is runtime-bounded; the verifier must not guess."""
-    program = pl.parse_program(
-        textwrap.dedent(
-            """
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                    extent: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.put_async(
-                        dst, peer, src, dst_offsets=[0], src_offsets=[0], shape=[extent]
-                    )
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    extent: pl.Scalar[pl.INT32],
-                ):
-                    self.kernel(dst, src, 1, extent)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(24)
-                    b = pld.alloc_window_buffer(24)
-                    x = pld.window(a, [16], dtype=pl.FP32)
-                    y = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(x, y, 6, device=0)
-            """
-        )
-    )
-    program = _apply(program)
-    assert _comm_domain_errors(program) == []
-
-
-def test_verifier_skips_async_without_a_resolvable_window():
-    """A standalone device kernel has no caller-side window; it is not an error."""
-    program = pl.parse_program(
-        textwrap.dedent(
-            """
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.put_async(dst, peer, src)
-            """
-        )
-    )
-    program = _apply(program)
-    assert _comm_domain_errors(program) == []
 
 
 @pytest.mark.parametrize("explicit_layout", [False, True])
@@ -2701,453 +2566,121 @@ def test_invalid_window_init(init, source):
         dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source, init=init)
 
 
-def _build_async_offset_program(op_name: str) -> ir.Program:
-    """A subregion whose size fits but offset+size exceeds the window slot."""
-    call = f"pld.tensor.{op_name}(dst, peer, src, dst_offsets=[16], src_offsets=[0], shape=[16])"
-    return pl.parse_program(
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_materialize_rejects_window_view_exceeding_slot(op_name):
+    """A 64-byte view in a 60-byte logical slot is rejected at materialization."""
+    with pytest.raises(
+        ValueError, match=r"window view .* of 64 bytes exceeds backing window slot .* of 60 bytes"
+    ):
+        _apply(_build_async_window_program(op_name, 60, 64))
+
+
+def test_materialize_accepts_exact_and_overallocated_slot():
+    program = _apply(_build_async_window_program("put_async", 64, 128))
+    assert _comm_domain_errors(program) == []
+
+
+def test_materialize_rejects_alignment_padding_as_capacity():
+    """The 64-byte physical alignment of a 60-byte slot is not addressable."""
+    with pytest.raises(
+        ValueError, match=r"window view .* of 64 bytes exceeds backing window slot .* of 60 bytes"
+    ):
+        _apply(_build_async_window_program("put_async", 64, 60))
+
+
+def test_materialize_rejects_sync_only_oversized_window():
+    """The capacity invariant applies to synchronous transfers too."""
+    with pytest.raises(ValueError, match=r"window view .* of 64 bytes exceeds backing window slot"):
+        _apply(_build_async_window_program("put", 60, 64))
+
+
+def test_materialize_rejects_host_derived_window_view():
+    """Host codegen cannot represent a derived window view (offset/KeyError)."""
+    program = pl.parse_program(
         textwrap.dedent(
-            f"""
+            """
             @pl.program
             class P:
                 @pl.function(type=pl.FunctionType.InCore)
                 def kernel(
                     self,
-                    dst: pld.DistributedTensor[[32], pl.FP32],
-                    src: pld.DistributedTensor[[32], pl.FP32],
+                    dst: pld.DistributedTensor[[8], pl.FP32],
+                    src: pld.DistributedTensor[[8], pl.FP32],
                     peer: pl.Scalar[pl.INT32],
                 ):
-                    {call}
+                    pld.tensor.put_async(dst, peer, src)
 
                 @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[32], pl.FP32],
-                    src: pld.DistributedTensor[[32], pl.FP32],
-                ):
-                    self.kernel(dst, src, 1)
+                def chip(self, view: pld.DistributedTensor[[8], pl.FP32]):
+                    self.kernel(view, view, 1)
 
                 @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
                 def host_orch(self):
-                    a = pld.alloc_window_buffer(64)
-                    b = pld.alloc_window_buffer(128)
-                    x = pld.window(a, [32], dtype=pl.FP32)
-                    y = pld.window(b, [32], dtype=pl.FP32)
-                    self.chip(x, y, device=0)
+                    buf = pld.alloc_window_buffer(64)
+                    full = pld.window(buf, [16], dtype=pl.FP32)
+                    view = pl.slice(full, [8], [0])
+                    self.chip(view, device=0)
             """
         )
     )
+    with pytest.raises(
+        ValueError, match=r"host_orch does not support 'tensor\.slice' on a DistributedTensor"
+    ):
+        _apply(program)
 
 
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_includes_endpoint_offset(op_name):
-    """64 bytes at byte offset 64 does not fit a 64-byte slot."""
-    with pytest.raises(pypto.Error, match="dst transfer of 64 bytes at offset 64 bytes exceeds window slot"):
-        _apply(_build_async_offset_program(op_name))
-
-
-def _build_async_rebind_program(op_name: str) -> ir.Program:
-    """The endpoint is rebound locally before the async call."""
-    call = f"""dst = pl.store(pl.load(src, [0], [8]), [0], dst)
-                    pld.tensor.{op_name}(dst, peer, src)"""
-    return pl.parse_program(
+def test_verifier_rejects_hand_built_oversized_window_view():
+    """The verifier also catches a reparsed/programmatic oversized view."""
+    program = pl.parse_program(
         textwrap.dedent(
-            f"""
+            """
             @pl.program
             class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    {call}
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.kernel(dst, src, 1)
-
                 @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(60)
-                    b = pld.alloc_window_buffer(64)
-                    x = pld.window(a, [16], dtype=pl.FP32)
-                    y = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(x, y, device=0)
+                def host(self):
+                    with pl._dump.comm_domain(
+                        name="d", devices=[0],
+                        slots=[pl._dump.window_buffer("w", base="buf", size=32)],
+                    ):
+                        buf: pl.Ptr = pl._dump.alloc_window_buffer(32, name="buf")
+                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")] = pl._dump.call(
+                            "pld.tensor.window", [buf, [16]],
+                            pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")],
+                            kwargs={"dtype": pl.FP32},
+                        )
+                        return x
             """
         )
     )
+    errors = _comm_domain_errors(program)
+    assert any("64 bytes exceeds backing window slot" in e.message for e in errors)
 
 
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_follows_local_endpoint_rebinding(op_name):
-    """The store-rebound endpoint resolves back to the host window slot."""
-    with pytest.raises(pypto.Error, match="dst transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_rebind_program(op_name))
-
-
-def _build_async_loop_carried_program(op_name: str) -> ir.Program:
-    """The endpoint is carried through a loop before the async call."""
-    return pl.parse_program(
+def test_verifier_dedupes_repeated_window_view():
+    """Using the same view twice reports one capacity error, not one per use."""
+    program = pl.parse_program(
         textwrap.dedent(
-            f"""
+            """
             @pl.program
             class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    for i in pl.range(2):
-                        dst = pl.store(pl.load(src, [0], [16]), [0], dst)
-                    pld.tensor.{op_name}(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.kernel(dst, src, 1)
-
                 @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(60)
-                    b = pld.alloc_window_buffer(64)
-                    x = pld.window(a, [16], dtype=pl.FP32)
-                    y = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(x, y, device=0)
+                def host(self):
+                    with pl._dump.comm_domain(
+                        name="d", devices=[0],
+                        slots=[pl._dump.window_buffer("w", base="buf", size=32)],
+                    ):
+                        buf: pl.Ptr = pl._dump.alloc_window_buffer(32, name="buf")
+                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")] = pl._dump.call(
+                            "pld.tensor.window", [buf, [16]],
+                            pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")],
+                            kwargs={"dtype": pl.FP32},
+                        )
+                        return x, x
             """
         )
     )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_follows_loop_carried_endpoint(op_name):
-    """The loop return var resolves through the yielded IterArg to the host slot."""
-    with pytest.raises(pypto.Error, match="dst transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_loop_carried_program(op_name))
-
-
-def _build_async_shared_callee_program(op_name: str) -> ir.Program:
-    """One kernel called from several sites, each with its own window binding."""
-    return pl.parse_program(
-        textwrap.dedent(
-            f"""
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.{op_name}(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    good: pld.DistributedTensor[[16], pl.FP32],
-                    bad: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    for _ in pl.range(4):
-                        self.kernel(good, src, 0)
-                    self.kernel(bad, src, 1)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(64)
-                    b = pld.alloc_window_buffer(60)
-                    c = pld.alloc_window_buffer(64)
-                    good = pld.window(a, [16], dtype=pl.FP32)
-                    bad = pld.window(b, [16], dtype=pl.FP32)
-                    src = pld.window(c, [16], dtype=pl.FP32)
-                    self.chip(good, bad, src, device=0)
-            """
-        )
-    )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_checks_shared_callee_per_call_site(op_name):
-    """The indexed traversal still applies each call site's own window binding."""
-    with pytest.raises(pypto.Error, match="dst transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_shared_callee_program(op_name))
-
-
-def _build_async_layered_binding_program(op_name: str) -> ir.Program:
-    """The endpoint is rebound through a chain of locals in a shared callee."""
-    return pl.parse_program(
-        textwrap.dedent(
-            f"""
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    first = pl.store(pl.load(src, [0], [16]), [0], dst)
-                    second = pl.store(pl.load(src, [0], [16]), [0], first)
-                    pld.tensor.{op_name}(second, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    good: pld.DistributedTensor[[16], pl.FP32],
-                    bad: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    for _ in pl.range(3):
-                        self.kernel(good, src, 0)
-                    self.kernel(bad, src, 1)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(64)
-                    b = pld.alloc_window_buffer(60)
-                    c = pld.alloc_window_buffer(64)
-                    good = pld.window(a, [16], dtype=pl.FP32)
-                    bad = pld.window(b, [16], dtype=pl.FP32)
-                    src = pld.window(c, [16], dtype=pl.FP32)
-                    self.chip(good, bad, src, device=0)
-            """
-        )
-    )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_resolves_layered_locals_per_call_site(op_name):
-    """Locals resolve before call-site parameters without copying the local map."""
-    with pytest.raises(pypto.Error, match="dst transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_layered_binding_program(op_name))
-
-
-def _build_async_through_user_call_alias_program(op_name: str) -> ir.Program:
-    """The ``src`` endpoint is rebound through a host helper that returns its
-    own parameter unchanged (``filled = self.fill_src(src)``). ``fill_src`` is
-    a ``GlobalVar`` call that ``ResultAliasedArgIndex`` never matches (it only
-    looks up registered operators), so the byte-count check must follow the
-    helper's declared return contract instead of stopping at the unresolved
-    call."""
-    return pl.parse_program(
-        textwrap.dedent(
-            f"""
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.{op_name}(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def fill_src(
-                    self, x: pld.DistributedTensor[[16], pl.FP32]
-                ) -> pld.DistributedTensor[[16], pl.FP32]:
-                    return x
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    filled = self.fill_src(src)
-                    self.kernel(dst, filled, 1)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(64)
-                    b = pld.alloc_window_buffer(60)
-                    dst = pld.window(a, [16], dtype=pl.FP32)
-                    src = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(dst, src, device=0)
-            """
-        )
-    )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_follows_user_call_return_alias(op_name):
-    """A host helper returning one of its own parameters unchanged must not
-    hide an undersized window slot from the byte-count check (review finding,
-    P1: ``ResultAliasedArgIndex`` only handles registered operators)."""
-    with pytest.raises(pypto.Error, match="src transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_through_user_call_alias_program(op_name))
-
-
-def _apply_basic(program: ir.Program) -> ir.Program:
-    """Like ``_apply``, but forces ``VerificationLevel.BASIC``.
-
-    A ``pl.submit`` task launch's tuple-temp lowering does not survive a
-    print->parse roundtrip check (see the equivalent note in
-    ``test_materialize_runtime_scopes.py::test_manual_scope_with_submit_suppresses_inner_for_wrap``);
-    that gap is unrelated to what a Submit-involving test here exercises.
-    """
-    with passes.PassContext([], passes.VerificationLevel.BASIC):
-        return _apply(program)
-
-
-def _build_async_through_submit_alias_program(op_name: str) -> ir.Program:
-    """The ``src`` endpoint is forwarded through a ``pl.submit`` task launch
-    that returns one of its own parameters unchanged (``produced, tid =
-    pl.submit(self.stage, src)``). ``Submit`` is a first-class node distinct
-    from ``Call`` (``pass-submit-awareness.md``); the resolver must follow a
-    Submit's ``TupleGetItemExpr`` projection the same way it already follows
-    a plain user-function Call's."""
-    return pl.parse_program(
-        textwrap.dedent(
-            f"""
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.{op_name}(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.InCore)
-                def stage(
-                    self, x: pld.DistributedTensor[[16], pl.FP32]
-                ) -> pld.DistributedTensor[[16], pl.FP32]:
-                    return x
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    with pl.manual_scope():
-                        produced, tid = pl.submit(self.stage, src)
-                    self.kernel(dst, produced, 1)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(64)
-                    b = pld.alloc_window_buffer(60)
-                    dst = pld.window(a, [16], dtype=pl.FP32)
-                    src = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(dst, src, device=0)
-            """
-        )
-    )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_follows_submit_return_alias(op_name):
-    """A ``pl.submit`` task launch returning one of its own parameters
-    unchanged must not hide an undersized window slot from the byte-count
-    check (review finding: ``Submit`` is call-like but distinct from
-    ``Call``, see ``pass-submit-awareness.md``)."""
-    with pytest.raises(pypto.Error, match="src transfer of 64 bytes exceeds window slot"):
-        _apply_basic(_build_async_through_submit_alias_program(op_name))
-
-
-def _build_async_diamond_shared_callee_program(op_name: str) -> ir.Program:
-    """Each wrapper layer calls the next layer twice with the same forwarded
-    arguments -- the duplicate-call-site shape the dedup in
-    ``CheckAsyncTransfersInFunction`` targets (review finding, P2). Without
-    memoizing by (callee, resolved binding), re-expanding every path through N
-    such layers costs O(2**N) recursive calls even though the IR itself is
-    linear in N: 5 layers here would be 2**5 = 32 naive re-expansions of the
-    leaf kernel. After the fix, each (callee, binding) pair the traversal
-    reaches is expanded exactly once."""
-    return pl.parse_program(
-        textwrap.dedent(
-            f"""
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.{op_name}(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def layer4(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.kernel(dst, src, 0)
-                    self.kernel(dst, src, 0)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def layer3(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.layer4(dst, src)
-                    self.layer4(dst, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def layer2(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.layer3(dst, src)
-                    self.layer3(dst, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def layer1(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.layer2(dst, src)
-                    self.layer2(dst, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(
-                    self,
-                    dst: pld.DistributedTensor[[16], pl.FP32],
-                    src: pld.DistributedTensor[[16], pl.FP32],
-                ):
-                    self.layer1(dst, src)
-                    self.layer1(dst, src)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    a = pld.alloc_window_buffer(64)
-                    b = pld.alloc_window_buffer(60)
-                    dst = pld.window(a, [16], dtype=pl.FP32)
-                    src = pld.window(b, [16], dtype=pl.FP32)
-                    self.chip(dst, src, device=0)
-            """
-        )
-    )
-
-
-@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
-def test_verifier_dedupes_diamond_shared_callee_expansion(op_name):
-    """Many equivalent paths to the same callee are expanded once instead of
-    once per path, and still catch the undersized window at the bottom
-    (review finding, P2)."""
-    with pytest.raises(pypto.Error, match="src transfer of 64 bytes exceeds window slot"):
-        _apply(_build_async_diamond_shared_callee_program(op_name))
+    errors = [e for e in _comm_domain_errors(program) if "64 bytes exceeds backing window slot" in e.message]
+    assert len(errors) == 1
 
 
 if __name__ == "__main__":

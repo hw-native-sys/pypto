@@ -121,6 +121,15 @@ class DistributedCodegen : public CodegenBase {
   /// Format a DistributedTensor's shape as a Python tuple literal.
   [[nodiscard]] std::string FormatShapeTuple(const std::vector<ir::ExprPtr>& shape);
 
+  /// Emit the expression that builds a comm-window wire tensor. Statically
+  /// fitting views keep the direct ``buffers[name].tensor(...)`` form; symbolic
+  /// views go through ``make_comm_window_tensor`` so the host side enforces the
+  /// slot's logical byte capacity before dispatch.
+  [[nodiscard]] std::string EmitCommWindowTensor(const ir::DistributedTensorTypePtr& type,
+                                                 const ir::WindowBufferPtr& window,
+                                                 const std::string& handle_var, const std::string& rank_expr,
+                                                 const ir::Span& span);
+
   /// Return a Python-safe identifier derived from an IR/runtime name hint.
   [[nodiscard]] std::string SanitizeName(const std::string& name) const;
 

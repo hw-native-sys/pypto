@@ -125,19 +125,25 @@ from `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` and requires the domain
 to request `workspace_engines=("urma",)` (the program-wide conservative
 policy).
 
-**Failure diagnostics.** The verifier rejects a non-window endpoint, a
+**Failure diagnostics.** Capacity is enforced transitively:
+`allocation >= window view >= transfer region`. When a window is
+materialized, its accessible byte span (including stride gaps) must fit the
+allocation's logical size; an oversized view is rejected even if the program
+only accesses a prefix. The physical cache-line padding of a slot is not
+addressable through a view. The verifier also rejects a non-window endpoint, a
 non-contiguous region, a missing offset/shape argument, a negative constant
-peer, an invalid engine, and a static endpoint range whose byte offset plus
-transfer size exceeds its window slot. The generated helper rejects at runtime an
-invalid peer (`peer < 0`, `peer >= nranks`, or `peer == rankId`), an
-out-of-range endpoint or window byte range, a zero/unaligned byte count, and
-a missing workspace. All failures are loud; there is no silent SDMA/RDMA
-fallback.
+peer, an invalid engine, and a transfer region that does not fit its endpoint
+view. A symbolic view or slot size is checked on the host immediately before
+dispatch. The generated helper rejects at runtime an invalid peer
+(`peer < 0`, `peer >= nranks`, or `peer == rankId`), an out-of-range endpoint
+or window byte range, a zero/unaligned byte count, and a missing workspace. All
+failures are loud; there is no silent SDMA/RDMA fallback.
 
 **Compatibility.** The return type (`dst`) and completion guarantee are stable.
-Support for sessions/events, `wait`/`test`, SDMA/RDMA engines, native PTOAS
-lowering, per-request release and multi-SGE will be added incrementally; an
-existing program recompiles unchanged.
+Capacity validation adds no generated-kernel ABI change; symbolic view/slot
+sizes are checked in host orchestration. Support for sessions/events,
+`wait`/`test`, SDMA/RDMA engines, native PTOAS lowering, per-request release and
+multi-SGE will be added incrementally; an existing program recompiles unchanged.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
