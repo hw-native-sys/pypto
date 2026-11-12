@@ -13,6 +13,7 @@ import pytest
 
 def test_ci_placeholder() -> None:
     """Pass without importing PyPTO, initializing devices, or transferring data."""
+    # Smoke-test the merged lint/full CI workflow split (#3382).
     assert True
 
 
