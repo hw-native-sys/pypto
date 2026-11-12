@@ -558,3 +558,74 @@ def kernel():
     assert lowered.count('part = "EVEN"') == 2
     assert lowered.count('part = "ODD"') == 2
     assert lowered.count("pto.vcgmax") == 1
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("kind", ["scale_pairs", "float_payload"])
+def test_compact_scale_packing_and_float_payload_interleave(kind, tmp_path):
+    # vselr does not accept compact exponent vectors in PTOAS 0.72. These
+    # same-source unmasked deinterleaves preserve the low four packed pairs
+    # using only supported logical operations. For payloads, interleave before
+    # FP8 conversion: interleave_store over two logical 128-byte vectors has no
+    # registered layout relation in the pinned PTOAS.
+    bodies = {
+        "scale_pairs": """
+    dst = pl.tile.full([128], pl.UINT16, 0)
+    with pl.reg_scope():
+        exp = pl.reg.index_gen(0, lanes=8, dtype=pl.INT32)
+        even, odd = pl.reg.dintlv(exp, exp)
+        mask = pl.reg.full_mask(lanes=8)
+        odd_shift = pl.reg.shift_lefts(odd, 8, mask)
+        packed = pl.reg.bitwise_or(even, odd_shift, mask)
+        halves = pl.reg.interpret_cast(packed, dtype=pl.UINT16)
+        pairs, unused = pl.reg.dintlv(halves, halves)
+        lane = pl.reg.index_gen(0, lanes=16, dtype=pl.UINT16)
+        full = pl.reg.full_mask(lanes=16)
+        offsets = pl.reg.shift_lefts(lane, 4, full)
+        first_four = pl.reg.active_mask(4, lanes=16)
+        out = pl.reg.scatter(dst, offsets, pairs, first_four)
+    consumer = pl.tile.add(out, out)
+""",
+        "float_payload": """
+    src = pl.tile.full([256], pl.BF16, 1)
+    dst = pl.tile.full([256], pl.INT8, 0)
+    with pl.reg_scope():
+        first = pl.reg.load(src, offset=0, lanes=128)
+        second = pl.reg.load(src, offset=128, lanes=128)
+        even, odd = pl.reg.dintlv(first, second)
+        x = pl.reg.convert(even, dtype=pl.FP32)
+        y = pl.reg.convert(odd, dtype=pl.FP32)
+        lo, hi = pl.reg.intlv(x, y)
+        ql = pl.reg.convert(lo, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
+        qh = pl.reg.convert(hi, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
+        bl = pl.reg.interpret_cast(ql, dtype=pl.INT8)
+        bh = pl.reg.interpret_cast(qh, dtype=pl.INT8)
+        updated = pl.reg.store(dst, offset=0, value=bl)
+        out = pl.reg.store(updated, offset=128, value=bh)
+    consumer = pl.tile.add(out, out)
+""",
+    }
+    function = pl.parse("@pl.function(type=pl.FunctionType.AIV)\ndef kernel():\n" + bodies[kind])
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    path = tmp_path / f"{kind}.pto"
+    output = tmp_path / f"{kind}.vpto"
+    path.write_text(source)
+    result = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lowered = output.read_text()
+    assert "pto.vmi." not in lowered
+    if kind == "scale_pairs":
+        assert lowered.count("pto.vdintlv") == 2
+        assert lowered.count("pto.vscatter") == 1
+    else:
+        assert lowered.count('"DINTLV_B16"') == 1
+        assert lowered.count("pto.vcvt") == 4
