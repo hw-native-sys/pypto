@@ -343,10 +343,7 @@ def test_latest_status_is_independent_of_page_order(progress, reverse):
     ],
 )
 def test_status_cache_ignores_other_contexts_and_publishers(progress, context, creator):
-    assert (
-        progress.latest_statuses([{"id": 900, "context": context, "creator": {"login": creator}}])
-        == {}
-    )
+    assert progress.latest_statuses([{"id": 900, "context": context, "creator": {"login": creator}}]) == {}
 
 
 def test_future_status_attempt_prevents_stale_projection(progress, event, harness):
