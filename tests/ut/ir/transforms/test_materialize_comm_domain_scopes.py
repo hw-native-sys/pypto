@@ -2594,41 +2594,6 @@ def test_materialize_rejects_sync_only_oversized_window():
         _apply(_build_async_window_program("put", 60, 64))
 
 
-def test_materialize_rejects_host_derived_window_view():
-    """Host codegen cannot represent a derived window view (offset/KeyError)."""
-    program = pl.parse_program(
-        textwrap.dedent(
-            """
-            @pl.program
-            class P:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kernel(
-                    self,
-                    dst: pld.DistributedTensor[[8], pl.FP32],
-                    src: pld.DistributedTensor[[8], pl.FP32],
-                    peer: pl.Scalar[pl.INT32],
-                ):
-                    pld.tensor.put_async(dst, peer, src)
-
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def chip(self, view: pld.DistributedTensor[[8], pl.FP32]):
-                    self.kernel(view, view, 1)
-
-                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-                def host_orch(self):
-                    buf = pld.alloc_window_buffer(64)
-                    full = pld.window(buf, [16], dtype=pl.FP32)
-                    view = pl.slice(full, [8], [0])
-                    self.chip(view, device=0)
-            """
-        )
-    )
-    with pytest.raises(
-        ValueError, match=r"host_orch does not support 'tensor\.slice' on a DistributedTensor"
-    ):
-        _apply(program)
-
-
 def test_verifier_rejects_hand_built_oversized_window_view():
     """The verifier also catches a reparsed/programmatic oversized view."""
     program = pl.parse_program(

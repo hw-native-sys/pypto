@@ -187,10 +187,12 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       const std::string arg_handle = codegen.GetCommDomainHandleVar(window_buffer);
       INTERNAL_CHECK_SPAN(arg_handle == *handle_var, call->span_)
           << "Internal error: builtin tensor collective window args must share the same comm-domain scope";
-      codegen.Emit(
-          ta_var + ".add_tensor(" +
-          codegen.EmitCommWindowTensor(dist_type, window_buffer, arg_handle, rank_expr, call->span_) + ", " +
-          tag + ")");
+      const std::string name = codegen.SanitizeName(window_buffer->name_hint_);
+      const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
+      const std::string dtype_enum =
+          "DataType." + DistributedCodegen::DataTypeToSimplerEnum(dist_type->dtype_);
+      codegen.Emit(ta_var + ".add_tensor(" + arg_handle + "[" + rank_expr + "].buffers[\"" + name +
+                   "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
       continue;
     }
     if (ir::As<ir::TileType>(call->args_[i]->GetType())) {
@@ -262,17 +264,15 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_alloc_window_buffer, "pld.tensor.alloc_window
 }
 
 // ============================================================================
-// pld.tensor.window — host-side marker, no runtime emission.
+// pld.tensor.window — check dynamic capacity at the view declaration.
 //
-// ``pld.tensor.window`` materialises a window-bound view at IR construction
-// time; ``MaterializeCommDomainScopes`` rewires every dispatch site so the per-rank
-// wire view is derived from ``__comm_d0[r].buffers["<name>"]`` at
-// chip-arg emission time. The host_orch.py module never calls back into
-// the IR window op.
+// The view is IR metadata; per-rank wire Tensors are still built at dispatch.
+// Returning an empty expression suppresses the wrapping Python assignment.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(pld_tensor_window, "pld.tensor.window") {
-  (void)op;
-  (void)codegen;
+  auto& dist_codegen = dynamic_cast<DistributedCodegen&>(codegen);
+  dist_codegen.EmitWindowCapacityCheck(op);
+  dist_codegen.MarkDeclared(codegen.GetCurrentResultTarget());
   return "";
 }
 
@@ -474,6 +474,11 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
          "drop_dims]]), "
          "got "
       << op->args_.size();
+
+  // This handler indexes the host tensors dict. Distributed windows are
+  // resolved through per-rank buffers and have no entry in that dict.
+  CHECK_SPAN(ir::As<ir::TensorType>(op->args_[0]->GetType()), op->span_)
+      << "tensor.slice in a HOST orchestrator currently supports plain Tensor operands only";
 
   const std::string input_name = codegen.GetExprAsCode(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.slice input must resolve to a non-empty Python name";

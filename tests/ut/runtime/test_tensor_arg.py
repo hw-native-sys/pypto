@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from pypto.runtime import DeviceTensor
-from pypto.runtime.tensor_arg import make_comm_window_tensor
 
 # ``task_interface`` eagerly imports the optional ``simpler`` runtime package;
 # skip the module when simpler is unavailable (same pattern as
@@ -380,82 +379,6 @@ def test_existing_host_wire_keeps_default_transfer_outside_control_slot():
         assert args.transfer(0) == TensorTransfer.H2D
     finally:
         backing.close()
-
-
-def test_make_comm_window_tensor_rejects_oversized_view():
-    """A view whose stride-aware span exceeds the logical slot is rejected."""
-    buffer = MagicMock()
-    with pytest.raises(
-        ValueError, match=r"window view 'data' of 64 bytes exceeds its backing window slot of 60 bytes"
-    ):
-        make_comm_window_tensor(
-            buffer, name="data", shapes=(16,), dtype="float32", element_bytes=4, slot_nbytes=60
-        )
-    buffer.tensor.assert_not_called()
-
-
-def test_make_comm_window_tensor_builds_fitting_view():
-    """A view that fits returns the wire tensor without extra validation."""
-    sentinel = object()
-    buffer = MagicMock()
-    buffer.tensor.return_value = sentinel
-    result = make_comm_window_tensor(
-        buffer, name="data", shapes=(16,), dtype="float32", element_bytes=4, slot_nbytes=64
-    )
-    assert result is sentinel
-    buffer.tensor.assert_called_once_with(shapes=(16,), dtype="float32")
-
-
-def test_make_comm_window_tensor_is_stride_aware():
-    """Stride gaps count toward the span; a zero stride is a broadcast."""
-    buffer = MagicMock()
-    with pytest.raises(ValueError, match=r"124 bytes exceeds its backing window slot of 120 bytes"):
-        make_comm_window_tensor(
-            buffer,
-            name="strided",
-            shapes=(16,),
-            dtype="float32",
-            element_bytes=4,
-            slot_nbytes=120,
-            strides=(2,),
-        )
-    assert (
-        make_comm_window_tensor(
-            buffer,
-            name="broadcast",
-            shapes=(16,),
-            dtype="float32",
-            element_bytes=4,
-            slot_nbytes=4,
-            strides=(0,),
-        )
-        is buffer.tensor.return_value
-    )
-
-
-def test_make_comm_window_tensor_rejects_stride_rank_mismatch():
-    with pytest.raises(ValueError, match="shape dimensions but 0 strides"):
-        make_comm_window_tensor(
-            MagicMock(),
-            name="bad",
-            shapes=(4,),
-            dtype="float32",
-            element_bytes=4,
-            slot_nbytes=16,
-            strides=(),
-        )
-
-
-def test_make_comm_window_tensor_rejects_non_positive_dimension():
-    with pytest.raises(ValueError, match="non-positive dimension"):
-        make_comm_window_tensor(
-            MagicMock(),
-            name="bad",
-            shapes=(-1,),
-            dtype="float32",
-            element_bytes=4,
-            slot_nbytes=16,
-        )
 
 
 if __name__ == "__main__":

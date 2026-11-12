@@ -49,6 +49,7 @@ from pypto import codegen
 from pypto.backend import BackendType, pto_backend
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
+from pypto.runtime.tensor_arg import check_window_capacity
 
 SIZE = 64
 
@@ -238,11 +239,34 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
     # namespaces the per-rank DFX ``output_prefix``), passing the rank last.
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, \w+\)", code), code
     # Static, fitting views keep the direct wire-tensor form; no host guard call.
-    assert "make_comm_window_tensor(" not in code, code
+    assert "check_window_capacity(" not in code, code
+
+
+def test_host_slice_rejects_distributed_window():
+    """Window views have no host tensors-dict entry; reject them in the handler."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, data: pld.DistributedTensor[[16], pl.FP32]):
+            return
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self):
+            buf = pld.alloc_window_buffer(64)
+            data = pld.window(buf, [16], dtype=pl.FP32)
+            self.chip(data, device=0)
+            _part = pl.slice(data, [8], [0])
+
+    # Materialization is concerned with allocation identity and capacity, not
+    # the host codegen's supported operand kinds.
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    with pytest.raises(ValueError, match="tensor.slice.*supports plain Tensor operands only"):
+        codegen.DistributedCodegen().generate(program)
 
 
 def test_symbolic_window_slot_emits_capacity_guard():
-    """A symbolic slot size defers capacity to a host check before dispatch."""
+    """A symbolic slot size is checked at the window declaration, before the loop."""
 
     @pl.program
     class Prog:
@@ -267,13 +291,31 @@ def test_symbolic_window_slot_emits_capacity_guard():
             return outputs
 
     code = _lower(Prog)
-    assert "make_comm_window_tensor(" in code, code
+    assert "check_window_capacity(" in code, code
+    assert code.count("check_window_capacity(") == 1, code
+    # The check is outside the dispatch loop and does not create a Tensor.
+    tree = ast.parse(code)
+    check = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "check_window_capacity"
+    )
+    loop = next(n for n in ast.walk(tree) if isinstance(n, ast.For))
+    assert check.lineno < loop.lineno
+    assert {kw.arg for kw in check.keywords} == {"name", "shapes", "element_bytes", "slot_nbytes"}
+
+    # Execute the actual generated expression with an undersized dynamic slot.
+    with pytest.raises(ValueError, match="exceeds its backing window slot"):
+        eval(
+            compile(ast.Expression(check), "<window-check>", "eval"),
+            {"check_window_capacity": check_window_capacity, "world_size": 0},
+        )
     assert re.search(r"slot_nbytes=\([^\n]*world_size[^\n]*\)", code), code
     compile(code, "<host_orch>", "exec")
 
 
-def test_symbolic_window_guard_is_emitted_at_each_site():
-    """Every dispatch site gets its own guard, independent of control flow."""
+def test_symbolic_window_guard_is_emitted_once_for_multiple_dispatches():
+    """A declaration checks capacity once even when multiple dispatches consume it."""
 
     @pl.program
     class Prog:
@@ -299,7 +341,8 @@ def test_symbolic_window_guard_is_emitted_at_each_site():
             return outputs
 
     code = _lower(Prog)
-    assert code.count("make_comm_window_tensor(") == 2, code
+    assert code.count("check_window_capacity(") == 1, code
+    assert code.count('.buffers["data_buf"].tensor(') == 2, code
     compile(code, "<host_orch>", "exec")
 
 

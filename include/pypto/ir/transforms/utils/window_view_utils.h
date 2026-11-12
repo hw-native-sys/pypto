@@ -21,12 +21,12 @@ namespace ir {
 class DistributedTensorType;
 class WindowBuffer;
 
-/// Result of comparing a distributed window view's accessible byte span with
+/// Result of comparing a dense window view's byte size with
 /// the logical size of the allocation that backs it.
 enum class WindowViewFit {
-  kFits,         ///< The view's span is statically known to fit the slot.
-  kViolation,    ///< The view's span is statically known to exceed the slot.
-  kUnverifiable  ///< The span or slot is symbolic; a host-side guard must check it.
+  kFits,         ///< The view's size is statically known to fit the slot.
+  kViolation,    ///< The view's size is statically known to exceed the slot.
+  kUnverifiable  ///< The view or slot is symbolic; a host-side guard must check it.
 };
 
 struct WindowViewFitResult {
@@ -36,17 +36,13 @@ struct WindowViewFitResult {
 };
 
 /**
- * @brief Compare a window view's accessible byte span with its backing slot.
+ * @brief Compare a dense window view's byte size with its backing slot.
  *
- * The span includes stride gaps:
- * ``(1 + sum((shape_i - 1) * stride_i)) * dtype_bytes``. A canonical packed
- * view therefore reduces to ``product(shape) * dtype_bytes``. Static
- * expressions are const-folded with checked int64 arithmetic. The comparison
- * uses the slot's logical ``size_``, not the cache-line-aligned physical
- * allocation: alignment padding is not addressable through a window view.
+ * ``pld.window`` declares a dense view, so its size is
+ * ``product(shape) * dtype_bytes``. Static expressions are const-folded with
+ * checked int64 arithmetic. The slot's logical size excludes physical padding.
  *
- * @param view Distributed view type; ``tensor_view_->stride`` is used when
- *             present, otherwise strides are derived from the layout.
+ * @param view Dense distributed window view type.
  * @param slot Backing window slot whose logical ``size_`` bounds the view.
  * @return Fit result with the computed view/slot bytes where statically known.
  */

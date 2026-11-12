@@ -147,22 +147,6 @@ class AllocAndWindowCollector : public IRVisitor {
     auto var = AsVarLike(op->var_);
     auto call = As<Call>(op->value_);
     if (var && call && call->op_) {
-      // Host codegen has no wire representation for a derived window view:
-      // it cannot carry the slice offset and its tensor-dict alias would
-      // reference a window that never enters the dict. Reject the pattern
-      // loudly instead of enabling a later KeyError or a silent base-offset
-      // read. Kernel-side view/slice/reinterpret already preserve byte size.
-      if (IsOp(call, "tensor.slice") || IsOp(call, "tensor.view") || IsOp(call, "tensor.reshape") ||
-          IsOp(call, "tensor.assemble")) {
-        for (const auto& arg : call->args_) {
-          if (As<DistributedTensorType>(arg->GetType())) {
-            CHECK_SPAN(false, call->span_)
-                << "MaterializeCommDomainScopes: host_orch does not support '" << call->op_->name_
-                << "' on a DistributedTensor window view; create the window at the required shape or "
-                   "slice/view it inside the InCore kernel";
-          }
-        }
-      }
       if (IsOp(call, "pld.tensor.alloc_window_buffer")) {
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
             << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer expects exactly one arg (size)";
@@ -811,8 +795,6 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Every direct pld.tensor.window view must fit the logical size of its
   // allocation. Reject an oversized view even if the program only accesses a
   // prefix: the view itself must be valid independently of its consumers.
-  // Derived views are re-checked by the CommDomainScopesMaterialized verifier
-  // after DerivedViewRetyper propagates the same WindowBuffer through them.
   for (const auto& w : collector.windows) {
     auto view_dt = As<DistributedTensorType>(w.old_view_var->GetType());
     INTERNAL_CHECK_SPAN(view_dt, w.old_view_var->span_)
@@ -1002,17 +984,16 @@ Pass MaterializeCommDomainScopes() {
 // ``window_size=0`` and the runtime would reject it); (b) every slot is
 // non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
 // scope program-wide (cross-scope identity uniqueness); (d) every
-// ``DistributedTensorType`` carrying a ``window_buffer_`` has an accessible
-// byte span (stride gaps included) no larger than that slot's logical size.
+// ``DistributedTensorType`` carrying a ``window_buffer_`` has a
+// dense byte size no larger than that slot's logical size.
 //
 // (d) is the IR-level capacity invariant. The op deducer cannot perform it
 // because ``DistributedTensorType::window_buffer_`` is still ``nullopt`` when
 // the type is deduced: the WindowBuffer and its ``size_`` are materialized by
 // this pass afterwards. Static violations are rejected here and re-checked by
 // the property verifier; symbolic view/slot sizes are checked by the generated
-// host guard before dispatch. Kernel-side view/slice/reinterpret operations
-// preserve or shrink the span; host-side derived views of a window are rejected
-// because host codegen cannot represent their offset.
+// host guard at the window declaration. Host operation support is checked by
+// the corresponding codegen handlers.
 // ============================================================================
 
 class CommDomainScopeCollector : public IRVisitor {
