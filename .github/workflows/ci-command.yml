@@ -21,6 +21,7 @@ jobs:
     outputs:
       key: ${{ steps.route.outputs.key }}
       head: ${{ steps.route.outputs.head }}
+      error: ${{ steps.route.outputs.command_error }}
     steps:
       - name: Checkout trusted command router
         uses: actions/checkout@v4
@@ -39,6 +40,8 @@ jobs:
     if: needs.route.outputs.key != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      error: ${{ steps.dispatch.outputs.command_error }}
     concurrency:
       group: ci-full-status-${{ needs.route.outputs.key }}
       queue: max
@@ -56,7 +59,33 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Validate PR and dispatch full CI
+        id: dispatch
         env:
           CI_ROUTED_HEAD: ${{ needs.route.outputs.head }}
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/ci_control.py dispatch
+
+  feedback:
+    needs: [route, dispatch]
+    if: >-
+      always() && github.event.issue.pull_request &&
+      (needs.route.result == 'failure' || needs.dispatch.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The conversation belongs to a PR; an issues-only token can receive 403
+      # when listing or posting its comments, including in fork repositories.
+      pull-requests: write
+    steps:
+      - name: Checkout trusted command feedback
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Explain the failed request on the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_COMMAND_ERROR: ${{ needs.route.outputs.error || needs.dispatch.outputs.error }}
+        run: python .github/scripts/ci_control.py command-feedback

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +30,24 @@ API_RESERVE = 200
 POLL_REQUESTS_PER_HOUR = 500
 MONITOR_SECONDS = 5 * 60 * 60
 HIDDEN_JOBS = {"changes", "toolchain", "lint-gate", "pre-commit", "clang-tidy", "full-result"}
+CHECK_ID = re.compile(r"ci-full:([1-9][0-9]*):([1-9][0-9]*):(.+)")
+
+
+def reusable_checks(run: dict[str, Any], existing: list[dict[str, Any]]) -> dict[str, Any]:
+    """Index this run's latest display records by job, across all attempts."""
+    latest: dict[str, Any] = {}
+    versions: dict[str, tuple[int, int]] = {}
+    for item in existing:
+        match = CHECK_ID.fullmatch(item.get("external_id") or "")
+        if match is None or int(match[1]) != run["id"] or item.get("app", {}).get("slug") != "github-actions":
+            continue
+        name = match[3]
+        version = (int(match[2]), item["id"])
+        # Older publishers created one record per attempt. Reuse the latest
+        # one deterministically even when REST pages arrive in another order.
+        if name not in versions or version > versions[name]:
+            latest[name], versions[name] = item, version
+    return latest
 
 
 def sync_jobs(
@@ -49,7 +68,9 @@ def sync_jobs(
         }
         if status == "completed":
             payload["conclusion"] = job["conclusion"] or "failure"
-        previous = checks.get(key)
+        # Attempt remains provenance, not display identity. Failed-job reruns
+        # update the same record, including jobs retained from older attempts.
+        previous = checks.get(job["name"])
         if previous is not None and all(previous.get(k) == v for k, v in payload.items()):
             continue
         if writes >= max_writes:
@@ -58,7 +79,7 @@ def sync_jobs(
             result = control.api(f"repos/{repo}/check-runs", {**payload, "head_sha": head})
         else:
             result = control.api(f"repos/{repo}/check-runs/{previous['id']}", payload, method="PATCH")
-        checks[key] = {**payload, "id": result["id"]}
+        checks[job["name"]] = {**payload, "id": result["id"]}
         writes += 1
     return True
 
@@ -94,8 +115,8 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
 
 
 def monitor(repo: str, event: dict[str, Any]) -> None:
-    source = control.verified_event_run(repo, event, require_title=False)
     resolved = False
+    source = control.verified_event_run(repo, event, require_title=False) if "workflow_run" in event else None
     deadline = time.monotonic() + MONITOR_SECONDS
     checks = None
     workflow = None
@@ -103,10 +124,8 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
     while time.monotonic() < deadline:
         delay = INTERVAL_SECONDS
         try:
-            delay, max_writes = poll_budget(repo, source["run_attempt"])
-            if max_writes == 0:
-                time.sleep(min(delay, max(0, deadline - time.monotonic())))
-                continue
+            # Manual dispatch has no webhook identity. Resolve it within the
+            # same bounded retry window as later REST reads, before using it.
             if not resolved:
                 routed = control.resolved_event(repo, event)
                 if routed is None:
@@ -114,6 +133,17 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
                 event = routed
                 source = event["workflow_run"]
                 resolved = True
+                # The always() fallback may publish only an identified PR-full
+                # source. Ordinary manual main CI is intentionally ignored.
+                # Record this before polling so subsequent failures still get
+                # a status reconciliation request.
+                if os.environ.get("GITHUB_OUTPUT"):
+                    control.output({"source_run": str(source["id"])})
+            assert source is not None
+            delay, max_writes = poll_budget(repo, source["run_attempt"])
+            if max_writes == 0:
+                time.sleep(min(delay, max(0, deadline - time.monotonic())))
+                continue
             match = control.FULL_TITLE.fullmatch(source["display_title"])
             assert match is not None
             number, head = int(match[1]), match[2]
@@ -121,20 +151,22 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
             control.verified_event_run(repo, {**event, "workflow_run": run})
             # A delayed event may belong to an old attempt. Never project it onto a
             # later attempt or allow an unrelated run to select the PR check target.
-            for key in (
-                "id",
-                "workflow_id",
-                "run_number",
-                "run_attempt",
-                "display_title",
-                "path",
-                "event",
-                "head_branch",
+            if any(
+                run.get(key) != source.get(key)
+                for key in (
+                    "id",
+                    "workflow_id",
+                    "run_number",
+                    "run_attempt",
+                    "display_title",
+                    "path",
+                    "event",
+                    "head_branch",
+                )
             ):
-                if run.get(key) != source.get(key):
-                    return
+                return
             if workflow is None:
-                workflow = control.api(f"repos/{repo}/actions/workflows/ci.yml")
+                workflow = control.full_workflow(repo, run)
             if run["workflow_id"] != workflow["id"]:
                 raise control.UntrustedRunError("Unexpected full CI workflow identity")
             pr = control.pull(repo, number)
@@ -144,18 +176,21 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
                 return
             if checks is None:
                 existing = control.pages(f"repos/{repo}/commits/{head}/check-runs?filter=all", "check_runs")
-                prefix = f"ci-full:{run['id']}:{run['run_attempt']}:"
-                checks = {
-                    item["external_id"]: item
-                    for item in existing
-                    if (item.get("external_id") or "").startswith(prefix)
-                    and item.get("app", {}).get("slug") == "github-actions"
-                }
+                checks = reusable_checks(run, existing)
+                # A newer projection also invalidates a stale REST snapshot.
+                # Never overwrite it or create a competing older record.
+                if any(
+                    int(item["external_id"].split(":", 3)[2]) > run["run_attempt"] for item in checks.values()
+                ):
+                    return
             synced = sync_jobs(repo, head, run, checks, max_writes=max_writes)
             if run["status"] == "completed" and synced:
                 return
             errors = 0
         except subprocess.CalledProcessError:
+            # A create may have succeeded before its response was lost. Read
+            # back persisted records before retrying instead of creating again.
+            checks = None
             errors += 1
             if errors >= 5:
                 raise

@@ -24,7 +24,7 @@ def test_distributed_job_routes_and_propagates_failure(
     tmp_path: Path, has_suite: bool, exit_code: int
 ) -> None:
     """Run the actual workflow shell with recording substitutes for execution."""
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())
     steps = workflow["jobs"]["onboard-tests-a5-distributed"]["steps"]
     command = next(step["run"] for step in steps if "-m pytest" in step.get("run", ""))
     checkout = tmp_path / "a5-dist-checkout"

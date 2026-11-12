@@ -20,12 +20,17 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
 
-WORKFLOW = ".github/workflows/ci.yml"
+WORKFLOW = ".github/workflows/ci-full.yml"
+LINT_WORKFLOW = ".github/workflows/ci.yml"
+# Old full runs keep their original workflow path during native reruns. They
+# remain eligible for recovery, but new requests always use the full workflow.
+FULL_WORKFLOWS = {WORKFLOW, LINT_WORKFLOW}
 FULL_TITLE = re.compile(r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})")
 UNFINISHED = ("queued", "in_progress", "requested", "waiting", "pending")
 REQUIRED = {
@@ -46,10 +51,16 @@ REQUIRED = {
 }
 OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-tidy"}
 CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
+MERGE_WAIT_SECONDS = 60
+MERGE_POLL_SECONDS = 5
 
 
 class UntrustedRunError(ValueError):
     """Reject unrelated runs without granting them permission to write statuses."""
+
+
+class MergePendingError(ValueError):
+    """The current PR snapshot and GitHub's test merge are not consistent yet."""
 
 
 def api(path: str, payload: dict[str, Any] | None = None, *, method: str = "POST") -> Any:
@@ -90,10 +101,31 @@ def report(message: str) -> None:
             stream.write(f"{message}\n\n")
 
 
+def full_workflow(repo: str, run: dict[str, Any]) -> dict[str, Any]:
+    """Verify a current or legacy full workflow, never an arbitrary path or ID."""
+    if run.get("path") not in FULL_WORKFLOWS:
+        raise UntrustedRunError("Full CI result did not originate from the trusted workflow")
+    workflow = api(f"repos/{repo}/actions/workflows/{Path(run['path']).name}")
+    if workflow["id"] != run["workflow_id"]:
+        raise UntrustedRunError("Full CI result did not originate from the trusted workflow")
+    return workflow
+
+
+def newer_run(candidate: dict[str, Any], run: dict[str, Any]) -> bool:
+    """Workflow-local sequence numbers cannot order runs across the split."""
+    if candidate["workflow_id"] == run["workflow_id"]:
+        return candidate["run_number"] > run["run_number"]
+    # Compare original creation times, not updated_at (which changes on rerun).
+    # Unique run IDs break ties between requests created in the same second.
+    created = datetime.strptime(candidate["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+    previous = datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+    return (created, candidate["id"]) > (previous, run["id"])
+
+
 def newer_request_exists(repo: str, number: int, head: str, run: dict[str, Any]) -> bool:
     """Only main dispatches can supersede a request, including across bases."""
     path = (
-        f"repos/{repo}/actions/workflows/ci.yml/runs?event=workflow_dispatch&branch=main"
+        f"repos/{repo}/actions/runs?event=workflow_dispatch&branch=main"
         f"&created=>={run['created_at']}&per_page=100"
     )
     for page in range(1, 11):
@@ -105,8 +137,14 @@ def newer_request_exists(repo: str, number: int, head: str, run: dict[str, Any])
                 and int(match[1]) == number
                 and match[2] == head
                 and candidate.get("head_branch") == "main"
-                and candidate["run_number"] > run["run_number"]
+                and candidate.get("path") in FULL_WORKFLOWS
+                and newer_run(candidate, run)
             ):
+                if candidate["path"] == run["path"]:
+                    if candidate["workflow_id"] != run["workflow_id"]:
+                        continue
+                else:
+                    full_workflow(repo, candidate)
                 return True
         if len(batch) < 100:
             return False
@@ -146,22 +184,32 @@ def newer_status_exists(repo: str, number: int, head: str, run: dict[str, Any]) 
         or candidate.get("run_attempt") != int(target[2])
         or candidate.get("run_number") != run["run_number"]
         or candidate.get("display_title") != run["display_title"]
-        or candidate.get("path") != WORKFLOW
+        or candidate.get("path") != run["path"]
         or candidate.get("repository", {}).get("full_name") != repo
         or candidate.get("repository", {}).get("id") != run["repository"]["id"]
         or candidate.get("head_repository", {}).get("id") != run["repository"]["id"]
     ):
         return False
     match = FULL_TITLE.fullmatch(candidate.get("display_title", ""))
-    return bool(
+    if not (
         match
         and int(match[1]) == number
         and match[2] == head
-        and candidate["workflow_id"] == run["workflow_id"]
+        and candidate.get("path") in FULL_WORKFLOWS
+        and candidate.get("repository", {}).get("full_name") == repo
+        and candidate.get("repository", {}).get("id") == run["repository"]["id"]
+        and candidate.get("head_repository", {}).get("id") == run["repository"]["id"]
         and candidate["event"] == "workflow_dispatch"
         and candidate["head_branch"] == "main"
-        and (same_run or candidate["run_number"] > run["run_number"])
-    )
+        and (same_run or newer_run(candidate, run))
+    ):
+        return False
+    # Same-workflow ownership remains verifiable from the trusted source even
+    # when the workflow lookup itself is the API call that failed publication.
+    if candidate["path"] == run["path"]:
+        return candidate["workflow_id"] == run["workflow_id"]
+    full_workflow(repo, candidate)
+    return True
 
 
 def output(values: dict[str, str]) -> None:
@@ -200,7 +248,7 @@ def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str
         raise ValueError("merge_sha is not the PR's current test merge; post /ci full again")
     commit = api(f"repos/{repo}/git/commits/{merge}")
     if [parent["sha"] for parent in commit["parents"]] != [base, head]:
-        raise ValueError("Test merge does not have the authorized base and head parents")
+        raise MergePendingError("Test merge does not have the authorized base and head parents")
 
 
 def unfinished_request_exists(repo: str, title: str, start: datetime, end: datetime) -> bool:
@@ -211,16 +259,14 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
     while windows:
         lower, upper = windows.pop()
         created = f"{lower:%Y-%m-%dT%H:%M:%SZ}..{upper:%Y-%m-%dT%H:%M:%SZ}"
-        path = (
-            f"repos/{repo}/actions/workflows/ci.yml/runs?event=workflow_dispatch"
-            f"&branch=main&created={created}&per_page=100"
-        )
+        path = f"repos/{repo}/actions/runs?event=workflow_dispatch&branch=main&created={created}&per_page=100"
         for page in range(1, 11):
             runs = api(f"{path}&page={page}")["workflow_runs"]
             if any(
                 run.get("display_title") == title
                 and run.get("head_branch") == "main"
                 and run.get("event") == "workflow_dispatch"
+                and run.get("path") in FULL_WORKFLOWS
                 and run["status"] in UNFINISHED
                 for run in runs
             ):
@@ -266,7 +312,7 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
         for run in runs
         if run.get("display_title") == title
         and run.get("event") == "pull_request"
-        and run.get("path") == WORKFLOW
+        and run.get("path") == LINT_WORKFLOW
         and run.get("workflow_id") == workflow["id"]
         and run.get("head_sha") == head
         and run.get("repository", {}).get("full_name") == repo
@@ -326,7 +372,7 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
         or run.get("display_title") != expected
         or run.get("event") != "workflow_dispatch"
         or run.get("head_branch") != "main"
-        or run.get("path") != WORKFLOW
+        or run.get("path") not in FULL_WORKFLOWS
         or run.get("repository", {}).get("full_name") != repo
         or run.get("repository", {}).get("id") != pr["base"]["repo"]["id"]
         or run.get("head_repository", {}).get("id") != pr["base"]["repo"]["id"]
@@ -334,8 +380,9 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
         or run["run_attempt"] < int(target[2])
     ):
         return False
-    workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
-    if run.get("workflow_id") != workflow["id"]:
+    try:
+        full_workflow(repo, run)
+    except UntrustedRunError:
         return False
     if run.get("status") in UNFINISHED:
         # The binding is available before run-list indexing. A native rerun may
@@ -353,22 +400,86 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
     return len(finalizers) == 1 and finalizers[0]["conclusion"] == "success"
 
 
+def is_full_command(event: dict[str, Any]) -> bool:
+    return (
+        event.get("action") == "created"
+        and "pull_request" in event.get("issue", {})
+        and event.get("comment", {}).get("body", "").strip() == "/ci full"
+    )
+
+
 def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None:
-    if (
-        event.get("action") != "created"
-        or "pull_request" not in event.get("issue", {})
-        or event.get("comment", {}).get("body", "").strip() != "/ci full"
+    if not is_full_command(event):
+        return None
+    # Anyone who can comment may request full CI. Keep the first head/base
+    # fixed while GitHub refreshes its synthetic merge; never authorize a push
+    # that arrives during this wait or while joining the writer queue.
+    number = int(event["issue"]["number"])
+    deadline = time.monotonic() + MERGE_WAIT_SECONDS
+    pr = pull(repo, number)
+    head, base = pr["head"]["sha"], pr["base"]["sha"]
+    routed_head = os.environ.get("CI_ROUTED_HEAD")
+    if routed_head and routed_head != head:
+        raise ValueError("PR head changed after queue admission; post /ci full again")
+    while True:
+        if pr["head"]["sha"] != head or pr["base"]["sha"] != base:
+            raise ValueError(
+                "PR head or base changed while waiting; wait for matching lint and post /ci full again"
+            )
+        if pr.get("mergeable") is False:
+            raise ValueError(
+                "PR has merge conflicts; update the branch, wait for lint and post /ci full again"
+            )
+        if pr.get("mergeable") is True and pr.get("merge_commit_sha"):
+            try:
+                verify_merge(repo, pr, head, base, pr["merge_commit_sha"])
+                return pr
+            except MergePendingError:
+                # The PR endpoint can report the new base before its merge
+                # commit is rebuilt. Retry that inconsistency, not bad SHAs,
+                # access failures, closed PRs, or genuine merge conflicts.
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError(
+                "GitHub merge information did not become consistent within 60 seconds; retry /ci full later"
+            )
+        report("Waiting for GitHub to refresh this PR's test merge.")
+        time.sleep(min(MERGE_POLL_SECONDS, remaining))
+        pr = pull(repo, number)
+
+
+def command_feedback(repo: str, event: dict[str, Any]) -> None:
+    """Report command failures from a separate job with comment-only writes."""
+    if not is_full_command(event):
+        return
+    number = int(event["issue"]["number"])
+    run_id, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
+    if not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run_id, attempt)):
+        raise ValueError("Expected positive command run and attempt IDs")
+    marker = f"<!-- ci-command-feedback:{run_id}:{attempt} -->"
+    comments = pages(f"repos/{repo}/issues/{number}/comments")
+    if any(
+        item.get("user", {}).get("login") == "github-actions[bot]" and marker in item.get("body", "")
+        for item in comments
     ):
         return
-    # Anyone who can comment may request full CI, including external contributors.
-    # Validate the live PR and merge revision both before queueing and dispatching.
-    number = int(event["issue"]["number"])
-    pr = pull(repo, number)
-    if pr.get("mergeable") is not True or not pr.get("merge_commit_sha"):
-        raise ValueError("PR merge is conflicting or still being computed; retry /ci full when ready")
-    head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
-    verify_merge(repo, pr, head, base, merge)
-    return pr
+    # Checkout failures and runner failures may produce no script output.
+    reason = json.loads(
+        os.environ.get("CI_COMMAND_ERROR")
+        or '"Command validation or dispatch failed; see the logs for details."'
+    )
+    if not isinstance(reason, str):
+        raise ValueError("Expected a command failure message")
+    url = f"https://github.com/{repo}/actions/runs/{run_id}/attempts/{attempt}"
+    api(
+        f"repos/{repo}/issues/{number}/comments",
+        {
+            "body": f"{marker}\nYour `/ci full` request could not be completed.\n\n"
+            f"<pre>{escape(reason[:2000])}</pre>\n\n[CI Command logs]({url}). "
+            "Check whether a full run was already created before retrying."
+        },
+    )
 
 
 def command_route(repo: str, event: dict[str, Any]) -> None:
@@ -416,7 +527,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     )
     # Dispatch always chooses the trusted workflow on main, never the PR branch.
     dispatched = api(
-        f"repos/{repo}/actions/workflows/ci.yml/dispatches",
+        f"repos/{repo}/actions/workflows/ci-full.yml/dispatches",
         {
             "ref": "main",
             "return_run_details": True,
@@ -442,6 +553,12 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
             "description": "Full CI dispatched; waiting for results",
             "target_url": f"https://github.com/{repo}/actions/runs/{run_id}/attempts/1",
         },
+    )
+    # A GITHUB_TOKEN dispatch does not reliably emit downstream workflow_run
+    # events. Start the observer explicitly, after binding this run's ownership.
+    api(
+        f"repos/{repo}/actions/workflows/ci-full-progress.yml/dispatches",
+        {"ref": "main", "inputs": {"run_id": str(run_id)}},
     )
     report(f"Requested full CI for PR #{number} at {head}; test merge {merge}.")
 
@@ -491,9 +608,9 @@ def verified_event_run(repo: str, event: dict[str, Any], *, require_title: bool 
         run, workflow, repository = event["workflow_run"], event["workflow"], event["repository"]
         if (
             event["action"] not in {"requested", "in_progress", "completed"}
-            or workflow["path"] != WORKFLOW
+            or workflow["path"] not in FULL_WORKFLOWS
             or workflow["id"] != run["workflow_id"]
-            or run["path"] != WORKFLOW
+            or run["path"] != workflow["path"]
             or run["event"] != "workflow_dispatch"
             or run["head_branch"] != "main"
             or repository["full_name"] != repo
@@ -531,7 +648,7 @@ def resolved_event(
         run = api(f"repos/{repo}/actions/runs/{run_id}")
         if run["id"] != int(run_id):
             raise UntrustedRunError("Unexpected reconciliation run ID")
-        workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
+        workflow = full_workflow(repo, run)
         event = {
             "action": "completed",
             "repository": run["repository"],
@@ -578,6 +695,10 @@ def resolved_event(
             "display_title",
         )
     }
+    # Retain original creation time for cross-workflow ordering even if a later
+    # live lookup fails and publication has only this routed identity available.
+    if "created_at" in run:
+        identity["created_at"] = run["created_at"]
     identity.update(repository=repository, head_repository={"id": run["head_repository"]["id"]})
     return {
         "action": event["action"],
@@ -625,7 +746,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
     if not match or run["event"] != "workflow_dispatch":
         return
     if (
-        run["path"] != WORKFLOW
+        run["path"] not in FULL_WORKFLOWS
         or run["head_branch"] != "main"
         or run["repository"]["full_name"] != repo
         or run["head_repository"]["id"] != run["repository"]["id"]
@@ -638,9 +759,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
     try:
         if lookup_failed:
             raise ValueError("Cannot read the live CI attempt; event data cannot prove success")
-        workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
-        if run["workflow_id"] != workflow["id"]:
-            raise UntrustedRunError("Full CI result did not originate from the trusted workflow")
+        full_workflow(repo, run)
         if newer_status_exists(repo, number, head, run):
             report("Preserving a pending command or a verified newer CI writer.")
             return
@@ -713,6 +832,7 @@ def main() -> None:
         repo = os.environ["GITHUB_REPOSITORY"]
         commands = {
             "command-route": command_route,
+            "command-feedback": command_feedback,
             "dispatch": dispatch,
             "prepare": prepare,
             "route": route,
@@ -728,6 +848,16 @@ def main() -> None:
         for key in ("GH_TOKEN", "GITHUB_TOKEN"):
             if token := os.environ.get(key):
                 detail = detail.replace(token, "[REDACTED]")
+        if command in {"command-route", "dispatch"} and os.environ.get("GITHUB_OUTPUT"):
+            # Only send a public error to the comment job; raw API stderr may
+            # include repository-controlled text or authentication diagnostics.
+            reason = (
+                "GitHub API validation or dispatch failed; "
+                "check the logs and any existing full run before retrying."
+                if isinstance(error, subprocess.CalledProcessError)
+                else detail
+            )
+            output({"command_error": json.dumps(reason)})
         print(f"{command} failed:\n" + "\n".join(f"  {line}" for line in detail.splitlines()))
         if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
             with Path(summary).open("a") as stream:

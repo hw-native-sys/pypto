@@ -23,6 +23,7 @@ HEAD, BASE = "a" * 40, "b" * 40
 
 @pytest.fixture
 def progress(monkeypatch):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.syspath_prepend(str(ROOT / ".github/scripts"))
     spec = importlib.util.spec_from_file_location("ci_progress", ROOT / ".github/scripts/ci_progress.py")
     assert spec and spec.loader
@@ -42,7 +43,7 @@ def event():
         "workflow_id": 99,
         "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
         "event": "workflow_dispatch",
-        "path": ".github/workflows/ci.yml",
+        "path": ".github/workflows/ci-full.yml",
         "head_branch": "main",
         "repository": repository,
         "head_repository": repository,
@@ -72,13 +73,15 @@ def harness(progress, monkeypatch, event):
     def api(path, payload=None, **kwargs):
         if payload is not None:
             writes.append((path, payload.copy(), kwargs))
-            return {"id": 200 + len(writes)}
+            return {
+                "id": int(path.rsplit("/", 1)[1]) if kwargs.get("method") == "PATCH" else 200 + len(writes)
+            }
         if path.endswith("/runs/50"):
             return copy.deepcopy(run)
         if "/runs/50/attempts/" in path:
             return {**copy.deepcopy(run), "run_attempt": event["workflow_run"]["run_attempt"]}
-        if path.endswith("/workflows/ci.yml"):
-            return {"id": 99}
+        if path.endswith("/workflows/ci-full.yml"):
+            return {"id": 99, "path": ".github/workflows/ci-full.yml"}
         if path.endswith("/pulls/123"):
             return pr
         raise AssertionError(path)
@@ -214,10 +217,14 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
         {"id": 101, "name": "system-tests", "status": "completed", "conclusion": "failure"},
     ]
     new_jobs = [{"id": 102, "name": "system-tests", "status": "completed", "conclusion": "success"}]
+    existing = [
+        {"id": 900, "external_id": "ci-full:50:1:unit-tests", "app": {"slug": "github-actions"}},
+        {"id": 901, "external_id": "ci-full:50:1:system-tests", "app": {"slug": "github-actions"}},
+    ]
 
     def pages(path, key):
         if key == "check_runs":
-            return []
+            return existing
         assert key == "jobs"
         if path.endswith("/attempts/1/jobs"):
             return old_jobs
@@ -229,6 +236,122 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
     assert {payload["name"] for _, payload, _ in writes} == {"full / unit-tests", "full / system-tests"}
     assert all(payload["conclusion"] == "success" for _, payload, _ in writes)
     assert all(payload["external_id"].startswith("ci-full:50:2:") for _, payload, _ in writes)
+    assert {path for path, _, _ in writes} == {f"repos/{REPO}/check-runs/900", f"repos/{REPO}/check-runs/901"}
+    assert all(kwargs == {"method": "PATCH"} for _, _, kwargs in writes)
+
+
+def test_repeated_reruns_keep_record_id_through_running_and_completed_states(
+    progress, monkeypatch, event, harness
+):
+    run, _, jobs, writes, checks = harness
+    original_api = progress.control.api
+
+    def api(path, payload=None, **kwargs):
+        result = original_api(path, payload, **kwargs)
+        if payload is not None:
+            record = {**payload, "id": result["id"], "app": {"slug": "github-actions"}}
+            if kwargs.get("method") == "PATCH":
+                assert result["id"] == checks[0]["id"]
+                checks[0] = record
+            else:
+                checks.append(record)
+        return result
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.control, "effective_jobs", lambda *args: jobs)
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="failure")
+    progress.monitor(REPO, event)
+    original_id = checks[0]["id"]
+
+    # Each restart reads every historical record, as the Actions page does.
+    # A latest-per-name API response would hide the original duplicate bug.
+    for attempt in (2, 3):
+        event["workflow_run"]["run_attempt"] = attempt
+        run.update(run_attempt=attempt, status="in_progress")
+        jobs[0].update(id=101 + attempt, status="in_progress", conclusion=None)
+
+        def complete(seconds):
+            assert checks[0]["status"] == "in_progress"
+            assert checks[0].get("conclusion") is None
+            run["status"] = "completed"
+            jobs[0].update(status="completed", conclusion="success")
+
+        monkeypatch.setattr(progress.time, "sleep", complete)
+        progress.monitor(REPO, event)
+        assert len(checks) == 1
+        assert checks[0]["id"] == original_id
+        assert checks[0]["external_id"] == f"ci-full:50:{attempt}:system-tests"
+        assert checks[0]["conclusion"] == "success"
+        assert checks[0]["details_url"].endswith(f"/job/{101 + attempt}")
+    assert len(writes) == 5
+    assert all(kwargs == {"method": "PATCH"} for _, _, kwargs in writes[1:])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_legacy_duplicates_reuse_latest_record_independent_of_page_order(progress, reverse):
+    records = [
+        {
+            "id": check_id,
+            "external_id": f"ci-full:50:{attempt}:matrix (a:b)",
+            "app": {"slug": "github-actions"},
+        }
+        for check_id, attempt in [(999, 1), (800, 2), (801, 2)]
+    ]
+    if reverse:
+        records.reverse()
+    selected = progress.reusable_checks({"id": 50}, records)
+    assert selected["matrix (a:b)"]["id"] == 801
+
+
+@pytest.mark.parametrize(
+    "external_id,app",
+    [
+        ("ci-full:51:1:system-tests", "github-actions"),
+        ("ci-full:50:1:system-tests", "another-app"),
+        ("ci-full:50:0:system-tests", "github-actions"),
+        ("ci-full:50:no-attempt:system-tests", "github-actions"),
+        ("native-action-job", "github-actions"),
+        (None, "github-actions"),
+    ],
+)
+def test_check_reuse_ignores_unrelated_or_malformed_records(progress, external_id, app):
+    assert (
+        progress.reusable_checks({"id": 50}, [{"id": 900, "external_id": external_id, "app": {"slug": app}}])
+        == {}
+    )
+
+
+def test_future_check_attempt_prevents_stale_projection(progress, event, harness):
+    run, _, _, writes, checks = harness
+    run["status"] = "completed"
+    checks.append({"id": 900, "external_id": "ci-full:50:2:system-tests", "app": {"slug": "github-actions"}})
+    progress.monitor(REPO, event)
+    assert not writes
+
+
+def test_lost_create_response_is_read_back_before_retry(progress, monkeypatch, event, harness):
+    run, _, jobs, writes, checks = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    original_api = progress.control.api
+    failed = False
+
+    def api(path, payload=None, **kwargs):
+        nonlocal failed
+        result = original_api(path, payload, **kwargs)
+        if payload is not None and not failed:
+            failed = True
+            checks.append({**payload, "id": result["id"], "app": {"slug": "github-actions"}})
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        return result
+
+    waits = []
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    progress.monitor(REPO, event)
+    assert waits == [60]
+    assert len(writes) == 1
 
 
 @pytest.mark.parametrize("active", [1, 2, 10])
@@ -272,7 +395,8 @@ def test_poll_budget_wakes_at_reset_when_no_write_fits(progress, monkeypatch, re
     assert progress.poll_budget(REPO, attempt) == (3601, 0)
 
 
-def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event, harness):
+@pytest.mark.parametrize("manual", [False, True])
+def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event, harness, manual):
     real_api = progress.control.api
     failed = False
     waits = []
@@ -287,9 +411,71 @@ def test_monitor_backs_off_on_transient_api_failure(progress, monkeypatch, event
 
     monkeypatch.setattr(progress.control, "api", api)
     monkeypatch.setattr(progress.time, "sleep", waits.append)
+    if manual:
+        # The first REST read resolves the run ID, before any monitoring poll.
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        event = {"inputs": {"run_id": "50"}}
     progress.monitor(REPO, event)
     assert waits == [60]
     assert harness[3]
+
+
+def test_manual_resolution_stops_after_bounded_retries(progress, monkeypatch, tmp_path):
+    reads = []
+    waits = []
+
+    def unavailable(path):
+        reads.append(path)
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(progress.control, "api", unavailable)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    with pytest.raises(subprocess.CalledProcessError):
+        progress.monitor(REPO, {"inputs": {"run_id": "50"}})
+    assert len(reads) == 5
+    assert waits == [60, 120, 240, 300]
+    assert not output.exists(), "An unresolved run must not trigger status publication"
+
+
+def test_non_full_main_ci_does_not_request_status_publication(
+    progress, monkeypatch, event, harness, tmp_path
+):
+    run, _, _, writes, _ = harness
+    run["display_title"] = "CI workflow_dispatch main"
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    progress.monitor(REPO, event)
+    assert not output.exists()
+    assert not writes
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_identified_full_source_keeps_fallback_after_monitor_failure(
+    progress, monkeypatch, event, harness, tmp_path, manual
+):
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    if manual:
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        event = {"inputs": {"run_id": "50"}}
+
+    def unavailable(*args):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    waits = []
+    monkeypatch.setattr(progress, "poll_budget", unavailable)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    with pytest.raises(subprocess.CalledProcessError):
+        progress.monitor(REPO, event)
+    assert output.read_text() == "source_run=50\n"
+    assert waits == [60, 120, 240, 300]
+    assert not harness[3]
 
 
 def test_completion_reconciles_jobs_across_write_budget(progress, monkeypatch, event, harness):
@@ -318,6 +504,47 @@ def test_progress_resolves_static_or_missing_webhook_title(progress, event, harn
     assert len(writes) == 1
     assert writes[0][1]["head_sha"] == HEAD
     assert writes[0][1]["conclusion"] == "success"
+
+
+def test_explicit_dispatch_mirrors_existing_results(progress, monkeypatch, harness):
+    run, _, jobs, writes, _ = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    progress.monitor(REPO, {"inputs": {"run_id": "50"}})
+    assert len(writes) == 1
+    path, payload, _ = writes[0]
+    assert path == f"repos/{REPO}/check-runs"
+    assert payload["head_sha"] == HEAD
+    assert payload["conclusion"] == "success"
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/main", ""])
+def test_explicit_progress_dispatch_rejects_untrusted_ref(progress, monkeypatch, ref):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", ref)
+    with pytest.raises(progress.control.UntrustedRunError, match="must run from main"):
+        progress.monitor(REPO, {"inputs": {"run_id": "50"}})
+
+
+def test_progress_reconciles_legacy_full_run(progress, monkeypatch, event, harness):
+    run, _, jobs, writes, _ = harness
+    for source in (event["workflow_run"], run):
+        source["path"] = progress.control.LINT_WORKFLOW
+    event["workflow"]["path"] = progress.control.LINT_WORKFLOW
+    original = progress.control.api
+
+    def api(path, payload=None, **kwargs):
+        if path.endswith("/workflows/ci.yml"):
+            return {"id": 99, "path": progress.control.LINT_WORKFLOW}
+        return original(path, payload, **kwargs)
+
+    monkeypatch.setattr(progress.control, "api", api)
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    progress.monitor(REPO, event)
+    assert writes[-1][1]["conclusion"] == "success"
 
 
 if __name__ == "__main__":
