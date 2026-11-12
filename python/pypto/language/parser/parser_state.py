@@ -160,6 +160,7 @@ class ProgramBindings:
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
 
         self.gvar_to_func = gvar_to_func or {}  # Track parsed functions for type inference
+        self.pending_placements: list[tuple[ir.Level | None, ir.GlobalVar, ir.Span]] = []
 
         self.external_funcs: dict[str, ir.Function] = {}  # Track external functions referenced
 

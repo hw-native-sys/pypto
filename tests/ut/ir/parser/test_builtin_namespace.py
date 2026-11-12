@@ -25,9 +25,13 @@ End-to-end coverage of the printed lowering (kwargs, ``device`` /
 module covers the namespace's own parse behaviour and diagnostics.
 """
 
+import ast
+from dataclasses import dataclass
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.ast_parser import ASTParser
 from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir
 
@@ -105,9 +109,9 @@ def test_builtin_op_carries_machine_only_attrs():
     ]
     assert len(barriers) == 1
     call = barriers[0]
-    assert set(call.attrs.keys()) == {"device", "arg_directions"}
-    assert isinstance(call.attrs["device"], ir.Var)
-    assert call.attrs["device"].name_hint == "r"
+    assert set(call.attrs.keys()) == {"worker", "arg_directions"}
+    assert isinstance(call.attrs["worker"], ir.Var)
+    assert call.attrs["worker"].name_hint == "r"
     assert list(call.attrs["arg_directions"]) == [ir.ArgDirection.InOut]
 
 
@@ -148,7 +152,7 @@ def test_builtin_op_reports_deduction_failures_against_its_own_name():
 def test_hand_written_builtin_call_without_device_is_a_user_error():
     """A bare `pl.builtin.tensor.barrier(signal)` is rejected at parse time.
 
-    Orchestration codegen resolves the dispatching rank from the `device` attr
+    Orchestration codegen resolves the dispatching rank from the `worker` attr
     behind an `INTERNAL_CHECK`, so accepting a hand-written call without it
     would turn bad user input into a compiler-bug diagnostic much later. The
     printer always stamps the attr, so requiring it costs the round-trip
@@ -156,7 +160,7 @@ def test_hand_written_builtin_call_without_device_is_a_user_error():
     """
     with pytest.raises(InvalidOperationError) as excinfo:
         pl.parse_program(_barrier_program("pl.builtin.tensor.barrier(signal)"))
-    assert "device" in str(excinfo.value)
+    assert "worker" in str(excinfo.value)
     assert excinfo.value.hint is not None
     assert "pld.tensor.barrier" in excinfo.value.hint
 
@@ -196,6 +200,23 @@ def test_public_collective_still_lowers_through_pld_surface():
     }
     assert _BUILTIN_BARRIER not in op_names
     assert ir.get_op("pld.tensor.barrier").name in op_names
+
+
+def test_distributed_alias_lookup_does_not_probe_user_instances():
+    @dataclass
+    class CallableValue:
+        value: int
+
+        def __call__(self):
+            return self.value
+
+        @property
+        def collective(self):
+            pytest.fail("Distributed alias lookup evaluated an instance property")
+
+    parser = ASTParser("<test>", [], closure_vars={"closure_value": CallableValue(1)})
+    for expression in ("closure_value", "closure_value.collective"):
+        assert parser._resolve_distributed_callable(ast.parse(expression, mode="eval").body) is None
 
 
 if __name__ == "__main__":

@@ -258,7 +258,7 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
         // as the direct ``pl.range(pld.system.world_size())`` form.
         ExprPtr stop = UnwrapStopExpr(fs->stop_, var_defs);
         if (auto stop_call = As<Call>(stop)) {
-          if (stop_call->op_ && IsOp(stop_call, "pld.system.world_size")) {
+          if (IsOp(stop_call, "pld.system.world_size") || IsOp(stop_call, "pld.system.num_workers")) {
             desc.is_all = true;
             return desc;
           }
