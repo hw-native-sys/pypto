@@ -46,7 +46,7 @@ from pypto.ir.distributed_compiled_program import (
     _DISTRIBUTED_META_FILENAME,
     DistributedCompiledProgram,
 )
-from pypto.ir.param_info import _ParamInfo, bind_complete_args
+from pypto.ir.param_info import _ParamInfo, bind_complete_args, collect_output_values
 from pypto.runtime import DeviceTensor, ExecutionMode, RunConfig, StackedDeviceTensor
 
 
@@ -2126,6 +2126,23 @@ def test_shared_artifact_load_failure_is_retryable_and_concurrent_loads_publish_
         assert all(cc is sentinel for cc in results)
         assert assemble.call_count == 2
         assert compiled._artifact.chip_callable is compiled.chip_callable
+
+
+@pytest.mark.parametrize("return_style", [False, True])
+def test_output_collection_uses_pure_out_metadata(return_style):
+    """Execution collects Out slots, not every written/returned tensor."""
+    _, output_indices, _ = _extract_param_infos(_make_program_with_inout())
+    args = [torch.empty(1), torch.empty(1), torch.empty(1)]
+    result = collect_output_values(args, output_indices, return_style=return_style)
+    assert result is (args[2] if return_style else None)
+
+
+def test_output_collection_preserves_metadata_order_and_identity():
+    args = [torch.empty(1), torch.empty(1), torch.empty(1)]
+    result = collect_output_values(args, [2, 0], return_style=True)
+    assert isinstance(result, tuple)
+    assert result[0] is args[2] and result[1] is args[0]
+    assert collect_output_values(args, [], return_style=True) == ()
 
 
 if __name__ == "__main__":

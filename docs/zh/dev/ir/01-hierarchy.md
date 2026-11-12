@@ -485,6 +485,22 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `role_` | optional[Role] | 层次角色（对 InCore/AIC/AIV/Group/Orchestration/Graph 自动派生，详见下文） |
 | `attrs_` | list[(str, Any)] | 有序的自由形式元数据，以 `UsualField` 暴露（参与结构遍历） |
 
+### 调用结果类型
+
+`ir.make_call_result_type(return_types, is_submit=False)`（C++：
+`MakeCallResultType`）封装已声明的返回位置，不执行类型推导，也不展开 tuple
+类型的单个结果。parser 和 lowering pass 共用此规则。
+
+| 声明结果 | Call 类型 | Submit 类型 |
+| -------- | --------- | ----------- |
+| `[]` | `UnknownType` | `Tuple[TaskId]` |
+| `[T]` | `T` | `Tuple[T, TaskId]` |
+| `[T1, T2]` | `Tuple[T1, T2]` | `Tuple[T1, T2, TaskId]` |
+| `[Tuple[T1, T2]]` | `Tuple[T1, T2]` | `Tuple[Tuple[T1, T2], TaskId]` |
+
+TaskId 属于任务启动；封装不会修改被调函数签名。返回类型推导和符号 shape
+代入在封装之前完成。
+
 ### 函数体表示
 
 `FunctionIRStage` 是独立于 `FunctionType`、`level` 和 `role` 的强类型反射字段。

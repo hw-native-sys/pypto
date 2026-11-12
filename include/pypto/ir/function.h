@@ -752,6 +752,13 @@ class Function : public IRNode {
 
 using FunctionPtr = std::shared_ptr<const Function>;
 
+/// Pack declared return positions into a call-like expression's result type.
+/// Plain calls use UnknownType for zero results, the result itself for one,
+/// and TupleType for multiple results. Submit always adds a trailing TaskId
+/// and retains the outer tuple, including when the callee returns nothing.
+/// A TupleType declared as ONE result is never flattened by this operation.
+TypePtr MakeCallResultType(const std::vector<TypePtr>& return_types, bool is_submit = false);
+
 /**
  * @brief Null-safe overload of IsOrchestrationLike for a function handle
  *

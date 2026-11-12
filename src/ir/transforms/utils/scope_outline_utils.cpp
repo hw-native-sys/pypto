@@ -2319,26 +2319,13 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   }
   TrackingSubstituteMutator caller_type_mutator(caller_var_map);
   std::vector<TypePtr> effective_return_types;
-  effective_return_types.reserve(return_types.size() + (scope_task_id_var ? 1 : 0));
+  effective_return_types.reserve(return_types.size());
   for (const auto& return_type : return_types) {
     effective_return_types.push_back(caller_type_mutator.RemapType(return_type));
   }
-  if (scope_task_id_var) {
-    effective_return_types.push_back(std::make_shared<ScalarType>(DataType::TASK_ID));
-  }
-  // Determine call return type. Single non-task-id return is unwrapped; the
-  // task_id_var path always uses TupleType (even for the lone TASK_ID
-  // element) so codegen's ``IsSubmitCall`` detection — which keys on a
-  // trailing ``Scalar[TASK_ID]`` element of a ``TupleType`` — fires
-  // uniformly.
-  TypePtr call_return_type;
-  if (effective_return_types.empty()) {
-    call_return_type = nullptr;
-  } else if (!scope_task_id_var && effective_return_types.size() == 1) {
-    call_return_type = effective_return_types[0];
-  } else {
-    call_return_type = std::make_shared<TupleType>(effective_return_types);
-  }
+  // Pack after remapping so result shapes retain caller-local identities.
+  // Submit appends TaskId without changing the outlined callee's signature.
+  auto call_return_type = MakeCallResultType(effective_return_types, scope_task_id_var != nullptr);
 
   // Build the synthesised call expression. When ``scope_task_id_var`` is
   // set (user-written ``as tid`` OR synthesized above for a deps-only
@@ -2368,8 +2355,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     // verification take one path.
     synthesised_call_expr = std::make_shared<Submit>(
         global_var, call_args, std::move(submit_deps), std::vector<std::pair<std::string, std::any>>{},
-        std::move(submit_attrs), call_return_type ? call_return_type : std::make_shared<UnknownType>(),
-        op->span_,
+        std::move(submit_attrs), call_return_type, op->span_,
         /*core_num=*/spmd_scope ? std::optional<ExprPtr>(spmd_scope->core_num_) : std::nullopt,
         /*sync_start=*/spmd_scope && spmd_scope->sync_start_,
         /*allow_early_resolve=*/scope_allow_early_resolve,
@@ -2394,13 +2380,11 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       }
     }
     if (!call_attrs.empty()) {
-      synthesised_call_expr = std::make_shared<Call>(
-          global_var, call_args, std::vector<std::pair<std::string, std::any>>{}, std::move(call_attrs),
-          call_return_type ? call_return_type : std::make_shared<UnknownType>(), op->span_);
-    } else if (call_return_type) {
-      synthesised_call_expr = std::make_shared<Call>(global_var, call_args, call_return_type, op->span_);
+      synthesised_call_expr =
+          std::make_shared<Call>(global_var, call_args, std::vector<std::pair<std::string, std::any>>{},
+                                 std::move(call_attrs), call_return_type, op->span_);
     } else {
-      synthesised_call_expr = std::make_shared<Call>(global_var, call_args, op->span_);
+      synthesised_call_expr = std::make_shared<Call>(global_var, call_args, call_return_type, op->span_);
     }
   }
   // Keep the original name (``call_expr``) for the rest of the function —

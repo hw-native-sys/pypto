@@ -2403,19 +2403,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   // AIV call (returns result)
   auto aiv_gvar = std::make_shared<GlobalVar>(aiv_name);
-  TypePtr aiv_return_type;
-  if (group_return_types.size() == 1) {
-    aiv_return_type = group_return_types[0];
-  } else if (group_return_types.size() > 1) {
-    aiv_return_type = std::make_shared<TupleType>(group_return_types);
-  }
-
-  CallPtr aiv_call;
-  if (aiv_return_type) {
-    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, aiv_return_type, func->span_);
-  } else {
-    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, func->span_);
-  }
+  auto aiv_return_type = MakeCallResultType(group_return_types);
+  auto aiv_call = std::make_shared<Call>(aiv_gvar, call_args, aiv_return_type, func->span_);
 
   // Build group body
   std::vector<StmtPtr> group_stmts;

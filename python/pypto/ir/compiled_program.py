@@ -38,7 +38,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import torch
 
@@ -88,6 +88,7 @@ from .param_info import (  # noqa: F401  -- re-export
     _ParamInfo,
     _to_torch_dtype,
     bind_complete_args,
+    collect_output_values,
 )
 from .param_info import (
     _DATATYPE_TO_TORCH as _DATATYPE_TO_TORCH,  # noqa: PLC0414
@@ -388,11 +389,11 @@ def _invoke_compiled(
         **({"artifact_runtime": artifact_runtime} if artifact_runtime is not None else {}),
     )
 
-    if not return_style:
-        return None
-    outputs = [coerced[i] for i in output_indices]
-    assert all(isinstance(o, torch.Tensor) for o in outputs)
-    return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
+    outputs = collect_output_values(coerced, output_indices, return_style=return_style)
+    if outputs is None or isinstance(outputs, torch.Tensor):
+        return outputs
+    assert isinstance(outputs, tuple) and all(isinstance(o, torch.Tensor) for o in outputs)
+    return cast(tuple[torch.Tensor, ...], outputs)
 
 
 def _default_platform(backend_type: BackendType) -> str:

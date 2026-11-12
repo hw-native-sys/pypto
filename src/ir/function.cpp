@@ -11,11 +11,28 @@
 
 #include "pypto/ir/function.h"
 
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/dtype.h"
+#include "pypto/ir/type.h"
+
 namespace pypto {
 namespace ir {
 
-// Function constructor is implemented inline in the header file
-// No additional implementation needed here
+TypePtr MakeCallResultType(const std::vector<TypePtr>& return_types, bool is_submit) {
+  // Use the same packing rule for parser-built calls and pass-synthesized calls.
+  // TaskId belongs to the launch, so it must not alter the callee's signature.
+  if (is_submit) {
+    auto elements = return_types;
+    elements.push_back(std::make_shared<ScalarType>(DataType::TASK_ID));
+    return std::make_shared<TupleType>(std::move(elements));
+  }
+  if (return_types.empty()) return GetUnknownType();
+  if (return_types.size() == 1) return return_types.front();
+  return std::make_shared<TupleType>(return_types);
+}
 
 }  // namespace ir
 }  // namespace pypto

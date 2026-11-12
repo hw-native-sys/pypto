@@ -4366,6 +4366,14 @@ def deep_clone(
         cloned by the traversal. Seeded entries from var_map are NOT included.
     """
 
+def make_call_result_type(return_types: Sequence[Type], is_submit: bool = False) -> Type:
+    """Pack declared results, appending TaskId for Submit without flattening tuples.
+
+    A plain call with no results has UnknownType; one result keeps its type;
+    multiple results form a TupleType. Submit always returns a TupleType.
+    """
+    ...
+
 def deduce_call_return_type(
     callee_params: Sequence[Var],
     args: Sequence[Expr],

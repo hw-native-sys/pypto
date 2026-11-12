@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 from pypto._target import ExecutionMode
 from pypto.backend import BackendType
+from pypto.ir.param_info import collect_output_values
 from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
 from .runner import RunConfig
@@ -640,10 +641,7 @@ class ChipWorker(Worker):
                     dfx_dir, self.platform, rc.dfx_options(), prebuilt_directory=runtime.directory
                 )
 
-        if not return_style:
-            return None
-        outputs = [coerced[i] for i in compiled.output_indices]
-        return outputs[0] if len(outputs) == 1 else tuple(outputs)
+        return collect_output_values(coerced, compiled.output_indices, return_style=return_style)
 
     def register(self, compiled: CompiledProgram) -> RegistrationHandle:
         """Pre-register *compiled* on this ChipWorker. Returns a callable handle.

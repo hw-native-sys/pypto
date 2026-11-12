@@ -324,3 +324,14 @@ compiled = ir.compile(program, **CompileOptions(execution_mode=ExecutionMode.ONB
 - [运行](../user/execution/01-run.md) —— `CompiledProgram`、`ChipWorker`、`DeviceTensor`。
 - [运行时 DFX 开关](03-runtime-dfx.md) —— 五个诊断子特性。
 - [每任务 Ring 尺寸](05-runtime-ring-sizing.md) —— 三个逐次派发的 ring 覆写项。
+
+## Python return-style 输出
+
+return-style 执行自动分配纯 `Out` 参数，按声明顺序返回这些位置，单个输出
+直接返回 tensor。`InOut` 必须由调用者提供，不参与输出收集；in-place 执行
+返回 `None`。L2/L3 单次调用和 `ChipWorker.run` 共用
+`param_info.collect_output_values`，重新加载的构建产物使用相同元数据。
+
+这一执行 ABI 与 IR 的逻辑返回值不同：它不求值 `ReturnStmt`，不按其操作数
+重新排列输出，也不重建嵌套 tuple。程序内部的 Call/Submit 结果绑定则遵循
+被调函数的显式返回值到参数映射。

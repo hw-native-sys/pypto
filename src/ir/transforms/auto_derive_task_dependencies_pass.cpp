@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -605,9 +606,12 @@ std::optional<int64_t> StaticPositiveTripCount(const ForStmtPtr& op) {
   return (*stop - *start + *step - 1) / *step;
 }
 
+using ReturnedParamIndexCache = std::unordered_map<const Function*, std::vector<std::optional<size_t>>>;
+
 class StorageRootAnalysis : public IRVisitor {
  public:
-  explicit StorageRootAnalysis(ProgramPtr program) : program_(std::move(program)) {}
+  StorageRootAnalysis(ProgramPtr program, ReturnedParamIndexCache& returned_param_indices)
+      : program_(std::move(program)), returned_param_indices_(returned_param_indices) {}
 
   void Initialize(const std::vector<VarPtr>& params) {
     for (const auto& param : params) {
@@ -882,15 +886,23 @@ class StorageRootAnalysis : public IRVisitor {
   std::unordered_map<const Var*, MemRefPtr> root_memrefs_;
   std::unordered_map<const Var*, std::vector<StorageLocation>> tuple_locations_;
   std::unordered_set<const Var*> unsupported_locations_;
+  ReturnedParamIndexCache& returned_param_indices_;
 
   std::vector<StorageLocation> CollectReturnedLocations(const CallPtr& call,
                                                         const FunctionPtr& callee) const {
-    auto ret = GetTrailingReturn(callee ? callee->body_ : StmtPtr{});
-    if (!ret) return {};
+    auto it = returned_param_indices_.find(callee.get());
+    if (it == returned_param_indices_.end()) {
+      it = returned_param_indices_.emplace(callee.get(), return_lineage::ExplicitReturnedParamIndices(callee))
+               .first;
+    }
+    const auto& indices = it->second;
     std::vector<StorageLocation> locations;
-    locations.reserve(ret->value_.size());
-    for (const auto& value : ret->value_) {
-      locations.push_back(ResolveCalleeReturnExpr(value, call, callee));
+    locations.reserve(indices.size());
+    for (const auto& index : indices) {
+      // Unknown slots keep their position; dropping one would shift every
+      // later TupleGetItem onto a different storage dependency.
+      locations.push_back(index && *index < call->args_.size() ? ResolveExpr(call->args_[*index])
+                                                               : StorageLocation{});
     }
     bool has_location = false;
     for (const auto& location : locations) {
@@ -901,25 +913,6 @@ class StorageRootAnalysis : public IRVisitor {
     }
     if (!has_location) return {};
     return locations;
-  }
-
-  StorageLocation ResolveCalleeReturnExpr(const ExprPtr& expr, const CallPtr& call,
-                                          const FunctionPtr& callee) const {
-    auto var = AsVarLike(expr);
-    if (!var || !call || !callee) return {};
-    for (size_t i = 0; i < callee->params_.size() && i < call->args_.size(); ++i) {
-      if (callee->params_[i] && callee->params_[i]->UniqueId() == var->UniqueId()) {
-        return ResolveExpr(call->args_[i]);
-      }
-    }
-    return {};
-  }
-
-  static ReturnStmtPtr GetTrailingReturn(const StmtPtr& stmt) {
-    if (auto ret = As<ReturnStmt>(stmt)) return ret;
-    auto seq = As<SeqStmts>(stmt);
-    if (!seq || seq->stmts_.empty()) return nullptr;
-    return As<ReturnStmt>(seq->stmts_.back());
   }
 };
 
@@ -2353,12 +2346,15 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
 
     auto new_functions = program->functions_;
     bool changed = false;
+    // All analyses read the original immutable Program. Share the cache across
+    // callers so nested returns in a callee's body are scanned only once per pass.
+    ReturnedParamIndexCache returned_param_indices;
 
     for (auto& [gvar, func] : new_functions) {
       (void)gvar;
       if (!func || !func->body_) continue;
 
-      StorageRootAnalysis storage(program);
+      StorageRootAnalysis storage(program, returned_param_indices);
       storage.Initialize(func->params_);
       storage.VisitStmt(func->body_);
 

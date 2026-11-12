@@ -364,3 +364,16 @@ hand-constructed `simpler.worker.Worker` still gets `chip_callable`,
 - [Running](../user/execution/01-run.md) — `CompiledProgram`, `ChipWorker`, `DeviceTensor`.
 - [Runtime DFX Flags](03-runtime-dfx.md) — the five diagnostic sub-features.
 - [Per-Task Ring Sizing](05-runtime-ring-sizing.md) — the three per-dispatch ring overrides.
+
+## Python return-style outputs
+
+Return-style execution auto-allocates pure `Out` parameters and returns those
+slots in declaration order, unwrapping a single output. `InOut` arguments must
+be supplied by the caller and are not collected. In-place execution returns
+`None`. One-shot L2/L3 calls and `ChipWorker.run` share
+`param_info.collect_output_values`; reloaded artifacts use the same metadata.
+
+This execution ABI is distinct from logical IR returns: it does not evaluate
+`ReturnStmt`, reorder outputs according to its operands, or reconstruct nested
+tuples. Call/Submit result binding inside a program instead follows the
+callee's explicit return-to-parameter map.
