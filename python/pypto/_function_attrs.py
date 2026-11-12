@@ -39,6 +39,10 @@ EXTERNAL_SOURCE_ATTR = "external_source"
 # Ordered parameter references returned by a declaration-only external kernel.
 EXTERNAL_RETURN_PARAMS_ATTR = "external_return_params"
 
+# Bridge-generated host checker definition and symbol; see function.h.
+EXTERNAL_PREFLIGHT_SOURCE_ATTR = "external_preflight_source"
+EXTERNAL_PREFLIGHT_SYMBOL_ATTR = "external_preflight_symbol"
+
 # Package-resource handle (":pypto.runtime.builtins.collectives.<op>") naming the
 # builtin template package that supplies a compiler-synthesized kernel's C++
 # source (str). Written by LowerL2TensorCollectives on the AIV function it
@@ -66,6 +70,8 @@ __all__ = [
     "BUILTIN_TEMPLATE_DIR_ATTR",
     "BUILTIN_TEMPLATE_VARS_ATTR",
     "DUAL_AIV_DISPATCH_ATTR",
+    "EXTERNAL_PREFLIGHT_SOURCE_ATTR",
+    "EXTERNAL_PREFLIGHT_SYMBOL_ATTR",
     "EXTERNAL_RETURN_PARAMS_ATTR",
     "EXTERNAL_SOURCE_ATTR",
     "REQUIRE_CONTIGUOUS_OPERANDS_ATTR",

@@ -307,7 +307,7 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
   } else if (t == typeid(bool)) {
     stream_ << (std::any_cast<bool>(value) ? "True" : "False");
   } else if (t == typeid(std::string)) {
-    stream_ << std::quoted(std::any_cast<std::string>(value));
+    PrintStringLiteral(std::any_cast<std::string>(value));
   } else if (t == typeid(double)) {
     stream_ << FormatFloatLiteral(std::any_cast<double>(value));
   } else if (t == typeid(float)) {

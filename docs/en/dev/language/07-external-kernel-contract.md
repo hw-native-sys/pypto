@@ -1,6 +1,6 @@
 # External Kernel Contract (Internal v1)
 
-This is the interface baseline for tasks 34.1–34.3 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
+This is the interface baseline for tasks 34.1–34.4 and [RFC #3293](https://github.com/hw-native-sys/pypto/issues/3293).
 It defines data exchange and executable IR prototypes, not a public provider
 registration API or an installed CANNBotDSL runtime adapter.
 
@@ -16,8 +16,8 @@ registration API or an installed CANNBotDSL runtime adapter.
 The implementation lives in `python/pypto/jit/external/`; the bridge protocol is
 in `python/pypto/backend/external_bridge.py`. Importing either does not import an
 optional DSL. Internal registration and capture are implemented in `registry.py` and
-`compatibility.py`. Call normalization and signature variants are implemented in the JIT; native
-wrappers/runtime binding checks remain in 34.4.
+`compatibility.py`. Call normalization and signature variants are implemented in the JIT;
+the TMR bridge and runtime binding checks are described below.
 
 ## Provider discovery and capture
 
@@ -302,6 +302,50 @@ Runtime-target fields follow the same exact schema checks as provider records.
 Supported ABI entries must be `(str, int)` tuples in a frozenset, with nonempty
 names and positive integer versions; booleans and floats cannot authorize an ABI
 through Python's numeric equality. Runtime name and version must be nonempty.
+
+## TMR bridge (task 34.4)
+
+`pypto.backend.tmr_bridge.TMRBridge` lowers `c_pointer` ABI version 1 for
+`RuntimeTarget(runtime="tmr", version="1", ...)`, targeting A5/CCEC. This is an
+internal runtime-interface version, not the runtime package's release number.
+The provider supplies an includable device function returning `void`; a host
+launch stub is not callable by this bridge. No optional DSL is imported.
+
+The physical signature may reorder logical parameters. Tensor slots precede scalar
+slots in TMR, independently of native argument order. Scalars preserve bits and
+must have the declared native C++ type. Metadata uses unsigned 1/2/4/8-byte integers;
+its declared units determine element-to-byte conversion. Data pointers name allocation
+bases: the native function applies the separately passed or compile-time offset once.
+Tensor alignment constrains that allocation-base pointer, independently of the offset;
+it does not require the resulting view address to have the same alignment.
+Compilation verifies native argument count, types, sizes and alignments.
+
+`lower()` returns owned source bytes plus a self-contained host checker.
+`with materialize(task) as native:` gives a private source lease;
+`native.configure_context(context)` checks the prepared request and attaches sources,
+includes, contract and checker to an existing extern specialization. Keep that lease
+alive until the existing runtime has compiled/published its sources. AIC/AIV members,
+mixed Groups and vector lane count come from the execution contract. Registered-object
+discovery and CANNBotDSL migration remain task 34.5; persistent reuse remains task 34.6.
+
+Orchestration invokes the checker after building actual task arguments and before
+submission, including direct calls, explicit submits and reordered SPMD/Group wrappers.
+It checks rank/dtype, fixed and shared extents, positive strides, offsets, alignment,
+storage/address bounds and native metadata widths on each invocation. Unpermitted
+write overlaps are rejected using conservative byte intervals; disjoint sibling views
+and explicit alias permissions are supported. Checks remain in generated orchestration
+on artifact hits. Before the native call, the wrapper disables atomics before saving
+CTRL, so restoring control state cannot re-enable an inherited atomic mode. It clears
+inherited HF32 mode on AIC cores; AIV preserves that control bit. It drains pipelines,
+writes back caches and applies the DDR barrier before returning, then restores control
+state with atomics disabled.
+
+Unsupported cases fail explicitly: descriptor ABIs, non-ND layouts, ranks outside
+1–5, FP16/BF16 scalars, other architectures/runtimes, logical launch context,
+synchronized/full-resident launches, runtime-allocated output slots and recorded
+Graph replay. Allocate output storage before submitting. CPU tests compile and execute
+argument conversion and checks against pinned TMR headers; mocked completion intrinsics
+verify sequencing, not device visibility. Device acceptance remains task 34.7.
 
 ## Versions and cache identity
 

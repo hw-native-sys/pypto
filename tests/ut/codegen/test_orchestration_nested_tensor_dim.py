@@ -41,7 +41,10 @@ def test_nested_dim_in_allocation_extent(source_kind, axis, tmp_path):
     span = ir.Span.unknown()
     index = DataType.INDEX
     n = ir.Var("N", ir.ScalarType(index), span)
-    shape = [64, 16] if source_kind in ("static", "invalid_axis", "other_call") else [n, 16]
+    # Normalize explicitly for the native all-int/all-Expr overloads; the public
+    # Python TensorType wrapper also accepts and normalizes mixed shapes.
+    first = ir.ConstInt(64, index, span) if source_kind in ("static", "invalid_axis", "other_call") else n
+    shape = [first, ir.ConstInt(16, index, span)]
     src = ir.Var("src", ir.TensorType(shape, DataType.FP32), span)
     stmts = []
     params = [src]
@@ -58,7 +61,7 @@ def test_nested_dim_in_allocation_extent(source_kind, axis, tmp_path):
         )
         dim = ir.Cast(read, index, span)
     extent = ir.Mul(dim, ir.ConstInt(2, index, span), index, span)
-    output_type = ir.TensorType([extent, 8], DataType.FP32)
+    output_type = ir.TensorType([extent, ir.ConstInt(8, index, span)], DataType.FP32)
     output = ir.Var("workspace", output_type, span)
     stmts.extend(
         [

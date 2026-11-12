@@ -564,6 +564,22 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.VisitStmt(func->body_);
 
   oss << GenerateIncludes(false, stmt_codegen.NeedsVectorInclude(), !graph_functions.empty());
+  // Bridge guards are template definitions, so emit outside the C linkage block.
+  // Keep the owned source in generated orchestration, not in a temporary header.
+  std::map<std::string, std::string> external_checks;
+  for (const auto& [gvar, member] : program->functions_) {
+    if (!member->HasAttr(kAttrExternalPreflightSource)) continue;
+    const auto symbol = member->GetAttr<std::string>(kAttrExternalPreflightSymbol, "");
+    const auto source = member->GetAttr<std::string>(kAttrExternalPreflightSource);
+    auto [it, inserted] = external_checks.emplace(symbol, source);
+    CHECK_SPAN(inserted || it->second == source, member->span_)
+        << "External preflight symbol has conflicting definitions: " << symbol;
+  }
+  // Recorded Graph tasks bypass the recorder on replay. Until Graph boundary
+  // validation carries these constraints, reject rather than checking just once.
+  CHECK_SPAN(graph_functions.empty() || external_checks.empty(), func->span_)
+      << "External runtime bridge does not yet support recorded Graph replay";
+  for (const auto& [symbol, source] : external_checks) oss << source << "\n";
 
   oss << "extern \"C\" {\n\n";
 

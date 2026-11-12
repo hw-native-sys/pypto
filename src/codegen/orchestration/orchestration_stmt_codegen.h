@@ -355,6 +355,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   std::string CurrentTaskVarName() const;
 
+  void AppendExternalPreflight(TaskDispatchPlan& plan, const ir::FunctionPtr& kernel_func);
+
   TaskDispatchPlan BuildTaskDispatchPlan(const std::string& comment, const ir::CallPtr& call,
                                          std::vector<ParamEntry>&& params, const ir::ExprPtr& launch_core_num,
                                          bool launch_sync_start, const std::string& submit_expr,
@@ -389,6 +391,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   TaskDispatchPlan BuildMixedGroupDispatchPlan(const ir::CallPtr& call, const ir::FunctionPtr& launch_func,
                                                const std::string& group_name, int aic_id, int aiv_id,
+                                               const ir::FunctionPtr& aic_func,
                                                const ir::FunctionPtr& aiv_func,
                                                std::vector<ParamEntry>&& params, bool capture_plain_task_id);
 

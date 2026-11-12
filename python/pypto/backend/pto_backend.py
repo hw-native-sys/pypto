@@ -48,6 +48,7 @@ from pypto._function_attrs import (
     BUILTIN_TEMPLATE_DIR_ATTR,
     BUILTIN_TEMPLATE_VARS_ATTR,
     DUAL_AIV_DISPATCH_ATTR,
+    EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
@@ -2566,6 +2567,13 @@ def _with_simt_helpers(
     return functions
 
 
+def _validate_external_bridge_runtime(program: _ir_core.Program, runtime: _passes.RuntimeKind) -> None:
+    if runtime != _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER and any(
+        EXTERNAL_PREFLIGHT_SOURCE_ATTR in f.attrs for f in program.functions.values()
+    ):
+        raise ValueError("External runtime bridge requires TENSORMAP_AND_RINGBUFFER")
+
+
 def _generate_single_chip(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -2595,6 +2603,8 @@ def _generate_single_chip(
         ),
         None,
     )
+
+    _validate_external_bridge_runtime(transformed_program, runtime)
 
     groups, ungrouped = _build_group_mapping(transformed_program)
 
