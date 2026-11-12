@@ -2547,10 +2547,12 @@ jobs:
           # The suite passes in ~5.5 min (slow path ~12 min). Bound a hung
           # case at 15 min of execution and 20 min of card-queue wait so a
           # failure reaches the log quickly instead of after the old 65/30-min caps.
+          # Stop at the first failing case (-x): a device failure otherwise
+          # repeats its ~2.5 min failure path for every remaining case.
           task-submit --device auto --device-num 4 --timeout 1200 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
               tests/st/distributed/test_l3_urma_async.py \
-              -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
+              -v -x --platform=a5 --device=\$TASK_DEVICE --durations=0 \
               --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-distributed-junit.xml"
 
       - name: Upload distributed test results
