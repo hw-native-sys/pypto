@@ -26,6 +26,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
@@ -44,6 +45,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_indexed_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -61,7 +63,7 @@ namespace {
 class BufferKernelSupport : public IRVisitor {
  public:
   explicit BufferKernelSupport(const FunctionPtr& function)
-      : return_types_(function->return_types_), views_(function->body_) {
+      : return_types_(function->return_types_), views_(function->body_), indexed_(function->body_) {
     for (size_t i = 0; i < function->params_.size(); ++i) {
       const auto& param = function->params_[i];
       if (As<TensorType>(param->GetType())) {
@@ -378,6 +380,10 @@ class BufferKernelSupport : public IRVisitor {
     } else if (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num") ||
                IsOp(call, "tile.get_subblock_idx")) {
       supported &= call->args_.empty() && call->kwargs_.empty();
+    } else if (const auto* indexed = backend::FindLogicalBufferIndexedRecipe(call->op_->name_)) {
+      supported &= backend::SupportsLogicalBufferIndexed(*indexed, call) &&
+                   (!indexed->scatter || indexed_.HasExclusiveZeroBase(call));
+      for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
     } else if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
       supported &= backend::SupportsLogicalBufferConversion(*conversion, call);
       for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
@@ -690,6 +696,7 @@ class BufferKernelSupport : public IRVisitor {
   Region* region_ = nullptr;
   const std::vector<TypePtr>& return_types_;
   BufferViewAnalysis views_;
+  BufferIndexedAnalysis indexed_;
   std::unordered_map<const Var*, int64_t> scalar_multiples_;
   std::unordered_map<const Expr*, int64_t> expression_multiples_;
   std::unordered_map<const Var*, TileTypePtr> window_parents_;

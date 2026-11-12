@@ -28,6 +28,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
@@ -52,6 +53,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_indexed_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -649,8 +651,11 @@ class LocalAccumulatorIndex : public IRVisitor {
 class TileToBufferMutator : public IRMutator {
  public:
   TileToBufferMutator(const StorageIndex& storage, bool guarded_valid,
-                      const LocalAccumulatorIndex* local_accumulators)
-      : storage_(storage), guarded_valid_(guarded_valid), local_accumulators_(local_accumulators) {}
+                      const LocalAccumulatorIndex* local_accumulators, const StmtPtr& body)
+      : storage_(storage),
+        guarded_valid_(guarded_valid),
+        local_accumulators_(local_accumulators),
+        indexed_(body) {}
 
   StmtPtr VisitStmt(const StmtPtr& stmt) override {
     auto lowered = IRMutator::VisitStmt(stmt);
@@ -1057,6 +1062,20 @@ class TileToBufferMutator : public IRMutator {
     // it). Every other attribute still needs an explicit conversion contract.
     CHECK_SPAN(StripAttr(call->attrs_, kPipelineMembershipAttr).empty(), call->span_)
         << "LowerTileToBuffer: device-call attributes require an explicit conversion contract";
+    if (const auto* indexed = backend::FindLogicalBufferIndexedRecipe(call->op_->name_)) {
+      CHECK_SPAN(result && backend::SupportsLogicalBufferIndexed(*indexed, call), call->span_)
+          << "LowerTileToBuffer: unsupported indexed operands";
+      CHECK_SPAN(!indexed->scatter || indexed_.HasExclusiveZeroBase(call), call->span_)
+          << "LowerTileToBuffer: scatter requires an exclusively consumed zero destination";
+      std::vector<ExprPtr> args;
+      // The zero base is already materialized and planned. Native scatter
+      // overwrites that result storage; it has no preserve input operand.
+      for (size_t i = indexed->scatter ? 1 : 0; i < call->args_.size(); ++i) {
+        args.push_back(Handle(call->args_[i]));
+      }
+      args.push_back(Handle(result));
+      return Operation(indexed->buffer_op, args, call->span_);
+    }
     if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
       CHECK_SPAN(result && backend::SupportsLogicalBufferConversion(*conversion, call), call->span_)
           << "LowerTileToBuffer: unsupported cast, comparison or selection operands";
@@ -1415,6 +1434,7 @@ class TileToBufferMutator : public IRMutator {
   std::unordered_map<const TileType*, VarPtr> use_windows_;
   std::vector<StmtPtr> use_definitions_;
   const LocalAccumulatorIndex* local_accumulators_;
+  BufferIndexedAnalysis indexed_;
   std::unordered_map<const Stmt*, std::vector<StmtPtr>> local_definitions_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;
@@ -1458,7 +1478,7 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
       local_accumulators->VisitStmt(function->body_);
     }
     TileToBufferMutator mutator(storage, function->GetAttr<bool>(kAttrBufferIrSelected, false),
-                                local_accumulators ? &*local_accumulators : nullptr);
+                                local_accumulators ? &*local_accumulators : nullptr, function->body_);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
     lowered->ir_stage_ = FunctionIRStage::Buffer;

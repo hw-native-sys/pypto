@@ -84,6 +84,25 @@ Runtime/empty valid state and window operands remain outside this rollout.
 Torch replay packs and unpacks the predicate bytes and preserves physical
 UINT32 scratch widths when allocations share storage.
 
+Indexed `gather` accepts full-valid dense FP16/FP32/INT32 sources, INT32
+indices, and explicit INT32 scratch matching the index shape. The result has
+the index shape and source dtype. Indices address flattened physical elements;
+nonnegative in-bounds indices are a caller precondition, checked by Torch replay.
+Gather scratch is writable and disjoint from the source, indices and result;
+its result is also disjoint from every input.
+
+Indexed `scatter` accepts FP32 values and INT32 indices with matching
+physical and positive static valid shapes, including partial source rectangles.
+Its destination must be full-valid and disjoint from both indexed reads.
+Native scatter clears the complete destination before ascending row-major
+indexed writes; duplicate indices retain the last value. Default selection
+therefore requires a fresh `full(0)` destination consumed only by this scatter
+in the same loop region. Nonzero bases, live old aliases and window operands
+retain Tile IR. Destination preservation is expressed by the existing
+zero-base scatter, written-mask comparison and select chain; it is never
+reconstructed by the emitter. Mask/byte-offset gather, mask scatter and
+multi-result gather remain outside this indexed rollout.
+
 Structured If/For/While regions may carry Tiles, scalars and aliases of one GM
 parameter. Both branch arms must resolve a GM result to the same parameter;
 loop backedges must preserve the initial GM alias. For loops require an INDEX
