@@ -1,0 +1,24 @@
+########## logs/cosq_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=512 wrong=0 max_abs=3.299e-07 max_rel=1.933e-05
+x -12.800 .. 12.750  zero_crossings=9  peak_abs_sin=0.999992  first_bad=-1  gate=ABSOLUTE
+PASS
+
+########## logs/cosq_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=512 wrong=0 max_abs=3.299e-07 max_rel=1.933e-05
+x -12.800 .. 12.750  zero_crossings=9  peak_abs_sin=0.999992  first_bad=-1  gate=ABSOLUTE
+PASS
+
+########## logs/cosq_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=512 wrong=0 max_abs=3.299e-07 max_rel=1.933e-05
+x -12.800 .. 12.750  zero_crossings=9  peak_abs_sin=0.999992  first_bad=-1  gate=ABSOLUTE
+PASS
+

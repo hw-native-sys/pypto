@@ -1,0 +1,164 @@
+VERBATIM OUTPUT OF ALL TWENTY RUNS, 2026-11-09.
+Host root@101.245.76.149 (opencompass-01), Ascend910B2, dav-2201, CANN 8.5.2,
+harness /tmp/di-i27, ORACLE 44, arity 3, n=5120, tolerance 1e-6.
+
+One file rather than twenty .log files because .gitignore excludes both `logs/`
+(:176) and `*.log` (:175) repo-wide. Every line below is as the harness printed it,
+including the three set_env.sh `unbound variable` lines, which are noise from the
+vendor script and not a failure.
+
+===== index load = 1 f32 (4 bytes), rep 1 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 1 f32 (4 bytes), rep 2 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 1 f32 (4 bytes), rep 3 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 1 f32 (4 bytes), rep 4 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 1 f32 (4 bytes), rep 5 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 2 f32 (8 bytes), rep 1 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 2 f32 (8 bytes), rep 2 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 2 f32 (8 bytes), rep 3 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 2 f32 (8 bytes), rep 4 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 2 f32 (8 bytes), rep 5 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 4 f32 (16 bytes), rep 1 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 4 f32 (16 bytes), rep 2 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 4 f32 (16 bytes), rep 3 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 4 f32 (16 bytes), rep 4 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 4 f32 (16 bytes), rep 5 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=5120 max_abs=3.200e+03 max_rel=8.333e-01 idx=3 rows=4
+  first disagreement at col 0: got 640.125000 want 3840.125000
+FAIL
+
+===== index load = 8 f32 (32 bytes), rep 1 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00 idx=3 rows=4
+PASS
+
+===== index load = 8 f32 (32 bytes), rep 2 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00 idx=3 rows=4
+PASS
+
+===== index load = 8 f32 (32 bytes), rep 3 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00 idx=3 rows=4
+PASS
+
+===== index load = 8 f32 (32 bytes), rep 4 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00 idx=3 rows=4
+PASS
+
+===== index load = 8 f32 (32 bytes), rep 5 =====
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=5120 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00 idx=3 rows=4
+PASS
+

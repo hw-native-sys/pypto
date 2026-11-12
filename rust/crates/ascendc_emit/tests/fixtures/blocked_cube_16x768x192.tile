@@ -1,0 +1,35 @@
+// A SMALL blocked cube matmul, written to be SCORABLE where the lmhead is not.
+//
+// Same four-op shape as bench/deepseek_v41/tile/gemm_f16_lmhead_v41_16x5120x12928
+// -- load A; load B; matmul; store -- and the same block plan (Mpad=16, Kb=256,
+// Nb=64), but at 16x768x192 it gives THREE K blocks and THREE N blocks. Three
+// rather than two on purpose: with two, an off-by-one at the last block and one
+// at the first are the same single case, and the K walk is where this arm's
+// likeliest defect lives.
+//
+// WHY NOT SCORE THE LMHEAD. At K=5120 a single dropped k is ~2e-4 relative,
+// below f16's ~2.6e-4 representation floor at |C| ~ 1920, so the general-GEMM
+// oracle there can detect a dropped K-BLOCK and provably not a dropped k
+// (measured by the peer lane, 2026-11-09). At K=768 with the oracle's own fill
+// -- values that are multiples of 0.0625 in [-0.75, 0.75], exactly f16
+// representable -- |C| is single digits and one k is ~3e-2 relative, tens of
+// ULP. The same defect that is invisible at lmhead scale is loud here.
+//
+// It is also small enough that the oracle's host reference RUNS: the 12928 case
+// sits at 99.9% host CPU and has not finished in 17 minutes, which is an n-scale
+// problem (n = 33,095,680) and not a property of the oracle.
+//
+// B is 768 x 192 f16 = 294,912 bytes, over the 94,208-byte per-buffer budget, so
+// the blocked-cube recogniser fires on it without the budget being forced.
+module {
+  llvm.func @bm_gemm_f16_16_768_192(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>) attributes {hacc.entry} {
+    %m = llvm.mlir.constant(16 : i32) : i32
+    %k = llvm.mlir.constant(768 : i32) : i32
+    %n = llvm.mlir.constant(192 : i32) : i32
+    %a = llvm.call @__tile_load_f16(%arg0, %m, %k) : (!llvm.ptr<1>, i32, i32) -> i32
+    %bw = llvm.call @__tile_load_f16(%arg1, %k, %n) : (!llvm.ptr<1>, i32, i32) -> i32
+    %o = llvm.call @__tile_matmul_f16(%a, %a, %bw, %m, %k, %n) : (i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f16(%arg2, %o, %m, %n) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

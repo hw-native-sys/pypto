@@ -1,0 +1,17 @@
+Narration cue sheet -- ds4-rs-ascend
+Timestamps are approximate at DEMO_SPEED=3.00 on the trimmed cast; the recording
+runs 00:48. Every command below produced real output from an 8-chip 910B2 box.
+
+00:00	SECTION: ds4-rs-ascend -- planning and serving on Ascend
+00:03	The build provenance line: which binary is answering.
+00:08	Free HBM per chip, read from npu-smi: 50.4 GiB free of 512, so the box is busy.
+00:22	The split it would choose. One stream, so expert-parallel across eight chips.
+00:26	A model name is not yet a choice: every name resolves to DeepSeek-V4-Flash.
+00:34	Serving a four-block model: routed-expert tables register, then tokens.
+00:36	Each token reports its own ms/step, so a slow run shows a rate, not a silence.
+01:20	Readiness, not a benchmark: 4 of 44 blocks, on a contended board.
+01:26	A full model needs about 160 GB of free HBM; this box has 50.4 GiB.
+
+Not shown, and the reason the recording stops where it does: the full 155 GB MXFP4
+set cannot be resident, so the engine falls back to SSD streaming, which is not a
+serving mode anyone should judge a decode rate by.

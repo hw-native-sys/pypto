@@ -1,0 +1,11 @@
+{
+  "model": "ds4",
+  "mode": "latency",
+  "tuned_on_device": false,
+  "knobs": {
+    "matvec_block_dim": 48,
+    "attn_block_dim": 48,
+    "reduction_block_dim": 1,
+    "attn_s_block": 8
+  }
+}

@@ -1,0 +1,14 @@
+// Captured from the tile-rs lowering, fused path: func.func -> llvm.func.
+// Form: a fused transformer kernel, in the llvm.func + hacc.entry + __tile_* shape
+// the emitters consume.
+module {
+  llvm.func @rope(%x: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %r = llvm.mlir.constant(12 : i32) : i32
+    %c = llvm.mlir.constant(128 : i32) : i32
+    %ta = llvm.call @__tile_load_f32(%x, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_rope_inplace_f32(%ta, %ta, %r, %c) : (i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%x, %res, %r, %c) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

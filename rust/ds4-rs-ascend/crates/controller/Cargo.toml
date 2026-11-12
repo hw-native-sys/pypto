@@ -1,0 +1,38 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "controller"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ds4-rs-ascend -- plan and serve DeepSeek V4.1 Flash on Ascend: memory profile, parallel split, kernel-set registry."
+
+[[bin]]
+name = "ds4-rs-ascend"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+engine_ascend = { path = "../engine_ascend" }
+engine_core = { path = "../engine_core" }
+
+# The kernel-set registry is SQLite at both ends. `bundled` compiles the C
+# amalgamation, so the host needs a C compiler; that is the cost of not
+# inventing a storage format for something a database already does.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Content addressing and integrity for configs and ELFs.
+sha2 = "0.10"
+# Verifies the signed kernel-set index. This is INTEGRITY: it answers "are
+# these the kernels that were published", nothing about permission. Keep it.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+[features]
+ascend = ["engine_ascend/ascend"]

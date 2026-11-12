@@ -1,0 +1,15 @@
+// Captured from the tile-rs lowering, matmul path: func.func -> llvm.func.
+// Form: an f16 matmul kernel, in the llvm.func + hacc.entry + __tile_* shape
+// the emitters consume.
+module {
+  llvm.func @matmul(%a: !llvm.ptr<1>, %b: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %c = llvm.mlir.constant(64 : i32) : i32
+    %ta = llvm.call @__tile_load_f16(%a, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %tb = llvm.call @__tile_load_f16(%b, %c, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_matmul_f16(%ta, %tb, %r, %c, %c) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f16(%out, %res, %r, %c) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

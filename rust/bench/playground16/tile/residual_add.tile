@@ -1,0 +1,15 @@
+// Captured from the tile-rs lowering: func.func -> llvm.func.
+// Form: llvm.func + hacc.entry + __tile_* -- the shape the emitters consume.
+module {
+  llvm.func @residual_add(%a: !llvm.ptr<1>, %b: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %c = llvm.mlir.constant(1536 : i32) : i32
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %a_t = llvm.call @__tile_load_f32(%a, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %b_t = llvm.call @__tile_load_f32(%b, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %y = llvm.call @__tile_add_f32(%c0, %a_t, %b_t, %r, %c) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %y, %r, %c) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

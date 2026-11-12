@@ -1,0 +1,48 @@
+########## logs/nm92_g92_cal_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=60 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=4 guard_breach=60 first_breach=4 first_breach_val=5 breach_equals_src0=0 guard_end=128
+FAIL
+
+########## logs/nm92_g92_cal_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=60 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=4 guard_breach=60 first_breach=4 first_breach_val=5 breach_equals_src0=0 guard_end=128
+FAIL
+
+########## logs/nm92_g92_cal_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=60 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=4 guard_breach=60 first_breach=4 first_breach_val=5 breach_equals_src0=0 guard_end=128
+FAIL
+
+########## logs/nm92_g93_plain4_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=4 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=0 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+FAIL
+
+########## logs/nm92_g93_plain4_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=4 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=0 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+FAIL
+
+########## logs/nm92_g93_plain4_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=4 wrong=4 max_abs=0.000e+00 max_rel=0.000e+00
+store_bytes=4 delivered=0 guard_breach=0 first_breach=-1 first_breach_val=0 breach_equals_src0=0 guard_end=128
+FAIL
+

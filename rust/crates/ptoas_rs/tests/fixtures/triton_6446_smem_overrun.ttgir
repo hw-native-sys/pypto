@@ -1,0 +1,18 @@
+// Verbatim TTGIR snippet from Triton issue #6446 (smem-capacity overrun).
+// Source: https://github.com/triton-lang/triton/issues/6446
+//
+// The layout-conversion lowering pre-allocates the whole 256x128 bf16
+// staging buffer in shared memory (= 64 KiB). At N=512 (the user's
+// failing config) the same pattern produces 128 KiB which overruns
+// SM86/SM121 99-KiB per-block opt-in budget.
+//
+// We use the issue's verbatim 256x128 dump as the fixture, then bump
+// to 512x128 in-test by string-replacement to confirm the differential.
+module {
+  tt.func @kernel(%arg0: !tt.ptr<bf16>, %arg1: !tt.ptr<bf16>) {
+    %22 = arith.constant dense<0.0> : tensor<256x128xbf16, #blocked>
+    %23 = ttg.local_alloc %22 : (tensor<256x128xbf16, #blocked>) -> !ttg.memdesc<256x128xbf16, #shared, #smem>
+    %24 = ttg.local_load %23 : !ttg.memdesc<256x128xbf16, #shared, #smem> -> tensor<256x128xbf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 4}>>
+    tt.return
+  }
+}

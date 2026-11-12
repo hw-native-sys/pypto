@@ -1,0 +1,64 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "tile_std"
+version = "0.0.1"
+edition = "2021"
+license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
+description = "Kernel-side DSL for accelerator kernels: the tile API the emitters lower"
+
+# Not a member of the `rust/` workspace, and it cannot be one. This is a
+# `#![no_core]` crate that declares its own lang items, so it needs nightly
+# permanently -- not until a feature stabilises. Cargo applies one toolchain per
+# workspace build, so making it a member would impose nightly on every tool.
+#
+# Build it on the pinned nightly WITH DEBUGINFO OFF:
+#
+#   RUSTFLAGS="-C debuginfo=0" cargo +nightly-2025-08-04 build
+#
+# With debuginfo on, rustc ICEs at `rustc_middle/src/ty/layout.rs` with
+# `assertion failed: i < this.fields.count()`, inside
+# `build_pointer_or_reference_di_node`. Measured on the pinned nightly; the
+# crate itself is fine, the panic is in debuginfo generation over a no_core
+# pointer type.
+#
+# ⚠ THE PROFILE BELOW ONLY COVERS BUILDING THIS CRATE AS THE ROOT. Cargo
+# ignores `[profile.*]` in a dependency's manifest, so a kernel crate that
+# depends on tile_std gets the ROOT crate's debuginfo and ICEs anyway. Measured:
+# a one-line consumer crate with no debuginfo setting panics the compiler, and
+# the same crate with `RUSTFLAGS="-C debuginfo=0"` builds. A consuming crate
+# must therefore set one of these ITSELF:
+#
+#   [profile.dev]           # in the KERNEL crate's own Cargo.toml
+#   debug = 0
+#
+#   # or, in its .cargo/config.toml, which is what a lowering driver should do
+#   # because it also covers the dependency:
+#   [build]
+#   rustflags = ["-C", "debuginfo=0"]
+#
+# `cargo check` is unaffected either way: it does not codegen, so it never
+# reaches the panicking pass. That is why the lift's rustc verification gate
+# passes without any of this.
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[lib]
+test = false
+
+[features]
+kernel-codegen = []
+
+[dependencies]
+tile_std_macros = { path = "../tile_std_macros" }

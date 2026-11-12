@@ -1,0 +1,156 @@
+########## g50_ok.cpp
+#include "kernel_operator.h"
+// ORACLE 50 positive arm: a CORRECT i8 GEMM with per-column dequant to f16, done
+// scalar-wise on the vector core. It is not the cube arm and is not meant to be --
+// its only job is to establish that the ORACLE's reference, fill and gate agree with
+// a kernel that computes the declared function. Five GM args so the harness's
+// existing arity-5 path seeds the scale into p3; the fifth is unused.
+class Kernel_g50 {
+public:
+    __aicore__ inline Kernel_g50() {}
+    __aicore__ inline void Init(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2, GM_ADDR g3, GM_ADDR g4) {
+        a.SetGlobalBuffer((__gm__ int8_t *)g0, 16777216);
+        b.SetGlobalBuffer((__gm__ int8_t *)g1, 16777216);
+        s.SetGlobalBuffer((__gm__ float *)g3, 16777216);
+        c.SetGlobalBuffer((__gm__ half *)g4, 16777216);  // LAST arg = output, per the harness copy-back
+        (void)g2;
+    }
+    __aicore__ inline void Process() {
+        const int M = 16, K = 64, N = 48;
+        for (int m = 0; m < M; ++m) {
+            for (int n = 0; n < N; ++n) {
+                int acc = 0;
+                for (int k = 0; k < K; ++k) {
+                    acc += (int)a.GetValue(m * K + k) * (int)b.GetValue(k * N + n);
+                }
+                c.SetValue(m * N + n, (half)((float)acc * s.GetValue(n)));
+            }
+        }
+    }
+private:
+    AscendC::GlobalTensor<int8_t> a, b;
+    AscendC::GlobalTensor<half> c;
+    AscendC::GlobalTensor<float> s;
+};
+extern "C" __global__ __aicore__ void g50k(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2, GM_ADDR g3, GM_ADDR g4) {
+    Kernel_g50 op; op.Init(g0, g1, g2, g3, g4); op.Process();
+}
+extern "C" void g50k_do(uint32_t bd, void *st, uint8_t *g0, uint8_t *g1, uint8_t *g2, uint8_t *g3, uint8_t *g4) {
+    g50k<<<bd, nullptr, st>>>(g0, g1, g2, g3, g4);
+}
+
+########## g50_scaleoff.cpp
+#include "kernel_operator.h"
+// ORACLE 50 positive arm: a CORRECT i8 GEMM with per-column dequant to f16, done
+// scalar-wise on the vector core. It is not the cube arm and is not meant to be --
+// its only job is to establish that the ORACLE's reference, fill and gate agree with
+// a kernel that computes the declared function. Five GM args so the harness's
+// existing arity-5 path seeds the scale into p3; the fifth is unused.
+class Kernel_g50 {
+public:
+    __aicore__ inline Kernel_g50() {}
+    __aicore__ inline void Init(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2, GM_ADDR g3, GM_ADDR g4) {
+        a.SetGlobalBuffer((__gm__ int8_t *)g0, 16777216);
+        b.SetGlobalBuffer((__gm__ int8_t *)g1, 16777216);
+        s.SetGlobalBuffer((__gm__ float *)g3, 16777216);
+        c.SetGlobalBuffer((__gm__ half *)g4, 16777216);  // LAST arg = output, per the harness copy-back
+        (void)g2;
+    }
+    __aicore__ inline void Process() {
+        const int M = 16, K = 64, N = 48;
+        for (int m = 0; m < M; ++m) {
+            for (int n = 0; n < N; ++n) {
+                int acc = 0;
+                for (int k = 0; k < K; ++k) {
+                    acc += (int)a.GetValue(m * K + k) * (int)b.GetValue(k * N + n);
+                }
+                c.SetValue(m * N + n, (half)((float)acc * s.GetValue((n + 1) % N)));  // DEFECT: scale off by one column
+            }
+        }
+    }
+private:
+    AscendC::GlobalTensor<int8_t> a, b;
+    AscendC::GlobalTensor<half> c;
+    AscendC::GlobalTensor<float> s;
+};
+extern "C" __global__ __aicore__ void g50k(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2, GM_ADDR g3, GM_ADDR g4) {
+    Kernel_g50 op; op.Init(g0, g1, g2, g3, g4); op.Process();
+}
+extern "C" void g50k_do(uint32_t bd, void *st, uint8_t *g0, uint8_t *g1, uint8_t *g2, uint8_t *g3, uint8_t *g4) {
+    g50k<<<bd, nullptr, st>>>(g0, g1, g2, g3, g4);
+}
+
+########## g51_div.cpp
+#include "kernel_operator.h"
+// ORACLE 51 positive arm: convention A, q = round(x / s) clamped to [-127, 127],
+// round half away from zero. Scalar on the vector core; its only job is to establish
+// that the oracle's reference, fill and convention table agree with a kernel that
+// implements the convention the oracle scores.
+class Kernel_g51 {
+public:
+    __aicore__ inline Kernel_g51() {}
+    __aicore__ inline void Init(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+        x.SetGlobalBuffer((__gm__ float *)g0, 16777216);
+        s.SetGlobalBuffer((__gm__ float *)g1, 16777216);
+        o.SetGlobalBuffer((__gm__ int8_t *)g2, 16777216);
+    }
+    __aicore__ inline void Process() {
+        const int R = 8, CL = 5120;
+        const float sc = s.GetValue(0);
+        for (int i = 0; i < R * CL; ++i) {
+            float v = x.GetValue(i) / sc;          // DIVIDE
+            float r = (v >= 0.0f) ? (v + 0.5f) : (v - 0.5f);
+            int q = (int)r;                         // truncation of v+-0.5 == round half away
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            o.SetValue(i, (int8_t)q);
+        }
+    }
+private:
+    AscendC::GlobalTensor<float> x, s;
+    AscendC::GlobalTensor<int8_t> o;
+};
+extern "C" __global__ __aicore__ void g51k(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+    Kernel_g51 op; op.Init(g0, g1, g2); op.Process();
+}
+extern "C" void g51k_do(uint32_t bd, void *st, uint8_t *g0, uint8_t *g1, uint8_t *g2) {
+    g51k<<<bd, nullptr, st>>>(g0, g1, g2);
+}
+
+########## g51_mul.cpp
+#include "kernel_operator.h"
+// ORACLE 51 positive arm: convention A, q = round(x / s) clamped to [-127, 127],
+// round half away from zero. Scalar on the vector core; its only job is to establish
+// that the oracle's reference, fill and convention table agree with a kernel that
+// implements the convention the oracle scores.
+class Kernel_g51 {
+public:
+    __aicore__ inline Kernel_g51() {}
+    __aicore__ inline void Init(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+        x.SetGlobalBuffer((__gm__ float *)g0, 16777216);
+        s.SetGlobalBuffer((__gm__ float *)g1, 16777216);
+        o.SetGlobalBuffer((__gm__ int8_t *)g2, 16777216);
+    }
+    __aicore__ inline void Process() {
+        const int R = 8, CL = 5120;
+        const float sc = s.GetValue(0);
+        for (int i = 0; i < R * CL; ++i) {
+            float v = x.GetValue(i) * sc;          // DEFECT: MULTIPLY, convention B
+            float r = (v >= 0.0f) ? (v + 0.5f) : (v - 0.5f);
+            int q = (int)r;                         // truncation of v+-0.5 == round half away
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            o.SetValue(i, (int8_t)q);
+        }
+    }
+private:
+    AscendC::GlobalTensor<float> x, s;
+    AscendC::GlobalTensor<int8_t> o;
+};
+extern "C" __global__ __aicore__ void g51k(GM_ADDR g0, GM_ADDR g1, GM_ADDR g2) {
+    Kernel_g51 op; op.Init(g0, g1, g2); op.Process();
+}
+extern "C" void g51k_do(uint32_t bd, void *st, uint8_t *g0, uint8_t *g1, uint8_t *g2) {
+    g51k<<<bd, nullptr, st>>>(g0, g1, g2);
+}
+

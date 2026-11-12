@@ -1,0 +1,8 @@
+module {
+  llvm.func @bm_mx4pk_5120_2304(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>, %arg3: !llvm.ptr<1>) attributes {hacc.entry} {
+    %ne00 = llvm.mlir.constant(5120 : i32) : i32
+    %ne0 = llvm.mlir.constant(2304 : i32) : i32
+    llvm.call @__tile_mul_mv_id_mxfp4_pk_f32(%arg0, %arg2, %arg1, %arg3, %ne00, %ne0) : (!llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i32, i32) -> ()
+    llvm.return
+  }
+}

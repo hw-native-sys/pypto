@@ -1,0 +1,23 @@
+########## logs/rv_kda_delta_glm53_1x128.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=128 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+PASS
+
+########## logs/rv_rope_k3_1x64.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=64 wrong=0 max_abs=1.334e-06 max_rel=6.001e-07
+PASS
+
+########## logs/rv_topk_v41_1x384_k6.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=6 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+topk k=6 n=384 spread=264 want[0..3]=192,96,288,139 got[0..3]=192,96,288,139
+NOT COVERED: the k values through gm1 -- arity 3 copies back gm2 alone
+PASS
+

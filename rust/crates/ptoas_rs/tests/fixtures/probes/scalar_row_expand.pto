@@ -1,0 +1,22 @@
+module {
+  func.func @scalar_probe(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %c512 = arith.constant 512 : index
+    %v0 = pto.make_tensor_view %arg0, shape = [%c1, %c512], strides = [%c512, %c1] : !pto.tensor_view<?x?xf32>
+    %p0 = pto.partition_view %v0, offsets = [%c0, %c0], sizes = [%c1, %c512] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x512xf32>
+    %t0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=512, v_row=1, v_col=512, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%p0 : !pto.partition_tensor_view<1x512xf32>) outs(%t0 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=512, v_row=1, v_col=512, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %v1 = pto.make_tensor_view %arg1, shape = [%c1, %c8], strides = [%c8, %c1] : !pto.tensor_view<?x?xf32>
+    %p1 = pto.partition_view %v1, offsets = [%c0, %c0], sizes = [%c1, %c1] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x1xf32>
+    %s0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=8, v_row=1, v_col=1, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%p1 : !pto.partition_tensor_view<1x1xf32>) outs(%s0 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=8, v_row=1, v_col=1, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %t1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=512, v_row=1, v_col=512, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.trowexpandmul ins(%t0, %s0 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=512, v_row=1, v_col=512, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=8, v_row=1, v_col=1, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%t1 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=512, v_row=1, v_col=512, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %v2 = pto.make_tensor_view %arg2, shape = [%c1, %c512], strides = [%c512, %c1] : !pto.tensor_view<?x?xf32>
+    %p2 = pto.partition_view %v2, offsets = [%c0, %c0], sizes = [%c1, %c512] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x512xf32>
+    pto.tstore ins(%t1 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=512, v_row=1, v_col=512, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%p2 : !pto.partition_tensor_view<1x512xf32>)
+    return
+  }
+}

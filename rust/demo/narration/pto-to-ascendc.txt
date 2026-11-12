@@ -1,0 +1,28 @@
+Narration cue sheet -- pto-to-ascendc
+Timestamps are at DEMO_SPEED=1.90 and shift with it.
+Read each line at its mark; the terminal holds for it.
+
+00:00	SECTION: pto-to-ascendc -- the fourth representation
+00:03	A kernel exists here as tile-rs, as tile-dialect MLIR, as PTO, and as AscendC C++.
+00:07	The point is comparison: which representation makes a thing easy to SEE.
+00:31	SECTION: One kernel, two representations, side by side
+00:52	The same computation. First as PTO, which is close to the machine.
+01:11	And now as AscendC, which is C++ a kernel engineer reads.
+01:36	SECTION: Generated code carries the licence header, emitted by the emitter
+01:40	Not bolted on by a script afterwards -- that would break every byte-for-byte comparison.
+01:59	SECTION: The part is not optional, and the default is a real one
+02:03	--soc picks which Ascend part to emit for: 910b by default, or the 950 family.
+02:16	Why it cannot be left blank: a blank target has NO unified buffer.
+02:19	Every budget check then answers 'fits', and every kernel appears to overflow.
+02:23	Measured before the default was made a real part: zero of sixteen emitted,
+02:27	with vec_add 'overflowing' at 1024 bytes. So the default is a part, not an absence.
+02:46	SECTION: The two emitters check different things
+02:50	Over the sixteen playground kernels, both emit fourteen. On real model shapes they diverge.
+02:54	AscendC covering less than PTO is a measured fact about the two emitters,
+02:57	not a gap in the corpus. The bench records a verdict per representation for that reason.
+03:20	SECTION: On the name, and what it does not do yet
+03:24	PTO input is the direction this tool is named for, and it is not implemented.
+03:37	That refusal is intended: two routes lead there and neither is in this tree yet
+03:42	The pinned assembler does it directly and is the reference answer.
+03:46	The other lifts the PTO back to tile-rs and lowers that. Having BOTH is the point:
+03:50	the two outputs can be diffed, and that diff says more than either route alone.

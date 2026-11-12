@@ -1,0 +1,13 @@
+// Engine slot (ds4-rs-ascend): the `ds4_q8mv_<in>_<out>` socket -- four pointers,
+// block scales pre-expanded into an f32 plane by the host.
+module {
+  llvm.func @proj_q8mv_engine_1x512_k4096(%w: !llvm.ptr<1>, %s: !llvm.ptr<1>, %x: !llvm.ptr<1>, %o: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %kk = llvm.mlir.constant(4096 : i32) : i32
+    %nn = llvm.mlir.constant(512 : i32) : i32
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %res = llvm.call @__tile_matvec_q8mv_f32(%w, %s, %x, %z, %nn, %kk) : (!llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%o, %res, %r, %nn) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

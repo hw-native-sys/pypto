@@ -1,0 +1,15 @@
+// Kimi K3 (kimi_k3), shapes read from the released model's own config.json.
+// Form: llvm.func + hacc.entry + __tile_* -- the shape the emitters consume.
+module {
+  llvm.func @k3_kda_f_a(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>, %arg3: !llvm.ptr<1>, %arg4: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %kk = llvm.mlir.constant(7168 : i32) : i32
+    %nn = llvm.mlir.constant(128 : i32) : i32
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %x = llvm.call @__tile_load_f32(%arg0, %r, %kk) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_matvec_w8a8_f32(%arg1, %arg2, %arg3, %x, %z, %nn, %kk) : (!llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%arg4, %res, %r, %nn) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+
+    llvm.return
+  }
+}

@@ -1,0 +1,21 @@
+// Captured from the tile-rs lowering, fused path: func.func -> llvm.func.
+// Form: a fused transformer kernel, in the llvm.func + hacc.entry + __tile_* shape
+// the emitters consume.
+module {
+  llvm.func @attn_gqa(%q: !llvm.ptr<1>, %k: !llvm.ptr<1>, %v: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %nh  = llvm.mlir.constant(12 : i32) : i32
+    %nkv = llvm.mlir.constant(2 : i32) : i32
+    %seq = llvm.mlir.constant(16 : i32) : i32
+    %dim = llvm.mlir.constant(64 : i32) : i32
+    %causal = llvm.mlir.constant(1 : i32) : i32
+    %qrows = llvm.mlir.constant(192 : i32) : i32
+    %kvrows = llvm.mlir.constant(32 : i32) : i32
+    %tq = llvm.call @__tile_load_f32(%q, %qrows, %dim) : (!llvm.ptr<1>, i32, i32) -> i32
+    %tk = llvm.call @__tile_load_f32(%k, %kvrows, %dim) : (!llvm.ptr<1>, i32, i32) -> i32
+    %tv = llvm.call @__tile_load_f32(%v, %kvrows, %dim) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_attention_gqa_f32(%tq, %tk, %tv, %seq, %dim, %nh, %nkv, %causal) : (i32, i32, i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %res, %seq, %dim) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}
