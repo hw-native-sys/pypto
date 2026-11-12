@@ -36,11 +36,11 @@ STATUS_SOURCE = re.compile(r"Full CI ([1-9][0-9]*) attempt ([1-9][0-9]*): .+")
 
 
 def latest_statuses(existing: list[dict[str, Any]]) -> dict[str, Any]:
-    """Read the latest visible state per context, not a mutable check-run ID."""
+    """Read the latest visible state; combined statuses omit the creator field."""
     latest: dict[str, Any] = {}
     for item in existing:
         context = item.get("context", "")
-        if not context.startswith("full / ") or item.get("creator", {}).get("login") != "github-actions[bot]":
+        if not context.startswith("full / "):
             continue
         if context not in latest or item["id"] > latest[context]["id"]:
             latest[context] = item

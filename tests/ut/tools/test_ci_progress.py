@@ -93,7 +93,8 @@ def harness(progress, monkeypatch, event):
             assert path == f"repos/{REPO}/actions/runs/50/attempts/1/jobs"
             return jobs
         assert key == "statuses" and path == f"repos/{REPO}/commits/{HEAD}/status"
-        return checks
+        # GitHub omits creator in the combined-status response.
+        return [{key: value for key, value in item.items() if key != "creator"} for item in checks]
 
     monkeypatch.setattr(progress.control, "api", api)
     monkeypatch.setattr(progress.control, "pages", pages)
@@ -334,16 +335,20 @@ def test_latest_status_is_independent_of_page_order(progress, reverse):
     assert selected["full / matrix (a:b)"]["id"] == 999
 
 
-@pytest.mark.parametrize(
-    "context,creator",
-    [
-        ("ci/full", "github-actions[bot]"),
-        ("full / system-tests", "another-app[bot]"),
-        ("unrelated", "github-actions[bot]"),
-    ],
-)
-def test_status_cache_ignores_other_contexts_and_publishers(progress, context, creator):
-    assert progress.latest_statuses([{"id": 900, "context": context, "creator": {"login": creator}}]) == {}
+@pytest.mark.parametrize("context", ["ci/full", "unrelated"])
+def test_status_cache_ignores_other_contexts(progress, context):
+    assert progress.latest_statuses([{"id": 900, "context": context}]) == {}
+
+
+def test_status_cache_reads_combined_api_without_creator(progress):
+    record = {
+        "id": 900,
+        "context": "full / system-tests",
+        "state": "success",
+        "description": "Full CI 50 attempt 1: Success",
+        "target_url": f"https://github.com/{REPO}/actions/runs/50/job/101",
+    }
+    assert progress.latest_statuses([record]) == {record["context"]: record}
 
 
 def test_future_status_attempt_prevents_stale_projection(progress, event, harness):
