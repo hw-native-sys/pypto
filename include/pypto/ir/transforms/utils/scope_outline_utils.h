@@ -195,19 +195,6 @@ class ScopeOutliner : public IRMutator {
   ExprPtr VisitExpr_(const IterArgPtr& op) override;
 
   /**
-   * @brief Compute used_after when no explicit context is available.
-   *
-   * Two regimes:
-   *   1. Scope is nested inside another (non-target) ScopeStmt — only store
-   *      targets escape, because scope boundaries confine locally-defined
-   *      variables.
-   *   2. Scope is at the top level or inside a control-flow body — retain the
-   *      original defensive fallback: all defined vars + store targets are
-   *      treated as outputs so the caller retains access.
-   */
-  [[nodiscard]] std::unordered_set<const Var*> ComputeFallbackUsedAfter(const ScopeStmtPtr& scope) const;
-
-  /**
    * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
    *
    * For each target scope, collects variables referenced in all subsequent statements
@@ -215,19 +202,8 @@ class ScopeOutliner : public IRMutator {
    */
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
 
-  /**
-   * @brief Handle ScopeStmts that are direct children of another node (not
-   * inside a SeqStmts).
-   *
-   * The fallback honours scope nesting via ``inside_nested_scope_body_``: an
-   * inner scope whose only "context" is an enclosing non-target scope has no
-   * way for its locally-defined variables to escape, so we only expose store
-   * targets. Scopes at the true top level (outside any parent scope body)
-   * retain the original defensive "all defs are outputs" behaviour.
-   */
-  // Shared per-kind logic: outline if kind matches, else descend with the
-  // nested-scope flag set so any target-kind scope we find inside can make a
-  // correct used_after decision.
+  /// Direct-child scopes use the enclosing node's required_outputs_; other
+  /// scope kinds preserve those requirements while recursing into their body.
   template <typename ScopeT>
   StmtPtr VisitScopeKind(const std::shared_ptr<const ScopeT>& op);
 
@@ -475,6 +451,12 @@ class ScopeOutliner : public IRMutator {
   std::unordered_map<const Var*, VarPtr> var_objects_;
   std::unordered_set<const Var*> runtime_bindings_;
   std::unordered_set<std::string> known_names_;
+  /// Value requirements from outside the current subtree. All pass entry
+  /// points traverse a complete function body, whose external requirement set
+  /// is empty. SeqStmts adds local tail references before descending into any
+  /// child containing a target scope; OutlineScope supplies its selected
+  /// outputs when recursing into an extracted body. Thus an empty set means
+  /// known-empty requirements, never an unavailable analysis result.
   std::unordered_set<const Var*> required_outputs_;
   /// Accumulates across scopes intentionally (not saved/restored like func_name_
   /// etc.) so that subsequent scopes and statements see the renamed variables.
@@ -507,10 +489,9 @@ class ScopeOutliner : public IRMutator {
   /// not opt in to cross-function name reservation.
   std::shared_ptr<std::unordered_set<std::string>> reserved_func_names_;
   int scope_counter_ = 0;
-  /// True while we are visiting the body of a non-target ScopeStmt — a
-  /// target-kind scope encountered here cannot leak locally-defined vars to
-  /// any surrounding context (scope boundaries confine them), so the
-  /// used_after fallback exposes only store targets.
+  /// True while visiting a non-target scope's body. Deferred-completion
+  /// waiters must be task-level launches, so OutlineScope rejects them here.
+  /// This flag does not affect value-use analysis.
   bool inside_nested_scope_body_ = false;
   std::vector<FunctionPtr> outlined_functions_;
 };

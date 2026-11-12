@@ -57,6 +57,11 @@ program_outlined = outline_pass(program)
 8. **提升父函数**：至少提取出一个作用域的 Opaque 父函数将变为 `Orchestration`——
    并在此之前先折叠其参数动态维度读取（见下）
 
+值使用分析从完整函数体开始。提取器将后续引用穿过控制流和作用域包装向内传递，
+再将已选定的输出需求传给被提取区域内的嵌套作用域。需求集合为空表示没有外部值引用，
+不会据此额外返回内部定义或写操作的别名。对捕获的 `tile.store` 目标另行处理，
+即使后面没有读取，写入效果也仍对调用方可见。
+
 **标量输出外提到调用方**：运行时没有标量输出通道——`Arg::add_scalar` 只把标量按
 值传**入**，`TaskOutputTensors` 只返回 tensor——因此提取函数的 `return_types_`
 中出现 `ScalarType` 是不可表达的。Orchestration codegen 没有任何载体可以绑定它，

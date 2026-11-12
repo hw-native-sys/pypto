@@ -4564,5 +4564,91 @@ class Before:
     assert calls[0].args[0].same_as(source_tensor_type.shape[0])
 
 
+def test_terminal_scope_exports_only_store_targets():
+    """A value-less entry's final scope exports only what it stores.
+
+    The final scope has no external value uses. Its caller-owned ``Out``
+    parameter is still exported by store-output handling; loaded tiles are
+    internal temporaries and must not become declared kernel returns.
+    """
+
+    @pl.program
+    class Valueless:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            b: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                left = pl.load(a, [0, 0], [128, 128])
+                right = pl.load(b, [0, 0], [128, 128])
+                pl.store(pl.add(left, right), [0, 0], out)
+
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Valueless))
+    outlined = next(fn for fn in after.functions.values() if fn.func_type == ir.FunctionType.InCore)
+    # Only the store target escapes: one tensor-typed return, no dead loads.
+    assert len(outlined.return_types) == 1, [str(t) for t in outlined.return_types]
+    assert isinstance(outlined.return_types[0], ir.TensorType)
+
+
+def test_terminal_scope_keeps_external_store_after_rebinding():
+    """Rebinding a store's result does not hide the external destination.
+
+    ``work = pl.store(value, [0, 0], work)`` has no outer use of its result,
+    but the scope still writes the buffer captured from the caller. Export
+    that destination once, without exporting the loaded Tile.
+    """
+
+    @pl.program
+    class AliasExport:
+        @pl.function
+        def main(self, a: pl.Tensor[[128, 128], pl.FP32]):
+            work: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
+            with pl.at(level=pl.Level.CORE_GROUP):
+                value = pl.load(a, [0, 0], [128, 128])
+                work = pl.store(value, [0, 0], work)
+
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(AliasExport))
+    outlined = next(fn for fn in after.functions.values() if fn.func_type == ir.FunctionType.InCore)
+    # One tensor-typed return for the captured store target, even though the
+    # post-store alias has no external value uses.
+    assert len(outlined.return_types) == 1, [str(t) for t in outlined.return_types]
+    assert isinstance(outlined.return_types[0], ir.TensorType)
+
+
+def test_terminal_scope_does_not_export_workspace_writer_results():
+    """Workspace writes do not make an unused result an output.
+
+    ``tile.gather`` writes a temporary workspace and returns a fresh Tile.
+    Neither the workspace write nor the result escapes this scope; only the
+    captured store destination is an output.
+    """
+
+    @pl.program
+    class WorkspaceWriter:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[1, 128], pl.FP16],
+            src: pl.Tile[[1, 128], pl.FP16, pl.Mem.Vec],
+            idx: pl.Tile[[1, 16], pl.INT32, pl.Mem.Vec],
+            tmp: pl.Tile[[1, 16], pl.INT32, pl.Mem.Vec],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP16]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                # Used by the store inside this scope, but not outside it.
+                # A workspace write is not an external use of the result.
+                gathered = pl.tile.gather(src, idx, tmp)
+                value = pl.load(a, [0, 0], [1, 16])
+                pl.store(pl.add(value, gathered), [0, 0], out)
+
+    after = passes.outline_incore_scopes()(passes.convert_to_ssa()(WorkspaceWriter))
+    outlined = next(fn for fn in after.functions.values() if fn.func_type == ir.FunctionType.InCore)
+    assert len(outlined.return_types) == 1, [str(t) for t in outlined.return_types]
+    assert isinstance(outlined.return_types[0], ir.TensorType)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
