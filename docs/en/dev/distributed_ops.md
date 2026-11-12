@@ -127,14 +127,14 @@ policy).
 
 **Failure diagnostics.** Capacity is enforced transitively:
 `allocation >= window view >= transfer region`. When a window is
-materialized, its accessible byte span (including stride gaps) must fit the
+materialized, its dense byte size (`product(shape) * dtype_bytes`) must fit the
 allocation's logical size; an oversized view is rejected even if the program
 only accesses a prefix. The physical cache-line padding of a slot is not
 addressable through a view. The verifier also rejects a non-window endpoint, a
 non-contiguous region, a missing offset/shape argument, a negative constant
 peer, an invalid engine, and a transfer region that does not fit its endpoint
-view. A symbolic view or slot size is checked on the host immediately before
-dispatch. The generated helper rejects at runtime an invalid peer
+view. A symbolic view or slot size is checked on the host when the window declaration
+executes, before its consumers. The generated helper rejects at runtime an invalid peer
 (`peer < 0`, `peer >= nranks`, or `peer == rankId`), an out-of-range endpoint
 or window byte range, a zero/unaligned byte count, and a missing workspace. All
 failures are loud; there is no silent SDMA/RDMA fallback.

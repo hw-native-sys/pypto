@@ -110,7 +110,7 @@ TypePtr DeducePutAsyncType(const std::vector<ExprPtr>& args,
   // Capacity is established upstream: MaterializeCommDomainScopes rejects a
   // window view larger than its backing allocation, and the transfer-region
   // validators above bound this request to the endpoint view. Symbolic view or
-  // slot sizes are checked by the generated host guard before dispatch.
+  // slot sizes are checked by the generated host guard at the window declaration.
   comm_op::ValidateAsyncEngine(kwargs, kOpName);
 
   // The result is the destination buffer itself; no fresh allocation is made.

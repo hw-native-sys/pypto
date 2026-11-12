@@ -623,9 +623,8 @@ PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_mater
  * ``window_size=0`` and the runtime would reject it); (b) every slot is
  * non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
  * scope program-wide; (d) every ``DistributedTensorType`` carrying a
- * ``window_buffer_`` has an accessible byte span (stride gaps included) no
- * larger than that slot's logical size. Host-side derived views of a window are
- * rejected by materialization; kernel-side views preserve or shrink the span.
+ * ``window_buffer_`` has a dense byte size no larger than that slot's logical size.
+ * Host operation support is checked by the corresponding codegen handlers.
  * ``DistributedCodegen`` relies on this shared_ptr-identity
  * uniqueness to route each Submit's per-arg ``device_ctx`` handle to the
  * correct domain; a duplicate slot would misroute communication traffic at

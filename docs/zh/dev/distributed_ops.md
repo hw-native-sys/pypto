@@ -111,10 +111,10 @@ URMA workspace，并要求通信域申请 `workspace_engines=("urma",)`（目前
 保守策略）。
 
 **失败诊断。** 容量按 `分配 >= 窗口视图 >= 传输区域` 传递地约束。窗口具化时，
-其可访问字节跨度（含 stride 间隙）必须不超过分配的逻辑大小；即使程序只访问前缀，
+其连续布局字节数（`product(shape) * dtype_bytes`）必须不超过分配的逻辑大小；即使程序只访问前缀，
 过大的视图也会被拒绝。槽位的物理 cache-line 对齐填充不能通过视图访问。verifier
 还拒绝非窗口端点、非连续区域、缺少 offset/shape 参数、负的常量 peer、非法 engine，
-以及不满足其端点视图的传输区域。符号化的视图或槽位大小在 dispatch 前由 host 侧检查。
+以及不满足其端点视图的传输区域。符号化的视图或槽位大小在 host 执行 window 声明时检查，早于其消费者。
 生成的 helper 在运行时拒绝非法 peer（`peer < 0`、`peer >= nranks` 或
 `peer == rankId`）、越界的端点或窗口字节范围、为零/未对齐的字节数以及缺失的
 workspace。所有失败都是显式的；不存在静默的 SDMA/RDMA 回退。

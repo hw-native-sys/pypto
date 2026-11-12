@@ -267,7 +267,7 @@ void DistributedCodegen::EmitImports() {
   emitter_.EmitLine(
       "from simpler.task_interface import "
       "CallConfig, CommBufferSpec, DataType, TaskArgs, TensorArgType");
-  emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg, make_comm_window_tensor");
+  emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg, check_window_capacity");
   // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
@@ -778,7 +778,7 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   const auto value_call = ir::As<ir::Call>(op->value_);
   const bool distributed_tensor_alias = ir::As<ir::DistributedTensorType>(op->var_->GetType()) &&
                                         ir::As<ir::DistributedTensorType>(op->value_->GetType()) &&
-                                        (!value_call || ir::IsOp(value_call, "pld.tensor.window"));
+                                        !value_call;
   if (distributed_tensor_alias) {
     declared_vars_.insert(var_name);
     current_target_var_ = "";
@@ -1179,9 +1179,11 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         comm_arg_scopes.push_back(owning_scope);
       }
       const std::string handle_var = HandleVarForScope(owning_scope);
-      emitter_.EmitLine(ta_var + ".add_tensor(" +
-                        EmitCommWindowTensor(dist_type, window_buffer, handle_var, rank_expr, call->span_) +
-                        ", " + tag + ")");
+      const std::string name = SanitizeName(window_buffer->name_hint_);
+      const std::string shape = FormatShapeTuple(dist_type->shape_);
+      const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(dist_type->dtype_);
+      emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
+                        "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
       continue;
     }
 
@@ -1800,34 +1802,22 @@ std::string DistributedCodegen::FormatShapeTuple(const std::vector<ir::ExprPtr>&
   return oss.str();
 }
 
-std::string DistributedCodegen::EmitCommWindowTensor(const ir::DistributedTensorTypePtr& type,
-                                                     const ir::WindowBufferPtr& window,
-                                                     const std::string& handle_var,
-                                                     const std::string& rank_expr, const ir::Span& span) {
-  INTERNAL_CHECK_SPAN(type && window, span)
-      << "DistributedCodegen: comm-window wire tensor requires a DistributedTensorType and WindowBuffer";
-  const std::string name = SanitizeName(window->name_hint_);
-  const std::string shape = FormatShapeTuple(type->shape_);
-  const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(type->dtype_);
-  std::string plain = handle_var + "[" + rank_expr + "].buffers[\"" + name + "\"].tensor(shapes=" + shape +
-                      ", dtype=" + dtype_enum + ")";
-
+void DistributedCodegen::EmitWindowCapacityCheck(const ir::CallPtr& call) {
+  auto type = ir::As<ir::DistributedTensorType>(call->GetType());
+  INTERNAL_CHECK_SPAN(type && type->window_buffer_.has_value(), call->span_)
+      << "Internal error: window capacity check requires a materialized WindowBuffer";
+  const auto& window = *type->window_buffer_;
   const auto fit = ir::EvaluateWindowViewFit(*type, *window);
-  INTERNAL_CHECK_SPAN(fit.fit != ir::WindowViewFit::kViolation, span)
+  INTERNAL_CHECK_SPAN(fit.fit != ir::WindowViewFit::kViolation, call->span_)
       << "DistributedCodegen: " << ir::DescribeWindowViewFit("", *window, fit);
-  if (fit.fit == ir::WindowViewFit::kFits) return plain;
+  if (fit.fit == ir::WindowViewFit::kFits) return;
 
-  const std::string strides = type->tensor_view_ && !type->tensor_view_->stride.empty()
-                                  ? FormatShapeTuple(type->tensor_view_->stride)
-                                  : std::string();
-
-  std::string guarded = "make_comm_window_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
-                        "\"], name=\"" + name + "\", shapes=" + shape + ", dtype=" + dtype_enum +
-                        ", element_bytes=" + std::to_string(type->dtype_.GetByte()) + ", slot_nbytes=(" +
-                        GetCommSlotSizeAsCode(window->size_) + ")";
-  if (!strides.empty()) guarded += ", strides=" + strides;
-  guarded += ")";
-  return guarded;
+  // Validate once where the view is declared, before any consumer. The check
+  // depends only on shape/dtype and logical capacity, not a dispatch rank.
+  emitter_.EmitLine("check_window_capacity(name=\"" + SanitizeName(window->name_hint_) +
+                    "\", shapes=" + FormatShapeTuple(type->shape_) +
+                    ", element_bytes=" + std::to_string(type->dtype_.GetByte()) + ", slot_nbytes=(" +
+                    GetCommSlotSizeAsCode(window->size_) + "))");
 }
 
 // ========================================================================
