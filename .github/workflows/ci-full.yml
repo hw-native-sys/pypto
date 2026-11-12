@@ -2489,7 +2489,8 @@ jobs:
           checkout-path: a5-checkout
 
   onboard-tests-a5-distributed:
-    timeout-minutes: 110
+    # Allow both test steps (35 + 40 minutes) plus setup and cleanup.
+    timeout-minutes: 85
     # Run Host-domain acceptance on two A5 cards independently of the
     # four-card URMA async suite. /ci full uses the workflow from main;
     # automatic integration PR runs use their merge revision's workflow.
@@ -2557,7 +2558,7 @@ jobs:
               --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-host-domain-junit.xml"
 
       - name: Run distributed tests
-        timeout-minutes: 70
+        timeout-minutes: 40
         run: |
           source activate.sh
           LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
@@ -2565,7 +2566,10 @@ jobs:
           export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
           # Four cards select the P=4 cases. No --forked: JIT compilation can
           # leave a child that pytest-forked waits on beyond its timeout.
-          task-submit --device auto --device-num 4 --timeout 3900 --max-time 1800 \
+          # The suite passes in ~5.5 min (slow path ~12 min). Bound a hung
+          # case at 15 min of execution and 20 min of card-queue wait so a
+          # failure reaches the log quickly instead of after the old 65/30-min caps.
+          task-submit --device auto --device-num 4 --timeout 1200 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
               tests/st/distributed/test_l3_urma_async.py \
               -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
