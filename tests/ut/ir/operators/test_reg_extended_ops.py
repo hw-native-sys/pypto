@@ -284,6 +284,7 @@ def test_indexed_scalar_base_offset(write):
         if write
         else pl.reg.gather(src, indices, m, base_offset=base)
     ).unwrap()
+    assert isinstance(result, ir.Call)
     assert result.args[-1] is base
     effect = ir.get_reg_memory_effect(result)
     # The scalar base is not the predicate. Indexed accesses still describe
@@ -321,11 +322,17 @@ def test_unmasked_rearrangement_types(name, dtype):
 @pytest.mark.parametrize("dtype", [DataType.FP32, DataType.BF16, DataType.UINT16])
 def test_channel_split_and_merge_types(dtype):
     even, odd = pl.reg.channel_split(vec(dtype, 128))
-    assert even.unwrap().tuple is odd.unwrap().tuple
-    assert even.unwrap().type.shape == 64
-    assert odd.unwrap().type.dtype == dtype
+    even_expr, odd_expr = even.unwrap(), odd.unwrap()
+    assert isinstance(even_expr, ir.TupleGetItemExpr)
+    assert isinstance(odd_expr, ir.TupleGetItemExpr)
+    assert even_expr.tuple is odd_expr.tuple
+    assert isinstance(even_expr.type, ir.RegType)
+    assert isinstance(odd_expr.type, ir.RegType)
+    assert even_expr.type.shape == 64
+    assert odd_expr.type.dtype == dtype
     for channels in [2, 4]:
         result = pl.reg.channel_merge(*[vec(dtype, 64) for _ in range(channels)]).unwrap()
+        assert isinstance(result.type, ir.RegType)
         assert result.type.shape == 64 * channels
         assert result.type.dtype == dtype
 

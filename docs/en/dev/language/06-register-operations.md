@@ -439,20 +439,17 @@ are rejected by PTOAS lowering. VF helpers support mixed Tile dtypes through
 typed pointers derived from one shared UB base; offsets use each Tile's own
 element width.
 
-
 The optional `base_offset` is a scalar INDEX offset in source/destination elements,
 added to the Tile view origin before applying the unsigned vector indices.
 It shifts the UB pointer without broadcasting the offset or widening the indices.
 Dynamic active addresses and initialization remain the caller's responsibility;
 masked-off lanes are not accessed. Existing calls default to a zero base offset.
 
-
 `intlv` and `dintlv` accept an omitted mask for all-active rearrangement.
 Explicit masks retain zero-inactive-result semantics; omitted masks do not need
 result-clearing selects. Two adjacent BF16 loads followed by unmasked `dintlv`
 can therefore lower to A5 `DINTLV_B16`, with `convert` selecting the required
 EVEN/ODD parts automatically. Physical conversion parts remain a backend choice.
-
 
 ## Logical channels
 

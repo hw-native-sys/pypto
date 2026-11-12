@@ -394,18 +394,15 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 其他动态粒度会被 PTOAS lowering 拒绝。VF helper 支持混合 Tile dtype：
 从同一 UB 基址派生对应类型的指针，偏移按各 Tile 自身的元素位宽计算。
 
-
 可选 `base_offset` 是以源/目标元素为单位的 INDEX 标量偏移，在应用无符号向量索引之前
 叠加到 Tile view 原点。它移动 UB 指针，不广播偏移或扩宽索引。
 调用方仍须保证动态活动地址的边界及初始化；非活动 lane 不访问内存。
 现有调用默认使用零基址偏移。
 
-
 `intlv` 和 `dintlv` 可省略 mask，表示所有 lane 均活动。
 显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
 相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
 后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
-
 
 ## 逻辑通道（Logical channels）
 
