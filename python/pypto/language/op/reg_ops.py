@@ -555,27 +555,37 @@ def mull(
 def intlv(
     lhs: Reg | ir.Expr,
     rhs: Reg | ir.Expr,
-    mask: Reg | ir.Expr,
+    mask: Reg | ir.Expr | None = None,
     *,
     pmode: str = "zero",
 ) -> tuple[Reg, Reg]:
     """Interleave two matching even-length vectors; return (low, high).
 
-    Each result has the input lane count and dtype. Inactive lanes are zero."""
-    return _pair("intlv", [_expr(lhs), _expr(rhs), _expr(mask)], pmode=pmode)
+    Each result has the input lane count and dtype. With a mask, inactive
+    lanes are zero. Omitting the mask rearranges all lanes without clearing
+    either result."""
+    args = [_expr(lhs), _expr(rhs)]
+    if mask is not None:
+        args.append(_expr(mask))
+    return _pair("intlv", args, pmode=pmode)
 
 
 def dintlv(
     lhs: Reg | ir.Expr,
     rhs: Reg | ir.Expr,
-    mask: Reg | ir.Expr,
+    mask: Reg | ir.Expr | None = None,
     *,
     pmode: str = "zero",
 ) -> tuple[Reg, Reg]:
     """Deinterleave two matching even-length vectors; return (even, odd).
 
-    Each result has the input lane count and dtype. Inactive lanes are zero."""
-    return _pair("dintlv", [_expr(lhs), _expr(rhs), _expr(mask)], pmode=pmode)
+    Each result has the input lane count and dtype. With a mask, inactive
+    lanes are zero. Omitting the mask rearranges all lanes without clearing
+    either result."""
+    args = [_expr(lhs), _expr(rhs)]
+    if mask is not None:
+        args.append(_expr(mask))
+    return _pair("dintlv", args, pmode=pmode)
 
 
 def addc(

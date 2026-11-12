@@ -296,8 +296,8 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 | `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `lhs - rhs - (1 - carry_in)` 的 `(result, not_borrow_out)`；INT32/UINT32 |
 | `gather(tile, offsets, mask, base_offset=0)` | `vgather` | 带掩码的索引 UB 读取；非活动结果 lane 为零 |
 | `scatter(tile, offsets, value, mask, base_offset=0)` | `vscatter` | 带掩码的索引 UB 写入；返回目标 Tile 别名 |
-| `intlv(lhs, rhs, mask)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
-| `dintlv(lhs, rhs, mask)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
+| `intlv(lhs, rhs, mask=None)` | `vintlv` | 交织后的 `(low, high)`；lane 数必须为偶数 |
+| `dintlv(lhs, rhs, mask=None)` | `vdintlv` | 解交织后的 `(even, odd)`；lane 数必须为偶数 |
 
 未知索引或动态读取不会关闭同一分配上已知静态读取的初始化检查；调用者仍需保证
 未知读取自身的安全。
@@ -398,3 +398,9 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 叠加到 Tile view 原点。它移动 UB 指针，不广播偏移或扩宽索引。
 调用方仍须保证动态活动地址的边界及初始化；非活动 lane 不访问内存。
 现有调用默认使用零基址偏移。
+
+
+`intlv` 和 `dintlv` 可省略 mask，表示所有 lane 均活动。
+显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
+相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
+后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
