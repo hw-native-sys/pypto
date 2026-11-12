@@ -479,11 +479,11 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
         rhs: Right-hand side tile
         tmp: Same-dtype scratch tile whose physical and valid capacity
             provably provides two rows and covers the dividend columns on
-            A2/A3. It must not overlap either source there.
+            A2/A3. It must not overlap either source there. With
+            ``high_precision=True`` the scratch layout needs many more
+            columns; an undersized tile is rejected at IR construction.
         high_precision: Whether to select PTOAS's high-precision TREM mode.
-            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
-            result, which compilation warns about.
-            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
+            Honoured on both A5 and A2/A3, and defined only for FP32.
 
     Returns:
         Tile wrapping the rem operation
