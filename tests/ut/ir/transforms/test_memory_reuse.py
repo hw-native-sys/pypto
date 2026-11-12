@@ -1593,12 +1593,12 @@ class TestInplaceOps:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 lhs_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(lhs, [0, 0], [16, 16])
                 rhs_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(rhs, [0, 0], [16, 16])
-                tmp2: pl.Tile[[2, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
-                    [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp2: pl.Tile[[2, 32], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [2, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 rem: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.rem(lhs_tile, rhs_tile, tmp2)
-                tmp1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
-                    [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp1: pl.Tile[[1, 32], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 rems: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.rems(rem, 3.0, tmp1)
                 return pl.store(rems, [0, 0], out)

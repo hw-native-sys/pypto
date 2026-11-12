@@ -976,6 +976,9 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
                                             const ir::Span& span) {
   const auto* handler = GetBackendHandler();
   if (handler->HonorsHighPrecisionAlgorithm()) return;
+  // A2/A3 TREM now implements the high-precision algorithm (pto-isa 925d2a200),
+  // unlike the other precision-selector ops.
+  if (pto_op_name == "pto.trem") return;
   if (!reported_precision_sites_.insert(op_name + "@" + span.to_string()).second) return;
 
   const std::string arch = handler->GetPtoTargetArch();
