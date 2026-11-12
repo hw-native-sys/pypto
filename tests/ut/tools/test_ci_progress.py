@@ -332,6 +332,8 @@ def test_latest_status_is_independent_of_page_order(progress, reverse):
     if reverse:
         records.reverse()
     selected = progress.latest_statuses(records)
+    # Attempt 1 has the newest status write (ID 999); the cache follows write
+    # order, while the monitor separately checks whether an attempt is stale.
     assert selected["full / matrix (a:b)"]["id"] == 999
 
 
@@ -588,7 +590,19 @@ def test_long_matrix_names_do_not_collide(progress):
     second = progress.job_context(prefix + ", python3.11)")
     assert len(first) == len(second) == 100
     assert first != second
+    assert "python3.10)" in first
+    assert "python3.11)" in second
     assert progress.job_context("unit-tests (ubuntu, 3.10)") == "full / unit-tests (ubuntu, 3.10)"
+
+
+def test_long_matrix_names_with_same_visible_parts_remain_distinct(progress):
+    prefix = "unit-tests (" + "a" * 80
+    suffix = "b" * 80 + ", python3.10)"
+    first = progress.job_context(prefix + ", linux, " + suffix)
+    second = progress.job_context(prefix + ", macos, " + suffix)
+    assert len(first) == len(second) == 100
+    assert first.rsplit(" ", 1)[0] == second.rsplit(" ", 1)[0]
+    assert first != second
 
 
 def test_new_full_run_reuses_context_and_replaces_log_link(progress, monkeypatch):

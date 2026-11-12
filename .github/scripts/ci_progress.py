@@ -52,8 +52,10 @@ def job_context(name: str) -> str:
     context = f"full / {name}"
     if len(context) <= 100:
         return context
-    suffix = hashlib.sha256(name.encode()).hexdigest()[:12]
-    return f"{context[:85]}...{suffix}"
+    digest = hashlib.sha256(name.encode()).hexdigest()[:12]
+    # Keep the matrix suffix readable and hash the full name so differences in
+    # the omitted middle still produce distinct contexts within 100 characters.
+    return f"{context[:60]}...{context[-24:]} {digest}"
 
 
 def job_status(job: dict[str, Any]) -> tuple[str, str]:
