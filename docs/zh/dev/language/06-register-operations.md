@@ -60,7 +60,8 @@ def kernel(
 | `pmode` | 非激活结果 lane 的处理策略。仅接受 `"zero"`，即非激活向量 lane 清零。 |
 
 签名中的 `*` 表示之后的参数只能按关键字传入。省略可选 mask 时所有 lane 参与。
-除转换、位重解释、直方图、归约、`expdif` 和字节 `gather` 外，结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
+除转换、位重解释、直方图、归约、`expdif`、字节 `gather` 和逻辑通道拆分/合并外，
+结果保持输入向量 dtype 和 lane 数。不做隐式向量类型提升或
 lane 广播。DSL 数值字面量会归一化为要求的 scalar dtype；整数参数不接受 Python
 `bool`。原始 IR 和 Builder 操作数必须已具有要求的 dtype。
 
@@ -277,7 +278,7 @@ FP8E4M3FN 转换保留逻辑 lane 数并产生紧凑的 FP8 值。使用
 
 ## 扩展 VMI 操作
 
-以下 API 位于 `pl.reg`，发射对应的 `pto.vmi.v*` 操作。除 `mula` 的 mask 可选外，
+以下 API 位于 `pl.reg`，发射对应的 `pto.vmi.v*` 操作。除 `mula`、`intlv`、`dintlv` 的 mask 可选外，
 其余操作均要求执行掩码。算术 `pmode` 为 `"zero"`；进借位操作和 `scatter` 不暴露
 `pmode` 参数。除表中特别说明外，向量输入的 dtype、符号性和 lane 数必须一致。
 已有 Scalar SSA 不会被隐式转换；`axpy`/`lrelu` 的 Python 标量字面量按向量 dtype 归一化。
@@ -404,3 +405,26 @@ PTOAS 0.70 的**动态**分组掩码要求 `group_size` 为 2 的幂，且消费
 显式 mask 仍保证非活动结果为零；省略 mask 无需额外的结果清零选择指令。
 相邻的两次 BF16 load 后接无 mask 的 `dintlv` 因此可降低为 A5 `DINTLV_B16`，
 后续 `convert` 自动选择所需 EVEN/ODD 部分。物理转换部分仍由后端决定。
+
+
+## 逻辑通道（Logical channels）
+
+`channel_split(value)` 返回两个相同 dtype、lane 数减半的寄存器：
+`even[i] = value[2*i]`、`odd[i] = value[2*i+1]`；源 lane 数必须为偶数。
+`channel_merge(*values)` 接受两个或四个 dtype 和 lane 数相同的通道；
+C 个通道对应 `result[C*i+c] = values[c][i]`。dtype 使用上文的 `T` 集合。
+这些操作不使用 mask、不执行数值转换。不同于 `intlv`/`dintlv`，它们改变结果 lane 数，
+不会为填满物理寄存器而复制输入；仍须满足后端布局支持范围。
+
+对于 256 元素 BF16 块，可拆分两个已扩宽的 even/odd128 向量：
+
+```python
+x0, x2 = pl.reg.channel_split(even_float)
+x1, x3 = pl.reg.channel_split(odd_float)
+# Process each 64-lane vector, sharing a group8 divisor and mask.
+restored = pl.reg.channel_merge(y0, y1, y2, y3)
+quantized = pl.reg.convert(restored, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
+```
+
+四通道合并允许 PTOAS 选择 P0/P1/P2/P3 转换部分以及一次完整向量写回。
+这是经过测试的 lowering 模式，不保证硬件性能；物理转换部分与寄存器分配仍由后端决定。

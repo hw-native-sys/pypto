@@ -66,8 +66,9 @@ described in [VF execution](../codegen/03-vpto-vf-integration.md#required-hardwa
 | `pmode` | Inactive-result policy. Only `"zero"` is accepted, so inactive vector lanes become zero. |
 
 `*` in a signature starts keyword-only parameters. Omitted optional masks mean
-all lanes participate. Except for conversion, reinterpretation, histograms, reduction, `expdif` and byte `gather`, results preserve the
-input vector dtype and lanes. There is no implicit vector promotion or lane
+all lanes participate. Except for conversion, reinterpretation, histograms,
+reduction, `expdif`, byte `gather`, and logical channel split/merge, results
+preserve the input vector dtype and lanes. There is no implicit vector promotion or lane
 broadcasting. DSL numeric literals are normalized to the requested scalar dtype;
 Python `bool` is not accepted as an integer argument. Raw IR and Builder operands
 must already have the required dtype.
@@ -304,7 +305,8 @@ where required; the defaults above are supplied by the DSL wrapper.
 ## Extended VMI operations
 
 These APIs live under `pl.reg` and emit the corresponding `pto.vmi.v*` operation.
-All require a governing mask except `mula`, whose mask is optional. Arithmetic
+The masks of `mula`, `intlv`, and `dintlv` are optional; the other operations
+require a governing mask. Arithmetic
 `pmode` is `"zero"`; carry operations and `scatter` expose no `pmode` argument.
 Vector operands must agree in dtype, signedness and lane count unless explicitly
 specified below. Existing scalar SSA values are never implicitly cast; Python
@@ -450,3 +452,28 @@ Explicit masks retain zero-inactive-result semantics; omitted masks do not need
 result-clearing selects. Two adjacent BF16 loads followed by unmasked `dintlv`
 can therefore lower to A5 `DINTLV_B16`, with `convert` selecting the required
 EVEN/ODD parts automatically. Physical conversion parts remain a backend choice.
+
+
+## Logical channels
+
+`channel_split(value)` returns two same-dtype registers with half as many lanes:
+`even[i] = value[2*i]` and `odd[i] = value[2*i+1]`. The source lane count must be even.
+`channel_merge(*values)` accepts two or four matching dtype/lane-count channels;
+for C channels, `result[C*i+c] = values[c][i]`. Dtypes are the `T` set above.
+These operations are unmasked logical rearrangements, without numeric conversion.
+Unlike `intlv`/`dintlv`, they change the result lane count; they do not duplicate
+an input to fill a physical register. Backend layout support still applies.
+
+For a 256-element BF16 block, split the two widened even/odd128 vectors:
+
+```python
+x0, x2 = pl.reg.channel_split(even_float)
+x1, x3 = pl.reg.channel_split(odd_float)
+# Process each 64-lane vector, sharing a group8 divisor and mask.
+restored = pl.reg.channel_merge(y0, y1, y2, y3)
+quantized = pl.reg.convert(restored, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
+```
+
+The four-channel merge lets PTOAS choose P0/P1/P2/P3 conversion parts and one
+full-vector store. This is a checked lowering pattern, not a guarantee of hardware
+performance; physical parts and register allocation remain backend decisions.

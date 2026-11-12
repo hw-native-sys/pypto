@@ -824,6 +824,36 @@ static bool RegisterPairedOps() {
 }
 static const bool paired_registered = RegisterPairedOps();
 
+REGISTER_OP("reg.channel_split")
+    .set_op_category("RegOp")
+    .set_reg_op("pto.vmi.channel_split")
+    .set_description("Split even and odd logical lanes into two half-length channels")
+    .add_argument("value", "Source VecReg")
+    .set_output_arity(2)
+    .no_arg_writes()
+    .f_deduce_type([](const Args& args, const Kwargs&) -> TypePtr {
+      CHECK(args.size() == 1) << "channel_split expects one register";
+      auto source = Register(args[0], RegKind::VecReg);
+      CHECK(source->shape_ % 2 == 0) << "channel_split requires an even lane count";
+      auto channel = std::make_shared<RegType>(source->shape_ / 2, source->dtype_, RegKind::VecReg);
+      return std::make_shared<TupleType>(std::vector<TypePtr>{channel, channel});
+    });
+REGISTER_OP("reg.channel_merge")
+    .set_op_category("RegOp")
+    .set_reg_op("pto.vmi.channel_merge")
+    .set_description("Interleave two or four matching logical channels into one VecReg")
+    .add_argument("values", "Two or four matching VecRegs")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& args, const Kwargs&) -> TypePtr {
+      CHECK(args.size() == 2 || args.size() == 4) << "channel_merge requires two or four channels";
+      auto source = Register(args[0], RegKind::VecReg);
+      for (size_t i = 1; i < args.size(); ++i) Match(source, Register(args[i], RegKind::VecReg));
+      CHECK(source->shape_ <= std::numeric_limits<int64_t>::max() / static_cast<int64_t>(args.size()))
+          << "channel_merge lane count overflows";
+      return std::make_shared<RegType>(source->shape_ * static_cast<int64_t>(args.size()), source->dtype_,
+                                       RegKind::VecReg);
+    });
+
 REGISTER_OP("reg.gather")
     .set_op_category("RegOp")
     .set_reg_op("pto.vmi.vgather")
