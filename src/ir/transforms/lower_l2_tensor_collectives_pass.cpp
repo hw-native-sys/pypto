@@ -31,10 +31,14 @@
  *     target = __builtin_all_to_all_v__fp32(input, target, signal,
  *                                           send_counts, recv_counts)
  *
- * ``L`` must be a compile-time constant. The pass folds the admitted block count
- * ``B = CalAllToAllVBlocks(P, L)`` (``P`` is the signal's static ``NR``) and, for
- * ``B > 1``, attaches it to the call as the ``core_num`` / ``sync_start`` launch
- * spec — call attrs, not kernel parameters, so the ABI below is unchanged.
+ * ``L`` may be a compile-time constant or a runtime ``Scalar[INDEX]``. With a
+ * literal ``L`` the pass folds the admitted block count
+ * ``B = CalAllToAllVBlocks(NR, L)`` (``NR`` is the signal's static row count) and,
+ * for ``B > 1``, attaches it to the call as the ``core_num`` / ``sync_start``
+ * launch spec. With a runtime ``L``, ``B`` is emitted into the orchestration as
+ * arithmetic over the signal's static ``NR``; dynamic values are not validated
+ * here, so a malformed request is the caller's responsibility. Either way these
+ * ride call attrs, not kernel parameters, so the ABI below is unchanged.
  *
  * The result is one ``rt_submit_aiv_task`` inside the caller's own pipeline —
  * no nested L2 -> L2 dispatch — and the collective participates in the normal
@@ -60,8 +64,7 @@
  *                 operand of one collective belongs to one comm domain.
  *
  * The rank count comes from ``CommContext::rankNum``, not from a scalar
- * argument: the CHIP orchestration cannot compute it (``pld.system.nranks``
- * has no orchestration codegen), and the context is derived per comm domain,
+ * argument: the context is derived per comm domain,
  * so its ``rankNum`` is exactly the ``domain_size`` the HOST dispatch used to
  * pass. The HOST rail therefore drops that scalar too, and the two argument
  * layouts coincide.
@@ -73,6 +76,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -102,6 +106,7 @@
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -383,11 +388,45 @@ class ValueSourceIndex : public IRVisitor {
   return is_packed ? "" : "a non-packed-stride ";
 }
 
+/// Replaces every Call/Submit subexpression with a fresh Var, binding each
+/// through ``bind`` in source order (depth first, left to right). A call-like
+/// argument is bound before the expression that contains it.
+class BindCallsToVars : public IRMutator {
+ public:
+  explicit BindCallsToVars(std::function<ExprPtr(const ExprPtr&)> bind) : bind_(std::move(bind)) {}
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override { return bind_(IRMutator::VisitExpr_(op)); }
+
+  // A Var's type may carry metadata calls (e.g. ``tensor.dim`` in a dynamic
+  // shape). Rewriting that type would return a fresh Var and break the SSA
+  // binding established by the original definition, so leave Vars untouched.
+  ExprPtr VisitExpr_(const VarPtr& op) override { return op; }
+
+  // IterArg has its own visitor; without this override the inherited one
+  // rewrites a loop-carried Var's shape metadata into a fresh, undefined
+  // IterArg while the loop header still defines the original.
+  ExprPtr VisitExpr_(const IterArgPtr& op) override { return op; }
+
+ private:
+  std::function<ExprPtr(const ExprPtr&)> bind_;
+};
+
 class LowerL2TensorCollectivesMutator : public IRMutator {
  public:
-  LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels, StmtPtr body,
+  LowerL2TensorCollectivesMutator(std::map<std::string, FunctionPtr>* kernels, const FunctionPtr& func,
                                   ProgramPtr program)
-      : kernels_(kernels), body_(std::move(body)), program_(std::move(program)) {}
+      : kernels_(kernels), body_(func->body_), program_(std::move(program)) {
+    // Seed the generated-name set with every name already visible in the
+    // function, so a user variable literally called ``a2av_result_0`` cannot be
+    // shadowed by a synthesized prelude binding.
+    for (const auto& param : func->params_) generated_names_.insert(param->name_hint_);
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(body_);
+    for (const Var* var : collector.GetAllVarRefs()) generated_names_.insert(var->name_hint_);
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -398,7 +437,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     auto kernel_call = LowerCollective(visited, call);
     auto result_var = std::make_shared<Var>(op->var_->name_hint_, kernel_call->GetType(), op->var_->span_);
     var_remap_[op->var_.get()] = result_var;
-    return std::make_shared<AssignStmt>(result_var, kernel_call, op->span_);
+    return SplicePrefix(std::make_shared<AssignStmt>(result_var, kernel_call, op->span_), op->span_);
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
@@ -407,31 +446,92 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     auto visited = As<Call>(VisitExpr(op->expr_));
     INTERNAL_CHECK_SPAN(IsManagedCollective(visited), op->span_)
         << "LowerL2TensorCollectives: collective EvalStmt rewrote to a non-collective expression";
-    return std::make_shared<EvalStmt>(LowerCollective(visited, call), op->span_);
+    return SplicePrefix(std::make_shared<EvalStmt>(LowerCollective(visited, call), op->span_), op->span_);
   }
 
   /// ``return pld.tensor.all_to_all_v(...)`` — the collective is embedded in
-  /// the ReturnStmt rather than bound to a Var first. Substituting the lowered
-  /// call in place is enough: it is another Call of the same type, so no
-  /// prelude statement is needed.
+  /// the ReturnStmt rather than bound to a Var first. A literal ``core_num``
+  /// still substitutes in place, but a runtime one needs an assignment the
+  /// launch legalizer can guard (and, on the non-indexed path, a width-arithmetic
+  /// prelude). So the lowered call is bound to a fresh result Var and any
+  /// prelude is spliced in front, the shape SynthesizeAllReduceSignals uses.
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
     std::vector<ExprPtr> values;
     values.reserve(op->value_.size());
+    // Per returned value: the statements that must precede the return, and
+    // whether the value must be lifted into an assignment. Kept per value
+    // rather than accumulated straight into ``pending_prefix_`` so both replay
+    // in source order below.
+    std::vector<std::vector<StmtPtr>> preludes(op->value_.size());
+    // Every returned value that *contains* a call-like expression, not only
+    // the collectives: a tuple projection of an ordinary kernel call left
+    // inline while a later collective is hoisted would run after it, so a
+    // consumer written before the exchange would read exchanged data.
+    // ``Submit`` counts for the same reason (pass-submit-awareness), and so
+    // does a call nested inside a projection or arithmetic expression.
+    std::vector<bool> needs_lift(op->value_.size(), false);
     bool changed = false;
-    for (const auto& value : op->value_) {
+    bool any_prelude = false;
+    // A runtime width with no arithmetic prefix (the indexed variant launches
+    // exactly ``L``) still has to leave the ReturnStmt: LegalizeSpmdLaunches
+    // can only wrap an assignment in ``if (B > 0)``, not an inline return value.
+    bool any_runtime_width = false;
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      const auto& value = op->value_[i];
       if (auto call = As<Call>(value); IsManagedCollective(call)) {
         auto visited = As<Call>(VisitExpr(value));
         INTERNAL_CHECK_SPAN(IsManagedCollective(visited), op->span_)
             << "LowerL2TensorCollectives: collective ReturnStmt value rewrote to a non-collective "
                "expression";
+        INTERNAL_CHECK_SPAN(pending_prefix_.empty(), op->span_)
+            << "Internal error: a prelude from an earlier returned value was never attached";
         values.push_back(LowerCollective(visited, call));
+        preludes[i] = std::move(pending_prefix_);
+        pending_prefix_.clear();
+        any_prelude = any_prelude || !preludes[i].empty();
+        any_runtime_width = any_runtime_width || !As<ConstInt>(call->args_.back());
+        needs_lift[i] = true;
         changed = true;
         continue;
       }
-      values.push_back(VisitExpr(value));
+      auto visited = VisitExpr(value);
+      needs_lift[i] = transform_utils::ExprContainsCallLike(visited);
+      values.push_back(visited);
     }
     if (!changed) return IRMutator::VisitStmt_(op);
-    return std::make_shared<ReturnStmt>(std::move(values), op->span_, op->leading_comments_);
+    if (!any_prelude && !any_runtime_width) {
+      // Every width folded and every value stays in place, so each call remains
+      // exactly where the author wrote it.
+      return std::make_shared<ReturnStmt>(std::move(values), op->span_, op->leading_comments_);
+    }
+    // One runtime width lifts *every* returned call-like value, in source
+    // order. Lifting only those needing a prelude would submit them ahead of
+    // anything left inline in the return, reversing both the order the author
+    // wrote and the task edges derived from it -- and that applies to an
+    // ordinary kernel call returned beside a collective just as much as to a
+    // second collective.
+    std::vector<StmtPtr> stmts;
+    for (size_t i = 0; i < values.size(); ++i) {
+      for (auto& stmt : preludes[i]) stmts.push_back(std::move(stmt));
+      if (!needs_lift[i]) continue;
+      // A lifted expression can itself contain a Call or Submit (for example
+      // a tuple projection of a kernel call). Bind those first: the result
+      // assignment must not carry a nested call-like node, which
+      // LegalizeSpmdLaunches rejects. A direct Call/Submit is already a
+      // top-level RHS and needs no unwrapping.
+      if (!As<Call>(values[i]) && !As<Submit>(values[i]) &&
+          transform_utils::ExprContainsCallLike(values[i])) {
+        values[i] = HoistCallSubexpressions(values[i], op->span_);
+        for (auto& stmt : pending_prefix_) stmts.push_back(std::move(stmt));
+        pending_prefix_.clear();
+      }
+      auto result =
+          std::make_shared<Var>(FreshGeneratedName("a2av_result_"), values[i]->GetType(), op->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(result, values[i], op->span_));
+      values[i] = result;
+    }
+    stmts.push_back(std::make_shared<ReturnStmt>(std::move(values), op->span_, op->leading_comments_));
+    return SeqStmts::Flatten(std::move(stmts), op->span_);
   }
 
  private:
@@ -453,33 +553,44 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     // identical to the HOST rail's. What it becomes instead is the launch spec on
     // the call (see the end of this function).
     //
-    // Only a compile-time L is accepted. A runtime L would need the block count
-    // computed in the emitted orchestration, plus a runtime `signal stride >= B`
-    // check, and orchestration has no surface for raising that fatal today; the
-    // HOST rail takes a runtime L because its entry runs on the host.
-    auto core_num_const = As<ConstInt>(call->args_.back());
-    CHECK_SPAN(core_num_const != nullptr, call->span_)
-        << "CHIP pld.tensor.all_to_all_v: a runtime core_num is not supported on this rail yet; pass a "
-           "compile-time core_num (the HOST rail accepts a runtime value)";
-    const int64_t requested_blocks = core_num_const->value_;
+    // Both forms are accepted (RFC #2521 O2). A literal folds to a ConstInt
+    // launch width here, exactly as it always has; a runtime value becomes
+    // orchestration arithmetic over the signal's static rank count -- see
+    // EmitRuntimeLaunchWidth.
+    const ExprPtr& core_num_expr = call->args_.back();
+    auto core_num_scalar = As<ScalarType>(core_num_expr->GetType());
+    INTERNAL_CHECK_SPAN(core_num_scalar != nullptr, call->span_)
+        << "Internal error: pld.tensor.all_to_all_v core_num must have a ScalarType, got "
+        << core_num_expr->GetType()->TypeName();
+    const DataType core_num_dtype = core_num_scalar->dtype_;
+    auto core_num_const = As<ConstInt>(core_num_expr);
+    // Only meaningful on the literal path; the runtime path never reads it.
+    const int64_t requested_blocks = core_num_const ? core_num_const->value_ : 0;
     // The launch width is a 32-bit count, and the HOST entry bounds `core_num` to
     // the same [1, INT32_MAX] at runtime; a static request outside it can never
     // be honoured, so say so here instead of folding it into an overflowing B.
-    CHECK_SPAN(requested_blocks >= 1 && requested_blocks <= std::numeric_limits<int32_t>::max(), call->span_)
-        << "CHIP pld.tensor.all_to_all_v: core_num must be in [1, " << std::numeric_limits<int32_t>::max()
-        << "], got " << requested_blocks;
+    // A runtime request is not diagnosed here; its validity is the caller's.
+    if (core_num_const) {
+      CHECK_SPAN(requested_blocks >= 1 && requested_blocks <= std::numeric_limits<int32_t>::max(),
+                 call->span_)
+          << "CHIP pld.tensor.all_to_all_v: core_num must be in [1, " << std::numeric_limits<int32_t>::max()
+          << "], got " << requested_blocks;
+    }
 
     auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
     INTERNAL_CHECK_SPAN(target_type, call->span_)
         << "LowerL2TensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
 
-    // The rank count P is a compile-time constant on this rail: the deducer
-    // requires `signal` to be [NR, S] with static NR and S, and the program is
-    // built once per rank count. That is what lets the compiler fold
-    // B = CalAllToAllVBlocks(P, L) here instead of in a generated entry. The
-    // kernel itself still reads the rank count from the CommContext, so NR must
-    // equal the runtime domain size — an invariant this rail already relies on
-    // for correctness (every counts address derives from NR), now also for width.
+    // The deducer requires `signal` to be [NR, S] with static NR and S, so both
+    // are literals here. A literal `core_num` lets this pass fold
+    // B = CalAllToAllVBlocks(NR, L) inline; a runtime one instead emits width
+    // arithmetic over that static NR. This is deliberately *not* a read of the
+    // runtime CommContext: the materialized CommCtx reaching a CHIP
+    // orchestration is the per-rank device pointer, so dereferencing it in
+    // orchestration C++ would fault. NR is the same invariant the kernel
+    // already relies on -- every counts address it derives comes from NR -- so
+    // a runtime rank count that disagrees with NR is a malformed caller
+    // program, not a case to support here.
     auto signal_type = As<DistributedTensorType>(call->args_[2]->GetType());
     INTERNAL_CHECK_SPAN(signal_type && signal_type->shape_.size() == 2, call->span_)
         << "LowerL2TensorCollectives: pld.tensor.all_to_all_v signal must be a 2D DistributedTensor";
@@ -494,16 +605,24 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(nranks >= 1 && signal_stride >= 1, call->span_)
         << "LowerL2TensorCollectives: pld.tensor.all_to_all_v signal [NR, S] must be positive, got ["
         << nranks << ", " << signal_stride << "]";
-    const int64_t launched_blocks = indexed ? requested_blocks : CalAllToAllVBlocks(nranks, requested_blocks);
+    const int64_t launched_blocks =
+        core_num_const ? (indexed ? requested_blocks : CalAllToAllVBlocks(nranks, requested_blocks)) : 0;
 
     // A stride narrower than the launched gang is a defect, not something the
     // kernel should clamp its way past (RFC #2521 §13.3). Compare against the
     // folded B, never the raw L: L=10, P=8 launches 8 blocks, so S=8 is enough.
     // Same condition and wording as the HOST rail's entry.
-    CHECK_SPAN(signal_stride >= launched_blocks, call->span_)
-        << "CHIP pld.tensor.all_to_all_v: signal stride (" << signal_stride
-        << ") is smaller than the admitted block count (" << launched_blocks
-        << ") for core_num=" << requested_blocks << ", nranks=" << nranks;
+    //
+    // Static capacity stays a compile-time rejection (RFC #2521 §12.1). A
+    // runtime B is not checked here or in the emitted orchestration: dynamic
+    // validity is the caller's responsibility, and a non-positive B takes
+    // LegalizeSpmdLaunches' empty path instead of launching.
+    if (core_num_const) {
+      CHECK_SPAN(signal_stride >= launched_blocks, call->span_)
+          << "CHIP pld.tensor.all_to_all_v: signal stride (" << signal_stride
+          << ") is smaller than the admitted block count (" << launched_blocks
+          << ") for core_num=" << requested_blocks << ", nranks=" << nranks;
+    }
 
     // send_counts is read REMOTELY by every peer (the hand-written kernel
     // resolves each peer's copy through CommRemotePtr for the counts pull), so
@@ -577,8 +696,10 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     std::vector<ExprPtr> kernel_args(
         call->args_.begin(), call->args_.begin() + static_cast<std::ptrdiff_t>(spec.param_names.size()));
     auto kernel_callee = std::make_shared<GlobalVar>(spec.function_name);
-    if (launched_blocks == 1) {
-      // One block needs no gang launch; leave the call exactly as it was.
+    if (core_num_const && launched_blocks == 1) {
+      // One block needs no gang launch; leave the call exactly as it was. Only
+      // a statically folded width can take this path -- a runtime width may be
+      // 1 at run time, but the launch spec still has to carry the expression.
       return std::make_shared<Call>(kernel_callee, std::move(kernel_args), call->args_[1]->GetType(),
                                     call->span_);
     }
@@ -587,10 +708,17 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     // optional: the block-aware barrier needs every admitted block resident
     // together, and the runtime rejects an over-capacity sync-start launch
     // rather than part-starting it.
-    auto core_num_dtype = As<ScalarType>(core_num_const->GetType())->dtype_;
     std::vector<std::pair<std::string, std::any>> launch_attrs;
-    launch_attrs.emplace_back(
-        kAttrCoreNum, ExprPtr(std::make_shared<ConstInt>(launched_blocks, core_num_dtype, call->span_)));
+    if (core_num_const) {
+      launch_attrs.emplace_back(
+          kAttrCoreNum, ExprPtr(std::make_shared<ConstInt>(launched_blocks, core_num_dtype, call->span_)));
+    } else {
+      // A runtime width is emitted as orchestration arithmetic ahead of the
+      // dispatch. Its validity is the caller's responsibility: only a
+      // compile-time value can be diagnosed here.
+      launch_attrs.emplace_back(kAttrCoreNum,
+                                EmitRuntimeLaunchWidth(call, indexed, core_num_expr, core_num_dtype, nranks));
+    }
     launch_attrs.emplace_back(kAttrSyncStart, true);
     return std::make_shared<Call>(kernel_callee, std::move(kernel_args),
                                   std::vector<std::pair<std::string, std::any>>{}, std::move(launch_attrs),
@@ -721,6 +849,92 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     return *param < args.size() ? args[*param] : ExprPtr(nullptr);
   }
 
+  /// Emit the orchestration arithmetic for a runtime launch width, and return
+  /// the expression to put in the ``core_num`` launch attribute.
+  ///
+  /// ``B = CalAllToAllVBlocks(P, L)`` (RFC #2521 frozen item #3) without a
+  /// ternary, which the expression codegen does not have:
+  ///
+  ///     B = L - (L % P) * (L >= P)
+  ///
+  /// ``L < P`` leaves ``L % P == L`` and the predicate 0, so ``B = L``; at
+  /// ``L >= P`` the remainder is subtracted, giving the largest multiple of
+  /// ``P`` not exceeding ``L``. ``Min``/``Max`` alone cannot express the split.
+  /// The indexed variant launches exactly ``L`` and needs no arithmetic.
+  ///
+  /// ``P`` is the signal's static ``NR``. It must equal the runtime domain size
+  /// -- every counts address the kernel derives comes from ``NR`` -- so it is
+  /// the same value the orchestration would read from the CommContext, without
+  /// dereferencing the per-rank *device* pointer a CHIP orchestration receives.
+  ///
+  /// The width is attached as computed, without a positivity clamp.
+  /// ``LegalizeSpmdLaunches`` runs next and wraps any launch whose width it
+  /// cannot prove positive in ``if (B > 0)``; that wrapper is the correct
+  /// behaviour for a malformed request, which is the caller's responsibility to
+  /// avoid. Clamping to ``max(B, 1)`` would launch one block instead.
+  [[nodiscard]] ExprPtr EmitRuntimeLaunchWidth(const CallPtr& call, bool indexed, const ExprPtr& core_num,
+                                               DataType dtype, int64_t nranks) {
+    const Span& span = call->span_;
+    // A call-valued request (including a call nested in a compound request
+    // such as ``n + available_aiv_count()``) must be bound once: a Call under
+    // arithmetic in the assignment RHS violates LegalizeSpmdLaunches'
+    // NoNestedCalls prerequisite and is not renderable by expression codegen.
+    // Hoist every call subexpression first, then bind the now call-free
+    // request once for the width arithmetic.
+    ExprPtr width = core_num;
+    if (transform_utils::ExprContainsCallLike(core_num)) {
+      width = HoistCallSubexpressions(core_num, span);
+    }
+    if (!As<Var>(width)) {
+      width = BindPrefix("a2av_width_", width, span);
+    }
+    if (!indexed) {
+      // ``nranks`` is deducer-enforced positive, so no floored-divisor guard is
+      // needed here; ``L % P`` is always defined.
+      auto p = std::make_shared<ConstInt>(nranks, dtype, span);
+      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(width, p, span), span);
+      auto at_least_p = BindPrefix("a2av_atleast_", MakeCast(MakeGe(width, p, span), dtype, span), span);
+      width = BindPrefix("a2av_blocks_", MakeSub(width, MakeMul(rem, at_least_p, span), span), span);
+    }
+    return width;
+  }
+
+  /// Bind ``value`` to a fresh local and record the binding in the prefix.
+  [[nodiscard]] ExprPtr BindPrefix(const std::string& prefix, const ExprPtr& value, const Span& span) {
+    auto var = std::make_shared<Var>(FreshGeneratedName(prefix), value->GetType(), span);
+    pending_prefix_.push_back(std::make_shared<AssignStmt>(var, value, span));
+    return var;
+  }
+
+  /// Bind every Call subexpression of a runtime ``core_num`` request to a fresh
+  /// local, in source order, and return the request with those calls replaced
+  /// by their Vars. A Var request passes through unchanged.
+  [[nodiscard]] ExprPtr HoistCallSubexpressions(const ExprPtr& request, const Span& span) {
+    BindCallsToVars hoister(
+        [this, &span](const ExprPtr& call) { return BindPrefix("a2av_width_", call, span); });
+    return hoister.VisitExpr(request);
+  }
+
+  /// Splice the pending prefix in front of ``stmt`` and clear it.
+  [[nodiscard]] StmtPtr SplicePrefix(StmtPtr stmt, const Span& span) {
+    if (pending_prefix_.empty()) return stmt;
+    std::vector<StmtPtr> stmts = std::move(pending_prefix_);
+    pending_prefix_.clear();
+    stmts.push_back(std::move(stmt));
+    return SeqStmts::Flatten(std::move(stmts), span);
+  }
+
+  /// Names must not contain ``__``: ``auto_name::Parse`` treats the first one
+  /// as the auto-suffix boundary and returns everything *before* it as the base
+  /// name, so a leading ``__`` yields an empty base name and orchestration
+  /// codegen cannot render the Var at all.
+  [[nodiscard]] std::string FreshGeneratedName(const std::string& prefix) {
+    while (true) {
+      auto name = prefix + std::to_string(next_generated_id_++);
+      if (generated_names_.insert(name).second) return name;
+    }
+  }
+
   /// The source index of the body as written, built on the first collective so
   /// a body without one never pays for it.
   const ValueSourceIndex& Sources() {
@@ -731,6 +945,14 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     return *sources_;
   }
 
+  /// Statements the collective being lowered needs in front of its rewritten
+  /// statement: the launch-width arithmetic for a runtime ``core_num``. Filled
+  /// by LowerCollective, drained by SplicePrefix. A literal ``core_num`` (and
+  /// the indexed runtime variant, whose width is the request itself) leaves it
+  /// empty, so those paths emit no arithmetic prelude.
+  std::vector<StmtPtr> pending_prefix_;
+  std::unordered_set<std::string> generated_names_;
+  int64_t next_generated_id_ = 0;
   std::map<std::string, FunctionPtr>* kernels_;
   StmtPtr body_;
   std::optional<ValueSourceIndex> sources_;
@@ -764,11 +986,11 @@ class ResidualCollectiveChecker : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& op) override {
     if (op && IsManagedTensorCollective(op->op_)) {
-      CHECK_SPAN(false, op->span_)
-          << op->op_->name_ << " in function '" << func_name_
-          << "' was not lowered. The managed CHIP/L2 rail currently supports only " << kAllToAllV
-          << " with a compile-time core_num; write any other collective in a HOST orchestrator (builtin "
-             "dispatch rail) or an InCore function (composite rail)";
+      CHECK_SPAN(false, op->span_) << op->op_->name_ << " in function '" << func_name_
+                                   << "' was not lowered. The managed CHIP/L2 rail currently supports only "
+                                   << kAllToAllV
+                                   << "; write any other collective in a HOST orchestrator (builtin "
+                                      "dispatch rail) or an InCore function (composite rail)";
     }
     IRVisitor::VisitExpr_(op);
   }
@@ -795,6 +1017,71 @@ void CheckNoResidualCollective(const ProgramPtr& program) {
   }
 }
 
+/// Replaces the topmost ReturnStmt with @p replacement. A body has at most one
+/// ReturnStmt by the time this pass runs (`CtrlFlowTransform` makes returns
+/// function-terminal), so replacing every occurrence is equivalent.
+class ReturnStmtReplacer : public IRMutator {
+ public:
+  explicit ReturnStmtReplacer(ReturnStmtPtr replacement) : replacement_(std::move(replacement)) {}
+
+ protected:
+  StmtPtr VisitStmt_(const ReturnStmtPtr&) override { return replacement_; }
+
+ private:
+  ReturnStmtPtr replacement_;
+};
+
+/// Re-express param-writeback returns as the parameter itself.
+///
+/// Lifting a call-valued return into an assignment (needed so the launch
+/// legalizer can guard a runtime width) leaves the ReturnStmt holding an SSA
+/// Var that aliases the parameter the callee writes back. The next pass,
+/// ``LegalizeSpmdLaunches``, pre-verifies ``ReturnParamsExplicit``, which
+/// requires such a return to reference the param directly. The lifted call
+/// remains its own statement, so side effects and task edges are unchanged.
+ProgramPtr CanonicalizeParamReturns(const ProgramPtr& program) {
+  // Reuse the recursive callee maps across every orchestration; otherwise each
+  // top-level query clears them and a shared K-node callee is indexed once per
+  // function, making the scan O(M*K).
+  return_lineage::ScopedTraceCache trace_scope;
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions;
+  bool changed = false;
+  for (const auto& [gvar, func] : program->functions_) {
+    auto ret = func && func->body_ ? return_lineage::FindFirstReturn(func->body_) : nullptr;
+    if (!ret || !IsChipOrch(func)) {
+      functions[gvar] = func;
+      continue;
+    }
+    auto returned = return_lineage::ReturnedParamIndices(func, program);
+    std::vector<ExprPtr> values = ret->value_;
+    bool local_changed = false;
+    for (size_t i = 0; i < values.size() && i < returned.size(); ++i) {
+      const std::optional<size_t>& maybe_param = returned[i];
+      if (!maybe_param.has_value()) continue;
+      const size_t param_index = maybe_param.value();
+      if (param_index >= func->params_.size()) continue;
+      const auto& param = func->params_[param_index];
+      if (values[i] != param) {
+        values[i] = param;
+        local_changed = true;
+      }
+    }
+    if (!local_changed) {
+      functions[gvar] = func;
+      continue;
+    }
+    auto new_ret = std::make_shared<ReturnStmt>(std::move(values), ret->span_, ret->leading_comments_);
+    auto new_body = ReturnStmtReplacer(new_ret).VisitStmt(func->body_);
+    functions[gvar] =
+        std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                   new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                   func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+    changed = true;
+  }
+  if (!changed) return program;
+  return std::make_shared<Program>(std::move(functions), program->name_, program->span_);
+}
+
 ProgramPtr TransformProgram(const ProgramPtr& program) {
   std::map<std::string, FunctionPtr> kernels;
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
@@ -804,7 +1091,7 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
       new_functions[gvar] = func;
       continue;
     }
-    LowerL2TensorCollectivesMutator mutator(&kernels, func->body_, program);
+    LowerL2TensorCollectivesMutator mutator(&kernels, func, program);
     auto new_func = mutator.VisitFunction(func);
     new_functions[gvar] = new_func;
     if (new_func.get() != func.get()) modified = true;
@@ -822,7 +1109,8 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     new_functions[gvar] = kernel;
   }
 
-  auto result = std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+  auto with_kernels = std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+  auto result = CanonicalizeParamReturns(with_kernels);
   CheckNoResidualCollective(result);
   return result;
 }

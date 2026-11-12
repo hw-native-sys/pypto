@@ -22,15 +22,15 @@ lower-level primitives only when building a custom protocol.
 ## System Substrate (`pld.system.*`)
 
 These are the lowest-level distributed primitives. Scope varies per op —
-`world_size` is host-only; `get_comm_ctx` works in both host orchestrator and
-InCore kernel code; `rank`, `nranks`, `notify`, `wait`, and `defer_wait` have codegen
-support only in InCore kernel code (there is no host-orchestrator lowering
-for them).
+`world_size` is host-only; `get_comm_ctx` works in host orchestrator, CHIP orchestration,
+and InCore kernel code. `rank`, `nranks`, `notify`, and `wait` have codegen support only
+in InCore kernel code. `defer_wait` requires a dedicated top-level `pl.at(CORE_GROUP)` waiter.
+There is no host-orchestrator lowering for these five operations.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `world_size` | `() -> Scalar` | **Host-only.** Number of ranks in the distributed execution. Returns `INT64`. |
-| `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | Lift a `DistributedTensor` to its `CommCtx` handle. Works in host orchestrator and InCore code. The verifier rejects plain `pl.Tensor`. |
+| `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | Lift a `DistributedTensor` to its `CommCtx` handle. Works in host orchestrator, CHIP orchestration, and InCore code. The verifier rejects plain `pl.Tensor`. |
 | `rank` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Local rank index (`INT32`). Lowers to a load of `CommContext::rankId`. |
 | `nranks` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Number of ranks in this comm group (`INT32`). Lowers to a load of `CommContext::rankNum`. |
 | `notify` | `(target: DT, peer: IntLike, offsets: Sequence[IntLike], value: IntLike, *, op: NotifyOp) -> Call` | **InCore-only.** Cross-rank signal deposit. **Side-effect-only** — no return value. Lowers to `TNOTIFY`. |

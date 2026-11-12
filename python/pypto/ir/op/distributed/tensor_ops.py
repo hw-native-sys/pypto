@@ -617,9 +617,12 @@ def all_to_all_v(
     block count ``B`` is computed at the entry (``CalAllToAllVBlocks``) and may
     be less than ``L``. Accepts a compile-time positive ``int`` or a genuine
     ``Scalar[INDEX]`` ``Expr`` — a dynamic value is type-checked here but not
-    evaluated at compile time; its positivity is validated at the runtime
-    entry instead. The InCore composite rail requires a compile-time
-    ``core_num == 1`` and is rejected otherwise by ``LowerCompositeOps``.
+    evaluated at compile time; its validity — including positivity — is the
+    caller's responsibility, and only compile-time values are diagnosed here.
+    On the CHIP rail a non-positive dynamic value is not launched; the HOST
+    entry validates it at runtime. The InCore composite rail requires a
+    compile-time ``core_num == 1`` and is rejected otherwise by
+    ``LowerCompositeOps``.
     """
     if isinstance(core_num, bool):
         raise TypeError("pld.tensor.all_to_all_v core_num must be a positive int, got bool")
