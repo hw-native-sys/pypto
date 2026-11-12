@@ -121,6 +121,32 @@ launch. `close()` releases the registrations and any `DeviceTensor` the caller f
 | **Freed explicitly** | `w.free_tensor(t)`; `close()` auto-frees as a backstop, not as the plan |
 | **Bound to its worker** | It is not portable to another `ChipWorker` |
 
+For opt-in A2/A3 VMM sharing, allocate with `exportable=True` and call
+`worker.export_buffer(tensor)`. A same-host consumer imports the returned lease
+with `simpler.buffer_export.BufferMapping` in its own current ACL context; the
+original worker retains ownership. Keep both the worker and mapping alive.
+Before freeing the tensor or closing the worker, drain external accesses,
+unregister external resources, successfully close the mapping, and call
+`worker.release_export(exported)`. Outstanding exports make free and close
+refuse cleanup. A `BufferExportError` exposes its unconfirmed lease as
+`error.exported`; `release_export(error.exported)` confirms and retires it.
+A `BufferImportError` exposes `error.mapping` for explicit cleanup retry in the
+importing context; retain the source lease until that cleanup succeeds.
+
+A real control timeout keeps its original payload alive. Retry `release_export`
+after the late reply arrives; it reconciles the original RETAIN/RELEASE instead
+of replaying it. This retires resources, but does not reopen the poisoned
+computation endpoint: close that worker and create a new one. An unresolved
+allocation reply prevents close until it completes; incomplete allocation
+rollback stays owned by the worker for a later close attempt. Failed VMM free
+revokes use while preserving a cleanup-only identity: retry `free_tensor` or
+close the worker; do not compute, copy, or export the retired tensor.
+
+Sharing is limited to trusted processes on the same host. Native export disables
+PID whitelist checks; a lease is a lifetime contract, not target-process
+authorization. Reuse one consumer mapping for each backing; repeated import of
+the same shareable handle is subject to CANN's restrictions.
+
 ### `RunConfig` fields that affect dispatch
 
 `RunConfig` carries both compile-side and runtime-side settings; the compile-side ones are

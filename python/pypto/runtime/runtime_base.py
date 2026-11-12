@@ -48,6 +48,8 @@ import torch
 from .device_tensor import DeviceTensor, alloc_device_tensor, default_init_prep
 
 if TYPE_CHECKING:
+    from simpler.buffer_export import BufferExport
+
     from .worker import RegistrationHandle
 
 
@@ -103,7 +105,7 @@ class Worker(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
+    def malloc(self, nbytes: int, *, worker_id: int = 0, exportable: bool = False) -> int:
         """Allocate ``nbytes`` of device memory; return an opaque pointer."""
 
     @abstractmethod
@@ -258,6 +260,7 @@ class Worker(ABC):
         *,
         init: torch.Tensor | None = None,
         worker_id: int = 0,
+        exportable: bool = False,
     ) -> DeviceTensor:
         """Allocate a device buffer and (optionally) upload host data.
 
@@ -277,12 +280,24 @@ class Worker(ABC):
         a caller that allocates on a non-default worker MUST pass the same
         ``worker_id`` to :meth:`free_tensor`.
 
+        Args:
+            shape: Shape of the allocation.
+            dtype: Element type of the allocation.
+            init: Optional CPU data uploaded after allocation.
+            worker_id: Chip owner; use the same ID for export and free.
+            exportable: Allocate onboard VMM storage that a same-host consumer can import.
+                Keep this Worker alive until every external access, mapping and lease retires.
+
         Returns:
             A :class:`DeviceTensor` referencing the allocated buffer.
         """
         self._require_ready("alloc_tensor")
         t = alloc_device_tensor(
-            malloc=lambda nbytes: self.malloc(nbytes, worker_id=worker_id),
+            malloc=lambda nbytes: (
+                self.malloc(nbytes, worker_id=worker_id, exportable=True)
+                if exportable
+                else self.malloc(nbytes, worker_id=worker_id)
+            ),
             copy_to=lambda dst, src, nbytes: self.copy_to(dst, src, nbytes, worker_id=worker_id),
             free=lambda ptr: self.free(ptr, worker_id=worker_id),
             buffer_for_ptr=lambda ptr: self._buffer_for_ptr(ptr, worker_id=worker_id),
@@ -293,6 +308,34 @@ class Worker(ABC):
         )
         self._owned_tensors[(worker_id, t.data_ptr)] = t
         return t
+
+    def export_buffer(self, tensor: DeviceTensor, *, worker_id: int = 0) -> BufferExport:
+        """Export a live tensor's backing for one same-host external consumer.
+
+        Args:
+            tensor: A resident tensor allocated by this Worker with exportable=True.
+            worker_id: The chip owner used for the original allocation.
+
+        Returns:
+            A consumer lease with a shareable handle; it contains no consumer-local VA.
+
+        The controller keeps this Worker alive, orders access with computation, and confirms
+        release only after the consumer drains, unregisters and unmaps the backing.
+        """
+        self._require_owned_resident_tensor(tensor, "export_buffer", worker_id=worker_id)
+        assert self._tensor_arg_worker is not None
+        return self._tensor_arg_worker.export_buffer(tensor.buffer)
+
+    def release_export(self, exported: BufferExport) -> None:
+        """Release a source lease after the consumer successfully finishes and unmaps.
+
+        Args:
+            exported: The exact lease returned by export_buffer for this Worker.
+
+        A missing completion or failed unmap must retain the lease and its source allocation.
+        """
+        assert self._tensor_arg_worker is not None
+        self._tensor_arg_worker.release_export(exported)
 
     def view_tensor(
         self,
