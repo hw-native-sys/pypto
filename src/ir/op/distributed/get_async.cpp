@@ -107,11 +107,10 @@ TypePtr DeduceGetAsyncType(const std::vector<ExprPtr>& args,
     comm_op::ValidateAsyncContiguousTransfer(transfer_shape, dst_type->shape_, kOpName);
     comm_op::ValidateAsyncContiguousTransfer(transfer_shape, src_type->shape_, kOpName);
   }
-  // Byte count vs window slot size is deliberately deferred: at deduce time
-  // DistributedTensorType::window_buffer_ is still nullopt, and the WindowBuffer
-  // (and its size_) is materialized only by MaterializeCommDomainScopes after
-  // this op's type deduction. A later lowering or verification stage must
-  // compare the transfer byte count with the resolved window extent.
+  // Capacity is established upstream: MaterializeCommDomainScopes rejects a
+  // window view larger than its backing allocation, and the transfer-region
+  // validators above bound this request to the endpoint view. Symbolic view or
+  // slot sizes are checked by the generated host guard before dispatch.
   comm_op::ValidateAsyncEngine(kwargs, kOpName);
 
   // The result is the local destination buffer itself; no fresh allocation.

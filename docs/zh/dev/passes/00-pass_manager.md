@@ -59,7 +59,7 @@
 | `OrchestrationReferencesResolved` | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function |
 | `TensorViewCanonical` | TensorView 规范性已验证（弱模式：允许空 stride；严格模式：要求已材料化，RFC #1300 §2.2） |
 | `ArrayNotEscaped` | ArrayType 不会出现在函数参数或返回类型中 |
-| `CommDomainScopesMaterialized` | host_orch 函数体已被 CommDomainScopeStmt 包裹，且 `pld.tensor.window` 结果类型带有 `DistributedTensorType::window_buffer_` 反向引用 |
+| `CommDomainScopesMaterialized` | host_orch 函数体已被 CommDomainScopeStmt 包裹，`pld.tensor.window` 结果类型带有 `DistributedTensorType::window_buffer_` 反向引用，且每个窗口视图的可访问字节跨度不超过其 slot 的逻辑大小 |
 | `DistTensorCtxMaterialized` | host orchestration 之外不再残留 `pld.system.get_comm_ctx`；每个 chip-orchestration / device 通信上下文都是可追溯到参数的显式 CommCtxType SSA 值 |
 | `RuntimeScopesMaterialized` | Orchestration 函数带有显式的 RuntimeScopeStmt 节点，codegen 不再隐式生成 `SIMPLER_SCOPE()` 包裹 |
 | `AssignTypeSymmetry` | 每个只被定义一次的 Var，在其定义所在的 AssignStmt 上满足 `structural_equal(var->GetType(), value->GetType())`（memref 作为分配细节被排除；pre-SSA 的重绑定没有唯一定义值） |

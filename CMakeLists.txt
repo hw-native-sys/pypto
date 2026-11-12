@@ -335,6 +335,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/utils/wrapper_call_utils.cpp
     src/ir/transforms/utils/window_alias_utils.cpp
+    src/ir/transforms/utils/window_view_utils.cpp
     src/ir/transforms/visitor.cpp
 
     # IR - Verifier

@@ -26,6 +26,8 @@ def test_distributed_job_routes_and_propagates_failure(tmp_path: Path, exit_code
     workflow = yaml.safe_load(workflow_text)
     steps = workflow["jobs"]["onboard-tests-a5-distributed"]["steps"]
     command = next(step["run"] for step in steps if "-m pytest" in step.get("run", ""))
+    # A rename/move of the suite must not leave the unconditional lane green.
+    assert (ROOT / "tests/st/distributed/test_l3_urma_async.py").is_file()
     # The placeholder fallback is retired: the real suite is the only path.
     assert "test_ci_placeholder.py" not in workflow_text
     assert "if [ -f tests/st/distributed/test_l3_urma_async.py ]" not in command
