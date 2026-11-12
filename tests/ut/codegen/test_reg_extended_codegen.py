@@ -42,6 +42,10 @@ CASES = [
     ("gather", "INT8", "y = pl.reg.gather(src, indices, m)"),
     ("scatter", "FP32", "out = pl.reg.scatter(dst, indices, x, m)"),
     ("scatter", "INT8", "out = pl.reg.scatter(dst, indices, x, m)"),
+    ("gather", "FP32", "y = pl.reg.gather(src, indices, m, base_offset=64)"),
+    ("gather", "FP16", "y = pl.reg.gather(src, indices, m, base_offset=64)"),
+    ("scatter", "FP32", "out = pl.reg.scatter(dst, indices, x, m, base_offset=64)"),
+    ("scatter", "FP16", "out = pl.reg.scatter(dst, indices, x, m, base_offset=64)"),
     ("intlv", "FP32", "y, second = pl.reg.intlv(x, x, m)"),
     ("dintlv", "FP32", "y, second = pl.reg.dintlv(x, x, m)"),
     *[
@@ -261,7 +265,8 @@ def test_builder_defaults_roundtrip(op_name):
 
 
 @pytest.mark.ptoas_compile
-def test_indexed_view_origin_and_scatter_alias_compile(tmp_path):
+@pytest.mark.parametrize("base_offset", [0, 16])
+def test_indexed_view_origin_and_scatter_alias_compile(tmp_path, base_offset):
     builder = IRBuilder()
     with builder.function("kernel", type=ir.FunctionType.AIV) as function:
         view = ir.TileView([128], [1], ir.ConstInt(32, DataType.INDEX, SPAN))
@@ -278,15 +283,17 @@ def test_indexed_view_origin_and_scatter_alias_compile(tmp_path):
                 {"lanes": 64, "dtype": DataType.UINT32},
             )
             m = builder.emit_reg("m", "reg.full_mask", [], {"lanes": 64})
-            value = builder.emit_reg("value", "reg.gather", [src, indices, m])
-            updated = builder.emit_reg("updated", "reg.scatter", [src, indices, value, m])
-            builder.emit_reg("reread", "reg.gather", [updated, indices, m])
+            base = [ir.ConstInt(base_offset, DataType.INDEX, SPAN)] if base_offset else []
+            value = builder.emit_reg("value", "reg.gather", [src, indices, m, *base])
+            updated = builder.emit_reg("updated", "reg.scatter", [src, indices, value, m, *base])
+            builder.emit_reg("reread", "reg.gather", [updated, indices, m, *base])
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([function.get_result()], "View", SPAN))
         program = passes.allocate_memory_addr()(program)
     source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
     assert source.count("pto.tile_buf_addr") == 1
-    assert source.count("pto.addptr") == 3  # Each access adds its view origin once.
+    # Each access adds its view origin once and, when present, the scalar base.
+    assert source.count("pto.addptr") == (6 if base_offset else 3)
     # The pinned PTOAS handles unknown indexed dependencies, including aliases.
     assert 'pto.mem_bar "VV_ALL"' not in source
     compiler = find_ptoas_binary()
@@ -456,3 +463,43 @@ def kernel(n: pl.Scalar[pl.INDEX]):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("name", ["gather", "scatter"])
+def test_indexed_scalar_base_offset_codegen(name):
+    statement = (
+        "y = pl.reg.gather(src, indices, m, base_offset=64)"
+        if name == "gather"
+        else "out = pl.reg.scatter(dst, indices, x, m, base_offset=64)"
+    )
+    function = frontend(name, "FP32", statement)
+    printed = python_print(function, format=False)
+    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert "reg_indexed_offset_base" in source
+    assert source.count("pto.addptr") == 1
+    assert source.count(f"pto.vmi.v{name}") == 1
+    # Pointer movement must not create a vector add or broadcast of the base.
+    assert "pto.vmi.vadds" not in source
+
+
+def test_dynamic_indexed_scalar_base_codegen():
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(base: pl.Scalar[pl.INDEX]):
+    src = pl.tile.full([256], pl.FP32, 1)
+    dst = pl.tile.full([256], pl.FP32, 0)
+    with pl.reg_scope():
+        indices = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+        mask = pl.reg.full_mask(lanes=64)
+        value = pl.reg.gather(src, indices, mask, base_offset=base)
+        out = pl.reg.scatter(dst, indices, value, mask, base_offset=base)
+    consumer = pl.tile.add(out, out)
+""")
+    printed = python_print(function, format=False)
+    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert source.count("pto.addptr") == 2
+    assert "pto.vmi.vadds" not in source
+    assert source.count("pto.vmi.vgather") == 1
+    assert source.count("pto.vmi.vscatter") == 1

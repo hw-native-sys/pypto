@@ -322,8 +322,8 @@ scalar literals for `axpy`/`lrelu` are normalized to the vector dtype.
 | `subc(lhs, rhs, mask)` | `vsubc` | `(result, not_borrow)`; INT32/UINT32 |
 | `addcs(lhs, rhs, carry_in, mask)` | `vaddcs` | `(result, carry_out)` for `lhs + rhs + carry_in`; INT32/UINT32 |
 | `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `(result, not_borrow_out)` for `lhs - rhs - (1 - carry_in)`; INT32/UINT32 |
-| `gather(tile, offsets, mask)` | `vgather` | Masked indexed UB read; inactive result lanes are zero |
-| `scatter(tile, offsets, value, mask)` | `vscatter` | Masked indexed UB write; returns the destination Tile alias |
+| `gather(tile, offsets, mask, base_offset=0)` | `vgather` | Masked indexed UB read; inactive result lanes are zero |
+| `scatter(tile, offsets, value, mask, base_offset=0)` | `vscatter` | Masked indexed UB write; returns the destination Tile alias |
 | `intlv(lhs, rhs, mask)` | `vintlv` | `(low, high)` interleaved vectors; even lane count |
 | `dintlv(lhs, rhs, mask)` | `vdintlv` | `(even, odd)` deinterleaved vectors; even lane count |
 
@@ -436,3 +436,10 @@ byte/halfword consumers, including histograms. Other dynamic granularities
 are rejected by PTOAS lowering. VF helpers support mixed Tile dtypes through
 typed pointers derived from one shared UB base; offsets use each Tile's own
 element width.
+
+
+The optional `base_offset` is a scalar INDEX offset in source/destination elements,
+added to the Tile view origin before applying the unsigned vector indices.
+It shifts the UB pointer without broadcasting the offset or widening the indices.
+Dynamic active addresses and initialization remain the caller's responsibility;
+masked-off lanes are not accessed. Existing calls default to a zero base offset.
