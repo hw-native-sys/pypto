@@ -105,6 +105,26 @@ finally:
 | **显式释放** | `w.free_tensor(t)`；`close()` 是兜底，不是方案 |
 | **绑定在它的 worker 上** | 不能移交给另一个 `ChipWorker` |
 
+A2/A3 上可用 `exportable=True` 分配 VMM 内存，再调用
+`worker.export_buffer(tensor)`。同机消费者在自己的当前 ACL context 中通过
+`simpler.buffer_export.BufferMapping` 导入返回的租约；原 worker 仍持有内存所有权。
+调用方必须保持 worker 和 mapping 存活。释放 tensor 或关闭 worker 前，依次完成：
+等待外部访问结束、注销外部资源、成功关闭 mapping、调用
+`worker.release_export(exported)`。仍有导出租约时，free 和 close 会拒绝清理。
+`BufferExportError` 通过 `error.exported` 提供尚未确认的租约，调用
+`release_export(error.exported)` 确认并释放它。`BufferImportError` 通过
+`error.mapping` 提供可重试清理的映射；应在导入 context 中完成清理后再释放源租约。
+
+真实控制超时会保留原始载荷。迟到回执到达后重试 `release_export`，将对账同一条
+RETAIN/RELEASE，而不重新执行原命令。这只恢复清理能力，不重新开放已隔离的计算
+endpoint；应关闭该 worker 并创建新实例。分配回执未决时 close 会拒绝；分配回滚
+未完成的资源仍由 worker 持有，可再次 close。VMM free 失败会撤销使用资格，同时
+保留仅用于清理的身份：可重试 `free_tensor` 或 close，不可继续计算、复制或导出该 tensor。
+
+共享范围限定为同机可信进程。native 导出关闭 PID 白名单校验，租约是生命周期合同，
+不代表目标进程授权。同一 backing 应复用一个消费者 mapping；重复导入同一 shareable
+handle 受 CANN 自身约束。
+
 ### 影响派发的 `RunConfig` 字段
 
 `RunConfig` 同时携带编译侧与运行时侧设置；编译侧那些见[上一页](00-compile.md)。派发时要紧的是：

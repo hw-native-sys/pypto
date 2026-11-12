@@ -46,7 +46,7 @@ class FakeHandle(Worker):
         self.free_calls: list[tuple[int, int]] = []  # (ptr, worker_id)
         self.fail_copy = False
 
-    def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
+    def malloc(self, nbytes: int, *, worker_id: int = 0, exportable: bool = False) -> int:
         ptr = self._next_ptr
         self._next_ptr += 0x1000
         self.live[ptr] = nbytes
