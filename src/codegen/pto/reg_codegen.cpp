@@ -464,14 +464,7 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
       result_types += signed_mull ? mull_type(type) : GetRegTypeString(type);
       names.push_back(name);
     }
-    if (ir::IsOp(call, "reg.channel_split")) {
-      // Channel operations use MLIR's generic assembly format. Their logical
-      // result geometry, rather than a physical layout hint, selects the split.
-      Emit(results + " = \"" + spec->emitter + "\"(" + operands + ") : (" + types + ") -> (" + result_types +
-           ")");
-    } else {
-      Emit(results + " = " + spec->emitter + " " + operands + attrs + " : " + types + " -> " + result_types);
-    }
+    Emit(results + " = " + spec->emitter + " " + operands + attrs + " : " + types + " -> " + result_types);
     if (signed_mull) {
       for (size_t i = 0; i < names.size(); ++i) {
         auto type = ir::As<ir::RegType>(tuple->types_[i]);
@@ -517,8 +510,8 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
   }
   auto name = NewNamedTemp(result->name_hint_);
   auto type = GetRegTypeString(ir::As<ir::RegType>(validated->GetType()));
-  if (ir::IsOp(call, "reg.axpy") || ir::IsOp(call, "reg.lrelu") || ir::IsOp(call, "reg.channel_merge")) {
-    // These VMI schemas provide only MLIR's generic assembly form.
+  if (ir::IsOp(call, "reg.axpy") || ir::IsOp(call, "reg.lrelu")) {
+    // These scalar-float VMI schemas provide only MLIR's generic assembly form.
     Emit(name + " = \"" + spec->emitter + "\"(" + operands + ")" + attrs + " : (" + types + ") -> " + type);
   } else {
     Emit(name + " = " + spec->emitter + " " + operands + attrs + " : " +

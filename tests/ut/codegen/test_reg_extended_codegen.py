@@ -9,7 +9,6 @@
 
 """Extended register APIs through parsing, passes and VMI lowering."""
 
-import shutil
 import subprocess
 
 import pypto.language as pl
@@ -20,7 +19,7 @@ from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
 from pypto.ir.printer import python_print
 from pypto.language.parser import ParserError
-from pypto.runtime._vpto import DEVICE_FLAGS, PTOAS_FLAGS
+from pypto.runtime._vpto import PTOAS_FLAGS
 
 SPAN = ir.Span.unknown()
 CASES = [
@@ -630,132 +629,3 @@ def test_compact_scale_packing_and_float_payload_interleave(kind, tmp_path):
     else:
         assert lowered.count('"DINTLV_B16"') == 1
         assert lowered.count("pto.vcvt") == 4
-
-
-@pytest.mark.parametrize("channels", [2, 4])
-def test_channels_roundtrip_and_codegen(channels):
-    values = ", ".join(["even", "odd"] * (channels // 2))
-    function = pl.parse(f"""
-@pl.function(type=pl.FunctionType.AIV)
-def kernel():
-    dst = pl.tile.full([{64 * channels}], pl.FP32, 0)
-    with pl.reg_scope():
-        source = pl.reg.index_gen(0, lanes=128, dtype=pl.FP32)
-        even, odd = pl.reg.channel_split(source)
-        merged = pl.reg.channel_merge({values})
-        out = pl.reg.store(dst, value=merged)
-    consumer = pl.tile.add(out, out)
-""")
-    printed = python_print(function, format=False)
-    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
-    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
-    assert source.count('"pto.vmi.channel_split"') == 1
-    assert source.count('"pto.vmi.channel_merge"') == 1
-    assert f"!pto.vmi.vreg<{64 * channels}xf32>" in source
-
-
-@pytest.mark.ptoas_compile
-def test_four_channel_quantization_compiles_to_device_object(tmp_path):
-    # The channels expose four logical64 FP32 vectors without prescribing their
-    # physical layout. Rejoining the scaled values before narrowing lets PTOAS
-    # choose P0..P3 and one full FP8 store, rather than two packed half-stores.
-    function = pl.parse("""
-@pl.function(type=pl.FunctionType.AIV)
-def kernel():
-    src = pl.tile.full([256], pl.BF16, 1)
-    dst = pl.tile.full([256], pl.INT8, 0)
-    with pl.reg_scope():
-        first = pl.reg.load(src, lanes=128)
-        second = pl.reg.load(src, offset=128, lanes=128)
-        even, odd = pl.reg.dintlv(first, second)
-        even_float = pl.reg.convert(even, dtype=pl.FP32)
-        odd_float = pl.reg.convert(odd, dtype=pl.FP32)
-        x0, x2 = pl.reg.channel_split(even_float)
-        x1, x3 = pl.reg.channel_split(odd_float)
-        full = pl.reg.full_mask(lanes=64)
-        compact_mask = pl.reg.full_mask(lanes=8)
-        a0 = pl.reg.abs(x0, full)
-        a1 = pl.reg.abs(x1, full)
-        a2 = pl.reg.abs(x2, full)
-        a3 = pl.reg.abs(x3, full)
-        max01 = pl.reg.maximum(a0, a1, full)
-        max23 = pl.reg.maximum(a2, a3, full)
-        maximum = pl.reg.maximum(max01, max23, full)
-        compact = pl.reg.reduce_max(maximum, full, group_size=8)
-        exponent = pl.reg.interpret_cast(compact, dtype=pl.INT32)
-        exponent = pl.reg.shift_rights(exponent, 23, compact_mask)
-        exponent = pl.reg.adds(exponent, -8, compact_mask)
-        zero8 = pl.reg.broadcast(0, lanes=8, dtype=pl.INT32)
-        exponent = pl.reg.maximum(exponent, zero8, compact_mask)
-        spread_exp = pl.reg.group_broadcast(exponent, lanes=64)
-        one = pl.reg.broadcast(1, lanes=64, dtype=pl.INT32)
-        nonzero = pl.reg.maximum(spread_exp, one, full)
-        bits = pl.reg.shift_lefts(nonzero, 23, full)
-        divisor = pl.reg.interpret_cast(bits, dtype=pl.FP32)
-        active = pl.reg.compares(spread_exp, 0, full, predicate="gt")
-        zero = pl.reg.broadcast(0.0, lanes=64, dtype=pl.FP32)
-        onef = pl.reg.broadcast(1.0, lanes=64, dtype=pl.FP32)
-        floor = pl.reg.select(active, onef, zero)
-        low = pl.reg.broadcast(-448.0, lanes=64, dtype=pl.FP32)
-        high = pl.reg.broadcast(448.0, lanes=64, dtype=pl.FP32)
-        y0 = pl.reg.div(x0, divisor, full)
-        y0 = pl.reg.mul(y0, floor, full)
-        y0 = pl.reg.maximum(y0, low, full)
-        y0 = pl.reg.minimum(y0, high, full)
-        y1 = pl.reg.div(x1, divisor, full)
-        y1 = pl.reg.mul(y1, floor, full)
-        y1 = pl.reg.maximum(y1, low, full)
-        y1 = pl.reg.minimum(y1, high, full)
-        y2 = pl.reg.div(x2, divisor, full)
-        y2 = pl.reg.mul(y2, floor, full)
-        y2 = pl.reg.maximum(y2, low, full)
-        y2 = pl.reg.minimum(y2, high, full)
-        y3 = pl.reg.div(x3, divisor, full)
-        y3 = pl.reg.mul(y3, floor, full)
-        y3 = pl.reg.maximum(y3, low, full)
-        y3 = pl.reg.minimum(y3, high, full)
-        restored = pl.reg.channel_merge(y0, y1, y2, y3)
-        quantized = pl.reg.convert(restored, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
-        carrier = pl.reg.interpret_cast(quantized, dtype=pl.INT8)
-        out = pl.reg.store(dst, value=carrier)
-    consumer = pl.tile.add(out, out)
-""")
-    program = lower(function)
-    printed = python_print(function, format=False)
-    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
-    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
-    assert len(bundle.helpers) == 1
-    compiler = find_ptoas_binary()
-    if compiler is None:
-        pytest.skip("PTOAS is unavailable")
-    source = tmp_path / "channels.pto"
-    vpto = tmp_path / "channels.vpto"
-    llvm = tmp_path / "channels.ll"
-    obj = tmp_path / "channels.o"
-    source.write_text(bundle.helpers[0].source)
-    common = [compiler, str(source), *(flag for flag in PTOAS_FLAGS if not flag.startswith("--emit-"))]
-    for flag, output in [("--emit-vpto", vpto), ("--emit-vpto-llvm-ir", llvm)]:
-        result = subprocess.run(
-            [*common, flag, "-o", str(output)], capture_output=True, text=True, timeout=120, check=False
-        )
-        assert result.returncode == 0, result.stderr
-    lowered = vpto.read_text()
-    assert lowered.count('"DINTLV_B16"') == 1
-    assert lowered.count("pto.vcgmax") == 1
-    assert lowered.count("pto.vintlv ") == 0
-    for part in ["P0", "P1", "P2", "P3"]:
-        assert lowered.count(f'part = "{part}"') == 1
-    assert lowered.count("pto.vsts ") == 1
-    assert 'dist = "PK_' not in lowered
-    bisheng = shutil.which("bisheng")
-    if bisheng is None:
-        pytest.skip("Bisheng is unavailable; PTOAS checks passed")
-    result = subprocess.run(
-        [bisheng, *DEVICE_FLAGS, "-c", "-x", "ir", str(llvm), "-o", str(obj)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert obj.stat().st_size > 0
