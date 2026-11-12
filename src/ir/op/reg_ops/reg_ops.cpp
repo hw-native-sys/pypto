@@ -345,10 +345,12 @@ TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
 TypePtr Paired(const Args& a, const Kwargs& k, const std::string& name) {
   const bool carry = name == "addc" || name == "subc" || name == "addcs" || name == "subcs";
   const bool carry_in = name == "addcs" || name == "subcs";
-  CHECK(a.size() == (carry_in ? 4 : 3)) << "reg." << name << " has invalid operand count";
+  const bool interleave = name == "intlv" || name == "dintlv";
+  CHECK(a.size() == (carry_in ? 4 : 3) || (interleave && a.size() == 2))
+      << "reg." << name << " has invalid operand count";
   auto x = Register(a[0], RegKind::VecReg);
   Match(x, Register(a[1], RegKind::VecReg));
-  Mask(a.back(), x);
+  if (a.size() >= 3) Mask(a.back(), x);
   if (carry_in) Mask(a[2], x);
   if (carry || name == "mull") {
     CHECK(x->dtype_ == DataType::INT32 || x->dtype_ == DataType::UINT32)
@@ -812,7 +814,9 @@ static bool RegisterPairedOps() {
         .add_argument("lhs", "VecReg")
         .add_argument("rhs", "VecReg");
     if (name == "addcs" || name == "subcs") e.add_argument("carry_in", "Carry/not-borrow MaskReg");
-    e.add_argument("mask", "MaskReg").set_output_arity(2).no_arg_writes();
+    e.add_argument("mask", name == "intlv" || name == "dintlv" ? "Optional MaskReg" : "MaskReg")
+        .set_output_arity(2)
+        .no_arg_writes();
     if (name == "mull" || name == "intlv" || name == "dintlv") e.set_attr<std::string>("pmode");
     e.f_deduce_type([name](const Args& a, const Kwargs& k) { return Paired(a, k, name); });
   }

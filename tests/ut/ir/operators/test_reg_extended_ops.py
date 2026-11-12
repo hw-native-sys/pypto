@@ -304,3 +304,15 @@ def test_indexed_base_rejects_boolean(base):
         pl.reg.gather(tile(), vec(DataType.UINT32), mask(), base_offset=base)
     with pytest.raises(TypeError, match="not bool"):
         pl.reg.scatter(tile(), vec(DataType.UINT32), vec(), mask(), base_offset=base)
+
+
+@pytest.mark.parametrize("name", ["intlv", "dintlv"])
+@pytest.mark.parametrize("dtype", [DataType.FP32, DataType.BF16])
+def test_unmasked_rearrangement_types(name, dtype):
+    first, second = getattr(pl.reg, name)(vec(dtype, 128), vec(dtype, 128))
+    assert first.unwrap().tuple is second.unwrap().tuple
+    assert len(first.unwrap().tuple.args) == 2
+    assert first.unwrap().type.dtype == dtype
+    assert first.unwrap().type.shape == 128
+    with pytest.raises(ValueError, match="lane shape"):
+        getattr(pl.reg, name)(vec(dtype, 128), vec(dtype, 64))

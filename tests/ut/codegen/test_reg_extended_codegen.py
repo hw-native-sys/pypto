@@ -49,6 +49,11 @@ CASES = [
     ("intlv", "FP32", "y, second = pl.reg.intlv(x, x, m)"),
     ("dintlv", "FP32", "y, second = pl.reg.dintlv(x, x, m)"),
     *[
+        (name, dtype, f"y, second = pl.reg.{name}(x, x)")
+        for name in ("intlv", "dintlv")
+        for dtype in ("BF16", "FP32")
+    ],
+    *[
         (name, dtype, f"y, second = pl.reg.{name}(x, x, m)")
         for name in ("intlv", "dintlv")
         for dtype in ("FP16", "BF16", "INT32", "UINT32")
@@ -137,11 +142,13 @@ def test_roundtrip_and_codegen(name, dtype, statement):
         assert "pmode" not in line
         assert "xpred>" in line.split(" -> ", 1)[1]
     if name in ("intlv", "dintlv"):
-        # PTOAS drops the rearrangement mask; both results need explicit zeroing.
-        assert source.count("pto.vmi.vsel") == 2
-        assert "interleave_zero" in source
+        masked = ", m)" in statement
+        # PTOAS drops the rearrangement mask. Only explicitly masked calls
+        # require result zeroing; all-active calls keep the load-fusion pattern.
+        assert source.count("pto.vmi.vsel") == (2 if masked else 0)
+        assert ("interleave_zero" in source) == masked
         if dtype == "BF16":
-            assert source.count("pto.vmi.vinterpret_cast") == 4
+            assert source.count("pto.vmi.vinterpret_cast") == (4 if masked else 0)
     if name == "expdif":
         assert line.endswith("!pto.vmi.vreg<64xf32>")
     if name == "scatter":
@@ -503,3 +510,51 @@ def kernel(base: pl.Scalar[pl.INDEX]):
     assert "pto.vmi.vadds" not in source
     assert source.count("pto.vmi.vgather") == 1
     assert source.count("pto.vmi.vscatter") == 1
+
+
+@pytest.mark.ptoas_compile
+def test_unmasked_deinterleave_fuses_bf16_load_and_grouped_reduction(tmp_path):
+    # Masked deinterleave needs result-clearing selects. They break the A5
+    # paired-load pattern and can exhaust the layout search for this chain.
+    # Omitting the mask allows PTOAS to pick DINTLV_B16 and EVEN/ODD conversions.
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    src = pl.tile.full([256], pl.BF16, 1)
+    dst = pl.tile.full([128], pl.FP32, 0)
+    with pl.reg_scope():
+        first = pl.reg.load(src, offset=0, lanes=128)
+        second = pl.reg.load(src, offset=128, lanes=128)
+        even, odd = pl.reg.dintlv(first, second)
+        x = pl.reg.convert(even, dtype=pl.FP32)
+        y = pl.reg.convert(odd, dtype=pl.FP32)
+        mask = pl.reg.full_mask(lanes=128)
+        mx = pl.reg.abs(x, mask)
+        my = pl.reg.abs(y, mask)
+        mag = pl.reg.maximum(mx, my, mask)
+        maximum = pl.reg.reduce_max(mag, mask, group_size=16)
+        spread = pl.reg.group_broadcast(maximum, lanes=128)
+        out = pl.reg.store(dst, value=spread)
+    consumer = pl.tile.add(out, out)
+""")
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert "interleave_zero" not in source
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    path = tmp_path / "deinterleave.pto"
+    output = tmp_path / "deinterleave.vpto"
+    path.write_text(source)
+    result = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lowered = output.read_text()
+    assert lowered.count('"DINTLV_B16"') == 1
+    assert lowered.count('part = "EVEN"') == 2
+    assert lowered.count('part = "ODD"') == 2
+    assert lowered.count("pto.vcgmax") == 1
