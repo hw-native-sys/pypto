@@ -75,6 +75,13 @@ The full-test base comes from the live `refs/heads/main` ref. GitHub's PR
 `base.sha` can remain behind that ref even after the test merge is current;
 that older snapshot is used only to match the original lint run. Full dispatch,
 duplicate detection, progress and final publication all check the live ref.
+Before allowing full CI, the command compares the pinned PR head with live main:
+**0–4 commits behind is allowed; 5 or more is rejected**. Only commits present on
+main but missing from the PR count; the PR's own commits do not. A rejected
+comment receives a reply with the count and instructions to rebase onto latest
+main, wait for lint, and post `/ci full` again. The check runs before dispatch or
+writing pending, and full preparation repeats it so manual PR dispatch cannot
+bypass the limit. Automatic lint and main push CI are unaffected.
 When GitHub is still computing the merge or reports merge parents that do not
 match the pinned head and live main revision, the command polls every five seconds within a
 60-second retry window on a GitHub-hosted runner. It keeps the initial head and

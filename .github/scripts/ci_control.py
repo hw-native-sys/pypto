@@ -53,6 +53,7 @@ OPTIONAL = {"prebuild-wheels", "prebuild-wheels-github", "pre-commit", "clang-ti
 CONDITIONAL = {"docs-examples": "docs_changed", "serving-guard": "ptoas_version_changed"}
 MERGE_WAIT_SECONDS = 60
 MERGE_POLL_SECONDS = 5
+REBASE_BEHIND_LIMIT = 5
 
 
 class UntrustedRunError(ValueError):
@@ -246,6 +247,22 @@ def current_base(repo: str) -> str:
     return sha(ref["object"]["sha"])
 
 
+def verify_branch_freshness(repo: str, head: str, base: str) -> None:
+    """Limit missing main commits, not PR-owned commits or the age of PR metadata."""
+    # Compare immutable revisions in this direction: behind_by counts commits
+    # reachable from main but absent from the PR, including for fork PRs. The
+    # summary count is independent of the paginated head-only commit list.
+    comparison = api(f"repos/{repo}/compare/{sha(base)}...{sha(head)}?per_page=1")
+    behind = comparison.get("behind_by")
+    if type(behind) is not int or behind < 0:
+        raise ValueError("Cannot determine how many commits the PR is behind main")
+    if behind >= REBASE_BEHIND_LIMIT:
+        raise ValueError(
+            f"PR is {behind} commits behind main (must be fewer than {REBASE_BEHIND_LIMIT}); "
+            "rebase onto the latest main, wait for lint to pass, then post /ci full again"
+        )
+
+
 def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str) -> None:
     """A fixed test merge preserves pull_request semantics, including forks."""
     for value in (head, base, merge):
@@ -432,6 +449,7 @@ def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None
     routed_head = os.environ.get("CI_ROUTED_HEAD")
     if routed_head and routed_head != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
+    verify_branch_freshness(repo, head, base)
     while True:
         if pr["head"]["sha"] != head or current_base(repo) != base:
             raise ValueError(
@@ -589,6 +607,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             raise ValueError("Expected a positive PR number")
         pr = pull(repo, int(number))
         verify_merge(repo, pr, inputs["head_sha"], inputs["base_sha"], inputs["merge_sha"])
+        verify_branch_freshness(repo, inputs["head_sha"], inputs["base_sha"])
         matching_lint_run(repo, pr)
         checkout = inputs["merge_sha"]
     elif any(inputs.get(key) for key in ("head_sha", "base_sha", "merge_sha")):

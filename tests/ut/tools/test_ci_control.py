@@ -44,6 +44,7 @@ def controller(monkeypatch):
 def control(controller, monkeypatch):
     # Most cases isolate other API contracts; live-ref tests use controller.
     monkeypatch.setattr(controller, "current_base", lambda repo: BASE)
+    monkeypatch.setattr(controller, "verify_branch_freshness", lambda *args: None)
     return controller
 
 
@@ -197,6 +198,99 @@ def test_current_base_requires_live_main_commit(controller, monkeypatch, invalid
         assert controller.current_base(REPO) == BASE
 
 
+@pytest.mark.parametrize("behind", [0, 4, 5, 6, 1000])
+def test_branch_freshness_counts_only_missing_main_commits(controller, monkeypatch, behind):
+    def api(path):
+        assert path == f"repos/{REPO}/compare/{BASE}...{HEAD}?per_page=1"
+        # A long PR history is allowed; neither ahead_by nor a paginated commit
+        # list measures how far the PR is behind main.
+        return {"behind_by": behind, "ahead_by": 200, "commits": [{}]}
+
+    monkeypatch.setattr(controller, "api", api)
+    if behind < 5:
+        controller.verify_branch_freshness(REPO, HEAD, BASE)
+    else:
+        with pytest.raises(ValueError, match=f"{behind} commits behind main.*rebase"):
+            controller.verify_branch_freshness(REPO, HEAD, BASE)
+
+
+@pytest.mark.parametrize("behind", [None, -1, True, "4", 4.5])
+def test_unknown_branch_distance_cannot_authorize_full(controller, monkeypatch, behind):
+    monkeypatch.setattr(controller, "api", lambda path: {"behind_by": behind})
+    with pytest.raises(ValueError, match="Cannot determine"):
+        controller.verify_branch_freshness(REPO, HEAD, BASE)
+
+
+@pytest.mark.parametrize("command", ["command-route", "dispatch"])
+@pytest.mark.parametrize("behind", [5, 6])
+def test_outdated_branch_blocks_full_and_reports_rebase(
+    controller, monkeypatch, event, pr, tmp_path, command, behind
+):
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps(event))
+    output_file = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    monkeypatch.setenv("GITHUB_RUN_ID", "50")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    monkeypatch.setattr(controller.sys, "argv", ["ci_control.py", command])
+
+    def api(path):
+        if path.endswith("/pulls/123"):
+            return pr
+        if path.endswith("/git/ref/heads/main"):
+            return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
+        assert path == f"repos/{REPO}/compare/{BASE}...{HEAD}?per_page=1"
+        return {"behind_by": behind}
+
+    monkeypatch.setattr(controller, "api", api)
+    # Only GET metadata is accepted above: rejection precedes pending status
+    # writes, device dispatch, and the merge-computation polling loop.
+    with pytest.raises(SystemExit) as error:
+        controller.main()
+    assert error.value.code == 1
+    key, reason = output_file.read_text().strip().split("=", 1)
+    assert key == "command_error"
+    monkeypatch.setenv("CI_COMMAND_ERROR", reason)
+    monkeypatch.setattr(controller, "pages", lambda path: [])
+    replies = []
+    monkeypatch.setattr(controller, "api", lambda path, payload: replies.append((path, payload)))
+    controller.command_feedback(REPO, event)
+    assert len(replies) == 1
+    assert replies[0][0] == f"repos/{REPO}/issues/123/comments"
+    assert f"{behind} commits behind main" in replies[0][1]["body"]
+    assert "rebase onto the latest main, wait for lint to pass" in replies[0][1]["body"]
+
+
+@pytest.mark.parametrize("behind", [0, 4, 5, 6])
+def test_manual_pr_full_cannot_bypass_branch_distance(controller, monkeypatch, pr, tmp_path, behind):
+    output_file = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_SHA", BASE)
+    monkeypatch.setattr(controller, "pull", lambda *args: pr)
+    monkeypatch.setattr(controller, "verify_merge", lambda *args: None)
+    lint_checks = []
+    monkeypatch.setattr(controller, "matching_lint_run", lambda *args: lint_checks.append(True))
+
+    def api(path):
+        assert path == f"repos/{REPO}/compare/{BASE}...{HEAD}?per_page=1"
+        return {"behind_by": behind}
+
+    monkeypatch.setattr(controller, "api", api)
+    event = {"inputs": {"pr_number": "123", "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE}}
+    if behind < 5:
+        controller.prepare(REPO, event)
+        assert f"checkout_sha={MERGE}\nreuse_lint=true\n" in output_file.read_text()
+        assert lint_checks == [True]
+    else:
+        with pytest.raises(ValueError, match="rebase"):
+            controller.prepare(REPO, event)
+        assert not output_file.exists() and not lint_checks
+
+
 def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, event, pr, tmp_path):
     # Reproduce #3400: PR REST/GraphQL retain the lint-time base indefinitely,
     # while the synthetic merge already uses live main. Keep both identities.
@@ -235,6 +329,30 @@ def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, eve
     }
     writes = []
     statuses = []
+    responses = {
+        f"repos/{REPO}/pulls/123": pr,
+        f"repos/{REPO}/git/ref/heads/main": {
+            "ref": "refs/heads/main",
+            "object": {"type": "commit", "sha": BASE},
+        },
+        f"repos/{REPO}/compare/{BASE}...{HEAD}": {"behind_by": 4, "ahead_by": 20},
+        f"repos/{REPO}/git/commits/{MERGE}": {"parents": [{"sha": BASE}, {"sha": HEAD}]},
+        f"repos/{REPO}/actions/workflows/ci.yml": {"id": 98},
+        f"repos/{REPO}/actions/workflows/ci-full.yml": {"id": 99},
+        f"repos/{REPO}/actions/workflows/ci.yml/runs": {"workflow_runs": [lint]},
+        f"repos/{REPO}/actions/runs": {"workflow_runs": []},
+        f"repos/{REPO}/commits/{HEAD}/status": {"statuses": statuses},
+        f"repos/{REPO}/actions/runs/50": run,
+        f"repos/{REPO}/actions/runs/40/attempts/1/jobs": {
+            "jobs": [
+                {"name": name, "status": "completed", "conclusion": "success"}
+                for name in ("changes", "pre-commit", "clang-tidy")
+            ]
+        },
+        f"repos/{REPO}/actions/runs/50/attempts/1/jobs": {
+            "jobs": [{"name": "full-result", "conclusion": "success"}]
+        },
+    }
 
     def api(path, payload=None):
         if payload is not None:
@@ -246,34 +364,9 @@ def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, eve
             else:
                 pytest.fail(f"Unexpected write: {path}")
             return None
-        if path.endswith("/pulls/123"):
-            return pr
-        if path.endswith("/git/ref/heads/main"):
-            return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
-        if path.endswith(f"/git/commits/{MERGE}"):
-            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
-        if path.endswith("/workflows/ci.yml"):
-            return {"id": 98}
-        if path.endswith("/workflows/ci-full.yml"):
-            return {"id": 99}
-        if "/workflows/ci.yml/runs?" in path:
-            return {"workflow_runs": [lint]}
-        if "/actions/runs?" in path:
-            return {"workflow_runs": []}
-        if f"/commits/{HEAD}/status?" in path:
-            return {"statuses": statuses}
-        if path.endswith("/runs/50"):
-            return run
-        if "/runs/40/attempts/1/jobs?" in path:
-            return {
-                "jobs": [
-                    {"name": name, "status": "completed", "conclusion": "success"}
-                    for name in ("changes", "pre-commit", "clang-tidy")
-                ]
-            }
-        if "/runs/50/attempts/1/jobs?" in path:
-            return {"jobs": [{"name": "full-result", "conclusion": "success"}]}
-        pytest.fail(f"Unexpected read: {path}")
+        endpoint = path.split("?", 1)[0]
+        assert endpoint in responses, f"Unexpected read: {path}"
+        return responses[endpoint]
 
     monkeypatch.setattr(controller, "api", api)
     controller.command_route(REPO, event)
