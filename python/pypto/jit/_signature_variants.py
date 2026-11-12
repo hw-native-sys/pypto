@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from pypto.pypto_core import DataType
 
 from . import _arguments, _ast_analysis, _call_binding, _tensor_meta
+from ._call_syntax import dependency_call
 from ._specialize_types import DynDim, TensorMeta
 from .specializer import SpecializeContext, build_specialize_context, func_name_lookup
 
@@ -125,6 +126,7 @@ def build_contexts(
     keys: dict[tuple[Any, ...], int] = {}
     order: list[int] = []
     active: set[int] = set()
+    submitted: set[int] = set()
     # These caches belong to this request: globals and hook bindings can change
     # between requests, while every variant in this request sees the same index.
     indices: dict[int, dict[ast.stmt, list[tuple[str, int, ast.Call]]]] = {}
@@ -145,9 +147,15 @@ def build_contexts(
         def walk(node: ast.AST, statement: ast.stmt | None = None) -> None:
             if isinstance(node, ast.stmt):
                 statement = node
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in deps:
+            view = dependency_call(node)
+            if (
+                isinstance(node, ast.Call)
+                and view is not None
+                and isinstance(view.func, ast.Name)
+                and view.func.id in deps
+            ):
                 assert statement is not None
-                if deps[node.func.id]._func_type == "extern" and (
+                if deps[view.func.id]._func_type == "extern" and (
                     not isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign, ast.Return))
                     or statement.value is not node
                 ):
@@ -156,7 +164,7 @@ def build_contexts(
                         "assignment/return; bind the call result before using it in a nested expression "
                         "or control-flow header"
                     )
-                calls.append((statement, node.func.id, node))
+                calls.append((statement, view.func.id, node))
             for child in ast.iter_child_nodes(node):
                 walk(child, statement)
 
@@ -246,7 +254,10 @@ def build_contexts(
                 # for local inference must not become constants in that callee.
                 for parameter, meta in dep_tensors.items():
                     dep_tensors[parameter] = descriptor_metas.for_call(meta, function.__name__)
-                variant.targets[(name, ordinal)] = visit(dep, dep_tensors, dep_scalars, values)
+                target = visit(dep, dep_tensors, dep_scalars, values)
+                variant.targets[(name, ordinal)] = target
+                if dependency_call(call) is not call:
+                    submitted.add(target)
 
         if calls:
             _tensor_meta.extract_local_tensor_metas(
@@ -277,6 +288,7 @@ def build_contexts(
             variant_keys[i]: {site: variant_keys[target] for site, target in variant.targets.items()}
             for i, variant in enumerate(variants)
         },
+        submitted={variant_keys[i] for i in submitted},
     )
     peer_names, ambiguous_peer_scopes = resolve_peers(
         peer_plan, {variant_keys[i]: name for i, name in names.items()}
@@ -309,6 +321,14 @@ def build_contexts(
                 external_aiv_source=function._external_aiv_source,
                 external_dual_aiv_dispatch=function._external_dual_aiv_dispatch,
                 external_include_dirs=function._external_include_dirs,
+                requires_return_contract=variant_id in submitted,
+                return_metas=(
+                    _tensor_meta.specialized_return_metas(
+                        function, variant.tensors, variant.constants, discover
+                    )
+                    if variant_id in submitted and function._func_type != "extern"
+                    else None
+                ),
             )
         )
     return contexts

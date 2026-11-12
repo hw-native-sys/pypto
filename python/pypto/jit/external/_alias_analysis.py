@@ -10,7 +10,7 @@
 """Conservative syntactic alias checks; runtime overlap remains a bridge obligation."""
 
 import ast
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -184,7 +184,7 @@ class AliasTracker:
             for index, element in enumerate(target.elts):
                 self._bind_target(element, elements[index] if index < len(elements) else None)
 
-    def record_assignment(self, statement: ast.stmt, roots: list[_AliasValue] | None = None) -> None:
+    def record_assignment(self, statement: ast.stmt, roots: Sequence[_AliasRoots] | None = None) -> None:
         if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
             return
         targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]

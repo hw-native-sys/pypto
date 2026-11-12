@@ -15,7 +15,7 @@ and rebinding rules stay aligned with emitted source.
 """
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, TypeVar, cast
 
 from pypto.language.parser.ast_parser import ASTParser
@@ -24,6 +24,7 @@ from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import arith, ir
 
 from . import _specialize_values as values
+from ._call_syntax import SUBMIT_DISPATCH_KEYWORDS, dependency_call
 from ._specialize_types import DynDim, TensorMeta
 
 _BindingValue = TypeVar("_BindingValue")
@@ -631,9 +632,17 @@ class BodyTransformer(ast.NodeTransformer):
         Inter-function calls inside ``@pl.program`` only accept positional
         args — preserving keyword form would make the parser reject the call.
         """
-        if isinstance(node.func, ast.Name) and node.func.id in self._dep_names:
+        original = node
+        normalized = dependency_call(node)
+        if (
+            normalized is not None
+            and isinstance(normalized.func, ast.Name)
+            and normalized.func.id in self._dep_names
+        ):
+            callee_name = normalized.func.id
+            node = normalized
             dep_name = self._dep_call_targets.get(
-                id(node), self._dep_func_names.get(node.func.id, node.func.id)
+                id(original), self._dep_func_names.get(callee_name, callee_name)
             )
             new_func = ast.Attribute(
                 value=ast.Name(id="self", ctx=ast.Load()),
@@ -643,13 +652,16 @@ class BodyTransformer(ast.NodeTransformer):
             param_order = self._dep_param_names.get(dep_name)
             constexpr_params = self._dep_constexpr_params.get(dep_name, set())
             if param_order is not None and (node.keywords or constexpr_params):
-                pos_args = list(node.args)
+                bound_args = [
+                    (param_order[index] if index < len(param_order) else None, arg)
+                    for index, arg in enumerate(node.args)
+                ]
                 kw_by_name = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
                 # Append keyword-bound args in dep's parameter order, skipping
                 # params already covered by positional args.
-                for param in param_order[len(pos_args) :]:
+                for param in param_order[len(node.args) :]:
                     if param in kw_by_name:
-                        pos_args.append(kw_by_name.pop(param))
+                        bound_args.append((param, kw_by_name.pop(param)))
                 # Any remaining keywords (e.g. **kwargs splats or unknown names)
                 # are kept as-is so we don't silently drop them; the parser
                 # will surface them as a clear error.
@@ -658,19 +670,32 @@ class BodyTransformer(ast.NodeTransformer):
                     # Drop the callee's compile-time arguments. It resolved them
                     # during specialization and its generated signature no longer
                     # declares them, so passing one would be an arity mismatch.
-                    # Filter by position against the *declared* order, which still
-                    # includes them; anything beyond it is left alone for the
-                    # parser to report.
-                    pos_args = [
-                        arg
-                        for index, arg in enumerate(pos_args)
-                        if index >= len(param_order) or param_order[index] not in constexpr_params
-                    ]
+                    # Preserve formal identities before compacting omitted Out
+                    # slots: a later keyword constexpr is not the missing output.
+                    bound_args = [(param, arg) for param, arg in bound_args if param not in constexpr_params]
                     remaining_kw = [kw for kw in remaining_kw if kw.arg not in constexpr_params]
-                new_node = ast.Call(func=new_func, args=pos_args, keywords=remaining_kw)
+                if original is not normalized:
+                    # Submit can allocate a suffix of omitted outputs. The
+                    # native ABI has no way to encode a hole in that prefix.
+                    runtime_params = [param for param in param_order if param not in constexpr_params]
+                    supplied = [param for param, _ in bound_args if param is not None]
+                    if supplied != runtime_params[: len(supplied)]:
+                        raise ValueError(
+                            f"Submit to {callee_name!r} cannot skip a runtime argument before a supplied one"
+                        )
+                new_node = ast.Call(func=new_func, args=[arg for _, arg in bound_args], keywords=remaining_kw)
             else:
                 new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
-            ast.copy_location(new_node, node)
+            if original is not normalized:
+                # Keep dispatch metadata on Submit while specializing the callee's
+                # constexpr/keyword arguments exactly like an ordinary JIT call.
+                dispatch_keywords = [kw for kw in original.keywords if kw.arg in SUBMIT_DISPATCH_KEYWORDS]
+                new_node = ast.Call(
+                    func=original.func,
+                    args=[new_func, *new_node.args],
+                    keywords=[*new_node.keywords, *dispatch_keywords],
+                )
+            ast.copy_location(new_node, original)
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
 
@@ -963,8 +988,10 @@ class BodyTransformer(ast.NodeTransformer):
         return isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == name
 
     @classmethod
-    def _lower_if_yields(cls, statements: list[ast.stmt]) -> None:
-        """Turn the selected arm's explicit results into ordinary assignments."""
+    def selected_yield_assignments(
+        cls, statements: list[ast.stmt]
+    ) -> Iterator[tuple[ast.Assign | ast.AnnAssign, ast.expr]]:
+        """Yield the ordinary RHS for each explicit result of a selected if arm."""
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
                 value = stmt.value
@@ -974,9 +1001,9 @@ class BodyTransformer(ast.NodeTransformer):
                     continue
                 target = stmt.targets[0] if isinstance(stmt, ast.Assign) else stmt.target
                 if isinstance(target, ast.Tuple) and len(target.elts) == len(value.args):
-                    stmt.value = ast.copy_location(ast.Tuple(elts=value.args, ctx=ast.Load()), value)
+                    yield stmt, ast.copy_location(ast.Tuple(elts=value.args, ctx=ast.Load()), value)
                 elif isinstance(target, ast.Name) and len(value.args) == 1:
-                    stmt.value = value.args[0]
+                    yield stmt, value.args[0]
             # These parser scopes are transparent to the enclosing if's yields.
             # Nested ifs and real loops keep ownership of their own yields.
             elif isinstance(stmt, ast.With) and any(
@@ -984,9 +1011,9 @@ class BodyTransformer(ast.NodeTransformer):
                 for item in stmt.items
                 for name in ("scope", "manual_scope")
             ):
-                cls._lower_if_yields(stmt.body)
+                yield from cls.selected_yield_assignments(stmt.body)
             elif isinstance(stmt, ast.For) and cls._is_attribute_call(stmt.iter, "split_aiv"):
-                cls._lower_if_yields(stmt.body)
+                yield from cls.selected_yield_assignments(stmt.body)
 
     def _visit_inactive_branch(self, statements: list[ast.stmt]) -> list[ast.stmt]:
         """Transform a constexpr-dead branch without publishing its bindings."""
@@ -1009,7 +1036,8 @@ class BodyTransformer(ast.NodeTransformer):
     def _visit_literal_if(self, node: ast.If, condition: bool) -> list[ast.stmt]:
         """Emit only the live arm, binding explicit results without an IfStmt."""
         selected = node.body if condition else node.orelse
-        self._lower_if_yields(selected)
+        for assignment, value in self.selected_yield_assignments(selected):
+            assignment.value = value
         return self._visit_scoped_body(selected)
 
     def visit_If(self, node: ast.If) -> ast.stmt | list[ast.stmt]:

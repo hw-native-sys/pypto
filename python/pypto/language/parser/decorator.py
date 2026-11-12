@@ -27,10 +27,17 @@ from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
-from .diagnostics import BUG_CLASS_EXCEPTIONS, ParserError, ParserSyntaxError, concise_error_message
+from .diagnostics import (
+    BUG_CLASS_EXCEPTIONS,
+    ParserError,
+    ParserSyntaxError,
+    ParserTypeError,
+    concise_error_message,
+)
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
-from .parser_state import JIT_GRAPH_REBINDS_ATTR
+from .parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
 from .source_lookup import DuplicateClassDefinitionError, get_class_source_lines
+from .type_semantics import ParameterReturnDims, derive_return_types_from_body
 
 
 def _is_pl_func_attr_stmt(stmt: ast.stmt) -> bool:
@@ -1120,6 +1127,38 @@ def inline(func: Callable[..., Any]) -> InlineFunction:
     )
 
 
+def _bind_jit_submit_returns(ir_func: ir.Function, arity: int | None) -> ir.Function:
+    """Publish typed JIT Submit results after the ordinary body parser resolves them."""
+    if arity is None:
+        return ir_func
+    return_types = derive_return_types_from_body(ir_func.body)
+    if arity > 1 and len(return_types) == 1 and isinstance(return_types[0], ir.TupleType):
+        return_types = list(return_types[0].types)
+    if len(return_types) == arity:
+        dims = ParameterReturnDims(ir_func)
+        return_types = [dims.return_type(typ) for typ in return_types]
+        if dims.unresolved:
+            raise ParserTypeError(
+                f"Cannot express JIT Submit results of '{ir_func.name}' in its parameter dimensions",
+                span=ir_func.span,
+                hint="Express returned tensor extents using parameter dimensions and scalar arithmetic.",
+            )
+        return ir.Function(
+            ir_func.name,
+            list(zip(ir_func.params, ir_func.param_directions, strict=True)),
+            return_types,
+            ir_func.body,
+            ir_func.span,
+            ir_func.func_type,
+            ir_func.level,
+            ir_func.role,
+            ir_func.attrs,
+            ir_func.requires_runtime_binding,
+            ir_func.ir_stage,
+        )
+    return ir_func
+
+
 @overload
 def program(cls: type) -> ir.Program: ...
 
@@ -1258,6 +1297,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     end = max((fd.end_lineno or fd.lineno), max(pending_comments, default=fd.lineno))
                 method_boundaries[id(fd)] = (start, end)
 
+            submit_return_arities: dict[str, int] = getattr(c, JIT_SUBMIT_RETURNS_ATTR, {})
             jit_graph_rebinds: dict[str, dict[str, str | int]] = getattr(c, JIT_GRAPH_REBINDS_ATTR, {})
             for func_def in func_defs:
                 # Extract function type, level/role, and attrs from decorator
@@ -1358,6 +1398,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         hint="Check your function definition for errors",
                     ) from e
 
+                ir_func = _bind_jit_submit_returns(ir_func, submit_return_arities.get(ir_func.name))
                 functions.append(ir_func)
                 # Update gvar_to_func map so subsequent functions can use this function's return type
                 gvar = global_vars[ir_func.name]

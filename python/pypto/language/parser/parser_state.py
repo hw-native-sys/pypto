@@ -25,6 +25,7 @@ from .type_resolver import (
     TypeResolver,  # noqa: PLC2701
 )
 
+JIT_SUBMIT_RETURNS_ATTR = "__pypto_jit_submit_returns__"
 JIT_GRAPH_REBINDS_ATTR = "__pypto_jit_graph_rebinds__"
 
 

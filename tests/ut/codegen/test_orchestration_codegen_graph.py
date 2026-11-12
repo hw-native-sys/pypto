@@ -35,9 +35,11 @@ import pypto.language.distributed as pld
 import pytest
 from _orchestration_codegen_common import (
     _assert_orchestration_compiles,
+    _generate_orch_code,
     _out_of_scope_tensor_refs,
     _runtime_include_args,
 )
+from pypto import backend
 from pypto.backend import BackendType, pto_backend
 from pypto.ir.compile import compile as ir_compile
 from pypto.pypto_core import codegen, passes
@@ -1196,6 +1198,140 @@ class PipeCapacities:
         assert capacity == per_block * core_num, (group, expression, per_block, core_num)
     assert len(allocations) == 2, orch
     _assert_orchestration_compiles(source)
+
+
+@pytest.mark.parametrize("trip_count", [2, 8])
+def test_unrolled_graph_hoists_have_distinct_parameter_names(tmp_path, trip_count):
+    """Unrolled locals have distinct identities but may share their name hint.
+
+    Graph boundary legalization hoists each derived row offset into a parameter.
+    Naming every parameter after that shared hint emitted duplicate C++ bindings.
+    Check all offsets survive and type-check the actual orchestration headers.
+    """
+
+    @pl.program
+    class UnrolledGraph:
+        @pl.function(type=pl.FunctionType.Graph)
+        def stage(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+            layer: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            for offset in pl.unroll(trip_count):
+                base = layer * 128 + offset * 16
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    value: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [base, 0], [128, 128])
+                    pl.store(value, [0, 0], c)
+            return c
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            c = self.stage(a, c, 0)
+            return c
+
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        ir_compile(
+            UnrolledGraph,
+            skip_ptoas=True,
+            platform="a2a3",
+            output_dir=str(tmp_path),
+        )
+    main_cpp = tmp_path / "orchestration/main.cpp"
+    names = re.findall(r"const auto (\w+) = args.scalar\(", main_cpp.read_text())
+    assert len(names) == trip_count + 1
+    assert len(set(names)) == len(names)
+    _assert_orchestration_compiles(main_cpp)
+
+
+def test_graph_specialization_suffixes_keep_distinct_cpp_symbols(tmp_path):
+    @pl.program
+    class Variants:
+        @pl.function(type=pl.FunctionType.Graph)
+        def stage(
+            self, a: pl.Tensor[[16, 32], pl.FP32], out: pl.InOut[pl.Tensor[[16, 32], pl.FP32]]
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                value = pl.load(a, [0, 0], [16, 32])
+                pl.store(pl.mul(value, 2), [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def stage__2(
+            self, a: pl.Tensor[[16, 32], pl.FP32], out: pl.InOut[pl.Tensor[[16, 32], pl.FP32]]
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                value = pl.load(a, [0, 0], [16, 32])
+                pl.store(pl.mul(value, 3), [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, a: pl.Tensor[[16, 32], pl.FP32], out: pl.InOut[pl.Tensor[[16, 32], pl.FP32]]
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            out = self.stage(a, out)
+            out = self.stage__2(a, out)
+            return out
+
+    source = _compile_orch(Variants)
+    symbols = re.findall(r"static void (pypto_graph_\w+)\(", source)
+    assert len(symbols) == 2
+    assert len(set(symbols)) == 2
+    generated = tmp_path / "variants.cpp"
+    generated.write_text(source)
+    _assert_orchestration_compiles(generated)
+
+
+def test_graph_dynamic_extent_uses_unique_parameter_binding(tmp_path):
+    extent = pl.dynamic("N")
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self,
+            left: pl.Tensor[[16, 32], pl.FP32],
+            right: pl.Tensor[[extent, 32], pl.FP32],
+            size: pl.Scalar[pl.INDEX],
+        ):
+            pass
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(
+            self,
+            a__ssa_v0: pl.Tensor[[16, 32], pl.FP32],
+            a__ssa_v1: pl.Tensor[[extent, 32], pl.FP32],
+        ):
+            self.kernel(a__ssa_v0, a__ssa_v1, extent)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            left: pl.Tensor[[16, 32], pl.FP32],
+            right: pl.Tensor[[extent, 32], pl.FP32],
+        ):
+            self.layer(left, right)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    try:
+        with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+            source = _generate_orch_code(Prog)
+        body = source[
+            source.index("static void pypto_graph_layer") : source.index("aicpu_orchestration_entry")
+        ]
+        declaration = re.search(r"int64_t N\s*=\s*([^;]+);", body)
+        assert declaration is not None, body
+        assert "a_1.shapes[0]" in declaration.group(1), body
+        cpp = tmp_path / "main.cpp"
+        cpp.write_text(source)
+        _assert_orchestration_compiles(cpp)
+    finally:
+        backend.reset_for_testing()
 
 
 def test_graph_distributed_context_is_replay_linked(tmp_path):

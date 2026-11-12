@@ -40,7 +40,6 @@
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/utils/alloc_batching.h"
-#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
@@ -59,7 +58,10 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 /// at every call site — a lambda would mint one pointer per syntactic
 /// occurrence and burn through the 16-entry Definition cache.
 std::string GraphFunctionSymbol(const std::string& func_name) {
-  return "pypto_graph_" + auto_name::GetCompatibleBaseName(func_name);
+  // Function names identify constexpr specializations, unlike SSA value hints.
+  // Removing a suffix such as __2 merges distinct Graph definitions and emits
+  // duplicate symbols (or calls the wrong specialization on replay).
+  return "pypto_graph_" + func_name;
 }
 
 namespace {

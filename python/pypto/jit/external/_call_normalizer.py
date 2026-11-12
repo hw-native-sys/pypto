@@ -16,11 +16,15 @@ expressions and control-flow headers are diagnosed rather than eagerly hoisted.
 
 import ast
 import copy
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
-from ._alias_analysis import AliasTracker, _AliasRoots
+from pypto.pypto_core.ir import ParamDirection
+
+from .._call_syntax import SUBMIT_DISPATCH_KEYWORDS, submit_target
+from ._alias_analysis import AliasTracker, _AliasRoots, _AliasValue
 from .normalization import CallPlan
 
 
@@ -31,6 +35,166 @@ class CallBinding:
     # None preserves the legacy ABI's alias policy. Provider contracts must
     # explicitly permit any known overlap involving a written parameter.
     alias_permissions: frozenset[tuple[int, int]] | None = None
+
+
+def _assign(name: str, value: ast.expr, origin: ast.AST) -> ast.Assign:
+    return ast.copy_location(ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=value), origin)
+
+
+def _bind_submit_targets(
+    statement: ast.stmt,
+    value: ast.Call,
+    plan: CallPlan,
+    occupied: set[str],
+    aliases: AliasTracker,
+    public_roots: Sequence[_AliasValue],
+) -> tuple[ast.Assign, list[ast.expr], list[ast.Assign]] | None:
+    if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+        return None
+    target = statement.targets[0]
+    if not isinstance(target, ast.Tuple):
+        return None
+    if len(target.elts) != 2:
+        raise ValueError("An external submission must bind (result, task_id)")
+    public, tid = target.elts
+    if not isinstance(tid, ast.Name):
+        raise ValueError("An external submission must bind a TaskId variable")
+    targets = public.elts if isinstance(public, ast.Tuple) else [public]
+    if len(targets) != len(plan.public_slots) or any(not isinstance(x, ast.Name) for x in targets):
+        raise ValueError("External submission targets must match the public return arity")
+
+    result_names = [aliases.fresh() for _ in plan.result_parameters]
+    selected: dict[int, str] = {}
+    names = [item.id for item in targets if isinstance(item, ast.Name)]
+    counts = Counter(names)
+    for slot, name in zip(plan.public_slots, names, strict=True):
+        # Keep result names on the Submit so the parser can validate their
+        # producer dependencies. Delay writes to aliased assignment targets.
+        if slot not in selected and name not in occupied and counts[name] == 1 and name != tid.id:
+            selected[slot] = name
+            result_names[slot] = name
+    late = [
+        _assign(name, ast.Name(id=result_names[slot], ctx=ast.Load()), statement)
+        for slot, name in zip(plan.public_slots, names, strict=True)
+        if name != selected.get(slot)
+    ]
+    task = tid.id if tid.id not in occupied and tid.id not in counts else aliases.fresh()
+    if task != tid.id:
+        late.append(_assign(tid.id, ast.Name(id=task, ctx=ast.Load()), statement))
+    result_root = tuple(public_roots) if isinstance(public, ast.Tuple) else public_roots[0]
+    aliases.record_assignment(statement, [result_root, None])
+    outputs: list[ast.expr] = [ast.Name(id=name, ctx=ast.Store()) for name in result_names]
+    lowered_target = ast.Tuple(
+        elts=[ast.Tuple(elts=outputs, ctx=ast.Store()), ast.Name(id=task, ctx=ast.Store())],
+        ctx=ast.Store(),
+    )
+    lowered = ast.copy_location(ast.Assign(targets=[lowered_target], value=value), statement)
+    return lowered, [ast.Name(id=name, ctx=ast.Load()) for name in result_names], late
+
+
+def _lower_call(  # noqa: PLR0912
+    statement: ast.stmt,
+    value: ast.Call,
+    binding: CallBinding,
+    operands: ast.Call,
+    aliases: AliasTracker,
+    reject_nested: Callable[[ast.AST], None],
+) -> list[ast.stmt]:
+    result: list[ast.stmt] = []
+    fresh = aliases.fresh
+    plan = binding.plan
+    submitted = value is not operands
+    supplied = len(operands.args)
+    directions = plan.parameter_directions
+    omitted = directions[supplied:]
+    if (
+        operands.keywords
+        or supplied > len(directions)
+        or (omitted and (not submitted or any(d != ParamDirection.Out for d in omitted)))
+    ):
+        raise ValueError(f"External call {ast.unparse(operands.func)!r} has unbound arguments")
+    writebacks = [(parameter, slot) for parameter, slot in plan.writeback_slots if parameter < supplied]
+    for operand in [*operands.args, *(kw.value for kw in value.keywords)]:
+        reject_nested(operand)
+    aliases.check_aliases(operands, binding)
+    roots = [
+        aliases.alias_of(operands.args[parameter]) if parameter < supplied else None
+        for parameter in plan.result_parameters
+    ]
+    public_roots = [roots[slot] for slot in plan.public_slots]
+    if not submitted and not plan.writeback_slots and plan.public_slots == (0,) and not binding.public_tuple:
+        aliases.record_assignment(statement, public_roots)
+        return [statement]
+
+    # Freeze arguments before any update. A view expression cannot be
+    # used as an assignment target and must not be evaluated twice.
+    arguments: list[ast.expr] = []
+    for argument in operands.args:
+        if isinstance(argument, (ast.Name, ast.Constant)):
+            arguments.append(argument)
+        else:
+            name = fresh()
+            result.append(_assign(name, argument, statement))
+            arguments.append(ast.Name(id=name, ctx=ast.Load()))
+
+    value.args = [value.args[0], *arguments] if submitted else arguments
+    occupied = {arg.id for parameter, _ in writebacks if isinstance(arg := arguments[parameter], ast.Name)}
+    unpack = (
+        _bind_submit_targets(statement, value, plan, occupied, aliases, public_roots) if submitted else None
+    )
+    late: list[ast.Assign] = []
+    temporary: str | None = None
+    if unpack is not None:
+        launch, projections, late = unpack
+        result.append(launch)
+    elif submitted or plan.result_parameters:
+        temporary = fresh()
+        result.append(_assign(temporary, value, statement))
+
+        def projection(slot: int, name: str = temporary) -> ast.expr:
+            expr: ast.expr = ast.Name(id=name, ctx=ast.Load())
+            if submitted or len(plan.result_parameters) > 1:
+                expr = ast.Subscript(value=expr, slice=ast.Constant(slot), ctx=ast.Load())
+            return expr
+
+        projections = [projection(slot) for slot in range(len(plan.result_parameters) + int(submitted))]
+    else:
+        result.append(ast.copy_location(ast.Expr(value=value), statement))
+        projections = []
+
+    for parameter, slot in writebacks:
+        target = arguments[parameter]
+        if not isinstance(target, ast.Name):
+            raise ValueError(
+                f"External tensor writeback requires a tensor argument, got {ast.unparse(target)}"
+            )
+        result.append(_assign(target.id, projections[slot], statement))
+
+    if unpack is not None:
+        return [*result, *late]
+
+    if submitted:
+        if not isinstance(statement, ast.Expr):
+            assert isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Return))
+            assert temporary is not None
+            public = [projections[slot] for slot in plan.public_slots]
+            statement.value = ast.Tuple(elts=[*public, projections[-1]], ctx=ast.Load())
+            aliases.bind(temporary, (*roots, None))
+            aliases.record_assignment(statement)
+            result.append(statement)
+        return result
+
+    aliases.record_assignment(statement, public_roots)
+    public = [projections[slot] for slot in plan.public_slots]
+    if not isinstance(statement, ast.Expr) and public:
+        assert isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Return))
+        statement.value = ast.Tuple(elts=public, ctx=ast.Load()) if binding.public_tuple else public[0]
+        result.append(statement)
+    elif isinstance(statement, ast.Return):
+        result.append(ast.copy_location(ast.Return(value=None), statement))
+    elif not isinstance(statement, ast.Expr):
+        raise ValueError("A void external call has no public value to assign")
+    return result
 
 
 def normalize_calls(
@@ -60,14 +224,27 @@ def normalize_calls(
 
     aliases = AliasTracker(parameter_names, fresh)
 
-    def binding_for(node: ast.AST) -> CallBinding | None:
+    def binding_for(node: ast.AST) -> tuple[CallBinding, ast.Call] | None:
+        if not isinstance(node, ast.Call):
+            return None
+        target = submit_target(node)
+        callee = target if target is not None else node.func
         if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "self"
+            isinstance(callee, ast.Attribute)
+            and isinstance(callee.value, ast.Name)
+            and callee.value.id == "self"
+            and (binding := bindings.get(callee.attr)) is not None
         ):
-            return bindings.get(node.func.attr)
+            operands = (
+                node
+                if target is None
+                else ast.Call(
+                    func=callee,
+                    args=node.args[1:],
+                    keywords=[kw for kw in node.keywords if kw.arg not in SUBMIT_DISPATCH_KEYWORDS],
+                )
+            )
+            return binding, operands
         return None
 
     def reject_nested(node: ast.AST) -> None:
@@ -79,72 +256,6 @@ def normalize_calls(
                     "or control-flow header"
                 )
 
-    def assign(name: str, value: ast.expr, origin: ast.AST) -> ast.Assign:
-        return ast.copy_location(
-            ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=value), origin
-        )
-
-    def lower_call(statement: ast.stmt, value: ast.AST | None, binding: CallBinding) -> list[ast.stmt]:
-        result: list[ast.stmt] = []
-
-        assert isinstance(value, ast.Call)
-        plan = binding.plan
-        if value.keywords or len(value.args) != len(plan.parameter_directions):
-            raise ValueError(f"External call {ast.unparse(value.func)!r} has unbound arguments")
-        for argument in value.args:
-            reject_nested(argument)
-        aliases.check_aliases(value, binding)
-        if not plan.writeback_slots and plan.public_slots == (0,) and not binding.public_tuple:
-            aliases.record_assignment(statement, [aliases.alias_of(value.args[plan.result_parameters[0]])])
-            return [statement]
-        public_roots = [
-            aliases.alias_of(value.args[plan.result_parameters[slot]]) for slot in plan.public_slots
-        ]
-        aliases.record_assignment(statement, public_roots)
-        # Freeze arguments before any update. A view expression cannot be
-        # used as an assignment target and must not be evaluated twice.
-        arguments: list[ast.expr] = []
-        for argument in value.args:
-            if isinstance(argument, (ast.Name, ast.Constant)):
-                arguments.append(argument)
-            else:
-                name = fresh()
-                result.append(assign(name, argument, statement))
-                arguments.append(ast.Name(id=name, ctx=ast.Load()))
-        value.args = arguments
-        if not plan.result_parameters:
-            result.append(ast.copy_location(ast.Expr(value=value), statement))
-        else:
-            temporary = fresh()
-            result.append(assign(temporary, value, statement))
-
-            def projection(slot: int) -> ast.expr:
-                expr: ast.expr = ast.Name(id=temporary, ctx=ast.Load())
-                if len(plan.result_parameters) > 1:
-                    expr = ast.Subscript(value=expr, slice=ast.Constant(slot), ctx=ast.Load())
-                return expr
-
-            for parameter, slot in plan.writeback_slots:
-                target = arguments[parameter]
-                if not isinstance(target, ast.Name):
-                    raise ValueError(
-                        f"External tensor writeback requires a tensor argument, got {ast.unparse(target)}"
-                    )
-                result.append(assign(target.id, projection(slot), statement))
-            public = [projection(slot) for slot in plan.public_slots]
-            if not isinstance(statement, ast.Expr) and public:
-                assert isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Return))
-                statement.value = (
-                    ast.Tuple(elts=public, ctx=ast.Load()) if binding.public_tuple else public[0]
-                )
-                result.append(statement)
-                return result
-        if isinstance(statement, ast.Return):
-            result.append(ast.copy_location(ast.Return(value=None), statement))
-        elif not isinstance(statement, ast.Expr):
-            raise ValueError("A void external call has no public value to assign")
-        return result
-
     def block(statements: list[ast.stmt]) -> list[ast.stmt]:
         result: list[ast.stmt] = []
         for statement in statements:
@@ -153,8 +264,8 @@ def normalize_calls(
                 if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Return, ast.Expr))
                 else None
             )
-            binding = binding_for(value) if value is not None else None
-            if binding is None:
+            match = binding_for(value) if value is not None else None
+            if match is None:
                 # Recurse only through statement blocks, so nested blocks are
                 # not rescanned when checking their parent's header.
                 rebound: set[str] = set()
@@ -190,7 +301,8 @@ def normalize_calls(
                 result.append(statement)
                 aliases.record_assignment(statement)
                 continue
-            result.extend(lower_call(statement, value, binding))
+            assert isinstance(value, ast.Call)
+            result.extend(_lower_call(statement, value, *match, aliases, reject_nested))
 
         return result
 

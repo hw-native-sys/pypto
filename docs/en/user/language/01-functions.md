@@ -111,9 +111,10 @@ Dynamic loops can be placed inside an InCore kernel.
 
 Inside an `@pl.program` class, launch a Graph method with
 `pl.submit(self.layer, ..., deps=[producer])` under a manual scope. This Submit
-form requires a `self.<kernel>` method reference; it does not accept a standalone
-`@pl.jit.graph` function. In a JIT entry, use the scope form
-`with pl.graph("layer", deps=[producer]) as done:` to express Graph dependencies
+form requires a `self.<kernel>` method reference. A JIT entry may submit a
+`@pl.jit.graph` dependency by name. JIT specializes it and supplies the method
+reference. For an inline region, use
+`with pl.graph("layer", deps=[producer]) as done:` to express its dependencies
 and capture completion.
 The trailing `TASK_ID` result of `pl.submit`, or the scope's `done` binding,
 names the outer Graph task and becomes ready when
@@ -124,7 +125,17 @@ computed values and recorded-internal TaskIds cannot be returned to the caller.
 Definition reuse is within one orchestration run, not across separate L2 calls.
 
 Sub-function dependencies (`.incore` / `.inline` / `.opaque` / `.graph`) are auto-discovered from
-the entry's body — call them by name. The name you call is resolved in the entry's own
+the entry's body — call them by name. Functions passed to `pl.submit` or
+`pl.spmd_submit` are discovered too; callee constexpr arguments specialize the
+function, while `deps` and other dispatch metadata remain on the submission.
+A first submission can omit runtime-allocated Out parameters when their complete
+tensor annotations determine shape and dtype, including call-owned constexpr
+values. JIT uses the specialized result metadata and fills unavailable slots
+from complete annotations. A genuinely void callee contributes no tensor result. Submit appends one TaskId
+after the callee values. Tensor metadata follows single-variable tuple bindings
+and constant projections, including projections used directly as call arguments;
+the TaskId slot is never treated as a tensor.
+The name you call is resolved in the entry's own
 namespace, so an aliased import (`from kernels import matmul as mm`, or a plain
 `mm = matmul` rebinding) is discovered like any other binding; the generated program still
 names the function after its `def`. When two distinct sub-functions share that name — two

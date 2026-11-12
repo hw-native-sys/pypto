@@ -18,6 +18,7 @@ import inspect
 import textwrap
 from typing import Any
 
+from ._call_syntax import dependency_call
 from .specializer import (
     DynDim,
     _collect_annotation_dynamic_dims,
@@ -71,8 +72,9 @@ def collect_all_called_names(func_def: ast.FunctionDef) -> tuple[str, ...]:
     names: list[str] = []
     seen: set[str] = set()
     for node in ast.walk(func_def):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = node.func.id
+        call = dependency_call(node)
+        if call is not None and isinstance(call.func, ast.Name):
+            name = call.func.id
             if name not in seen:
                 names.append(name)
                 seen.add(name)
@@ -118,6 +120,8 @@ def _collect_bind_dynamic_bindings(
 def build_dyndim_map_for_func(
     func: Any,
     param_names: tuple[str, ...],
+    *,
+    include_annotations: bool = True,
 ) -> dict[str, dict[int, DynDim]]:
     """For each tensor param of ``func``, return ``dim_idx → DynDim``.
 
@@ -150,6 +154,10 @@ def build_dyndim_map_for_func(
     for (p, i), dv_name in bd_bindings.items():
         out.setdefault(p, {})[i] = DynDim(name=dv_name, literal=_literal_for(dv_name), static_bound=0)
 
+    # A call-resolved annotation supplies its own axes. Keep only independent
+    # body declarations when the definition-time annotation is superseded.
+    if not include_annotations:
+        return out
     # annotation source fills dims not covered by bind_dynamic
     for key, dv_name in ann_bindings.items():
         p, idx_str = key.rsplit("__", 1)

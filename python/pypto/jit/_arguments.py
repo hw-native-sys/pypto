@@ -12,10 +12,13 @@
 Torch stays optional and is loaded through one module-owned cache. These helpers
 read captured namespaces through the existing specializer services."""
 
+import ast
 import inspect
+import sys
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any
+from types import GenericAlias
+from typing import Any, cast
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -24,6 +27,14 @@ from .specializer import (
     DynDim,
     ShapeDim,
     TensorMeta,
+    _annotation_names,
+    _classify_params,
+    _extern_annotation_source,
+    _LangTensor,
+    _LangTuple,
+    _normalize_extern_return_calls,
+    _tuple_annotation_elements,
+    _unwrap_direction_annotation,
     func_name_lookup,
 )
 
@@ -189,6 +200,121 @@ def resolve_annotation(annotation: Any, ann_ns: Mapping[str, Any] | None) -> Any
         return eval(annotation, dict(ann_ns))  # noqa: S307
     except Exception:  # noqa: BLE001 - leave as string; callers treat it as "cannot infer"
         return annotation
+
+
+def resolve_call_annotation(
+    source: ast.expr | None, eager: Any, namespace: Mapping[str, Any], binding: Mapping[str, str]
+) -> Any:
+    """Keep definition-time fields and reevaluate fields that the call owns."""
+    if source is None:
+        return resolve_annotation(eager, namespace)
+    if isinstance(source, ast.Constant) and isinstance(source.value, str):
+        source = ast.parse(source.value, mode="eval").body
+    if (
+        not isinstance(eager, str)
+        and eager is not inspect.Signature.empty
+        and binding.keys().isdisjoint(_annotation_names(source))
+    ):
+        return eager
+    elements = _tuple_annotation_elements(eager)
+    if not isinstance(eager, _LangTensor) and elements is None:
+        resolved = resolve_annotation(ast.unparse(source), namespace)
+        return resolve_annotation(eager, namespace) if isinstance(resolved, str) else resolved
+
+    original = _unwrap_direction_annotation(_normalize_extern_return_calls(source, namespace), namespace)
+    if not isinstance(original, ast.Subscript):
+        raise ValueError(f"Cannot recover call-owned annotation {ast.unparse(source)!r}")
+    fields = original.slice.elts if isinstance(original.slice, ast.Tuple) else [original.slice]
+    if elements is not None:
+        children = tuple(
+            resolve_call_annotation(expr, value, namespace, binding)
+            for expr, value in zip(fields, elements, strict=True)
+        )
+        return _LangTuple[children] if isinstance(eager, _LangTuple) else GenericAlias(tuple, children)
+    return _resolve_tensor_annotation_fields(eager, fields, namespace, binding)
+
+
+def _resolve_eager_field(
+    expr: ast.expr, captured: Any, namespace: Mapping[str, Any], binding: Mapping[str, str]
+) -> Any:
+    names = _annotation_names(expr)
+    if binding.keys().isdisjoint(names):
+        return captured
+    spelling = ast.unparse(expr)
+    # An eagerly evaluated field preserves its value, not the individual
+    # factory locals used to compute it. Re-evaluating a mixed expression
+    # can silently use a different global with the same name.
+    canonical_modules = {
+        name
+        for name, module in (("pl", "pypto.language"), ("pld", "pypto.language.distributed"))
+        if module in sys.modules and namespace.get(name) is sys.modules[module]
+    }
+    if names - binding.keys() - canonical_modules:
+        raise ValueError(
+            f"Annotation field {spelling!r} mixes call-owned and definition-owned names; "
+            "compute the field at the call site and pass its value as a constexpr"
+        )
+    result = resolve_annotation(spelling, namespace)
+    if isinstance(result, str):
+        raise ValueError(f"Cannot resolve call-owned annotation field {spelling!r}")
+    return result
+
+
+def resolve_call_tensor_dtype(
+    source: ast.expr | None, eager: Any, namespace: Mapping[str, Any], binding: Mapping[str, str]
+) -> Any:
+    """Read the declared dtype without interpreting the shape of a supplied tensor."""
+    if isinstance(source, ast.Constant) and isinstance(source.value, str):
+        source = ast.parse(source.value, mode="eval").body
+    if source is not None:
+        original = _unwrap_direction_annotation(_normalize_extern_return_calls(source, namespace), namespace)
+        if isinstance(original, ast.Subscript) and isinstance(original.slice, ast.Tuple):
+            constructor = resolve_annotation(ast.unparse(original.value), namespace)
+            if isinstance(constructor, type) and issubclass(constructor, _LangTensor):
+                if len(original.slice.elts) >= 2:
+                    dtype = original.slice.elts[1]
+                    if isinstance(eager, _LangTensor):
+                        return _resolve_eager_field(dtype, eager.dtype, namespace, binding)
+                    return resolve_annotation(ast.unparse(dtype), namespace)
+    return getattr(resolve_annotation(eager, namespace), "dtype", None)
+
+
+def _resolve_tensor_annotation_fields(
+    eager: Any, fields: list[ast.expr], namespace: Mapping[str, Any], binding: Mapping[str, str]
+) -> Any:
+    if eager.shape is None or not 2 <= len(fields) <= 4:
+        raise ValueError("Cannot recover call-owned fields of an incomplete Tensor annotation")
+
+    shape = fields[0]
+    if isinstance(shape, (ast.List, ast.Tuple)) and len(shape.elts) == len(eager.shape):
+        dimensions = [
+            _resolve_eager_field(axis, value, namespace, binding)
+            for axis, value in zip(shape.elts, eager.shape, strict=True)
+        ]
+    else:
+        dimensions = _resolve_eager_field(shape, eager.shape, namespace, binding)
+    captured = [eager.dtype]
+    if len(fields) == 3:
+        captured.append(eager.memref if eager.memref is not None else eager.layout)
+    elif len(fields) == 4:
+        captured.extend([eager.layout, eager.memref])
+    values = [
+        _resolve_eager_field(expr, value, namespace, binding)
+        for expr, value in zip(fields[1:], captured, strict=True)
+    ]
+    return cast("Any", type(eager))[tuple([dimensions, *values])]
+
+
+def eager_tensor_annotation_fingerprints(func: Any, definition: ast.FunctionDef) -> dict[str, str]:
+    """Include definition-owned Out and return fields in JIT cache identity."""
+    signature = inspect.signature(func)
+    captures = {name: signature.parameters[name].annotation for name in _classify_params(definition)[0]}
+    captures["return"] = signature.return_annotation
+    return {
+        name: source
+        for name, value in captures.items()
+        if (source := _extern_annotation_source(value)) is not None
+    }
 
 
 def _annotation_namespace(func: Any, sig: inspect.Signature) -> Mapping[str, Any] | None:

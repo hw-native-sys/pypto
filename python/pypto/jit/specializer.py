@@ -55,7 +55,7 @@ from pypto._function_attrs import (
     EXTERNAL_RETURN_PARAMS_ATTR,
 )
 from pypto.language.parser.expr_evaluator import ExprEvaluator
-from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR
+from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
 from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
@@ -69,6 +69,7 @@ from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import TensorLayout
 
 from . import _specialize_values as values
+from ._call_syntax import dependency_call
 from ._source import _UNBOUND, cache_in_snapshot, function_namespace
 from ._specialize_body import BodyTransformer, remap_peer_references
 from ._specialize_types import DynDim, ShapeDim, TensorMeta
@@ -223,6 +224,11 @@ class SpecializeContext:
     # remain expressions so call bindings and local dimensions take precedence.
     eager_tile_annotations: _EagerTileAnnotations = field(default_factory=_EagerTileAnnotations)
     annotation_dynvars: dict[str, str] = field(default_factory=dict[str, str])
+    eager_return_annotation: Any = None
+    # An incoming Submit needs explicit result arity before its body is lowered.
+    requires_return_contract: bool = False
+    return_metas: tuple[TensorMeta | None, ...] | None = None
+
     # Internal provider hand-off after preparation/validation. Legacy externs
     # derive the equivalent result plan from their validated declaration.
     external_contract: KernelContract | None = None
@@ -395,8 +401,14 @@ def _resolve_dep_call_targets(
     """
     by_name: dict[str, list[ast.Call]] = {}
     for node in ast.walk(func_def):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in dep_names:
-            by_name.setdefault(node.func.id, []).append(node)
+        view = dependency_call(node)
+        if (
+            isinstance(node, ast.Call)
+            and view is not None
+            and isinstance(view.func, ast.Name)
+            and view.func.id in dep_names
+        ):
+            by_name.setdefault(view.func.id, []).append(node)
     targets: dict[int, str] = {}
     for name, calls in by_name.items():
         for index, call in enumerate(sorted(calls, key=lambda call: (call.lineno, call.col_offset))):
@@ -1660,12 +1672,124 @@ def _validate_extern_return_mapping(
             )
 
 
-def _infer_return_type(
+def _infer_expression_return_type(  # noqa: PLR0913
+    annotation: ast.expr | None,
+    tensor_meta: Mapping[str, TensorMeta],
+    py_globals: Mapping[str, Any],
+    constexpr_values: Mapping[str, str] | None,
+    eager_annotation: Any,
+    *,
+    emit_declared_contract: bool,
+) -> str | None:
+    """Emit a resolved declaration when Submit needs an explicit contract."""
+    if not emit_declared_contract:
+        return None
+    if isinstance(eager_annotation, _LangTensor) or _tuple_annotation_elements(eager_annotation) is not None:
+        from . import _arguments  # noqa: PLC0415 - annotation helpers import this module
+
+        canonical = {
+            "pl": importlib.import_module("pypto.language"),
+            "pld": importlib.import_module("pypto.language.distributed"),
+            "tuple": tuple,
+        }
+        bindings = constexpr_values or {}
+        namespace = {**canonical, **py_globals}
+        namespace.update({name: _eval_annotation(text, canonical) for name, text in bindings.items()})
+        resolved = _arguments.resolve_call_annotation(annotation, eager_annotation, namespace, bindings)
+        rendered = _extern_annotation_source(resolved)
+    else:
+        rendered = _render_complete_return_annotation(annotation, py_globals, constexpr_values)
+    known_names = {"pl", "pld", "tuple"} | {
+        dim.name for meta in tensor_meta.values() for dim in meta.shape if isinstance(dim, DynDim)
+    }
+    # Annotation-only factory locals have no closure cells. A spelling that
+    # still contains their names is not a contract the generated module can use.
+    if rendered is not None and _annotation_names(ast.parse(rendered, mode="eval").body) <= known_names:
+        return rendered
+    return None
+
+
+def _infer_tuple_return_type(  # noqa: PLR0913
+    return_elts: Sequence[ast.expr | None],
+    annotation: ast.expr | None,
+    tensor_meta: dict[str, TensorMeta],
+    dist_set: set[str],
+    py_globals: Mapping[str, Any],
+    return_metas: tuple[TensorMeta | None, ...] | None,
+) -> str | None:
+    """Combine specialized tensor elements with declared scalar or opaque slots."""
+    explicit_elements: list[ast.expr] | None = None
+    if isinstance(annotation, ast.Subscript) and _is_tuple_annotation(annotation.value):
+        annotation_slice = annotation.slice
+        explicit_elements = (
+            annotation_slice.elts if isinstance(annotation_slice, ast.Tuple) else [annotation_slice]
+        )
+        if len(explicit_elements) != len(return_elts):
+            explicit_elements = None
+
+    def _element_uninferable(i: int) -> bool:
+        e = return_elts[i]
+        return not (isinstance(e, ast.Name) and e.id in tensor_meta)
+
+    # A *complete* (subscripted) explicit element for an un-inferrable return
+    # — e.g. ``pl.Scalar[pl.TASK_ID]`` — is one the parser cannot re-derive
+    # from a value, so the annotation is required and must not be dropped. A
+    # plain tensor local, in contrast, is re-inferable once the annotation is
+    # gone (the pre-#2016 behavior).
+    annotation_required = explicit_elements is not None and any(
+        _element_uninferable(i) and isinstance(explicit_elements[i], ast.Subscript)
+        for i in range(len(return_elts))
+    )
+
+    elt_annotations: list[str] = []
+    has_bare_element = False
+    for index, elt in enumerate(return_elts):
+        inferred = return_metas[index] if return_metas and len(return_metas) == len(return_elts) else None
+        if inferred is not None:
+            elt_annotations.append(
+                _build_tensor_annotation(inferred, is_out=False, is_distributed=inferred.is_distributed)
+            )
+        elif isinstance(elt, ast.Name) and elt.id in tensor_meta:
+            elt_annotations.append(
+                _build_tensor_annotation(
+                    tensor_meta[elt.id],
+                    is_out=False,
+                    is_distributed=elt.id in dist_set,
+                )
+            )
+        elif explicit_elements is not None and isinstance(explicit_elements[index], ast.Subscript):
+            # Complete explicit element; fold module int constants in its shape
+            # to literals so the emitted source carries concrete extents.
+            folded = _fold_const_names(explicit_elements[index], py_globals)
+            elt_annotations.append(ast.unparse(folded))
+        elif explicit_elements is not None:
+            # Un-inferrable element with a bare (shapeless) explicit annotation.
+            elt_annotations.append(ast.unparse(explicit_elements[index]))
+            has_bare_element = True
+        else:
+            return None  # no explicit annotation at all — drop (pre-#2016)
+
+    # Drop the annotation only when it is entirely dispensable: a bare element
+    # is present AND no sibling element requires the annotation. That keeps a
+    # bare tensor-local tuple parsing again without stripping a TASK_ID an
+    # adjacent element depends on (the bare element then surfaces as a clear
+    # ``Incomplete type annotation`` the author must shape).
+    if has_bare_element and not annotation_required:
+        return None
+    return f"tuple[{', '.join(elt_annotations)}]"
+
+
+def _infer_return_type(  # noqa: PLR0913
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
     distributed_params: set[str] | None = None,
     py_globals: Mapping[str, Any] | None = None,
+    constexpr_values: Mapping[str, str] | None = None,
+    *,
+    eager_annotation: Any = None,
+    emit_expression_contract: bool = False,
+    return_metas: tuple[TensorMeta | None, ...] | None = None,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1675,8 +1799,8 @@ def _infer_return_type(
       and bare ``pl.Tensor`` params).
     - ``return name``       -> that name's tensor type (without ``Out[]``) when
       ``name`` is a tensor-typed param.
-    - ``return f(...)``     -> ``None`` (return type depends on f, which we
-      can't resolve here).
+    - ``return f(...)``     -> a fully resolved explicit contract, otherwise
+      ``None`` so the ordinary call can infer its result type.
     - No tensor-typed params -> ``None``.
 
     Falls back to the first ``Out`` param's tensor type as a last resort —
@@ -1704,67 +1828,43 @@ def _infer_return_type(
             return_node = node
             break
 
-    # Multi-return: `return a, b, ...` -> emit `tuple[T_a, T_b, ...]`.
-    # Tensor elements are specialized from runtime metadata. Non-tensor elements
-    # (for example a TASK_ID captured by ``with pl.spmd(...) as tid``) must be
-    # supplied by a matching explicit tuple return annotation because they have
-    # no TensorMeta entry.
-    if return_node is not None and isinstance(return_node.value, ast.Tuple):
-        return_elts = return_node.value.elts
-        explicit_elements: list[ast.expr] | None = None
-        if isinstance(func_def.returns, ast.Subscript) and _is_tuple_annotation(func_def.returns.value):
-            annotation_slice = func_def.returns.slice
-            explicit_elements = (
-                annotation_slice.elts if isinstance(annotation_slice, ast.Tuple) else [annotation_slice]
+    if return_node is None and emit_expression_contract:
+        return None
+
+    if return_node is not None and return_node.value is not None:
+        value = return_node.value
+        annotation = func_def.returns
+        if emit_expression_contract and (
+            isinstance(eager_annotation, _LangTuple)
+            or (
+                isinstance(annotation, ast.Subscript)
+                and _eval_annotation(ast.unparse(annotation.value), py_globals or {}) is _LangTuple
             )
-            if len(explicit_elements) != len(return_elts):
-                explicit_elements = None
-
-        def _element_uninferable(i: int) -> bool:
-            e = return_elts[i]
-            return not (isinstance(e, ast.Name) and e.id in tensor_meta)
-
-        # A *complete* (subscripted) explicit element for an un-inferrable return
-        # — e.g. ``pl.Scalar[pl.TASK_ID]`` — is one the parser cannot re-derive
-        # from a value, so the annotation is required and must not be dropped. A
-        # plain tensor local, in contrast, is re-inferable once the annotation is
-        # gone (the pre-#2016 behavior).
-        annotation_required = explicit_elements is not None and any(
-            _element_uninferable(i) and isinstance(explicit_elements[i], ast.Subscript)
-            for i in range(len(return_elts))
-        )
-
-        elt_annotations: list[str] = []
-        has_bare_element = False
-        for index, elt in enumerate(return_elts):
-            if isinstance(elt, ast.Name) and elt.id in tensor_meta:
-                elt_annotations.append(
-                    _build_tensor_annotation(
-                        tensor_meta[elt.id],
-                        is_out=False,
-                        is_distributed=elt.id in dist_set,
-                    )
-                )
-            elif explicit_elements is not None and isinstance(explicit_elements[index], ast.Subscript):
-                # Complete explicit element; fold module int constants in its shape
-                # to literals so the emitted source carries concrete extents.
-                folded = _fold_const_names(explicit_elements[index], py_globals or {})
-                elt_annotations.append(ast.unparse(folded))
-            elif explicit_elements is not None:
-                # Un-inferrable element with a bare (shapeless) explicit annotation.
-                elt_annotations.append(ast.unparse(explicit_elements[index]))
-                has_bare_element = True
-            else:
-                return None  # no explicit annotation at all — drop (pre-#2016)
-
-        # Drop the annotation only when it is entirely dispensable: a bare element
-        # is present AND no sibling element requires the annotation. That keeps a
-        # bare tensor-local tuple parsing again without stripping a TASK_ID an
-        # adjacent element depends on (the bare element then surfaces as a clear
-        # ``Incomplete type annotation`` the author must shape).
-        if has_bare_element and not annotation_required:
+        ):
+            return _infer_expression_return_type(
+                annotation,
+                tensor_meta,
+                py_globals or {},
+                constexpr_values,
+                eager_annotation,
+                emit_declared_contract=True,
+            )
+        if return_metas and (
+            all(meta is not None for meta in return_metas)
+            or any(
+                meta.inexact_axes or any(isinstance(dim, DynDim) and dim.synthesized for dim in meta.shape)
+                for meta in return_metas
+                if meta is not None
+            )
+        ):
+            # Ask the parser for the actual returned IR types. Planning may
+            # retain parent bounds for views or use descriptor placeholders;
+            # neither is an exact extent to publish in a return annotation.
             return None
-        return f"tuple[{', '.join(elt_annotations)}]"
+        if isinstance(value, ast.Tuple):
+            return _infer_tuple_return_type(
+                value.elts, annotation, tensor_meta, dist_set, py_globals or {}, return_metas
+            )
 
     # A TASK_ID (or another explicit Scalar) has no TensorMeta entry. Preserve
     # its declared type for any scalar expression so an inline helper can
@@ -1780,8 +1880,20 @@ def _infer_return_type(
     # `return f(...)`: the result type depends on f's declared return types,
     # which we don't have here. Emit no annotation rather than wrongly assuming
     # `out_params[0]` — the caller may be a multi-return function.
-    if return_node is not None and isinstance(return_node.value, ast.Call):
-        return None
+    if (
+        return_node is not None
+        and return_node.value is not None
+        and (isinstance(return_node.value, ast.Call) or emit_expression_contract)
+        and not (isinstance(return_node.value, ast.Name) and return_node.value.id in tensor_meta)
+    ):
+        return _infer_expression_return_type(
+            func_def.returns,
+            tensor_meta,
+            py_globals or {},
+            constexpr_values,
+            eager_annotation,
+            emit_declared_contract=emit_expression_contract,
+        )
 
     # `return name`: use that name's tensor type if known.
     if (
@@ -2120,6 +2232,7 @@ class Specializer:
         # Accumulated alias→original map across all specialized functions.
         self._rename_map: dict[str, str] = {}
         self._graph_rebinds: dict[str, dict[str, str | int] | None] = {}
+        self._submit_return_arities: dict[str, int] = {}
         # Param order per function — lets the body transformer rewrite
         # ``self.<dep>(a, out=out)`` keyword args into all-positional form
         # (the parser rejects keyword args on inter-function calls).
@@ -2210,6 +2323,8 @@ class Specializer:
         }
         if graph_rebinds:
             lines.append(f"    {JIT_GRAPH_REBINDS_ATTR} = {graph_rebinds!r}")
+        if self._submit_return_arities:
+            lines.append(f"    {JIT_SUBMIT_RETURNS_ATTR} = {self._submit_return_arities!r}")
         lines.extend(body_lines)
 
         src = "\n".join(lines)
@@ -2274,6 +2389,30 @@ class Specializer:
                     orig_col + ctx.orig_col_offset,
                 )
         return out
+
+    def _specialize_return_annotation(
+        self,
+        func_def: ast.FunctionDef,
+        ctx: SpecializeContext,
+        out_params: list[str],
+        distributed_params: set[str],
+        tensor_meta: dict[str, TensorMeta],
+        implicit_out: str | None,
+    ) -> str | None:
+        ret_type = _infer_return_type(
+            func_def,
+            tensor_meta,
+            out_params,
+            distributed_params,
+            ctx.py_globals,
+            ctx.constexpr_values,
+            eager_annotation=ctx.eager_return_annotation,
+            emit_expression_contract=ctx.requires_return_contract and implicit_out is None,
+            return_metas=ctx.return_metas,
+        )
+        if ret_type is None and ctx.requires_return_contract and ctx.return_metas:
+            self._submit_return_arities[ctx.func_name] = len(ctx.return_metas)
+        return ret_type
 
     def _specialize_function(self, ctx: SpecializeContext) -> list[str]:
         """Generate lines for a single @pl.function method."""
@@ -2478,7 +2617,14 @@ class Specializer:
         return_distributed = distributed_params | {
             alias for alias, name in aliases.items() if name in distributed_params
         }
-        ret_type = _infer_return_type(return_def, return_meta, out_params, return_distributed, ctx.py_globals)
+        ret_type = self._specialize_return_annotation(
+            return_def,
+            ctx,
+            out_params,
+            return_distributed,
+            return_meta,
+            _implicit_entry_output_name(func_def, ctx.func_type, out_params),
+        )
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         _materialize_implicit_entry_output(ctx, func_def, out_params, ret_type, distributed_params, flat_body)
@@ -2938,6 +3084,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     dep_func_names: dict[str, str] | None = None,
     constexpr_values: dict[str, str] | None = None,
     dep_call_variants: dict[tuple[str, int], str] | None = None,
+    requires_return_contract: bool = False,
+    return_metas: tuple[TensorMeta | None, ...] | None = None,
     peer_func_names: Mapping[str, str | None] | None = None,
     peer_func_scope_ambiguous: bool = False,
 ) -> SpecializeContext:
@@ -2995,7 +3143,8 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     orig_file = src_file if (src_file and not src_file.startswith("<")) else None
     orig_col_offset = (len(raw_lines[0]) - len(raw_lines[0].lstrip())) if raw_lines else 0
 
-    param_names = [p for p in inspect.signature(func).parameters if p != "self"]
+    signature = inspect.signature(func)
+    param_names = [p for p in signature.parameters if p != "self"]
     eager_data = (
         _eager_tile_annotation_data(func)
         if func_type == "inline"
@@ -3023,6 +3172,9 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         py_globals=func_name_lookup(func),
         eager_tile_annotations=eager_data,
         annotation_dynvars=dict(eager_data.dynvars),
+        eager_return_annotation=signature.return_annotation,
+        requires_return_contract=requires_return_contract,
+        return_metas=return_metas,
         orig_file=orig_file,
         orig_start_line=orig_start_line,
         orig_col_offset=orig_col_offset,

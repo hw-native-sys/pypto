@@ -92,13 +92,23 @@ def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
 
 在 `@pl.program` 类的手动作用域中，可以通过
 `pl.submit(self.layer, ..., deps=[producer])` 提交 Graph 方法。这种 Submit
-写法要求 `self.<kernel>` 方法引用，不接受独立的 `@pl.jit.graph` 函数。
-JIT 入口应使用 `with pl.graph("layer", deps=[producer]) as done:`
-表达 Graph 依赖并取得完成号。
+写法要求 `self.<kernel>` 方法引用。在 JIT 入口里，`pl.submit(layer, ..., deps=[producer])`
+可直接使用由 `@pl.jit.graph` 修饰的依赖，JIT 会将其转为方法引用。
+内联区域可以使用 `with pl.graph("layer", deps=[producer]) as done:`
+表达依赖并取得完成号。
 `pl.submit` 的末尾 `TASK_ID` 结果与作用域的 `done` 均表示外层 Graph 任务；首次录制时也有效，只有整个调用完成后才完成。
 显式前驱约束的是这次调用的外层任务，不会进入已录制 Definition 的内部边。
 Graph 函数仍然写入调用方提供的张量，不能向调用方返回新计算的值或图内任务号。
 Definition 只在一次 orchestration run 内复用，不跨独立 L2 调用持久保存。
+
+传给 `pl.submit` 或 `pl.spmd_submit` 的 JIT 依赖也会被发现；callee 的 constexpr
+参数参与特化，`deps` 等提交元数据仍保留在提交操作上。
+
+首次提交也可省略由运行时分配的 Out 参数，但其完整张量注解必须能确定 shape 和 dtype；
+constexpr 使用本次调用的绑定值。JIT 优先使用特化后的返回值元数据，并用完整注解补充无法推导的槽位。
+真正无返回值的 callee 不会额外产生张量结果。Submit 在 callee 各结果后追加一个 TaskId。
+单变量 tuple 绑定及常量投影会保留张量元数据，也支持直接作为调用实参的投影；
+TaskId 槽位不会被当成张量。
 
 子函数依赖（`.incore` / `.inline` / `.opaque` / `.graph`）从入口函数体自动发现 —— 按名字调用即可。这里的名字在入口函数自身的命名空间中解析，因此别名导入（`from kernels import matmul as mm`，或普通的 `mm = matmul` 重绑定）与其他绑定一样能被发现；生成的程序仍以其 `def` 名字命名该函数。当两个不同的子函数同名时 —— 两个模块各自定义了 `helper`，或同一个工厂产出的两个 kernel —— 后生成的那个会被加上后缀（`helper`、`helper__2`），从而两份特化都得以保留；入口函数始终保留自己的名字。`@pl.jit.host` 入口还会额外发现 `@pl.jit`（chip 编排）依赖，因此一个完整的分布式程序无需任何 `@pl.program` 类。
 
