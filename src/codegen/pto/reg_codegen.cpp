@@ -257,6 +257,16 @@ bool PTOCodegen::TryEmitRegCall(const ir::CallPtr& call, const ir::VarPtr& resul
            ", ub>");
       pointer = adjusted;
     }
+    const size_t base_index = indexed_read ? 3 : 4;
+    if (args.size() > base_index) {
+      // A scalar base shift is independent of the index element width. Keep
+      // the original index register and predicate unchanged for gather/scatter.
+      auto offset = GetExprAsCode(args[base_index]);
+      auto adjusted = NewNamedTemp("reg_indexed_offset_base");
+      Emit(adjusted + " = pto.addptr " + pointer + ", " + offset + " : <" + element + ", ub> -> <" + element +
+           ", ub>");
+      pointer = adjusted;
+    }
     // PTOAS >= 0.72 conservatively synchronizes unknown indexed footprints,
     // including aliased views and surrounding contiguous UB accesses.
     if (indexed_read) {
