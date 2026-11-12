@@ -122,9 +122,16 @@ jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
 
-The PR keeps its original lint checks and displays each downstream job as
-`full / <job name>`, including matrix legs and links to job logs. `CI Full Progress`
-reads GitHub metadata on a GitHub-hosted runner and refreshes these checks roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
+The PR keeps its original lint checks and displays each downstream job as an
+independent `full / <job name>` commit status in the PR checks list, including
+matrix legs and direct links to the original job logs. These are not jobs added
+to the lint workflow. Commit statuses avoid the check-suite grouping and
+overridden Details links of check runs created with Actions' `GITHUB_TOKEN`.
+Queued and running jobs both display pending, with the phase in the description;
+skipped/neutral jobs display success with their actual conclusion in the description.
+Only `ci/full` determines whether the required tests passed.
+`CI Full Progress` reads GitHub metadata on a GitHub-hosted runner and refreshes
+these statuses roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
 monitor runs while waiting for a comment. Polling slows down with concurrent
 monitors and the shared API budget, reserving 200 requests for gate writers and
 other automation; transient API errors, including initial run-ID resolution,
@@ -133,11 +140,13 @@ hours; the finalizer explicitly dispatches reconciliation even after a monitor
 failure or timeout. Progress checks are informational: require `ci/full` for
 merge, not every `full / ...` check (some tests are conditional or advisory).
 
-Native reruns update the existing `full / ...` records for the same full run,
-including results retained from earlier attempts. They do not append another
-set of checks. The full workflow retains the execution history and each record
-links to its effective job. Records duplicated by older publishers remain in
-history; reconciliation reuses the latest record for each job.
+Native reruns publish to the same `full / ...` contexts, including results retained
+from earlier attempts. GitHub displays the latest value once per context; its
+status history is append-only. Unchanged results are not posted repeatedly.
+The full workflow retains execution history, and each status links to its effective
+job. A trusted router serializes progress writers per PR commit, so old runs cannot
+overwrite newer writers. Historical check runs from the previous publisher remain
+on their original commit; update the PR branch to get a clean status-only display.
 
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
 updated by `CI Full Status`. After binding the full run ID, `CI Command` explicitly

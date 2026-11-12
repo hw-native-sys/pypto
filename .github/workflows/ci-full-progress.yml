@@ -15,25 +15,48 @@ on:
 permissions: {}
 
 jobs:
-  progress:
+  route:
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.event == 'workflow_dispatch' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      key: ${{ steps.route.outputs.key }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout trusted progress router
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Validate the PR commit before joining the writer queue
+        id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/ci_progress.py route
+
+  progress:
+    needs: route
+    if: needs.route.outputs.key != ''
+    runs-on: ubuntu-latest
     timeout-minutes: 310
     concurrency:
-      # Completion notifications reconcile after the live monitor exits.
-      # Serialize attempts too, so they cannot create checks concurrently.
-      group: ci-full-progress-${{ inputs.run_id || github.event.workflow_run.id }}
+      # All runs/attempts for this PR commit update the same status contexts.
+      # Serialize their writers; after acquiring the slot, an obsolete monitor
+      # revalidates the source and exits before it can overwrite a newer result.
+      group: ci-full-progress-${{ needs.route.outputs.key }}
       queue: max
       cancel-in-progress: false
     permissions:
       contents: read
       actions: write
       pull-requests: read
-      statuses: read
-      checks: write
+      statuses: write
     steps:
       - name: Checkout trusted progress publisher
         uses: actions/checkout@v4

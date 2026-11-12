@@ -74,7 +74,9 @@ def harness(progress, monkeypatch, event):
         if payload is not None:
             writes.append((path, payload.copy(), kwargs))
             return {
-                "id": int(path.rsplit("/", 1)[1]) if kwargs.get("method") == "PATCH" else 200 + len(writes)
+                **payload,
+                "id": 200 + len(writes),
+                "creator": {"login": "github-actions[bot]"},
             }
         if path.endswith("/runs/50"):
             return copy.deepcopy(run)
@@ -90,7 +92,7 @@ def harness(progress, monkeypatch, event):
         if key == "jobs":
             assert path == f"repos/{REPO}/actions/runs/50/attempts/1/jobs"
             return jobs
-        assert key == "check_runs" and f"/commits/{HEAD}/check-runs?filter=all" in path
+        assert key == "statuses" and path == f"repos/{REPO}/commits/{HEAD}/status"
         return checks
 
     monkeypatch.setattr(progress.control, "api", api)
@@ -101,7 +103,7 @@ def harness(progress, monkeypatch, event):
     return run, pr, jobs, writes, checks
 
 
-def test_progress_follows_jobs_and_does_not_duplicate_unchanged_checks(progress, monkeypatch, event, harness):
+def test_progress_follows_jobs_without_reposting_unchanged_statuses(progress, monkeypatch, event, harness):
     run, _, jobs, writes, _ = harness
     transitions = iter(["in_progress", "in_progress", "completed"])
 
@@ -114,16 +116,32 @@ def test_progress_follows_jobs_and_does_not_duplicate_unchanged_checks(progress,
 
     monkeypatch.setattr(progress.time, "sleep", advance)
     progress.monitor(REPO, event)
-    assert [payload["status"] for _, payload, _ in writes] == ["queued", "in_progress", "completed"]
-    assert writes[0][1]["head_sha"] == HEAD
-    assert writes[0][1]["name"] == "full / system-tests"
-    assert writes[1][2] == {"method": "PATCH"}
-    assert writes[-1][1]["conclusion"] == "success"
-    assert writes[-1][1]["details_url"].endswith("/runs/50/job/101")
+    assert [payload["state"] for _, payload, _ in writes] == ["pending", "pending", "success"]
+    assert [payload["description"] for _, payload, _ in writes] == [
+        "Full CI 50 attempt 1: Queued",
+        "Full CI 50 attempt 1: Running",
+        "Full CI 50 attempt 1: Success",
+    ]
+    assert {path for path, _, _ in writes} == {f"repos/{REPO}/statuses/{HEAD}"}
+    assert all(not kwargs for _, _, kwargs in writes)
+    assert writes[0][1]["context"] == "full / system-tests"
+    assert writes[-1][1]["target_url"] == f"https://github.com/{REPO}/actions/runs/50/job/101"
 
 
-@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "skipped", "timed_out", "success"])
-def test_completion_preserves_individual_job_results(progress, event, harness, conclusion):
+@pytest.mark.parametrize(
+    "conclusion,state,label",
+    [
+        ("failure", "failure", "Failure"),
+        ("cancelled", "failure", "Cancelled"),
+        ("skipped", "success", "Skipped"),
+        ("neutral", "success", "Neutral"),
+        ("timed_out", "failure", "Timed out"),
+        ("success", "success", "Success"),
+        (None, "failure", "Unknown result"),
+        ("startup_failure", "failure", "Startup failure"),
+    ],
+)
+def test_completion_describes_actual_job_result(progress, event, harness, conclusion, state, label):
     run, _, jobs, writes, _ = harness
     run["status"] = "completed"
     jobs[0].update(status="completed", conclusion=conclusion)
@@ -136,25 +154,28 @@ def test_completion_preserves_individual_job_results(progress, event, harness, c
         }
     )
     progress.monitor(REPO, event)
-    assert writes[0][1]["conclusion"] == conclusion
-    assert writes[1][1]["name"] == "full / unit-tests (ubuntu-latest, 3.10)"
+    assert writes[0][1]["state"] == state
+    assert writes[0][1]["description"].endswith(f": {label}")
+    assert writes[1][1]["context"] == "full / unit-tests (ubuntu-latest, 3.10)"
 
 
-def test_completed_event_reconciles_existing_checks(progress, event, harness):
+def test_completed_event_reconciles_existing_status_context(progress, event, harness):
     run, _, jobs, writes, checks = harness
     run["status"] = "completed"
     jobs[0].update(status="completed", conclusion="success")
     checks.append(
         {
             "id": 999,
-            "external_id": "ci-full:50:1:system-tests",
-            "app": {"slug": "github-actions"},
-            "status": "in_progress",
+            "context": "full / system-tests",
+            "creator": {"login": "github-actions[bot]"},
+            "state": "pending",
+            "description": "Full CI 50 attempt 1: Running",
         }
     )
     progress.monitor(REPO, event)
-    assert writes[0][0] == f"repos/{REPO}/check-runs/999"
-    assert writes[0][2] == {"method": "PATCH"}
+    assert writes[0][0] == f"repos/{REPO}/statuses/{HEAD}"
+    assert writes[0][1]["context"] == checks[0]["context"]
+    assert writes[0][1]["state"] == "success"
 
 
 @pytest.mark.parametrize("change", ["attempt", "head", "base", "newer"])
@@ -198,10 +219,18 @@ def test_progress_workflow_is_isolated_from_test_code():
     assert workflow[True]["workflow_run"]["types"] == ["in_progress", "completed"]
     job = workflow["jobs"]["progress"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["permissions"]["checks"] == "write"
-    assert job["permissions"]["statuses"] == "read"
+    assert "checks" not in job["permissions"]
+    assert job["permissions"]["statuses"] == "write"
     assert "display_title" not in job["if"]
     assert job["concurrency"]["cancel-in-progress"] is False
+    assert job["concurrency"]["queue"] == "max"
+    assert job["concurrency"]["group"] == "ci-full-progress-${{ needs.route.outputs.key }}"
+    assert job["needs"] == "route"
+    assert job["if"] == "needs.route.outputs.key != ''"
+    route = workflow["jobs"]["route"]
+    assert "concurrency" not in route
+    assert route["permissions"] == {"contents": "read", "actions": "read"}
+    assert route["steps"][-1]["run"].endswith("ci_progress.py route")
     checkout = job["steps"][0]["with"]
     assert checkout["ref"] == "${{ github.workflow_sha }}"
     assert checkout["sparse-checkout"] == ".github/scripts"
@@ -218,12 +247,17 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
     ]
     new_jobs = [{"id": 102, "name": "system-tests", "status": "completed", "conclusion": "success"}]
     existing = [
-        {"id": 900, "external_id": "ci-full:50:1:unit-tests", "app": {"slug": "github-actions"}},
-        {"id": 901, "external_id": "ci-full:50:1:system-tests", "app": {"slug": "github-actions"}},
+        {
+            "id": 900 + index,
+            "context": f"full / {name}",
+            "description": "Full CI 50 attempt 1: Failure",
+            "creator": {"login": "github-actions[bot]"},
+        }
+        for index, name in enumerate(["unit-tests", "system-tests"])
     ]
 
     def pages(path, key):
-        if key == "check_runs":
+        if key == "statuses":
             return existing
         assert key == "jobs"
         if path.endswith("/attempts/1/jobs"):
@@ -233,14 +267,14 @@ def test_rerun_progress_includes_retained_successful_jobs(progress, monkeypatch,
 
     monkeypatch.setattr(progress.control, "pages", pages)
     progress.monitor(REPO, event)
-    assert {payload["name"] for _, payload, _ in writes} == {"full / unit-tests", "full / system-tests"}
-    assert all(payload["conclusion"] == "success" for _, payload, _ in writes)
-    assert all(payload["external_id"].startswith("ci-full:50:2:") for _, payload, _ in writes)
-    assert {path for path, _, _ in writes} == {f"repos/{REPO}/check-runs/900", f"repos/{REPO}/check-runs/901"}
-    assert all(kwargs == {"method": "PATCH"} for _, _, kwargs in writes)
+    assert {payload["context"] for _, payload, _ in writes} == {"full / unit-tests", "full / system-tests"}
+    assert all(payload["state"] == "success" for _, payload, _ in writes)
+    assert all(payload["description"] == "Full CI 50 attempt 2: Success" for _, payload, _ in writes)
+    assert {path for path, _, _ in writes} == {f"repos/{REPO}/statuses/{HEAD}"}
+    assert {payload["target_url"].rsplit("/", 1)[1] for _, payload, _ in writes} == {"100", "102"}
 
 
-def test_repeated_reruns_keep_record_id_through_running_and_completed_states(
+def test_repeated_reruns_keep_one_context_through_running_and_completed_states(
     progress, monkeypatch, event, harness
 ):
     run, _, jobs, writes, checks = harness
@@ -249,12 +283,7 @@ def test_repeated_reruns_keep_record_id_through_running_and_completed_states(
     def api(path, payload=None, **kwargs):
         result = original_api(path, payload, **kwargs)
         if payload is not None:
-            record = {**payload, "id": result["id"], "app": {"slug": "github-actions"}}
-            if kwargs.get("method") == "PATCH":
-                assert result["id"] == checks[0]["id"]
-                checks[0] = record
-            else:
-                checks.append(record)
+            checks.append(result)
         return result
 
     monkeypatch.setattr(progress.control, "api", api)
@@ -262,70 +291,75 @@ def test_repeated_reruns_keep_record_id_through_running_and_completed_states(
     run["status"] = "completed"
     jobs[0].update(status="completed", conclusion="failure")
     progress.monitor(REPO, event)
-    original_id = checks[0]["id"]
-
-    # Each restart reads every historical record, as the Actions page does.
-    # A latest-per-name API response would hide the original duplicate bug.
+    # Status writes append history, while one stable context identifies the
+    # single visible row. A native rerun must not introduce an attempt suffix.
     for attempt in (2, 3):
         event["workflow_run"]["run_attempt"] = attempt
         run.update(run_attempt=attempt, status="in_progress")
         jobs[0].update(id=101 + attempt, status="in_progress", conclusion=None)
 
         def complete(seconds):
-            assert checks[0]["status"] == "in_progress"
-            assert checks[0].get("conclusion") is None
+            latest = progress.latest_statuses(checks)["full / system-tests"]
+            assert latest["state"] == "pending"
+            assert latest["description"].endswith(": Running")
             run["status"] = "completed"
             jobs[0].update(status="completed", conclusion="success")
 
         monkeypatch.setattr(progress.time, "sleep", complete)
         progress.monitor(REPO, event)
-        assert len(checks) == 1
-        assert checks[0]["id"] == original_id
-        assert checks[0]["external_id"] == f"ci-full:50:{attempt}:system-tests"
-        assert checks[0]["conclusion"] == "success"
-        assert checks[0]["details_url"].endswith(f"/job/{101 + attempt}")
+        visible = progress.latest_statuses(checks)
+        assert len(visible) == 1
+        latest = visible["full / system-tests"]
+        assert latest["description"] == f"Full CI 50 attempt {attempt}: Success"
+        assert latest["state"] == "success"
+        assert latest["target_url"].endswith(f"/job/{101 + attempt}")
     assert len(writes) == 5
-    assert all(kwargs == {"method": "PATCH"} for _, _, kwargs in writes[1:])
+    assert all(not kwargs for _, _, kwargs in writes)
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_legacy_duplicates_reuse_latest_record_independent_of_page_order(progress, reverse):
+def test_latest_status_is_independent_of_page_order(progress, reverse):
     records = [
         {
             "id": check_id,
-            "external_id": f"ci-full:50:{attempt}:matrix (a:b)",
-            "app": {"slug": "github-actions"},
+            "context": "full / matrix (a:b)",
+            "description": f"Full CI 50 attempt {attempt}: Success",
+            "creator": {"login": "github-actions[bot]"},
         }
         for check_id, attempt in [(999, 1), (800, 2), (801, 2)]
     ]
     if reverse:
         records.reverse()
-    selected = progress.reusable_checks({"id": 50}, records)
-    assert selected["matrix (a:b)"]["id"] == 801
+    selected = progress.latest_statuses(records)
+    assert selected["full / matrix (a:b)"]["id"] == 999
 
 
 @pytest.mark.parametrize(
-    "external_id,app",
+    "context,creator",
     [
-        ("ci-full:51:1:system-tests", "github-actions"),
-        ("ci-full:50:1:system-tests", "another-app"),
-        ("ci-full:50:0:system-tests", "github-actions"),
-        ("ci-full:50:no-attempt:system-tests", "github-actions"),
-        ("native-action-job", "github-actions"),
-        (None, "github-actions"),
+        ("ci/full", "github-actions[bot]"),
+        ("full / system-tests", "another-app[bot]"),
+        ("unrelated", "github-actions[bot]"),
     ],
 )
-def test_check_reuse_ignores_unrelated_or_malformed_records(progress, external_id, app):
+def test_status_cache_ignores_other_contexts_and_publishers(progress, context, creator):
     assert (
-        progress.reusable_checks({"id": 50}, [{"id": 900, "external_id": external_id, "app": {"slug": app}}])
+        progress.latest_statuses([{"id": 900, "context": context, "creator": {"login": creator}}])
         == {}
     )
 
 
-def test_future_check_attempt_prevents_stale_projection(progress, event, harness):
+def test_future_status_attempt_prevents_stale_projection(progress, event, harness):
     run, _, _, writes, checks = harness
     run["status"] = "completed"
-    checks.append({"id": 900, "external_id": "ci-full:50:2:system-tests", "app": {"slug": "github-actions"}})
+    checks.append(
+        {
+            "id": 900,
+            "context": "full / system-tests",
+            "description": "Full CI 50 attempt 2: Success",
+            "creator": {"login": "github-actions[bot]"},
+        }
+    )
     progress.monitor(REPO, event)
     assert not writes
 
@@ -342,7 +376,7 @@ def test_lost_create_response_is_read_back_before_retry(progress, monkeypatch, e
         result = original_api(path, payload, **kwargs)
         if payload is not None and not failed:
             failed = True
-            checks.append({**payload, "id": result["id"], "app": {"slug": "github-actions"}})
+            checks.append(result)
             raise subprocess.CalledProcessError(1, ["gh", "api"])
         return result
 
@@ -502,8 +536,8 @@ def test_progress_resolves_static_or_missing_webhook_title(progress, event, harn
         event["workflow_run"]["display_title"] = title
     progress.monitor(REPO, event)
     assert len(writes) == 1
-    assert writes[0][1]["head_sha"] == HEAD
-    assert writes[0][1]["conclusion"] == "success"
+    assert writes[0][0] == f"repos/{REPO}/statuses/{HEAD}"
+    assert writes[0][1]["state"] == "success"
 
 
 def test_explicit_dispatch_mirrors_existing_results(progress, monkeypatch, harness):
@@ -515,9 +549,8 @@ def test_explicit_dispatch_mirrors_existing_results(progress, monkeypatch, harne
     progress.monitor(REPO, {"inputs": {"run_id": "50"}})
     assert len(writes) == 1
     path, payload, _ = writes[0]
-    assert path == f"repos/{REPO}/check-runs"
-    assert payload["head_sha"] == HEAD
-    assert payload["conclusion"] == "success"
+    assert path == f"repos/{REPO}/statuses/{HEAD}"
+    assert payload["state"] == "success"
 
 
 @pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/main", ""])
@@ -544,7 +577,119 @@ def test_progress_reconciles_legacy_full_run(progress, monkeypatch, event, harne
     run["status"] = "completed"
     jobs[0].update(status="completed", conclusion="success")
     progress.monitor(REPO, event)
-    assert writes[-1][1]["conclusion"] == "success"
+    assert writes[-1][1]["state"] == "success"
+
+
+def test_long_matrix_names_do_not_collide(progress):
+    prefix = "unit-tests (" + "a" * 120
+    first = progress.job_context(prefix + ", python3.10)")
+    second = progress.job_context(prefix + ", python3.11)")
+    assert len(first) == len(second) == 100
+    assert first != second
+    assert progress.job_context("unit-tests (ubuntu, 3.10)") == "full / unit-tests (ubuntu, 3.10)"
+
+
+def test_new_full_run_reuses_context_and_replaces_log_link(progress, monkeypatch):
+    jobs = [{"id": 101, "name": "system-tests", "status": "completed", "conclusion": "success"}]
+    monkeypatch.setattr(progress.control, "effective_jobs", lambda *args: jobs)
+    writes = []
+
+    def api(path, payload):
+        writes.append((path, payload))
+        return {**payload, "id": len(writes)}
+
+    monkeypatch.setattr(progress.control, "api", api)
+    statuses = {}
+    for run_id in (50, 51):
+        progress.sync_jobs(REPO, HEAD, {"id": run_id, "run_attempt": 1}, statuses)
+    assert len(statuses) == 1
+    assert {p["context"] for _, p in writes} == {"full / system-tests"}
+    assert statuses["full / system-tests"]["target_url"].endswith("/runs/51/job/101")
+
+
+def test_publisher_detects_server_rewriting_log_link(progress, monkeypatch, event, harness):
+    run, _, jobs, _, _ = harness
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    original = progress.control.api
+
+    def api(path, payload=None, **kwargs):
+        result = original(path, payload, **kwargs)
+        if payload is not None:
+            result["target_url"] = "https://github.com/incorrect-workflow"
+        return result
+
+    monkeypatch.setattr(progress.control, "api", api)
+    with pytest.raises(ValueError, match="did not preserve"):
+        progress.monitor(REPO, event)
+
+
+@pytest.mark.parametrize("run_id,attempt", [(50, 1), (51, 1), (50, 2)])
+def test_route_groups_every_run_and_attempt_for_one_pr_commit(
+    progress, monkeypatch, harness, tmp_path, run_id, attempt
+):
+    run = harness[0]
+    run.update(id=run_id, run_attempt=attempt)
+    original = progress.control.api
+
+    def api(path):
+        if path == f"repos/{REPO}/actions/runs/{run_id}":
+            return copy.deepcopy(run)
+        return original(path)
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    progress.route(REPO, {"inputs": {"run_id": str(run_id)}})
+    outputs = dict(line.split("=", 1) for line in target.read_text().splitlines())
+    assert outputs["key"] == f"123-{HEAD}"
+    assert not harness[3], "Routing must not write any status"
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_route_retries_api_failure_before_entering_writer_queue(
+    progress, monkeypatch, harness, tmp_path, recovers
+):
+    original = progress.control.api
+    reads = []
+    waits = []
+
+    def api(path):
+        if path.endswith("/runs/50"):
+            reads.append(path)
+            if not recovers or len(reads) == 1:
+                raise subprocess.CalledProcessError(1, ["gh", "api"])
+        return original(path)
+
+    monkeypatch.setattr(progress.control, "api", api)
+    monkeypatch.setattr(progress.time, "sleep", waits.append)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    if recovers:
+        progress.route(REPO, {"inputs": {"run_id": "50"}})
+        assert f"key=123-{HEAD}\n" in target.read_text()
+        assert waits == [60]
+    else:
+        with pytest.raises(subprocess.CalledProcessError):
+            progress.route(REPO, {"inputs": {"run_id": "50"}})
+        assert not target.exists()
+        assert len(reads) == 5
+        assert waits == [60, 120, 240, 300]
+    assert not harness[3]
+
+
+def test_route_does_not_queue_untrusted_dispatch(progress, monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/feature")
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    with pytest.raises(progress.control.UntrustedRunError):
+        progress.route(REPO, {"inputs": {"run_id": "50"}})
+    assert not target.exists()
 
 
 if __name__ == "__main__":

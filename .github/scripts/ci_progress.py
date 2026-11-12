@@ -8,17 +8,19 @@
 # -----------------------------------------------------------------------------------------------------------
 """Mirror trusted full-run jobs onto the PR without executing PR code.
 
-These checks are informational; only ci/full enforces the merge gate. A separate
-workflow serializes monitors per source run, including completion reconciliation.
+These commit statuses are informational; only ci/full enforces the merge gate.
+A separate workflow serializes monitors per PR head, including reconciliation.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -30,56 +32,72 @@ API_RESERVE = 200
 POLL_REQUESTS_PER_HOUR = 500
 MONITOR_SECONDS = 5 * 60 * 60
 HIDDEN_JOBS = {"changes", "toolchain", "lint-gate", "pre-commit", "clang-tidy", "full-result"}
-CHECK_ID = re.compile(r"ci-full:([1-9][0-9]*):([1-9][0-9]*):(.+)")
+STATUS_SOURCE = re.compile(r"Full CI ([1-9][0-9]*) attempt ([1-9][0-9]*): .+")
 
 
-def reusable_checks(run: dict[str, Any], existing: list[dict[str, Any]]) -> dict[str, Any]:
-    """Index this run's latest display records by job, across all attempts."""
+def latest_statuses(existing: list[dict[str, Any]]) -> dict[str, Any]:
+    """Read the latest visible state per context, not a mutable check-run ID."""
     latest: dict[str, Any] = {}
-    versions: dict[str, tuple[int, int]] = {}
     for item in existing:
-        match = CHECK_ID.fullmatch(item.get("external_id") or "")
-        if match is None or int(match[1]) != run["id"] or item.get("app", {}).get("slug") != "github-actions":
+        context = item.get("context", "")
+        if not context.startswith("full / ") or item.get("creator", {}).get("login") != "github-actions[bot]":
             continue
-        name = match[3]
-        version = (int(match[2]), item["id"])
-        # Older publishers created one record per attempt. Reuse the latest
-        # one deterministically even when REST pages arrive in another order.
-        if name not in versions or version > versions[name]:
-            latest[name], versions[name] = item, version
+        if context not in latest or item["id"] > latest[context]["id"]:
+            latest[context] = item
     return latest
 
 
+def job_context(name: str) -> str:
+    """Keep matrix legs distinct even when a long name must be shortened."""
+    context = f"full / {name}"
+    if len(context) <= 100:
+        return context
+    suffix = hashlib.sha256(name.encode()).hexdigest()[:12]
+    return f"{context[:85]}...{suffix}"
+
+
+def job_status(job: dict[str, Any]) -> tuple[str, str]:
+    """Commit statuses share pending for queued/running and describe the phase."""
+    if job["status"] != "completed":
+        return "pending", "Running" if job["status"] == "in_progress" else "Queued"
+    conclusion = job.get("conclusion")
+    # Skipped/neutral are display-only successes, not proof of a passing test.
+    # The independent ci/full aggregator still rejects skipped required tests.
+    state = "success" if conclusion in {"success", "skipped", "neutral"} else "failure"
+    label = str(conclusion or "unknown result").replace("_", " ").capitalize()
+    return state, label
+
+
 def sync_jobs(
-    repo: str, head: str, run: dict[str, Any], checks: dict[str, Any], max_writes: int = 50
+    repo: str, head: str, run: dict[str, Any], statuses: dict[str, Any], max_writes: int = 50
 ) -> bool:
     jobs = control.effective_jobs(repo, run)
     writes = 0
     for job in jobs:
         if job["name"] in HIDDEN_JOBS:
             continue
-        key = f"ci-full:{run['id']}:{run['run_attempt']}:{job['name']}"
-        status = job["status"] if job["status"] in {"in_progress", "completed"} else "queued"
+        context = job_context(job["name"])
+        state, label = job_status(job)
+        # Actions GITHUB_TOKEN check runs cannot select a check suite and their
+        # details_url is overridden. Commit statuses preserve target_url and
+        # appear independently in the PR's checks list, just like ci/full.
         payload = {
-            "name": f"full / {job['name']}"[:100],
-            "status": status,
-            "details_url": f"https://github.com/{repo}/actions/runs/{run['id']}/job/{job['id']}",
-            "external_id": key,
+            "context": context,
+            "state": state,
+            "target_url": f"https://github.com/{repo}/actions/runs/{run['id']}/job/{job['id']}",
+            "description": f"Full CI {run['id']} attempt {run['run_attempt']}: {label}",
         }
-        if status == "completed":
-            payload["conclusion"] = job["conclusion"] or "failure"
-        # Attempt remains provenance, not display identity. Failed-job reruns
-        # update the same record, including jobs retained from older attempts.
-        previous = checks.get(job["name"])
+        # Status history is append-only, but GitHub displays its latest value
+        # once per context. Avoid writes when neither state nor provenance moved.
+        previous = statuses.get(context)
         if previous is not None and all(previous.get(k) == v for k, v in payload.items()):
             continue
         if writes >= max_writes:
             return False
-        if previous is None:
-            result = control.api(f"repos/{repo}/check-runs", {**payload, "head_sha": head})
-        else:
-            result = control.api(f"repos/{repo}/check-runs/{previous['id']}", payload, method="PATCH")
-        checks[job["name"]] = {**payload, "id": result["id"]}
+        result = control.api(f"repos/{repo}/statuses/{head}", payload)
+        if any(result.get(key) != value for key, value in payload.items()):
+            raise ValueError("GitHub did not preserve the full-job status or log URL")
+        statuses[context] = result
         writes += 1
     return True
 
@@ -118,7 +136,7 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
     resolved = False
     source = control.verified_event_run(repo, event, require_title=False) if "workflow_run" in event else None
     deadline = time.monotonic() + MONITOR_SECONDS
-    checks = None
+    statuses = None
     workflow = None
     errors = 0
     while time.monotonic() < deadline:
@@ -174,23 +192,26 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
                 return
             if control.newer_status_exists(repo, number, head, run):
                 return
-            if checks is None:
-                existing = control.pages(f"repos/{repo}/commits/{head}/check-runs?filter=all", "check_runs")
-                checks = reusable_checks(run, existing)
+            if statuses is None:
+                existing = control.pages(f"repos/{repo}/commits/{head}/status", "statuses")
+                statuses = latest_statuses(existing)
                 # A newer projection also invalidates a stale REST snapshot.
                 # Never overwrite it or create a competing older record.
                 if any(
-                    int(item["external_id"].split(":", 3)[2]) > run["run_attempt"] for item in checks.values()
+                    (published := STATUS_SOURCE.fullmatch(item.get("description") or ""))
+                    and int(published[1]) == run["id"]
+                    and int(published[2]) > run["run_attempt"]
+                    for item in statuses.values()
                 ):
                     return
-            synced = sync_jobs(repo, head, run, checks, max_writes=max_writes)
+            synced = sync_jobs(repo, head, run, statuses, max_writes=max_writes)
             if run["status"] == "completed" and synced:
                 return
             errors = 0
         except subprocess.CalledProcessError:
             # A create may have succeeded before its response was lost. Read
             # back persisted records before retrying instead of creating again.
-            checks = None
+            statuses = None
             errors += 1
             if errors >= 5:
                 raise
@@ -200,5 +221,18 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
     control.report("Live progress window ended; the completion event will reconcile final job results.")
 
 
+def route(repo: str, event: dict[str, Any]) -> None:
+    """Resolve a trusted PR/head key before entering the progress writer queue."""
+    for attempt in range(5):
+        try:
+            control.route(repo, event)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == 4:
+                raise
+            time.sleep(min(300, INTERVAL_SECONDS * 2**attempt))
+
+
 if __name__ == "__main__":
-    monitor(os.environ["GITHUB_REPOSITORY"], json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()))
+    command = route if sys.argv[1:] == ["route"] else monitor
+    command(os.environ["GITHUB_REPOSITORY"], json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()))
