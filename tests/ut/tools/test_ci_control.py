@@ -28,7 +28,7 @@ HEAD, BASE, MERGE = "a" * 40, "b" * 40, "c" * 40
 
 
 @pytest.fixture
-def control(monkeypatch):
+def controller(monkeypatch):
     spec = importlib.util.spec_from_file_location("ci_control", ROOT / ".github/scripts/ci_control.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -38,6 +38,13 @@ def control(monkeypatch):
     monkeypatch.setenv("CI_ROUTED_HEAD", HEAD)
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: pytest.fail("Unexpected subprocess"))
     return module
+
+
+@pytest.fixture
+def control(controller, monkeypatch):
+    # Most cases isolate other API contracts; live-ref tests use controller.
+    monkeypatch.setattr(controller, "current_base", lambda repo: BASE)
+    return controller
 
 
 @pytest.fixture
@@ -166,6 +173,121 @@ def test_merge_revision_is_verified(control, monkeypatch, pr, parents):
     else:
         with pytest.raises(ValueError, match="parents"):
             control.verify_merge(REPO, pr, HEAD, BASE, MERGE)
+
+
+@pytest.mark.parametrize("invalid", ["", "ref", "type", "sha"])
+def test_current_base_requires_live_main_commit(controller, monkeypatch, invalid):
+    ref: dict[str, Any] = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
+    if invalid == "ref":
+        ref["ref"] = "refs/heads/feature"
+    elif invalid == "type":
+        ref["object"]["type"] = "tag"
+    elif invalid == "sha":
+        ref["object"]["sha"] = "not-a-sha"
+
+    def api(path):
+        assert path == f"repos/{REPO}/git/ref/heads/main"
+        return ref
+
+    monkeypatch.setattr(controller, "api", api)
+    if invalid:
+        with pytest.raises(ValueError, match="Expected"):
+            controller.current_base(REPO)
+    else:
+        assert controller.current_base(REPO) == BASE
+
+
+def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, event, pr, tmp_path):
+    # Reproduce #3400: PR REST/GraphQL retain the lint-time base indefinitely,
+    # while the synthetic merge already uses live main. Keep both identities.
+    stale = "d" * 40
+    pr["base"]["sha"] = stale
+    output_file = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_SHA", BASE)
+    monkeypatch.setattr(controller.time, "sleep", lambda *args: pytest.fail("No merge wait is needed"))
+    run = {
+        "id": 50,
+        "run_attempt": 1,
+        "run_number": 8,
+        "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
+        "created_at": "2026-11-05T01:00:00Z",
+        "event": "workflow_dispatch",
+        "path": controller.WORKFLOW,
+        "workflow_id": 99,
+        "head_branch": "main",
+        "repository": {"full_name": REPO, "id": 1},
+        "head_repository": {"id": 1},
+        "status": "completed",
+        "conclusion": "success",
+    }
+    lint = {
+        **run,
+        "id": 40,
+        "display_title": f"CI lint PR #123 @{HEAD} base:{stale}",
+        "event": "pull_request",
+        "path": controller.LINT_WORKFLOW,
+        "workflow_id": 98,
+        "head_sha": HEAD,
+        "head_repository": {"id": 2},
+    }
+    writes = []
+    statuses = []
+
+    def api(path, payload=None):
+        if payload is not None:
+            writes.append((path, payload))
+            if path.endswith(f"/statuses/{HEAD}"):
+                statuses[:] = [payload]
+            elif path.endswith("/dispatches"):
+                return {"workflow_run_id": 50}
+            else:
+                pytest.fail(f"Unexpected write: {path}")
+            return None
+        if path.endswith("/pulls/123"):
+            return pr
+        if path.endswith("/git/ref/heads/main"):
+            return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
+        if path.endswith(f"/git/commits/{MERGE}"):
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+        if path.endswith("/workflows/ci.yml"):
+            return {"id": 98}
+        if path.endswith("/workflows/ci-full.yml"):
+            return {"id": 99}
+        if "/workflows/ci.yml/runs?" in path:
+            return {"workflow_runs": [lint]}
+        if "/actions/runs?" in path:
+            return {"workflow_runs": []}
+        if f"/commits/{HEAD}/status?" in path:
+            return {"statuses": statuses}
+        if path.endswith("/runs/50"):
+            return run
+        if "/runs/40/attempts/1/jobs?" in path:
+            return {
+                "jobs": [
+                    {"name": name, "status": "completed", "conclusion": "success"}
+                    for name in ("changes", "pre-commit", "clang-tidy")
+                ]
+            }
+        if "/runs/50/attempts/1/jobs?" in path:
+            return {"jobs": [{"name": "full-result", "conclusion": "success"}]}
+        pytest.fail(f"Unexpected read: {path}")
+
+    monkeypatch.setattr(controller, "api", api)
+    controller.command_route(REPO, event)
+    controller.dispatch(REPO, event)
+    inputs = writes[1][1]["inputs"]
+    assert inputs == {"pr_number": "123", "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE}
+    controller.prepare(REPO, {"inputs": inputs})
+    assert f"checkout_sha={MERGE}\nreuse_lint=true\n" in output_file.read_text()
+    controller.publish(REPO, {"workflow_run": {"id": 50}})
+    assert statuses[0]["state"] == "success"
+    assert statuses[0]["target_url"].endswith("/runs/50/attempts/1")
+    # A repeat comment must recognize this run despite the old PR base field.
+    assert controller.already_running_or_passed(REPO, pr)
+    assert pr["base"]["sha"] == stale, "Do not rewrite the lint snapshot"
 
 
 def test_changed_pr_rejected_before_checkout(control, pr):
@@ -637,6 +759,9 @@ def test_command_waits_for_consistent_merge_without_authorizing_another_revision
 def test_merge_wait_stops_when_request_is_no_longer_valid(
     control, monkeypatch, event, pr, merge_clock, change
 ):
+    if change == "base":
+        monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40 if merge_clock else BASE)
+
     def request(path):
         assert path.endswith("/pulls/123"), "Rejected revisions must not dispatch or write status"
         current = copy.deepcopy(pr)
@@ -739,8 +864,9 @@ def test_forged_merge_with_correct_parents_is_rejected(control, pr):
         control.verify_merge(REPO, pr, HEAD, BASE, "d" * 40)
 
 
-def test_obsolete_base_cannot_publish_success(control, publication, pr):
-    pr["base"]["sha"] = "d" * 40
+def test_obsolete_base_cannot_publish_success(control, monkeypatch, publication):
+    # The PR snapshot can still name the tested base after main has advanced.
+    monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40)
     control.publish(REPO, {"workflow_run": {"id": 50}})
     assert publication[3][0][1]["state"] == "failure"
 
@@ -1748,7 +1874,7 @@ def test_already_green_requires_verified_full_revision(control, monkeypatch, pr,
         ],
     )
     if case == "changed-base":
-        pr["base"]["sha"] = "d" * 40
+        monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40)
     elif case == "failed":
         jobs[0]["conclusion"] = "failure"
     elif case == "rerunning":

@@ -118,7 +118,7 @@ def poll_budget(repo: str, attempt: int) -> tuple[int, int]:
     active = max(1, monitors["total_count"])
     # Include per-attempt job reads, provenance/status reads and startup lookup
     # overhead. Spread a shared 500-request/hour polling budget across monitors.
-    cost = 6 + attempt
+    cost = 7 + attempt
     writes = max(0, min(50, remaining // active - cost))
     if writes == 0:
         # A positive quota may still be too small for a poll and one write.
@@ -190,7 +190,7 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
             if run["workflow_id"] != workflow["id"]:
                 raise control.UntrustedRunError("Unexpected full CI workflow identity")
             pr = control.pull(repo, number)
-            if pr["head"]["sha"] != head or pr["base"]["sha"] != match[3]:
+            if pr["head"]["sha"] != head or control.current_base(repo) != match[3]:
                 return
             if control.newer_status_exists(repo, number, head, run):
                 return

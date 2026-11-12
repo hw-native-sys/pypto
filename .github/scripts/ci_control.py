@@ -238,11 +238,19 @@ def pull(repo: str, number: int) -> dict[str, Any]:
     return pr
 
 
+def current_base(repo: str) -> str:
+    """Read the live target ref; a PR's base.sha can lag behind main indefinitely."""
+    ref = api(f"repos/{repo}/git/ref/heads/main")
+    if ref.get("ref") != "refs/heads/main" or ref.get("object", {}).get("type") != "commit":
+        raise ValueError("Expected main to resolve to a commit")
+    return sha(ref["object"]["sha"])
+
+
 def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str) -> None:
     """A fixed test merge preserves pull_request semantics, including forks."""
     for value in (head, base, merge):
         sha(value)
-    if pr["head"]["sha"] != head or pr["base"]["sha"] != base:
+    if pr["head"]["sha"] != head or current_base(repo) != base:
         raise ValueError("PR changed; post /ci full again for the new revision")
     if pr.get("merge_commit_sha") != merge:
         raise ValueError("merge_sha is not the PR's current test merge; post /ci full again")
@@ -301,6 +309,9 @@ def effective_jobs(repo: str, run: dict[str, Any]) -> list[dict[str, Any]]:
 
 def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
     """Reuse only the latest automatic run for this exact PR/head/base snapshot."""
+    # Lint titles record the pull_request event's base, which may predate main.
+    # Keep that snapshot distinct from the live base pinned for the full merge;
+    # replacing it with main's tip would discard otherwise matching lint runs.
     head, base = pr["head"]["sha"], pr["base"]["sha"]
     title = f"CI lint PR #{pr['number']} @{head} base:{base}"
     workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
@@ -366,7 +377,7 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
     if status.get("state") not in ("pending", "success") or not target:
         return False
     run = api(f"repos/{repo}/actions/runs/{target[1]}")
-    expected = f"CI full PR #{pr['number']} @{pr['head']['sha']} base:{pr['base']['sha']}"
+    expected = f"CI full PR #{pr['number']} @{pr['head']['sha']} base:{current_base(repo)}"
     if (
         run.get("id") != int(target[1])
         or run.get("display_title") != expected
@@ -417,12 +428,12 @@ def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None
     number = int(event["issue"]["number"])
     deadline = time.monotonic() + MERGE_WAIT_SECONDS
     pr = pull(repo, number)
-    head, base = pr["head"]["sha"], pr["base"]["sha"]
+    head, base = pr["head"]["sha"], current_base(repo)
     routed_head = os.environ.get("CI_ROUTED_HEAD")
     if routed_head and routed_head != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
     while True:
-        if pr["head"]["sha"] != head or pr["base"]["sha"] != base:
+        if pr["head"]["sha"] != head or current_base(repo) != base:
             raise ValueError(
                 "PR head or base changed while waiting; wait for matching lint and post /ci full again"
             )
@@ -435,9 +446,9 @@ def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None
                 verify_merge(repo, pr, head, base, pr["merge_commit_sha"])
                 return pr
             except MergePendingError:
-                # The PR endpoint can report the new base before its merge
-                # commit is rebuilt. Retry that inconsistency, not bad SHAs,
-                # access failures, closed PRs, or genuine merge conflicts.
+                # The test merge can lag behind the live target ref. Retry that
+                # inconsistency, not bad SHAs, access failures, closed PRs, or
+                # genuine merge conflicts.
                 pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -495,7 +506,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     if pr is None:
         return
     number = pr["number"]
-    head, base, merge = pr["head"]["sha"], pr["base"]["sha"], pr["merge_commit_sha"]
+    head, base, merge = pr["head"]["sha"], current_base(repo), pr["merge_commit_sha"]
     if os.environ.get("CI_ROUTED_HEAD") != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
     if already_running_or_passed(repo, pr):
@@ -791,7 +802,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
                 and finalizers[0]["conclusion"] == "success"
             )
             state = "success" if passed else "failure"
-        if pr["base"]["sha"] != base:
+        if current_base(repo) != base:
             # Strict up-to-date rules are still needed for main advancing
             # after publication, but an already obsolete base cannot pass.
             state = "failure"

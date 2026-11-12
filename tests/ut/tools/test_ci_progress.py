@@ -86,6 +86,8 @@ def harness(progress, monkeypatch, event):
             return {"id": 99, "path": ".github/workflows/ci-full.yml"}
         if path.endswith("/pulls/123"):
             return pr
+        if path.endswith("/git/ref/heads/main"):
+            return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": BASE}}
         raise AssertionError(path)
 
     def pages(path, key):
@@ -184,12 +186,26 @@ def test_obsolete_monitor_cannot_publish_new_revision(progress, monkeypatch, eve
     run, pr, _, writes, _ = harness
     if change == "attempt":
         run["run_attempt"] = 2
-    elif change in {"head", "base"}:
-        pr[change]["sha"] = "d" * 40
+    elif change == "head":
+        pr["head"]["sha"] = "d" * 40
+    elif change == "base":
+        monkeypatch.setattr(progress.control, "current_base", lambda repo: "d" * 40)
     else:
         monkeypatch.setattr(progress.control, "newer_status_exists", lambda *args: True)
     progress.monitor(REPO, event)
     assert not writes
+
+
+def test_stale_pr_base_does_not_hide_full_job_results(progress, event, harness):
+    run, pr, jobs, writes, _ = harness
+    # The full run tested current main; only the PR snapshot is behind it.
+    pr["base"]["sha"] = "d" * 40
+    run["status"] = "completed"
+    jobs[0].update(status="completed", conclusion="success")
+    progress.monitor(REPO, event)
+    assert len(writes) == 1
+    assert writes[0][1]["state"] == "success"
+    assert writes[0][1]["context"] == "full / system-tests"
 
 
 @pytest.mark.parametrize(
@@ -404,7 +420,7 @@ def test_poll_budget_scales_with_concurrent_monitors(progress, monkeypatch, acti
 
     monkeypatch.setattr(progress.control, "api", api)
     interval, writes = progress.poll_budget(REPO, 1)
-    assert active * 7 * 3600 / interval <= progress.POLL_REQUESTS_PER_HOUR
+    assert active * 8 * 3600 / interval <= progress.POLL_REQUESTS_PER_HOUR
     assert 0 < writes <= 50
 
 
