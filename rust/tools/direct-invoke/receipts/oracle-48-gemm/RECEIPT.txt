@@ -1,0 +1,138 @@
+ORACLE 48 — a general GEMM oracle, and why it needed no change to buffer sizing
+===============================================================================
+Host 910b (101.245.76.149), Ascend910B2 dav-2201, CANN 8.5.2. 2026-11-09.
+
+WHY IT EXISTS. The K/N-blocked cube arm is the biggest remaining lever on C_m
+(+3 kernels: both gemm_f16_lmhead and gemm_i8_v41_16x5120x2304), and it was
+believed to be owner-blocked on "may the harness size buffers differently". It was
+not. VERIFIED: `main.asc` allocates p1..p8 as `n * sizeof(float)` and ONLY p0 takes
+the EMB_ROWS multiplier, so each oracle reads the PREFIX it needs out of uniformly
+sized buffers. ORACLE 23 is the existence proof -- it reads q[512], kv[128][512]
+and sink[8] out of one `n`. A GEMM therefore passes n = max(M*K, K*N, M*N) and
+reads prefixes. No sizing change, so this is a new id inside the existing ruling.
+
+COST, including the half an earlier estimate omitted. For the 12928 lmhead,
+n = 66,191,360: 252.5 MiB per device buffer, 757.5 MiB for three, against ~6 GiB
+free HBM. But `main.asc` also allocates NINE host vectors of n floats
+(a,b,c,v,s,e,f,g,h) = 2.22 GiB of HOST RAM per run, which the HBM figure does not
+cover. The f64 CPU reference is 1.06G MACs.
+
+THE THIRD EXTENT. MV_N and MV_K carry two; MV_P carries N. It defaults to 0 and an
+oracle handed 0 REFUSES rather than assuming a square shape, because a square
+guess would silently score a different kernel than the one declared. Plumbing it
+took THREE files and a wasted run: the `#ifndef MV_P` default in main.asc,
+`mv_p="${12:-0}"` in setup.sh, AND a declaration plus `target_compile_definitions`
+entry in CMakeLists.txt. setup.sh drives cmake, so `-DMV_P=4` on the cmake line
+sets a CACHE VARIABLE that reaches the compiler only if CMakeLists forwards it --
+it did not, so MV_P stayed 0 and the first calibration attempt measured the
+refusal path while reporting it as a FAIL on a correct kernel.
+
+CALIBRATION, both directions, because a detector never seen to fire either way is
+worth nothing. A naive scalar GEMM at M=4 K=8 N=4, and the same kernel with the
+LAST k of every dot product dropped -- the exact shape of a blocked arm losing one
+K-block:
+
+    g48_ok    PASS   elements=16 wrong=0  max_abs=0.000e+00 max_rel=0.000e+00
+    g48_drop  FAIL   elements=16 wrong=16 max_abs=2.500e-01 max_rel=5.600e+00
+                     first_bad=0
+    both      ref_abs spread 3.906250e-02 .. 6.640625e-01   (the control: a
+                     degenerate reference could not refute a dropped block)
+
+    refusals exercised: MV_P=0 refuses naming the three extents; n < prefix_need
+                        refuses naming the n it wants.
+
+INPUT BUILT TO REFUTE, not merely to be non-zero. A[m][k] and B[k][n] depend on
+BOTH indices and are non-symmetric in k and n, so a dropped K-block leaves C low,
+an N-block at the wrong column offset disagrees everywhere (no two columns of B
+are equal), a transposed B disagrees, and an accumulator initialised on the SECOND
+block instead of the first -- the cmatrixInitVal true-then-false split the stored
+lmhead plan uses -- keeps only the last block. Magnitudes stay small (|A| <= 0.75,
+|B| <= 0.5) so at K=5120 the largest |C| is about 1920 and an f32 accumulation of
+f16 products compares against an f64 reference without the test measuring rounding.
+
+INERTNESS, and the test needed fixing before it meant anything. Both ORACLE 48
+blocks are COMPILE-TIME gated (`#if ORACLE == 48`), because a runtime
+`if (ORACLE == 48)` is dead code for another oracle and still perturbs its emitted
+object. Verified with the SOURCE PATH HELD CONSTANT:
+
+    ORACLE 46 built from old vs new main.asc   9281af7a6b495929  BYTE-IDENTICAL
+    ORACLE 44 built from old vs new main.asc   d1337d5d5427d821  BYTE-IDENTICAL
+    control: the same source built twice is reproducible (a27b0a13d3fa50d2 twice)
+
+A first attempt reported "NOT inert" and was CONFOUNDED: I built the old file from
+/tmp/main.asc.old and the new from .../op_host/main.asc, so content and PATH varied
+together, and the path is embedded in the object. Held the path constant and the
+difference vanished. Two earlier attempts were worse -- one compiled the OLD file
+to validate the NEW one, and one read stale .bin artefacts from a build that had
+silently failed under `2>/dev/null`.
+
+WHAT THIS UNBLOCKS: the arm, which is the neighbouring lane's. This id does not
+score anything by itself.
+
+
+ADDENDUM — ORACLE 48 SCORED AN f32 GEMM AND THE CORPUS HAS NONE
+===============================================================
+The version first committed was useless for its stated purpose, and the way the
+error survived calibration is the part worth recording.
+
+THE DEFECT. The input filled `a` and `b` as f32 and the harness memcpys raw float
+bytes, so the reference scored an f32 GEMM. Every matmul in the corpus is f16 or
+i8:
+
+    gemm_f16_lmhead_16x5120x12928   __tile_load_f16   __tile_matmul_f16
+    gemm_f16_lmhead_16x5120x16160   __tile_load_f16   __tile_matmul_f16
+    gemm_i8_16x5120x2304            __tile_load_i8    __tile_matmul_i8_acc_i32_dequant_f16
+    gemm_i8_1x5120x2304             __tile_load_i8    (same)
+    matmul (playground16)           __tile_load_f16   __tile_matmul_f16
+
+and the only two `__tile_matmul_f32` users -- `attn_sink_1head_1blk` and
+`attn_sink_engine_64heads` -- load through `__tile_load_at_f32` and are scored by
+ORACLE 23. VERIFIED: no corpus kernel both loads f32 and matmuls f32. So an f16
+kernel would have read the float bytes as pairs of halves and computed garbage
+against a reference that was itself correct.
+
+WHY CALIBRATION DID NOT CATCH IT, which is the lesson. The first calibration used
+`g48_ok` / `g48_drop` -- a scalar f32 GEMM I wrote myself. It fired both ways, so
+the detector was demonstrably live. But it was live AGAINST AN INVENTED TARGET IN
+THE ORACLE'S OWN DTYPE, which structurally cannot reveal a dtype mismatch with the
+real kernels. Calibrated, against the wrong population. That is the same denominator
+error as the exposure census, wearing a different hat: the question is never only
+"does the detector fire" but "does it fire on the thing it will be pointed at".
+
+The inconsistency was visible in my own comment, too: it said the magnitudes suit
+"an f32 accumulation of f16 PRODUCTS", a sentence that only makes sense if the
+kernel reads f16, written directly above a fill that wrote f32.
+
+THE FIX. Host-side `__fp16` packing: A as M x K halves at the start of `a`, B as
+K x N halves at the start of `b`, and the reference reads back exactly the halves
+it wrote. The arithmetic is unchanged. The prefix requirement is now computed in
+BYTES -- `2 * max(M*K, K*N, M*N) <= n * sizeof(float)` -- so the refusal states the
+byte figure and the n it wants. Magnitudes are multiples of 0.125 and 0.0625 inside
+[-0.75, 0.75], exactly representable in f16, so the pack is lossless and the test
+measures the matmul rather than the f32->f16 rounding.
+
+RE-CALIBRATED IN THE CORPUS DTYPE, files o48-f16-runs.txt and o48-f16-sources.txt:
+
+    g48f_ok    (correct f16 GEMM)   PASS  wrong=0   max_abs 0.000e+00
+    g48f_drop  (one k dropped)      FAIL  wrong=16  max_abs 2.500e-01  max_rel 5.600e+00
+                                                    first_bad=0
+    both       ref_abs spread 3.906250e-02 .. 6.640625e-01   (the control)
+    refusals   MV_P=0 names the three extents; n=4 reports "needs 64 f16 BYTES
+               but n = 4 gives 16"
+
+AND ONE MORE SELF-INFLICTED DETOUR, because it is the third instance of the same
+mistake in this session: the first f16 calibration attempt FAILED on the correct
+kernel with max_abs 9.05e+05, and the cause was that I patched main.asc LOCALLY and
+never copied it to the box -- so an f16 KERNEL ran against the f32 ORACLE. Edit
+locally, run remotely, read the stale result as a finding. The fix is the md5
+comparison of local against remote before the run, which is now done and which I
+had been skipping.
+
+STILL NOT COVERED, and it is a different oracle rather than a dtype switch: the
+two i8 GEMMs. `__tile_matmul_i8_acc_i32_dequant_f16` takes a per-column SCALE
+operand and dequantises in flight, so scoring it needs the quantised weights, the
+scale plane, and a reference applying the same dequant. Named, unspent.
+
+NOT A CONSTRAINT, measured by the neighbouring lane: host RAM. The box has
+1266 GiB available against the 2.22 GiB this oracle needs at the 12928 shape, and
+192 cores for the f64 reference's 1.06G MACs.

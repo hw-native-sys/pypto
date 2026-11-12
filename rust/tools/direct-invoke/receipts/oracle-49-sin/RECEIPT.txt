@@ -1,0 +1,281 @@
+ORACLE 49 — AscendC adv_api Sin on 910B2: it compiles, it runs, 9e-08 absolute
+=============================================================================
+Host 910b (101.245.76.149), Ascend910B2 dav-2201, CANN 8.5.2. 2026-11-09.
+Files: sinprobe.cpp, sin-3-runs.txt.
+
+WHY. The AscendC emitter's `__tile_rope_f32` arm carried a rationale that faithful
+rope needs either a host-precomputed cos/sin LUT through a signature change or a
+costly Taylor chain, "because the cores have NO scalar libm". The scalar-libm
+premise is true; the conclusion is not exhaustive -- CANN 8.5.2 ships adv_api
+VECTOR Sin/Cos gated ON `__NPU_ARCH__ == 2201`. That was a HEADER READ and nothing
+more: a header that declares a function says nothing about whether it compiles for
+this arch, links, runs, or is accurate. This closes that gap.
+
+    compiles   YES, clean, `-x asc --npu-arch=dav-2201`, object present
+    runs       YES, rc=0, no fault, 3 of 3 reps
+    accurate   max_abs 9.000e-08, max_rel 1.229e-07, wrong=0, 3 of 3 IDENTICAL
+
+9.0e-08 is BELOW f32 epsilon (1.19e-07), so the result is within an ulp of the f64
+reference for values near 1.
+
+THE INPUT EXERCISES THE PART THAT GOES WRONG. The vendor's routine is a 4-term
+Cody-Waite range reduction followed by a degree-9 odd polynomial; an input confined
+to one period would exercise the polynomial and never the reduction, which is the
+half that misbehaves far from the origin. The ramp spans x = -12.800 .. 12.750,
+about four periods each side of zero, and the run PRINTS ITS OWN CONTROLS:
+
+    zero_crossings=9      the reduction was genuinely crossed, not inferred
+    peak_abs_sin=0.999992 the polynomial was driven to its extremes, not only
+                          near 0 where every implementation agrees
+
+GATED ON ABSOLUTE ERROR, deliberately. sin has zeros in this range, so near every
+crossing the relative error of any implementation diverges while the absolute error
+stays tiny. A relative gate would report a correct routine as broken, and loosening
+the tolerance to compensate would then hide a real error at the peaks. max_rel is
+printed for information and is expected to be larger.
+
+WHAT IT DOES AND DOES NOT ESTABLISH:
+  * It establishes that a FAITHFUL rope arm is possible on this part without any
+    signature change -- Sin works, and freq_i = 10000^(-2i/d) is computable on
+    device from pos alone with Muls/Exp. The emitter's rationale is refuted on
+    measurement now, not only on a header read.
+  * It does NOT establish Cos (same header, same guard, not run), f16/bf16, or
+    any other SKU.
+  * It does NOT clear the cube core. `SinImpl` opens `if ASCEND_IS_AIC { return; }`
+    -- a SILENT NO-OP there -- and this probe ran on the vector core, which is the
+    default. A cube-core call would return without computing and without a fault,
+    which is B30's defect shape in a different API.
+  * The tmp-buffer overload was used (`Sin(dst, src, work, count)`) with an 8 KiB
+    `uint8_t` work buffer. The no-tmp overloads reach for `PopStackBuffer` behind
+    an `ASCENDC_ASSERT` and were not exercised.
+
+INERTNESS, with the SOURCE PATH HELD CONSTANT, because varying content and path
+together makes any object comparison meaningless (the path is embedded):
+
+    ORACLE 46 built from pre-49 and post-49 main.asc   BYTE-IDENTICAL
+
+Both ORACLE 49 blocks are COMPILE-TIME gated (`#if ORACLE == 49`), since a runtime
+`if` is dead code for another oracle and still perturbs its emitted object.
+
+
+ADDENDUM — Cos: compiles and runs; its accuracy is BOUNDED, not measured
+========================================================================
+Files: cosprobe.cpp, cos-3-runs.txt.
+
+Measured without spending a new oracle id, by using cos(x - pi/2) == sin(x) so
+ORACLE 49's sin reference applies unchanged:
+
+    compiles   clean, same guard, same arch
+    runs       rc=0, no fault, 3 of 3
+    max_abs    3.299e-07, max_rel 1.933e-05, wrong=0, 3 of 3 IDENTICAL
+
+SO Cos COMPILES AND RUNS -- which is what the rope capability claim needs, and
+those two legs are as solid as Sin's.
+
+BUT THE ACCURACY FIGURE IS CONFOUNDED, BY MY OWN SHORTCUT, and it bounds Cos
+rather than measuring it. The probe shifts the argument by -pi/2 in f32 first. At
+the far end of the ramp x - pi/2 is about -14.37, where the f32 ulp is 9.537e-07,
+so the SHIFTED ARGUMENT carries up to 4.768e-07 of error before Cos is called at
+all. With |d cos/dx| <= 1 that propagates to up to 4.768e-07 in the output --
+larger than the 3.299e-07 observed. So the entire measured error is consistent
+with the shift alone, and Cos's own contribution could be anything from 0 to
+3.299e-07.
+
+That is the same two-variables-one-reading confound this receipt directory already
+records five instances of, and I introduced it deliberately to avoid a new id. It
+is recorded as a BOUND:
+
+    Cos error on this part  <= 3.299e-07 over x in [-12.8, 12.75]   (bounded)
+    Cos error attributable to Cos itself                             (NOT measured)
+
+A clean measurement needs a cos reference of its own -- one more oracle id. It is
+deliberately not spent, because nothing currently rests on the exact figure: the
+capability claim that a faithful rope arm is possible needs Sin's accuracy (9e-08,
+measured) plus Cos compiling and running (both established here), and 3.3e-07 is
+already far inside any tolerance rope would be banked at.
+
+
+ADDENDUM 2 — the Cos probe was NON-CONFORMING; re-run conforming, same answer
+=============================================================================
+Files: cosprobe2.cpp, cosq-3-runs.txt.
+
+A SECOND DEFECT IN THE FIRST Cos PROBE, and it is not the shift. `cosprobe.cpp`
+did `Adds(dst, src, -pi/2)` then `Cos(dst, dst, work, 512)` -- `src` ALIASES `dst`,
+with the default `isReuseSource = false`, against this very row's recorded header
+note: "it doesn't allow src/dst/sharedTmpBuffer tensor address overlap." So what
+addendum 1 established was that an OVERLAPPING-OPERAND Cos compiled, ran and
+produced plausible values. It did NOT establish that a CONFORMING Cos call works,
+which is the only version anyone writing an arm would be entitled to use.
+
+The fix was one line and no new oracle id: a third tile for the shifted argument,
+so src, dst and the shared tmp are three distinct buffers.
+
+    conforming   Cos(dst, shifted, work, 512)   max_abs 3.299e-07  wrong=0  3 of 3
+    aliased      Cos(dst, dst,     work, 512)   max_abs 3.299e-07  wrong=0  3 of 3
+
+  * A CONFORMING Cos COMPILES, RUNS AND IS CORRECT to the same bound. That is the
+    claim a faithful rope arm needs, and it is now the one on record.
+  * THE TWO FORMS AGREE EXACTLY, which does two things. It confirms the 3.299e-07
+    is entirely the pi/2 shift -- changing the operand aliasing moved it not at all
+    -- and it is a weak data point that this particular overlap did not corrupt
+    anything. It is NOT a licence to overlap: the header forbids it, one agreeing
+    shape proves almost nothing about the general case, and the conforming form
+    costs one buffer.
+  * The accuracy remains BOUNDED, not measured, for the reason in addendum 1: the
+    f32 shift carries up to 4.768e-07 of argument error at the far end, which
+    exceeds the observed figure.
+
+CORROBORATION OF THE SHIFT DIAGNOSIS that this lane did not claim and the
+knowledge owner supplied: Sin and Cos share the range, the nine crossings and the
+absolute gate, yet Sin -- WITH NO SHIFT -- holds max_rel at 1.229e-07 while Cos
+shows 1.933e-05. If the large relative figure were an intrinsic near-zero artefact
+of the gate choice, Sin would show it too. It does not. That moves the shift from
+"arithmetically capable of explaining it" to "visibly the cause".
+
+
+ADDENDUM 3 — the cube-core no-op is REAL but SCOPED, and I had it too broad
+===========================================================================
+Source read on the installed toolchain, 2026-11-09. `cfg:`, not measured: this
+narrows a hazard by reading the headers correctly, not by running a cube core.
+
+I called the cube-core silent no-op "the sharpest remaining item" on this axis.
+That overstated it, and the source says why. There is EXACTLY ONE `ASCEND_IS_AIC`
+in the entire sin impl tree:
+
+    asc/impl/adv_api/detail/math/sin/sin_common_impl.h:251
+        // Only for AI Vector Core.
+        if ASCEND_IS_AIC {
+            return;
+        }
+        // Using the Stack Space to Allocate tmpBuffer
+        LocalTensor<uint8_t> sharedTmpBuffer;
+        bool ans = PopStackBuffer<uint8_t, TPosition::LCM>(sharedTmpBuffer);
+        ASCENDC_ASSERT((ans), ...);
+        SinImpl<T, isReuseSource>(dstTensor, srcTensor, sharedTmpBuffer, calCount);
+
+It is inside the NO-TMP-BUFFER `SinImpl(dst, src, calCount)` -- the overload that
+allocates its own scratch through `PopStackBuffer`. And the 4-argument overload,
+which is what both of this directory's probes used and what any emitter would
+emit, forwards STRAIGHT PAST it:
+
+    Sin(dst, src, sharedTmpBuffer, calCount)
+        -> SinImpl<T, isReuseSource>(dst, src, sharedTmpBuffer, calCount)   // NO guard
+
+So:
+  * THE FORM MEASURED HERE HAS NO CUBE-CORE EARLY RETURN. The hazard cannot reach
+    a caller that passes its own tmp buffer, which is the form a generated kernel
+    would use, because the emitter allocates buffers explicitly.
+  * THE HAZARD IS REAL for the convenience overloads `Sin(dst, src, calCount)` and
+    `Sin(dst, src)`, which route through the guarded `SinImpl`. On a cube-core
+    build those compile to a bare `return`: `ASCEND_IS_AIC` is
+    `constexpr(g_coreType == AscendC::AIC)`, an `if constexpr`, so the body is
+    ELIDED AT COMPILE TIME rather than skipped at run time.
+  * It is therefore the same two paths this receipt already flagged as unexercised
+    -- the no-tmp overloads and their `PopStackBuffer` dependency. The AIC guard
+    lives in exactly that path, which neither probe touched, and I had noted the
+    path without noticing the guard was in it.
+
+STILL NOT MEASURED, and the scope is now narrow enough to say precisely what would
+close it: a cube-core build calling the NO-TMP overload, with `dst` poisoned, to
+confirm the elided body leaves `dst` untouched and returns rc=0. Nothing in this
+directory's 40-odd runs touches that, and the emitter does not emit that form.
+
+
+ADDENDUM 4 — the cube-core no-op is GATED ON A COMPILE FLAG, and that path does
+not compile
+==============================================================================
+Both earlier readings of this hazard were wrong, in opposite directions, and the
+fact that settles it was in a file neither of us had opened.
+
+WHERE THE GUARD COMES FROM. `asc/impl/basic_api/kernel_macros.h:140-166`:
+
+    #if defined(ASCENDC_CPU_DEBUG)
+      extern int32_t g_coreType;                       // a RUNTIME value
+      #define ASCEND_IS_AIC (g_coreType == AscendC::AIC)
+    #else
+      #if   defined(SPLIT_CORE_CUBE)  constexpr int32_t g_coreType = AscendC::AIC;
+      #elif defined(SPLIT_CORE_VEC)   constexpr int32_t g_coreType = AscendC::AIV;
+      #else                           constexpr int32_t g_coreType = AscendC::MIX;
+      #endif
+      #define ASCEND_IS_AIC constexpr(g_coreType == AscendC::AIC)
+    #endif
+
+So the guard is NOT about which core the kernel lands on. It is a compile-time
+`if constexpr` on a `g_coreType` chosen by `SPLIT_CORE_CUBE` / `SPLIT_CORE_VEC`,
+DEFAULTING TO `MIX` -- where `constexpr(MIX == AIC)` is permanently false and the
+guard is dead. (Under `ASCENDC_CPU_DEBUG` it becomes a runtime comparison instead,
+which is a different build and a different question.)
+
+MEASURED THREE WAYS, all agreeing:
+
+  * MACRO ARITHMETIC: default is MIX, so neither Sin's nor Cos's guard can fire.
+  * BYTE IDENTITY: the cos probe built in default mode and with
+    `-DSPLIT_CORE_VEC` gives the SAME .aicore_binary, 4928 B, identical md5 --
+    i.e. MIX already emits the vector-core code.
+  * DEVICE, with the destination POISONED to 7.0 before a conforming
+    `Cos(dst, shifted, work, 512)`: PASS, wrong=0, max_abs=3.299e-07. Had the
+    guard fired, dst would have kept 7.0 and max_abs would be about 8. The body
+    ran and wrote dst.
+
+AND THE PATH TO THE GUARD IS A COMPILE ERROR, NOT SILENCE:
+
+    -DSPLIT_CORE_CUBE  ->  rc=1, NO binary,
+                           "error: use of undeclared identifier 'g_vecTPipePtr'"
+
+A cube-only TU has no vector TPipe, while `Cos` needs vector `LocalTensor`s, so a
+Cos-using kernel does not build in that mode at all. The failure is loud.
+
+SO BOTH EARLIER CLAIMS WERE WRONG. This lane said the hazard could not reach a
+caller passing its own tmp buffer -- false in general, because `Cos` guards BOTH
+overloads (`cos_common_impl.h:238` inside the tmp-buffer form and `:287` inside
+the no-tmp one) while `Sin` guards only the no-tmp one (`sin_common_impl.h:251`).
+The knowledge owner then reinstated it as live in the conforming form -- also
+false, because reaching it needs `SPLIT_CORE_CUBE`, which does not compile here.
+Two sibling routines really do differ in which overloads they guard; what neither
+of us checked was whether the guard's CONDITION can hold at all in these builds.
+
+WHAT REMAINS GENUINELY OPEN, stated narrowly: a kernel structured for the mixed
+KFC model, where the cube side has its own pipe, might compile under
+`SPLIT_CORE_CUBE` and then hit the elision. That is not tested here, and nothing
+the emitter produces is of that shape -- it uses `TBuf<TPosition::VECCALC>`
+throughout, which is what fails to compile. For the emitter's output and for any
+`Sin`/`Cos` call in a MIX build, the hazard is dead by construction.
+
+
+ADDENDUM 5 — the mirror trap, and why the cube arm is not exposed to it
+======================================================================
+Source read, `cfg:`, 2026-11-09. Follows a knowledge-owner observation that in a
+default MIX build BOTH `ASCEND_IS_AIC` and `ASCEND_IS_AIV` are false (0 == 1 and
+0 == 2), so adv_api code gating REAL WORK on a POSITIVE `if ASCEND_IS_AIV` is
+elided too -- the same trap in the mirror. Three files under `asc/impl/adv_api/`
+carry that pattern, and one of them is on the matmul path the K/N-blocked cube arm
+would take, so it was worth checking before that arm is written.
+
+    detail/matmul/utils/matmul_utils.h                 2 AIV/AIC sites
+    detail/kfc/kfc_register_obj.h                      2 AIV sites
+    detail/conv_backprop/.../conv3d_bp_input_init_func.h  1 AIV site
+
+THE MATMUL ONE IS NOT A HAZARD HERE, for two independent reasons:
+
+  * BOTH SITES ARE INSIDE `#if defined(USE_WORKSPACE)`, and `USE_WORKSPACE` is
+    defined NOWHERE in this harness -- not in CMakeLists.txt, setup.sh or
+    main.asc -- and nowhere in `rust/crates` or `rust/bench`. So the code is not
+    elided in our builds; it is not compiled at all.
+  * AND THE ELISION WOULD BE SYMMETRIC EVEN IF IT WERE. The two sites are the two
+    halves of ONE cross-core handshake -- `if ASCEND_IS_AIC { WaitEvent(9) }` and
+    `if ASCEND_IS_AIV { NotifyEvent<PIPE_MTE3>(9) }` -- both further gated on the
+    same `AShare && BShare`, both returning. In MIX both vanish together, so there
+    is no asymmetry in which one core waits forever or the other notifies into
+    nothing. A half-elided handshake would be the dangerous shape; this is not one.
+
+SO THE CUBE ARM IS CLEAR OF THIS, which is the actionable part: the +3-kernel
+K/N-blocked arm can be written against the Matmul path without inheriting a
+mixed-core elision.
+
+AND THE REMAINING TWO SITES ARE THE SAME OPEN QUESTION ALREADY ON RECORD.
+`kfc_register_obj.h` has two UNCONDITIONAL `ASCEND_IS_AIV` sites -- no
+`USE_WORKSPACE` guard -- and KFC is the mixed-core framework, which is exactly the
+"mixed-KFC-shaped kernel" residue left NULL in addendum 4. So the two open items
+collapse into one: anything built in the KFC mixed shape is where both the AIC
+elision and the mirror AIV elision could actually bite, and nothing this emitter
+produces is of that shape. `conv3d_bp_input_init_func.h` is not on any path here.

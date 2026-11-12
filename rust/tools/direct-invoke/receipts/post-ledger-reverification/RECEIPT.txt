@@ -1,0 +1,176 @@
+Post-incident re-verification of the restored campaign ledger
+=============================================================
+Host 910b (101.245.76.149), Ascend910B2 dav-2201, CANN 8.5.2. 2026-11-09.
+
+WHY. `coverage_models.py baseline --manifest` opens its path with "w", so running
+it on the live ledger truncated 134 records to 60 and took all 61 device-`verified`
+records with them. The ledger was recovered from git (commit e8c79a5) and
+re-scored to C = 61/72 exactly. But a RESTORE PROVES THE RECORDS ARE PRESENT, NOT
+THAT THEY ARE TRUE, and the campaign's own re-earned conditions list "every banked
+row still re-verifiable from its own artefact" as something `progress.py check`
+cannot compute. Nobody had asked it. These are the two checks that answer it.
+
+CHECK 1 -- ARTEFACT INTEGRITY, all 61, no device needed. For every verified
+record, the recorded `evidence.sha256` was compared against a fresh sha256 of the
+file at `evidence.artifact`:
+
+    61 of 61 match          0 drifted      0 missing      0 without a recorded hash
+
+So every restored record points at exactly the bytes it claims. That is the
+complete population, not a sample.
+
+CHECK 2 -- DO THOSE BYTES STILL PASS? A sample, one per model, chosen as the
+cheapest `n` in each so the re-runs are short, with the RECORDED COMMAND RE-RUN
+VERBATIM rather than reconstructed:
+
+    topk_v41_1x384_k6       ORACLE 42  rc=0  PASS  wrong=0  max_abs 0.000e+00
+    kda_delta_glm53_1x128   ORACLE  4  rc=0  PASS  wrong=0  max_abs 0.000e+00
+    rope_k3_1x64            ORACLE 12  rc=0  PASS  max_rel 6.001e-07 (gate 1e-6)
+
+So the restored ledger is TRUE and not merely PRESENT, on this sample.
+
+AND IT DOUBLES AS AN END-TO-END INERTNESS CHECK on this session's two new oracle
+ids. ORACLE 48 and 49 were verified inert by rebuilding ORACLE 44 and 46
+byte-identically with the source path held constant -- a compile-layer check on two
+ids. These three rows exercise oracles 42, 4 and 12 against the CURRENT main.asc
+and all three pass, which is the behavioural counterpart on three further ids.
+
+SCOPE, stated rather than left to be assumed:
+  * Check 1 is complete over the 61 verified records.
+  * Check 2 is 3 of 61. It is a sample and nothing here licenses "all 61 re-run
+    clean". A full re-verification is ~61 device launches, mostly cheap, and the
+    recorded commands are self-contained enough to script -- `verify_all.sh`
+    already holds rows for most of them.
+  * The 15 C_b amendment records are deliberately NOT re-run: each states that no
+    device run happened on 2026-11-09 and that every device field is verbatim from
+    the original run. Re-running them would test the original claim, which is what
+    check 2 samples, not the amendment.
+
+ADDENDUM 1 -- A THIRD CLAIM THE RESTORE MADE. I GOT THIS ONE WRONG FIRST.
+--------------------------------------------------------------------------
+Checks 1 and 2 ask whether the restored LEDGER's records are true. The restore also
+summarised its own OUTCOME, at `evidence/0021-ledger-destroyed/README.md:95`:
+
+    C_b  24/72 (33.3%) -> 39/72 (54.2%)     +15.3 points, a new high-water mark
+
+A fresh `report` reads C_b = 33/72. I first argued 39 was never a measurement at
+all -- that it was 24 + 15 (the count of `SAME-RUNG RESTATEMENT` records) and that
+it was UNATTAINABLE, because C_b counts kernels carrying both a `.pto` and a `.rs`
+and only 33 `.rs` artefacts exist. **That argument was wrong, and wrong in an
+instructive way: the invariant I used is the FIXED scorer's, applied to a reading
+the HOLED scorer produced.** The other lane said so and the measurement backs it.
+
+WHAT ACTUALLY HAPPENED. The old `report` unioned `evidence.checks` across a
+kernel's history without testing that either column still exists. Structurally
+confirmed, not taken on trust:
+
+    grep -c both_columns  coverage_models.py.bak-20261107   ->  0
+    grep -c both_columns  coverage_models.py (current)      ->  2
+
+So the presence test is new. The accounting the other lane supplied, with its six
+kernels verified here file-by-file:
+
+    SAME-RUNG RESTATEMENT records appended         15
+    checks-union only (OLD scorer)                 39    = 24 + 15
+    union AND both columns present (FIXED)         33
+    removed by the presence test                    6
+    amendments surviving the presence test      15/15
+
+The 6 are PRE-EXISTING claims, none of them amendments. Verified directly:
+`argmax_glm53_1x154880`, `router_topk_glm53_1x288_k8` and `argmax_k3_1x163840`
+have no `.pto`; `rmsnorm_v41_8x5120`, `topk_v41_1x384_k6` and
+`router_sigmoid_topk_k3_1x896_k16` have no `.tile-rs`. So the amendments were
+sound, all 15 counted, and the drop is a correction to the 24 baseline -- NOT, as
+I had it, nine of fifteen landing. The `git log --diff-filter=D` evidence I
+offered does not bear on it either: those three kernels never had a tracked `.rs`,
+so no deletion was needed for the claim to go stale.
+
+The defensible reading is the one the trend supports: 28/72 -> 33/72, +6.9 points.
+
+ADDENDUM 2 -- THE REAL DEFECT UNDER THE 39: THE SCORER HAS NO IDENTITY
+-----------------------------------------------------------------------
+Conceding the above makes a worse problem visible, and this is the finding of the
+iteration. **The 39 cannot be reproduced by anything that still exists.** Three
+scorer versions existed today:
+
+    Nov-7 backup      no presence test  -- but REFUSES today's ledger
+                      ("manifest.jsonl:142 ... regresses from static-verified to
+                      lowered") under a rung rule that has since moved, so it
+                      cannot be run against the records that produced the 39
+    pre-09:30 today   no presence test, accepted the ledger  -- PRINTED THE 39
+                      -- NO LONGER EXISTS ANYWHERE
+    current (09:30)   presence test  -- prints 33
+
+So the number is unauditable in both directions: I cannot re-derive it and neither
+can the lane that produced it. Two structural reasons, both measured:
+
+  * `~/.claude/skills/flashrsi-kernel-coverage` IS NOT A GIT REPOSITORY. The
+    scorer's only history is ad-hoc `.bak-` copies, and the one that printed the 39
+    was overwritten without one.
+  * `assets/components-pto-models.json` declares `root: ~/pypto-fork` with
+    `skill: []`, `prompt: []` and `tool`/`config` naming only paths under that
+    root. **No role matches the skill's own scripts**, so `snapshot.py` does not
+    hash the scorer, and the campaign's harness snapshot id is BLIND to it. That
+    file's own `_why` block was written about exactly this failure one level up --
+    "the unit of promotion was blind to every edit the campaign had ever made" --
+    and it recurs for the instrument that computes the score.
+  * `reports/progress.tsv` has columns for `snapshot` and `report` but NONE for the
+    scorer, so rows computed by different scorers are indistinguishable in the
+    trend. C_b rows before and after 09:30 today are not comparable and nothing
+    records that.
+
+The campaign pins its corpus SHA, denominator, splits, tolerances and oracle. It
+does not pin the thing that turns evidence into a number. A fixed scorer is the
+right outcome -- the hole over-counted and the fix moved C_b DOWN, against the
+fixing lane's own interest, which is the opposite of gaming -- but an unversioned,
+unhashed, unrecorded instrument means no reading of this campaign is reproducible
+across a scorer edit, and the 39 is the proof.
+
+WHY NOTHING CAUGHT IT, from the other lane and worth keeping: `append_trend`'s
+dedup keyed on `(num, den, snapshot, report)` -- the PRIMARY's numerator and
+denominator plus two filenames -- and `show` always writes the same
+`reports/current.json`. So any cycle that moved only a SECONDARY deduped to
+nothing. Iterations 84 and 85 moved C_s 65->66 and C_b 24->33 with C pinned at
+61/72 and the trend recorded neither, which is how a 39 sat with no neighbours to
+contradict it. My own i65 append was eaten by the same rule. Now fixed: the
+secondaries are in the identity, and re-showing an unchanged state still dedups.
+
+ADDENDUM 3 -- WHAT THE COMMIT GATE CAUGHT ON THE WAY IN
+--------------------------------------------------------
+This receipt's commit was REFUSED by pre-commit, by
+`test_bench_manifest_records_every_artefact.py::test_the_totals_block_agrees_with_the_rows_it_counts`
+on all three scored corpora:
+
+    deepseek_v41  totals.tile_rs = 4   rows carrying =  5   files on disk =  5
+    glm_5_3       totals.tile_rs = 4   rows carrying = 11   files on disk = 11
+    kimi_k3       totals.tile_rs = 8   rows carrying = 17   files on disk = 17
+
+No manifest was dirty and all three totals matched HEAD, so no manifest edit caused
+it. The mechanism is `_row_carries`' fallback: a row with no string claim for its
+`.rs` is counted by `(root/sub/f"{stem}{ext}").is_file()`, so a file appearing on
+disk moves the count with no manifest edit -- which is why `carrying` equalled the
+file count exactly in all three.
+
+Underneath it: `git ls-files --others` showed 17 of those `.rs` files UNTRACKED,
+while `coverage_models.py` builds the tile_rs column by globbing the directory. So
+the tile-rs half of C_b was read off one working tree. The ledger does not pin them
+either -- across all 146 records there are ZERO `(artifact, sha256)` pairs whose
+artifact ends in `.rs`; the C_b records pin the `.cpp` and list `rustc-compiles` in
+`evidence.checks`, so the file that gate ran against had no recorded identity
+anywhere. `components-pto-models.json` excluded `rust/bench/*/tile-rs/**` from the
+harness roles on the stated grounds that "the evidence ladder already carries their
+sha256 per kernel" -- false as written for every one of the 146 records.
+
+A `git clean -fdx` would have taken C_b to about 16/72 with nothing in the ledger
+showing it had been higher: the ledger loss one level down. The other lane owns
+those artefacts and landed the repair -- an explicit `"tile_rs"` claim plus
+`"tile_rs_sha256_16"` per affected row following the existing
+`pto_sha256_16`/`ascendc_sha256_16` convention, totals -> 5/11/17, one
+`"tile-rs": null` dropped where the gate then caught a two-spelling disagreement,
+and that justification reworded against the zero-`.rs` count. This lane
+deliberately did not `git add` them: staging into a shared index is how five of
+that lane's files were swept into bf69b059b earlier today. The 18 `.rs` files
+remain untracked pending the owner.
+
+LEDGER INTEGRITY, incidentally measured while parsing: 146 records, 44 comment
+lines, **zero** malformed. The restore is intact on that axis too.

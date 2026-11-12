@@ -1,0 +1,12 @@
+// Kimi K3 (kimi_k3), shapes read from the released model's own config.json.
+// Form: llvm.func + hacc.entry + __tile_* -- the shape the emitters consume.
+module {
+  llvm.func @k3_argmax_163840(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %cl = llvm.mlir.constant(20480 : i32) : i32
+    %v = llvm.call @__tile_load_f32(%arg0, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %o = llvm.call @__tile_argmax_f32(%v, %v, %r, %cl) : (i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%arg1, %o, %r, %r) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

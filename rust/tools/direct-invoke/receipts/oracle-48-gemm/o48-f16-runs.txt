@@ -1,0 +1,16 @@
+########## logs/o48f_g48f_drop.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=16 wrong=16 max_abs=2.500e-01 max_rel=5.600e+00
+dtype=f16 M=4 K=8 N=4 n=32 need_bytes=64 ref_abs 3.906250e-02 .. 6.640625e-01 first_bad=0
+FAIL
+
+########## logs/o48f_g48f_ok.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=16 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00
+dtype=f16 M=4 K=8 N=4 n=32 need_bytes=64 ref_abs 3.906250e-02 .. 6.640625e-01 first_bad=-1
+PASS
+

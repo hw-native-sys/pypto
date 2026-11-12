@@ -1,0 +1,10 @@
+// DeepSeek V4.1 Flash (deepseek_v41), shapes read from the model's own GGUF.
+// Form: llvm.func + hacc.entry + __tile_* -- the shape the emitters consume.
+module {
+  llvm.func @bm_argmax_8_131072(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(8 : i32) : i32
+    %cl = llvm.mlir.constant(131072 : i32) : i32
+    llvm.call @__tile_argmax_rows_i32(%arg1, %arg0, %r, %cl) : (!llvm.ptr<1>, !llvm.ptr<1>, i32, i32) -> ()
+    llvm.return
+  }
+}

@@ -1,0 +1,17 @@
+// Intentionally malformed: lhs cols (128) != rhs rows (64).
+// The emitter should detect this during matmul lowering and surface an error
+// BEFORE the output is even written, without needing rustc.
+module {
+  func.func @bad_mm(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %c128 = arith.constant 128 : index
+    %l = pto.alloc_tile : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=128>
+    %r = pto.alloc_tile : !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=32>
+    %acc = pto.alloc_tile : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32>
+    pto.tmatmul ins(%l, %r : !pto.tile_buf<loc=left, dtype=f32, rows=32, cols=128>, !pto.tile_buf<loc=right, dtype=f32, rows=64, cols=32>) outs(%acc : !pto.tile_buf<loc=acc, dtype=f32, rows=32, cols=32>)
+    return
+  }
+}

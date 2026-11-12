@@ -1,0 +1,28 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "tile_std_macros"
+version = "0.0.1"
+edition = "2024"
+license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
+description = "The `#[tile_kernel]` / `#[aiv_kernel]` attribute macros for tile_std"
+
+# Excluded from the workspace with `tile_std`, which is its only consumer.
+# It would build on stable, but it is the one crate here with third-party
+# dependencies, and keeping it out is what lets the tools' dependency-free
+# property stay checkable by `cargo tree`.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0.38"
+syn = { version = "2.0.96", features = ["full"] }
+proc-macro2 = "1.0.93"

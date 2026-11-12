@@ -1,0 +1,31 @@
+// Reference PTO for router_topk_glm53_1x288_k8, the same shape as the kimi
+// router's topk chain (tci -> tsort32 -> tgather P1010 -> textract head-K).
+// It mirrors the .tile's three calls: load 1x288, top-k k=8, store 1x8. As in
+// that reference, the indices output (%arg2) is carried in the .rs
+// (tile_topk_f32) and not stored by this PTO projection.
+module {
+  func.func @glm53_router_288_8(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c8 = arith.constant 8 : index
+    %c288 = arith.constant 288 : index
+    %pto0 = pto.make_tensor_view %arg0, shape = [%c1, %c288], strides = [%c288, %c1] : !pto.tensor_view<?x?xf32>
+    %pto1 = pto.partition_view %pto0, offsets = [%c0, %c0], sizes = [%c1, %c288] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x288xf32>
+    %pto2 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tload ins(%pto1 : !pto.partition_tensor_view<1x288xf32>) outs(%pto2 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %pto7 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=i32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %pto8 = arith.constant 0 : i32
+    pto.tci ins(%pto8 : i32) outs(%pto7 : !pto.tile_buf<loc=vec, dtype=i32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {descending = false}
+    %pto9 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=576, v_row=1, v_col=576, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tsort32 ins(%pto2, %pto7 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=i32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%pto9 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=576, v_row=1, v_col=576, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %pto10 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tgather ins(%pto9, {maskPattern = #pto.mask_pattern<P1010>} : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=576, v_row=1, v_col=576, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%pto10 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>) {axis = "row"}
+    %pto11 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=8, v_row=1, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    // head-extract first 8 of 288 sorted values
+    pto.textract ins(%pto10, %c0, %c0 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=288, v_row=1, v_col=288, blayout=row_major, slayout=none_box, fractal=512, pad=0>, index, index) outs(%pto11 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=8, v_row=1, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+    %pto12 = pto.make_tensor_view %arg1, shape = [%c1, %c8], strides = [%c8, %c1] : !pto.tensor_view<?x?xf32>
+    %pto13 = pto.partition_view %pto12, offsets = [%c0, %c0], sizes = [%c1, %c8] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<1x8xf32>
+    pto.tstore ins(%pto11 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=8, v_row=1, v_col=8, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%pto13 : !pto.partition_tensor_view<1x8xf32>)
+    return
+  }
+}

@@ -1,0 +1,34 @@
+Narration cue sheet -- tile-search
+Timestamps are at DEMO_SPEED=1.60 and shift with it.
+Read each line at its mark; the terminal holds for it.
+
+00:00	SECTION: tile-search -- which tilings does this kernel admit?
+00:03	Knobs are read OUT of the kernel, not supplied. A value typed by hand is a guess.
+00:23	SECTION: The case that matters: a kernel the hardware refuses
+00:26	We saw rspto refuse this one. Its live tile set is larger than the unified buffer.
+00:37	That refusal is intended: so as written, this kernel cannot run at all
+00:41	Now ask the search what widths the target WOULD accept.
+01:06	SECTION: Read what just happened
+01:09	Eight candidates. Seven accepted. The captured width is the one that is refused.
+01:13	And the oracle is the REAL emitter -- every candidate was compiled, not scored by a model.
+01:16	A model of the bounds would be a second place for them to live, and the two would drift.
+01:32	SECTION: The ranking is a declared model, and says so
+01:35	Nothing here ran on hardware, so this cannot know which accepted tiling is faster.
+01:38	It orders them by a stated rule -- largest accepted extent -- and prints that it is a model.
+01:41	Its own failure mode is written down too: the largest extent may leave no room to double-buffer.
+01:57	SECTION: Writing the chosen kernel out
+02:08	And the choice has to survive the emitter that refused the original.
+02:20	It emits. A kernel that could not run now can.
+02:33	SECTION: Doing nothing has to be reachable
+02:36	A search that cannot choose the input it was given is not a search.
+02:45	Already the largest accepted extent, so it says there is nothing to change.
+02:57	SECTION: Real model shapes push harder
+03:01	DeepSeek V4.1's own dimensions, not teaching sizes. Seven of fourteen are refused.
+03:22	SECTION: And the limit of a tiling search, shown rather than claimed
+03:26	GLM 5.3 routes over 288 experts. Watch the search try, and fail honestly.
+03:35	That refusal is intended: every candidate refused -- and the arithmetic says why
+03:39	A row must span whole 512-byte fractals, so an f32 extent must be a multiple of 128.
+03:43	288 has no divisor that is. The expert count is the obstruction, not the tiling.
+03:46	No choice of tiling can move that, and a search claiming otherwise would be lying.
+04:05	SECTION: Lifting the winner back to tile-rs
+04:08	--emit rs runs the chosen tiling through the lift, so the output is a kernel, not a number.

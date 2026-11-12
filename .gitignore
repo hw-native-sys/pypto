@@ -213,3 +213,20 @@ coverage.xml
 dist/
 wheelhouse/
 undiscovered_cases.txt
+
+# Rust build artifacts (rust/ is a Cargo workspace).
+rust/target/
+# `profile` defaults to ./ds4-tune.json; the committed sample lives at
+# rust/ds4-tune.json, so a run from the repository root must not add a second.
+/ds4-tune.json
+rust/ds4-rs-ascend/target/
+# The excluded crates are separate cargo roots, and the lifted-kernel compile
+# gate writes a scratch crate under the ptoas_rs crate's own target dir.
+rust/crates/*/target/
+rust/examples/*/*/target/
+# rustc writes these beside the crate when it panics, and tile_std panics under
+# debuginfo on the pinned nightly (see its Cargo.toml). One got committed once.
+rustc-ice-*.txt
+rust/demo/out/
+
+.demo-env/

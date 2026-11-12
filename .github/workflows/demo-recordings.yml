@@ -1,0 +1,66 @@
+name: demo recordings
+
+# Two jobs, for two different reasons.
+#
+# `docs-consistency` is a gate: documentation that promises a flag, a subcommand
+# or an environment variable the code does not implement fails the build. That is
+# the drift that actually happens.
+#
+# `record` re-renders the terminal demonstrations on every push so the recordings
+# cannot silently age. It captures each tool's `demo` subcommand to an asciinema
+# cast and uploads the cast as an artifact. It deliberately does NOT commit the
+# rendered media back: a recording that changes on every run would make every PR
+# touch binary files.
+#
+# NOT covered here, on purpose: `ds4-rs-ascend`'s serve demo needs Ascend
+# hardware and memory the hosted runners do not have. That recording has to be
+# made on a 910 box; `record` records only the tools that run on a CPU.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "rust/**"
+      - "scripts/**"
+      - ".github/workflows/demo-recordings.yml"
+
+jobs:
+  docs-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Documentation must match the code
+        run: python3 scripts/check_doc_consistency.py
+
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install asciinema
+        run: pip install asciinema
+      - name: Build the four utilities
+        run: cargo build --release --manifest-path rust/Cargo.toml
+      - name: Record each CPU-runnable demo
+        run: |
+          set -euo pipefail
+          mkdir -p recordings
+          export PATH="$PWD/rust/target/release:$PATH"
+          for tool in rspto ptoas-rs pto-to-ascendc tile-search; do
+            if "$tool" demo >/dev/null 2>&1 || true; then :; fi
+            asciinema rec --overwrite \
+              --command "$tool demo" "recordings/$tool.cast" || true
+          done
+          ls -la recordings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-casts
+          path: recordings/*.cast
+          if-no-files-found: warn

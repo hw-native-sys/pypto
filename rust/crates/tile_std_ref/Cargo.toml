@@ -1,0 +1,29 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "tile_std_ref"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "A std CPU reference for the tile API, so a lifted kernel can run under Miri"
+
+# `rust-version` is NOT inherited from the workspace, and the gap is the point.
+#
+# The workspace floor is 1.98, which is where the tools sit. This crate has to
+# be buildable by the PINNED NIGHTLY as well -- `nightly-2025-08-04`, which
+# reports as rustc 1.91.0-nightly, i.e. OLDER than the workspace floor. That is
+# the only toolchain Miri is installed on here, and Miri is the whole reason
+# this crate exists. Inheriting 1.98 makes `cargo miri` refuse before it
+# compiles a line: "rustc 1.91.0-nightly is not supported by the following
+# package: tile_std_ref@0.1.0 requires rustc 1.98".
+#
+# Nothing here needs anything recent: const generics on a struct (1.51) and
+# `Vec`. 1.70 is a floor with room, not a measurement.
+rust-version = "1.70"

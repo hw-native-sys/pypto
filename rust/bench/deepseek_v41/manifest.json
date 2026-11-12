@@ -1,0 +1,448 @@
+{
+  "corpus": "deepseek_v41",
+  "what": "Operator-level kernels at DeepSeek V4.1 Flash's real shapes. Unlike the playground corpus these are not teaching sizes, and they stress the part's bounds hard enough that most of them are refused as written -- which is the useful part.",
+  "shapes": {
+    "source": "The deepseek41 GGUF's own configuration. Every value below is read from it rather than chosen; a shape set with no cited source does not belong in this bench (see bench/shapes/registry.json).",
+    "D": 5120,
+    "MOE_INTER": 2304,
+    "N_EXP": 384,
+    "TOPK": 6,
+    "HEAD_DIM": 512,
+    "ROPE": 64,
+    "VOCAB": 129280,
+    "T": 8,
+    "EROWS": 1,
+    "EPS": 1e-20,
+    "Q_LORA": 1280,
+    "ATTN_S": 8,
+    "ATTN_S_source": "8 positions: the engine's own `ds4_attn_sink_batched` block size (bench/engine/tile/attn_sink_1head_1blk.tile), and the extent the sink reference is parameterised at. The sink is a virtual position -- attn_dispatch.rs:1428-1490."
+  },
+  "representations": {
+    "tile": "tile-dialect MLIR, generated from the shape table above.",
+    "pto": "PTO assembly from the in-tree rspto. Reproducible; a test asserts it byte for byte.",
+    "ascendc": "AscendC C++ from the in-tree pto-to-ascendc, for --soc 910b. Covers strictly LESS than the PTO column here, which is a measured fact about the two emitters rather than a gap in the corpus.",
+    "tile-rs": "Lifted from the PTO by ptoas-rs. Sparsest column: the lift models fewer ops than either emitter. COMPILED, and checked both ways -- every file builds against the kernel-side DSL, and the lift is checked to still accept the .pto each one came from, so a file cannot outlive the generator that produced it.",
+    "searched": "For a kernel the PTO emitter refuses, the tiling tile-search chose instead. Present only where a search succeeded."
+  },
+  "a_refusal_is_a_result": "Six distinct bounds are hit across this corpus -- a row-major tile bound, the unified-buffer budget, a blocked-matmul N multiple, an operand-load form, an mxfp4 pair-count multiple, and a fractal stride. Each is recorded per representation, because the two emitters check different things and disagree about several of these kernels. Of the kernels the PTO emitter refuses, tile-search finds an accepted tiling for most; the ones it cannot are the ones whose bound is not a tile extent at all, and that distinction is the single most useful thing this corpus says.",
+  "totals": {
+    "kernels": 17,
+    "tile": 17,
+    "pto": 15,
+    "ascendc": 17,
+    "tile_rs": 17,
+    "pto_refused": 4,
+    "rescued_by_search": 5,
+    "search_found_nothing": 2,
+    "ascendc_refused": 7,
+    "tile_rs_refused": 11,
+    "reshaped": 1,
+    "device_verified": 10,
+    "device_verified_what_it_counts": "COUNTS rows in THIS corpus carrying a device_check with no outstanding attribution caveat, of any date. It is NOT the migration campaign's device-verified count, and as of 2026-11-08 the two differ by exactly 13 across the four corpora -- 46 rows here against 33 banked -- with every one of the 13 accounted for: 10 are in the `engine` corpus, which is outside the campaign's K=72 scope (deepseek_v41, glm_5_3, kimi_k3) and so is never banked by it; the other 3 are kimi_k3's SiTU gate/up rows, which reproduce their recorded max_rel 4.892e-06 exactly and are held back only because that figure meets the 1e-5 this row declares and not the 1e-6 the campaign's tolerance table assigns to f32_elementwise. See each of those rows' device_check_tolerance_conflict_2026_11_08. A row here claims `this kernel was observed correct on device`; a campaign `verified` record additionally claims `these exact bytes were, at the campaign's own tolerance`. The 2026-11-08 sweep is what made the second claim checkable: 13 artefacts across the tree did not derive from their own .tile, and until model_corpora_ascendc_matches_its_emitter.rs landed, only bench/playground16 was gated."
+  },
+  "kernels": {
+    "argmax_v41_8x129280": {
+      "tile": "tile/argmax_v41_8x129280.tile",
+      "pto": "pto/argmax_v41_8x129280.pto",
+      "pto_refused": "mlir_to_pto has no arm for `__tile_argmax_rows_i32`; the AscendC per-row arm carries this kernel. Its .pto is NOT claimed.",
+      "ascendc": "ascendc/argmax_v41_8x129280.cpp",
+      "tile-rs": null,
+      "tile_rs_refused": "no PTO to lift",
+      "searched": {
+        "tile": "searched/argmax_v41_8x129280.tile",
+        "chose": "%cl = 1280",
+        "accepted_candidates": 4,
+        "sha256_16": "22c05a48ced373e9",
+        "oracle": "pto",
+        "oracle_note": "WHICH ORACLE DECIDED THIS, recorded because its absence has already caused a wrong claim. tile-search takes --oracle pto (the default) or ascendc, and they disagree hard: for this corpus's five searched rows the PTO oracle accepts 4 to 7 candidates while the AscendC oracle accepts ZERO for argmax_v41_8x129280 and quant_i8_v41_8x5120, whose refusals are a missing arm and a many-row scan that no choice of extent reaches. On 2026-11-08 a session measured those two under the AscendC oracle, read the 0 against a recorded 4 and 5, and wrote down that both entries were stale. One was; the other reproduces exactly. A row that does not name its oracle cannot be re-measured, only re-guessed.",
+        "candidates_total": 8,
+        "candidates_total_note": "ACCEPTED OF HOW MANY, because `accepted_candidates: 5` alone is not a number anyone can check. argmax_v41_8x131072_pad is 5 of ELEVEN while the other four are out of eight, so the bare 5 read as the same result and is not.",
+        "remeasured": "2026-11-09",
+        "ascendc_oracle_accepts": 0,
+        "reproduced_2026_11_09": "Re-measured under the PTO oracle: 4 of 8 accepted, chose %cl = 1280 -- the recorded values exactly. Recorded because the sibling rows were NOT all stable and a blanket claim about them was made and is now corrected."
+      },
+      "ascendc_sha256_16": "8e63399c153f5a18",
+      "device_check": "PASS 2026-11-10 on 910B2 (910b 101.245.76.149, opencompass-01): rows=8 cols=129280 all eight indices exact against ORACLE 58, first=43093 last=51752, first_bad=-1. Ties resolve to the FIRST index. The plane is streamed per row, so the 8 x 129280 f32 load (4.1 MB) never has to fit UB; indices are written as i32, not 8x8 f32.",
+      "tile_rs": "tile-rs/argmax_v41_8x129280.rs",
+      "tile_rs_sha256_16": "6acb02a8f0bc3add",
+      "pto_sha256_16": "8f6e00f5b197ebdb"
+    },
+    "argmax_v41_8x131072_pad": {
+      "tile": "tile/argmax_v41_8x131072_pad.tile",
+      "pto": null,
+      "pto_refused": "mlir_to_pto has no arm for `__tile_argmax_rows_i32`; the AscendC per-row arm carries this kernel. Its .pto is NOT claimed.",
+      "ascendc": "ascendc/argmax_v41_8x131072_pad.cpp",
+      "tile-rs": null,
+      "tile_rs_refused": "no PTO to lift",
+      "searched": {
+        "tile": "searched/argmax_v41_8x131072_pad.tile",
+        "chose": "%cl = 2048",
+        "accepted_candidates": 5,
+        "sha256_16": "c3ee708030b67e17",
+        "oracle": "pto",
+        "oracle_note": "WHICH ORACLE DECIDED THIS, recorded because its absence has already caused a wrong claim. tile-search takes --oracle pto (the default) or ascendc, and they disagree hard: for this corpus's five searched rows the PTO oracle accepts 4 to 7 candidates while the AscendC oracle accepts ZERO for argmax_v41_8x129280 and quant_i8_v41_8x5120, whose refusals are a missing arm and a many-row scan that no choice of extent reaches. On 2026-11-08 a session measured those two under the AscendC oracle, read the 0 against a recorded 4 and 5, and wrote down that both entries were stale. One was; the other reproduces exactly. A row that does not name its oracle cannot be re-measured, only re-guessed.",
+        "candidates_total": 11,
+        "candidates_total_note": "ACCEPTED OF HOW MANY, because `accepted_candidates: 5` alone is not a number anyone can check. argmax_v41_8x131072_pad is 5 of ELEVEN while the other four are out of eight, so the bare 5 read as the same result and is not.",
+        "remeasured": "2026-11-09",
+        "ascendc_oracle_accepts": 0,
+        "reproduced_2026_11_09": "Re-measured under the PTO oracle: 5 of 11 accepted, chose %cl = 2048 -- the recorded values exactly. Recorded because the sibling rows were NOT all stable and a blanket claim about them was made and is now corrected."
+      },
+      "ascendc_sha256_16": "f5b7d9f040baabc0",
+      "device_check": "PASS 2026-11-10 on 910B2 (910b 101.245.76.149, opencompass-01): rows=8 cols=131072 all eight indices exact against ORACLE 58, first=43690 last=52349, first_bad=-1. Ties resolve to the FIRST index. The plane is streamed per row, so the 8 x 131072 f32 load (4.1 MB) never has to fit UB; indices are written as i32, not 8x8 f32.",
+      "tile_rs": "tile-rs/argmax_v41_8x131072_pad.rs",
+      "tile_rs_sha256_16": "812056bf820ef1dd"
+    },
+    "gemm_f16_lmhead_v41_16x5120x12928": {
+      "tile": "tile/gemm_f16_lmhead_v41_16x5120x12928.tile",
+      "pto": "pto/gemm_f16_lmhead_v41_16x5120x12928.pto",
+      "pto_sha256_16": "5ccb43413d8ec97c",
+      "ascendc": "ascendc/gemm_f16_lmhead_v41_16x5120x12928.cpp",
+      "ascendc_sha256_16": "7e0364b6fb6f12a8",
+      "ascendc_refusal_retired_2026_11_09_blocked_cube": "UB overflow in kernel 'bm_gemm_f16_16_5120_12928': buffer 0 needs 81920 elements (163840 bytes) but only 94208 bytes available per buffer (188416 UB / 2 slots). Reduce the number of buffers or the element count. This body accumulates across the width -- a reduction, a matmul or a matvec -- so the chunked path is NOT the repair: a chunk boundary would change the answer. It needs a blocked arm that carries the accumulation, which mlir_to_cpp does not have for this operation. mlir_to_pto does, and emits `pto.tmatmul.acc` under an scf.for nest.",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/gemm_f16_lmhead_v41_16x5120x12928.pto: `bm_gemm_f16_16_5120_12928_aic` and `bm_gemm_f16_16_5120_12928_aiv` are the cube and vector halves of ONE kernel, linked by a          cross-core FIFO",
+      "ascendc_refusal_reinstated_2026_11_08": "REINSTATED 2026-11-08 (iteration 34), and the 2026-11-08 retraction above was WRONG. The retracted text named 'buffer 0 needs 81920 elements (163840 bytes)'. Those are exactly the numbers the artefact still had: pipe.InitBuffer(tbuf0, 51712) against a DataCopy(buf0, gm0Tensor, 16*5120) of 163840 bytes. The refusal was correct and the emitter had merely stopped DETECTING it. ROOT CAUSE, one token: mlir_to_cpp stands its chunker down for a body that accumulates across the width, via a case-sensitive substring search over the emitted text for [\"ReduceMax\", \"ReduceSum\", \"tile_matmul\", \"argmax\", \"tile_matvec\"] -- and the matmul arm writes the marker TILE_DEGENERATE_MATMUL, so `tile_matmul` matched NOTHING. Measured: 0 of the corpus's artefacts contain the string `tile_matmul`, while 5 contain TILE_DEGENERATE_MATMUL. With the chunker wrongly engaged, the body chunked its flat element count (66191360 as 2560 x 25856) while the matmul arm kept indexing the unchunked extents, and the capacity check passed because it sized the CHUNK (3 x 51712 = 155136 < 194560). The device verdict was 507035 at aclrtSynchronizeStream. The needle now matches what the arm emits, the body is offered to the capacity check unchunked, and that check refuses it with its own computed bound -- the message in ascendc_refused below, taken from the tool.",
+      "ascendc_refusal_retracted_2026_11_08_WRONG": "This row recorded ascendc_refused = \"UB overflow in kernel 'bm_gemm_f16_16_5120_12928': buffer 0 needs 81920 elements (163840 bytes) but only 62784 bytes available per buffer (188416 UB / 3 slots)....\" and the emitter ACCEPTS this kernel: `pto-to-ascendc <its .tile>` exits 0 and writes the artefact now recorded above. The refusal claim was stale -- a UB bound that the buffer reuse and chunked-emission work stopped hitting -- and nothing re-ran it, because the only AscendC byte-identity gate pointed at bench/playground16. A stale REFUSAL is the same defect class as a stale artefact in the opposite direction: it understates the emitter and makes the corpus's refusal spread wrong.",
+      "device_attempt_2026_11_08": "FAIL aclrtSynchronizeStream(stream) -> 507035, 14s, run 2026-11-08 against device bytes hash-gated to cff9f65919537744 (= the repo's). CHUNK-BLIND MATMUL. The `// chunked:` window makes __n = 25856 elements resident; the TILE_DEGENERATE_MATMUL arm indexes the UNCHUNKED logical extents __mm_m=16, __mm_k=5120, __mm_n=12928. Out of bounds by its own constants: pipe.InitBuffer(tbuf0, 51712) against a DataCopy(buf0, gm0Tensor, 16*5120) of 163840 bytes, and buf1.GetValue(__p*12928+__j) reaching element 66191359 of a 25856-element buffer. The UB capacity gate passes because it is computed from the CHUNK WIDTH (3 x 51712 = 155136 < 194560 UB_ADDRESSABLE_TOP), so nothing refused it. AND THIS CORRECTS THE ROW ABOVE: the refusal iteration 30 retracted as stale said \"buffer 0 needs 81920 elements (163840 bytes) but only 62784 bytes available per buffer\" -- the SAME 81920 elements and the SAME 163840 bytes measured here. That refusal was CORRECT. What changed was not the kernel but the gate: chunked emission made the capacity check read a chunk width instead of the arm's own indexing, so the emitter stopped DETECTING the overflow rather than stopping committing it, and `pto-to-ascendc` exiting 0 was read as evidence the bound was gone. Degenerate is not the defect -- three other corpus artefacts carry TILE_DEGENERATE_MATMUL with no chunking and engine/attn_sink_engine_64heads is banked and passing. The composition is.",
+      "tile_rs": "tile-rs/gemm_f16_lmhead_v41_16x5120x12928.rs",
+      "tile_rs_sha256_16": "805f5842ef3959eb"
+    },
+    "gemm_f16_lmhead_v41_16x5120x16160": {
+      "tile": "tile/gemm_f16_lmhead_v41_16x5120x16160.tile",
+      "pto": "pto/gemm_f16_lmhead_v41_16x5120x16160.pto",
+      "ascendc": "ascendc/gemm_f16_lmhead_v41_16x5120x16160.cpp",
+      "ascendc_sha256_16": "af1fa862edb14d16",
+      "ascendc_refusal_retired_2026_11_09_blocked_cube": "UB overflow in kernel 'bm_gemm_f16_16_5120_16160': buffer 0 needs 81920 elements (163840 bytes) but only 94208 bytes available per buffer (188416 UB / 2 slots). Reduce the number of buffers or the element count. This body accumulates across the width -- a reduction, a matmul or a matvec -- so the chunked path is NOT the repair: a chunk boundary would change the answer. It needs a blocked arm that carries the accumulation, which mlir_to_cpp does not have for this operation. mlir_to_pto does, and emits `pto.tmatmul.acc` under an scf.for nest.",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/gemm_f16_lmhead_v41_16x5120x16160.pto: `bm_gemm_f16_16_5120_16160_aic` and `bm_gemm_f16_16_5120_16160_aiv` are the cube and vector halves of ONE kernel, linked by a          cross-core FIFO, and the tile API has no form for that: `tile_std` contains no          occurrence of `c2v`, `aic` or `aiv`, so this is not a missing wrapper over an          existing intrinsic. The accumulator tile also changes dtype in flight -- pushed          i32, popped f16 -- by the `acc_push_epilogue` attribute on the pipe rather than          by any op a lift could emit. And the geometry is an emit-time environment knob          (`TILERS_GMM_BLOCKS`, `TILERS_GMM_NB`) that above 1 adds a cross-block reduction          and fixes the blockDim the kernel must be launched at, so the lifted source would          not determine the artifact. Modelling the unmodelled ops would not change any of          the three",
+      "searched": null,
+      "search_found_nothing": "every candidate tiling was refused too. The bound is not a tile extent: see pto_refused above, which names a structural constraint (an N multiple, or an operand-load form) that a tiling search cannot move.",
+      "ascendc_refusal_reinstated_2026_11_08": "REINSTATED 2026-11-08 (iteration 34), and the 2026-11-08 retraction above was WRONG. The retracted text named 'buffer 0 needs 81920 elements (163840 bytes)'. Those are exactly the numbers the artefact still had: pipe.InitBuffer(tbuf0, 51712) against a DataCopy(buf0, gm0Tensor, 16*5120) of 163840 bytes. The refusal was correct and the emitter had merely stopped DETECTING it. ROOT CAUSE, one token: mlir_to_cpp stands its chunker down for a body that accumulates across the width, via a case-sensitive substring search over the emitted text for [\"ReduceMax\", \"ReduceSum\", \"tile_matmul\", \"argmax\", \"tile_matvec\"] -- and the matmul arm writes the marker TILE_DEGENERATE_MATMUL, so `tile_matmul` matched NOTHING. Measured: 0 of the corpus's artefacts contain the string `tile_matmul`, while 5 contain TILE_DEGENERATE_MATMUL. With the chunker wrongly engaged, the body chunked its flat element count (66191360 as 2560 x 25856) while the matmul arm kept indexing the unchunked extents, and the capacity check passed because it sized the CHUNK (3 x 51712 = 155136 < 194560). The device verdict was 507035 at aclrtSynchronizeStream. The needle now matches what the arm emits, the body is offered to the capacity check unchunked, and that check refuses it with its own computed bound -- the message in ascendc_refused below, taken from the tool.",
+      "ascendc_refusal_retracted_2026_11_08_WRONG": "This row recorded ascendc_refused = \"UB overflow in kernel 'bm_gemm_f16_16_5120_16160': buffer 0 needs 81920 elements (163840 bytes) but only 62784 bytes available per buffer (188416 UB / 3 slots)....\" and the emitter ACCEPTS this kernel: `pto-to-ascendc <its .tile>` exits 0 and writes the artefact now recorded above. The refusal claim was stale -- a UB bound that the buffer reuse and chunked-emission work stopped hitting -- and nothing re-ran it, because the only AscendC byte-identity gate pointed at bench/playground16. A stale REFUSAL is the same defect class as a stale artefact in the opposite direction: it understates the emitter and makes the corpus's refusal spread wrong.",
+      "device_attempt_2026_11_08": "NOT RUN; the same artefact shape at a wider n, and the arithmetic is identical to gemm_f16_lmhead_v41_16x5120x12928's -- see that row's device_attempt_2026_11_08, which measured 507035 at aclrtSynchronizeStream. Here __mm_n=16160, so buf1.GetValue(__p*16160+__j) reaches element 82739199 of a 25856-element buffer. Note also that this row has pto: null with a pto_refused, yet carries an AscendC artefact -- the columns disagree about whether this kernel lowers at all, which is a separate question from the one above and is NOT resolved here.",
+      "pto_sha256_16": "08b0533e8306dc41",
+      "pto_refused_retracted_2026_11_09": "WAS: blocked matmul: N=16160 must be a multiple of Nb=64 -- true of Nb=64 and NOT a property of the shape. 16160 = 32 x 505, so Nb=32 divides N, is a legal multiple of the 16 cube fractal (cube_n_size=16, Ascend910B2.ini), and only shrinks the L0B footprint: 256 x 32 x 2 B = 16 KB against l0_b_size=65536. pick_nb_for_dtype now halves to find a divisor, as pick_kb already did. ptoas 0.68 --pto-arch=a2 accepts the result at rc=0 (252 lines). i8 is deliberately NOT adapted: PTO_MM_NB_I8=256 is a correctness constraint, since ptoas picks the L0A Left tile's BLayout from the Right width and a narrower i8 Nb silently yields ColMajor.",
+      "tile_rs_refused_repointed_2026_11_09": "WAS: no PTO to lift -- a DERIVED refusal whose cause is retracted: there is a PTO to lift now. The lift's own words replace it, which classify as CHECKED_LIFT.",
+      "tile_rs": "tile-rs/gemm_f16_lmhead_v41_16x5120x16160.rs",
+      "tile_rs_sha256_16": "77cc8656e42ac716"
+    },
+    "gemm_i8_v41_16x5120x2304": {
+      "tile": "tile/gemm_i8_v41_16x5120x2304.tile",
+      "pto": "pto/gemm_i8_v41_16x5120x2304.pto",
+      "pto_sha256_16": "498bce476eac6241",
+      "ascendc": "ascendc/gemm_i8_v41_16x5120x2304.cpp",
+      "ascendc_refused": "mlir_to_cpp has no arm for `__tile_matmul_i8_acc_i32_dequant_f16`; implemented: __tile_matmul_f32, __tile_matmul_transposed_f32, __tile_matmul_cube, __tile_matmul_f16, __tile_matmul_transposed_f16. Emitting it would sile",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/gemm_i8_v41_16x5120x2304.pto: `bm_gemm_i8_16_5120_2304_aic` and `bm_gemm_i8_16_5120_2304_aiv` are the cube and vector halves of ONE kernel, linked by a          cross-core FIFO, and the til",
+      "tile_rs": "tile-rs/gemm_i8_v41_16x5120x2304.rs",
+      "tile_rs_sha256_16": "ec542aeb404d5d09"
+    },
+    "gemm_i8_v41_1x5120x2304": {
+      "tile": "tile/gemm_i8_v41_1x5120x2304.tile",
+      "pto": null,
+      "pto_refused": "matmul_i8: call has 6 argument(s); `matmul_i8` takes 7 -- (dst, a, b, scale, m, k, n). A short call is NOT read as a shorter form here: the shape operands are positional, so the missing one would silently become 0 and the failure would surface later under a different name. Fix the call in the .tile source.",
+      "ascendc": "ascendc/gemm_i8_v41_1x5120x2304.cpp",
+      "ascendc_refused": "mlir_to_cpp has no arm for `__tile_matmul_i8_acc_i32_dequant_f16`; implemented: __tile_matmul_f32, __tile_matmul_transposed_f32, __tile_matmul_cube, __tile_matmul_f16, __tile_matmul_transposed_f16. Emitting it would sile",
+      "tile-rs": null,
+      "tile_rs_refused": "no PTO to lift",
+      "searched": null,
+      "search_found_nothing": "every candidate tiling was refused too. The bound is not a tile extent: see pto_refused above, which names a structural constraint (an N multiple, or an operand-load form) that a tiling search cannot move.",
+      "reshaped": {
+        "tile": "tile/fixed/gemm_i8_v41_1x5120x2304.tile",
+        "pto": null,
+        "pto_refused": "blocked matmul: M=1 must be a multiple of 16 (910B2 cube fixedRowSize). Pad the M dim.",
+        "why": "the capture passes 6 operands where the i8 dequant matmul declares 7, dropping `scale: *const f32`. At 6 the blocked-matmul pre-pass cannot read the shape, so the emitter blamed one of our own passes (`detect_blocked_matmul_loads must mark i8 matmul inputs`). With the call corrected the true constraint appears and it is the part's: on the 910B2 cube M must be a multiple of 16, so this decode shape needs the padded M=16 form the corpus already carries."
+      },
+      "pto_refused_rediagnosed_2026_11_09": "WAS: matmul_i8: both operand loads must be deferred for blocked emit (a.deferred=false, b.deferred=false); detect_blocked_matmul_loads must mark i8 matmul inputs -- a MISDIAGNOSIS. The .tile call carries six args to the seven-arg dequant form, so `%m` was read as the scale pointer, `%k` as M, `%n` as K and N became 0; detect_blocked_matmul_loads requires seven args too and had correctly skipped the line. The emitter now checks arity before any positional read, and the refusal names the call.",
+      "tile_rs": "tile-rs/gemm_i8_v41_1x5120x2304.rs",
+      "tile_rs_sha256_16": "06163228c3efaa34"
+    },
+    "mx4pk_v41_5120x2304": {
+      "tile": "tile/mx4pk_v41_5120x2304.tile",
+      "pto": "pto/mx4pk_v41_5120x2304.pto",
+      "pto_sha256_16": "bb83d0c832e50558",
+      "pto_refused_retracted_2026_11_09": "RETRACTED 2026-11-09: the bound was a KNOB DEFAULT read as a divisor, not a capability. TILE_MXFP4_PAIRS_PER_CHUNK caps the chunk at 64 and the code took min(np_total, cap) and then refused when that did not divide the pair count. 80 pairs is not a multiple of 64 and never will be. mlir_to_pto now takes the largest chunk at or below the cap that divides the pair count and is a multiple of 8 (npc * 4 must be a multiple of 32 for the row_major none_box partials tile), which is 40 here: two chunks of 40 pairs, and ptoas 0.68 accepts it at rc=0. Kept rather than deleted so the refusal that licensed `pto: null` records its retirement. Was: mul_mv_id_mxfp4_pk: pair count (80) must be a multiple of the 64 chunk",
+      "ascendc": "ascendc/mx4pk_v41_5120x2304.cpp",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/mx4pk_v41_5120x2304.pto: `pto.get_block_idx` for `%pto24` is not lifted. `tile_std::get_block_idx` does exist, at the `tile_std` crate root -- but importing it would not help: `mlir_to_pto` deletes any line containing `get_block_idx`, and the grid-stride `scf.for` around this op is synthesised by that emitter from the kernel's shape rather than read from its input. This file is the expansion of one whole-kernel `__tile_*` call, and that call does not determine it: the tiling comes from an emit-time environment knob, so several corpus artifacts are the SAME call at different geometries and would all lift to the same Rust",
+      "tile_rs_refused_repointed_2026_11_09": "Was \"no PTO to lift\", which was DERIVED from this kernel's PTO refusal -- retracted the same day when the chunk cap was fixed. A derived refusal outliving its cause points at nothing. The real blocker is structural and documented at length in ptoas_rs: mlir_to_pto deletes any line containing get_block_idx, the grid-stride scf.for around it is synthesised by that emitter from the kernel's shape rather than read from its input, and this artefact is the knob-driven expansion of one whole-kernel call -- so lifting it to that call would emit identical Rust for files that differ. Kept out of the refusal text itself because every refusal is classified into exactly one kind and a quotation of the old one made this match two.",
+      "searched": {
+        "tile": "searched/mx4pk_v41_5120x2304.tile",
+        "chose": "%ne00 = 2560",
+        "accepted_candidates": 5,
+        "sha256_16": "744e37ed287f2b38",
+        "oracle": "pto",
+        "oracle_note": "WHICH ORACLE DECIDED THIS, recorded because its absence has already caused a wrong claim. tile-search takes --oracle pto (the default) or ascendc, and they disagree hard: for this corpus's five searched rows the PTO oracle accepts 4 to 7 candidates while the AscendC oracle accepts ZERO for argmax_v41_8x129280 and quant_i8_v41_8x5120, whose refusals are a missing arm and a many-row scan that no choice of extent reaches. On 2026-11-08 a session measured those two under the AscendC oracle, read the 0 against a recorded 4 and 5, and wrote down that both entries were stale. One was; the other reproduces exactly. A row that does not name its oracle cannot be re-measured, only re-guessed.",
+        "candidates_total": 8,
+        "candidates_total_note": "ACCEPTED OF HOW MANY, because `accepted_candidates: 5` alone is not a number anyone can check. argmax_v41_8x131072_pad is 5 of ELEVEN while the other four are out of eight, so the bare 5 read as the same result and is not.",
+        "remeasured": "2026-11-09",
+        "ascendc_oracle_accepts": 0,
+        "reproduced_2026_11_09": "Re-measured under the PTO oracle: 5 of 8 accepted, chose %ne00 = 2560 -- the recorded values exactly. Recorded because the sibling rows were NOT all stable and a blanket claim about them was made and is now corrected."
+      },
+      "ascendc_sha256_16": "26a0dc7789cb2240",
+      "device_check": "PASS 2026-11-10 on 910B2 (910b 101.245.76.149, opencompass-01): elements=2304 wrong=0 max_abs=3.057e-05 backward_rel=1.455e-07 against ORACLE 59. The oracle is the C++ port of engine_ascend::mxfp4_repack::matvec_ref -- the engine's own executable contract, not a second copy of the arm: 32-byte packed block pairs, low nibble plane = block 2g, high = 2g+1, HALVED scales, concatenated x planes.",
+      "tile_rs": "tile-rs/mx4pk_v41_5120x2304.rs",
+      "tile_rs_sha256_16": "4ccbd3f297b575e5"
+    },
+    "quant_i8_v41_8x5120": {
+      "tile": "tile/quant_i8_v41_8x5120.tile",
+      "pto": "pto/quant_i8_v41_8x5120.pto",
+      "ascendc": "ascendc/quant_i8_v41_8x5120.cpp",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/quant_i8_v41_8x5120.pto: partition view `%pto1_u0` is a 8x1280 window of a 8x5120 parent; its rows are 5120 elements apart in memory while the tile call reads 10240 contiguous ones, so the lift would read past each row",
+      "searched": {
+        "tile": "searched/quant_i8_v41_8x5120.tile",
+        "chose": "%cl = 5120 (the captured value: nothing to change)",
+        "accepted_candidates": 7,
+        "sha256_16": "4c3d2dbf7b1698aa",
+        "oracle": "pto",
+        "oracle_note": "WHICH ORACLE DECIDED THIS, recorded because its absence has already caused a wrong claim. tile-search takes --oracle pto (the default) or ascendc, and they disagree hard: for this corpus's five searched rows the PTO oracle accepts 4 to 7 candidates while the AscendC oracle accepts ZERO for argmax_v41_8x129280 and quant_i8_v41_8x5120, whose refusals are a missing arm and a many-row scan that no choice of extent reaches. On 2026-11-08 a session measured those two under the AscendC oracle, read the 0 against a recorded 4 and 5, and wrote down that both entries were stale. One was; the other reproduces exactly. A row that does not name its oracle cannot be re-measured, only re-guessed.",
+        "candidates_total": 8,
+        "candidates_total_note": "ACCEPTED OF HOW MANY, because `accepted_candidates: 5` alone is not a number anyone can check. argmax_v41_8x131072_pad is 5 of ELEVEN while the other four are out of eight, so the bare 5 read as the same result and is not.",
+        "remeasured": "2026-11-09",
+        "ascendc_oracle_accepts": 0,
+        "superseded_2026_11_09": "THIS ROW WAS STALE and is corrected, not deleted. It read {'chose': '%cl = 1280', 'accepted_candidates': 5} and re-measuring under the same (PTO) oracle gives 7 of 8 accepted with the CAPTURED extent chosen -- so there is nothing left to rescue and the recorded smaller extent is no longer the search's answer. The cause is that the emitters got stronger underneath a stored number: for rmsnorm_v41_8x5120 it was this project's own row-blocked arm, landed 2026-11-08, which made the captured 8x5120 emit. A search result is a measurement with a date, and nothing re-ran it until now."
+      },
+      "pto_sha256_16": "0832d45f59048c11",
+      "tile_rs": "tile-rs/quant_i8_v41_8x5120.rs",
+      "ascendc_sha256_16": "a9fdaa6e7da2b8f1",
+      "ascendc_refusal_retired_2026_11_09_quantize_arm": "mlir_to_cpp has no arm for `__tile_quantize_f32_i8`. Emitting it would drop the operation silently: the dispatch skips calls it does not match, so the kernel would compile, run, and quietly omit this step.",
+      "tile_rs_sha256_16": "ce9cfd2467fc4292"
+    },
+    "rmsnorm_v41_1x5120_decode": {
+      "tile": "tile/rmsnorm_v41_1x5120_decode.tile",
+      "pto": "pto/rmsnorm_v41_1x5120_decode.pto",
+      "pto_sha256_16": "1c19b0e64396f67a",
+      "ascendc": "ascendc/rmsnorm_v41_1x5120_decode.cpp",
+      "ascendc_sha256_16": "3a28aa37adad01cc",
+      "tile_rs_sha256_16": "602d65142dedec6a",
+      "tile_rs": "tile-rs/rmsnorm_v41_1x5120_decode.rs",
+      "device_check": "PASS 2026-11-07 on 910B2 (CANN 8.5.2 aarch64, dav-2201): elements=5120 wrong=0 max_abs=2.809e-07 max_rel=1.870e-07 against an f64 oracle. ORACLE 1, x/rms(x). The decode-step RMS norm at full width. eps is 1e-20 so the oracle and the kernel agree on the denominator rather than on an epsilon.",
+      "device_metrics": {
+        "elements": 5120,
+        "wrong": 0,
+        "max_abs": 2.809e-07,
+        "max_rel": 1.87e-07,
+        "tolerance": 1e-06
+      },
+      "verify_args": "dav-2201 bm_rmsnorm_1_5120_do 5120 2 1 1e-20f 1e-6"
+    },
+    "rmsnorm_v41_8x1280_quarter": {
+      "tile": "tile/rmsnorm_v41_8x1280_quarter.tile",
+      "pto": "pto/rmsnorm_v41_8x1280_quarter.pto",
+      "pto_sha256_16": "1644137e92d2a242",
+      "ascendc": "ascendc/rmsnorm_v41_8x1280_quarter.cpp",
+      "ascendc_sha256_16": "db952a4a3dbb0e34",
+      "tile_rs_sha256_16": "902d6ed913b1f04c",
+      "tile_rs": "tile-rs/rmsnorm_v41_8x1280_quarter.rs",
+      "device_check": "PASS 2026-11-08 on 910B2 (CANN 8.5.2 aarch64, dav-2201), ORACLE 40 (per-row rms, 8 rows of 1280), n=10240, DEFAULT input, two identical runs: elements=10240 wrong=0 max_abs=1.077e-06 max_rel=7.113e-07, row denominators spanning 3.665e+02 .. 4.800e+03 (ratio 13.098).",
+      "device_metrics": {
+        "elements": 10240,
+        "wrong": 0,
+        "max_abs": 3.312e-08,
+        "max_rel": 2.933e-08,
+        "tolerance": 1e-06
+      },
+      "verify_args": "dav-2201 bm_rmsnorm_8_1280_do 10240 2 40 1e-20f 1e-6 1 8 1280",
+      "verify_input": "none -- the default ramp. ORACLE 40 holds each row to ITS OWN denominator, so the row-periodic input this row needed on 2026-11-08 is no longer required and the stop-gap that generated it has been removed from verify_all.sh.",
+      "device_check_resized_2026_11_08": "THE EARLIER RECORD WAS UNDER-SIZED AND IS SUPERSEDED, NOT RETRACTED. It read: PASS 2026-11-07 on 910B2 (CANN 8.5.2 aarch64, dav-2201): elements=1280 wrong=0 max_abs=1.077e-06 max_rel=6.506e-07 against an f64 oracle. ORACLE 1, x/rms(x). The same norm tiled 8 rows x 1280 -- the quarter-width blocking. -- taken at n=1280 while the kernel touches 8x1280 = 10240 floats. main.asc allocates n*sizeof(float) per pointer and the oracles compare n elements, so that run filled one row, compared one row, and let the kernel write seven more rows past a 5120-byte allocation. Three runs settle it. (1) n=1280, default input: wrong=0 max_rel=6.506e-07 -- reproduces the banked figure to the digit. (2) n=10240, default input: wrong=10240 max_rel=7.058e+00. (3) n=10240, ROW-PERIODIC input: wrong=0 max_rel=2.933e-08. Run 2 is NOT evidence the kernel is wrong -- ORACLE 1's denominator is one global rms and the kernel's is one per row, so at n=10240 on arbitrary input the oracle asks for a different function and every element must disagree, row 0 included. Run 3 removes that confound by making the two denominators equal, and the kernel passes on all 10240 elements. So the artefact was right and the EVIDENCE was the defect.",
+      "device_check_limit": "CLOSED 2026-11-08 by ORACLE 40. The limit this field recorded was that row-periodic input could not distinguish a correct per-row normalisation from one broadcasting row 0's denominator, because on that input the two agree. ORACLE 40 holds each row to its own, and on the default ramp the eight denominators span a ratio of 13.098 -- so a broadcast would have been wrong by up to 13x and the run REFUTES it rather than being consistent with it. This artefact takes the many-row SCALAR fallback, which is the path that had never been checked per row; it passes. max_rel rises 2.933e-08 -> 7.113e-07 because rows 1..7 are now actually compared."
+    },
+    "rmsnorm_v41_8x5120": {
+      "tile": "tile/rmsnorm_v41_8x5120.tile",
+      "pto": "pto/rmsnorm_v41_8x5120.pto",
+      "ascendc": "ascendc/rmsnorm_v41_8x5120.cpp",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/rmsnorm_v41_8x5120.pto: `pto.barrier` cannot be dropped in `bm_rmsnorm_8_5120`: `%pto5` is written in place (it is both an input and the output of one op), so two PTO ops share a buffer that the lifted Rust represents as two separate values. The tile API cannot express a barrier either -- `mlir_to_pto` SKIPS any `__tile_pipe_barrier` line, so a call would not survive a recompile -- which leaves refusing as the only option",
+      "searched": {
+        "tile": "searched/rmsnorm_v41_8x5120.tile",
+        "chose": "%cl = 5120 (the captured value: nothing to change)",
+        "accepted_candidates": 7,
+        "sha256_16": "3b456b0ce325e9bb",
+        "oracle": "pto",
+        "oracle_note": "WHICH ORACLE DECIDED THIS, recorded because its absence has already caused a wrong claim. tile-search takes --oracle pto (the default) or ascendc, and they disagree hard: for this corpus's five searched rows the PTO oracle accepts 4 to 7 candidates while the AscendC oracle accepts ZERO for argmax_v41_8x129280 and quant_i8_v41_8x5120, whose refusals are a missing arm and a many-row scan that no choice of extent reaches. On 2026-11-08 a session measured those two under the AscendC oracle, read the 0 against a recorded 4 and 5, and wrote down that both entries were stale. One was; the other reproduces exactly. A row that does not name its oracle cannot be re-measured, only re-guessed.",
+        "candidates_total": 8,
+        "candidates_total_note": "ACCEPTED OF HOW MANY, because `accepted_candidates: 5` alone is not a number anyone can check. argmax_v41_8x131072_pad is 5 of ELEVEN while the other four are out of eight, so the bare 5 read as the same result and is not.",
+        "remeasured": "2026-11-09",
+        "ascendc_oracle_accepts": 0,
+        "superseded_2026_11_09": "THIS ROW WAS STALE and is corrected, not deleted. It read {'chose': '%cl = 1280', 'accepted_candidates': 5} and re-measuring under the same (PTO) oracle gives 7 of 8 accepted with the CAPTURED extent chosen -- so there is nothing left to rescue and the recorded smaller extent is no longer the search's answer. The cause is that the emitters got stronger underneath a stored number: for rmsnorm_v41_8x5120 it was this project's own row-blocked arm, landed 2026-11-08, which made the captured 8x5120 emit. A search result is a measurement with a date, and nothing re-ran it until now."
+      },
+      "pto_sha256_16": "eb099dd5d6530de2",
+      "tile_rs": "tile-rs/rmsnorm_v41_8x5120.rs",
+      "ascendc_sha256_16": "8369e0b383527739",
+      "ascendc_row_blocked": "8 rows of 5120, one at a time",
+      "ascendc_refused_retracted_2026_11_08": "RETRACTED: the bound was real and the arm did not exist. mlir_to_cpp now has a ROW-BLOCKED arm -- when a many-row body does not fit as a tile but one ROW does, the kernel's own body runs once per row with every GM tensor rebased by r*cols and the row-count scalar pinned to 1. Pinning it to 1 does more than make the kernel fit: the emitted row-norm has a vector fast path for a single row and a per-row scalar GetValue/SetValue fallback otherwise (the 910B2 LocalTensor[i>0] sub-view miscompiles vector ops), so this moves the body onto the path already device-verified at exactly this width. Was: UB overflow in kernel 'bm_rmsnorm_8_5120': buffer 0 needs 40960 elements (163840 bytes) but only 37664 bytes available per buffer (188416 UB / 5 slots). Reduce the number of buffers or the element count.",
+      "device_check": "PASS 2026-11-08 on 910B2 (CANN 8.5.2 aarch64, dav-2201), ORACLE 40 (per-row rms, 8 rows of 5120), n=40960, two identical runs: elements=40960 wrong=0 max_abs=2.809e-07 max_rel=1.870e-07, row denominators spanning 1.475e+03 .. 1.921e+04 (ratio 13.024). THAT max_rel IS THE FIGURE rmsnorm_v41_1x5120_decode CARRIES TO THE DIGIT -- 1.870e-07 -- which is the corroboration that matters: the row-blocked arm runs the same single-row path per row, so reproducing the one-row kernel's error exactly is what correct looks like here.",
+      "device_metrics": {
+        "elements": 40960,
+        "wrong": 0,
+        "max_abs": 2.809e-07,
+        "max_rel": 1.87e-07,
+        "tolerance": 1e-06
+      },
+      "verify_args": "dav-2201 bm_rmsnorm_8_5120_do 40960 2 40 1e-20f 1e-6 1 8 5120",
+      "tile_rs_sha256_16": "d7ff6f893e1bfa9b"
+    },
+    "rope_v41_8x64": {
+      "tile": "tile/rope_v41_8x64.tile",
+      "pto": "pto/rope_v41_8x64.pto",
+      "pto_sha256_16": "1ecf44915f8cef78",
+      "ascendc": "ascendc/rope_v41_8x64.cpp",
+      "ascendc_sha256_16": "0dc5ef349438e788",
+      "tile_rs_sha256_16": "372fd2018eb6a72d",
+      "tile_rs": "tile-rs/rope_v41_8x64.rs",
+      "rope_pos0_is_exact_2026_11_09": "SUPERSEDES the 2026-11-08 ineligibility note below, which is kept with its date because the direction of travel is the information. The tile declares `%p = llvm.mlir.constant(0 : i32)`: rope rotates each pair by theta = pos * freq, so at pos 0 every theta is 0, cos = 1, sin = 0, and the rotation matrix is I -- for the halves convention and the interleaved one alike, since it is the ANGLE that vanishes and not the pairing. Both columns therefore compute this kernel EXACTLY: the .cpp copies every element, and the .pto multiplies by 1.0, which is exact in IEEE-754 for every finite value. The old note's own reasoning does not bite here -- a STRIDED load is what a FAITHFUL nonzero-pos rope would need, and at pos 0 no rotation is performed at all, so no stride is required. Both emitters now carry a declared-constant pos=0 guard and emit their stub or substitution wording ONLY for a nonzero or dynamic position; neither artefact carries a marker any more (0 occurrences, checked). Device-verified 2026-11-09 against ORACLE 45 (exact identity, ZERO tolerance): 5 of 5 PASS, elements=512 wrong=0 max_abs=0.000e+00, zeros_in_input=0. The claim is EXISTENTIAL -- this shape, this position -- and says nothing about rope at any other position, because at pos 0 a faithful rotation and a plain copy are bit-identical and no device run against this corpus could tell them apart. The refuting class lives in the unit tests: test_tile_rope_emitter (pos=5) and test_pto_rope (pos=42) both still demand the marker, and after this change they are the ONLY thing covering that wording, since no corpus artefact carries it.",
+      "device_ineligible_substitution_2026_11_08_superseded": "TILE_SUBSTITUTION in its own .cpp: intrinsic=__tile_rope_f32, replacement=identity-copy, reason=missing-cos-sin-operands. Ineligible above `tiled` under the campaign's eligibility gate, and NOT a tolerance or oracle question: the artefact takes TWO GM buffers while rope needs cos and sin, and engine/rope_halves_engine_1x64 -- the faithful one, banked against ORACLE 12 -- takes FOUR. So ORACLE 12 cannot be invoked against this kernel at any arity it has. Recorded 2026-11-08 because the campaign's scorer had never read the marker and both rope rows were still counting toward C_s and L. deepseek_v41's own eligibility_gate note adds the reason the generator cannot simply be fixed here: this shape needs a STRIDED load and __tile_load_f32 takes no stride, which is not true of kimi_k3/rope_k3_1x64, whose generator fix was PROVEN on device 2026-11-07 and never applied to the corpus."
+    },
+    "swiglu_v41_1x2304": {
+      "tile": "tile/swiglu_v41_1x2304.tile",
+      "tile_rs": "tile-rs/swiglu_v41_1x2304.rs",
+      "tile_rs_sha256_16": "dc4952db2dc8f240",
+      "pto": "pto/swiglu_v41_1x2304.pto",
+      "pto_sha256_16": "0c9e706764dd6187",
+      "ascendc": "ascendc/swiglu_v41_1x2304.cpp",
+      "ascendc_sha256_16": "889c18072bbd08d9",
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/swiglu_v41_1x2304.pto: `pto.tmuls` at dtype `f32` is liftable as `tile_scale_f32` but is not wired: the scalar operand's literal is not threaded into this emitter",
+      "device_check": "PASS 2026-11-08 on 910B2 (CANN 8.5.2 aarch64, dav-2201): elements=2304 wrong=0 max_abs=3.125e-02 max_rel=1.247e-07 against an f64 oracle. ORACLE 3, silu(a)*b. DeepSeek V4.1's SwiGLU activation at the dense FFN's half-width: the gate and up planes arrive already projected, so this kernel is the activation and the elementwise product, not the projections. FIRST device run for this kernel -- it had an ascendc artefact and no device_check at all, so its only evidence was static.",
+      "device_metrics": {
+        "elements": 2304,
+        "wrong": 0,
+        "max_abs": 0.03125,
+        "max_rel": 1.247e-07,
+        "tolerance": 1e-06
+      },
+      "verify_args": "dav-2201 bm_swiglu_1_2304_do 2304 3 3 1e-5f 1e-6"
+    },
+    "topk_v41_1x384_k6": {
+      "tile": "tile/topk_v41_1x384_k6.tile",
+      "pto": "pto/topk_v41_1x384_k6.pto",
+      "pto_sha256_16": "3985bad8c9ffbd43",
+      "ascendc": "ascendc/topk_v41_1x384_k6.cpp",
+      "tile-rs": null,
+      "tile_rs_refused": "refused bench/deepseek_v41/pto/topk_v41_1x384_k6.pto: tile_buf missing/unknown dtype",
+      "ascendc_sha256_16": "408a8bd3baeb4d01",
+      "ascendc_refused_retracted_2026_11_08": "RETRACTED: the arm did not exist and now does. mlir_to_cpp gains __tile_topk_f32. Top-k is k selection passes of ReduceMax plus a scalar first-hit scan, masking each taken position out of a WORKING COPY so the source survives -- it is read twice in the sigmoid variant. The k VALUES leave through the kernel's own store and the k INDICES through the GM pointer the intrinsic takes as its third operand, as int32, the same decision as the argmax index. Was: mlir_to_cpp has no arm for `__tile_topk_f32`. Emitting it would drop the operation silently: the dispatch skips calls it does not match, so the kernel would compile, run, and quietly omit this step.",
+      "device_check": "PASS 2026-11-08 on 910B2 (CANN 8.5.2 aarch64, dav-2201), ORACLE 42 (top-k: the k indices, descending by value, ties by LOWER index first), k=6 passed as MV_N, two identical runs: elements=6 wrong=0, want[0..3]=192,96,288,139 got[0..3]=192,96,288,139 EXACT, spread=264 of n=384. The SPREAD is the evidence that this is a selection and not a head extract -- the PTO column's own fallback for this intrinsic is documented as 'a head extract and not a sort', which would have reported spread=5.",
+      "device_check_not_covered": "The k VALUES through gm1. This kernel has two outputs and at KERNEL_ARGS == 3 the harness copies back gm2 alone, so the indices are compared and the value store is not. The indices identify the selection completely and the value written is the same one the index was found for, so what is unchecked is whether it reached the right slot of the other buffer. Widening the copy-back would overwrite `b`, which several existing oracles read as an INPUT, so it is not a change an added oracle may make. The oracle PRINTS this line on every run rather than leaving it to be discovered.",
+      "device_metrics": {
+        "elements": 6,
+        "wrong": 0,
+        "spread": 264,
+        "tolerance": 0
+      },
+      "verify_args": "dav-2201 bm_topk_384_6_do 384 3 42 1e-5f 1e-6 1 6 256",
+      "tile_rs": "tile-rs/topk_v41_1x384_k6.rs",
+      "tile_rs_sha256_16": "00de95dd14e720e1"
+    },
+    "residual_add_v41_1x5120": {
+      "tile": "tile/residual_add_v41_1x5120.tile",
+      "pto": "pto/residual_add_v41_1x5120.pto",
+      "pto_sha256_16": "e7431cf7b139126a",
+      "ascendc": "ascendc/residual_add_v41_1x5120.cpp",
+      "ascendc_sha256_16": "3303fe4d50635f0d",
+      "tile_rs_sha256_16": "ddab13a0840e409c",
+      "tile_rs": "tile-rs/residual_add_v41_1x5120.rs",
+      "device_check": "PASS 2026-11-07 on 910B2 (CANN 8.5.2 aarch64, dav-2201): elements=5120 wrong=0 max_abs=0.000e+00 max_rel=0.000e+00 against an f64 oracle. ORACLE 0, a+b. The residual add at DeepSeek V4.1's model width.",
+      "device_metrics": {
+        "elements": 5120,
+        "wrong": 0,
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+        "tolerance": 1e-06
+      },
+      "verify_args": "dav-2201 v41_residual_add_do 5120 3 0 1e-5f 1e-6"
+    },
+    "embedding_v41_129280x5120": {
+      "tile": "tile/embedding_v41_129280x5120.tile",
+      "pto": "pto/embedding_v41_129280x5120.pto",
+      "pto_sha256_16": "66c4cd7fa073cea0",
+      "pto_refusal_retracted_2026_11_10": "RETRACTED: the op existed and the ARM did not. The old text read -- mlir_to_pto has no arm for `__tile_get_value_f32`. The kernel is a GM row copy and the scalar read-back is the one step this emitter cannot take; the AscendC column carries it. Emitting it anyway would drop the operation silently. -- and its premise, that the scalar read-back is a step this emitter cannot take, was about the emitter and read as if it were about PTO. `ptoas` ships as a Python package, so its op registry is inspectable, and `ptoas/mlir/dialects/_pto_ops_gen.py:22306` has declared `pto.tgetval(src, offset) -> value` all along. It never appears in the corpus's .pto vocabulary because nothing had emitted it -- scraping the corpus for the dialect's ops is a narrowing query, and it returned a plausible absence. mlir_to_pto now has arms for `__tile_get_value_f32` -> `pto.tgetval` and `__tile_load_at_f32` -> a runtime-offset `partition_view`, plus `llvm.mul` on a runtime scalar -> `arith.muli`. Operand and result types were MEASURED, not inferred: of five plausible spellings exactly one assembles (offset `index`, result `f32`). The offset is converted to an integer BEFORE the multiply, so unlike the AscendC path it carries no float-exactness bound on the row width. Inertness: 75 of 75 pre-existing .pto regenerate byte-identically, 0 changed.",
+      "ascendc": "ascendc/embedding_v41_129280x5120.cpp",
+      "ascendc_sha256_16": "c64325c338aa7726",
+      "ascendc_refused_retracted_2026_11_08": "RETRACTED 2026-11-08: the bound was real and the LOWERING was wrong. `__tile_embedding_f32` declares its weight table as a tile, so no arm can satisfy it at vocabulary scale -- but the operation does not need that intrinsic. At decode shape it is one row copy from GM: read the index, multiply by the row width, `__tile_load_at_f32` at that element offset. The generator now emits that form and this emitter takes it, with the offset reaching the generated `DataCopy(buf1, gm0Tensor[__v3], ...)` so the table is never resident. Kept rather than deleted so the refusal that licensed `ascendc: null` also records its retirement. Was: UB overflow in kernel 'v41_embedding_5120': __tile_embedding_f32 gathers rows from a tile that holds 5120 element(s) while the vocabulary needs 661913600 (vocab x dim). The table cannot be resident -- it is far larger than the unified buffer -- so its rows have to be copied from global memory one at a time, and mlir_to_cpp has no GM-driven embedding path. Refusing rather than emitting a gather that reads past the tile it was given.",
+      "tile_rs": "tile-rs/embedding_v41_129280x5120.rs",
+      "tile_rs_sha256_16": "bde4ec3d05777536"
+    },
+    "attention_decode_v41_1x512": {
+      "tile": "tile/attention_decode_v41_1x512.tile",
+      "pto": "pto/attention_decode_v41_1x512.pto",
+      "pto_sha256_16": "dfb7d5de89cb7914",
+      "ascendc": "ascendc/attention_decode_v41_1x512.cpp",
+      "ascendc_sha256_16": "744ac65dca3ed9af",
+      "device_check": "PASS 2026-11-10 on 910B2 (910b 101.245.76.149, opencompass-01): elements=512 wrong=0 max_abs=3.480e-09 backward_rel=5.976e-08 against ORACLE 53, the scaled VIRTUAL-POSITION sink reference (score[p] = sum_d kv*q/sqrt(D); den = exp(sink-m) + sum_p exp(score-m); out = sum_p exp(score-m)*v/den), Q[1x512], K/V[8x512], eight DISTINCT sink lanes. This replaces the degenerate stub whose S=1 made softmax over one score a copy of V.",
+      "device_check_why_it_is_new": "The semantics is sourced, not chosen: the engine's CPU reference attn_dispatch.rs:1428-1490 pushes attn_sinks[h] as an extra score, scales QK by 1/sqrt(head_dim), and starts V accumulation at scores[1]. The old ORACLE 23 is the additive-bias stage probe and cannot score this arm.",
+      "tile_rs": "tile-rs/attention_decode_v41_1x512.rs",
+      "tile_rs_sha256_16": "1add918ccaec6ef6"
+    }
+  },
+  "estimated_decode_kernels": {
+    "count": 52,
+    "is_lower_bound": true,
+    "source": "the published kernel registry's DeepSeek V4 Flash row, read 2026-11-02: 52 distinct kernels, 13 of them traced and 39 read from sources. A floor three times over -- the view is redacted, most rows are unverified by a trace, and V4.1 is a later revision of the same architecture",
+    "what_it_is": "The number of distinct kernels one decode step of this model needs -- the denominator the representation counts are read against. Where the count is KNOWN it is used; where it is not, inventory() derives a LOWER BOUND from the model's own configuration. Not a measurement of a running engine in either case.",
+    "derivation_error": "the inventory predicted 15 for DeepSeek V4 Flash against a registry count of 52, so it under-counts by about 3.5x. Not applied as a correction: one anchor cannot calibrate a model, and a derivation multiplied by 3.5 would look measured and would not be.",
+    "a_kernel_is": "one distinct (operation, shape) pair, because that is what this corpus holds -- one rmsnorm file serves every block that shares D. A layer count does not multiply it.",
+    "derived_inventory_total": 15,
+    "inventory": [
+      {
+        "n": 1,
+        "line": "embedding / get_rows at D"
+      },
+      {
+        "n": 1,
+        "line": "rmsnorm at D (attn_norm, ffn_norm and the final norm share it)"
+      },
+      {
+        "n": 1,
+        "line": "residual add at D"
+      },
+      {
+        "n": 1,
+        "line": "lm-head matvec at VOCAB"
+      },
+      {
+        "n": 1,
+        "line": "argmax over VOCAB"
+      },
+      {
+        "n": 5,
+        "line": "MLA projections: q_a, q_b, kv_a, kv_b, output"
+      },
+      {
+        "n": 1,
+        "line": "rope"
+      },
+      {
+        "n": 1,
+        "line": "attention core (decode shape)"
+      },
+      {
+        "n": 1,
+        "line": "MoE router (scores, then top-k)"
+      },
+      {
+        "n": 2,
+        "line": "routed expert gate/up at MOE_INTER, and down at D"
+      }
+    ],
+    "inventory_is_not_used_here": "the inventory derives 15 and the known count is 52. The known count wins; the inventory is kept because the gap between them is the measurement of how coarse it is.",
+    "uncounted_because_unrecorded": [
+      "N_SHARED_EXP is not in the registry, so `shared expert gate/up and down` is uncounted",
+      "LEADING_DENSE_BLOCKS is not in the registry, so `the leading dense blocks' gate/up at DENSE_FFN_INTER, and down at D` is uncounted"
+    ],
+    "what_the_inventory_collapses": {
+      "each expert's gate, up and down are one row": "a real engine has three kernels there, and the gate/up pair is often fused separately from the down-projection",
+      "one attention core": "decode, prefill and partial/chunked are different kernels with different shapes, and a model with two attention types doubles that again",
+      "one matvec per projection": "f16 and f32 weight forms are separate kernels, and each quantisation the engine supports adds another (q8_0, q4_K, iq2_xxs, mxfp4 ...)",
+      "no prefill shapes": "every projection and norm has a batched prefill form, which is a different kernel from its decode form",
+      "no quantise/dequantise kernels": "activation quantisation and weight unpacking are real kernels; the inventory treats weight format as out of scope",
+      "one sampling kernel": "argmax is counted; top-p, top-k sampling and draft verification are not"
+    },
+    "why_collapses_are_listed_not_multiplied": "'under-counts by 3.5x' is one number and tells a reader nothing they can act on. These name the specific rows that each stand for several real kernels. They are not multiplied out: that would turn a list of known omissions into a fabricated total. Someone who knows the true count for this model can see which rows to expand.",
+    "published_registry": "the published kernel registry, read 2026-11-02 and generated 2026-08-31, holds 52 distinct kernels for DeepSeek V4 Flash: 13 under a `trace` basis and 39 under `source-scan`. This supersedes an earlier floor of 51; 52 is the larger of the two floors. It stays a floor for three independent reasons -- the published view is marked redacted, so it is a subset; most rows are unverified by a trace, and the registry's own wording is that only a trace is evidence a kernel holds measurable time; and V4.1 is a later revision of the same architecture, so its count can only grow.",
+    "published_registry_count": 52
+  },
+  "stored_pto_that_does_not_assemble": {
+    "pto/topk_v41_1x384_k6.pto": "the stored .pto does NOT assemble: `pto.tci` emits `{descending = ...}` inside the `ins(...)` operand list, where MLIR's parser wants `:`, so ptoas reports `expected ':'`. The attribute belongs on the op. The artefact is kept because it is the reproduction; the byte-identity gate cannot see this, since it compares the emitter's output to the file the emitter wrote and both hold the same invalid text."
+  }
+}

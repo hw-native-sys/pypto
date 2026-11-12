@@ -1,0 +1,35 @@
+Narration cue sheet -- ptoas-rs
+Timestamps are at DEMO_SPEED=1.55 and shift with it.
+Read each line at its mark; the terminal holds for it.
+
+00:00	SECTION: ptoas-rs -- PTO back to tile-rs
+00:03	The pipeline backwards. PTO in, Rust out, and a report on what the compiler can prove about it.
+00:22	SECTION: Why lift at all
+00:25	Compiling the result puts two invariants in front of a checker the assembler does not run.
+00:28	Const-generic Tile<R,C,T> makes a matmul with disagreeing inner dimensions a TYPE error.
+00:31	And a tile is deliberately not Copy, so a double store is a borrow-check error.
+00:59	SECTION: Read the coverage line before trusting an exit of zero
+01:02	An op the lift does not model is carried through verbatim. That keeps a round trip faithful
+01:05	and says nothing about whether the lift understood the kernel. So every run prints it.
+01:22	SECTION: Four refusals, four different causes
+01:26	Ten of the fourteen bench artefacts lift. The four that do not are not one problem.
+01:36	That refusal is intended: a scalar literal is not threaded into the emitter -- wiring, nothing deeper
+01:47	That refusal is intended: there is no tile-to-tile copy wrapper to call: this one needs a new intrinsic
+01:59	That refusal is intended: an operation that is not modelled at all
+02:10	That refusal is intended: a strided view. THIS one must stay refused -- lifting it would read the wrong elements
+02:15	That last distinction is the useful one. Three are work; one is a correctness boundary.
+02:30	SECTION: The safety report
+02:33	Aliasing, capacity, operand constraints, matmul bounds, dead tiles, linear use. Advisory, on the console.
+02:42	The address-shape checks read an assembler memory-plan dump, not a bare .pto, and it says so.
+02:54	SECTION: Handing the kernel to the Rust compiler
+02:57	--verify compiles what was lifted. This is the difference between 'rustc could' and 'rustc did'.
+03:06	Unavailable, not clean -- and exit code 4, not 0. Those are not the same answer,
+03:09	and a caller reading only a status must not be able to confuse them.
+03:25	SECTION: The intermediate representation
+03:28	--emit tile would write the tile-dialect MLIR. That needs the Rust-to-MLIR half.
+03:36	That refusal is intended: an accepted flag that silently did nothing would be worse than a missing one
+03:49	SECTION: pto-diff -- what moved between two memory plans
+03:52	A different question, useful without lifting anything: which tiles moved, and where to.
+04:08	SECTION: The round trip, closed
+04:11	Lift a kernel to Rust, and separately re-emit its PTO from the MLIR. Both directions, one corpus.
+04:27	Byte-identical. Every generated file in the bench is re-derived on every test run, never trusted.

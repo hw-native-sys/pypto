@@ -1,0 +1,12 @@
+// Engine slot (ds4-rs-ascend): W8A8 matvec, K CHUNKED so k may exceed UB.
+module {
+  llvm.func @proj_w8a8_engine_1x24_k16384(%xbuf: !llvm.ptr<1>, %w: !llvm.ptr<1>, %sc: !llvm.ptr<1>, %of: !llvm.ptr<1>, %o: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %kk = llvm.mlir.constant(16384 : i32) : i32
+    %nn = llvm.mlir.constant(24 : i32) : i32
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %res = llvm.call @__tile_matvec_w8a8_gm_f32(%xbuf, %w, %sc, %of, %z, %nn, %kk) : (!llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%o, %res, %r, %nn) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

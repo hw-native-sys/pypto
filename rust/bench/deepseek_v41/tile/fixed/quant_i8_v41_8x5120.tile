@@ -1,0 +1,47 @@
+// The i8 quantiser, fixed so the call matches the intrinsic tile_std declares.
+//
+// The captured form passes a TILE where an f32 VALUE is declared
+// (crates/tile_std/src/tile.rs):
+//
+//     __tile_quantize_f32_i8(dst: u32, src: u32, scale: f32, rows: u32, cols: u32)
+//
+// `scale` is an f32, and the capture hands it `%sc`, the result of
+// `__tile_load_f32(%arg1, 1, 1)` -- a 1x1 tile handle. Arity matches at five, and
+// the leading `dst` is the in-place form that rule 2 exempts, so nothing in the
+// conformance checker saw it until a fourth rule was added for exactly this shape:
+// a slot declared with a non-u32 scalar type receiving a tile-producing SSA. One
+// violation in 2541 operand slots across the corpus, and this is it.
+//
+// Two defects, not one, and the second is invisible until the first is fixed.
+// `__tile_load_f32(%arg1, %one, %one)` is a FOUR-BYTE load, under the 32-byte DMA
+// block, which on an Ascend910B2 does not fault and does not deliver the element
+// (see tools/direct-invoke/receipts/b30-datacopy-extent-threshold). The emitter
+// refuses it now -- but only after the missing-arm refusal, which fires first, so
+// correcting the call would have exposed a second wrong load rather than a working
+// kernel.
+//
+// The corrected form reads the scalar back the way the embedding kernels do, using
+// the accessor declared on 2026-11-08: load ONE BLOCK, `__tile_get_value_f32` at
+// element 0, pass that f32. The seven extra elements are loaded and ignored.
+//
+// This variant exists to record the corrected CALL and the refusal it then earns,
+// not to add an artefact: with the call fixed, `mlir_to_cpp` still has no arm for
+// `__tile_quantize_f32_i8`, which is the true and only remaining blocker. The
+// widest tile is 8 x 5120 f32 = 163840 bytes against a 194560-byte unified
+// buffer, so unlike the rest of this corpus's tail it needs no rescue -- just the
+// arm.
+module {
+  llvm.func @bm_quant_i8_8_5120(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>) attributes {hacc.entry} {
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(8 : i32) : i32
+    %cl = llvm.mlir.constant(5120 : i32) : i32
+    %one = llvm.mlir.constant(1 : i32) : i32
+    %e8 = llvm.mlir.constant(8 : i32) : i32
+    %x = llvm.call @__tile_load_f32(%arg0, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %sct = llvm.call @__tile_load_f32(%arg1, %one, %e8) : (!llvm.ptr<1>, i32, i32) -> i32
+    %sc = llvm.call @__tile_get_value_f32(%sct, %z) : (i32, i32) -> i32
+    %q = llvm.call @__tile_quantize_f32_i8(%x, %x, %sc, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_i8(%arg2, %q, %r, %cl) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

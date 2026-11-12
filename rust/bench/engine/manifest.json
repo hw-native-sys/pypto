@@ -1,0 +1,340 @@
+{
+  "corpus": "engine",
+  "status": "generated",
+  "what": "The kernels the Rust serving engine (ds4-rs-ascend) launches, at the shapes it launches them. Separate from the model corpora because these rows exist for an ENGINE SLOT, not for a model block: rms_norm_512 is here because LAYER0_KERNELS launches it, not because any model has a 512-wide normalisation. The rope row is the engine's `ds4_rope_halves`: 64-wide input split into two 32 halves, one 64-wide output written as two halves -- the shape and formula are the layer0 fixture's.",
+  "shapes_source": "rust/ds4-rs-ascend/crates/engine_ascend/src/device.rs LAYER0_KERNELS",
+  "generator": "shapes/gen_engine.py",
+  "totals": {
+    "kernels": 27,
+    "tile": 25,
+    "pto": 2,
+    "ascendc": 25,
+    "device_verified": 15,
+    "device_verified_what_it_counts": "COUNTS rows in THIS corpus carrying a device_check with no outstanding attribution caveat, of any date. It is NOT the migration campaign's device-verified count, and as of 2026-11-08 the two differ by exactly 13 across the four corpora -- 46 rows here against 33 banked -- with every one of the 13 accounted for: 10 are in the `engine` corpus, which is outside the campaign's K=72 scope (deepseek_v41, glm_5_3, kimi_k3) and so is never banked by it; the other 3 are kimi_k3's SiTU gate/up rows, which reproduce their recorded max_rel 4.892e-06 exactly and are held back only because that figure meets the 1e-5 this row declares and not the 1e-6 the campaign's tolerance table assigns to f32_elementwise. See each of those rows' device_check_tolerance_conflict_2026_11_08. A row here claims `this kernel was observed correct on device`; a campaign `verified` record additionally claims `these exact bytes were, at the campaign's own tolerance`. The 2026-11-08 sweep is what made the second claim checkable: 13 artefacts across the tree did not derive from their own .tile, and until model_corpora_ascendc_matches_its_emitter.rs landed, only bench/playground16 was gated."
+  },
+  "kernels": {
+    "rope_halves_engine_1x64": {
+      "tile": "tile/rope_halves_engine_1x64.tile",
+      "pto": null,
+      "ascendc": "ascendc/rope_halves_engine_1x64.cpp",
+      "ascendc_sha256_16": "5ac5fe93ac336c87",
+      "device_check": "PASS 2026-11-05 on 910B2 (opencompass-01), 20 launches: wrong=0, max_rel=6.001e-07 against an f64 rope-over-halves oracle, tolerance 1e-6; 0.016756 ms per launch after discarding the first. Formula and chain from the layer0 fixture.",
+      "device_metrics": {
+        "max_rel": 6.001e-07,
+        "time_ms": 0.016756,
+        "repeat": 20,
+        "tolerance": 1e-06
+      }
+    },
+    "rmsnorm_engine_1x16384": {
+      "tile": "tile/rmsnorm_engine_1x16384.tile",
+      "pto": null,
+      "pto_refused": "NPU UB budget (arch a2a3): tile of 65536B at offset 166400B would use 231936B > UB_SIZE 194560B. The AscendC path places this row by keeping the square separate, making the output the source buffer and halving the reduce work buffer (160 KB); rspto has no such form, so the PTO representation is refused.",
+      "ascendc": "ascendc/rmsnorm_engine_1x16384.cpp",
+      "ascendc_sha256_16": "678aac67e67b4cd7",
+      "device_check": "PASS 2026-11-05 on 910B2 (opencompass-01), 20 launches: wrong=0, max_rel=7.634e-08 against an f64 rms_norm at eps 1e-6, tolerance 1e-6; 0.024601 ms per launch after discarding the first. This is the engine's `hc_norm` slot.",
+      "device_metrics": {
+        "max_rel": 7.634e-08,
+        "time_ms": 0.024601,
+        "repeat": 20,
+        "tolerance": 1e-06
+      }
+    },
+    "proj_w8a8_engine_1x1024_k4096": {
+      "tile": "tile/proj_w8a8_engine_1x1024_k4096.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_w8a8_engine_1x1024_k4096.cpp",
+      "ascendc_sha256_16": "8b46cc0bdb7fbf53",
+      "device_check": "PASS 2026-11-05 on 910B2 (opencompass-01), 3 launches: wrong=0, backward relative error 1.398e-07 against an f64 oracle, tolerance 1e-6; 0.602790 ms per launch after discarding the first. w8a8: int8 weights, per-output-channel scale/offset, (1024 outputs x 4096 contraction). This is the engine's projection slot served by the deployment quantisation.",
+      "device_metrics": {
+        "backward_rel": 1.398e-07,
+        "time_ms": 0.59262,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 1024,
+        "k": 4096
+      },
+      "device_check_reattributed_2026_11_08": "RE-RUN on the REGENERATED artefact: PASS elements=1024 wrong=0 max_abs=3.200e+01 max_rel=1.398e-07, sha256=8b46cc0bdb7fbf533f4df6cb85608ace... The row above was obtained on a .cpp whose pipe.InitBuffer plan had drifted from what the emitter computes; that claim is superseded by this one, which names its bytes. LIVENESS, measured 2026-11-08: this w8a8/ORACLE-15 path intermittently fails to COMPLETE on this box. Same bytes, same arguments, five consecutive runs of kda_f_a_glm53_1x128_k4096: PASS, PASS, HANG (240 s timeout), PASS, PASS. Two kernels returned aclrtSynchronizeStream -> 507034 once and PASSED on a clean serial retry. The answer was NEVER WRONG in any run that finished -- wrong=0 throughout, figures reproducing to the digit -- so this is liveness, not correctness. Cause NOT claimed: the box is shared and a co-tenant holds ~91% of HBM on every chip, so contention and a kernel hazard are both live and this session cannot separate them."
+    },
+    "proj_w8a8_engine_1x512_k4096": {
+      "tile": "tile/proj_w8a8_engine_1x512_k4096.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_w8a8_engine_1x512_k4096.cpp",
+      "ascendc_sha256_16": "2148d2cde36d5e08",
+      "device_check": "PASS 2026-11-05 on 910B2 (opencompass-01), 3 launches: wrong=0, backward relative error 1.411e-07 against an f64 oracle, tolerance 1e-6; 0.307880 ms per launch after discarding the first. w8a8: int8 weights, per-output-channel scale/offset, (512 outputs x 4096 contraction). This is the engine's projection slot served by the deployment quantisation.",
+      "device_metrics": {
+        "backward_rel": 1.411e-07,
+        "time_ms": 0.31349,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 512,
+        "k": 4096
+      },
+      "device_check_reattributed_2026_11_08": "RE-RUN on the REGENERATED artefact: PASS elements=512 wrong=0 max_abs=3.225e+01 max_rel=1.411e-07, sha256=2148d2cde36d5e08496cb35adc282787... The row above was obtained on a .cpp whose pipe.InitBuffer plan had drifted from what the emitter computes; that claim is superseded by this one, which names its bytes. LIVENESS, measured 2026-11-08: this w8a8/ORACLE-15 path intermittently fails to COMPLETE on this box. Same bytes, same arguments, five consecutive runs of kda_f_a_glm53_1x128_k4096: PASS, PASS, HANG (240 s timeout), PASS, PASS. Two kernels returned aclrtSynchronizeStream -> 507034 once and PASSED on a clean serial retry. The answer was NEVER WRONG in any run that finished -- wrong=0 throughout, figures reproducing to the digit -- so this is liveness, not correctness. Cause NOT claimed: the box is shared and a co-tenant holds ~91% of HBM on every chip, so contention and a kernel hazard are both live and this session cannot separate them."
+    },
+    "proj_w8a8_engine_1x32768_k1024": {
+      "tile": "tile/proj_w8a8_engine_1x32768_k1024.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_w8a8_engine_1x32768_k1024.cpp",
+      "ascendc_sha256_16": "5a75cbf1ef6be124",
+      "device_check": "PASS 2026-11-05 on 910B2 (opencompass-01), 3 launches: wrong=0, backward relative error 1.309e-07 against an f64 oracle, tolerance 1e-6; 10.097850 ms per launch after discarding the first. w8a8: int8 weights, per-output-channel scale/offset, (32768 outputs x 1024 contraction). This is the engine's projection slot served by the deployment quantisation.",
+      "device_metrics": {
+        "backward_rel": 1.309e-07,
+        "time_ms": 10.01289,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 32768,
+        "k": 1024
+      },
+      "device_check_reattributed_2026_11_08": "RE-RUN on the REGENERATED artefact: PASS elements=32768 wrong=0 max_abs=2.000e+00 max_rel=1.309e-07, sha256=5a75cbf1ef6be124c6555f505ad4a700... The row above was obtained on a .cpp whose pipe.InitBuffer plan had drifted from what the emitter computes; that claim is superseded by this one, which names its bytes. LIVENESS, measured 2026-11-08: this w8a8/ORACLE-15 path intermittently fails to COMPLETE on this box. Same bytes, same arguments, five consecutive runs of kda_f_a_glm53_1x128_k4096: PASS, PASS, HANG (240 s timeout), PASS, PASS. Two kernels returned aclrtSynchronizeStream -> 507034 once and PASSED on a clean serial retry. The answer was NEVER WRONG in any run that finished -- wrong=0 throughout, figures reproducing to the digit -- so this is liveness, not correctness. Cause NOT claimed: the box is shared and a co-tenant holds ~91% of HBM on every chip, so contention and a kernel hazard are both live and this session cannot separate them."
+    },
+    "proj_w8a8_engine_1x4096_k8192": {
+      "tile": "tile/proj_w8a8_engine_1x4096_k8192.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_w8a8_engine_1x4096_k8192.cpp",
+      "ascendc_sha256_16": "2b529b6f256e7bce",
+      "device_check": "PASS 2026-11-05 on 910B2, 3 launches: wrong=0, backward relative error 2.293e-07 against an f64 oracle, tolerance 1e-6; 5.280340 ms. Uses the CHUNKED arm (__tile_matvec_w8a8_gm_f32): the non-chunked form needs eight k-wide buffers and was refused as a UB overflow once aliasing was correctly forbidden, and its earlier 'successful' emission only fit by overlapping them (25 of 4096 outputs +inf). Every buffer here is 4096-wide, so k=8192 chunks into two.",
+      "device_metrics": {
+        "backward_rel": 2.293e-07,
+        "time_ms": 5.28034,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 4096,
+        "k": 8192
+      },
+      "device_check_reattributed_2026_11_08": "RE-RUN on the REGENERATED artefact: PASS elements=4096 wrong=0 max_abs=1.940e+02 max_rel=2.293e-07, sha256=2b529b6f256e7bce3563c6c47f881c53... The row above was obtained on a .cpp whose pipe.InitBuffer plan had drifted from what the emitter computes; that claim is superseded by this one, which names its bytes. LIVENESS, measured 2026-11-08: this w8a8/ORACLE-15 path intermittently fails to COMPLETE on this box. Same bytes, same arguments, five consecutive runs of kda_f_a_glm53_1x128_k4096: PASS, PASS, HANG (240 s timeout), PASS, PASS. Two kernels returned aclrtSynchronizeStream -> 507034 once and PASSED on a clean serial retry. The answer was NEVER WRONG in any run that finished -- wrong=0 throughout, figures reproducing to the digit -- so this is liveness, not correctness. Cause NOT claimed: the box is shared and a co-tenant holds ~91% of HBM on every chip, so contention and a kernel hazard are both live and this session cannot separate them."
+    },
+    "proj_w8a8_engine_1x24_k16384": {
+      "tile": "tile/proj_w8a8_engine_1x24_k16384.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_w8a8_engine_1x24_k16384.cpp",
+      "ascendc_sha256_16": "cb79c77000454308",
+      "device_check": "PASS 2026-11-05 on 910B2, 3 launches: wrong=0, backward relative error 4.639e-08 against an f64 oracle, tolerance 1e-6; 0.090650 ms. This is the engine's `hc_mv` slot -- 24 outputs over a 16384-wide activation, from the layer0 fixture's \"dst[24] = W_expert . x[16384]\" -- served by the CHUNKED w8a8 kernel, i.e. the deployment quantisation rather than the fixture's q8_0.",
+      "device_metrics": {
+        "backward_rel": 4.639e-08,
+        "time_ms": 0.09065,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 24,
+        "k": 16384
+      },
+      "device_check_reattributed_2026_11_08": "RE-RUN on the REGENERATED artefact: PASS elements=24 wrong=0 max_abs=2.070e+02 max_rel=4.639e-08, sha256=cb79c77000454308f6488044b3c7e3c1... The row above was obtained on a .cpp whose pipe.InitBuffer plan had drifted from what the emitter computes; that claim is superseded by this one, which names its bytes. LIVENESS, measured 2026-11-08: this w8a8/ORACLE-15 path intermittently fails to COMPLETE on this box. Same bytes, same arguments, five consecutive runs of kda_f_a_glm53_1x128_k4096: PASS, PASS, HANG (240 s timeout), PASS, PASS. Two kernels returned aclrtSynchronizeStream -> 507034 once and PASSED on a clean serial retry. The answer was NEVER WRONG in any run that finished -- wrong=0 throughout, figures reproducing to the digit -- so this is liveness, not correctness. Cause NOT claimed: the box is shared and a co-tenant holds ~91% of HBM on every chip, so contention and a kernel hazard are both live and this session cannot separate them."
+    },
+    "rmsnorm_engine_rmsmul_1x512": {
+      "tile": "tile/rmsnorm_engine_rmsmul_1x512.tile",
+      "pto": null,
+      "ascendc": "ascendc/rmsnorm_engine_rmsmul_1x512.cpp",
+      "ascendc_sha256_16": "1e2254f065199f07",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 3.340e-08 against an f64 oracle, tolerance 1e-6; 0.015010 ms. RMS-norm TIMES GAMMA -- the engine's `ds4_rmsmul_512(x, g, o)` socket, three pointers, matching the fixture's chain which ends in tmul(out, gamma).",
+      "device_metrics": {
+        "backward_rel": 3.34e-08,
+        "time_ms": 0.01501,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 512,
+        "args": 3
+      }
+    },
+    "rmsnorm_engine_rmsmul_1x1024": {
+      "tile": "tile/rmsnorm_engine_rmsmul_1x1024.tile",
+      "pto": null,
+      "ascendc": "ascendc/rmsnorm_engine_rmsmul_1x1024.cpp",
+      "ascendc_sha256_16": "ec233f2608e6b48b",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 2.953e-08 against an f64 oracle, tolerance 1e-6; 0.035690 ms. RMS-norm TIMES GAMMA -- the engine's `ds4_rmsmul_1024(x, g, o)` socket, three pointers, matching the fixture's chain which ends in tmul(out, gamma).",
+      "device_metrics": {
+        "backward_rel": 2.953e-08,
+        "time_ms": 0.03569,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 1024,
+        "args": 3
+      }
+    },
+    "rmsnorm_engine_rmsmul_1x4096": {
+      "tile": "tile/rmsnorm_engine_rmsmul_1x4096.tile",
+      "pto": null,
+      "ascendc": "ascendc/rmsnorm_engine_rmsmul_1x4096.cpp",
+      "ascendc_sha256_16": "8d91a42a52aeee5e",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 1.317e-07 against an f64 oracle, tolerance 1e-6; 0.026020 ms. RMS-norm TIMES GAMMA -- the engine's `ds4_rmsmul_4096(x, g, o)` socket, three pointers, matching the fixture's chain which ends in tmul(out, gamma).",
+      "device_metrics": {
+        "backward_rel": 1.317e-07,
+        "time_ms": 0.02602,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 4096,
+        "args": 3
+      }
+    },
+    "proj_q8mv_engine_1x1024_k4096": {
+      "tile": "tile/proj_q8mv_engine_1x1024_k4096.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_q8mv_engine_1x1024_k4096.cpp",
+      "ascendc_sha256_16": "801d8d8ceda0d5c8",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 1.527e-07 against an f64 reference built from the SAME bytes, tolerance 1e-6; 0.645550 ms. This is the engine's `ds4_q8mv_4096_1024` socket: FOUR pointers (w, s, x, o) with the q8_0 block scales pre-expanded into an f32 plane, and the kernel computes out[r] = sum_k w8[r,k]*x[k]*s[r,k].",
+      "device_metrics": {
+        "backward_rel": 1.527e-07,
+        "time_ms": 0.64555,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 1024,
+        "k": 4096,
+        "alloc_floats": 4300000,
+        "args": 4
+      },
+      "device_check_unattributable_2026_11_08": "The .cpp this row's PASS was obtained on did NOT derive from its own .tile: a fresh emit differs in its pipe.InitBuffer plan, so the artefact's allocation sizes had drifted from what the emitter computes. The artefact has been regenerated (sha256=801d8d8ceda0d5c83176f247d623dd22...), and the run above cannot be attributed to those bytes -- it must be re-run before this row claims a device result again. Kept rather than deleted so the run is not lost. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs: this corpus held 7 of the 13 stale artefacts in the tree, the most of any corpus, because the only AscendC byte-identity gate pointed at bench/playground16 alone."
+    },
+    "proj_q8mv_engine_1x512_k4096": {
+      "tile": "tile/proj_q8mv_engine_1x512_k4096.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_q8mv_engine_1x512_k4096.cpp",
+      "ascendc_sha256_16": "41ff74f3176c9de2",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 1.489e-07 against an f64 reference built from the SAME bytes, tolerance 1e-6; 0.352020 ms. This is the engine's `ds4_q8mv_4096_512` socket: FOUR pointers (w, s, x, o) with the q8_0 block scales pre-expanded into an f32 plane, and the kernel computes out[r] = sum_k w8[r,k]*x[k]*s[r,k].",
+      "device_metrics": {
+        "backward_rel": 1.489e-07,
+        "time_ms": 0.35202,
+        "repeat": 3,
+        "tolerance": 1e-06,
+        "n": 512,
+        "k": 4096,
+        "alloc_floats": 4300000,
+        "args": 4
+      },
+      "device_check_unattributable_2026_11_08": "The .cpp this row's PASS was obtained on did NOT derive from its own .tile: a fresh emit differs in its pipe.InitBuffer plan, so the artefact's allocation sizes had drifted from what the emitter computes. The artefact has been regenerated (sha256=41ff74f3176c9de2c1bb7f560de6ea89...), and the run above cannot be attributed to those bytes -- it must be re-run before this row claims a device result again. Kept rather than deleted so the run is not lost. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs: this corpus held 7 of the 13 stale artefacts in the tree, the most of any corpus, because the only AscendC byte-identity gate pointed at bench/playground16 alone."
+    },
+    "proj_q8mv_engine_1x4096_k8192": {
+      "tile": "tile/proj_q8mv_engine_1x4096_k8192.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_q8mv_engine_1x4096_k8192.cpp",
+      "ascendc_sha256_16": "947b1de3d572912b",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 2.011e-07 against an f64 reference built from the SAME bytes; 4.833310 ms. The engine's `ds4_q8mv_8192_4096` socket: four pointers (w, s, x, o), block scales pre-expanded to an f32 plane.",
+      "device_metrics": {
+        "backward_rel": 2.011e-07,
+        "time_ms": 4.83331,
+        "repeat": 3,
+        "n": 4096,
+        "k": 8192,
+        "alloc_floats": 34000000,
+        "args": 4
+      }
+    },
+    "proj_q8mv_engine_1x32768_k1024": {
+      "tile": "tile/proj_q8mv_engine_1x32768_k1024.tile",
+      "pto": null,
+      "ascendc": "ascendc/proj_q8mv_engine_1x32768_k1024.cpp",
+      "ascendc_sha256_16": "39d9d28940386d02",
+      "device_check": "PASS 2026-11-06 on 910B2, 3 launches: wrong=0, backward relative error 1.018e-07 against an f64 reference built from the SAME bytes; 10.534870 ms. The engine's `ds4_q8mv_1024_32768` socket: four pointers (w, s, x, o), block scales pre-expanded to an f32 plane.",
+      "device_metrics": {
+        "backward_rel": 1.018e-07,
+        "time_ms": 10.53487,
+        "repeat": 3,
+        "n": 32768,
+        "k": 1024,
+        "alloc_floats": 34000000,
+        "args": 4
+      }
+    },
+    "attn_sink_engine_64heads": {
+      "tile": "tile/attn_sink_engine_64heads.tile",
+      "pto": null,
+      "ascendc": "ascendc/attn_sink_engine_64heads.cpp",
+      "ascendc_sha256_16": "75d0448db7368ddf",
+      "device_check": "PASS 2026-11-06 on 910B2: heads=64 elements=32768 wrong=0, max_abs 3.644e-10, backward_rel 9.618e-08 against an f64 oracle over ALL 64 heads. The engine's `ds4_attn_sink_batched` extent (64 heads x 512), expressed as ONE scf.for over heads with per-head q/sink/out offsets -- 23 buffers, 80224 B of UB, 16 s.",
+      "device_metrics": {
+        "backward_rel": 9.618e-08,
+        "heads": 64,
+        "elements": 32768,
+        "tolerance": 1e-05
+      }
+    },
+    "w8a8_experts_1x4096_k2048": {
+      "tile": "tile/w8a8_experts_1x4096_k2048.tile",
+      "pto": null,
+      "ascendc": "ascendc/w8a8_experts_1x4096_k2048.cpp",
+      "ascendc_sha256_16": "e0fd6bf7ff978699",
+      "device_check": "PASS 2026-11-06 on 910B2: wrong=0, max_rel 2.270e-07 against an f64 oracle, 3 launches. The MoE expert w2/down shape (4096 out from k=2048), which the engine's slot table names as `mx4pk_2048_4096` -- a packed-MXFP4 socket. This artefact is w8a8, so it serves the SHAPE and not that socket's format: crediting it needs the deliberate slot switch.",
+      "device_metrics": {
+        "max_rel": 2.27e-07,
+        "repeat": 3,
+        "n": 4096,
+        "k": 2048,
+        "args": 5
+      }
+    },
+    "w8a8_experts_1x2048_k4096": {
+      "tile": "tile/w8a8_experts_1x2048_k4096.tile",
+      "pto": null,
+      "ascendc": "ascendc/w8a8_experts_1x2048_k4096.cpp",
+      "ascendc_sha256_16": "088991ce53c22f74",
+      "device_check": "PASS 2026-11-06 on 910B2: elements=2048 wrong=0, max_abs 5.425e+01, max_rel 2.325e-07 against an f64 oracle. The engine's `w8a8_experts_4096_2048` slot (2048 outputs from k=4096). It FAULTED (507034) at this shape until the arm stopped reading its scale and offset planes with a row-indexed scalar GM access and DMA'd them as tiles instead.",
+      "device_metrics": {
+        "elements": 2048,
+        "k": 4096,
+        "max_rel": 2.325e-07,
+        "tolerance": 1e-05
+      }
+    },
+    "attn_sink_1head_1blk": {
+      "tile": "tile/attn_sink_1head_1blk.tile",
+      "ascendc": "ascendc/attn_sink_1head_1blk.cpp",
+      "ascendc_sha256_16": "ac2a45c3426a6cb1",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact."
+    },
+    "attn_stage1_scores": {
+      "tile": "tile/attn_stage1_scores.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/attn_stage1_scores.cpp",
+      "ascendc_sha256_16": "7a1e2da22be5f433",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "attn_stage2_softmax": {
+      "tile": "tile/attn_stage2_softmax.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/attn_stage2_softmax.cpp",
+      "ascendc_sha256_16": "0beef9cbc96cbf90",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "attn_stage2b_softmax_nomax": {
+      "tile": "tile/attn_stage2b_softmax_nomax.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/attn_stage2b_softmax_nomax.cpp",
+      "ascendc_sha256_16": "af9ed96078464b52",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "attn_stage2c_exp_sum": {
+      "tile": "tile/attn_stage2c_exp_sum.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/attn_stage2c_exp_sum.cpp",
+      "ascendc_sha256_16": "3c8e68f65268bb89",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "attn_stage2d_exp": {
+      "tile": "tile/attn_stage2d_exp.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/attn_stage2d_exp.cpp",
+      "ascendc_sha256_16": "e84378e602e12c99",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "attn_stage2e_bcast_den": {
+      "tile": "tile/attn_stage2e_bcast_den.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/attn_stage2e_bcast_den.cpp",
+      "ascendc_sha256_16": "30b4f95dddf63bd7",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "w8a8_probe_1x1536_k4096": {
+      "tile": "tile/w8a8_probe_1x1536_k4096.tile",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact.",
+      "ascendc": "ascendc/w8a8_probe_1x1536_k4096.cpp",
+      "ascendc_sha256_16": "b64b7d208c2ba5b6",
+      "ascendc_landed_2026_11_08": "The emitter accepted this kernel and no .cpp was recorded, so the AscendC column said nothing about it -- neither an artefact nor a refusal. Found by the sweep that added model_corpora_ascendc_matches_its_emitter.rs, which pins this count per corpus; 17 kernels across four corpora were in this state. The playground16 gate has always asserted it as a hard failure (\"a kernel that emits and is not recorded makes the corpus totals wrong\"), so this lands the artefact to the corpus's own stated rule."
+    },
+    "rmsnorm_engine_1x1024": {
+      "pto": "pto/rmsnorm_engine_1x1024.pto",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact."
+    },
+    "rmsnorm_engine_1x512": {
+      "pto": "pto/rmsnorm_engine_1x512.pto",
+      "recorded": "added 2026-11-07: on disk, generated, named nowhere in this manifest. A probe is still an artefact."
+    }
+  }
+}

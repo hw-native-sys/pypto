@@ -1,0 +1,42 @@
+// matmul, fixed so the call matches the intrinsic tile_std declares.
+//
+// The captured form passes FIVE operands where tile_std declares six
+// (crates/tile_std/src/tile.rs:768):
+//
+//     __tile_matmul_f16(dst, a, b, m, k, n)
+//
+// The leading `dst` is missing. That did not fail, which is the interesting
+// part: the PTO emitter carries a SECOND declared contract at five operands --
+// a cuTile form `(a, b, acc, m, n)` that omits `k` because the A cell's width
+// implies it -- so the call was silently reinterpreted under the other
+// contract rather than rejected. Under that reading `m` is taken from operand
+// 3, which is the 64 this kernel means as `k`, so the emitter computed m=64
+// for a kernel whose A operand is 1x64.
+//
+// The emitted kernel was correct anyway, and only by luck: the accumulator's
+// shape comes from the A tile's own rows, not from that parsed `m`.
+//
+// What the shift DID cost is visible in the PTO. With five operands the
+// blocked-matmul pre-pass requires six and skips the call, so neither operand
+// load is deferred and the emitter materialises both whole operands in the
+// unified buffer -- a 1x64 and a 64x64 f16 tile, filled by DMA and then read
+// by nothing, because the matmul re-reads GM into its own mat/left/right
+// tiles regardless. With the call corrected the pre-pass defers both loads and
+// the emission drops four operations: two `alloc_tile`s in `loc=vec` and their
+// two `tload`s. The `tmatmul` and `tstore` are unchanged, which is what makes
+// this a pure removal of dead work rather than a different kernel.
+//
+// 1x64 @ 64x64 -> 1x64, f16.
+module {
+  llvm.func @matmul(%a: !llvm.ptr<1>, %b: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %c = llvm.mlir.constant(64 : i32) : i32
+    %ta = llvm.call @__tile_load_f16(%a, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %tb = llvm.call @__tile_load_f16(%b, %c, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_matmul_f16(%c0, %ta, %tb, %r, %c, %c) : (i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f16(%out, %res, %r, %c) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

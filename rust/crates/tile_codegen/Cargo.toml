@@ -1,0 +1,23 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[package]
+name = "tile_codegen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The CodegenTarget trait, the target registry, and the hardware parameters a target is described by. Standard library only."
+
+[lib]
+path = "src/lib.rs"
+
+# No dev-dependency on a GPU crate. The upstream version of this manifest
+# carried `metal = "0.29"` under a macOS target gate, to run emitted Apple
+# shaders in its tests; that emitter and its tests are not part of this tree.

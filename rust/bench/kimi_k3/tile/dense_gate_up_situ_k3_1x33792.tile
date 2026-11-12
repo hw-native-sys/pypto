@@ -1,0 +1,40 @@
+// Kimi K3 (kimi_k3), shapes read from the released model's own config.json.
+// Form: llvm.func + hacc.entry + __tile_* -- the shape the emitters consume.
+module {
+  llvm.func @k3_dense_situ(%arg0: !llvm.ptr<1>, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>) attributes {hacc.entry} {
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %cl = llvm.mlir.constant(33792 : i32) : i32
+    %c1f = llvm.mlir.constant(1.0 : f32) : f32
+    %cm1f = llvm.mlir.constant(-1.0 : f32) : f32
+    %z0f = llvm.mlir.constant(0.0 : f32) : f32
+    %cm2ob = llvm.mlir.constant(-0.5 : f32) : f32
+    %cm2obl = llvm.mlir.constant(-0.08 : f32) : f32
+    %cbb = llvm.mlir.constant(100.0 : f32) : f32
+    %g = llvm.call @__tile_load_f32(%arg0, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %u = llvm.call @__tile_load_f32(%arg1, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %one0 = llvm.call @__tile_scale_f32(%z, %g, %z0f, %r, %cl) : (i32, i32, f32, i32, i32) -> i32
+    %one = llvm.call @__tile_exp_f32(%z, %one0, %r, %cl) : (i32, i32, i32, i32) -> i32
+    %two = llvm.call @__tile_adds_f32(%z, %one, %c1f, %cl) : (i32, i32, f32, i32) -> i32
+    %gneg = llvm.call @__tile_scale_f32(%z, %g, %cm1f, %r, %cl) : (i32, i32, f32, i32, i32) -> i32
+    %gen = llvm.call @__tile_exp_f32(%z, %gneg, %r, %cl) : (i32, i32, i32, i32) -> i32
+    %gd = llvm.call @__tile_adds_f32(%z, %gen, %c1f, %cl) : (i32, i32, f32, i32) -> i32
+    %sg = llvm.call @__tile_div_f32(%z, %one, %gd, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %gz2 = llvm.call @__tile_scale_f32(%z, %g, %cm2ob, %r, %cl) : (i32, i32, f32, i32, i32) -> i32
+    %gE = llvm.call @__tile_exp_f32(%z, %gz2, %r, %cl) : (i32, i32, i32, i32) -> i32
+    %gEp = llvm.call @__tile_adds_f32(%z, %gE, %c1f, %cl) : (i32, i32, f32, i32) -> i32
+    %gq = llvm.call @__tile_div_f32(%z, %two, %gEp, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %th = llvm.call @__tile_subs_f32(%z, %gq, %c1f, %cl) : (i32, i32, f32, i32) -> i32
+    %gs = llvm.call @__tile_mul_f32(%z, %th, %sg, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %uz = llvm.call @__tile_scale_f32(%z, %u, %cm2obl, %r, %cl) : (i32, i32, f32, i32, i32) -> i32
+    %uE = llvm.call @__tile_exp_f32(%z, %uz, %r, %cl) : (i32, i32, i32, i32) -> i32
+    %uEp = llvm.call @__tile_adds_f32(%z, %uE, %c1f, %cl) : (i32, i32, f32, i32) -> i32
+    %uq = llvm.call @__tile_div_f32(%z, %two, %uEp, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %ut = llvm.call @__tile_subs_f32(%z, %uq, %c1f, %cl) : (i32, i32, f32, i32) -> i32
+    %o = llvm.call @__tile_mul_f32(%z, %gs, %ut, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    %ob = llvm.call @__tile_scale_f32(%z, %o, %cbb, %r, %cl) : (i32, i32, f32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%arg2, %ob, %r, %cl) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+
+    llvm.return
+  }
+}

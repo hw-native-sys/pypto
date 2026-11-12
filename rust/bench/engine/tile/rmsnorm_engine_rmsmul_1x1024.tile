@@ -1,0 +1,16 @@
+// Engine slot (ds4-rs-ascend): RMS-norm TIMES GAMMA, the engine's `ds4_rmsmul_W`.
+// x, g, o -- three pointers, because the engine's socket has three.
+module {
+  llvm.func @engine_rmsmul_1_1024(%x: !llvm.ptr<1>, %g: !llvm.ptr<1>, %o: !llvm.ptr<1>) attributes {hacc.entry} {
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %cl = llvm.mlir.constant(1024 : i32) : i32
+    %eps = llvm.mlir.constant(1e-06 : f32) : f32
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %x = llvm.call @__tile_load_f32(%x, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %gm = llvm.call @__tile_load_f32(%g, %r, %cl) : (!llvm.ptr<1>, i32, i32) -> i32
+    %nrm = llvm.call @__tile_rms_norm_f32(%x, %x, %eps, %r, %cl) : (i32, i32, f32, i32, i32) -> i32
+    %sc = llvm.call @__tile_mul_f32(%z, %nrm, %gm, %r, %cl) : (i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%o, %sc, %r, %cl) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

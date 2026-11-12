@@ -1,0 +1,37 @@
+// attn_gqa, fixed so both Ascend emitters accept it — and so that what they emit is the
+// kernel the source meant.
+//
+// The captured form calls the intrinsic with its operands SHIFTED BY ONE. tile_std
+// declares (crates/tile_std/src/tile.rs:262):
+//
+//     __tile_attention_gqa_f32(dst, q, k, v, heads_q, heads_kv, seq_len, head_dim)
+//
+// and the capture passes (tq, tk, tv, seq, dim, nh, nkv, causal) — no dst, so q receives
+// the k tile, k receives v, and v receives %seq, a constant 16. It also passes a
+// `causal` flag the intrinsic does not take.
+//
+// the AscendC emitter refuses it for exactly that: "operand 3 (v) is %seq, which is not a tile".
+// mlir_to_pto ACCEPTS it and emits attention over the wrong operands — a silently wrong
+// kernel, which is the one outcome its fail-closed policy exists to prevent. That is a
+// bug in mlir_to_pto's operand validation, not a property of this corpus.
+//
+// Fixed: dst first, then q/k/v as tiles, then the four scalars in the declared order.
+// 192 = 12 heads * 16 seq, 32 = 2 kv heads * 16 seq, head_dim 64.
+module {
+  llvm.func @attn_gqa(%q: !llvm.ptr<1>, %k: !llvm.ptr<1>, %v: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %c0  = llvm.mlir.constant(0 : i32) : i32
+    %nh  = llvm.mlir.constant(12 : i32) : i32
+    %nkv = llvm.mlir.constant(2 : i32) : i32
+    %seq = llvm.mlir.constant(16 : i32) : i32
+    %dim = llvm.mlir.constant(64 : i32) : i32
+    %qrows = llvm.mlir.constant(192 : i32) : i32
+    %kvrows = llvm.mlir.constant(32 : i32) : i32
+    %tq = llvm.call @__tile_load_f32(%q, %qrows, %dim) : (!llvm.ptr<1>, i32, i32) -> i32
+    %tk = llvm.call @__tile_load_f32(%k, %kvrows, %dim) : (!llvm.ptr<1>, i32, i32) -> i32
+    %tv = llvm.call @__tile_load_f32(%v, %kvrows, %dim) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_attention_gqa_f32(%c0, %tq, %tk, %tv, %nh, %nkv, %seq, %dim) : (i32, i32, i32, i32, i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %res, %qrows, %dim) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

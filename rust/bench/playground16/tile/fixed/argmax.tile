@@ -1,0 +1,29 @@
+// argmax, fixed so both Ascend emitters accept it.
+//
+// The captured form loads 1x151936 f32 as ONE tile — 607744B against a 196608B UB —
+// and then stores 151936 values for what is a single result. Two separate defects of
+// the degenerate capture.
+//
+// Fixed: one UB-fitting block, and a 1x1 store.
+//   * 16384 cols * 4B = 65536B for the input. 32768 was tried first and missed by
+//     512B — the emitter's own C1 report put the working set at 197120B against a
+//     196608B UB, because the reduction allocates a second tile on top of the input.
+//   * the emitter blocks a row by 8, so the per-fractal width is 16384/8 = 2048 elems
+//     = 8192B, and 8192 % 512 == 0 — the padding rule its C2 diagnostic asks for
+//     ("pad cols so cols*sizeof(dtype) % 512 == 0").
+// The full vocabulary is covered by invoking this per block and reducing on the host;
+// a running cross-block reduction needs scalar carry that the tile intrinsics do not
+// express.
+module {
+  llvm.func @argmax(%x: !llvm.ptr<1>, %out: !llvm.ptr<1>) attributes {hacc.entry} {
+    ^bb0:
+    %c0 = llvm.mlir.constant(0 : i32) : i32
+    %r = llvm.mlir.constant(1 : i32) : i32
+    %c = llvm.mlir.constant(16384 : i32) : i32
+    %one = llvm.mlir.constant(1 : i32) : i32
+    %in0 = llvm.call @__tile_load_f32(%x, %r, %c) : (!llvm.ptr<1>, i32, i32) -> i32
+    %res = llvm.call @__tile_argmax_f32(%c0, %in0, %r, %c) : (i32, i32, i32, i32) -> i32
+    llvm.call @__tile_store_f32(%out, %res, %r, %one) : (!llvm.ptr<1>, i32, i32, i32) -> ()
+    llvm.return
+  }
+}

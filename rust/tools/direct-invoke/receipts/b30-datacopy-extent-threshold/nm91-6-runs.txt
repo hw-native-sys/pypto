@@ -1,0 +1,48 @@
+########## logs/nm91_n33_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=33 wrong=1 max_abs=0.000e+00 max_rel=0.000e+00
+i8_bytes=33 arrived=32 first_mismatch=32 poison_bytes=1 zeros_in_input=0
+FAIL
+
+########## logs/nm91_n33_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=33 wrong=1 max_abs=0.000e+00 max_rel=0.000e+00
+i8_bytes=33 arrived=32 first_mismatch=32 poison_bytes=1 zeros_in_input=0
+FAIL
+
+########## logs/nm91_n33_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=33 wrong=1 max_abs=0.000e+00 max_rel=0.000e+00
+i8_bytes=33 arrived=32 first_mismatch=32 poison_bytes=1 zeros_in_input=0
+FAIL
+
+########## logs/nm91_n63_rep1.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=63 wrong=31 max_abs=0.000e+00 max_rel=0.000e+00
+i8_bytes=63 arrived=32 first_mismatch=32 poison_bytes=31 zeros_in_input=0
+FAIL
+
+########## logs/nm91_n63_rep2.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=63 wrong=31 max_abs=0.000e+00 max_rel=0.000e+00
+i8_bytes=63 arrived=32 first_mismatch=32 poison_bytes=31 zeros_in_input=0
+FAIL
+
+########## logs/nm91_n63_rep3.log
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: LD_LIBRARY_PATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 48: PYTHONPATH: unbound variable
+/usr/local/Ascend/cann-8.5.2/set_env.sh: line 31: CMAKE_PREFIX_PATH: unbound variable
+elements=63 wrong=31 max_abs=0.000e+00 max_rel=0.000e+00
+i8_bytes=63 arrived=32 first_mismatch=32 poison_bytes=31 zeros_in_input=0
+FAIL
+
