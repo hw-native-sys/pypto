@@ -478,12 +478,15 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         tmp: Same-dtype scratch tile whose physical and valid capacity
-            provably provides two rows and covers the dividend columns on
-            A2/A3. It must not overlap either source there.
+            provably provides two rows and the scratch columns below on A2/A3,
+            where ``R`` is the dividend physical row stride and
+            ``mask = 8 * ceil(R / 256)``: ``3R + mask + 8`` for INT32,
+            ``R + mask + 8`` for FP32. For example an FP32 ``[16, 64]``
+            dividend needs a ``[2, 80]`` tmp. It must not overlap either
+            source there.
         high_precision: Whether to select PTOAS's high-precision TREM mode.
-            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
-            result, which compilation warns about.
-            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
+            This mode is defined only for FP32; A5 honors it, while A2/A3
+            compilation drops the selector and warns.
 
     Returns:
         Tile wrapping the rem operation
@@ -503,8 +506,12 @@ def rems(lhs: Tile, rhs: int | float | Expr | Scalar, tmp: Tile) -> Tile:
         lhs: Tile
         rhs: Scalar value
         tmp: Same-dtype scratch tile whose physical and valid capacity
-            provably provides one row and covers the dividend columns on
-            A2/A3. It must not overlap the dividend there.
+            provably provides one row and the scratch columns below on A2/A3,
+            where ``R`` is the dividend physical row stride and
+            ``mask = 8 * ceil(R / 256)``: ``2R + mask + 8`` for INT32,
+            ``R + mask + 8`` for FP32. For example an FP32 ``[16, 64]``
+            dividend needs a ``[1, 80]`` tmp, or ``[1, 144]`` for INT32. It
+            must not overlap the dividend there.
 
     Returns:
         Tile wrapping the rems operation

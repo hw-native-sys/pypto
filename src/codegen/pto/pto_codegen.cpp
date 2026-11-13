@@ -981,9 +981,7 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
   const std::string arch = handler->GetPtoTargetArch();
   ir::EmitDiagnostics({Diagnostic(DiagnosticSeverity::Warning, "HighPrecisionIgnored", 0,
                                   op_name + "(high_precision=True) is not supported on the '" + arch +
-                                      "' backend: PTO-ISA implements the high-precision algorithm only "
-                                      "on a5, so " +
-                                      pto_op_name +
+                                      "' backend: " + pto_op_name +
                                       " runs the default algorithm and the result is bit-identical to "
                                       "high_precision=False.",
                                   span)},
