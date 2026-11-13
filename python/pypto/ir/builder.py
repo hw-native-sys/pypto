@@ -18,13 +18,32 @@ import builtins
 import inspect
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import Any, Generic, Protocol, TypeVar
 
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
 from .type import _merge_annotation_metadata
-from .utils import _get_span_or_capture, _normalize_expr
+from .utils import _get_span_or_capture, _normalize_expr, current_pinned_span
+
+
+def _pinned_span_or_unknown(span: ir.Span | None) -> ir.Span:
+    """Explicit span, else the pinned span, else ``Span.unknown()``.
+
+    The direct begin/end primitives never walk the Python stack — a
+    value-oriented frontend sits too many frames below the user's source
+    for frame capture to land anywhere useful. Under tracing, however,
+    the interpreter pins one span per instrumented row (the same pin
+    ``_capture_call_span`` honors for single-line methods), and that pin is
+    the structural node's location: resolving it here is what keeps a
+    traced ``ForStmt``/``IfStmt``/``WhileStmt``/``ScopeStmt`` from degrading
+    to unknown. The parser always passes explicit spans, so its behavior
+    is unchanged.
+    """
+    if span is not None:
+        return span
+    pinned = current_pinned_span()
+    return pinned if pinned is not None else ir.Span.unknown()
 
 
 class IRBuilder:
@@ -52,6 +71,255 @@ class IRBuilder:
         self._builder = CppIRBuilder()
         self._begin_spans: dict[int, ir.Span] = {}  # Track begin spans for multi-line contexts
         self._ctx_counter = 0  # Counter for unique context IDs
+        # Open ``ScopeKind``s (mirror of the C++ scope stack, tracked on the
+        # Python side so a trace-protocol object can answer structural wrap
+        # questions — e.g.
+        # ``SplitAivContext`` deciding whether the bare top-level form needs an
+        # enclosing InCore wrapper. The mirror is write-tracking only:
+        # ``begin_scope``/``end_scope`` keep it balanced; it observes no C++
+        # state (the C++ LIFO remains the source of truth).
+        self._scope_kinds: list[ir.ScopeKind] = []
+        # Per-open-scope MANUAL flag (``Runtime`` scopes only; ``False``
+        # otherwise). The runtime forbids a MANUAL scope nested in another
+        # MANUAL one and an AUTO scope nested in a MANUAL one, so a
+        # trace-protocol object must be able to ask "is a MANUAL scope open
+        # above me?" before it opens its own. Mirrors the AST parser's
+        # ``_manual_scope_depth`` (tracked here because the open-scope stack
+        # is the builder's, and an in-trace expansion borrows it).
+        self._scope_manuals: list[bool] = []
+        # Per-open-scope user-declared ``pl.split(...)`` mode (``None`` unless
+        # the scope is an InCore opened with an explicit ``split=``). Mirrors
+        # the AST parser's ``_incore_user_split``: a ``pl.split_aiv`` region
+        # inside a scope that declared a function-level split is the loud
+        # "mutually exclusive" rejection, and the literal ``SplitMode.NONE``
+        # spelling is only observable here — in IR it is indistinguishable
+        # from no split.
+        self._incore_user_splits: list[ir.SplitMode | None] = []
+
+    def innermost_scope_kind(self) -> ir.ScopeKind | None:
+        """The innermost open scope's kind, or ``None`` outside any scope.
+
+        A read over the Python-side mirror (``_scope_kinds``); used by the
+        tracing Frame to route scope-level declarations to their owning
+        scope."""
+        return self._scope_kinds[-1] if self._scope_kinds else None
+
+    # ========== Direct begin/end primitives (contextmanager-free) ==========
+    #
+    # The scope-creating ``@contextmanager`` forms below (``function``/
+    # ``for_loop``/…) are thin wrappers over these primitives: they add the
+    # parser-frontend's span-capture/combine + the ``<X>Builder`` handle +
+    # ``_result`` bookkeeping. The tracing frontend's thin handles call these
+    # directly (a ``span=None`` argument resolves through the pinned span —
+    # the trace interpreter's per-row pin — before falling back to
+    # ``Span.unknown()``; no ``inspect`` capture, no retained ctx — the C++
+    # builder's LIFO tracks the open scope).
+
+    def begin_function(
+        self,
+        name: str,
+        span: ir.Span | None = None,
+        type: ir.FunctionType = ir.FunctionType.Opaque,
+        level: ir.Level | None = None,
+        role: ir.Role | None = None,
+        attrs: dict[str, Any] | None = None,
+        requires_runtime_binding: bool = False,
+        ir_stage: ir.FunctionIRStage = ir.FunctionIRStage.Functional,
+    ) -> None:
+        actual_span = _pinned_span_or_unknown(span)
+        self._builder.begin_function(
+            name, actual_span, type, level, role, attrs or {}, requires_runtime_binding, ir_stage
+        )
+
+    def end_function(self, span: ir.Span | None = None) -> ir.Function:
+        return self._builder.end_function(_pinned_span_or_unknown(span))
+
+    def begin_for_loop(
+        self,
+        loop_var: ir.Var,
+        start: int | ir.Expr,
+        stop: int | ir.Expr,
+        step: int | ir.Expr,
+        span: ir.Span | None = None,
+        kind: ir.ForKind = ir.ForKind.Sequential,
+        attrs: dict[str, object] | None = None,
+        hardware_loop_policy: ir.HardwareLoopPolicy = ir.HardwareLoopPolicy.Auto,
+    ) -> None:
+        actual_span = _pinned_span_or_unknown(span)
+        attrs_list = list((attrs or {}).items())
+        self._builder.begin_for_loop(
+            loop_var,
+            _normalize_expr(start, actual_span),
+            _normalize_expr(stop, actual_span),
+            _normalize_expr(step, actual_span),
+            actual_span,
+            kind,
+            attrs=attrs_list,
+            hardware_loop_policy=hardware_loop_policy,
+        )
+
+    def end_for_loop(self, span: ir.Span | None = None) -> ir.ForStmt:
+        return self._builder.end_for_loop(_pinned_span_or_unknown(span))
+
+    def begin_while_loop(self, condition: int | ir.Expr, span: ir.Span | None = None) -> None:
+        actual_span = _pinned_span_or_unknown(span)
+        self._builder.begin_while_loop(_normalize_expr(condition, actual_span), actual_span)
+
+    def end_while_loop(self, span: ir.Span | None = None) -> ir.WhileStmt:
+        return self._builder.end_while_loop(_pinned_span_or_unknown(span))
+
+    def begin_if(self, condition: int | ir.Expr, span: ir.Span | None = None) -> None:
+        actual_span = _pinned_span_or_unknown(span)
+        self._builder.begin_if(_normalize_expr(condition, actual_span), actual_span)
+
+    def begin_else(self, span: ir.Span | None = None) -> None:
+        self._builder.begin_else(_pinned_span_or_unknown(span))
+
+    def end_if(self, span: ir.Span | None = None) -> ir.IfStmt:
+        return self._builder.end_if(_pinned_span_or_unknown(span))
+
+    def add_iter_arg(self, iter_arg: ir.IterArg) -> None:
+        """Add a loop-carried ``iter_arg`` to the innermost open for/while
+        loop (text-parser explicit declaration).
+        Mirrors ``ForLoopBuilder.iter_arg``'s C++ reach-in so the caller
+        does not reach into ``_builder._builder``."""
+        self._builder.add_iter_arg(iter_arg)
+
+    def add_return_var(self, var: ir.Var) -> None:
+        """Add a ``return_var`` to the innermost open for/while loop (text-parser explicit
+        yield/return declaration)."""
+        self._builder.add_return_var(var)
+
+    def add_if_return_var(self, var: ir.Var) -> None:
+        """Add a ``return_var`` (phi output) to the innermost open ``if``
+        (text-parser explicit phi declaration)."""
+        self._builder.add_if_return_var(var)
+
+    def add_while_iter_arg(self, iter_arg: ir.IterArg) -> None:
+        """Add a loop-carried ``iter_arg`` to the innermost open ``while``
+        (the explicit while-assembly channel).
+
+        Distinct from ``add_iter_arg`` (which targets the ``ForLoopContext``):
+        the C++ ``IRBuilder::AddWhileIterArg`` casts to ``WhileLoopContext``,
+        so the for-loop API would be wrong for a while. The while-side C++
+        and bindings already exist (``ir_builder.cpp``); this is only the
+        Python wrapper the trace context manager needs."""
+        self._builder.add_while_iter_arg(iter_arg)
+
+    def add_while_return_var(self, var: ir.Var) -> None:
+        """Add a ``return_var`` to the innermost open ``while`` (the explicit
+        while-assembly result channel). See ``add_while_iter_arg``."""
+        self._builder.add_while_return_var(var)
+
+    def set_while_condition(self, condition: int | ir.Expr, span: ir.Span | None = None) -> None:
+        """Update the innermost open ``while``'s condition (for explicit carry
+        where the predicate references the just-attached ``IterArg``s)."""
+        actual_span = _pinned_span_or_unknown(span)
+        self._builder.set_while_loop_condition(_normalize_expr(condition, actual_span))
+
+    def begin_scope(
+        self,
+        scope_kind: ir.ScopeKind,
+        span: ir.Span | None = None,
+        level: ir.Level | None = None,
+        role: ir.Role | None = None,
+        split: ir.SplitMode | None = None,
+        name_hint: str = "",
+        core_num: int | ir.Expr | None = None,
+        sync_start: bool | None = None,
+        manual: bool | None = None,
+        attrs: list[tuple[str, Any]] | None = None,
+    ) -> None:
+        actual_span = _pinned_span_or_unknown(span)
+        core_num_expr = _normalize_expr(core_num, actual_span) if core_num is not None else None
+        attrs_list = list(attrs) if attrs is not None else []
+        self._builder.begin_scope(
+            scope_kind,
+            actual_span,
+            level,
+            role,
+            split,
+            name_hint,
+            core_num_expr,
+            sync_start,
+            manual,
+            attrs_list,
+        )
+        self._scope_kinds.append(scope_kind)  # append only on C++ success (the mirror stays balanced)
+        self._scope_manuals.append(bool(manual) if scope_kind is ir.ScopeKind.Runtime else False)
+        self._incore_user_splits.append(split if scope_kind is ir.ScopeKind.InCore else None)
+
+    def end_scope(self, span: ir.Span | None = None) -> ir.ScopeStmt:
+        result = self._builder.end_scope(_pinned_span_or_unknown(span))
+        # Pop only on C++ success — the mirror must not report a scope closed
+        # that the native builder rejected (mirrors begin_scope's discipline).
+        if self._scope_kinds:
+            self._scope_kinds.pop()
+            self._scope_manuals.pop()
+            self._incore_user_splits.pop()
+        return result
+
+    def is_inside_scope(self, scope_kind: ir.ScopeKind) -> bool:
+        """Whether the current build position is nested inside an open scope
+        of the given kind (the Python-side mirror of the C++ scope stack).
+        Read by trace-protocol objects for wrap decisions — e.g.
+        ``SplitAivContext.begin`` emitting the bare-top-level form inside a
+        synthesized InCore wrapper unless already inside a CORE_GROUP InCore
+        scope (mirrors the AST parser's ``_is_inside_scope``)."""
+        return scope_kind in self._scope_kinds
+
+    def is_inside_manual_scope(self) -> bool:
+        """Whether the current build position is nested inside an open MANUAL
+        runtime scope (``RuntimeScopeStmt(manual=True)``).
+
+        A read over the Python-side mirror (``_scope_manuals``); the runtime
+        forbids a MANUAL scope nested in another MANUAL one and an AUTO scope
+        nested in a MANUAL one, so the trace-protocol scope descriptors gate on
+        this before ``begin_scope``. The AST parser tracks the same fact as
+        ``_manual_scope_depth``."""
+        return any(self._scope_manuals)
+
+    def enclosing_user_split(self) -> ir.SplitMode | None:
+        """The user-declared ``pl.split(...)`` mode of any open InCore scope.
+
+        A second mirror read for trace-protocol objects: the innermost open
+        scope that declared a function-level split wins (nested scopes without
+        one inherit the parser's state rather than clearing it). None means no
+        open scope declared a split."""
+        for mode in reversed(self._incore_user_splits):
+            if mode is not None:
+                return mode
+        return None
+
+    def begin_program(self, name: str, span: ir.Span | None = None) -> None:
+        self._builder.begin_program(name, _pinned_span_or_unknown(span))
+
+    def end_program(self, span: ir.Span | None = None) -> ir.Program:
+        return self._builder.end_program(_pinned_span_or_unknown(span))
+
+    # —— the function/program handle-methods the tracing frontend uses directly
+    #    (the ``<X>Builder`` handles below delegate to these; no
+    #    ``_builder._builder`` private-attr reach) ——
+    def func_arg(
+        self,
+        name: str,
+        type: ir.Type,
+        span: ir.Span | None = None,
+        direction: ir.ParamDirection = ir.ParamDirection.In,
+    ) -> ir.Var:
+        return self._builder.func_arg(name, type, _pinned_span_or_unknown(span), direction)
+
+    def return_type(self, type: ir.Type) -> None:
+        self._builder.return_type(type)
+
+    def declare_function(self, name: str) -> ir.GlobalVar:
+        return self._builder.declare_function(name)
+
+    def add_function(self, func: ir.Function) -> None:
+        self._builder.add_function(func)
+
+    def get_global_var(self, name: str) -> ir.GlobalVar:
+        return self._builder.get_global_var(name)
 
     @contextmanager
     def simt_scope(
@@ -146,16 +414,14 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_function(
-            name, begin_span, type, level, role, attrs or {}, requires_runtime_binding, ir_stage
-        )
+        self.begin_function(name, begin_span, type, level, role, attrs, requires_runtime_binding, ir_stage)
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_function(combined_span)
+            result = self.end_function(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -197,22 +463,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        # Normalize all expression parameters
-        start_expr = _normalize_expr(start, begin_span)
-        stop_expr = _normalize_expr(stop, begin_span)
-        step_expr = _normalize_expr(step, begin_span)
-
-        attrs_list = list((attrs or {}).items())
-        self._builder.begin_for_loop(
-            loop_var,
-            start_expr,
-            stop_expr,
-            step_expr,
-            begin_span,
-            kind,
-            attrs=attrs_list,
-            hardware_loop_policy=hardware_loop_policy,
-        )
+        self.begin_for_loop(loop_var, start, stop, step, begin_span, kind, attrs, hardware_loop_policy)
         builder_obj = ForLoopBuilder(self)
         body_ok = False
         try:
@@ -222,7 +473,7 @@ class IRBuilder:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
             try:
-                result = self._builder.end_for_loop(combined_span)
+                result = self.end_for_loop(combined_span)
                 builder_obj._result = result
             except Exception:
                 # The body already raised, so the loop was never completed and
@@ -260,8 +511,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        condition_expr = _normalize_expr(condition, begin_span)
-        self._builder.begin_while_loop(condition_expr, begin_span)
+        self.begin_while_loop(condition, begin_span)
         builder_obj = WhileLoopBuilder(self)
         body_ok = False
         try:
@@ -271,7 +521,7 @@ class IRBuilder:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
             try:
-                result = self._builder.end_while_loop(combined_span)
+                result = self.end_while_loop(combined_span)
                 builder_obj._result = result
             except Exception:
                 # See for_loop: keep the body's diagnostic, not the structural
@@ -305,15 +555,14 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        condition_expr = _normalize_expr(condition, begin_span)
-        self._builder.begin_if(condition_expr, begin_span)
+        self.begin_if(condition, begin_span)
         builder_obj = IfStmtBuilder(self)
         try:
             yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_if(combined_span)
+            result = self.end_if(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -361,19 +610,17 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        core_num_expr = _normalize_expr(core_num, begin_span) if core_num is not None else None
-        attrs_list = list(attrs) if attrs is not None else []
-        self._builder.begin_scope(
+        self.begin_scope(
             scope_kind,
             begin_span,
             level,
             role,
             split,
             name_hint,
-            core_num_expr,
+            core_num,
             sync_start,
             manual,
-            attrs_list,
+            attrs,
         )
         builder_obj = ScopeBuilder(self)
         try:
@@ -381,7 +628,7 @@ class IRBuilder:
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_scope(combined_span)
+            result = self.end_scope(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -452,14 +699,14 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_program(name, begin_span)
+        self.begin_program(name, begin_span)
         builder_obj = ProgramBuilder(self)
         try:
             yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.end_program(combined_span)
+            result = self.end_program(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -952,11 +1199,19 @@ class IRBuilder:
     # ========== Private Span Tracking Helpers ==========
 
     def _capture_call_span(self) -> ir.Span:
-        """Capture span from immediate caller using inspect.
+        """Pinned span, else the immediate caller's location.
+
+        A pinned span (the DSL parser per DSL call, the trace interpreter
+        per instrumented row) wins: in traced execution the two-frame
+        caller is framework plumbing (the language Sema), so the grab would
+        attribute IR statements to the wrong file.
 
         Returns:
             Span: Source location of the caller
         """
+        pinned = current_pinned_span()
+        if pinned is not None:
+            return pinned
         # Go back 2 frames:
         # frame 0 = _capture_call_span
         # frame 1 = our wrapper method (var, assign, etc.)
@@ -1019,7 +1274,7 @@ class FunctionBuilder:
             Var: The parameter variable
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
-        return self._builder._builder.func_arg(name, type, actual_span, direction)
+        return self._builder.func_arg(name, type, actual_span, direction)
 
     def return_type(self, type: ir.Type) -> None:
         """Add return type to the function.
@@ -1027,7 +1282,7 @@ class FunctionBuilder:
         Args:
             type: Return type
         """
-        self._builder._builder.return_type(type)
+        self._builder.return_type(type)
 
     def get_result(self) -> ir.Function:
         """Get the built Function.
@@ -1039,16 +1294,27 @@ class FunctionBuilder:
         return self._result
 
 
-class _ReturnVarsAccessor:
+class _HasReturnVars(Protocol):
+    """The statement kinds a completed host builder holds in ``_result``."""
+
+    @property
+    def return_vars(self) -> Sequence[ir.Var]: ...
+
+
+_ResultStmtT = TypeVar("_ResultStmtT", bound=_HasReturnVars)
+
+
+class _ReturnVarsAccessor(Generic[_ResultStmtT]):
     """Mixin: ``output()`` / ``outputs()`` over a completed statement's return vars.
 
     Host builders (for / while / if) set the class attribute ``_result_kind``
     (e.g. ``"for loop"``) and, once built, hold the statement in ``self._result``
-    with a ``return_vars`` sequence.
+    with a ``return_vars`` sequence. The generic parameter is the concrete
+    statement kind, so each subclass's ``_result`` stays precisely typed.
     """
 
     _result_kind: str
-    _result: "ir.ForStmt | ir.WhileStmt | ir.IfStmt | None"
+    _result: _ResultStmtT | None
 
     def output(self, index: int = 0) -> ir.Var:
         """Return a single return variable by index (default 0).
@@ -1077,7 +1343,7 @@ class _ReturnVarsAccessor:
         return list(self._result.return_vars)
 
 
-class ForLoopBuilder(_ReturnVarsAccessor):
+class ForLoopBuilder(_ReturnVarsAccessor[ir.ForStmt]):
     """Helper for building for loops within a loop context."""
 
     _result_kind = "for loop"
@@ -1089,7 +1355,7 @@ class ForLoopBuilder(_ReturnVarsAccessor):
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result = None
+        self._result: ir.ForStmt | None = None
         self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
@@ -1207,10 +1473,10 @@ class ForLoopBuilder(_ReturnVarsAccessor):
             ForStmt: The completed for loop IR node
         """
         assert self._result is not None
-        return cast("ir.ForStmt", self._result)
+        return self._result
 
 
-class WhileLoopBuilder(_ReturnVarsAccessor):
+class WhileLoopBuilder(_ReturnVarsAccessor[ir.WhileStmt]):
     """Helper for building while loops within a loop context."""
 
     _result_kind = "while loop"
@@ -1222,7 +1488,7 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result = None
+        self._result: ir.WhileStmt | None = None
         self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
@@ -1358,7 +1624,7 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
             WhileStmt: The completed while loop IR node
         """
         assert self._result is not None
-        return cast("ir.WhileStmt", self._result)
+        return self._result
 
 
 class ScopeBuilder:
@@ -1383,7 +1649,7 @@ class ScopeBuilder:
         return self._result
 
 
-class IfStmtBuilder(_ReturnVarsAccessor):
+class IfStmtBuilder(_ReturnVarsAccessor[ir.IfStmt]):
     """Helper for building if statements within an if context."""
 
     _result_kind = "if statement"
@@ -1395,7 +1661,7 @@ class IfStmtBuilder(_ReturnVarsAccessor):
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result = None
+        self._result: ir.IfStmt | None = None
 
     def else_(self, span: ir.Span | None = None) -> None:
         """Begin else branch of the if statement.
@@ -1404,7 +1670,7 @@ class IfStmtBuilder(_ReturnVarsAccessor):
             span: Optional explicit span. If None, captured from call site.
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
-        self._builder._builder.begin_else(actual_span)
+        self._builder.begin_else(actual_span)
 
     def return_var(self, name: str, type: ir.Type, span: ir.Span | None = None) -> None:
         """Add return variable for SSA phi node.
@@ -1433,7 +1699,7 @@ class IfStmtBuilder(_ReturnVarsAccessor):
             IfStmt: The completed if statement IR node
         """
         assert self._result is not None
-        return cast("ir.IfStmt", self._result)
+        return self._result
 
 
 class ProgramBuilder:
@@ -1479,7 +1745,7 @@ class ProgramBuilder:
             ...         ib.return_stmt(result)
             ...     p.add_function(f.get_result())
         """
-        return self._builder._builder.declare_function(name)
+        return self._builder.declare_function(name)
 
     def get_global_var(self, name: str) -> ir.GlobalVar:
         """Get GlobalVar for a declared function.
@@ -1493,7 +1759,7 @@ class ProgramBuilder:
         Raises:
             RuntimeError: If function not declared
         """
-        return self._builder._builder.get_global_var(name)
+        return self._builder.get_global_var(name)
 
     def add_function(self, func: ir.Function) -> None:
         """Add a function to the program.
@@ -1503,7 +1769,7 @@ class ProgramBuilder:
         Args:
             func: Function to add
         """
-        self._builder._builder.add_function(func)
+        self._builder.add_function(func)
 
     def get_result(self) -> ir.Program:
         """Get the built Program.

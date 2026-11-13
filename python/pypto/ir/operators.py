@@ -9,34 +9,30 @@
 
 """Operator overloading with automatic span capture and expression normalization."""
 
-import inspect
-
 from pypto.pypto_core import ir as _ir
 
-from .utils import _normalize_expr
+from .utils import _get_span_or_capture, _normalize_expr
 
 
 def _capture_call_span() -> _ir.Span:
-    """Capture span from the caller's location.
+    """Pinned span, else the caller's location.
 
-    Goes back through the call stack to find the actual user code that invoked the operator.
+    Delegates to :func:`pypto.ir.utils._get_span_or_capture`, so a pinned
+    span (the DSL parser per DSL call, the trace interpreter per
+    instrumented row) wins: under tracing the two-frame caller is framework
+    plumbing, not the user's kernel source.
+
+    Frame depth when no pin is active:
+      frame 0 = _get_span_or_capture
+      frame 1 = _capture_call_span
+      frame 2 = our wrapper (e.g., __add__)
+      frame 3 = user's code (what we want)
+    hence ``frame_offset=2``.
 
     Returns:
         Span: Source location of the caller
     """
-    # Go back through frames to find user code:
-    # frame 0 = _capture_call_span
-    # frame 1 = our wrapper (e.g., __add__)
-    # frame 2 = user's code (what we want)
-    frame = inspect.currentframe()
-    if frame is not None and frame.f_back is not None:
-        frame = frame.f_back.f_back
-
-    if frame is not None:
-        info = inspect.getframeinfo(frame)
-        return _ir.Span(info.filename, info.lineno, -1)
-
-    return _ir.Span.unknown()
+    return _get_span_or_capture(frame_offset=2)
 
 
 def _make_binary_op(op_name: str):

@@ -1669,6 +1669,12 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.
   stream_.str("");
   stream_.clear();
+  // The prologue's synthesized ops (parameter views, extra alloc tiles) carry
+  // the enclosing function's span — every emitted operation should name a
+  // location, and the function definition line is the only truthful one for
+  // compiler-synthesized preamble statements.
+  const ir::Span* prologue_span = func->span_.is_valid() ? &func->span_ : nullptr;
+  SpanScope prologue_loc(this, prologue_span);
   EmitMakeTensorViews(func);
   EmitExtraAllocTiles();
   std::string prologue_content = stream_.str();
@@ -1757,9 +1763,11 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     if (!fs_.buffer_ir && param->name_hint_ == "__gm_pipe_buffer") continue;  // Legacy GM slot buffer
     if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a raw pointer
 
-    // ptoas rejects a malformed view (bad strides / layout) on this line, so
-    // attribute it to the parameter that declared the tensor.
-    SpanScope param_loc(this, &param->span_);
+    // The view is compiler-synthesized preamble, not a user statement: it
+    // inherits the prologue's function span (installed around this call by
+    // both GenerateFunction and GenerateBufferFunction) instead of the
+    // parameter's declaration span — the function definition line is the only
+    // truthful location for generated preamble.
     std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
 
