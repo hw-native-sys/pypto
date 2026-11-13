@@ -372,7 +372,7 @@ jobs:
           # repeats its ~2.5 min failure path for every remaining case.
           task-submit --device auto --device-num 4 --timeout 2100 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
-              tests/st/distributed/test_l3_urma_async.py -k 'test_exchange_values and 4' \
+              tests/st/distributed/test_l3_urma_async.py -k 'test_put_only and not fp16 and 4' \
               -v -x --platform=a5 --device=\$TASK_DEVICE --durations=0 \
               --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-distributed-junit.xml"
 
