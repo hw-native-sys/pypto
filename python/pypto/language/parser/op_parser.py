@@ -10,6 +10,7 @@
 """DSL operator dispatch, argument conversion and buffer metadata."""
 
 import ast
+from enum import IntEnum
 from typing import Any, TypeGuard, cast
 
 from pypto.ir import op as ir_op
@@ -105,6 +106,16 @@ class OpParser:
             "mulhi",
             "ftoi",
             "itof",
+        }:
+            return self.dispatch_op(
+                _dsl_simt,
+                "pl.simt",
+                name,
+                call,
+                expression_keywords=frozenset({"value", "lhs", "rhs", "acc", "selector"}),
+                preserve_omitted_kwargs=True,
+            )
+        if name in {
             "atomic_add",
             "atomic_min",
             "atomic_max",
@@ -456,8 +467,9 @@ class OpParser:
         For ``ast.Attribute`` nodes (e.g. ``pl.INDEX``, ``pl.FP32``), try
         dtype resolution first so wrappers receive a ``DataType`` for slots
         like ``pl.cast(value, dtype)``, then closure evaluation for enum and
-        numeric constants (``pl.PadValue.zero``, ``math.inf``) — neither of
-        which ``parse_expression`` accepts. ``ast.Name`` resolves enums from
+        numeric constants (``pl.PadValue.zero``, ``math.inf``). Numeric values
+        are materialized with the same dtype as ordinary literals; enum values
+        remain wrapper metadata. ``ast.Name`` resolves enums from
         the closure only when the name is not an IR variable; numeric closure
         names stay on the existing path, which materializes them as
         ``ConstInt`` / ``ConstFloat`` carrying the parser's chosen dtype.
@@ -472,11 +484,16 @@ class OpParser:
             success, value = self.services.expr_evaluator.try_eval_expr(arg)
             # bool subclasses int — a positional ``True`` is not a numeric
             # constant slot, so leave it on the expression path.
-            if success and (
-                isinstance(value, ENUM_VALUE_TYPES)
-                or (isinstance(value, (int, float)) and not isinstance(value, bool))
-            ):
+            # Arithmetic enums (e.g. PipeType) subclass int but remain wrapper
+            # metadata; do not turn them into scalar operands.
+            if success and (isinstance(value, ENUM_VALUE_TYPES) or isinstance(value, IntEnum)):
                 return value
+            if success and isinstance(value, (int, float)) and not isinstance(value, bool):
+                # A numeric attribute is an operand, just like a literal or
+                # numeric closure name. Wrappers need its typed IR constant.
+                return self.services.expr_evaluator.python_value_to_ir(
+                    value, self.services.span_tracker.get_span(arg)
+                )
         elif isinstance(arg, ast.Name) and self.services.scope_manager.lookup_var(arg.id) is None:
             success, value = self.services.expr_evaluator.try_eval_expr(arg)
             if success and isinstance(value, ENUM_VALUE_TYPES):
@@ -489,16 +506,21 @@ class OpParser:
             if isinstance(arg.operand, ast.Attribute):
                 success, value = self.services.expr_evaluator.try_eval_expr(arg.operand)
                 if success and isinstance(value, (int, float)) and not isinstance(value, bool):
-                    return -value
+                    return self.services.expr_evaluator.python_value_to_ir(
+                        -value, self.services.span_tracker.get_span(arg)
+                    )
         return self.callbacks.expression(arg)
 
-    def parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
+    def parse_op_kwargs(
+        self, call: ast.Call, *, expression_keywords: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
         Shared helper for tensor, tile, system, and unified op parsing.
 
         Args:
             call: Call AST node
+            expression_keywords: Operand names that use positional expression parsing.
 
         Returns:
             Dictionary of keyword argument names to values
@@ -518,7 +540,11 @@ class OpParser:
                 continue
 
             # Handle dtype specially
-            if key == "dtype":
+            if key in expression_keywords:
+                # Operand literals need the same dtype as positional operands;
+                # compile-time attributes still use the value parsing below.
+                kwargs[key] = self.parse_op_positional_arg(value)
+            elif key == "dtype":
                 kwargs[key] = self.services.type_resolver.resolve_dtype(value)
             elif isinstance(value, ast.Constant):
                 kwargs[key] = value.value
@@ -630,7 +656,16 @@ class OpParser:
             return cast("list[Any]", result)
         return self.callbacks.expression(value)
 
-    def dispatch_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
+    def dispatch_op(
+        self,
+        module: Any,
+        module_name: str,
+        op_name: str,
+        call: ast.Call,
+        *,
+        expression_keywords: frozenset[str] = frozenset(),
+        preserve_omitted_kwargs: bool = False,
+    ) -> ir.Expr:
         """Dispatch an op call to a DSL wrapper module.
 
         The wrapper owns type-checking and dispatch (e.g. ``tile.add`` already
@@ -644,6 +679,8 @@ class OpParser:
             module_name: Human-readable module name for error messages.
             op_name: Name of the operation to look up on the module.
             call: Call AST node.
+            expression_keywords: Keyword operands parsed like positional operands.
+            preserve_omitted_kwargs: Preserve implicit IR defaults during text round trips.
 
         Returns:
             IR expression from the operation.
@@ -655,12 +692,20 @@ class OpParser:
                 hint=f"Check if '{op_name}' is a valid {module_name} operation",
             )
         args = [self.parse_op_positional_arg(arg) for arg in call.args]
-        kwargs = self.parse_op_kwargs(call)
+        kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
         span = self.services.span_tracker.get_span(call)
         try:
-            return self.attrs.attach_op_attrs(invoke_dsl(op_func, args, kwargs, span), attrs)
+            result = invoke_dsl(op_func, args, kwargs, span)
+            if preserve_omitted_kwargs and isinstance(result, ir.Call):
+                # DSL wrappers materialize conversion defaults, but raw IR may
+                # intentionally omit them. Keep only attributes present in the
+                # source so printing/reparsing preserves structural identity.
+                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in kwargs}
+                if len(explicit_kwargs) != len(result.kwargs):
+                    result = ir.create_op_call(result.op.name, result.args, explicit_kwargs, span)
+            return self.attrs.attach_op_attrs(result, attrs)
         except ParserError:
             raise
         except BUG_CLASS_EXCEPTIONS:

@@ -176,3 +176,5 @@ unit tests. Compilation and device execution are separate validation stages.
 The LLVM-text device build removes unsupported LLVM memory-effect annotations,
 matching PTOAS object emission, before invoking CANN Bisheng. It preserves
 instructions, synchronization and other attributes.
+Groups left empty by this cleanup and their references are removed together,
+since LLVM rejects empty attribute groups.

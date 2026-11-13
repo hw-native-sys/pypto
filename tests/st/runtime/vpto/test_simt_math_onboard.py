@@ -221,6 +221,9 @@ def check_results(src, bits, floats, integers, valid):
     # or an incorrect tie rule in the exact arithmetic rows.
     for row in (0, 8, 9, 10, 11, 13):
         torch.testing.assert_close(floats[row], expected_f[row], rtol=0, atol=0, equal_nan=True)
+    # Numerical equality treats both zero signs alike; abs must clear the bit.
+    if valid > 7:
+        assert not torch.signbit(floats[0, 7]).item()
     torch.testing.assert_close(floats[14:24], expected_f[14:24], rtol=0, atol=0)
     torch.testing.assert_close(floats[24], expected_f[24], rtol=3e-5, atol=2e-6, equal_nan=True)
 

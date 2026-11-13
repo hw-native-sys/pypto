@@ -10,6 +10,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op import simt
+from pypto.language.parser import parse_program
 
 SPAN = ir.Span.unknown()
 
@@ -334,6 +335,39 @@ def test_explicit_conversion_controls(name, rounding, unsigned):
     call = getattr(simt, name)(arg, rounding=rounding, unsigned=unsigned)
     assert call.kwargs == {"rounding": rounding, "unsigned": unsigned}
     ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("name", ["ftoi", "itof", "mulhi"])
+@pytest.mark.parametrize("kwargs", [{}, {"unsigned": False}, {"unsigned": True}])
+def test_omitted_conversion_attributes_text_round_trip(name, kwargs):
+    _check_conversion_attributes_text_round_trip(name, kwargs)
+
+
+@pytest.mark.parametrize("name", ["ftoi", "itof"])
+@pytest.mark.parametrize("rounding", ["r", "a", "f", "c", "z"])
+@pytest.mark.parametrize("signedness", [{}, {"unsigned": False}, {"unsigned": True}])
+def test_partial_conversion_attributes_text_round_trip(name, rounding, signedness):
+    _check_conversion_attributes_text_round_trip(name, {"rounding": rounding, **signedness})
+
+
+def _check_conversion_attributes_text_round_trip(name, kwargs):
+    # Construct raw IR: wrapper-created calls already contain default kwargs
+    # and therefore cannot catch a parser that inserts previously absent ones.
+    dtype = DataType.FP32 if name == "ftoi" else DataType.INT32
+    args = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(MATH_ARITIES[name])]
+    call = ir.create_op_call(f"simt.{name}", args, kwargs, SPAN)
+    call = ir.set_call_attrs(call, {"test_marker": "preserve"})
+    result = ir.Var("result", call.type, SPAN)
+    helper = ir.Function(
+        "helper",
+        args,
+        [],
+        ir.SeqStmts([ir.AssignStmt(result, call, SPAN), ir.ReturnStmt([], SPAN)], SPAN),
+        SPAN,
+        ir.FunctionType.SIMT,
+    )
+    program = ir.Program([helper], "Defaults", SPAN)
+    ir.assert_structural_equal(program, parse_program(ir.python_print(program)))
 
 
 @pytest.mark.parametrize("name", ["ftoi", "itof"])
