@@ -165,7 +165,7 @@ output elements outside the valid rectangle.
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST; native FP4×FP4 tiles use PTOAS v0.72 logical Cube dimensions; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST; native FP4×FP4 tiles use logical Cube dimensions introduced in PTOAS v0.72; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
 | pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.matmul_mx_acc`) |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_bias`); ST pending |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
