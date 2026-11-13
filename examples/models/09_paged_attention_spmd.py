@@ -44,6 +44,8 @@ Tensor layout:
   config:      [7]  (batch, num_heads, kv_head_num, head_dim,
                      block_size, block_num_capacity, active_block_num)  INT64
 
+Run:  python examples/models/09_paged_attention_spmd.py -p a2a3sim
+
 Legacy Python API example: platform= calls below are retained for compatibility
 and emit DeprecationWarning. New Python code should use backend_type and
 execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
