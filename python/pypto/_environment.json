@@ -181,6 +181,10 @@
       "category": "fresh_request",
       "reason": "Enabled compilation profiling must run compiler stages on each request."
     },
+    "PYPTO_DISABLE_PTO_ISA_TREM_PATCH": {
+      "category": "semantic",
+      "reason": "Debug-only bypass of the temporary A2/A3 TREM backport; switches the PTO-ISA sources PyPTO compiles against between the pinned tree and its patched worktree."
+    },
     "PYPTO_EMIT_DEBUG_RUNNER": {
       "category": "fresh_request",
       "reason": "Controls generated replay files; integration must honor output requests. Only an explicit enabled value requests fresh compilation; 0/false/no do not."

@@ -50,10 +50,6 @@ _TREM_PINNED_HEADER = Path("include") / "pto" / "npu" / "a2a3" / "TRem.hpp"
 _TREM_FIX_MARKER = "read-only-src form"
 _TREM_PATCH_DISABLE_ENV = "PYPTO_DISABLE_PTO_ISA_TREM_PATCH"
 _TREM_PATCH_AUTHOR = ("PyPTO TREM fallback", "pypto-trem-fallback@localhost")
-# Fixed commit dates keep the patch commit SHA deterministic for a given
-# pin+patch, so a cached patched worktree and a fresh one share the same
-# kernel-binary identity.
-_TREM_PATCH_DATE = "2000-01-01T00:00:00+0000"
 
 
 def ensure_pto_isa_root() -> str:
@@ -176,8 +172,6 @@ def _ensure_trem_patch(pinned: str) -> str:
                 f"({_TREM_PATCH_PATH})."
             ) from error
 
-        environment = os.environ.copy()
-        environment["GIT_AUTHOR_DATE"] = environment["GIT_COMMITTER_DATE"] = _TREM_PATCH_DATE
         _git(
             target,
             "-c",
@@ -188,7 +182,6 @@ def _ensure_trem_patch(pinned: str) -> str:
             "-a",
             "-m",
             f"PyPTO TREM fallback {patch_id}\n\nBase pin: {pin_revision}",
-            env=environment,
         )
         if not _trem_fix_present(target):
             raise RuntimeError(f"PyPTO TREM fallback patch did not produce the expected header in {target}")
@@ -217,13 +210,10 @@ def _git_output(root: Path, *args: str) -> str:
     return _git(root, *args).stdout.strip()
 
 
-def _git(
-    root: Path, *args: str, env: dict[str, str] | None = None, check: bool = True
-) -> subprocess.CompletedProcess[str]:
+def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True,
         text=True,
-        env=env,
         check=check,
     )
