@@ -9,6 +9,8 @@
 
 """Codegen tests for MXFP8, native FP4, and explicit FP4-to-FP8 legalization."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -26,25 +28,95 @@ def _reset_backend_after_test():
     reset_for_testing()
 
 
-def _run_default_pipeline(program, backend_type=BackendType.Ascend950):
+def _run_default_pipeline(
+    program,
+    backend_type=BackendType.Ascend950,
+    *,
+    planner=passes.MemoryPlanner.PYPTO,
+    enable_buffer_ir=True,
+):
     """Run the Default pipeline for an explicitly selected backend."""
     reset_for_testing()
     set_backend_type(backend_type)
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enable_buffer_ir):
         return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 
-def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
+def _emit_incore_mlir(
+    program,
+    backend_type=BackendType.Ascend950,
+    *,
+    planner=passes.MemoryPlanner.PYPTO,
+    enable_buffer_ir=True,
+) -> str:
     """Run Default pipeline and concatenate AIC/AIV MLIR."""
-    optimized = _run_default_pipeline(program, backend_type)
+    optimized = _run_default_pipeline(
+        program, backend_type, planner=planner, enable_buffer_ir=enable_buffer_ir
+    )
     parts: list[str] = []
     for func in optimized.functions.values():
         if func.func_type in (pl.FunctionType.Orchestration, pl.FunctionType.Group):
             continue
         single = ir.Program([func], func.name, optimized.span)
-        result = codegen.PTOCodegen().generate(single, emit_tile_addr=True)
+        result = codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
         parts.append(result if isinstance(result, str) else "".join(result.values()))
     return "\n".join(parts)
+
+
+def _assert_outer_scale_fills_are_prebound(mlir: str, expected_fills: int = 4) -> None:
+    """Check the exact scale handles consumed by MX, not unrelated nearby bindings."""
+    lines = mlir.splitlines()
+    aliases = {}
+    for line in lines:
+        reshaped = re.search(r"(%[\w.$-]+)\s*=\s*pto\.treshape\s+(%[\w.$-]+)", line)
+        if reshaped:
+            # A metadata-only view preserves the physical address used by MX
+            # binding even when the producer and consumer use distinct SSAs.
+            aliases[reshaped.group(1)] = reshaped.group(2)
+        if "iter_args(" in line:
+            # The carried regression below self-yields these handles unchanged.
+            # Canonicalize its descriptor names to the initial resident tiles.
+            aliases.update(re.findall(r"(%[\w.$-]+)\s*=\s*(%[\w.$-]+)", line))
+
+    def canonical(value: str) -> str:
+        seen = set()
+        while value in aliases:
+            assert value not in seen, "cyclic loop descriptor aliases in generated PTO"
+            seen.add(value)
+            value = aliases[value]
+        return value
+
+    pairs: dict[str, set[str]] = {}
+    for line in lines:
+        if "pto.tmatmul.mx" not in line:
+            continue
+        operands = line.split("ins(", 1)[1].split(":", 1)[0].split(",")
+        operands = [operand.strip() for operand in operands]
+        if "pto.tmatmul.mx.acc" in line:
+            operands = operands[1:]
+        for data, scale in ((operands[0], operands[1]), (operands[2], operands[3])):
+            pairs.setdefault(canonical(scale), set()).add(canonical(data))
+
+    first_loop = next(i for i, line in enumerate(lines) if "scf.for" in line)
+    bindings: dict[str, tuple[str, int]] = {}
+    fills = []
+    for i, line in enumerate(lines):
+        if "pto.tget_scale_addr" in line:
+            data = line.split("ins(", 1)[1].split(":", 1)[0].strip()
+            scale = line.split("outs(", 1)[1].split(":", 1)[0].strip()
+            bindings[canonical(scale)] = (canonical(data), i)
+        elif "pto.tmov" in line:
+            destination = line.split("outs(", 1)[1]
+            if "loc=scaling" not in destination:
+                continue
+            scale = canonical(destination.split(":", 1)[0].strip())
+            assert i < first_loop, f"regression fixture must fill {scale} outside the loop"
+            assert scale in bindings, f"{scale} is filled before its inferred address is bound:\n{line}"
+            data, binding_line = bindings[scale]
+            assert pairs[scale] == {data}, f"{scale} was bound to the wrong resident data tile"
+            assert binding_line < i
+            fills.append(scale)
+    assert len(fills) == expected_fills
 
 
 class TestMxMatmulCodegen:
@@ -407,10 +479,523 @@ class TestMxMatmulCodegen:
         assert "strides = [%c256_index, %c32_index, %c32_index, %c2_index, %c1_index]" in mx_a_view
         assert "shape = [%c1_index, %c4_index, %c1_index, %c16_index, %c2_index]" in mx_b_view
         assert "strides = [%c128_index, %c32_index, %c32_index, %c2_index, %c1_index]" in mx_b_view
-        # Mat→scale fill stays source-order; PTOAS later reorders bind-before-fill.
+        # This straight-line case remains eligible for PTOAS's same-block
+        # normalization. Cross-scope fills must be prebound by PyPTO itself.
         lines = mlir.splitlines()
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    @pytest.mark.parametrize("conditional", [False, True], ids=["loop", "conditional-loop"])
+    def test_resident_mx_scale_bindings_precede_outer_fills(
+        self, tmp_path, planner, enable_buffer_ir, conditional
+    ):
+        """Resident Left/Right scales must be filled at their eventual MX addresses."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[128, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[4, 32], pl.FP8E8M0, pl.MX_B_NN],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ):
+                lhs0 = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                ls0 = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                lhs1 = pl.move(pl.load(a, [16, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                ls1 = pl.move(pl.load(sa, [16, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs0 = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs0 = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                rhs1 = pl.move(pl.load(b, [64, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs1 = pl.move(pl.load(sb, [2, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    if conditional:
+                        if flag > 0:
+                            dot0 = pl.matmul_mx(lhs0, ls0, rhs0, rs0)
+                            out = pl.store(dot0, [panel * 32, 0], out)
+                            dot1 = pl.matmul_mx(lhs1, ls1, rhs1, rs1)
+                            out = pl.store(dot1, [panel * 32 + 16, 0], out)
+                    else:
+                        dot0 = pl.matmul_mx(lhs0, ls0, rhs0, rs0)
+                        out = pl.store(dot0, [panel * 32, 0], out)
+                        dot1 = pl.matmul_mx(lhs1, ls1, rhs1, rs1)
+                        out = pl.store(dot1, [panel * 32 + 16, 0], out)
+                return out
+
+        mlir = _emit_incore_mlir(Program, planner=planner, enable_buffer_ir=enable_buffer_ir)
+        # Two pairs on each side prevent offset zero from accidentally hiding
+        # the resident scale's missing derived-address binding.
+        _assert_outer_scale_fills_are_prebound(mlir)
+        if conditional:
+            assert "scf.if" in mlir
+        if find_ptoas_binary() is not None:
+            # Assembly must also accept the producer prebinding plus original
+            # consumer bindings; checking PTO order alone would miss a later
+            # normalization rejection from repeated scale bindings.
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path), planner)
+            assert "TMATMUL_MX(" in cpp
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_loop_carried_resident_mx_scale_bindings_precede_initial_fills(self, enable_buffer_ir):
+        """An invariant descriptor carry still names its outer resident producer."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                ls = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel, (lhs_i, ls_i) in pl.range(2, init_values=(lhs, ls)):
+                    dot = pl.matmul_mx(lhs_i, ls_i, rhs, rs)
+                    pl.store(dot, [panel * 16, 0], out)
+                    _lhs_out, _ls_out = pl.yield_(lhs_i, ls_i)
+                return out
+
+        mlir = _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+        _assert_outer_scale_fills_are_prebound(mlir, expected_fills=2)
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_cross_scope_scale_binding_preserves_consumer_valid_shape(self, tmp_path, enable_buffer_ir):
+        """A dominating data allocation can have wider metadata than its MX alias."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                lhs_root = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                # Only eight rows are valid in the paired scale. The consumer
+                # narrows the data view to match, without changing its address.
+                ls = pl.move(
+                    pl.load(sa, [0, 0], [16, 2], valid_shape=[8, 2], target_memory=pl.Mem.Mat),
+                    pl.Mem.LeftScale,
+                )
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    lhs_view = pl.set_validshape(lhs_root, 8, 64)
+                    dot = pl.matmul_mx(lhs_view, ls, rhs, rs)
+                    out = pl.store(dot, [panel * 16, 0], out)
+                return out
+
+        mlir = _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+        _assert_outer_scale_fills_are_prebound(mlir, expected_fills=2)
+        assert "pto.set_validshape" in mlir
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            assert "TMATMUL_MX(" in cpp
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_cross_scope_scale_binding_preserves_both_metadata_aliases(self, tmp_path, enable_buffer_ir):
+        """Producer geometry stays valid when both MX consumer views are narrower."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                lhs_root = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                ls_root = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    # The outer fill is valid for all sixteen rows. Reusing
+                    # the first consumer's narrower metadata for that producer
+                    # would incorrectly reject the early address binding.
+                    lhs_view = pl.set_validshape(lhs_root, 8, 64)
+                    ls_view = pl.set_validshape(ls_root, 8, 2)
+                    dot = pl.matmul_mx(lhs_view, ls_view, rhs, rs)
+                    out = pl.store(dot, [panel * 16, 0], out)
+                return out
+
+        mlir = _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+        _assert_outer_scale_fills_are_prebound(mlir, expected_fills=2)
+        assert mlir.count("pto.set_validshape") >= 2
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            assert "TMATMUL_MX(" in cpp
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_cross_scope_scale_with_multiple_data_pairs_is_rejected(self, enable_buffer_ir):
+        """One outer fill cannot populate distinct data-derived scale addresses."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ):
+                lhs0 = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                lhs1 = pl.move(pl.load(a, [16, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                ls = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    dot0 = pl.matmul_mx(lhs0, ls, rhs, rs)
+                    out = pl.store(dot0, [panel * 32, 0], out)
+                    dot1 = pl.matmul_mx(lhs1, ls, rhs, rs)
+                    out = pl.store(dot1, [panel * 32 + 16, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="MX scale cross-scope fill requires a unique paired data tile"):
+            _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_nested_changing_scale_carry_is_rejected(self, enable_buffer_ir):
+        """Nested changing carries must still trace back to the unsafe outer fill."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ):
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                initial_scale = pl.move(
+                    pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale
+                )
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for outer, (outer_scale,) in pl.range(2, init_values=(initial_scale,)):
+                    for inner, (inner_scale,) in pl.range(2, init_values=(outer_scale,)):
+                        dot = pl.matmul_mx(lhs, inner_scale, rhs, rs)
+                        pl.store(dot, [(outer * 2 + inner) * 16, 0], out)
+                        # Both carries change: a one-hop search stops at the
+                        # outer IterArg instead of finding initial_scale.
+                        replacement_scale = pl.move(
+                            pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale
+                        )
+                        inner_result = pl.yield_(replacement_scale)
+                    _outer_result = pl.yield_(inner_result)
+                return out
+
+        with pytest.raises(ValueError, match="MX scale cross-scope fill requires a unique paired data tile"):
+            _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_cross_scope_scale_with_inner_data_is_rejected(self, enable_buffer_ir):
+        """Binding an outer fill must not refer to a later inner-loop tile handle."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                ls = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    lhs = pl.move(
+                        pl.load(a, [panel * 16, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left
+                    )
+                    dot = pl.matmul_mx(lhs, ls, rhs, rs)
+                    out = pl.store(dot, [panel * 16, 0], out)
+                return out
+
+        with pytest.raises(
+            ValueError, match="MX scale cross-scope fill requires its paired data tile to dominate the fill"
+        ):
+            _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+
+    @pytest.mark.parametrize("dtype", [pl.FP4E2M1X2, pl.FP4E1M2X2])
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_resident_packed_fp4_scale_validity_uses_carrier_units(self, tmp_path, dtype, enable_buffer_ir):
+        """Logical scale M/N must not double the packed Left/Right carrier extents."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 32], dtype],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], dtype],
+                sb: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ):
+                # 32 logical rows give a complete 16-row packed Mat box.
+                lhs = pl.move(pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                rhs_mat = pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+                rhs = pl.move(pl.tile.transpose_view(rhs_mat), pl.Mem.Right)
+                ls = pl.move(pl.load(sa, [0, 0], [32, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 64], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, ls, rhs, rs), [panel * 32, 0], out)
+                return out
+
+        mlir = _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+        _assert_outer_scale_fills_are_prebound(mlir, expected_fills=2)
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            assert "TMATMUL_MX(" in cpp
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_resident_scale_binding_accepts_dominating_data_slices(self, enable_buffer_ir):
+        """A slice declared before a fill dominates it, and its offset belongs in the binding."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ):
+                lhs_root = pl.move(pl.load(a, [0, 0], [64, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                lhs = pl.tile.slice(lhs_root, [32, 64], [32, 0])
+                rhs_root = pl.move(pl.load(b, [0, 0], [64, 64], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rhs = pl.tile.slice(rhs_root, [64, 32], [0, 0])
+                ls = pl.move(
+                    pl.load(sa, [0, 0], [32, 2], target_memory=pl.Mem.Mat),
+                    pl.Mem.LeftScale,
+                )
+                rs = pl.move(
+                    pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
+                    pl.Mem.RightScale,
+                )
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, ls, rhs, rs), [panel * 32, 0], out)
+                return out
+
+        # The PTOAS planner retains these as actual view handles; the addressed
+        # planner can fold slices into allocations and no longer isolates the
+        # missing view-declaration registration.
+        planner = passes.MemoryPlanner.PTOAS
+        mlir = _emit_incore_mlir(Program, planner=planner, enable_buffer_ir=enable_buffer_ir)
+        _assert_outer_scale_fills_are_prebound(mlir, expected_fills=2)
+        assert "pto.subview" in mlir
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_resident_scale_binding_rejects_later_data_reshape(self, enable_buffer_ir):
+        """A shared allocation does not make a later reshape descriptor available."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP8E4M3FN],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ):
+                lhs_root = pl.move(pl.load(a, [0, 0], [16, 128], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                ls = pl.move(pl.load(sa, [0, 0], [32, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                lhs = pl.tile.reshape(lhs_root, [32, 64])
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, ls, rhs, rs), [panel * 32, 0], out)
+                return out
+
+        with pytest.raises(
+            ValueError, match="MX scale cross-scope fill requires its paired data tile to dominate the fill"
+        ):
+            _emit_incore_mlir(Program, planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=enable_buffer_ir)
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_resident_scale_binding_accepts_dominating_data_reshape(self, enable_buffer_ir):
+        """Bind the emitted reshape descriptor, with its own rows, before filling scales."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP8E4M3FN],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ):
+                lhs_root = pl.move(pl.load(a, [0, 0], [16, 128], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                lhs = pl.tile.reshape(lhs_root, [32, 64])
+                ls = pl.move(pl.load(sa, [0, 0], [32, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, ls, rhs, rs), [panel * 32, 0], out)
+                return out
+
+        mlir = _emit_incore_mlir(
+            Program, planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=enable_buffer_ir
+        )
+        _assert_outer_scale_fills_are_prebound(mlir, expected_fills=2)
+        # Do not canonicalize reshape aliases here: the base has 16 rows, while
+        # this scale needs the actual 32-row consumer descriptor.
+        reshape = re.search(r"(%[\w.$-]+)\s*=\s*pto\.treshape[^\n]*loc=left[^\n]*rows=32, cols=64", mlir)
+        assert reshape is not None
+        binding = re.search(
+            rf"pto\.tget_scale_addr ins\({re.escape(reshape.group(1))}\s*:[^\n]*outs\((%[\w.$-]+)",
+            mlir,
+        )
+        assert binding is not None
+        fill = re.search(rf"pto\.tmov[^\n]*outs\({re.escape(binding.group(1))}\s*:", mlir)
+        assert fill is not None
+        assert reshape.start() < binding.start() < fill.start() < mlir.index("scf.for")
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_branch_returned_scale_requires_a_proven_binding(self, enable_buffer_ir):
+        """A phi must not hide both branch fills from the cross-region safety check."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                scale_mat0 = pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat)
+                scale_mat1 = pl.load(sa, [16, 0], [16, 2], target_memory=pl.Mem.Mat)
+                if flag > 0:
+                    ls = pl.move(scale_mat0, pl.Mem.LeftScale)
+                else:
+                    ls = pl.move(scale_mat1, pl.Mem.LeftScale)
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, ls, rhs, rs), [panel * 16, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="MX scale bindings through branch or changing loop results"):
+            # PTOAS retains the branch-result descriptors instead of applying
+            # the legacy MemoryReuse branch-phi coalescing first.
+            _emit_incore_mlir(Program, planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=enable_buffer_ir)
+
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer-fallback"])
+    def test_changing_loop_scale_result_requires_a_proven_binding(self, enable_buffer_ir):
+        """A post-loop consumer must not lose the provenance of its replacement scale fill."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ):
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                initial = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for _panel, (_carried,) in pl.range(2, init_values=(initial,)):
+                    replacement = pl.move(
+                        pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale
+                    )
+                    result = pl.yield_(replacement)
+                out = pl.store(pl.matmul_mx(lhs, result, rhs, rs), [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="MX scale bindings through branch or changing loop results"):
+            _emit_incore_mlir(Program, enable_buffer_ir=enable_buffer_ir)
+
+    def test_cross_scope_scale_subview_requires_a_consumer_scope_fill(self):
+        """A scale subview cannot silently lose the root fill's address provenance."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                scale_root = pl.move(pl.load(sa, [0, 0], [32, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                ls = pl.tile.slice(scale_root, [16, 2], [16, 0])
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, ls, rhs, rs), [panel * 16, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="MX scale views consumed across a loop or branch"):
+            _emit_incore_mlir(Program, planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False)
+
+    def test_cross_scope_reinterpret_scale_view_requires_a_consumer_scope_fill(self):
+        """Zero-copy dtype views must retain the resident fill's provenance."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                sa: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                sb: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), pl.Mem.Left)
+                scale_root = pl.move(pl.load(sa, [0, 0], [16, 2], target_memory=pl.Mem.Mat), pl.Mem.LeftScale)
+                scale_bytes = pl.tile.reinterpret_view(scale_root, pl.UINT8)
+                scale_view = pl.tile.reinterpret_view(scale_bytes, pl.FP8E8M0)
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+                rs = pl.move(pl.load(sb, [0, 0], [2, 32], target_memory=pl.Mem.Mat), pl.Mem.RightScale)
+                for panel in pl.range(2):
+                    out = pl.store(pl.matmul_mx(lhs, scale_view, rhs, rs), [panel * 16, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="MX scale views consumed across a loop or branch"):
+            _emit_incore_mlir(Program, planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False)
 
     def test_nd_backing_alias_only_emits_physical_rank5_mx_views(self):
         @pl.program

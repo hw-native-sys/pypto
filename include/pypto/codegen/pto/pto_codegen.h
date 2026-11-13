@@ -987,6 +987,12 @@ class PTOCodegen : public CodegenBase {
    */
   void GenerateFunction(const ir::FunctionPtr& func);
 
+  /// Index cross-region scale fills once; consumer bindings remain unchanged.
+  void IndexMxScaleFillBindings(const ir::FunctionPtr& func);
+  /// A destination handle exists here even though the functional IR producer
+  /// has not executed yet. Bind its address before the first scale write.
+  void EmitMxScaleFillBinding(const ir::CallPtr& call, const ir::VarPtr& destination);
+
   // Experimental direct emission for explicitly constructed Buffer IR. This
   // path never enters Tile/MemRef allocation or handle discovery.
   static bool UsesBufferIR(const ir::FunctionPtr& func);
@@ -1203,6 +1209,10 @@ class PTOCodegen : public CodegenBase {
     /// RegScope pre-scanning uses this provenance when an external alias is
     /// defined before the scope and therefore is outside its statement tree.
     std::map<const ir::Var*, ir::VarPtr> tile_aliases;
+    /// Scale producer -> (unique physical data, validated consumer descriptor,
+    /// crosses a region). Null data marks an ambiguous pairing. Keep metadata
+    /// separate: a set_validshape alias can narrow validity without moving data.
+    std::map<const ir::Var*, std::tuple<ir::VarPtr, ir::TileTypePtr, bool>> mx_scale_fill_bindings;
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
         memref_to_tile_type;  ///< keyed by base_ Ptr
 
@@ -1279,11 +1289,15 @@ class PTOCodegen : public CodegenBase {
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
-    /// Declaration region for each emitted/staged alloc. Region 0 is the
+    /// Declaration region for each emitted/staged alloc or view. Region 0 is the
     /// function body/head; every SCF region gets a unique ID, including sibling
     /// branches at the same nesting depth. Only active ancestor regions dominate
     /// the current emission point. Keep this separate from function-wide dedup.
     std::map<std::string, size_t> tile_alloc_scope;
+    /// Actual descriptor definitions, distinct from preassigned storage handles.
+    /// In PTOAS mode an unvisited view can share an already allocated base handle;
+    /// only its completed defining statement makes the view descriptor available.
+    std::map<const ir::Var*, size_t> tile_descriptor_scope;
     std::vector<size_t> tile_alloc_scope_stack{0};
     std::set<size_t> active_tile_alloc_scopes{0};
     size_t next_tile_alloc_scope = 0;
@@ -1354,6 +1368,7 @@ class PTOCodegen : public CodegenBase {
       memref_to_mlir.clear();
       var_to_memref.clear();
       tile_aliases.clear();
+      mx_scale_fill_bindings.clear();
       memref_to_tile_type.clear();
 
       emitted_numeric_constants.clear();
@@ -1376,6 +1391,7 @@ class PTOCodegen : public CodegenBase {
       memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
       tile_alloc_scope.clear();
+      tile_descriptor_scope.clear();
       tile_alloc_scope_stack = {0};
       active_tile_alloc_scopes = {0};
       next_tile_alloc_scope = 0;

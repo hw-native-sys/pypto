@@ -53,7 +53,24 @@ SOURCE_SUFFIXES = frozenset({".cpp", ".cc", ".h", ".hpp"})
 
 # Sites that are genuinely user-facing despite matching a rule. Each entry is
 # "<repo-relative path>:<line>" and needs a comment saying why the user can actually reach it.
-ALLOWLIST: frozenset[str] = frozenset()
+ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # A user can reuse one outer MX scale with different data tiles or
+        # changing loop carries. This is an unsupported cross-scope binding
+        # pattern, not an argument-count invariant.
+        "src/codegen/pto/pto_codegen.cpp:3098",
+        # A user can prepare a scale outside a loop/branch whose paired data
+        # is defined inside it or is a later view of an already allocated base;
+        # the paired descriptor cannot dominate the early fill.
+        "src/codegen/pto/pto_codegen.cpp:3110",
+        # A metadata alias can require a descriptor view, but early binding
+        # currently supports only identical unpacked physical data storage.
+        "src/codegen/pto/pto_codegen.cpp:3158",
+        # A user can give an outer scale dynamic valid dimensions; early
+        # metadata views currently require static producer validity.
+        "src/codegen/pto/pto_codegen.cpp:3165",
+    }
+)
 
 # ``CHECK(`` / ``CHECK_SPAN(`` but never ``INTERNAL_CHECK(`` / ``INTERNAL_CHECK_SPAN(``.
 _MACRO_RE = re.compile(r"(?<![A-Za-z0-9_])(CHECK|CHECK_SPAN)\s*\(")

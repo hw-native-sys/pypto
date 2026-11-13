@@ -381,5 +381,152 @@ def test_native_fp4_matmul_mx(case_run):
     case_run.assert_passed()
 
 
+def _resident_lhs_scale_entry(resident: bool):
+    @pl.jit(auto_scope=False)
+    def entry(
+        a: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+        a_scale: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+        b_scale: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+    ):
+        with pl.spmd(1):
+            row = pl.tile.get_block_idx() * 64
+            lhs0 = pl.move(pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left)
+            lhs1 = pl.move(pl.load(a, [16, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left)
+            sa0 = pl.load(a_scale, [0, 0], [16, 2], target_memory=pl.Mem.Mat)
+            sa1 = pl.load(a_scale, [16, 0], [16, 2], target_memory=pl.Mem.Mat)
+            if resident:
+                lhs_scale0 = pl.move(sa0, target_memory=pl.Mem.LeftScale)
+                lhs_scale1 = pl.move(sa1, target_memory=pl.Mem.LeftScale)
+            for panel in pl.range(2):
+                rhs = pl.move(
+                    pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right
+                )
+                rhs_scale = pl.move(
+                    pl.load(b_scale, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.RightScale,
+                )
+                if not resident:
+                    lhs_scale0 = pl.move(sa0, target_memory=pl.Mem.LeftScale)
+                    lhs_scale1 = pl.move(sa1, target_memory=pl.Mem.LeftScale)
+                first = pl.matmul_mx(lhs0, lhs_scale0, rhs, rhs_scale)
+                out = pl.store(first, [row + panel * 32, 0], out)
+                second = pl.matmul_mx(lhs1, lhs_scale1, rhs, rhs_scale)
+                out = pl.store(second, [row + panel * 32 + 16, 0], out)
+        return out
+
+    return entry
+
+
+def _resident_rhs_scale_entry(resident: bool):
+    @pl.jit(auto_scope=False)
+    def entry(
+        a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+        a_scale: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+        b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+        b_scale: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+    ):
+        with pl.spmd(1):
+            row = pl.tile.get_block_idx() * 32
+            rhs0 = pl.move(pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right)
+            rhs1 = pl.move(
+                pl.load(b, [0, 32], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right
+            )
+            sb0 = pl.load(b_scale, [0, 0], [2, 32], target_memory=pl.Mem.Mat)
+            sb1 = pl.load(b_scale, [0, 32], [2, 32], target_memory=pl.Mem.Mat)
+            if resident:
+                rhs_scale0 = pl.move(sb0, target_memory=pl.Mem.RightScale)
+                rhs_scale1 = pl.move(sb1, target_memory=pl.Mem.RightScale)
+            for panel in pl.range(2):
+                lhs = pl.move(
+                    pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left
+                )
+                lhs_scale = pl.move(
+                    pl.load(a_scale, [0, 0], [16, 2], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.LeftScale,
+                )
+                if not resident:
+                    rhs_scale0 = pl.move(sb0, target_memory=pl.Mem.RightScale)
+                    rhs_scale1 = pl.move(sb1, target_memory=pl.Mem.RightScale)
+                first = pl.matmul_mx(lhs, lhs_scale, rhs0, rhs_scale0)
+                out = pl.store(first, [row + panel * 16, 0], out)
+                second = pl.matmul_mx(lhs, lhs_scale, rhs1, rhs_scale1)
+                out = pl.store(second, [row + panel * 16, 32], out)
+        return out
+
+    return entry
+
+
+def _resident_scale_specs(side: str) -> list[TensorSpec]:
+    a_shape, b_shape, out_shape = (
+        ((32, 64), (64, 32), (64, 32)) if side == "left" else ((16, 64), (64, 64), (32, 64))
+    )
+    a = torch.ones(a_shape, dtype=torch.float32).to(torch.float8_e4m3fn)
+    b = torch.ones(b_shape, dtype=torch.float32).to(torch.float8_e4m3fn)
+    sa = torch.full((a_shape[0], 2), 127, dtype=torch.uint8)
+    sb = torch.full((2, b_shape[1]), 127, dtype=torch.uint8)
+    # Different exact powers of two expose a second resident operand reading
+    # a provisional scale offset instead of its nonzero paired address.
+    if side == "left":
+        sa[:16] = 128
+        sa[16:] = 126
+    else:
+        sb[:, :32] = 128
+        sb[:, 32:] = 126
+    return [
+        TensorSpec("a", list(a_shape), DataType.FP8E4M3FN, init_value=a),
+        TensorSpec(
+            "a_scale",
+            list(sa.shape),
+            DataType.FP8E8M0,
+            init_value=_pack_a_scale(sa).view(torch.float8_e8m0fnu),
+        ),
+        TensorSpec("b", list(b_shape), DataType.FP8E4M3FN, init_value=b),
+        TensorSpec(
+            "b_scale",
+            list(sb.shape),
+            DataType.FP8E8M0,
+            init_value=_pack_b_scale(sb).view(torch.float8_e8m0fnu),
+        ),
+        TensorSpec("out", list(out_shape), DataType.FP32, is_output=True),
+    ]
+
+
+def _resident_scale_golden(side: str):
+    def golden(_tensors):
+        # K=64 with unit FP8 payloads and unit opposite-side scales. The two
+        # resident scale codes are 128 (2) and 126 (0.5), hence 128 and 32.
+        if side == "left":
+            panel = torch.cat((torch.full((16, 32), 128.0), torch.full((16, 32), 32.0)))
+            output = torch.cat((panel, panel))
+        else:
+            output = torch.cat((torch.full((32, 32), 128.0), torch.full((32, 32), 32.0)), dim=1)
+        return {"out": output}
+
+    return golden
+
+
+@pytest.mark.platforms("a5")
+@st.cases(
+    *[
+        st.case(
+            (_resident_lhs_scale_entry if side == "left" else _resident_rhs_scale_entry)(resident),
+            tensors=_resident_scale_specs(side),
+            name=f"mx_scale_{side}_{'resident' if resident else 'per_panel_control'}",
+            golden=_resident_scale_golden(side),
+            rtol=0.0,
+            atol=0.0,
+        )
+        for side in ("left", "right")
+        for resident in (True, False)
+    ]
+)
+def test_resident_mx_scale_fill_before_loop(case_run):
+    """Check resident scale contents across panel loops and same-block controls."""
+    case_run.assert_passed()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--platform", "a5"])

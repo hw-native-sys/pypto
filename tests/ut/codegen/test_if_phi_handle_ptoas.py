@@ -206,6 +206,49 @@ def test_dynamic_valid_matmul_if_phi_restores_shape_at_lexical_site(planner):
     )
 
 
+def test_dynamic_valid_shared_subview_if_phi_preserves_its_descriptor():
+    """A pass-through phi must preserve the subview's existing runtime validity."""
+
+    @pl.program
+    class SharedSubviewProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP32],
+            valid_rows: pl.Scalar[pl.INDEX],
+            valid_cols: pl.Scalar[pl.INDEX],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+        ) -> pl.Tensor[[8, 64], pl.FP32]:
+            root = pl.load(x, [0, 0], [16, 32])
+            # Different physical shapes make this shared MemRef mixed-type.
+            reshaped = pl.tile.reshape(root, [8, 64])
+            view = pl.tile.slice(reshaped, [8, 64], [0, 0], valid_shape=[valid_rows, valid_cols])
+            # Yield the existing view directly, without branch-local aliases.
+            if flag == 0:
+                result = pl.yield_(view)
+            else:
+                result = pl.yield_(view)
+            return pl.store(result, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SharedSubviewProgram)
+    func = next(f for f in optimized.functions.values() if f.name == "kernel")
+    mlir = codegen.PTOCodegen().generate(_ir.Program([func], "kernel", optimized.span), emit_tile_addr=False)
+    subview = _sole_line(mlir, "pto.subview")
+    view_handle = _first_group(r"(%[A-Za-z0-9_]+) = pto\.subview", subview)
+    assert "valid [" in subview and "v_row=?, v_col=?" in subview, mlir
+    assert mlir.index("pto.subview") < mlir.index("scf.if"), mlir
+    assert _ins_of(_sole_line(mlir, "pto.tstore")) == view_handle, mlir
+    assert f"{view_handle} = pto.alloc_tile" not in mlir, mlir
+    # The subview's valid operands already establish both runtime extents.
+    # Unlike an allocation-backed phi, this handle cannot be shape-mutated.
+    assert f"pto.set_validshape {view_handle}," not in mlir, mlir
+    assert "pto.tmov" not in mlir, mlir
+
+
 @pl.program
 class LoopCarriedIfPhiProgram:
     """A `pl.range` accumulator whose per-iteration update is an if/else. The loop
