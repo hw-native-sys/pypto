@@ -132,6 +132,12 @@ the INT32 carrier as 32 unsigned bits; the IR type remains INT32, so ordinary
 arithmetic and comparisons on that result are still signed. This flag does not
 enable UINT32 storage or general unsigned arithmetic.
 
+The text parser treats positional and keyword scalar operands identically.
+Evaluated numeric attributes such as `math.pi`, `math.inf`, and `-math.inf`
+become typed IR constants, just like numeric literals and closure names.
+Printing and reparsing raw IR preserves omitted conversion attributes; their
+defaults apply during lowering without adding attributes to the parsed IR.
+
 For `prmt`, each low selector nibble controls one result byte, from least to
 most significant. Its low three bits select bytes 0–3 of `y` or 4–7 of `x` (the
 right operand supplies the low bytes of the combined source). Nibble bit 3 and

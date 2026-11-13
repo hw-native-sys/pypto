@@ -490,5 +490,36 @@ def test_bisheng_memory_annotations_preserve_other_llvm_text(effect):
     assert prepare_llvm_for_bisheng(text) == expected
 
 
+def test_bisheng_removes_empty_attribute_groups_and_references():
+    from pypto.runtime._vpto import prepare_llvm_for_bisheng  # noqa: PLC0415
+
+    # Declarations, definitions and call sites may all reference the same group.
+    # Group #10, quoted #1 text, and comments must survive removal of group #1.
+    text = (
+        "; keep #1 and #2 in comments\n"
+        "declare void @callee() #1 #10\n"
+        "define void @caller() #2 {\n"
+        "  call void @callee() #1 ; keep #1 here too\n"
+        "  ret void\n"
+        "}\n"
+        "attributes #1 = { memory(none) }\n"
+        "attributes #2 = { memory(read) }\n"
+        'attributes #10 = { nounwind memory(write) "note"="#1" }\n'
+    )
+    expected = (
+        "; keep #1 and #2 in comments\n"
+        "declare void @callee()  #10\n"
+        "define void @caller()  {\n"
+        "  call void @callee()  ; keep #1 here too\n"
+        "  ret void\n"
+        "}\n"
+        "\n"
+        "\n"
+        'attributes #10 = { nounwind "note"="#1" }\n'
+    )
+    assert prepare_llvm_for_bisheng(text) == expected
+    assert prepare_llvm_for_bisheng(expected) == expected
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

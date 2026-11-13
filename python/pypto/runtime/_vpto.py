@@ -53,14 +53,35 @@ def prepare_llvm_for_bisheng(text: str) -> str:
     preserve instructions, other attributes and quoted attribute values.
     """
 
+    empty_groups: set[str] = set()
+
     def clean_group(group: re.Match[str]) -> str:
-        return re.sub(
+        body = re.sub(
             r'"(?:[^"\\]|\\.)*"|\bmemory\([^()\n]*\) *',
             lambda token: token[0] if token[0].startswith('"') else "",
-            group[0],
+            group["body"],
         )
+        if not body.strip():
+            empty_groups.add(group["number"])
+            return ""
+        return f"attributes #{group['number']} = {{{body}}}"
 
-    return re.sub(r"^attributes #[0-9]+ = \{[^\n]*\}$", clean_group, text, flags=re.MULTILINE)
+    text = re.sub(
+        r"^attributes #(?P<number>[0-9]+) = \{(?P<body>[^\n]*)\}$",
+        clean_group,
+        text,
+        flags=re.MULTILINE,
+    )
+    # LLVM rejects empty groups. Remove references only after collecting every
+    # empty group, since declarations and call sites usually precede definitions.
+    # Quoted names/strings and comments are not attribute-group references.
+    if empty_groups:
+        text = re.sub(
+            r'"(?:[^"\\]|\\.)*"|;[^\n]*|#(?P<number>[0-9]+)\b',
+            lambda token: "" if token["number"] in empty_groups else token[0],
+            text,
+        )
+    return text
 
 
 def source_paths(value: object) -> tuple[str, ...]:

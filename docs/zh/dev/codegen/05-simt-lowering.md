@@ -150,3 +150,4 @@ JIT 单元测试 `test_public_math_native_compile` 覆盖原生 LLVM 导出。
 
 LLVM 文本设备编译在调用 CANN Bisheng 前移除其不支持的 LLVM 内存效果属性，
 与 PTOAS 对象文件生成路径一致；保留指令、同步和其他属性。
+若清理后属性组为空，则同时移除该组及其引用，因为 LLVM 不接受空属性组。

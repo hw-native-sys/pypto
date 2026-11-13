@@ -106,6 +106,17 @@ class OpParser:
             "mulhi",
             "ftoi",
             "itof",
+        }:
+            return self.dispatch_op(
+                _dsl_simt,
+                "pl.simt",
+                name,
+                call,
+                expression_args=True,
+                expression_keywords=frozenset({"value", "lhs", "rhs", "acc", "selector"}),
+                preserve_omitted_kwargs=True,
+            )
+        if name in {
             "atomic_add",
             "atomic_min",
             "atomic_max",
@@ -521,13 +532,16 @@ class OpParser:
         assert isinstance(constant, ir.ConstFloat)
         return constant.value
 
-    def parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
+    def parse_op_kwargs(
+        self, call: ast.Call, *, expression_keywords: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
         Shared helper for tensor, tile, system, and unified op parsing.
 
         Args:
             call: Call AST node
+            expression_keywords: Operand names that use positional expression parsing.
 
         Returns:
             Dictionary of keyword argument names to values
@@ -547,7 +561,11 @@ class OpParser:
                 continue
 
             # Handle dtype specially
-            if key == "dtype":
+            if key in expression_keywords:
+                # Operand literals need the same dtype as positional operands;
+                # compile-time attributes still use the value parsing below.
+                kwargs[key] = self.callbacks.expression(value)
+            elif key == "dtype":
                 kwargs[key] = self.services.type_resolver.resolve_dtype(value)
             elif (dumped_float := self.parse_dump_float_arg(value)) is not None:
                 kwargs[key] = dumped_float
@@ -658,7 +676,17 @@ class OpParser:
             return cast("list[Any]", result)
         return self.callbacks.expression(value)
 
-    def dispatch_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
+    def dispatch_op(
+        self,
+        module: Any,
+        module_name: str,
+        op_name: str,
+        call: ast.Call,
+        *,
+        expression_args: bool = False,
+        expression_keywords: frozenset[str] = frozenset(),
+        preserve_omitted_kwargs: bool = False,
+    ) -> ir.Expr:
         """Dispatch an op call to a DSL wrapper module.
 
         The wrapper owns type-checking and dispatch (e.g. ``tile.add`` already
@@ -672,6 +700,9 @@ class OpParser:
             module_name: Human-readable module name for error messages.
             op_name: Name of the operation to look up on the module.
             call: Call AST node.
+            expression_args: Parse all positional operands as typed IR expressions.
+            expression_keywords: Keyword operands parsed as typed IR expressions.
+            preserve_omitted_kwargs: Preserve implicit IR defaults during text round trips.
 
         Returns:
             IR expression from the operation.
@@ -682,13 +713,25 @@ class OpParser:
                 span=self.services.span_tracker.get_span(call),
                 hint=f"Check if '{op_name}' is a valid {module_name} operation",
             )
-        args = [self.parse_op_positional_arg(arg) for arg in call.args]
-        kwargs = self.parse_op_kwargs(call)
+        # SIMT math requires typed scalar operands. Generic wrappers retain
+        # Python numeric values for slots such as full/padding and choose their
+        # own literal dtype, so keep the two argument contracts explicit.
+        parse_arg = self.callbacks.expression if expression_args else self.parse_op_positional_arg
+        args = [parse_arg(arg) for arg in call.args]
+        kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
         span = self.services.span_tracker.get_span(call)
         try:
-            return self.attrs.attach_op_attrs(invoke_dsl(op_func, args, kwargs, span), attrs)
+            result = invoke_dsl(op_func, args, kwargs, span)
+            if preserve_omitted_kwargs and isinstance(result, ir.Call):
+                # DSL wrappers materialize conversion defaults, but raw IR may
+                # intentionally omit them. Keep only attributes present in the
+                # source so printing/reparsing preserves structural identity.
+                explicit_kwargs = {key: value for key, value in result.kwargs.items() if key in kwargs}
+                if len(explicit_kwargs) != len(result.kwargs):
+                    result = ir.create_op_call(result.op.name, result.args, explicit_kwargs, span)
+            return self.attrs.attach_op_attrs(result, attrs)
         except ParserError:
             raise
         except BUG_CLASS_EXCEPTIONS:
