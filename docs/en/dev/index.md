@@ -71,11 +71,13 @@ repository write access, can post exactly this comment in the PR conversation:
 The `CI Command` workflow requires an open PR targeting this repository's `main`
 branch and dispatches `CI Full` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
-The full-test base comes from the live `refs/heads/main` ref. GitHub's PR
-`base.sha` can remain behind that ref even after the test merge is current;
-that snapshot is not used to select lint. Lint selection uses the newest automatic
-run for the same PR head whose base remains in live main history. Full dispatch
-still pins and verifies the live merge.
+The full-test base is read from the actual test merge's first parent, not the
+PR's cached `base.sha` or an assumed current main. Its second parent must match
+the current PR head. An existing GitHub merge snapshot may be used when its base
+is an ancestor of live `refs/heads/main` and is **0–4 commits behind**; a snapshot
+5 or more commits behind, rewritten history, or an unknown distance is rejected.
+The dispatch inputs and run title record this actual tested base. Lint selection
+uses the newest automatic run for the same PR head whose base remains in main history.
 Before allowing full CI, the command compares the pinned PR head with live main:
 **0–4 commits behind is allowed; 5 or more is rejected**. Only commits present on
 main but missing from the PR count; the PR's own commits do not. A rejected
@@ -83,13 +85,15 @@ comment receives a reply with the count and instructions to rebase onto latest
 main, wait for lint, and post `/ci full` again. The check runs before dispatch or
 writing pending, and full preparation repeats it so manual PR dispatch cannot
 bypass the limit. Automatic lint and main push CI are unaffected.
-When GitHub is still computing the merge or reports merge parents that do not
-match the pinned head and live main revision, the command polls every five seconds within a
-60-second retry window on a GitHub-hosted runner. It keeps the initial head and
-base fixed: a changed revision, closed PR, invalid target or confirmed merge
-conflict stops the request. A conflict requires updating the branch, waiting for
-lint and posting `/ci full` again. API errors and invalid revisions are not treated
-as pending merge computation.
+When GitHub is still computing the merge or its parents do not match the PR
+head, the command polls every five seconds within a 60-second retry window on a
+GitHub-hosted runner. An eligible older-base snapshot is accepted immediately.
+The initial head and live main ref remain fixed during that wait: a changed
+revision, closed PR, invalid target or confirmed conflict stops the request.
+Full preparation verifies the exact pinned merge and base again, including
+mergeability and both distances against live main. Conflicts require updating
+the branch, waiting for lint and posting `/ci full` again. API errors, invalid
+revisions, and ineligible snapshot bases are not retried as merge computation.
 If validation or dispatch fails, a separate job replies in the PR with the
 reason and a link to the command run's logs. Only that job has comment-write
 permission; the admission job remains read-only. The reply is deduplicated for
@@ -241,8 +245,9 @@ cannot hide an existing request from that scan.
 A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances during
 the run, per-job results keep syncing and `ci/full` remains pending until completion.
-A successful result uses the same PR-head freshness limit: 0–4 missing main commits
-is allowed; 5 or more fails with a rebase explanation in the status description.
+A successful result applies the same limit to both the PR head and the actual
+tested base: 0–4 missing main commits is allowed; 5 or more for either fails with
+a rebase explanation in the status description.
 Rewritten main history that no longer contains the tested base also fails.
 Repeated comments preserve an ongoing run for the same head, or a successful result
 that still meets this limit. This check is made at publication time; an already

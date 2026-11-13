@@ -273,7 +273,8 @@ def test_manual_pr_full_cannot_bypass_branch_distance(controller, monkeypatch, p
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     monkeypatch.setenv("GITHUB_SHA", BASE)
     monkeypatch.setattr(controller, "pull", lambda *args: pr)
-    monkeypatch.setattr(controller, "verify_merge", lambda *args: None)
+    monkeypatch.setattr(controller, "verify_merge", lambda *args: BASE)
+    monkeypatch.setattr(controller, "current_base", lambda repo: BASE)
     lint_checks = []
     monkeypatch.setattr(controller, "matching_lint_run", lambda *args: lint_checks.append(True))
 
@@ -293,10 +294,14 @@ def test_manual_pr_full_cannot_bypass_branch_distance(controller, monkeypatch, p
         assert not output_file.exists() and not lint_checks
 
 
-def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, event, pr, tmp_path):
-    # Reproduce #3400: PR REST/GraphQL retain the lint-time base indefinitely,
-    # while the synthetic merge already uses live main. Keep both identities.
+@pytest.mark.parametrize("snapshot_behind", [0, 1, 4])
+def test_stale_pr_base_allows_pinned_full_lifecycle(
+    controller, monkeypatch, event, pr, tmp_path, snapshot_behind
+):
+    # PR metadata and the actual merge may both lag live main, as in #3400.
+    # Keep the actual merge parents rather than relabelling the tested base.
     stale = "d" * 40
+    tested = stale if snapshot_behind else BASE
     pr["base"]["sha"] = stale
     output_file = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
@@ -308,7 +313,7 @@ def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, eve
         "id": 50,
         "run_attempt": 1,
         "run_number": 8,
-        "display_title": f"CI full PR #123 @{HEAD} base:{BASE}",
+        "display_title": f"CI full PR #123 @{HEAD} base:{tested}",
         "created_at": "2026-11-05T01:00:00Z",
         "event": "workflow_dispatch",
         "path": controller.WORKFLOW,
@@ -338,8 +343,11 @@ def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, eve
             "object": {"type": "commit", "sha": BASE},
         },
         f"repos/{REPO}/compare/{BASE}...{HEAD}": {"behind_by": 4, "ahead_by": 20},
-        f"repos/{REPO}/compare/{stale}...{BASE}": {"merge_base_commit": {"sha": stale}},
-        f"repos/{REPO}/git/commits/{MERGE}": {"parents": [{"sha": BASE}, {"sha": HEAD}]},
+        f"repos/{REPO}/compare/{stale}...{BASE}": {
+            "merge_base_commit": {"sha": stale},
+            "ahead_by": snapshot_behind,
+        },
+        f"repos/{REPO}/git/commits/{MERGE}": {"parents": [{"sha": tested}, {"sha": HEAD}]},
         f"repos/{REPO}/actions/workflows/ci.yml": {"id": 98},
         f"repos/{REPO}/actions/workflows/ci-full.yml": {"id": 99},
         f"repos/{REPO}/actions/workflows/ci.yml/runs": {"workflow_runs": [lint]},
@@ -378,7 +386,7 @@ def test_stale_pr_base_allows_pinned_full_lifecycle(controller, monkeypatch, eve
     assert inputs == {
         "pr_number": "123",
         "head_sha": HEAD,
-        "base_sha": BASE,
+        "base_sha": tested,
         "merge_sha": MERGE,
         "request_id": "900-1",
     }
@@ -396,6 +404,63 @@ def test_changed_pr_rejected_before_checkout(control, pr):
     pr["head"]["sha"] = "d" * 40
     with pytest.raises(ValueError, match="PR changed"):
         control.verify_merge(REPO, pr, HEAD, BASE, MERGE)
+
+
+@pytest.mark.parametrize("behind", [None, -1, True, "4", 4.5, 5, 8])
+@pytest.mark.parametrize("stage", ["admission", "prepare", "result"])
+def test_old_or_unknown_snapshot_cannot_pass_with_a_fresh_head(
+    controller, monkeypatch, pr, event, tmp_path, behind, stage
+):
+    live = "d" * 40
+    monkeypatch.setattr(controller, "current_base", lambda repo: live)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_SHA", live)
+    output_file = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    monkeypatch.setattr(controller.time, "sleep", lambda *a: pytest.fail("Reject without polling"))
+
+    def api(path, payload=None):
+        assert payload is None, "Snapshot rejection must precede status writes and dispatch"
+        if path.endswith("/pulls/123"):
+            return pr
+        if path.endswith(f"/git/commits/{MERGE}"):
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
+        if path == f"repos/{REPO}/compare/{live}...{HEAD}?per_page=1":
+            return {"behind_by": 0}
+        assert path == f"repos/{REPO}/compare/{BASE}...{live}?per_page=1"
+        return {"merge_base_commit": {"sha": BASE}, "ahead_by": behind}
+
+    monkeypatch.setattr(controller, "api", api)
+    with pytest.raises(ValueError, match="tested base|Tested base"):
+        if stage == "admission":
+            controller.dispatch(REPO, event)
+        elif stage == "prepare":
+            controller.prepare(
+                REPO, {"inputs": {"pr_number": "123", "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE}}
+            )
+        else:
+            controller.verify_result_freshness(REPO, HEAD, BASE)
+    assert not output_file.exists()
+
+
+@pytest.mark.parametrize("invalid", ["rewritten", "wrong-head", "wrong-base", "conflict", "unknown"])
+def test_snapshot_reuse_keeps_revision_and_conflict_guards(control, monkeypatch, pr, invalid):
+    live = "d" * 40
+    monkeypatch.setattr(control, "current_base", lambda repo: live)
+    if invalid in {"conflict", "unknown"}:
+        pr["mergeable"] = False if invalid == "conflict" else None
+
+    def api(path):
+        if path.endswith(f"/git/commits/{MERGE}"):
+            return {"parents": [{"sha": BASE}, {"sha": "e" * 40 if invalid == "wrong-head" else HEAD}]}
+        assert path == f"repos/{REPO}/compare/{BASE}...{live}?per_page=1"
+        return {"merge_base_commit": {"sha": "e" * 40}, "ahead_by": 1}
+
+    monkeypatch.setattr(control, "api", api)
+    pinned = live if invalid == "wrong-base" else None
+    with pytest.raises(ValueError):
+        control.verify_merge(REPO, pr, HEAD, pinned, MERGE)
 
 
 @pytest.mark.parametrize("failure", ["", "pending", "dispatch", "bind", "ack", "observer"])
@@ -828,7 +893,7 @@ def test_unavailable_merge_never_dispatches(control, monkeypatch, event, pr, mer
     assert merge_clock == ([] if conflicting is False else [5] * 12)
 
 
-@pytest.mark.parametrize("pending", ["unknown", "missing-merge", "stale-parents"])
+@pytest.mark.parametrize("pending", ["unknown", "missing-merge", "stale-head"])
 def test_command_waits_for_consistent_merge_without_authorizing_another_revision(
     control, monkeypatch, event, pr, merge_clock, pending
 ):
@@ -848,10 +913,9 @@ def test_command_waits_for_consistent_merge_without_authorizing_another_revision
                 current.update(mergeable=True, merge_commit_sha=new_merge)
             return copy.deepcopy(current)
         if path.endswith(f"/git/commits/{MERGE}"):
-            # Reproduce #3321: the PR already names the new base, but the
-            # synthetic merge still has the previous base as its first parent.
-            assert pending == "stale-parents"
-            return {"parents": [{"sha": "e" * 40}, {"sha": HEAD}]}
+            # A previous PR head must still wait for the current test merge.
+            assert pending == "stale-head"
+            return {"parents": [{"sha": BASE}, {"sha": "e" * 40}]}
         assert path.endswith(f"/git/commits/{new_merge}")
         return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
 
@@ -896,7 +960,7 @@ def test_inconsistent_merge_parents_exhaust_wait_without_dispatch(
         if path.endswith("/pulls/123"):
             return pr
         assert path.endswith(f"/git/commits/{MERGE}")
-        return {"parents": [{"sha": "d" * 40}, {"sha": HEAD}]}
+        return {"parents": [{"sha": BASE}, {"sha": "d" * 40}]}
 
     monkeypatch.setattr(control, "api", request)
     with pytest.raises(ValueError, match="60 seconds"):
@@ -982,7 +1046,7 @@ def test_result_freshness_allows_bounded_main_advance(controller, monkeypatch, b
         if path == f"repos/{REPO}/compare/{current}...{HEAD}?per_page=1":
             return {"behind_by": behind}
         assert path == f"repos/{REPO}/compare/{BASE}...{current}?per_page=1"
-        return {"merge_base_commit": {"sha": BASE if ancestor else "e" * 40}}
+        return {"merge_base_commit": {"sha": BASE if ancestor else "e" * 40}, "ahead_by": behind}
 
     monkeypatch.setattr(controller, "api", api)
     if behind >= 5 or not ancestor:
@@ -1575,7 +1639,7 @@ def test_accepted_full_recovers_unbound_request(
     monkeypatch.setattr(control, "matching_lint_run", lambda *args: {"id": 40})
     monkeypatch.setattr(control, "already_running_or_passed", lambda *args: False)
     monkeypatch.setattr(control, "unfinished_request_exists", lambda *args: False)
-    monkeypatch.setattr(control, "verify_merge", lambda *args: None)
+    monkeypatch.setattr(control, "verify_merge", lambda *args: BASE)
 
     def api(path, payload=None):
         if payload is not None and path.endswith(f"/statuses/{HEAD}"):
@@ -2107,7 +2171,7 @@ def test_green_result_survives_allowed_main_advance(control, monkeypatch, pr, pu
     monkeypatch.setattr(
         control,
         "api",
-        lambda path, payload=None: {"merge_base_commit": {"sha": BASE}}
+        lambda path, payload=None: {"merge_base_commit": {"sha": BASE}, "ahead_by": 1}
         if "/compare/" in path
         else api(path, payload),
     )

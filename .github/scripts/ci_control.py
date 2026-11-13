@@ -274,17 +274,27 @@ def verify_branch_freshness(repo: str, head: str, base: str) -> None:
         )
 
 
-def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str) -> None:
-    """A fixed test merge preserves pull_request semantics, including forks."""
-    for value in (head, base, merge):
+def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str | None, merge: str) -> str:
+    """Select an eligible merge base, or verify an already pinned one."""
+    for value in (head, merge):
         sha(value)
-    if pr["head"]["sha"] != head or current_base(repo) != base:
+    if base is not None:
+        sha(base)
+    if pr["head"]["sha"] != head:
         raise ValueError("PR changed; post /ci full again for the new revision")
+    if pr.get("mergeable") is False:
+        raise ValueError("PR has merge conflicts; rebase and post /ci full again")
+    if pr.get("mergeable") is not True:
+        raise MergePendingError("GitHub has not confirmed PR mergeability yet")
     if pr.get("merge_commit_sha") != merge:
         raise ValueError("merge_sha is not the PR's current test merge; post /ci full again")
     commit = api(f"repos/{repo}/git/commits/{merge}")
-    if [parent["sha"] for parent in commit["parents"]] != [base, head]:
+    parents = [parent["sha"] for parent in commit["parents"]]
+    if len(parents) != 2 or parents[1] != head or (base is not None and parents[0] != base):
         raise MergePendingError("Test merge does not have the authorized base and head parents")
+    tested_base = sha(parents[0])
+    verify_result_freshness(repo, head, tested_base)
+    return tested_base
 
 
 def verify_result_freshness(repo: str, head: str, tested_base: str) -> None:
@@ -295,6 +305,14 @@ def verify_result_freshness(repo: str, head: str, tested_base: str) -> None:
         comparison = api(f"repos/{repo}/compare/{sha(tested_base)}...{base}?per_page=1")
         if comparison.get("merge_base_commit", {}).get("sha") != tested_base:
             raise ValueError("main no longer contains the tested base; rebase and post /ci full again")
+        behind = comparison.get("ahead_by")
+        if type(behind) is not int or behind < 0:
+            raise ValueError("Cannot determine how many commits the tested base is behind main")
+        if behind >= REBASE_BEHIND_LIMIT:
+            raise ValueError(
+                f"Tested base is {behind} commits behind main (must be fewer than {REBASE_BEHIND_LIMIT}); "
+                "rebase onto the latest main, wait for lint, and post /ci full again"
+            )
 
 
 def unfinished_request_exists(repo: str, title: str, start: datetime, end: datetime) -> bool:
@@ -501,12 +519,12 @@ def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None
             )
         if pr.get("mergeable") is True and pr.get("merge_commit_sha"):
             try:
-                verify_merge(repo, pr, head, base, pr["merge_commit_sha"])
+                verify_merge(repo, pr, head, None, pr["merge_commit_sha"])
                 return pr
             except MergePendingError:
-                # The test merge can lag behind the live target ref. Retry that
-                # inconsistency, not bad SHAs, access failures, closed PRs, or
-                # genuine merge conflicts.
+                # Retry an absent or inconsistent merge for this head. A base
+                # 0-4 commits behind live main is already eligible; a rewritten
+                # or older base fails immediately with an actionable reason.
                 pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -564,7 +582,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     if pr is None:
         return
     number = pr["number"]
-    head, base, merge = pr["head"]["sha"], current_base(repo), pr["merge_commit_sha"]
+    head, merge = pr["head"]["sha"], pr["merge_commit_sha"]
     if os.environ.get("CI_ROUTED_HEAD") != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
     if already_running_or_passed(repo, pr):
@@ -574,7 +592,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         return
     matching_lint_run(repo, pr)
     # Metadata reads can overlap a push; revalidate before writing or dispatching.
-    verify_merge(repo, pull(repo, number), head, base, merge)
+    base = verify_merge(repo, pull(repo, number), head, None, merge)
     title = f"CI full PR #{number} @{head} base:{base}"
     # A full request cannot predate its PR. Fix the upper bound for pagination;
     # never filter by mutable run status, which can move between queries.
@@ -635,7 +653,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         f"repos/{repo}/actions/workflows/ci-full-progress.yml/dispatches",
         {"ref": "main", "inputs": {"run_id": str(run_id)}},
     )
-    report(f"Requested full CI for PR #{number} at {head}; test merge {merge}.")
+    report(f"Requested full CI for PR #{number} at {head}; tested base {base}; test merge {merge}.")
 
 
 def prepare(repo: str, event: dict[str, Any]) -> None:
@@ -653,7 +671,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             raise ValueError("Expected a positive PR number")
         pr = pull(repo, int(number))
         verify_merge(repo, pr, inputs["head_sha"], inputs["base_sha"], inputs["merge_sha"])
-        verify_branch_freshness(repo, inputs["head_sha"], inputs["base_sha"])
+        verify_branch_freshness(repo, inputs["head_sha"], current_base(repo))
         matching_lint_run(repo, pr)
         checkout = inputs["merge_sha"]
     elif any(inputs.get(key) for key in ("head_sha", "base_sha", "merge_sha")):
