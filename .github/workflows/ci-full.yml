@@ -2490,10 +2490,9 @@ jobs:
 
   onboard-tests-a5-distributed:
     timeout-minutes: 110
-    # Bootstrap the trusted main-branch job before adding hardware acceptance
-    # tests. /ci full loads this workflow from main, so a PR cannot introduce
-    # and exercise a new job in the same dispatched run. Select the real suite
-    # from the test checkout when present; otherwise run the bootstrap dummy.
+    # Run Host-domain acceptance on two A5 cards independently of the optional
+    # four-card URMA async suite. /ci full uses the workflow from main;
+    # automatic integration PR runs use their merge revision's workflow.
     needs: [changes, toolchain, lint-gate]
     if: >-
       !cancelled() &&
@@ -2541,6 +2540,21 @@ jobs:
           unset-ring: 'true'
           toolchain: bundle
 
+      - name: Run Host communication-domain tests
+        timeout-minutes: 35
+        run: |
+          source activate.sh
+          HOST_DOMAIN_LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/host_comm_domain/ascend"
+          mkdir -p "$HOST_DOMAIN_LOGDIR"
+          export ASCEND_PROCESS_LOG_PATH="$HOST_DOMAIN_LOGDIR"
+          # Exercise local Host access and file/tensor initialization with all
+          # reset policies, even when the optional URMA async suite is absent.
+          task-submit --device auto --device-num 2 --timeout 1800 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
+              tests/st/distributed/test_l3_host_comm_domain.py \
+              -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
+              --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-host-domain-junit.xml"
+
       - name: Run distributed tests
         timeout-minutes: 70
         run: |
@@ -2570,6 +2584,8 @@ jobs:
           name: a5-distributed-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           path: |
+            a5-dist-checkout/ci-host-domain-junit.xml
+            a5-dist-checkout/outputs/host_comm_domain/ascend/**
             a5-dist-checkout/ci-distributed-junit.xml
             a5-dist-checkout/outputs/urma_async/ascend/**
 
