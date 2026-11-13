@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <map>
@@ -153,6 +154,50 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
 }
 
 namespace {
+
+// Check the finalized stream once, without rescanning each nested subtree for
+// every outer receive. Accepted nested bodies release their local receives
+// locally, so one structural visit also covers zero/multiple loop iterations.
+// A deeper receive/release must never consume an enclosing body's FIFO prefix.
+class NestedFifoValidator : public IRVisitor {
+ protected:
+  void VisitStmt_(const ForStmtPtr& op) override { VisitRegion(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitRegion(op); }
+  void VisitStmt_(const IfStmtPtr& op) override { VisitRegion(op); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = As<Call>(op->value_);
+    if (!op_predicates::IsTPop(call)) return;
+    auto& pending = outstanding_[call->GetKwarg<int>("id", 0)];
+    CHECK_SPAN(pending.empty() || pending.front() == depth_, op->span_)
+        << "FIFO receive in a nested body cannot reuse a pipe with an outstanding outer receive; "
+           "finish the outer receive's consumers and release it before entering the nested body, "
+           "or use a different pipe";
+    pending.push_back(depth_);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    auto call = As<Call>(op->expr_);
+    if (!op_predicates::IsTFree(call)) return;
+    auto& pending = outstanding_[call->GetKwarg<int>("id", 0)];
+    if (pending.empty()) return;
+    CHECK_SPAN(pending.front() == depth_, op->span_)
+        << "FIFO release in a nested body cannot release an outstanding outer receive; "
+           "release the received slot in its defining body";
+    pending.pop_front();
+  }
+
+ private:
+  template <typename RegionPtr>
+  void VisitRegion(const RegionPtr& op) {
+    ++depth_;
+    IRVisitor::VisitStmt_(op);
+    --depth_;
+  }
+
+  size_t depth_ = 0;
+  std::map<int, std::deque<size_t>> outstanding_;
+};
 
 std::vector<StmtPtr> FinalizeTpopTfreesImpl(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
                                             const std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
@@ -313,6 +358,17 @@ std::vector<StmtPtr> FinalizeTpopTfreesImpl(const std::vector<StmtPtr>& stmts, c
   };
 
   propagate_stmt_aliases_into = [&](const StmtPtr& stmt, TpopVarRemap& remap) {
+    if (auto ret = As<ReturnStmt>(stmt); ret && reject_escaping_borrows) {
+      // This walk has the enclosing body's receive/alias map. The earlier
+      // bottom-up finalization only knows local receives, so it cannot reject
+      // an outer borrow returned from a nested branch or loop on its own.
+      for (const auto& value : ret->value_) {
+        CHECK_SPAN(!try_resolve_canonical_tpop(value, remap, nullptr), ret->span_)
+            << "FIFO-backed Tile cannot escape the body where it is received through yield or return; "
+               "materialize independent Tile storage before exporting the value";
+      }
+      return;
+    }
     if (auto scope = As<RegScopeStmt>(stmt)) {
       // RegScope is an execute-once region whose Tile versions remain visible
       // afterward. Export aliases without flattening the scope or placing any
@@ -490,7 +546,12 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
     void VisitStmt_(const RegScopeStmtPtr&) override { found = true; }
   } finder;
   for (const auto& stmt : stmts) finder.VisitStmt(stmt);
-  return FinalizeTpopTfreesImpl(stmts, side, tpop_var_remap, finder.found);
+  auto finalized = FinalizeTpopTfreesImpl(stmts, side, tpop_var_remap, finder.found);
+  if (finder.found) {
+    NestedFifoValidator validator;
+    for (const auto& stmt : finalized) validator.VisitStmt(stmt);
+  }
+  return finalized;
 }
 
 }  // namespace tpop_tfree

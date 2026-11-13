@@ -570,6 +570,27 @@ class TestMemRefSharing:
             after = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
 
+    def test_borrowed_if_result_inside_loop_retains_storage(self):
+        """An IterArg and its view refer to the same borrowed slot at a branch join."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, count: pl.Scalar[pl.INDEX], flag: pl.Scalar[pl.BOOL]):
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                for _, (carried,) in pl.range(count, init_values=(received,)):
+                    if flag:
+                        view = pl.reshape(carried, [16, 16])
+                        selected = pl.yield_(view)
+                    else:
+                        selected = pl.yield_(carried)
+                    result = pl.yield_(selected)
+                pl.tfree_to_aic(result)
+
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Before))
+
     def test_fifo_writeback_rejects_independent_declared_allocation(self):
         """The MemRef-less shortcut must not silently discard a user binding."""
 

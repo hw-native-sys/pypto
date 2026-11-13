@@ -16,10 +16,14 @@ lowers it to ``pto.treshape`` reading the popped tile directly — instead of a
 fresh, disconnected ``pto.alloc_tile`` the popped data is never moved into.
 """
 
+import re
+from pathlib import Path
+
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen
-from pypto.backend import BackendType
+from pypto import backend, codegen, ir, passes
+from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir import OptimizationStrategy, PassManager
 
 PTOCodegen = codegen.PTOCodegen
@@ -55,6 +59,157 @@ def _function_body(mlir: str, func_name: str) -> str:
             if depth <= 0 and "{" in "\n".join(out):
                 break
     return "\n".join(out)
+
+
+def _compile_borrowed_program(
+    program: ir.Program, planner: passes.MemoryPlanner, tmp_path: Path, backend_type: BackendType
+) -> str:
+    """Check the legacy Tile path with both address and PTOAS memory planning."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Peer:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(self):
+            peer = pl.import_peer_buffer(name="c2v", peer_func="kernel")
+            pl.aic_initialize_pipe(peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+
+    # PTOAS validates both ends of a reserved FIFO even in compile-only tests.
+    program = ir.Program([*program.functions.values(), *Peer.functions.values()], program.name, program.span)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    mlir = PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert isinstance(mlir, str)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+    return mlir
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_borrowed_if_result_codegen(tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType):
+    """An ordinary Tile if-result must retain the received handle without an allocation."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self, flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            buffer = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            if flag:
+                selected = pl.yield_(received)
+            else:
+                selected = pl.yield_(received)
+            out = pl.store(selected, [0, 0], out)
+            pl.tfree_to_aic(received)
+            return out
+
+    mlir = _compile_borrowed_program(Program, planner, tmp_path, backend_type)
+    assert "scf.if" in mlir
+    assert "pto.alloc_tile" not in mlir
+    assert "pto.tmov" not in mlir
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_borrowed_if_view_result_codegen(
+    tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
+):
+    """Branch-local views must remain defined at the merged borrowed result."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self, flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+        ) -> pl.Tensor[[8, 32], pl.FP32]:
+            buffer = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            if flag:
+                flat = pl.reshape(received, [8, 32])
+                selected = pl.yield_(flat)
+            else:
+                other = pl.reshape(received, [8, 32])
+                selected = pl.yield_(other)
+            out = pl.store(selected, [0, 0], out)
+            pl.tfree_to_aic(received)
+            return out
+
+    mlir = _compile_borrowed_program(Program, planner, tmp_path, backend_type)
+    assert "scf.if" in mlir
+    assert "pto.alloc_tile" not in mlir
+    assert "pto.tmov" not in mlir
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_different_borrowed_if_sources_keep_phi_copy(
+    tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
+):
+    """Selecting distinct slots must copy before their FIFO lifetimes end."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self, flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            buffer = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            second: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            if flag:
+                selected = pl.yield_(first)
+            else:
+                selected = pl.yield_(second)
+            pl.tfree_to_aic(first)
+            pl.tfree_to_aic(second)
+            out = pl.store(selected, [0, 0], out)
+            return out
+
+    mlir = _compile_borrowed_program(Program, planner, tmp_path, backend_type)
+    assert mlir.count("pto.alloc_tile") == 1
+    assert mlir.count("pto.tmov") == 2
+    assert mlir.rindex("pto.tmov") < mlir.index("pto.tfree_from_aic") < mlir.index("pto.tstore")
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_borrowed_fillpad_writeback_codegen(
+    tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
+):
+    """Fillpad needs a defined alias with its own pad metadata, under either planner."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+            buffer = pl.reserve_buffer(name="c2v", size=2048, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+            received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            padded = pl.tile.fillpad_inplace(received, pad_value=pl.PadValue.zero)
+            out = pl.store(padded, [0, 0], out)
+            pl.tfree_to_aic(received)
+            return out
+
+    mlir = _compile_borrowed_program(Program, planner, tmp_path, backend_type)
+    fill = next(line for line in mlir.splitlines() if "pto.tfillpad " in line)
+    destination = re.search(r"outs\((%[\w.$]+)", fill)
+    assert destination is not None, fill
+    assert f"{destination[1]} = pto.treshape" in mlir
+    types = re.findall(r"!pto\.tile_buf<[^>]+>", fill)
+    assert len(types) == 2 and "pad=0>" in types[0] and "pad=1>" in types[1], fill
+    assert "pto.alloc_tile" not in mlir
 
 
 @pl.program

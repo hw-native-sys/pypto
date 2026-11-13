@@ -536,7 +536,9 @@ class InitMemRefMutator : public IRMutator {
         old_var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
         source_memory_space);
 
-    return std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
+    auto result = std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
+    TrackBorrowedAlias(result, new_init);
+    return result;
   }
 
   // Process normal Var variable (creates new MemRef based on usage)
@@ -723,6 +725,11 @@ class InitMemRefMutator : public IRMutator {
         ResolveTileMemorySpace(var_expr->GetType()));
     auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
     var_map_[op->var_] = new_var;
+    if (op_predicates::IsTPop(As<Call>(new_value))) {
+      borrowed_roots_[new_var.get()] = new_var.get();
+    } else {
+      TrackBorrowedAlias(new_var, op_predicates::GetBufferAliasSource(new_value));
+    }
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
   }
 
@@ -835,6 +842,7 @@ class InitMemRefMutator : public IRMutator {
       const auto& argument = launch->args_[launch->result_param_indices_[i]];
       auto result =
           std::make_shared<Var>(op->results_[i]->name_hint_, argument->GetType(), op->results_[i]->span_);
+      TrackBorrowedAlias(result, argument);
       var_map_[op->results_[i]] = result;
       launch->results_[i] = std::move(result);
     }
@@ -951,9 +959,18 @@ class InitMemRefMutator : public IRMutator {
     if (!then_yield && !else_yield) return result;
 
     auto get_yield_var = [&](size_t i) -> VarPtr {
-      VarPtr var = nullptr;
-      if (then_yield && i < then_yield->value_.size()) var = As<Var>(then_yield->value_[i]);
-      if (!var && else_yield && i < else_yield->value_.size()) var = As<Var>(else_yield->value_[i]);
+      auto then_var =
+          then_yield && i < then_yield->value_.size() ? AsVarLike(then_yield->value_[i]) : nullptr;
+      auto else_var =
+          else_yield && i < else_yield->value_.size() ? AsVarLike(else_yield->value_[i]) : nullptr;
+      auto var = then_var ? then_var : else_var;
+      if (auto tile = var ? As<TileType>(var->GetType()) : nullptr; tile && !tile->memref_) {
+        // Only a single borrowed slot can remain an alias after the join.
+        // Distinct slots need the ordinary allocated phi and branch copies:
+        // lifetime analysis cannot tie the selected handle to either slot.
+        auto root = GetBorrowedRoot(then_var);
+        if (!root || root != GetBorrowedRoot(else_var)) return nullptr;
+      }
       return var;
     };
     auto [patched, changed] = PatchReturnVarsFromYield(new_if->return_vars_, op->return_vars_, get_yield_var);
@@ -966,6 +983,16 @@ class InitMemRefMutator : public IRMutator {
   }
 
  private:
+  const Var* GetBorrowedRoot(const ExprPtr& value) const {
+    auto var = AsVarLike(value);
+    auto it = var ? borrowed_roots_.find(var.get()) : borrowed_roots_.end();
+    return it != borrowed_roots_.end() ? it->second : nullptr;
+  }
+
+  void TrackBorrowedAlias(const VarPtr& result, const ExprPtr& source) {
+    if (auto root = GetBorrowedRoot(source)) borrowed_roots_[result.get()] = root;
+  }
+
   // Share return storage with loop carries (For/While) or branch yield values (If).
   // get_yield_var(i) resolves the yield variable for the i-th return_var.
   using YieldVarResolver = std::function<VarPtr(size_t)>;
@@ -986,6 +1013,7 @@ class InitMemRefMutator : public IRMutator {
                                             yield_tile->GetMemorySpace());
         auto new_rv =
             std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+        TrackBorrowedAlias(new_rv, yield_var);
         var_map_[old_return_vars[i]] = new_rv;
         patched.push_back(new_rv);
         changed = true;
@@ -997,6 +1025,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
   std::map<VarPtr, VarPtr> var_map_;
+  std::map<const Var*, const Var*> borrowed_roots_;
   std::set<MemRefPtr> non_dense_view_memrefs_;
   const DeclaredAllocMap& declared_allocs_;
   const backend::BackendHandler* handler_ = nullptr;

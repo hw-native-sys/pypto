@@ -3039,12 +3039,20 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         // there is no MemRef to read. Register it before the op codegen runs so
         // GetCurrentResultTileBufTypeString() can emit the `-> type` annotation.
         result_tile_type = tile_type;
-        result_buf = NewNamedTemp(op->var_->name_hint_);
-        BindVarToMlir(op->var_, result_buf);
-        std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
-        if (!type_str.empty()) {
-          RegisterTileBufType(result_buf, type_str, tile_type);
+        const auto writeback = ir::op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+        if (writeback && As<TileType>(call->args_[*writeback]->GetType())) {
+          // The result still borrows the input slot. Define a typed alias of
+          // that handle before the DPS emitter writes it; a fresh SSA name
+          // alone would leave its destination undefined. A view preserves
+          // result metadata such as fillpad's padding and full valid extent.
+          const auto source = GetExprAsCode(call->args_[*writeback]);
+          result_buf = EnsureTileView(source, GetSSATileBufType(source), tile_type, "writeback_view");
+        } else {
+          result_buf = NewNamedTemp(op->var_->name_hint_);
+          std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+          if (!type_str.empty()) RegisterTileBufType(result_buf, type_str, tile_type);
         }
+        BindVarToMlir(op->var_, result_buf);
       } else if (alias_array_update_to_input) {
         // array.update_element: alias the result Var to the input array's SSA so
         // the emitted pto.local_array_set mutates the same declare_local_array

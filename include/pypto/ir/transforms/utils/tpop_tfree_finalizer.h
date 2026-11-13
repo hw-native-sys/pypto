@@ -58,8 +58,9 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
 /// each tfree stays at or after the tile's last use, including nested control
 /// flow bodies and physical writeback aliases exported by RegScope. A receive
 /// in a function containing RegScope may not escape its defining body through
-/// yield/return. Within each body,
-/// releases follow pop order per pipe: a later
+/// yield/return, including nested returns of enclosing aliases. Nested bodies
+/// must not receive on a pipe with an outstanding outer receive or release an
+/// outer receive. Within each body, releases follow pop order per pipe: a later
 /// tile cannot release its slot until the preceding FIFO prefix is finished.
 std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
                                         const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);

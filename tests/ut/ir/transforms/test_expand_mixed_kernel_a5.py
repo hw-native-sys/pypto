@@ -2932,6 +2932,150 @@ class TestAutoPipeSetup:
         with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
             _expand_raw(Before)
 
+    def test_register_writeback_rejects_nested_if_return(self):
+        """The branch must inherit provenance from a writeback in the outer scope."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                with pl.reg_scope():
+                    value = pl.reg.load(received, lanes=64)
+                    updated = pl.reg.store(received, value=value)
+                if condition:
+                    return updated
+                return pl.tile.full([256], pl.FP32, 1.0)
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_rejects_nested_loop_return(self):
+        """A direct outer receive cannot escape through a doubly nested return."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                with pl.reg_scope():
+                    value = pl.reg.load(received, lanes=64)
+                    _updated = pl.reg.store(received, value=value)
+                for _ in pl.range(4):
+                    if condition:
+                        return received
+                return pl.tile.full([256], pl.FP32, 1.0)
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_rejects_nested_while_return(self):
+        """An outer writeback cannot escape through a while-body return."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                with pl.reg_scope():
+                    value = pl.reg.load(received, lanes=64)
+                    updated = pl.reg.store(received, value=value)
+                while condition:
+                    return updated
+                return pl.tile.full([256], pl.FP32, 1.0)
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_nested_loop_pipe_overlap(self):
+        """A nested loop cannot release the still-live outer FIFO prefix."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                for _ in pl.range(4):
+                    inner: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    out = pl.store(inner, [0, 0], out)
+                    pl.tfree_to_aic(inner)
+                out = pl.store(pl.reshape(updated, [16, 16]), [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="nested body cannot reuse a pipe with an outstanding"):
+            _expand_raw(Before)
+
+    def test_register_writeback_nested_branch_pipe_overlap(self):
+        """A conditional receive cannot release the still-live outer FIFO prefix."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, condition: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                if condition:
+                    inner: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    out = pl.store(inner, [0, 0], out)
+                    pl.tfree_to_aic(inner)
+                out = pl.store(pl.reshape(updated, [16, 16]), [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="nested body cannot reuse a pipe with an outstanding"):
+            _expand_raw(Before)
+
+    def test_register_writeback_releases_outer_slot_before_nested_loop(self):
+        """Finishing the outer consumers before the loop makes same-pipe reuse safe."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                out = pl.store(pl.reshape(updated, [16, 16]), [0, 0], out)
+                pl.tfree_to_aic(received)
+                for _ in pl.range(4):
+                    inner: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    out = pl.store(inner, [0, 0], out)
+                    pl.tfree_to_aic(inner)
+                return out
+
+        after = _expand_raw(Before)
+        aiv = after.get_function("main_aiv")
+        assert aiv is not None
+        statements = _flatten_top_level_stmts(aiv.body)
+        free_index = next(
+            i for i, stmt in enumerate(statements) if _get_stmt_op_name(stmt) in _AUTO_TFREE_OPS
+        )
+        loop_index = next(i for i, stmt in enumerate(statements) if isinstance(stmt, ir.ForStmt))
+        assert free_index < loop_index
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+
     def test_register_writeback_rejects_changing_loop_storage(self):
         """A zero-trip loop still returns its initial FIFO slot."""
 

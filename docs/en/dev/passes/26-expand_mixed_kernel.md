@@ -361,12 +361,17 @@ an authored free preserves its explicit attributes.
 
 In functions containing `RegScope`, a receive created inside a branch or loop
 body must not escape that body through
-`yield`; returning borrowed storage from the function is also rejected. Freeing
+`yield`; returning borrowed storage from the function is also rejected, including
+an outer receive or writeback alias returned inside a nested branch or loop. Freeing
 such a value before the terminator would invalidate the escaped alias. Materialize
 independent storage before exporting the value. An outer receive can pass through
 a branch or loop result only when every path retains the same slot, including
 the initial value of a zero-trip loop; joins with a different slot or independent
-storage are rejected. These are compiler lifetime
+storage are rejected. A nested body cannot receive on the same pipe while an
+outer receive is still outstanding, because its free would release the older
+slot. Finish the outer consumers and release that slot before entering the
+nested body, or use a different pipe. A nested body also cannot release an outer
+receive. These are compiler lifetime
 rules, not a proof of hardware completion: direct FIFO capture by VF remains
 unsupported until its runtime-pointer ABI and synchronization are qualified.
 

@@ -245,9 +245,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     }
     EmitStructural("}");
   } else {
-    // Like loops, keep tile return values out of scf.if results. Pre-declare
+    // Like loops, keep allocated tile return values out of scf.if results. Pre-declare
     // tile buffers for return_vars using the canonical MemRef address (assigned
-    // by MemoryReuse), and only use scf.if results for scalar-like SSA values.
+    // by MemoryReuse). Scalars, registers and borrowed tile handles use SSA
+    // results instead of allocating a destination.
     // MemoryReuse's YieldFixupMutator ensures all branch yields already share
     // the return_var's canonical MemRef, so no codegen-level tmov is needed.
     std::vector<bool> returns_via_scf(op->return_vars_.size(), false);
@@ -274,8 +275,20 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
               << "Register Tile branch result lacks a prepared external handle";
           continue;
         }
-        INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
-            << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
+        if (!tile_type->memref_) {
+          // A borrowed FIFO value has no address for a phi allocation. Carry
+          // its tile handle through the branch instead of allocating storage
+          // disconnected from the receive. Normalize the yielded view types
+          // below, since tpop handles and zero-copy views differ in validity.
+          const auto ret_name = NewNamedTemp(return_var->name_hint_);
+          const auto ret_type = GetViewTileBufTypeStringFromTileType(tile_type);
+          BindVarToMlir(return_var, ret_name);
+          RegisterTileBufType(ret_name, ret_type, tile_type);
+          scf_return_names.push_back(ret_name);
+          scf_return_types.push_back(ret_type);
+          returns_via_scf[i] = true;
+          continue;
+        }
         // A tile phi handle is declared in the function head so it dominates
         // both branches and every post-if read. A dynamic valid_shape may be
         // computed only in the surrounding loop/body, however, and therefore
@@ -385,9 +398,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       if (!emit_tile_addr_ && yield) {
         for (size_t i = 0; i < op->return_vars_.size(); ++i) {
           if (i >= yield->value_.size()) continue;
+          if (returns_via_scf[i]) continue;
           if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
           auto src = ir::AsVarLike(yield->value_[i]);
           if (!src) continue;
+          auto src_tile = As<TileType>(src->GetType());
+          if (src_tile && !src_tile->memref_) continue;
           // Only re-point a branch-local producer; an outer var yielded through
           // the branch is read elsewhere and must keep its own handle.
           if (!IsDefinedInBranch(src.get(), body)) continue;
@@ -405,8 +421,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       std::vector<std::string> ssa_yields;
       ssa_yields.reserve(scf_return_types.size());
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        auto yielded_tile =
+            yield && i < yield->value_.size() ? As<TileType>(yield->value_[i]->GetType()) : nullptr;
         if (returns_via_scf[i]) {
-          ssa_yields.push_back(branch_yields[i]);
+          auto value = branch_yields[i];
+          if (auto tile_type = As<TileType>(op->return_vars_[i]->GetType())) {
+            value = EnsureTileView(value, GetSSATileBufType(value), tile_type, "if_borrow_view");
+          }
+          ssa_yields.push_back(std::move(value));
         } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
                    ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
           if (As<ir::DistributedTensorType>(op->return_vars_[i]->GetType())) {
@@ -451,14 +473,17 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
                 << "' yields different backing SSAs across branches: " << inplace_return_ssa[i] << " vs "
                 << branch_yields[i];
           }
-        } else if (!emit_tile_addr_ && As<TileType>(op->return_vars_[i]->GetType())) {
+        } else if (As<TileType>(op->return_vars_[i]->GetType()) &&
+                   (!emit_tile_addr_ || (yielded_tile && !yielded_tile->memref_))) {
           // Tile phi under PTOAS (fix #1956). A branch-local producer was already
           // re-pointed at the phi handle above, so its yield resolves to the phi
           // handle and needs nothing. Any other yield — an outer tile threaded
           // through the branch, or one the re-point conservatively skipped — has
           // NOT written the phi buffer, so copy it in: without MemoryReuse's
           // YieldFixupMutator (skipped under PTOAS) the post-if read would
-          // otherwise see an uninitialised phi buffer.
+          // otherwise see an uninitialised phi buffer. Borrowed sources need
+          // the same copy under PYPTO: YieldFixup cannot compare their absent
+          // MemRefs with the allocated phi's address.
           auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
           if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
               branch_yields[i] != phi_it->second) {
@@ -484,7 +509,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             Emit(mov.str());
           }
         }
-        // Tile return_vars under PYPTO: MemoryReuse ensures branch yields share the
+        // Allocated Tile yields under PYPTO: MemoryReuse ensures they share the
         // return_var's canonical MemRef (same physical address), so no codegen-level
         // tmov is needed — the IR-level tile.move (from YieldFixupMutator) handles it.
       }
@@ -493,8 +518,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         Emit("scf.yield " + JoinCommaSep(ssa_yields) + " : " + JoinCommaSep(scf_return_types));
       }
       CHECK(ssa_yields.size() == scf_return_types.size())
-          << "IfStmt " << branch_name << "-branch scalar yield count (" << ssa_yields.size()
-          << ") must match scalar return_vars (" << scf_return_types.size() << ")";
+          << "IfStmt " << branch_name << "-branch SSA yield count (" << ssa_yields.size()
+          << ") must match SSA return_vars (" << scf_return_types.size() << ")";
       fs_.yield_buffer.clear();
     };
 

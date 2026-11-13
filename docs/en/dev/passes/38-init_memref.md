@@ -55,6 +55,7 @@ program_with_memrefs = init_pass(program)
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **Borrowed FIFO storage**: `tile.tpop_*` results, zero-copy views, plain aliases, and physical writebacks such as `reg.store` / `reg.scatter` remain MemRef-less. Writebacks follow `output_reuses_input_arg`, including masked writes; they do not allocate a copy of the receive buffer. `HasMemRefs` uses the same classification.
    - **Control-flow results**: `ForStmt` / `WhileStmt` carries and results inherit the initial buffer, including a borrowed value's absent MemRef; `IfStmt` results inherit yielded storage. `HasMemRefs` tracks borrowed carries and branch results before checking their consumers.
+     When both branches refer to the same borrowed slot, PTO codegen carries the `IfStmt` result as a tile handle through `scf.if`, without a phi allocation. Distinct borrowed slots retain the allocated phi and branch copies, so the result survives their release. Borrowed writebacks receive an input-derived destination view that preserves result metadata such as padding.
    - **Declared allocations**: the tile keeps the allocation the author declared instead of getting a fresh one
 6. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 7. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
