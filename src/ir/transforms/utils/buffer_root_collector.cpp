@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -39,8 +40,9 @@ using op_predicates::IsBuiltinOp;
 
 }  // namespace
 
-BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy)
-    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy) {}
+BufferRootCollector::BufferRootCollector(ProgramPtr program, AmbiguousRootPolicy ambiguous_policy,
+                                         bool follow_reshape)
+    : program_(std::move(program)), ambiguous_policy_(ambiguous_policy), follow_reshape_(follow_reshape) {}
 
 void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
@@ -79,35 +81,34 @@ void BufferRootCollector::VisitStmt_(const IfStmtPtr& if_stmt) {
 }
 
 void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
-  auto init_roots = InitializeLoopCarryRoots(for_stmt->iter_args_);
+  InitializeLoopCarryRoots(for_stmt->iter_args_);
   IRVisitor::VisitStmt_(for_stmt);
-  RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, init_roots,
+  RecordLoopReturnRoots(for_stmt->body_, for_stmt->return_vars_, for_stmt->iter_args_,
                         transform_utils::EvalConstTripCount(for_stmt).value_or(0) > 0);
 }
 
 void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
-  auto init_roots = InitializeLoopCarryRoots(while_stmt->iter_args_);
+  InitializeLoopCarryRoots(while_stmt->iter_args_);
   IRVisitor::VisitStmt_(while_stmt);
   // A while condition may be false before the first iteration, so both the
   // initial and yielded roots remain possible.
-  RecordLoopReturnRoots(while_stmt->body_, while_stmt->return_vars_, init_roots,
+  RecordLoopReturnRoots(while_stmt->body_, while_stmt->return_vars_, while_stmt->iter_args_,
                         /*guaranteed_to_run=*/false);
 }
 
-std::vector<BufferRootCollector::RootCandidates> BufferRootCollector::InitializeLoopCarryRoots(
-    const std::vector<IterArgPtr>& iter_args) {
-  std::vector<RootCandidates> init_roots;
-  init_roots.reserve(iter_args.size());
+void BufferRootCollector::InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args) {
   for (const auto& iter_arg : iter_args) {
-    auto roots = ResolveRootCandidates(iter_arg->initValue_);
-    init_roots.push_back(roots);
-    RecordRootCandidates(iter_arg, roots, IsAmbiguous(iter_arg->initValue_));
+    if (follow_reshape_) {
+      ShareRootCandidates(iter_arg, iter_arg->initValue_);
+    } else {
+      RecordRootCandidates(iter_arg, ResolveRootCandidates(iter_arg->initValue_),
+                           IsAmbiguous(iter_arg->initValue_));
+    }
   }
-  return init_roots;
 }
 
 void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
-                                                const std::vector<RootCandidates>& init_roots,
+                                                const std::vector<IterArgPtr>& iter_args,
                                                 bool guaranteed_to_run) {
   // Resolve after visiting the body so fresh-rebind assignments already have
   // roots. An in-place yield of the IterArg still resolves to its init root.
@@ -115,11 +116,21 @@ void BufferRootCollector::RecordLoopReturnRoots(const StmtPtr& body, const std::
   if (!yield) return;
 
   for (size_t i = 0; i < return_vars.size() && i < yield->value_.size(); ++i) {
-    auto roots = ResolveRootCandidates(yield->value_[i]);
-    bool unresolved = roots.empty() || IsAmbiguous(yield->value_[i]);
-    if (!guaranteed_to_run && i < init_roots.size()) {
-      if (init_roots[i].empty()) unresolved = true;
-      for (const Var* root : init_roots[i]) {
+    const auto& value = yield->value_[i];
+    const auto yielded_var = AsVarLike(value);
+    if (follow_reshape_ && yielded_var &&
+        (guaranteed_to_run || (i < iter_args.size() && &RootCandidatesOf(yielded_var.get()) ==
+                                                           &RootCandidatesOf(iter_args[i].get())))) {
+      // An identity carry retains the same roots even when the loop is skipped.
+      ShareRootCandidates(return_vars[i], value);
+      continue;
+    }
+    auto roots = ResolveRootCandidates(value);
+    bool unresolved = roots.empty() || IsAmbiguous(value);
+    if (!guaranteed_to_run && i < iter_args.size()) {
+      const auto& init_roots = RootCandidatesOf(iter_args[i].get());
+      if (init_roots.empty()) unresolved = true;
+      for (const Var* root : init_roots) {
         if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
       }
     }
@@ -147,6 +158,8 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
       } else if (!aliases.empty()) {
         RecordRootCandidates(assign->var_, ResolveRootCandidates(aliases[0]), IsAmbiguous(aliases[0]));
       }
+    } else if (follow_reshape_ && IsOp(call, "tensor.reshape") && !call->args_.empty()) {
+      ShareRootCandidates(assign->var_, call->args_[0]);
     } else if (IsOp(call, "tensor.create") || IsOp(call, "tensor.slice")) {
       RecordRootCandidates(assign->var_, {assign->var_.get()});
     } else if (IsOp(call, "tensor.assemble")) {
@@ -159,10 +172,12 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
       if (As<TupleType>(call->GetType())) {
         std::vector<RootInfo> roots;
         roots.reserve(out_roots.size());
-        for (const auto& entry : out_roots) roots.push_back(entry.info);
+        for (const auto& entry : out_roots) roots.push_back({entry.roots, entry.ambiguous});
         tuple_output_roots_[assign->var_.get()] = std::move(roots);
+      } else if (follow_reshape_ && out_roots.size() == 1) {
+        ShareRootCandidates(assign->var_, out_roots.front().argument);
       } else {
-        auto info = SelectReturnRootInfo(out_roots, call->GetType());
+        auto info = SelectReturnRootInfo(out_roots, call);
         if (!info.roots.empty()) {
           RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
         }
@@ -181,7 +196,11 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
     if (auto it = tuple_output_roots_.find(source.get()); it != tuple_output_roots_.end()) {
       tuple_output_roots_[assign->var_.get()] = it->second;
     }
-    RecordRootCandidates(assign->var_, ResolveRootCandidates(assign->value_), IsAmbiguous(assign->value_));
+    if (follow_reshape_) {
+      ShareRootCandidates(assign->var_, source);
+    } else {
+      RecordRootCandidates(assign->var_, ResolveRootCandidates(source), IsAmbiguous(source));
+    }
   }
   IRVisitor::VisitStmt_(assign);
 }
@@ -197,11 +216,22 @@ void BufferRootCollector::VisitStmt_(const SimtLaunchStmtPtr& launch) {
   IRVisitor::VisitStmt_(launch);
 }
 
-BufferRootCollector::RootCandidates BufferRootCollector::ResolveRootCandidates(const ExprPtr& expr) const {
-  auto var = AsVarLike(expr);
-  if (!var) return {};
-  auto it = root_candidates_.find(var.get());
-  return it != root_candidates_.end() ? it->second : RootCandidates{};
+const BufferRootCollector::RootCandidates& BufferRootCollector::ResolveRootCandidates(
+    const ExprPtr& expr) const {
+  return RootCandidatesOf(AsVarLike(expr).get());
+}
+
+void BufferRootCollector::ShareRootCandidates(const VarPtr& var, const ExprPtr& source) {
+  auto source_var = AsVarLike(source);
+  if (!var || !source_var) return;
+  const Var* key = source_var.get();
+  auto alias = candidate_sources_.find(key);
+  if (alias != candidate_sources_.end()) key = alias->second;
+  if (root_candidates_.find(key) == root_candidates_.end()) return;
+  candidate_sources_[var.get()] = key;
+  auto root = buffer_roots.find(source_var.get());
+  if (root != buffer_roots.end()) buffer_roots[var.get()] = root->second;
+  if (ambiguous_buffer_vars.count(source_var.get())) ambiguous_buffer_vars.insert(var.get());
 }
 
 bool BufferRootCollector::IsAmbiguous(const ExprPtr& expr) const {
@@ -214,8 +244,9 @@ void BufferRootCollector::RecordRootCandidates(const VarPtr& var, const RootCand
   if (!var) return;
   RootCandidates unique;
   unique.reserve(roots.size());
+  std::unordered_set<const Var*> seen;
   for (const Var* root : roots) {
-    if (root && std::find(unique.begin(), unique.end(), root) == unique.end()) unique.push_back(root);
+    if (root && seen.insert(root).second) unique.push_back(root);
   }
   if (unique.empty()) return;
 
@@ -245,30 +276,58 @@ std::vector<BufferRootCollector::OutputRoot> BufferRootCollector::CollectCallOut
         callee->param_directions_[i] != ParamDirection::InOut) {
       continue;
     }
-    roots.push_back(OutputRoot{RootInfo{ResolveRootCandidates(call->args_[i]), IsAmbiguous(call->args_[i])},
-                               call->args_[i]->GetType()});
+    const auto& arg = call->args_[i];
+    roots.push_back({arg, ResolveRootCandidates(arg), IsAmbiguous(arg)});
   }
   return roots;
 }
 
 BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
-    const std::vector<OutputRoot>& out_roots, const TypePtr& return_type) const {
+    const std::vector<OutputRoot>& out_roots, const CallPtr& call) const {
   if (out_roots.empty()) return RootInfo{{}, false};
-  if (out_roots.size() == 1) return out_roots[0].info;
+  if (out_roots.size() == 1) return {out_roots.front().roots, out_roots.front().ambiguous};
 
   const OutputRoot* match = nullptr;
   bool ambiguous = false;
   for (const auto& candidate : out_roots) {
-    if (!candidate.info.roots.empty() && TypesMatchShapeDtype(candidate.type, return_type)) {
+    if (!candidate.roots.empty() && TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) {
       if (match == nullptr) {
         match = &candidate;
-      } else if (match->info.roots != candidate.info.roots ||
-                 match->info.ambiguous != candidate.info.ambiguous) {
+      } else if (match->roots != candidate.roots || match->ambiguous != candidate.ambiguous) {
         ambiguous = true;
       }
     }
   }
-  if (match && !ambiguous) return match->info;
+  if (match && !ambiguous) return {match->roots, match->ambiguous};
+
+  if (follow_reshape_ && ambiguous) {
+    // Resolve a tie between same-shaped outputs from the callee's actual
+    // return. Following reshape can expose a second compatible buffer.
+    const auto callee = program_->GetFunction(call->op_->name_);
+    if (callee && callee->return_types_.size() == 1) {
+      const auto param = return_lineage::ReturnedParamIndex(callee, program_);
+      if (param && *param < call->args_.size() && callee->param_directions_[*param] != ParamDirection::In) {
+        const auto& arg = call->args_[*param];
+        auto roots = ResolveRootCandidates(arg);
+        // Callee identity is useful only if the actual argument has one
+        // proven root. A partial set still needs the compatible candidates.
+        if (!roots.empty() && !IsAmbiguous(arg)) {
+          return RootInfo{std::move(roots), false};
+        }
+      }
+    }
+    // A consumer may read or write whichever compatible buffer was returned.
+    // Retain every compatible root when the return proof is unavailable.
+    RootInfo possible{{}, true};
+    std::unordered_set<const Var*> seen;
+    for (const auto& candidate : out_roots) {
+      if (!TypesMatchShapeDtype(candidate.argument->GetType(), call->GetType())) continue;
+      for (const auto* root : candidate.roots) {
+        if (seen.insert(root).second) possible.roots.push_back(root);
+      }
+    }
+    return possible;
+  }
   // No provable unambiguous type match (0 matches, or >1 distinct candidates).
   // The fallback depends on what the consumer needs when the owning buffer
   // can't be pinned down:
@@ -280,7 +339,7 @@ BufferRootCollector::RootInfo BufferRootCollector::SelectReturnRootInfo(
   //                  so a later write to the returned var still promotes to
   //                  InOut; a null root would silently drop the WAW/InOut dep.
   if (ambiguous_policy_ == AmbiguousRootPolicy::kFirstOutput) {
-    return out_roots[0].info;
+    return {out_roots.front().roots, out_roots.front().ambiguous};
   }
   return RootInfo{{}, false};
 }

@@ -58,7 +58,8 @@ enum class AmbiguousRootPolicy {
 class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
-                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip);
+                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
+                               bool follow_reshape = false);
 
   void Initialize(const std::vector<VarPtr>& params);
 
@@ -82,6 +83,8 @@ class BufferRootCollector : public IRVisitor {
   /// single unambiguous answer or (under `kFirstOutput`) an arbitrary pick.
   [[nodiscard]] const std::vector<const Var*>& RootCandidatesOf(const Var* var) const {
     static const std::vector<const Var*> kNone;
+    auto alias = candidate_sources_.find(var);
+    if (alias != candidate_sources_.end()) var = alias->second;
     auto it = root_candidates_.find(var);
     return it == root_candidates_.end() ? kNone : it->second;
   }
@@ -105,17 +108,18 @@ class BufferRootCollector : public IRVisitor {
   // with that arg's type so a single return value can be matched to the param
   // it actually aliases (see SelectReturnRoot).
   struct OutputRoot {
-    RootInfo info;
-    TypePtr type;
+    ExprPtr argument;
+    const RootCandidates& roots;
+    bool ambiguous;
   };
 
-  [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
+  [[nodiscard]] const RootCandidates& ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
+  void ShareRootCandidates(const VarPtr& var, const ExprPtr& source);
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
-  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
-      const std::vector<IterArgPtr>& iter_args);
+  void InitializeLoopCarryRoots(const std::vector<IterArgPtr>& iter_args);
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
-                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run);
+                             const std::vector<IterArgPtr>& iter_args, bool guaranteed_to_run);
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
@@ -126,7 +130,7 @@ class BufferRootCollector : public IRVisitor {
   // making tensor.create -> tensor.slice(output) alias and corrupt the result.
   // When no unambiguous match exists, the fallback follows ambiguous_policy_.
   [[nodiscard]] RootInfo SelectReturnRootInfo(const std::vector<OutputRoot>& out_roots,
-                                              const TypePtr& return_type) const;
+                                              const CallPtr& call) const;
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
@@ -134,7 +138,9 @@ class BufferRootCollector : public IRVisitor {
 
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
+  bool follow_reshape_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
+  std::unordered_map<const Var*, const Var*> candidate_sources_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
 };
 

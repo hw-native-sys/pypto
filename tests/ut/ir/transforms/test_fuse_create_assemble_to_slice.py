@@ -121,6 +121,35 @@ class TestFuseCreateAssembleToSlice:
         expected = _run_prereqs_only(Expected)
         ir.assert_structural_equal(after, expected)
 
+    def test_reshape_source_not_fused(self):
+        """A reshape changes which destination rows and columns are assembled."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                x: pl.Tensor[[4, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                tile = pl.load(x, [0, 0], [4, 16])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                local = pl.create_tensor([4, 16], dtype=pl.FP32)
+                local = self.fill(x, local)
+                reshaped = pl.reshape(local, [8, 8])
+                return pl.assemble(out, reshaped, [0, 0])
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Before)
+        ir.assert_structural_equal(after, expected)
+
     def test_duplicate_assemble_not_fused(self):
         """tensor.create assembled more than once → no fusion, IR unchanged."""
 
