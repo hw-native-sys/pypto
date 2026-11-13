@@ -246,6 +246,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("runtime", runtime_kind_to_name(runtime)),
         ("enable_buffer_ir", enable_buffer_ir),
         ("buffer_ir_version", 12 if enable_buffer_ir else 0),
+        # Tile fallback also changed: native compare gather needs its full scratch
+        # backing, even when Buffer IR is disabled. Invalidate pre-contract kernels.
+        ("gather_compare_scratch_version", 2),
         ("enable_software_pipeline", enable_software_pipeline),
     )
     return CacheKey(

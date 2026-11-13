@@ -21,6 +21,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 from pypto.ir import DistributedConfig, OptimizationStrategy
+from pypto.jit._persistent import _specialization_digest
 from pypto.jit._source import capture_namespaces, function_namespace
 from pypto.jit.cache import (
     SCALAR_SEMANTICS,
@@ -174,6 +175,7 @@ class TestMakeCacheKey:
             ("runtime", "tensormap_and_ringbuffer"),
             ("enable_buffer_ir", False),
             ("buffer_ir_version", 0),
+            ("gather_compare_scratch_version", 2),
             ("enable_software_pipeline", False),
         )
 
@@ -499,6 +501,28 @@ class TestMakeCacheKey:
         assert off.compile_opts is not None and on.compile_opts is not None
         assert ("buffer_ir_version", 0) in off.compile_opts
         assert ("buffer_ir_version", 12) in on.compile_opts
+
+    @pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
+    @pytest.mark.parametrize("enable_buffer_ir", [False, True])
+    @pytest.mark.parametrize("previous_version", [None, 1])
+    def test_compare_gather_scratch_invalidates_legacy_persistent_key(
+        self, planner, enable_buffer_ir, previous_version
+    ):
+        # Before full-capacity scratch planning, Tile kernels had the same source,
+        # package version, and compile options. They must miss the persistent cache
+        # even when Buffer IR is disabled (or the kernel falls back to Tile).
+        current = self._make_key(memory_planner=planner, enable_buffer_ir=enable_buffer_ir)
+        assert current.compile_opts is not None
+        assert ("gather_compare_scratch_version", 2) in current.compile_opts
+        legacy = current._replace(
+            compile_opts=tuple(
+                (name, previous_version) if name == "gather_compare_scratch_version" else (name, value)
+                for name, value in current.compile_opts
+                if previous_version is not None or name != "gather_compare_scratch_version"
+            )
+        )
+        assert current != legacy
+        assert _specialization_digest(current) != _specialization_digest(legacy)
 
     def test_software_pipeline_splits_key(self):
         assert self._make_key() != self._make_key(enable_software_pipeline=True)

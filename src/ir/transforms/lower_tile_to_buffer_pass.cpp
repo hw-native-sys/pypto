@@ -340,14 +340,20 @@ class StorageIndex : public IRVisitor {
     const bool has_column =
         std::any_of(storage.members.begin(), storage.members.end(),
                     [](const auto& member) { return backend::IsColumnVectorBuffer(member.descriptor); });
-    const bool has_gather_workspace =
-        std::any_of(storage.members.begin(), storage.members.end(),
-                    [&](const auto& member) { return gather_workspaces_.count(member.tile.get()) != 0; });
-    // Addressed reuse can give scratch and a later value different descriptors
-    // over one allocation. Keep their planned typed handles: the native mask
-    // prefix must view the workspace directly, never a reshape of a byte root.
-    if (backend::IsMatrixBufferSpace(*memory_space) || has_column || (addressed_ && has_gather_workspace)) {
-      FinalizeTypedRoot(base, storage, capacity, origin, span);
+    const auto gather_workspace =
+        std::find_if(storage.members.begin(), storage.members.end(),
+                     [&](const auto& member) { return gather_workspaces_.count(member.tile.get()) != 0; });
+    // Aliases and reuse can give scratch different descriptors over one allocation.
+    // The native mask prefix must view the workspace directly, never a reshape.
+    if (backend::IsMatrixBufferSpace(*memory_space) || has_column ||
+        gather_workspace != storage.members.end()) {
+      // Addressless typed storage allocates its first member and reshapes other
+      // interpretations. A backing tile may precede its workspace reshape, so
+      // explicitly choose the workspace as the native subview's allocation root.
+      const size_t root_index = !addressed_ && gather_workspace != storage.members.end()
+                                    ? static_cast<size_t>(gather_workspace - storage.members.begin())
+                                    : 0;
+      FinalizeTypedRoot(base, storage, capacity, origin, span, root_index);
       return;
     }
     CHECK_SPAN(origin, span) << "LowerTileToBuffer: addressed storage needs a full-capacity MemRef anchor; "
@@ -530,7 +536,7 @@ class StorageIndex : public IRVisitor {
   // planner decided. Without addresses, one allocation can carry only one
   // window, relabelled in place by same-size reshapes (NZ <-> ZN).
   void FinalizeTypedRoot(const Var* base, BufferStorage& storage, uint64_t capacity,
-                         std::optional<int64_t> origin, const Span& span) {
+                         std::optional<int64_t> origin, const Span& span, size_t root_index) {
     std::map<TypedKey, VarPtr> handles_by_window;
     std::vector<std::pair<TypedKey, BufferTypePtr>> member_keys;
     for (const auto& member : storage.members) {
@@ -550,7 +556,9 @@ class StorageIndex : public IRVisitor {
     }
     VarPtr root;
     uint64_t root_offset = 0;
-    for (size_t i = 0; i < storage.members.size(); ++i) {
+    // Start with the selected allocation descriptor without moving storage members.
+    for (size_t step = 0; step < storage.members.size(); ++step) {
+      const size_t i = (root_index + step) % storage.members.size();
       const auto& [key, descriptor] = member_keys[i];
       auto [entry, inserted] = handles_by_window.emplace(key, nullptr);
       if (inserted) {
