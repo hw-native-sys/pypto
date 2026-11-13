@@ -99,6 +99,10 @@ struct VFHelper {
 struct PTOCodegenBundle {
   std::string caller_source;
   std::vector<VFHelper> helpers;
+  /// Every emitted InCore entry, including entries without helpers. Keys are
+  /// sorted; values name helpers in first-use order without duplicates. SIMT
+  /// definitions/adapters are not entries. A shared helper may have many users.
+  std::map<std::string, std::vector<std::string>> entry_helpers;
 };
 
 /**
@@ -895,8 +899,12 @@ class PTOCodegen : public CodegenBase {
   /// Lexical emission guard for RegOps and nested scopes, not memory ownership.
   bool inside_reg_scope_ = false;
   bool separate_vf_ = false;
-  bool single_vf_function_ = false;
+  bool supported_vf_entries_ = false;
   std::vector<VFHelper> vf_helpers_;
+  std::map<std::string, std::vector<std::string>> entry_helpers_;
+  /// Separate membership index preserves first-use order without linear scans.
+  std::set<std::pair<std::string, std::string>> entry_helper_uses_;
+  void RecordEntryHelperUse(const std::string& symbol);
   std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
   void EmitVFHelperCall(const ir::RegScopeStmtPtr& scope);
   void EmitVFAdapter(const VFHelper& helper);

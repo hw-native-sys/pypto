@@ -30,7 +30,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 
 # importlib.resources.abc is new in 3.11; older interpreters expose the same
@@ -1949,6 +1949,9 @@ class _CodegenUnit:
     is_group: bool
     stage_record: StageRecord  # profiling record (started in Phase 1)
     helpers: tuple[_codegen_core.VFHelper, ...] = ()
+    # Keys are emitted function names, not the group/compilation-unit name.
+    # The two AIV lanes share one entry and therefore the same helper objects.
+    entry_helpers: dict[str, list[str]] = field(default_factory=lambda: dict[str, list[str]]())
 
 
 @dataclass
@@ -1982,7 +1985,8 @@ def _emit_unit(
         local_files[f"vpto/{unit.name}/manifest.json"] = (
             json.dumps(
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
+                    "entry_helpers": unit.entry_helpers,
                     "target": "a5",
                     "core_type": "aiv",
                     "bridge": False,
@@ -2523,23 +2527,37 @@ def _generate_pto_bundle(
     memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool,
     is_group: bool = False,
-) -> tuple[str, tuple[_codegen_core.VFHelper, ...]]:
+) -> tuple[str, tuple[_codegen_core.VFHelper, ...], dict[str, list[str]]]:
     """Retain combined diagnostic output; execution consumes structured artifacts."""
     generator = _codegen_core.PTOCodegen()
     emit_tile_addr = memory_planner != _passes.MemoryPlanner.PTOAS
     if skip_ptoas:
-        return generator.generate(program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc), ()
+        return (
+            generator.generate(program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc),
+            (),
+            {},
+        )
     if uses_native_fp4_mx(program):
         check_native_fp4_mx_support()
     bundle = generator.generate_bundle(
         program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
     )
     if bundle.helpers:
+        entries = [f for f in program.functions.values() if _ir_core.is_incore_type(f.func_type)]
         if is_group:
-            raise ValueError("VF/SIMT execution does not yet support grouped functions")
-        if any(h.kind == "vf" for h in bundle.helpers) and memory_planner != _passes.MemoryPlanner.PYPTO:
-            raise ValueError("VF execution requires the PyPTO Tile memory planner")
-    return bundle.caller_source, tuple(bundle.helpers)
+            if any(h.kind == "simt" for h in bundle.helpers):
+                raise ValueError("SIMT execution does not yet support grouped functions")
+            if len(entries) != 2 or {f.func_type for f in entries} != {
+                _ir_core.FunctionType.AIC,
+                _ir_core.FunctionType.AIV,
+            }:
+                raise ValueError("Grouped VF execution requires exactly one AIC and one AIV function")
+        if any(h.kind == "vf" for h in bundle.helpers):
+            if not is_group and len(entries) != 1:
+                raise ValueError("VF execution does not yet support ungrouped peer functions")
+            if memory_planner != _passes.MemoryPlanner.PYPTO:
+                raise ValueError("VF execution requires the PyPTO Tile memory planner")
+    return bundle.caller_source, tuple(bundle.helpers), bundle.entry_helpers
 
 
 def _with_simt_helpers(
@@ -2665,7 +2683,7 @@ def _generate_single_chip(
             )
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code, _ = _generate_pto_bundle(
+            pto_code, helpers, entry_helpers = _generate_pto_bundle(
                 grouped_program,
                 skip_ptoas=skip_ptoas,
                 memory_planner=memory_planner,
@@ -2674,7 +2692,17 @@ def _generate_single_chip(
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
-            units.append(_CodegenUnit(group_name, pto_code, members, is_group=True, stage_record=stage))
+            units.append(
+                _CodegenUnit(
+                    group_name,
+                    pto_code,
+                    members,
+                    is_group=True,
+                    stage_record=stage,
+                    helpers=helpers,
+                    entry_helpers=entry_helpers,
+                )
+            )
         except Exception as e:
             func_names = ", ".join(m.name for m in members)
             logger.error("Failed to compile group '%s' [%s]: %s", group_name, func_names, e)
@@ -2700,7 +2728,7 @@ def _generate_single_chip(
             )
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code, helpers = _generate_pto_bundle(
+            pto_code, helpers, entry_helpers = _generate_pto_bundle(
                 single_program,
                 skip_ptoas=skip_ptoas,
                 memory_planner=memory_planner,
@@ -2709,7 +2737,15 @@ def _generate_single_chip(
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
             units.append(
-                _CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage, helpers=helpers)
+                _CodegenUnit(
+                    func.name,
+                    pto_code,
+                    [func],
+                    is_group=False,
+                    stage_record=stage,
+                    helpers=helpers,
+                    entry_helpers=entry_helpers,
+                )
             )
         except Exception as e:
             logger.error("Failed to compile function '%s': %s", func.name, e)
@@ -2772,9 +2808,15 @@ def _generate_single_chip(
                     host_tensor_indices=host_indices,
                     unshared_code_names=codegen_free_kernels,
                     func_name_to_vpto_sources={
-                        unit.name: [f"vpto/{unit.name}/{h.symbol}.pto" for h in unit.helpers]
+                        # Registration lookup uses each member's code_name. A
+                        # group name is not a callable entry and would silently
+                        # drop AIV dependencies (or attach them to the AIC).
+                        func.name: [
+                            f"vpto/{unit.name}/{symbol}.pto" for symbol in unit.entry_helpers[func.name]
+                        ]
                         for unit in units
                         if unit.helpers
+                        for func in unit.funcs
                     },
                 )
         except Exception as e:

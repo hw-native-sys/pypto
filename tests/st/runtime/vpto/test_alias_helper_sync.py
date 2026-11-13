@@ -157,7 +157,7 @@ def _run(output: Path, device: int) -> None:
             machine_barriers = _audit_machine_code(evidence, kind, offset)
             manifest = json.loads((case / "artifact/vpto/body/manifest.json").read_text())
             helper = manifest["helpers"][0]
-            assert manifest["schema_version"] == 3
+            assert manifest["schema_version"] == 4
             assert helper["parameter_types"].count("!pto.ptr<f32, ub>") == 1
             expected_offsets = [0, offset * 4] + ([1024] if kind != "ww" else [])
             assert helper["capture_byte_offsets"][: len(expected_offsets)] == expected_offsets
