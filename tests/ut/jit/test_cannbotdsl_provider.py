@@ -82,6 +82,11 @@ def compiler(monkeypatch, tmp_path):
                 "stride": [-1, 1],
                 "size": 24,
                 "alignment": 8,
+                "pointer_offset": 0,
+                "dynamic_fields": [
+                    {"field": "shape", "dimension": 0, "slot": 0, "offset": 8},
+                    {"field": "stride", "dimension": 0, "slot": 0, "offset": 16},
+                ],
             },
             {
                 "logical_index": 2,
@@ -94,8 +99,21 @@ def compiler(monkeypatch, tmp_path):
                 "stride": [-1, 1],
                 "size": 24,
                 "alignment": 8,
+                "pointer_offset": 0,
+                "dynamic_fields": [
+                    {"field": "shape", "dimension": 0, "slot": 0, "offset": 8},
+                    {"field": "stride", "dimension": 0, "slot": 0, "offset": 16},
+                ],
             },
-            {"logical_index": 0, "name": "alpha", "kind": "scalar", "size": 4, "alignment": 4},
+            {
+                "logical_index": 0,
+                "name": "alpha",
+                "kind": "scalar",
+                "size": 4,
+                "alignment": 4,
+                "scalar_kind": "float",
+                "bits": 32,
+            },
         ],
         "core_type": "aiv",
         "participants": {"aic": 0, "aiv": 1},
@@ -106,12 +124,48 @@ def compiler(monkeypatch, tmp_path):
             "publication": "consumer_after_all_participants_return",
         },
         "contract": {
+            "schema_version": 6,
+            "dimensions": [
+                {"name": "rows", "min": 0, "max": None, "multiple_of": 1},
+                {"name": "pitch", "min": 1, "max": None, "multiple_of": 1},
+            ],
             "parameters": [
                 {"name": "alpha", "role": "runtime", "argument": {"kind": "scalar", "element": "f32"}},
-                {"name": "x", "role": "runtime", "argument": {"kind": "tensor", "element": "f32"}},
-                {"name": "out", "role": "runtime", "argument": {"kind": "tensor", "element": "f32"}},
+                *[
+                    {
+                        "name": name,
+                        "role": "runtime",
+                        "argument": {
+                            "kind": "tensor",
+                            "element": "f32",
+                            "address_space": "GM",
+                            "shape": [
+                                {"kind": "dimension", "name": "rows"},
+                                {"kind": "constant", "value": 32},
+                            ],
+                            "stride": [
+                                {"kind": "dimension", "name": "pitch"},
+                                {"kind": "constant", "value": 1},
+                            ],
+                        },
+                    }
+                    for name in ("x", "out")
+                ],
             ],
-            "tensor_views": {"pointer": "first_valid_element", "offset_applied_by": "consumer"},
+            "tensor_views": {
+                "layout": "ND",
+                "pointer": "first_valid_element",
+                "offset_applied_by": "consumer",
+                "positive_strides": True,
+                "innermost_stride": 1,
+                "non_overlapping": True,
+                "validation": "consumer_must_prove_or_check_shapes_strides_and_dimension_relations",
+            },
+            "aliasing": {
+                "single_parameter_inplace": True,
+                "readonly_overlap": True,
+                "cross_parameter_write_overlap": False,
+            },
         },
         "resources": {
             "gm_write_isolation": {"granularity_bytes": 64, "rule": "serialize_conflicting_cache_lines"}
@@ -177,6 +231,10 @@ def test_dynamic_symbols_and_scalar_types_are_shared_without_addresses(compiler)
 
 
 def test_symbol_shared_by_extent_and_stride_is_positive(compiler):
+    contract = compiler.manifest["contract"]
+    contract["dimensions"] = [{"name": "rows", "min": 1, "max": None, "multiple_of": 1}]
+    for parameter in contract["parameters"][1:]:
+        parameter["argument"]["stride"][0]["name"] = "rows"
     request = _request()
     tensor = TensorSpec(("rows", 32), DataType.FP32, strides=("rows", 1))
     request = replace(
@@ -305,12 +363,175 @@ def test_logical_runtime_parameters_must_match_request(compiler, names):
         ("layout_map", 1, "ND descriptor"),
         ("layout_map", False, "ND descriptor"),
         ("access", "unknown", "invalid device export"),
-        ("size", True, "immutable"),
+        ("size", True, "descriptor size"),
     ],
 )
 def test_invalid_parameter_metadata_is_rejected(compiler, field, value, match):
     compiler.manifest["parameters"][0][field] = value
     with pytest.raises(ContractError, match=match):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pointer_offset", 8),
+        ("pointer_offset", False),
+        ("alignment", 4),
+        ("alignment", 8.0),
+        ("size", 16),
+        ("size", 32),
+        ("dynamic_fields", []),
+        ("dynamic_fields", None),
+    ],
+)
+def test_descriptor_layout_is_checked_before_handoff(compiler, field, value):
+    compiler.manifest["parameters"][0][field] = value
+    with pytest.raises(ContractError, match="descriptor"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("offset", 0),
+        ("offset", 16),
+        ("offset", 9),
+        ("offset", 8.0),
+        ("dimension", 1),
+        ("dimension", False),
+        ("slot", 1),
+        ("slot", False),
+        ("field", "offset"),
+    ],
+)
+def test_dynamic_fields_cannot_overlap_or_address_another_axis(compiler, field, value):
+    compiler.manifest["parameters"][0]["dynamic_fields"][0][field] = value
+    with pytest.raises(ContractError, match="descriptor dynamic fields"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+def test_dynamic_field_records_may_be_reordered_but_not_duplicated(compiler):
+    fields = compiler.manifest["parameters"][0]["dynamic_fields"]
+    fields.reverse()
+    adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+    fields.append(dict(fields[0]))
+    with pytest.raises(ContractError, match="descriptor dynamic fields"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_descriptor_slots_cover_static_and_multiple_dynamic_axes(compiler, dynamic):
+    if dynamic:
+        spec = TensorSpec(("rows", "cols", 32), DataType.FP32, strides=("plane", "pitch", 1), offset=16)
+        physical_shape, physical_stride = [-1, -1, 32], [-1, -1, 1]
+        shape = [{"kind": "dimension", "name": name} for name in ("rows", "cols")]
+        stride = [{"kind": "dimension", "name": name} for name in ("plane", "pitch")]
+        fields = [
+            {"field": "shape", "dimension": 0, "slot": 0, "offset": 8},
+            {"field": "shape", "dimension": 1, "slot": 1, "offset": 16},
+            {"field": "stride", "dimension": 0, "slot": 0, "offset": 24},
+            {"field": "stride", "dimension": 1, "slot": 1, "offset": 32},
+        ]
+        dimensions = [
+            {"name": name, "min": minimum, "max": None, "multiple_of": 1}
+            for name, minimum in (("rows", 0), ("cols", 0), ("plane", 1), ("pitch", 1))
+        ]
+    else:
+        spec = TensorSpec((2, 32), DataType.FP32, strides=(32, 1), offset=16)
+        physical_shape, physical_stride = [2, 32], [32, 1]
+        shape, stride = [{"kind": "constant", "value": 2}], [{"kind": "constant", "value": 32}]
+        fields, dimensions = [], []
+    contract = compiler.manifest["contract"]
+    contract["dimensions"] = dimensions
+    for parameter in contract["parameters"][1:]:
+        parameter["argument"].update(
+            shape=[*shape, {"kind": "constant", "value": 32}],
+            stride=[*stride, {"kind": "constant", "value": 1}],
+        )
+    for parameter in compiler.manifest["parameters"][:2]:
+        parameter.update(
+            shape=physical_shape, stride=physical_stride, dynamic_fields=fields, size=40 if dynamic else 8
+        )
+    request = replace(
+        _request(),
+        parameters=(_request().parameters[0], ParameterSpec("x", spec), ParameterSpec("out", spec)),
+    )
+    prepared = adapter.CANNBotDSLProvider().prepare(_kernel, request)
+    assert prepared.native_abi.parameters[0].size_bytes == (40 if dynamic else 8)
+    # The view offset is not a field offset in the descriptor. It stays in the
+    # request for a future bridge to apply exactly once to the data pointer.
+    assert prepared.request.parameters[1].type == spec
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("size", 8), ("alignment", 8), ("bits", 64), ("bits", 32.0), ("scalar_kind", "int")],
+)
+def test_scalar_physical_abi_must_match_logical_type(compiler, field, value):
+    compiler.manifest["parameters"][2][field] = value
+    with pytest.raises(ContractError, match=f"scalar {field}"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("kind", "scalar"),
+        ("element", "i32"),
+        ("address_space", "UB"),
+        ("shape", [{"kind": "dimension", "name": "pitch"}, {"kind": "constant", "value": 32}]),
+        ("stride", [{"kind": "dimension", "name": "rows"}, {"kind": "constant", "value": 1}]),
+    ],
+)
+def test_logical_tensor_contract_cannot_disagree_with_physical_markers(compiler, field, value):
+    # Both symbols become -1 in the physical ABI. Checking that ABI alone
+    # misses a changed equality relationship between shape and stride.
+    compiler.manifest["contract"]["parameters"][1]["argument"][field] = value
+    with pytest.raises(ContractError, match="logical tensor contract"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize(
+    "field,value", [("min", 1), ("min", False), ("max", 1024), ("multiple_of", 16), ("name", "other")]
+)
+def test_export_cannot_silently_strengthen_dimension_constraints(compiler, field, value):
+    compiler.manifest["contract"]["dimensions"][0][field] = value
+    with pytest.raises(ContractError, match="logical dimension constraints"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "unused"])
+def test_dimension_declarations_must_cover_exactly_the_request(compiler, mutation):
+    dimensions = compiler.manifest["contract"]["dimensions"]
+    if mutation == "missing":
+        dimensions.pop()
+    else:
+        dimensions.append({**dimensions[0], "name": "unused" if mutation == "unused" else "rows"})
+    with pytest.raises(ContractError, match="logical dimension constraints"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize("version", [5, 6.0, True])
+def test_unknown_or_mistyped_logical_schema_is_rejected(compiler, version):
+    compiler.manifest["contract"]["schema_version"] = version
+    with pytest.raises(ContractError, match="logical contract schema"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize(
+    "section,field,value",
+    [
+        ("tensor_views", "pointer", "allocation_base"),
+        ("tensor_views", "offset_applied_by", "producer"),
+        ("tensor_views", "non_overlapping", False),
+        ("tensor_views", "innermost_stride", True),
+        ("aliasing", "cross_parameter_write_overlap", True),
+    ],
+)
+def test_view_and_aliasing_conventions_are_explicit(compiler, section, field, value):
+    compiler.manifest["contract"][section][field] = value
+    with pytest.raises(ContractError, match="convention"):
         adapter.CANNBotDSLProvider().prepare(_kernel, _request())
 
 
@@ -445,6 +666,33 @@ def test_real_constexpr_and_e8m0_export():
     assert [p["dtype"] for p in manifest["parameters"]] == ["f8e8m0", "f8e8m0"]
     assert len(prepared.native_abi.parameters) == 2
     assert prepared.contract.writebacks[0].parameter == 1
+
+
+@pytest.mark.parametrize("dtype", [DataType.BOOL, DataType.UINT32, DataType.INT64, DataType.INDEX])
+def test_real_scalar_storage_width_and_kind(dtype):
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    @cb.kernel
+    def store_value(value, out):
+        # Bool scalars are supported even though sub-byte tensor exports are
+        # not. Use the scalar in control flow and keep the output byte-addressable.
+        if value:
+            out[0] = 1
+        else:
+            out[0] = 0
+
+    request = KernelRequest(
+        (
+            ParameterSpec("value", ScalarSpec(dtype)),
+            ParameterSpec("out", TensorSpec((1,), DataType.INT32, strides=(1,))),
+        ),
+        CompileTarget("a5", "ccec", "test"),
+    )
+    prepared = adapter.CANNBotDSLProvider().prepare(store_value, request)
+    scalar = next(p for p in prepared.native_abi.parameters if p.value == ABIValue.SCALAR)
+    assert scalar.size_bytes == dtype.get_byte()
 
 
 if __name__ == "__main__":

@@ -156,6 +156,112 @@ def _file(path: str, content: bytes) -> SourceFile:
     return SourceFile(path, hashlib.sha256(content).hexdigest(), content)
 
 
+def _expect_metadata(actual: Any, expected: Any, label: str) -> None:
+    # JSON comparison is type-sensitive: Python equality would accept True as
+    # offset 1 and 8.0 as an ABI size. Field order in objects is immaterial.
+    _require(
+        json.dumps(actual, sort_keys=True, allow_nan=False)
+        == json.dumps(expected, sort_keys=True, allow_nan=False),
+        f"{label}: expected {expected!r}, got {actual!r}",
+    )
+
+
+def _expect_records(actual: Any, expected: list[dict[str, Any]], label: str) -> None:
+    _require(isinstance(actual, list), f"{label} must be an array")
+    # Retain duplicates and JSON types while ignoring only the record order.
+    _expect_metadata(
+        sorted(json.dumps(record, sort_keys=True, allow_nan=False) for record in actual),
+        sorted(json.dumps(record, sort_keys=True, allow_nan=False) for record in expected),
+        label,
+    )
+
+
+def _validate_descriptor(item: dict[str, Any], spec: TensorSpec) -> None:
+    """Check the v1 POD layout independently of the source's static assertions.
+
+    The pointer precedes packed int64 dynamic shape fields, then packed int64
+    dynamic stride fields. Slots are local to each array; offsets are bytes
+    from the descriptor base. Static dimensions have no physical field.
+    """
+    fields: list[dict[str, Any]] = []
+    for field, dimensions in (("shape", spec.shape), ("stride", spec.strides)):
+        slot = 0
+        for axis, dimension in enumerate(dimensions):
+            if isinstance(dimension, str):
+                fields.append(
+                    {"field": field, "dimension": axis, "slot": slot, "offset": 8 * (len(fields) + 1)}
+                )
+                slot += 1
+    label = f"parameter {item['logical_index']} descriptor"
+    _expect_metadata(item["pointer_offset"], 0, f"{label} pointer offset")
+    _expect_metadata(item["alignment"], 8, f"{label} alignment")
+    _expect_metadata(item["size"], 8 * (1 + len(fields)), f"{label} size")
+    # The record sequence is not the ABI order: byte offsets are. Compare the
+    # complete records without sorting untrusted offset values or coercing them.
+    _expect_records(item["dynamic_fields"], fields, f"{label} dynamic fields")
+
+
+def _validate_logical_contract(manifest: dict[str, Any], request: KernelRequest) -> None:
+    contract = manifest["contract"]
+    _expect_metadata(contract["schema_version"], 6, "logical contract schema")
+    logical = [p for p in contract["parameters"] if p["role"] == "runtime"]
+    stride_symbols = {
+        value
+        for p in request.parameters
+        if isinstance(p.type, TensorSpec)
+        for value in p.type.strides
+        if isinstance(value, str)
+    }
+    symbols: set[str] = set()
+
+    def expression(value: int | str) -> dict[str, Any]:
+        if isinstance(value, int):
+            return {"kind": "constant", "value": value}
+        symbols.add(value)
+        return {"kind": "dimension", "name": value}
+
+    for parameter, declared in zip(request.parameters, logical):
+        spec = parameter.type
+        if not isinstance(spec, TensorSpec):
+            continue
+        # Physical -1 markers erase symbol identities. Check the logical
+        # expressions too, or a renamed/shared dimension can change semantics
+        # while producing an identical native descriptor layout.
+        _expect_metadata(
+            declared["argument"],
+            {
+                "kind": "tensor",
+                "element": _DTYPES[spec.dtype][1],
+                "address_space": "GM",
+                "shape": [expression(d) for d in spec.shape],
+                "stride": [expression(d) for d in spec.strides],
+            },
+            f"parameter {parameter.name!r} logical tensor contract",
+        )
+    expected = [
+        {"name": name, "min": int(name in stride_symbols), "max": None, "multiple_of": 1} for name in symbols
+    ]
+    _expect_records(contract["dimensions"], expected, "logical dimension constraints")
+    _expect_metadata(
+        contract["tensor_views"],
+        {
+            "layout": "ND",
+            "pointer": "first_valid_element",
+            "offset_applied_by": "consumer",
+            "positive_strides": True,
+            "innermost_stride": 1,
+            "non_overlapping": True,
+            "validation": "consumer_must_prove_or_check_shapes_strides_and_dimension_relations",
+        },
+        "tensor view convention",
+    )
+    _expect_metadata(
+        contract["aliasing"],
+        {"single_parameter_inplace": True, "readonly_overlap": True, "cross_parameter_write_overlap": False},
+        "tensor aliasing convention",
+    )
+
+
 def _artifact(cb: Any, source: str, manifest: dict[str, Any]) -> SourceArtifact:
     _require(type(source) is str, "device source must be text")
     payload = source.encode("utf-8")
@@ -247,6 +353,7 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
                     item[field] == expected_dimensions and all(type(d) is int for d in item[field]),
                     f"parameter {index} {field} differs from the request",
                 )
+            _validate_descriptor(item, spec)
             access = Access(item["access"])
             coverage = Coverage.UNKNOWN if access in (Access.WRITE, Access.READ_WRITE) else Coverage.NONE
             # An access mask proves a write exists, never that every element of
@@ -263,6 +370,20 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
                 f"parameter {index} scalar dtype mismatch: expected {expected_element}, "
                 f"got {argument['element']!r}",
             )
+            dtype = parameter.type.dtype
+            size = dtype.get_byte()
+            # Integer SSA carriers can be signed even for unsigned logical
+            # values. Validate kind/width here; a bridge must preserve the bits
+            # rather than infer a numeric conversion from the C++ spelling.
+            kind = "bool" if dtype == DataType.BOOL else "float" if expected_element[0] in "fb" else "integer"
+            for field, expected in (
+                ("size", size),
+                ("alignment", size),
+                ("bits", 1 if dtype == DataType.BOOL else size * 8),
+                ("scalar_kind", kind),
+            ):
+                _expect_metadata(item[field], expected, f"parameter {index} scalar {field}")
+    _validate_logical_contract(manifest, request)
     cores = {"aic": (Core.AIC,), "aiv": (Core.AIV,), "mixed": (Core.AIC, Core.AIV)}
     core_type = manifest["core_type"]
     _require(core_type in cores, f"unsupported core type {core_type!r}")

@@ -116,6 +116,22 @@ Scalar element tags in the logical runtime contract must match the request;
 equal byte widths alone are insufficient. Malformed exports, including missing
 `manifest` or `source` attributes, raise `ContractError` before handoff.
 
+Preparation also validates the v1 descriptor layout: an 8-byte pointer at byte
+offset 0, followed by packed int64 dynamic shape fields and then dynamic stride
+fields, with 8-byte alignment. Static dimensions occupy no descriptor slots.
+Field offsets, per-array slots, axes, total size and scalar kind/bit width must
+agree with the request. Numeric metadata is type-sensitive; boolean and floating
+point substitutes for integer offsets or sizes are rejected.
+
+Logical contract schema 6 is checked separately because physical `-1` markers
+cannot express dimension equality. Tensor element types, GM address space,
+shape/stride expressions and dimension bounds must match the request exactly;
+extra or stronger constraints are rejected. The supported view convention is
+first-valid-element pointers with consumer-applied offsets and non-overlapping
+positive strides. Cross-parameter write overlap is not supported. These checks
+validate declarations; checking actual addresses, bounds and overlaps on each
+invocation remains the runtime bridge's responsibility.
+
 The owned artifact contains `device_callable.hpp`, the complete
 `device_manifest.json`, and digest-checked copies of DSL extension headers. The
 manifest retains descriptor layout, view constraints, state clobbers, exclusive
@@ -131,6 +147,9 @@ must implement a bridge that checks the complete manifest, lifetime-safe JIT
 binding, and the relevant compatibility regressions. In particular, resource and
 64-byte GM write-isolation requirements cannot be dropped when introducing the
 runtime path. Device completion, numerical and performance acceptance remain 34.7.
+The next runtime work must establish cache-line conflict serialization and
+validate compiler stack requirements, alongside descriptor packing and resource
+ownership. The existing text-only ELF checks alone do not establish these guarantees.
 `test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
 when installed, the real public compiler export; it does not validate a binary.
 
