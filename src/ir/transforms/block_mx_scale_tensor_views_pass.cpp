@@ -586,8 +586,9 @@ class BlockMxMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(IsMxTensorLayout(layout), op->span_)
         << "Internal error: MX tile.store destination must use an MX layout";
     args[1] = BlockMxTupleArg(args[1], layout, op->span_, /*is_offsets=*/true, facts_, logical_views_);
-    if (args.size() == 4)
+    if (args.size() == 4) {
       args[3] = BlockMxTupleArg(args[3], layout, op->span_, /*is_offsets=*/false, facts_, logical_views_);
+    }
     return args;
   }
 

@@ -176,15 +176,15 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     } else if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_B_NN) {
       pto_layout = "mx_b_nn";
     }
+    if (!pto_layout.empty()) {
+      INTERNAL_CHECK_SPAN(
+          ir::tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, tensor_type->tensor_view_->layout),
+          op->span_)
+          << "Internal error: MX tile.load reached codegen without a canonical logical rank-2 shape — "
+          << "use LegalizeMxScaleTensorViews for PTOAS v0.74";
+    }
   }
   const bool is_mx_load = !pto_layout.empty();
-  if (is_mx_load) {
-    INTERNAL_CHECK_SPAN(
-        ir::tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, tensor_type->tensor_view_->layout),
-        op->span_)
-        << "Internal error: MX tile.load reached codegen without a canonical logical rank-2 shape — "
-        << "use LegalizeMxScaleTensorViews for PTOAS v0.74";
-  }
 
   // RFC #1300 P7: the IR's offsets / shapes / valid_shape are already in
   // canonical coordinates (matching the source TensorType's shape). There is

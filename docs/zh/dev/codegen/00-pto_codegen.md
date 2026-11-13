@@ -7,7 +7,7 @@ Tile 和 Buffer 代码生成均输出 `#pto<div_precision diff_compensation>`，
 对应重命名后的除法算法。Python API 保持不变；`log` 和 `recip`
 仍使用 `high_precision` 属性。
 
-MX tensor view 通过 [LegalizeMxScaleTensorViews](../passes/17-block_mx_scale_tensor_views.md)
+MX tensor view 通过 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md)
 保留逻辑 rank-2 形状、stride 和分区偏移。PTOAS v0.74 根据
 `mx_a_zz` / `mx_b_nn` 构造物理打包描述符，不能将这些视图改标为普通 ND 内存。
 

@@ -8,7 +8,7 @@ renamed division algorithm. The Python API is unchanged; `log` and `recip`
 retain their `high_precision` attributes.
 
 MX tensor views retain logical rank-2 shapes, strides, and partition offsets
-through [LegalizeMxScaleTensorViews](../passes/17-block_mx_scale_tensor_views.md).
+through [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md).
 PTOAS v0.74 constructs their packed physical descriptors from `mx_a_zz` /
 `mx_b_nn`; these views must not be relabeled as ordinary ND memory.
 

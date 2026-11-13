@@ -5,7 +5,7 @@ Fills every `view.has_value() && view.stride.empty()` slot on every `TensorType`
 > **Status**: this pass is registered (`passes.materialize_tensor_strides()`), covered by unit tests, and wired into the default tile/PTO pipeline between `CanonicalizeIOOrder` and `InitMemRef` starting from RFC #1300 P6.
 
 MX views in the default pipeline remain logical rank-2 after
-[LegalizeMxScaleTensorViews](17-block_mx_scale_tensor_views.md); their strides
+[LegalizeMxScaleTensorViews](18-block_mx_scale_tensor_views.md); their strides
 are `[cols, 1]`, and PTOAS owns physical packing. Explicit legacy blocked
 rank-5 MX views remain valid for this pass, but are not emitted to PTOAS v0.74.
 
