@@ -530,6 +530,13 @@ std::vector<StmtPtr> FinalizeTpopTfreesImpl(const std::vector<StmtPtr>& stmts, c
         auto tile = As<TileType>(received->GetType());
         INTERNAL_CHECK_SPAN(tile && tile->memory_space_.has_value(), yield->span_)
             << "Internal error: received Tile must have a memory space before FIFO yield materialization";
+        // Only Vec receives have a supported same-space materialization here.
+        // AIC receives reside in Mat: copying them would emit Mat-to-Mat TMOV,
+        // which is unsupported on A2/A3. Do not assume a legal copy on another
+        // backend without a corresponding lowering and lifetime contract.
+        CHECK_SPAN(tile->memory_space_ == MemorySpace::Vec, yield->span_)
+            << "Yielding a branch/loop-local FIFO-backed Tile is only supported in Vec memory; "
+               "consume the Mat receive inside its defining branch or loop before yielding";
         auto copy = OpRegistry::GetInstance().Create(
             "tile.move", {value}, {{"target_memory", std::any(*tile->memory_space_)}}, yield->span_);
         auto source = AsVarLike(value);

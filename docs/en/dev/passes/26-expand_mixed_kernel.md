@@ -359,11 +359,16 @@ including a later scope or Tile store. Releases preserve pop order within each
 pipe, so a later pop cannot return credit before an earlier live slot. Retiming
 an authored free preserves its explicit attributes.
 
-In Tile-only functions, a branch or loop that yields a locally received Tile
+In Tile-only functions, a branch or loop that yields a locally received Vec Tile
 first copies the yielded value or view into independent storage. Its order is
 `tpop` → view/consumers → `tile.move` → `tfree` → `yield`. The branch result
 therefore survives the release, and later phi lowering never needs to read
 the freed slot. `yield` remains the final statement in the body.
+This automatic copy is limited to Vec receives on both backends. Yielding a
+locally received Mat Tile or its view is rejected before materialization:
+Mat-to-Mat `TMOV` is unsupported on A2/A3, and no portable Mat copy strategy is
+implemented here. Consume the Mat receive inside its defining branch or loop
+before yielding.
 
 In functions containing `RegScope`, a receive created inside a branch or loop
 body must not escape that body through
