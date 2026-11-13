@@ -73,8 +73,8 @@ branch and dispatches `CI Full` from trusted `main`. It fixes the PR head, base 
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
 The full-test base comes from the live `refs/heads/main` ref. GitHub's PR
 `base.sha` can remain behind that ref even after the test merge is current;
-that older snapshot is used only to match the original lint run. Full dispatch,
-duplicate detection, progress and final publication all check the live ref.
+that snapshot is not used to select lint. Lint selection uses the newest automatic
+run for the same PR head. Full dispatch still pins and verifies the live merge.
 Before allowing full CI, the command compares the pinned PR head with live main:
 **0–4 commits behind is allowed; 5 or more is rejected**. Only commits present on
 main but missing from the PR count; the PR's own commits do not. A rejected
@@ -100,7 +100,8 @@ retrying an API failure.
 An identical request already queued/running is not dispatched again. The command
 validates the run linked by the current status before searching run history,
 so a bound pending request is honored even before the run list indexes it.
-A verified successful full result for the same head and base also makes the comment a no-op,
+A verified successful full result for the same head that still meets the freshness
+limit also makes the comment a no-op,
 so another commenter cannot reset a green gate. Comment
 access allows users to request device tests; it does not grant repository write
 or merge permission, and duplicate detection is not a general rate limit.
@@ -118,12 +119,13 @@ when run-history searches have not yet indexed it.
 
 The comment opens the downstream test stage after `pre-commit` and `clang-tidy`
 have passed in the latest matching automatic PR run. Matching includes the PR
-number, head SHA, recorded PR base SHA, workflow identity and fork identity. A docs-only PR
+number, head SHA, workflow identity and fork identity. Event base snapshots may
+differ; the newest run wins across them, including failures and cancellations. A docs-only PR
 may reuse a skipped `clang-tidy` after its changed paths are verified. Missing,
 running or failed lint rejects the request; it does not reserve a runner while
-waiting. Changes to the PR snapshot require matching lint again. Main advancing
-without changing that snapshot does not rerun lint; full tests use the current
-main merge while reusing the lint result from the recorded PR snapshot.
+waiting. Changes to the PR head require matching lint again. Main advancing
+without a head change does not rerun lint; full tests use the pinned main merge
+while reusing lint for that head.
 
 The downstream run skips both lint jobs. A lightweight gate verifies their
 reuse before tests start; revision checks and toolchain preparation still run.
@@ -230,12 +232,15 @@ Duplicate detection scans all statuses together from the PR creation time, split
 creation-time ranges at GitHub’s search limit. Moving between unfinished statuses
 cannot hide an existing request from that scan.
 A rerun of an old request cannot cancel a
-newer request. A new commit needs a new `/ci full` comment. If main advances
-before result publication, the old-base result fails. Post `/ci full` again to
-test the current main merge; update the PR branch and wait for lint if no matching
-lint result is available. This check is made at publication time; an already published success
-is not automatically invalidated by a later main push. Requiring an up-to-date
-branch at merge time is a separate ruleset policy, unchanged by this PR.
+newer request. A new commit needs a new `/ci full` comment. If main advances during
+the run, per-job results keep syncing and `ci/full` remains pending until completion.
+A successful result uses the same PR-head freshness limit: 0–4 missing main commits
+is allowed; 5 or more fails with a rebase explanation in the status description.
+Rewritten main history that no longer contains the tested base also fails.
+Repeated comments preserve an ongoing run for the same head, or a successful result
+that still meets this limit. This check is made at publication time; an already
+published success is not automatically invalidated by a later main push. Requiring
+an up-to-date branch at merge time is a separate ruleset policy, unchanged here.
 Changed-path classification compares the pinned base and head SHAs, so later
 PR pushes cannot change which conditional tests run. If the comparison fails
 or reaches GitHub’s 300-file limit, all conditional checks are enabled.

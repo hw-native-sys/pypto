@@ -957,9 +957,56 @@ def test_forged_merge_with_correct_parents_is_rejected(control, pr):
         control.verify_merge(REPO, pr, HEAD, BASE, "d" * 40)
 
 
-def test_obsolete_base_cannot_publish_success(control, monkeypatch, publication):
-    # The PR snapshot can still name the tested base after main has advanced.
+@pytest.mark.parametrize("behind", [0, 1, 4, 5, 6])
+@pytest.mark.parametrize("ancestor", [True, False])
+def test_result_freshness_allows_bounded_main_advance(controller, monkeypatch, behind, ancestor):
+    current = "d" * 40
+    monkeypatch.setattr(controller, "current_base", lambda repo: current)
+
+    def api(path):
+        if path == f"repos/{REPO}/compare/{current}...{HEAD}?per_page=1":
+            return {"behind_by": behind}
+        assert path == f"repos/{REPO}/compare/{BASE}...{current}?per_page=1"
+        return {"merge_base_commit": {"sha": BASE if ancestor else "e" * 40}}
+
+    monkeypatch.setattr(controller, "api", api)
+    if behind >= 5 or not ancestor:
+        with pytest.raises(ValueError, match="rebase"):
+            controller.verify_result_freshness(REPO, HEAD, BASE)
+    else:
+        controller.verify_result_freshness(REPO, HEAD, BASE)
+
+
+@pytest.mark.parametrize("behind", [1, 4, 5])
+def test_publication_checks_freshness_and_explains_rejection(control, monkeypatch, publication, behind):
+    calls = []
+
+    def freshness(repo, head, base):
+        calls.append((repo, head, base))
+        if behind >= 5:
+            raise ValueError(f"PR is {behind} commits behind main; rebase and post /ci full again")
+
+    monkeypatch.setattr(control, "verify_result_freshness", freshness)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    status = publication[3][0][1]
+    assert calls == [(REPO, HEAD, BASE)]
+    assert status["state"] == ("success" if behind < 5 else "failure")
+    if behind >= 5:
+        assert "5 commits behind main; rebase" in status["description"]
+
+
+def test_running_full_stays_pending_when_main_advances(control, monkeypatch, publication):
     monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40)
+    publication[0].update(status="in_progress", conclusion=None)
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert publication[3][0][1]["state"] == "pending"
+
+
+def test_unavailable_base_comparison_cannot_publish_success(control, monkeypatch, publication):
+    def unavailable(*args):
+        raise subprocess.CalledProcessError(1, ["gh", "api"])
+
+    monkeypatch.setattr(control, "verify_result_freshness", unavailable)
     control.publish(REPO, {"workflow_run": {"id": 50}})
     assert publication[3][0][1]["state"] == "failure"
 
@@ -1871,7 +1918,7 @@ def test_lint_reuse_accepts_matching_revision(control, pr, lint_run):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("display_title", f"CI lint PR #123 @{HEAD} base:{'d' * 40}"),
+        ("display_title", f"CI lint PR #123 @{HEAD} base:invalid"),
         ("display_title", f"CI lint PR #124 @{HEAD} base:{BASE}"),
         ("event", "push"),
         ("path", ".github/workflows/other.yml"),
@@ -1907,6 +1954,48 @@ def test_lint_reuse_does_not_fall_back_to_old_green(control, pr, lint_run):
     lint_run[2][1]["conclusion"] = "failure"
     with pytest.raises(ValueError, match="pre-commit did not pass"):
         control.matching_lint_run(REPO, pr)
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled"])
+def test_latest_lint_wins_across_base_snapshots(control, pr, lint_run, result):
+    run, runs, jobs, _ = lint_run
+    # #3404: REST names the older cancelled run's base, while the newest
+    # successful run records a different pull_request event snapshot.
+    runs.append({**run, "id": 39, "run_number": 3})
+    run["display_title"] = f"CI lint PR #123 @{HEAD} base:{'d' * 40}"
+    jobs[1]["conclusion"] = result
+    if result == "success":
+        assert control.matching_lint_run(REPO, pr)["id"] == 40
+    else:
+        with pytest.raises(ValueError, match="pre-commit did not pass"):
+            control.matching_lint_run(REPO, pr)
+
+
+def test_bound_pending_survives_main_advance(control, monkeypatch, pr, bound_pending):
+    monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40)
+    assert control.already_running_or_passed(REPO, pr)
+
+
+def test_green_result_survives_allowed_main_advance(control, monkeypatch, pr, publication):
+    api = control.api
+    monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40)
+    monkeypatch.setattr(
+        control,
+        "api",
+        lambda path, payload=None: {"merge_base_commit": {"sha": BASE}}
+        if "/compare/" in path
+        else api(path, payload),
+    )
+    run, _, _, writes = publication
+    # Use the current bound attempt for successful-result deduplication.
+    run["run_attempt"] = 1
+    pages = control.pages
+    monkeypatch.setattr(
+        control, "pages", lambda path, key: publication[1] if key == "jobs" else pages(path, key)
+    )
+    control.publish(REPO, {"workflow_run": {"id": 50}})
+    assert writes[0][1]["state"] == "success"
+    assert control.already_running_or_passed(REPO, pr)
 
 
 @pytest.mark.parametrize(
@@ -1967,7 +2056,11 @@ def test_already_green_requires_verified_full_revision(control, monkeypatch, pr,
         ],
     )
     if case == "changed-base":
-        monkeypatch.setattr(control, "current_base", lambda repo: "d" * 40)
+
+        def stale(*args):
+            raise ValueError("PR is 5 commits behind main; rebase")
+
+        monkeypatch.setattr(control, "verify_result_freshness", stale)
     elif case == "failed":
         jobs[0]["conclusion"] = "failure"
     elif case == "rerunning":
@@ -2059,7 +2152,7 @@ def bound_pending(control, monkeypatch, publication):
         ("head_repository", {"id": 2}),
         ("display_title", f"CI full PR #124 @{HEAD} base:{BASE}"),
         ("display_title", f"CI full PR #123 @{'d' * 40} base:{BASE}"),
-        ("display_title", f"CI full PR #123 @{HEAD} base:{'d' * 40}"),
+        ("display_title", f"CI full PR #123 @{HEAD} base:invalid"),
         ("run_attempt", 1),
         ("run_attempt", "2"),
     ],

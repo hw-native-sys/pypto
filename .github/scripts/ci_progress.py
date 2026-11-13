@@ -190,7 +190,9 @@ def monitor(repo: str, event: dict[str, Any]) -> None:
             if run["workflow_id"] != workflow["id"]:
                 raise control.UntrustedRunError("Unexpected full CI workflow identity")
             pr = control.pull(repo, number)
-            if pr["head"]["sha"] != head or control.current_base(repo) != match[3]:
+            # Job results describe this tested head even when main advances.
+            # The independent ci/full publisher decides merge eligibility.
+            if pr["head"]["sha"] != head:
                 return
             if control.newer_status_exists(repo, number, head, run):
                 return

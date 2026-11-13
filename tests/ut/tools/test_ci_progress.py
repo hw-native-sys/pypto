@@ -181,19 +181,32 @@ def test_completed_event_reconciles_existing_status_context(progress, event, har
     assert writes[0][1]["state"] == "success"
 
 
-@pytest.mark.parametrize("change", ["attempt", "head", "base", "newer"])
+@pytest.mark.parametrize("change", ["attempt", "head", "newer"])
 def test_obsolete_monitor_cannot_publish_new_revision(progress, monkeypatch, event, harness, change):
     run, pr, _, writes, _ = harness
     if change == "attempt":
         run["run_attempt"] = 2
     elif change == "head":
         pr["head"]["sha"] = "d" * 40
-    elif change == "base":
-        monkeypatch.setattr(progress.control, "current_base", lambda repo: "d" * 40)
     else:
         monkeypatch.setattr(progress.control, "newer_status_exists", lambda *args: True)
     progress.monitor(REPO, event)
     assert not writes
+
+
+def test_main_advance_does_not_freeze_queued_job(progress, monkeypatch, event, harness):
+    run, _, jobs, writes, _ = harness
+
+    def advance(seconds):
+        assert seconds == 60
+        monkeypatch.setattr(progress.control, "current_base", lambda repo: "d" * 40)
+        run["status"] = "completed"
+        jobs[0].update(status="completed", conclusion="success")
+
+    monkeypatch.setattr(progress.time, "sleep", advance)
+    progress.monitor(REPO, event)
+    assert [payload["state"] for _, payload, _ in writes] == ["pending", "success"]
+    assert writes[-1][1]["target_url"].endswith("/runs/50/job/101")
 
 
 def test_stale_pr_base_does_not_hide_full_job_results(progress, event, harness):
