@@ -9,6 +9,11 @@
       "function": "toolchain_probe_env",
       "path": "python/pypto/_environment.py",
       "reason": "Copies an existing metadata probe environment, omitting runtime-only loader injection, tracing and profiling under the documented deployment contract. Actual builds retain the caller environment; compiler and dependency search settings remain visible to probes."
+    },
+    {
+      "function": "_git",
+      "path": "python/pypto/runtime/pto_isa.py",
+      "reason": "Copies the process environment minus Git repository-location overrides (GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/...) so a Git hook or wrapper cannot redirect the fallback's worktree or commit. Repository selection is explicit via -C."
     }
   ],
   "schema": 1,
@@ -180,6 +185,10 @@
     "PYPTO_COMPILE_PROFILING": {
       "category": "fresh_request",
       "reason": "Enabled compilation profiling must run compiler stages on each request."
+    },
+    "PYPTO_DISABLE_PTO_ISA_TREM_PATCH": {
+      "category": "semantic",
+      "reason": "Debug-only bypass of the temporary A2/A3 TREM backport; switches the PTO-ISA sources PyPTO compiles against between the pinned tree and its patched worktree."
     },
     "PYPTO_EMIT_DEBUG_RUNNER": {
       "category": "fresh_request",

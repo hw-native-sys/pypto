@@ -218,12 +218,17 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 
 **接口：** 定义指令 API 的 C++ 头文件库。下游消费者 `#include` pto-isa 头文件；硬件厂商提供支撑这些头文件的目标特定实现。
 
-`runtime/pto_isa.pin` 是版本的唯一真相来源，解析器只有 simpler 一份
+`runtime/pto_isa.pin` 是版本的唯一真相来源，pin 解析器只有 simpler 一份
 （`simpler_setup.pto_isa.ensure_pto_isa_root`）：它在 runtime 的 `build/pto-isa`
 下管理唯一一份检出，仅当该工作树干净且已停在 pin 上时才复用，否则重新克隆，并在
 返回前校验 `HEAD`。PyPTO 委托给它而不自行解析 pin —— 第二份解析器可能把偏离 pin
-的目录交给 kernel 编译器，而编译器正是因为"解析器已保证 pin"才跳过自己的版本复
-查。如需更改版本，应更新 runtime 侧的 pin。
+的目录交给 kernel 编译器，而编译器正是因为"解析已保证返回的目录"才跳过自己的版本
+复查。
+
+当 pinned 头文件需要临时 backport（当前为 A2/A3 TREM/TREMS 修复）时，
+`pypto.runtime.pto_isa.ensure_pto_isa_root()` 会从同一个已验证的 pin 派生一个
+detached worktree，应用经过评审的补丁并在本地提交；一旦 pin 自带该修复，补丁即被
+移除且回退逻辑自动停用。如需更改版本，应更新 runtime 侧的 pin。
 
 `PTO_ISA_ROOT` 会被*导出*为解析结果，供构建 extern CCE kernel 的下游消费者找到
 ISA 头文件；但它永远不会被*读取* —— 环境里的值不等于 pin。需要头文件路径的代码应

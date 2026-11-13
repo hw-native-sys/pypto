@@ -207,7 +207,9 @@ class KernelCompiler:
             # while retaining PyPTO ownership of the actual compiler process.
             compile_flags = cast("list[str]", self.sdk.incore_compile_cache_token(core_type)["flags"])
             if pto_isa_root is None:
-                from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
+                # Use PyPTO's resolver so a temporary PTO-ISA header backport
+                # applies to simulator compiles as well.
+                from .pto_isa import ensure_pto_isa_root  # noqa: PLC0415
 
                 pto_isa_root = ensure_pto_isa_root()
         else:

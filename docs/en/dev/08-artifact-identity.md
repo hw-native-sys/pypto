@@ -88,10 +88,13 @@ installation reports about itself is not such a proof, and neither is a path
 that contains a version number.
 
 PTO-ISA is the only component that currently qualifies. `ensure_pto_isa_root()`
-returns a checkout only after proving it is clean and at the pinned commit, and
-re-clones it from the pin otherwise; git objects are content-addressed, so a
-clean tree at `HEAD == pin` is byte-for-byte the pinned tree. Hashing that tree
-again re-proves what the resolution established.
+returns a clean checkout whose HEAD is the pin, or — while the temporary
+A2/A3 TREM/TREMS backport is active — a clean detached worktree of that pin
+whose HEAD is the local backport commit. Either way the resolution has verified
+that git accounts for every path in the tree, and git objects are
+content-addressed, so the HEAD revision identifies the exact sources the
+compiler uses. Hashing the tree again re-proves what the resolution
+established.
 
 That resolution decides cleanliness with `git status --porcelain`, which omits
 paths the checkout ignores, so a build writing generated files into the ISA tree
