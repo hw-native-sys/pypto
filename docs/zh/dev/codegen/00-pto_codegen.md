@@ -11,6 +11,10 @@ MX tensor view 通过 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_t
 保留逻辑 rank-2 形状、stride 和分区偏移。PTOAS v0.74 根据
 `mx_a_zz` / `mx_b_nn` 构造物理打包描述符，不能将这些视图改标为普通 ND 内存。
 
+PTOAS v0.74 还会为 A2/A3 行收集操作生成 `pto::GatherSync::Async`。
+请使用 `runtime/pto_isa.pin` 指定的 PTO-ISA 版本（`90a37965`），该版本提供此 API。
+runtime 子模块固定为 `c1c234667`，确保运行时构建与生成内核使用相同的兼容头文件。
+
 ## 设计原则：严格的 1-to-1 映射
 
 代码生成必须是从 IR 到生成代码的**严格 1-to-1 转换**。每个 IR 节点直接映射到对应的输出代码结构——代码生成层不应执行优化、分析或间接转换。

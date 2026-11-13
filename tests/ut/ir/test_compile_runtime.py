@@ -580,7 +580,8 @@ def test_program_preserves_original_mx_parameters(tmp_path, multi_entry):
     for entry in entries:
         metadata = entry._artifact.metadata
         assert metadata is not None
-        assert [param.shape for param in metadata.lowered_parameters] == [(1, 4, 2, 16, 2)] * 2
+        # PTOAS v0.74 packs MX views; PyPTO keeps logical shapes in both metadata layers.
+        assert [param.shape for param in metadata.lowered_parameters] == [(64, 4), (4, 64)]
         for program in (entry, CompiledProgram.from_dir(entry.output_dir)):
             params, outputs, returns = program._get_metadata()
             assert params == expected_params

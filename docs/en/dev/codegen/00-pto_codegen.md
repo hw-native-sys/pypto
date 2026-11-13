@@ -12,6 +12,11 @@ through [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md
 PTOAS v0.74 constructs their packed physical descriptors from `mx_a_zz` /
 `mx_b_nn`; these views must not be relabeled as ordinary ND memory.
 
+PTOAS v0.74 also emits `pto::GatherSync::Async` for A2/A3 row gathers.
+Use the PTO-ISA revision selected by `runtime/pto_isa.pin` (`90a37965`),
+which provides that API. The runtime submodule is pinned to `c1c234667` so
+runtime builds and generated kernels use the same compatible headers.
+
 ## Design Principle: Strict 1-to-1 Mapping
 
 Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each IR node maps directly to its corresponding output construct — no optimization, analysis, or indirection transformation should occur in the codegen layer.
