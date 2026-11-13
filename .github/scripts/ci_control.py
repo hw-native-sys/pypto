@@ -31,7 +31,10 @@ LINT_WORKFLOW = ".github/workflows/ci.yml"
 # Old full runs keep their original workflow path during native reruns. They
 # remain eligible for recovery, but new requests always use the full workflow.
 FULL_WORKFLOWS = {WORKFLOW, LINT_WORKFLOW}
-FULL_TITLE = re.compile(r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})")
+FULL_TITLE = re.compile(
+    r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})(?: request:([1-9][0-9]*-[1-9][0-9]*))?"
+)
+LINT_TITLE = re.compile(r"CI lint PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})")
 UNFINISHED = ("queued", "in_progress", "requested", "waiting", "pending")
 REQUIRED = {
     "changes",
@@ -160,10 +163,18 @@ def newer_status_exists(repo: str, number: int, head: str, run: dict[str, Any]) 
         return False
     if (
         status.get("state") == "pending"
-        and status.get("description") == "Full CI requested; waiting for dispatch"
         and status.get("target_url") == f"https://github.com/{repo}/pull/{number}"
     ):
-        return True  # An authorized command has not yet bound its replacement run.
+        marker = re.fullmatch(
+            r"Full CI requested; waiting for dispatch(?: \(request ([1-9][0-9]*-[1-9][0-9]*)\))?",
+            status.get("description") or "",
+        )
+        if marker:
+            source = FULL_TITLE.fullmatch(run.get("display_title") or "")
+            # A lost dispatch response or binding write must not strand the
+            # accepted run. Only that command attempt can recover its marker;
+            # legacy markers have no identity and remain protected.
+            return not (source and marker[1] and source[4] == marker[1])
     target = re.fullmatch(
         rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)(?:/attempts/([1-9][0-9]*))?",
         status.get("target_url") or "",
@@ -263,17 +274,45 @@ def verify_branch_freshness(repo: str, head: str, base: str) -> None:
         )
 
 
-def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str, merge: str) -> None:
-    """A fixed test merge preserves pull_request semantics, including forks."""
-    for value in (head, base, merge):
+def verify_merge(repo: str, pr: dict[str, Any], head: str, base: str | None, merge: str) -> str:
+    """Select an eligible merge base, or verify an already pinned one."""
+    for value in (head, merge):
         sha(value)
-    if pr["head"]["sha"] != head or current_base(repo) != base:
+    if base is not None:
+        sha(base)
+    if pr["head"]["sha"] != head:
         raise ValueError("PR changed; post /ci full again for the new revision")
+    if pr.get("mergeable") is False:
+        raise ValueError("PR has merge conflicts; rebase and post /ci full again")
+    if pr.get("mergeable") is not True:
+        raise MergePendingError("GitHub has not confirmed PR mergeability yet")
     if pr.get("merge_commit_sha") != merge:
         raise ValueError("merge_sha is not the PR's current test merge; post /ci full again")
     commit = api(f"repos/{repo}/git/commits/{merge}")
-    if [parent["sha"] for parent in commit["parents"]] != [base, head]:
+    parents = [parent["sha"] for parent in commit["parents"]]
+    if len(parents) != 2 or parents[1] != head or (base is not None and parents[0] != base):
         raise MergePendingError("Test merge does not have the authorized base and head parents")
+    tested_base = sha(parents[0])
+    verify_result_freshness(repo, head, tested_base)
+    return tested_base
+
+
+def verify_result_freshness(repo: str, head: str, tested_base: str) -> None:
+    """Apply the admission limit to results while rejecting rewritten base history."""
+    base = current_base(repo)
+    verify_branch_freshness(repo, head, base)
+    if base != tested_base:
+        comparison = api(f"repos/{repo}/compare/{sha(tested_base)}...{base}?per_page=1")
+        if comparison.get("merge_base_commit", {}).get("sha") != tested_base:
+            raise ValueError("main no longer contains the tested base; rebase and post /ci full again")
+        behind = comparison.get("ahead_by")
+        if type(behind) is not int or behind < 0:
+            raise ValueError("Cannot determine how many commits the tested base is behind main")
+        if behind >= REBASE_BEHIND_LIMIT:
+            raise ValueError(
+                f"Tested base is {behind} commits behind main (must be fewer than {REBASE_BEHIND_LIMIT}); "
+                "rebase onto the latest main, wait for lint, and post /ci full again"
+            )
 
 
 def unfinished_request_exists(repo: str, title: str, start: datetime, end: datetime) -> bool:
@@ -288,7 +327,7 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
         for page in range(1, 11):
             runs = api(f"{path}&page={page}")["workflow_runs"]
             if any(
-                run.get("display_title") == title
+                re.sub(r" request:[1-9][0-9]*-[1-9][0-9]*$", "", run.get("display_title") or "") == title
                 and run.get("head_branch") == "main"
                 and run.get("event") == "workflow_dispatch"
                 and run.get("path") in FULL_WORKFLOWS
@@ -325,12 +364,11 @@ def effective_jobs(repo: str, run: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
-    """Reuse only the latest automatic run for this exact PR/head/base snapshot."""
-    # Lint titles record the pull_request event's base, which may predate main.
-    # Keep that snapshot distinct from the live base pinned for the full merge;
-    # replacing it with main's tip would discard otherwise matching lint runs.
-    head, base = pr["head"]["sha"], pr["base"]["sha"]
-    title = f"CI lint PR #{pr['number']} @{head} base:{base}"
+    """Reuse the latest automatic run for this PR head across event base snapshots."""
+    # PR metadata and separate pull_request events can name different bases for
+    # the same head. Filtering by base can select a cancelled run over its newer
+    # successful replacement, or hide a newer failure behind an old success.
+    head = pr["head"]["sha"]
     workflow = api(f"repos/{repo}/actions/workflows/ci.yml")
     runs = pages(
         f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request&head_sha={head}", "workflow_runs"
@@ -338,7 +376,9 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
     candidates = [
         run
         for run in runs
-        if run.get("display_title") == title
+        if (match := LINT_TITLE.fullmatch(run.get("display_title") or ""))
+        and int(match[1]) == pr["number"]
+        and match[2] == head
         and run.get("event") == "pull_request"
         and run.get("path") == LINT_WORKFLOW
         and run.get("workflow_id") == workflow["id"]
@@ -346,9 +386,21 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
         and run.get("repository", {}).get("full_name") == repo
         and run.get("head_repository", {}).get("id") == pr["head"]["repo"]["id"]
     ]
-    if not candidates:
+    base = current_base(repo)
+    ancestry = {base: True}
+    run = None
+    for candidate in sorted(candidates, key=lambda item: item["run_number"], reverse=True):
+        match = LINT_TITLE.fullmatch(candidate["display_title"])
+        assert match is not None
+        lint_base = match[3]
+        if lint_base not in ancestry:
+            comparison = api(f"repos/{repo}/compare/{lint_base}...{base}?per_page=1")
+            ancestry[lint_base] = comparison.get("merge_base_commit", {}).get("sha") == lint_base
+        if ancestry[lint_base]:
+            run = candidate
+            break
+    if run is None:
         raise ValueError("No matching PR lint run; update the PR branch and wait for lint before /ci full")
-    run = max(candidates, key=lambda item: item["run_number"])
     # Wait for the attempt to finish so not-yet-indexed rerun jobs cannot make
     # an earlier success look reusable while that check is actually rerunning.
     if run["status"] != "completed":
@@ -391,13 +443,15 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
         rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
         status.get("target_url") or "",
     )
-    if status.get("state") not in ("pending", "success") or not target:
+    if not target:
         return False
     run = api(f"repos/{repo}/actions/runs/{target[1]}")
-    expected = f"CI full PR #{pr['number']} @{pr['head']['sha']} base:{current_base(repo)}"
+    match = FULL_TITLE.fullmatch(run.get("display_title") or "")
     if (
         run.get("id") != int(target[1])
-        or run.get("display_title") != expected
+        or not match
+        or int(match[1]) != pr["number"]
+        or match[2] != pr["head"]["sha"]
         or run.get("event") != "workflow_dispatch"
         or run.get("head_branch") != "main"
         or run.get("path") not in FULL_WORKFLOWS
@@ -422,6 +476,10 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
         or run.get("status") != "completed"
         or run.get("conclusion") == "cancelled"
     ):
+        return False
+    try:
+        verify_result_freshness(repo, pr["head"]["sha"], match[3])
+    except ValueError:
         return False
     jobs = pages(f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
     finalizers = [job for job in jobs if job["name"] == "full-result"]
@@ -461,12 +519,12 @@ def validated_request(repo: str, event: dict[str, Any]) -> dict[str, Any] | None
             )
         if pr.get("mergeable") is True and pr.get("merge_commit_sha"):
             try:
-                verify_merge(repo, pr, head, base, pr["merge_commit_sha"])
+                verify_merge(repo, pr, head, None, pr["merge_commit_sha"])
                 return pr
             except MergePendingError:
-                # The test merge can lag behind the live target ref. Retry that
-                # inconsistency, not bad SHAs, access failures, closed PRs, or
-                # genuine merge conflicts.
+                # Retry an absent or inconsistent merge for this head. A base
+                # 0-4 commits behind live main is already eligible; a rewritten
+                # or older base fails immediately with an actionable reason.
                 pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -524,7 +582,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     if pr is None:
         return
     number = pr["number"]
-    head, base, merge = pr["head"]["sha"], current_base(repo), pr["merge_commit_sha"]
+    head, merge = pr["head"]["sha"], pr["merge_commit_sha"]
     if os.environ.get("CI_ROUTED_HEAD") != head:
         raise ValueError("PR head changed after queue admission; post /ci full again")
     if already_running_or_passed(repo, pr):
@@ -534,7 +592,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         return
     matching_lint_run(repo, pr)
     # Metadata reads can overlap a push; revalidate before writing or dispatching.
-    verify_merge(repo, pull(repo, number), head, base, merge)
+    base = verify_merge(repo, pull(repo, number), head, None, merge)
     title = f"CI full PR #{number} @{head} base:{base}"
     # A full request cannot predate its PR. Fix the upper bound for pagination;
     # never filter by mutable run status, which can move between queries.
@@ -543,6 +601,9 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     if unfinished_request_exists(repo, title, created, cutoff):
         report(f"Full CI for PR #{number} at {head} is already queued or running.")
         return
+    request_id = f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+    if not re.fullmatch(r"[1-9][0-9]*-[1-9][0-9]*", request_id):
+        raise ValueError("Expected positive command run and attempt IDs")
     # Close the old-green window before creating another run. If this write
     # fails, do not dispatch; if dispatch fails, keep the gate pending for retry.
     api(
@@ -550,7 +611,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         {
             "context": "ci/full",
             "state": "pending",
-            "description": "Full CI requested; waiting for dispatch",
+            "description": f"Full CI requested; waiting for dispatch (request {request_id})",
             "target_url": f"https://github.com/{repo}/pull/{number}",
         },
     )
@@ -565,15 +626,18 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
                 "head_sha": head,
                 "base_sha": base,
                 "merge_sha": merge,
+                "request_id": request_id,
             },
         },
     )
     run_id = dispatched.get("workflow_run_id") if isinstance(dispatched, dict) else None
     if type(run_id) is not int or run_id <= 0:
-        raise ValueError("Dispatch did not return a valid run ID; pending request remains blocked")
+        raise ValueError(
+            "Dispatch did not return a valid run ID; an accepted full run can recover its status"
+        )
     # Bind ownership before releasing the shared queue, even if run-history
-    # searches have not indexed the new run yet. Lost acknowledgements retain
-    # the unbound marker; an older publisher must not clear it.
+    # searches have not indexed the new run yet. If this fails, the request ID
+    # lets this run's publisher recover the marker while excluding older runs.
     api(
         f"repos/{repo}/statuses/{head}",
         {
@@ -589,7 +653,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         f"repos/{repo}/actions/workflows/ci-full-progress.yml/dispatches",
         {"ref": "main", "inputs": {"run_id": str(run_id)}},
     )
-    report(f"Requested full CI for PR #{number} at {head}; test merge {merge}.")
+    report(f"Requested full CI for PR #{number} at {head}; tested base {base}; test merge {merge}.")
 
 
 def prepare(repo: str, event: dict[str, Any]) -> None:
@@ -607,7 +671,7 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
             raise ValueError("Expected a positive PR number")
         pr = pull(repo, int(number))
         verify_merge(repo, pr, inputs["head_sha"], inputs["base_sha"], inputs["merge_sha"])
-        verify_branch_freshness(repo, inputs["head_sha"], inputs["base_sha"])
+        verify_branch_freshness(repo, inputs["head_sha"], current_base(repo))
         matching_lint_run(repo, pr)
         checkout = inputs["merge_sha"]
     elif any(inputs.get(key) for key in ("head_sha", "base_sha", "merge_sha")):
@@ -783,6 +847,7 @@ def publish(repo: str, event: dict[str, Any]) -> None:
     ):
         raise ValueError("Full CI result did not originate from the trusted workflow")
     number, head, base = int(match[1]), match[2], match[3]
+    failure_reason = None
     # Live metadata or the validated event identifies the expected origin.
     # Lookup failures and obsolete PR revisions invalidate old green statuses;
     # untrusted workflow origins never write.
@@ -821,14 +886,11 @@ def publish(repo: str, event: dict[str, Any]) -> None:
                 and finalizers[0]["conclusion"] == "success"
             )
             state = "success" if passed else "failure"
-        if current_base(repo) != base:
-            # Strict up-to-date rules are still needed for main advancing
-            # after publication, but an already obsolete base cannot pass.
-            state = "failure"
-            report("The tested base is obsolete; post /ci full again against current main.")
+            if passed:
+                verify_result_freshness(repo, head, base)
     except UntrustedRunError:
         raise
-    except (ValueError, subprocess.CalledProcessError):
+    except (ValueError, subprocess.CalledProcessError) as error:
         # A failed check must not preserve this run's previously green status.
         # The combined-status API returns only the latest entry per context,
         # so a known newer writer can still be protected without a run search.
@@ -838,6 +900,9 @@ def publish(repo: str, event: dict[str, Any]) -> None:
                 return
         except (ValueError, subprocess.CalledProcessError):
             report("Could not verify the published full CI status either.")
+        if isinstance(error, ValueError):
+            failure_reason = str(error)
+            report(failure_reason)
         report("Cannot verify full CI metadata; invalidating ci/full. Post /ci full again.")
         state = "failure"
     api(
@@ -845,7 +910,9 @@ def publish(repo: str, event: dict[str, Any]) -> None:
         {
             "context": "ci/full",
             "state": state,
-            "description": f"Full CI: {state} (attempt {run['run_attempt']})",
+            "description": failure_reason[:140]
+            if failure_reason
+            else f"Full CI: {state} (attempt {run['run_attempt']})",
             "target_url": f"https://github.com/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}",
         },
     )
