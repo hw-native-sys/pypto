@@ -17,6 +17,17 @@ Use the PTO-ISA revision selected by `runtime/pto_isa.pin` (`90a37965`),
 which provides that API. The runtime submodule is pinned to `c1c234667` so
 runtime builds and generated kernels use the same compatible headers.
 
+
+On A2/A3, TREM and TREMS require a disjoint, same-dtype scratch tile with
+at least one physical and valid row. For source row stride `S` (rounded to
+8 elements), the default scratch column count is `S + 8*ceil(S/256) + 8`.
+High-precision FP32 TREM is now honoured on A2/A3 and requires the maximum of
+that count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)`, with
+`C = max(valid_cols // 64, 1)`; dynamic valid columns use the physical width
+as their capacity bound. Both physical and valid scratch columns must cover
+that count. The ISA restores INT32 source values itself; codegen must not
+emit the former extra FP32-to-INT32 divisor conversion.
+
 ## Design Principle: Strict 1-to-1 Mapping
 
 Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each IR node maps directly to its corresponding output construct — no optimization, analysis, or indirection transformation should occur in the codegen layer.

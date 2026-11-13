@@ -12,7 +12,7 @@
 The request survives every layer below the DSL: PyPTO writes ``precisionType``
 into the PTO IR and PTOAS keeps it as a ``HIGH_PRECISION`` template argument.
 Only PTO-ISA decides whether to read it, and Ascend910's ``TDIV_IMPL`` /
-``TLOG_IMPL`` / ``TREM_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
+``TLOG_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
 without ever branching on it — the op computes the default result and nothing
 downstream says so. Ascend950 selects a separate compensated algorithm.
 

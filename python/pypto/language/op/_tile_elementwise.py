@@ -477,13 +477,14 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
     Args:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
-        tmp: Same-dtype scratch tile whose physical and valid capacity
-            provably provides two rows and covers the dividend columns on
-            A2/A3. It must not overlap either source there.
-        high_precision: Whether to select PTOAS's high-precision TREM mode.
-            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
-            result, which compilation warns about.
-            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
+        tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
+            Provide one physical and valid row with at least
+            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements. High-precision rem requires
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0))``,
+            with ``C = max(valid_cols // 64, 1)``; use physical columns to
+            bound dynamic valid columns. A5 does not consume scratch.
+        high_precision: Select the FP32 high-precision TREM algorithm on A2/A3 and A5.
 
     Returns:
         Tile wrapping the rem operation
@@ -502,9 +503,10 @@ def rems(lhs: Tile, rhs: int | float | Expr | Scalar, tmp: Tile) -> Tile:
     Args:
         lhs: Tile
         rhs: Scalar value
-        tmp: Same-dtype scratch tile whose physical and valid capacity
-            provably provides one row and covers the dividend columns on
-            A2/A3. It must not overlap the dividend there.
+        tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
+            Provide one physical and valid row with at least
+            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements. A5 does not consume scratch.
 
     Returns:
         Tile wrapping the rems operation

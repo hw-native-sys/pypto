@@ -4885,13 +4885,12 @@ class TestTileBitwiseArithmeticOps:
     @pytest.mark.parametrize(
         "op,tmp_shape",
         [
-            pytest.param(tile.rem, [1, 16], id="trem-needs-two-rows"),
             pytest.param(tile.rem, [2, 12], id="trem-needs-valid-cols"),
             pytest.param(tile.rems, [1, 12], id="trems-needs-valid-cols"),
         ],
     )
     def test_tile_remainder_rejects_undersized_tmp(self, op, tmp_shape):
-        """TREM needs two scratch rows; both tmp forms must cover valid columns."""
+        """Both tmp forms must cover valid columns before backend-specific capacity checks."""
         span = ir.Span.unknown()
         src_view = ir.TileView(valid_shape=[7, 13])
         src = ir.Var("src", ir.TileType([8, 16], DataType.FP32, tile_view=src_view), span)

@@ -150,12 +150,15 @@ def rem(
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
-        tmp: Same-dtype 2D scratch tile. On A2/A3 its physical and valid
-            capacity must provably provide at least two rows and cover every
-            ``lhs`` column, and it must not overlap either source.
+        tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
+            Provide one physical and valid row with at least
+            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements. High-precision rem requires
+            ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0))``,
+            with ``C = max(valid_cols // 64, 1)``; use physical columns to
+            bound dynamic valid columns. A5 does not consume scratch.
         span: Optional source span for debugging (auto-captured if not provided)
-        high_precision: Whether to select PTOAS's high-precision TREM mode.
-            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
+        high_precision: Select the FP32 high-precision TREM algorithm on A2/A3 and A5.
 
     Returns:
         Call expression for element-wise remainder
@@ -175,9 +178,10 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
     Args:
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
-        tmp: Same-dtype 2D scratch tile. On A2/A3 its physical and valid
-            capacity must provably provide at least one row and cover every
-            ``lhs`` column, and it must not overlap ``lhs``.
+        tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
+            Provide one physical and valid row with at least
+            ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
+            row stride rounded to 8 elements. A5 does not consume scratch.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

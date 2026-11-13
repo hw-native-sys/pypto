@@ -407,7 +407,7 @@ TypePtr DeduceTileRemainderType(const std::vector<ExprPtr>& args,
   if (has_tmp) {
     auto tmp = As<TileType>(args[2]->GetType());
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
-    CheckRemainderTmpContract(lhs, tmp, 2, op_name);
+    CheckRemainderTmpContract(lhs, tmp, 1, op_name);
   }
 
   TileView tile_view;
