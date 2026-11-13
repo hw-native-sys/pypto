@@ -34,7 +34,7 @@ from pypto.jit.decorator import (
     _resolve_memory_planner,
     _resolve_runtime,
 )
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+from pypto.language.diagnostics import ParserSyntaxError
 from pypto.pypto_core import DataType, ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig

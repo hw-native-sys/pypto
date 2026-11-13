@@ -98,7 +98,7 @@ class TestOpErrorWrapping:
 
             @pl.function
             def unknown(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.nonexistent_op(x)  # type: ignore
+                result: pl.Tensor[[64], pl.FP32] = pl.nonexistent_op(x)
                 return result
 
 

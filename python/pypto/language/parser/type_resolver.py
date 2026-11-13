@@ -35,17 +35,6 @@ def _is_dump_call(node: object, name: str | None = None) -> TypeGuard[ast.Call]:
     )
 
 
-def _const_int_value(value: object) -> int | None:
-    """Extract integer value from a compile-time constant, or None."""
-    if isinstance(value, int):
-        return value
-    if isinstance(value, ir.ConstInt):
-        return value.value
-    if isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt):
-        return -value.operand.value
-    return None
-
-
 class _LocalDynamicSymbolRemapper(ir.IRMutator):
     """Rebind evaluated closure dimensions without mutating shared expressions."""
 
@@ -73,45 +62,20 @@ class _LocalDynamicSymbolRemapper(ir.IRMutator):
         return self.visit_expr(expr) if self.bindings else expr
 
 
-def _infer_implicit_tile_layout_from_shape(shape: "Sequence[ir.Expr | int]") -> "ir.TileLayout":
-    """Infer the block layout represented by omitted TileView syntax."""
-    if len(shape) != 2:
-        return ir.TileLayout.row_major
-    rows_value = _const_int_value(shape[0])
-    cols_value = _const_int_value(shape[1])
-    if rows_value is None or cols_value is None:
-        return ir.TileLayout.row_major
-    return ir.TileLayout.col_major if cols_value == 1 and rows_value > 1 else ir.TileLayout.row_major
-
-
 def _implicit_tile_view_defaults(
     shape: "Sequence[ir.Expr | int]",
     memory_space: "ir.MemorySpace | None" = None,
 ) -> "tuple[ir.TileLayout, ir.TileLayout, int]":
-    """Return (blayout, slayout, fractal) implicit defaults for a given shape + memory space."""
-    default_blayout = _infer_implicit_tile_layout_from_shape(shape)
-    default_slayout = ir.TileLayout.none_box
-    default_fractal = ir.TileView().fractal
-    if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.row_major
-    elif memory_space == ir.MemorySpace.Right:
-        default_slayout = ir.TileLayout.col_major
-    elif memory_space == ir.MemorySpace.Acc:
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.row_major
-        default_fractal = 1024
-    elif memory_space == ir.MemorySpace.LeftScale:
-        # ISA TileLeftScale: RowMajor / RowMajor, MX scale fractal size 32.
-        default_blayout = ir.TileLayout.row_major
-        default_slayout = ir.TileLayout.row_major
-        default_fractal = 32
-    elif memory_space == ir.MemorySpace.RightScale:
-        # ISA TileRightScale: ColMajor / ColMajor, MX scale fractal size 32.
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.col_major
-        default_fractal = 32
-    return default_blayout, default_slayout, default_fractal
+    """Return (blayout, slayout, fractal) implicit defaults for a given shape + memory space.
+
+    Thin alias over the shared table
+    (``pypto.language.typing.type_utils.implicit_tile_view_defaults``) — the
+    tracing frontend's annotation funnel materializes the same defaults, so
+    the table must have exactly one definition.
+    """
+    from pypto.language.typing.type_utils import implicit_tile_view_defaults  # noqa: PLC0415
+
+    return implicit_tile_view_defaults(shape, memory_space)
 
 
 if TYPE_CHECKING:

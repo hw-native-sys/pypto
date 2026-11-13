@@ -193,7 +193,7 @@ class Program:
             @pl.function
             def unknown_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 # nonexistent_op doesn't exist
-                result: pl.Tensor[[64], pl.FP32] = pl.nonexistent_op(x)  # type: ignore
+                result: pl.Tensor[[64], pl.FP32] = pl.nonexistent_op(x)
                 return result
 
 

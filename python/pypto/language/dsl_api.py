@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import ir as _ir
 
-from .optimizations import Optimization
+from .constructs.optimizations import Optimization
 
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]

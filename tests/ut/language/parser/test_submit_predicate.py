@@ -27,7 +27,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.ir import python_print
-from pypto.language.parser.diagnostics.exceptions import (
+from pypto.language.parser.diagnostics import (
     ParserSyntaxError,
     ParserTypeError,
     UndefinedVariableError,

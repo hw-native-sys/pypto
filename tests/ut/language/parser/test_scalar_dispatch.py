@@ -15,7 +15,7 @@ when called with scalar arguments.
 
 import pypto.language as pl
 import pytest
-from pypto.language.parser.diagnostics.exceptions import InvalidOperationError
+from pypto.language.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir
 
 

@@ -26,7 +26,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.ir.op._pad_value import normalize_pad_value
-from pypto.language.parser.diagnostics.exceptions import InvalidOperationError
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 # Module-level closure constant — exercises the bare-``Name`` positional path,
 # which resolves from the closure rather than from the IR variable scope.

@@ -54,10 +54,6 @@ from pypto._function_attrs import (
     EXTERNAL_PREFLIGHT_SYMBOL_ATTR,
     EXTERNAL_RETURN_PARAMS_ATTR,
 )
-from pypto.language.parser.expr_evaluator import ExprEvaluator
-from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR, JIT_SUBMIT_RETURNS_ATTR
-from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call
-from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.array import Array as _LangArray
 from pypto.language.typing.dynamic import DynVar as _LangDynVar
 from pypto.language.typing.scalar import Scalar as _LangScalar
@@ -1628,6 +1624,11 @@ def _validate_extern_return_mapping(
     """
     if not ret_ann:
         return
+    # Imported here so ``pypto.language`` can pull in this module without
+    # dragging the parser package along (see tests/ut/language/test_dialect_isolation.py).
+    from pypto.language.parser.expr_evaluator import ExprEvaluator  # noqa: PLC0415
+    from pypto.language.parser.type_resolver import TypeResolver  # noqa: PLC0415
+
     namespace = {name: _LangDynVar(literal) for name, literal in ctx.dynvar_literals().items()}
     resolver = TypeResolver(ExprEvaluator(namespace))
     signature = ast.parse(f"def kernel({', '.join(params)}){ret_ann}: pass").body[0]
@@ -1951,6 +1952,8 @@ def _materialize_implicit_entry_output(
     while saved_out in used_names:
         suffix += 1
         saved_out = f"{saved_base}{suffix}"
+    from pypto.language.parser.syntax_helpers import is_docstring_stmt, is_pl_call  # noqa: PLC0415
+
     insertion_index = 1 if body and is_docstring_stmt(body[0]) else 0
     while insertion_index < len(body) and is_pl_call(
         getattr(body[insertion_index], "value", None), "func_attr"
@@ -2322,8 +2325,12 @@ class Specializer:
             name: aliases for name, aliases in self._graph_rebinds.items() if aliases is not None
         }
         if graph_rebinds:
+            from pypto.language.parser.parser_state import JIT_GRAPH_REBINDS_ATTR  # noqa: PLC0415
+
             lines.append(f"    {JIT_GRAPH_REBINDS_ATTR} = {graph_rebinds!r}")
         if self._submit_return_arities:
+            from pypto.language.parser.parser_state import JIT_SUBMIT_RETURNS_ATTR  # noqa: PLC0415
+
             lines.append(f"    {JIT_SUBMIT_RETURNS_ATTR} = {self._submit_return_arities!r}")
         lines.extend(body_lines)
 

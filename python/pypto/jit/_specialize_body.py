@@ -18,9 +18,7 @@ import ast
 from collections.abc import Iterator, Mapping
 from typing import Any, TypeVar, cast
 
-from pypto.language.parser.ast_parser import ASTParser
-from pypto.language.parser.control_flow_parser import ControlFlowParser
-from pypto.language.parser.diagnostics import ParserError
+from pypto.language.diagnostics import ParserError
 from pypto.pypto_core import arith, ir
 
 from . import _specialize_values as values
@@ -65,6 +63,8 @@ def _constant_condition(node: ast.expr) -> bool | None:
     )
     if not all(isinstance(child, literal_nodes) for child in ast.walk(node)):
         return None
+
+    from pypto.language.parser.ast_parser import ASTParser  # noqa: PLC0415
 
     # Names and calls would need the actual function scope. Let the normal
     # parser handle those conditions, and retain diagnostics for invalid DSL.
@@ -894,6 +894,8 @@ class BodyTransformer(ast.NodeTransformer):
     @classmethod
     def _loop_yield_targets(cls, statements: list[ast.stmt]) -> set[str]:
         """Collect outputs using the parser's yield ownership boundaries."""
+        from pypto.language.parser.control_flow_parser import ControlFlowParser  # noqa: PLC0415
+
         names: set[str] = set()
         for stmt in ControlFlowParser.iter_yield_assignments(statements):
             targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]

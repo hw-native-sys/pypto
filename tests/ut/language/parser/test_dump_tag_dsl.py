@@ -22,8 +22,8 @@ from __future__ import annotations
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.diagnostics import ParserTypeError
 from pypto.language.parser.diagnostics import ParserSyntaxError
-from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 
 
 def _kernel_calls(program: ir.Program, callee_name: str = "kernel") -> list[ir.Call]:
