@@ -90,6 +90,46 @@ runtime wrappers or make arbitrary registered objects executable in JIT programs
 Connecting arbitrary registered objects to executable runtime wrappers and real DSL
 migration remain subsequent tasks.
 
+## CANNBotDSL preparation (task 34.5, first stage)
+
+`pypto.jit.external.providers.cannbotdsl.CANNBotDSLProvider` implements direct
+`prepare(kernel, request)` using the optional package's public `inspect_kernel`,
+`export_device` and `get_include` APIs. Importing the adapter does not import the
+compiler. This stage supports A5/CCEC, explicit positional parameters, tensor and
+runtime scalar descriptors, and named constexpr values. Tensor requests must use
+ND layout with explicit positive strides and innermost stride 1; unconstrained
+strides are rejected rather than assumed contiguous. Shared dimension symbols
+remain shared, including zero extents. Compiler options are not yet accepted.
+
+For example, a `(rows, 32)` tensor whose row stride is dynamic is described as
+`TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))`. A runtime-bound
+view offset remains in the request; the eventual bridge must apply it exactly
+once when constructing the provider's first-valid-element pointer.
+
+The result is a `PreparedKernel` with the named `cannbotdsl.device_callable` v1
+descriptor ABI, preserving the export's physical argument order. Public returns
+are empty. Every tensor write creates an internal writeback with unknown coverage,
+so an access mask cannot discard dependencies on untouched data. AIC/AIV/MIX
+participants come from the export, including two AIV lanes for MIX.
+
+The owned artifact contains `device_callable.hpp`, the complete
+`device_manifest.json`, and digest-checked copies of DSL extension headers. The
+manifest retains descriptor layout, view constraints, state clobbers, exclusive
+resources, cache-line write isolation, completion and binary-loading requirements.
+CANN SDK headers remain a consumer toolchain dependency. Preparation runs afresh;
+its identity is explicitly incomplete because no complete Python closure/input
+snapshot exists. This provider is therefore not registered with the capture-only
+registry and does not claim preparation-cache reuse.
+
+**This stage does not enable calls from JIT programs or device execution.** The
+existing `c_pointer` TMR bridge rejects this descriptor ABI. Subsequent 34.5 work
+must implement a bridge that checks the complete manifest, lifetime-safe JIT
+binding, and the relevant compatibility regressions. In particular, resource and
+64-byte GM write-isolation requirements cannot be dropped when introducing the
+runtime path. Device completion, numerical and performance acceptance remain 34.7.
+`test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
+when installed, the real public compiler export; it does not validate a binary.
+
 ## Requests and prepared kernels
 
 `KernelRequest` carries ordered `ParameterSpec` records, compile-time constants,
