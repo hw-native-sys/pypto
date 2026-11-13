@@ -30,6 +30,7 @@ struct BufferIndexedRecipe {
   const char* native_op;
   bool scatter;
   size_t input_count;
+  bool compare = false;
 };
 
 const std::vector<BufferIndexedRecipe>& GetBufferIndexedRecipes();

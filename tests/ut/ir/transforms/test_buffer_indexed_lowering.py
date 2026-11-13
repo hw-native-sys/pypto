@@ -251,5 +251,109 @@ def test_indexed_replay_checks_bounds_before_writing_output(kind, bad_index):
     assert torch.all(out == -777)
 
 
+def _compare_program(dtype="FP32", mode="gt", *, unused="", scratch_bytes=4096):
+    threshold = "1" if dtype == "INT32" else "1.0"
+    count_store = "" if unused == "counts" else "pl.store(counts, [0, 0], count_out)"
+    index_store = "" if unused == "indices" else "pl.store(indices, [0, 0], index_out)"
+    return pl.parse_program(f"""
+@pl.program
+class CompareGather:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[8, 128], pl.{dtype}],
+               index_out: pl.Out[pl.Tensor[[8, 128], pl.INT32]],
+               count_out: pl.Out[pl.Tensor[[1, 8], pl.INT32]],
+               live_out: pl.Out[pl.Tensor[[8, 128], pl.{dtype}]]):
+        source = pl.load(a, [0, 0], [8, 128])
+        scratch = pl.create_tile([1, {scratch_bytes}], dtype=pl.UINT8)
+        indices, counts = pl.tile.gather_compare(source, pl.const({threshold}, pl.{dtype}), scratch,
+                                                cmp_mode="{mode}", out_cols=128, offset=7)
+        {index_store}
+        {count_store}
+        pl.store(source, [0, 0], live_out)
+""")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dtype,mode", [("FP32", "gt"), ("FP16", "eq"), ("INT32", "eq")])
+def test_compare_gather_default_two_results_and_complete_workspace(tmp_path, planner, dtype, mode):
+    program = _lower(_compare_program(dtype, mode, scratch_bytes=8192), planner)
+    assert _kernel(program).ir_stage == ir.FunctionIRStage.Buffer
+    native = _native(program, tmp_path, planner)
+    assert "pto.tgather" in native
+    assert "gather_prefix" in native
+    data_type = {"FP32": torch.float32, "FP16": torch.float16, "INT32": torch.int32}[dtype]
+    source = (torch.arange(1024).reshape(8, 128) % 5).to(data_type)
+    original = source.clone()
+    indices = torch.full((8, 128), -777, dtype=torch.int32)
+    counts = torch.full((1, 8), -777, dtype=torch.int32)
+    live = torch.zeros_like(source)
+    namespace = {}
+    exec(torch_codegen(program), namespace)  # noqa: S102
+    namespace["kernel"](source, indices, counts, live)
+    torch.testing.assert_close(live, original, rtol=0, atol=0)
+    torch.testing.assert_close(source, original, rtol=0, atol=0)
+    for row in range(8):
+        matched = torch.nonzero(original[row] > 1 if mode == "gt" else original[row] == 1).flatten()
+        assert counts[0, row] == matched.numel()
+        torch.testing.assert_close(indices[row, : matched.numel()], (matched + row * 128 + 7).int())
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("unused", ["indices", "counts"])
+def test_compare_gather_keeps_unread_native_destination(tmp_path, planner, unused):
+    program = _lower(_compare_program(unused=unused, scratch_bytes=8192), planner)
+    assert _kernel(program).ir_stage == ir.FunctionIRStage.Buffer
+    line = next(line for line in _native(program, tmp_path, planner).splitlines() if "pto.tgather" in line)
+    # Both native destinations exist even when only one is subsequently stored.
+    assert "," in line.split("outs(")[1].split(":")[0]
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["off", "scratch", "mode"])
+def test_compare_gather_retains_tile_for_unvalidated_forms(planner, kind):
+    program = _compare_program(
+        mode="ne" if kind == "mode" else "gt", scratch_bytes=32 if kind == "scratch" else 8192
+    )
+    lowered = _lower(program, planner, False if kind == "off" else None)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_compare_gather_output_lifetime_starts_before_delayed_projections(tmp_path, planner):
+    # The temporary dies before the tuple projections. Starting result lifetimes
+    # at those projections would let it overwrite the already produced indices.
+    program = pl.parse_program("""
+@pl.program
+class DelayedResults:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[8, 128], pl.FP32],
+               out: pl.Out[pl.Tensor[[8, 128], pl.INT32]],
+               counts_out: pl.Out[pl.Tensor[[1, 8], pl.INT32]],
+               temporary_out: pl.Out[pl.Tensor[[8, 128], pl.FP32]]):
+        source = pl.load(a, [0, 0], [8, 128])
+        workspace = pl.create_tile([1, 8192], dtype=pl.UINT8)
+        pair = pl.tile.gather_compare(source, pl.const(1.0, pl.FP32), workspace,
+                                      cmp_mode="gt", out_cols=128)
+        temporary = pl.tile.full([8, 128], pl.FP32, -999.0)
+        pl.store(temporary, [0, 0], temporary_out)
+        indices = pair[0]
+        counts = pair[1]
+        pl.store(indices, [0, 0], out)
+        pl.store(counts, [0, 0], counts_out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    _native(lowered, tmp_path, planner)
+    indices = torch.empty((8, 128), dtype=torch.int32)
+    counts = torch.empty((1, 8), dtype=torch.int32)
+    temporary = torch.empty((8, 128))
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    namespace["kernel"](torch.full((8, 128), 2.0), indices, counts, temporary)
+    torch.testing.assert_close(indices, torch.arange(1024, dtype=torch.int32).reshape(8, 128))
+    torch.testing.assert_close(counts, torch.full((1, 8), 128, dtype=torch.int32))
+    torch.testing.assert_close(temporary, torch.full((8, 128), -999.0))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

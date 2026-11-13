@@ -187,9 +187,19 @@ class BufferIRVisitor : public IRVisitor {
           for (const auto& arg : op->args_) {
             const auto window = windows_.find(AsVarLike(arg).get());
             const auto type = As<BufferType>(arg->GetType());
+            if (!type) continue;  // Compare gather has one non-memory scalar operand.
             const auto pitch = static_cast<uint64_t>(type->shape_[1]) * (type->dtype_.GetBit() / 8);
             if (window == windows_.end() || window->second.row_pitch != pitch) {
               Error("Indexed Buffer operations require dense physical row pitch", op->span_);
+            }
+          }
+          if (indexed->compare) {
+            const auto mask = windows_.find(AsVarLike(op->args_[2]).get());
+            const auto backing = windows_.find(AsVarLike(op->args_[3]).get());
+            if (mask == windows_.end() || backing == windows_.end() || !mask->second.known_offset ||
+                !backing->second.known_offset || mask->second.root != backing->second.root ||
+                mask->second.offset != backing->second.offset) {
+              Error("Compare gather mask must start at its explicit workspace backing", op->span_);
             }
           }
           for (const auto& [first, second] : backend::BufferIndexedDisjointPairs(*indexed)) {

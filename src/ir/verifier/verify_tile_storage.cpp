@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/buffer_tuple_results.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -63,6 +64,7 @@ class TileStorageVisitor : public IRVisitor {
 
   void VisitFunction(const FunctionPtr& function) override {
     function_name_ = function->name_;
+    tuples_ = BufferTupleResults(function->body_);
     IRVisitor::VisitFunction(function);
   }
 
@@ -119,6 +121,16 @@ class TileStorageVisitor : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& statement) override {
     auto call = As<Call>(statement->value_);
+    if (const auto result = tuples_.Get(statement->var_)) {
+      std::vector<TileTypePtr> simultaneous;
+      for (const auto& value : {call->args_[0], call->args_[2]}) {
+        if (const auto type = CheckTile(value)) simultaneous.push_back(type);
+      }
+      for (const auto& output : result->outputs) {
+        if (const auto type = CheckTile(output)) simultaneous.push_back(type);
+      }
+      CheckDestinations(simultaneous, statement->span_, false);
+    }
     if (physical_ && IsOp(call, "tile.move") && !call->args_.empty()) {
       auto source = CheckTile(call->args_[0]);
       auto target = CheckTile(statement->var_);
@@ -141,7 +153,12 @@ class TileStorageVisitor : public IRVisitor {
   TileTypePtr CheckTile(const ExprPtr& value) {
     if (!value) return nullptr;
     if (As<TupleType>(value->GetType()) && ContainsTile(value->GetType())) {
-      Error("Tile storage in tuple values must be flattened before storage legalization", value->span_);
+      if (!tuples_.Get(AsVarLike(value))) {
+        Error(
+            "Tile storage in tuple values must be flattened before storage legalization or have complete "
+            "canonical result bindings",
+            value->span_);
+      }
       return nullptr;
     }
     auto tile = As<TileType>(value->GetType());
@@ -246,6 +263,7 @@ class TileStorageVisitor : public IRVisitor {
 
   std::vector<Diagnostic>& diagnostics_;
   bool physical_;
+  BufferTupleResults tuples_;
   std::string function_name_;
   std::unordered_set<const Var*> checked_;
   std::unordered_map<const Type*, bool> contains_tile_;
