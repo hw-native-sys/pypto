@@ -36,8 +36,14 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 
 ## 评论触发完整 CI
 
-在 `integration/urma-ccu-test` 分支上，自动 PR lint 也监听以该集成分支为目标的 PR，
-检查任务与 main 相同。`/ci full` 命令和 push 触发的完整 CI 仍仅支持 main。
+以 `integration/urma-ccu-test` 为目标的 PR 在创建、重新打开或更新时会自动运行 `CI Full`。
+测试在正式合入前使用 GitHub 生成的 PR 与集成分支的临时合并版本，完整测试任务与 main 相同。
+纯文档 PR 也运行核心测试；文档示例和 serving guard 保留按变更路径判断的运行条件。
+结果直接显示在 PR Checks 中；必需测试失败或被跳过时，`full-pr-result` 会失败，
+无需评论 `/ci full`。评论命令和 push 触发的完整 CI 仍仅支持 main。
+手动运行 `CI Full` 时，输入留空即可测试选定分支。
+
+下文的评论触发流程适用于以 main 为目标的 PR。
 
 PR 专用 `CI` 工作流（`ci.yml`）在创建或更新时自动运行 `changes`、`toolchain`、`pre-commit` 和
 `clang-tidy`，随后运行轻量 `lint-gate`；独立的 `Docs / build` 检查也会运行。纯文档 PR 保留自动跳过

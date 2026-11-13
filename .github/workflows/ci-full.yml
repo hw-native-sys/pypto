@@ -2,15 +2,20 @@ name: CI Full
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
       && format('CI full PR #{0} @{1} base:{2}', inputs.pr_number, inputs.head_sha, inputs.base_sha)
+      || (github.event_name == 'pull_request'
+          && format('CI full PR #{0} @{1} base:{2}', github.event.pull_request.number,
+                    github.event.pull_request.head.sha, github.event.pull_request.base.sha))
       || format('CI {0} {1}', github.event_name, github.ref_name) }}
 
 on:
+  pull_request:
+    branches: [ "integration/urma-ccu-test" ]
   push:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: PR number (normally supplied by /ci full; empty tests main)
+        description: PR number (normally supplied by /ci full; empty tests the selected branch)
         type: string
         default: ''
       head_sha:
@@ -40,9 +45,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ci.yml handles automatic PR lint, including forks without repository variables.
+  # ci.yml handles automatic main PR lint; integration PRs run this full workflow.
   # /ci full dispatches trusted main with immutable PR head/base/merge inputs.
-  # Dispatched PR full runs deliberately disable the docs-only exemption for
+  # Full PR runs deliberately disable the docs-only exemption for
   # core tests. docs-examples and serving-guard retain their applicability gates.
   changes:
     runs-on: ubuntu-latest
@@ -82,6 +87,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ steps.target.outputs.full }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           PR_BASE_SHA: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
@@ -231,7 +237,7 @@ jobs:
 
           # Explicit full means core tests actually execute, even for docs-only
           # PRs. Keep docs_changed/ptoas_version_changed independently computed.
-          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ] || [ "${FULL_CI:-false}" = 'true' ]; then
             docs_only=false
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
@@ -2779,3 +2785,45 @@ jobs:
         run: >-
           gh workflow run ci-full-progress.yml --repo "$GITHUB_REPOSITORY" --ref main
           -f run_id="$GITHUB_RUN_ID"
+
+  # Native PR checks attach to the test merge without the main-only publisher.
+  full-pr-result:
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      github.event.pull_request.base.ref == 'integration/urma-ccu-test'
+    needs:
+      - changes
+      - toolchain
+      - pre-commit
+      - clang-tidy
+      - lint-gate
+      - codegen-tests
+      - dist-system-tests
+      - docs-examples
+      - examples-tests
+      - onboard-tests-a5
+      - onboard-tests-a5-distributed
+      - prebuild-wheels
+      - prebuild-wheels-github
+      - pypto-lib-compile
+      - pypto-lib-model
+      - serving-guard
+      - system-tests
+      - system-tests-a5sim
+      - system-tests-direct
+      - unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted result validator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Require every applicable full test
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python .github/scripts/ci_control.py aggregate

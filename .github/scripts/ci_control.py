@@ -596,9 +596,15 @@ def prepare(repo: str, event: dict[str, Any]) -> None:
     kind = os.environ["GITHUB_EVENT_NAME"]
     inputs: dict[str, str] = event.get("inputs") or {}
     number = inputs.get("pr_number", "")
-    # Fork PR runs can have an empty vars context. The event alone selects the
-    # tier so missing configuration cannot launch device tests automatically.
-    full = kind != "pull_request"
+    # Select the tier from the event, including fork PRs with an empty vars
+    # context. Only the integration base opts PRs into automatic device tests.
+    base = event.get("pull_request", {}).get("base", {})
+    integration_pr = (
+        kind == "pull_request"
+        and base.get("ref") == "integration/urma-ccu-test"
+        and base.get("repo", {}).get("full_name") == repo
+    )
+    full = kind != "pull_request" or integration_pr
     checkout = sha(os.environ["GITHUB_SHA"])
     if number:
         if kind != "workflow_dispatch" or os.environ["GITHUB_REF"] != "refs/heads/main":

@@ -28,7 +28,7 @@ run-name: >-
 
 on:
   pull_request:
-    branches: [ "main", "integration/urma-ccu-test" ]
+    branches: [ "main" ]
 
 permissions:
   contents: read

@@ -7,7 +7,7 @@ run-name: >-
 
 on:
   pull_request:
-    branches: [ "main", "integration/urma-ccu-test" ]
+    branches: [ "main" ]
 
 permissions:
   contents: read
@@ -56,6 +56,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
+          FULL_CI: ${{ steps.target.outputs.full }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           PR_BASE_SHA: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
@@ -205,7 +206,7 @@ jobs:
 
           # Explicit full means core tests actually execute, even for docs-only
           # PRs. Keep docs_changed/ptoas_version_changed independently computed.
-          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ] || [ "${FULL_CI:-false}" = 'true' ]; then
             docs_only=false
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"

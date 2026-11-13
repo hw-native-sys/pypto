@@ -147,15 +147,18 @@ def test_failed_matrix_blocks_merge(control, needs):
 )
 @pytest.mark.parametrize("enabled", [None, "", "false", "true"])
 @pytest.mark.parametrize("fork", [False, True])
+@pytest.mark.parametrize("base_ref", ["main", "integration/urma-ccu-test", "other"])
 def test_event_selects_tier_without_repository_variables(
-    control, monkeypatch, tmp_path, pr, kind, expected, enabled, fork
+    control, monkeypatch, tmp_path, pr, kind, expected, enabled, fork, base_ref
 ):
     target = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(target))
     monkeypatch.setenv("GITHUB_EVENT_NAME", kind)
     monkeypatch.setenv("GITHUB_SHA", MERGE)
-    # Fork runs supplied an empty value even with the base repository switch
-    # enabled. Missing or stale rollout settings must never opt a PR into full.
+    pr["base"]["ref"] = base_ref
+    if kind == "pull_request" and base_ref == "integration/urma-ccu-test":
+        expected = "true"
+    # The PR base selects the tier regardless of fork status or rollout flags.
     if enabled is None:
         monkeypatch.delenv("CI_COMMENT_TIERS_ENABLED", raising=False)
     else:
@@ -164,6 +167,17 @@ def test_event_selects_tier_without_repository_variables(
         pr["head"]["repo"] = pr["base"]["repo"]
     control.prepare(REPO, {"pull_request": pr} if kind == "pull_request" else {})
     assert target.read_text() == f"full={expected}\ncheckout_sha={MERGE}\nreuse_lint=false\n"
+
+
+@pytest.mark.parametrize("base_repo", [{}, {"full_name": "other/repo"}])
+def test_integration_tier_requires_matching_base_repository(control, monkeypatch, tmp_path, pr, base_repo):
+    target = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(target))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_SHA", MERGE)
+    pr["base"].update(ref="integration/urma-ccu-test", repo=base_repo)
+    control.prepare(REPO, {"pull_request": pr})
+    assert target.read_text() == f"full=false\ncheckout_sha={MERGE}\nreuse_lint=false\n"
 
 
 @pytest.mark.parametrize("parents", [[BASE, HEAD], [HEAD, BASE], [BASE, "d" * 40]])
@@ -759,10 +773,12 @@ def test_workflow_wiring_covers_every_full_job(control):
     workflow = yaml.safe_load((ROOT / control.WORKFLOW).read_text())
     assert isinstance(workflow, dict)
     jobs = workflow["jobs"]
-    assert set(jobs["full-result"]["needs"]) == set(jobs) - {"full-result"}
+    finalizers = {"full-result", "full-pr-result"}
+    assert set(jobs["full-result"]["needs"]) == set(jobs) - finalizers
+    assert jobs["full-pr-result"]["needs"] == jobs["full-result"]["needs"]
     assert set(jobs["full-result"]["needs"]) == control.REQUIRED | control.OPTIONAL | set(control.CONDITIONAL)
     for name, job in jobs.items():
-        if name not in {"changes", "toolchain", "pre-commit", "clang-tidy", "lint-gate", "full-result"}:
+        if name not in {"changes", "toolchain", "pre-commit", "clang-tidy", "lint-gate"} | finalizers:
             assert "needs.changes.outputs.full == 'true'" in job["if"]
         for step in job.get("steps", []):
             if step.get("uses", "").startswith("actions/checkout@"):
@@ -777,6 +793,8 @@ def test_workflow_wiring_covers_every_full_job(control):
                         "github.event_name == 'pull_request' && "
                         "github.event.pull_request.base.sha || github.workflow_sha"
                     )
+                if name == "full-pr-result":
+                    expected = "github.event.pull_request.base.sha"
                 assert options["ref"] == "${{ " + expected + " }}"
                 assert options["persist-credentials"] is False
             if step.get("uses") == "./.github/actions/setup-ci-job":
@@ -1393,7 +1411,8 @@ def test_tiered_pr_controller_uses_trusted_base_without_changing_trigger():
         ("missing-version", "workflow_dispatch", ("false", "true", "true")),
     ],
 )
-def test_classification_uses_pinned_comparison(tmp_path, case, event_name, expected):
+@pytest.mark.parametrize("full", [False, True])
+def test_classification_uses_pinned_comparison(tmp_path, case, event_name, expected, full):
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())
     classify = next(s for s in workflow["jobs"]["changes"]["steps"] if s.get("id") == "classify")
     assert "inputs.base_sha" in classify["env"]["PR_BASE_SHA"]
@@ -1415,6 +1434,7 @@ def test_classification_uses_pinned_comparison(tmp_path, case, event_name, expec
         os.environ,
         GITHUB_OUTPUT=str(output_file),
         EVENT_NAME=event_name,
+        FULL_CI=str(full).lower(),
         PR_NUMBER="123",
         PR_BASE_SHA=BASE,
         PR_HEAD_SHA=HEAD,
@@ -1451,6 +1471,8 @@ def test_classification_uses_pinned_comparison(tmp_path, case, event_name, expec
     )
     assert result.returncode == 0, result.stderr
     outputs = dict(line.split("=", 1) for line in output_file.read_text().splitlines())
+    if full:
+        expected = ("false", *expected[1:])
     assert tuple(outputs[k] for k in ("docs_only", "docs_changed", "ptoas_version_changed")) == expected
     calls = calls_file.read_text().splitlines()
     assert calls[0] == f"repos/{REPO}/compare/{BASE}...{HEAD}?per_page=1"
@@ -2156,7 +2178,7 @@ def test_effective_jobs_preserves_successful_dependencies(control, monkeypatch):
 def test_every_downstream_job_explicitly_tolerates_skipped_lint_ancestors():
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())["jobs"]
     for name, job in jobs.items():
-        if name == "full-result" or "lint-gate" not in job.get("needs", []):
+        if name in {"full-result", "full-pr-result"} or "lint-gate" not in job.get("needs", []):
             continue
         condition = job["if"]
         assert "!cancelled()" in condition, name
@@ -2431,20 +2453,46 @@ sleep() { :; }
     assert int(counter.read_text()) == (3 if recovers else 60)
 
 
-def test_split_workflows_create_only_lint_jobs_for_pull_requests(control):
+def test_split_workflows_route_main_to_lint_and_integration_to_full(control):
     lint = yaml.safe_load((ROOT / control.LINT_WORKFLOW).read_text())
     full = yaml.safe_load((ROOT / control.WORKFLOW).read_text())
     assert lint["name"] == "CI"  # Preserve required contexts and pre-rollout lint lookup.
     assert set(lint[True]) == {"pull_request"}
     assert set(lint["jobs"]) == {"changes", "toolchain", "pre-commit", "clang-tidy", "lint-gate"}
     assert full["name"] == "CI Full"
-    assert set(full[True]) == {"push", "workflow_dispatch"}
-    assert "pull_request" not in full["run-name"]
+    assert lint[True]["pull_request"]["branches"] == ["main"]
+    assert set(full[True]) == {"push", "workflow_dispatch", "pull_request"}
+    assert full[True]["pull_request"]["branches"] == ["integration/urma-ccu-test"]
+    assert full[True]["push"]["branches"] == ["main"]
+    assert "github.event.pull_request.head.sha" in full["run-name"]
+    assert "github.event.pull_request.base.sha" in full["run-name"]
+    classify = next(step for step in full["jobs"]["changes"]["steps"] if step.get("id") == "classify")
+    assert classify["env"]["FULL_CI"] == "${{ steps.target.outputs.full }}"
     for name, job in lint["jobs"].items():
         assert job == full["jobs"][name], name
     for filename in ("ci-full-progress.yml", "ci-full-status.yml"):
         publisher = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
         assert publisher[True]["workflow_run"]["workflows"] == ["CI", "CI Full"]
+
+
+def test_integration_full_result_is_a_read_only_native_pr_check(control):
+    workflow = yaml.safe_load((ROOT / control.WORKFLOW).read_text())
+    jobs = workflow["jobs"]
+    finalizer = jobs["full-pr-result"]
+    assert "always()" in finalizer["if"]
+    assert "github.event_name == 'pull_request'" in finalizer["if"]
+    assert "github.event.pull_request.base.ref == 'integration/urma-ccu-test'" in finalizer["if"]
+    assert finalizer["permissions"] == {"contents": "read"}
+    assert finalizer["steps"][0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert finalizer["steps"][1]["env"]["CI_NEEDS"] == "${{ toJSON(needs) }}"
+    assert finalizer["steps"][1]["run"] == "python .github/scripts/ci_control.py aggregate"
+    assert len(finalizer["steps"]) == 2
+    # The only write-enabled job stays restricted to main dispatches.
+    for name, job in jobs.items():
+        if "write" in job.get("permissions", {}).values():
+            assert name == "full-result"
+            assert "github.event_name == 'workflow_dispatch'" in job["if"]
+            assert "github.ref == 'refs/heads/main'" in job["if"]
 
 
 def test_generated_lint_workflow_is_current_and_excludes_new_full_jobs(control):

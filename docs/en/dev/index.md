@@ -38,9 +38,16 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 
 ## Comment-triggered full CI
 
-On `integration/urma-ccu-test`, automatic PR lint also listens for PRs targeting
-that integration branch, with the same jobs as main. The `/ci full` command and
-push-triggered full CI still support only main.
+PRs targeting `integration/urma-ccu-test` automatically run `CI Full` when opened,
+reopened, or updated. Tests use GitHub's temporary merge of the PR into that
+integration branch before merging, with the same full test jobs as main. Even
+docs-only PRs run the core tests; docs examples and the serving guard retain their
+path-based conditions. Results appear directly in PR Checks, and `full-pr-result`
+fails when a required test fails or is skipped. No `/ci full` comment is needed.
+The comment command and push-triggered full CI still support only main. Manual
+`CI Full` runs with empty inputs test the selected branch.
+
+The following comment-triggered workflow applies to PRs targeting main.
 
 The PR-only `CI` workflow (`ci.yml`) runs `changes`, `toolchain`, `pre-commit`
 and `clang-tidy`, followed by a lightweight `lint-gate`. The separate `Docs / build` check also runs. Documentation-only
