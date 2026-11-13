@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_REMAINDER_SCRATCH_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_REMAINDER_SCRATCH_H_
 
-#include <algorithm>
 #include <cstdint>
 #include <optional>
 
@@ -26,36 +25,18 @@ namespace ir {
  * base: the data area(s), a packed compare mask rounded up to a 32-byte block,
  * and an 8-element address buffer. The INT32 paths keep the float-domain
  * dividend, divisor and quotient chain in tmp, so they need three (TREM) or
- * two (TREMS) data areas instead of one. The FP32 high-precision TREM path
- * additionally stages its divisor, quotient and fused-subtraction buffers,
- * whose capacity scales with the number of 64-element vectors per row.
+ * two (TREMS) data areas instead of one.
  *
- * `row_stride` is the destination tile's physical row stride in elements and
- * `valid_cols` its valid column count, if statically known. Returns
- * std::nullopt when the row stride is not strictly positive, so callers can
- * fall back to a symbolic check. A symbolic valid-column count is bounded by
- * the physical row stride, so the conservative row-stride value is used for
- * the high-precision budget.
+ * `row_stride` is the destination tile's physical row stride in elements.
+ * Returns std::nullopt when the row stride is not strictly positive, so
+ * callers can fall back to a symbolic check.
  */
-inline std::optional<int64_t> RemainderTmpRequiredCols(bool is_trem, bool is_int32, bool high_precision,
-                                                       int64_t row_stride,
-                                                       std::optional<int64_t> valid_cols = std::nullopt) {
+inline std::optional<int64_t> RemainderTmpRequiredCols(bool is_trem, bool is_int32, int64_t row_stride) {
   if (row_stride <= 0) return std::nullopt;
 
   const int64_t mask_bytes = (row_stride + 7) / 8;           // 1 bit per element
   const int64_t mask_floats = ((mask_bytes + 31) / 32) * 8;  // 32-byte blocks
-  int64_t required = (is_int32 ? (is_trem ? 3 : 2) : 1) * row_stride + mask_floats + 8;
-
-  if (high_precision && !is_int32) {
-    const int64_t cap_vecs = std::max<int64_t>(valid_cols.value_or(row_stride) / 64, 1);  // 256-byte vectors
-    const int64_t hp_mask_bytes = cap_vecs * 8;
-    const int64_t hp_mask_floats = ((hp_mask_bytes + 31) / 32) * 8;
-    const int64_t chunk = std::min<int64_t>(cap_vecs, 8);  // TREM_HP_FUSED_CHUNK_A2A3
-    const int64_t hp = (is_trem ? 192 : 128) * cap_vecs + hp_mask_floats + 8 + (cap_vecs == 1 ? 64 : 0) +
-                       int64_t{8} * 64 * chunk;
-    required = std::max(required, hp);
-  }
-  return required;
+  return (is_int32 ? (is_trem ? 3 : 2) : 1) * row_stride + mask_floats + 8;
 }
 
 }  // namespace ir

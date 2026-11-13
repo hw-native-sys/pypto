@@ -481,15 +481,12 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
             provably provides two rows and the scratch columns below on A2/A3,
             where ``R`` is the dividend physical row stride and
             ``mask = 8 * ceil(R / 256)``: ``3R + mask + 8`` for INT32,
-            ``R + mask + 8`` for FP32, and for FP32 ``high_precision``
-            ``max(R + mask + 8, 192C + 8 * ceil(C / 4) + 8 + (C == 1 ? 64 : 0)
-            + 512 * min(C, 8))`` with ``C = max(valid_cols // 64, 1)``. For
-            example an FP32 ``[16, 64]`` dividend needs a ``[2, 80]`` tmp, or
-            ``[2, 784]`` with ``high_precision=True``. It must not overlap
-            either source there.
+            ``R + mask + 8`` for FP32. For example an FP32 ``[16, 64]``
+            dividend needs a ``[2, 80]`` tmp. It must not overlap either
+            source there.
         high_precision: Whether to select PTOAS's high-precision TREM mode.
-            This mode is defined only for FP32; A5 and A2/A3 honor it, and the
-            A2/A3 scratch requirement grows accordingly.
+            This mode is defined only for FP32; A5 honors it, while A2/A3
+            compilation drops the selector and warns.
 
     Returns:
         Tile wrapping the rem operation

@@ -526,22 +526,17 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
 
       // PTO-ISA's TREM/TREMS scratch is a single flat row: the data area(s), a
       // packed compare mask and an address buffer. INT32 keeps the float-domain
-      // dividend/divisor/quotient chain there, and FP32 high-precision TREM
-      // stages its own buffers, so the old "columns cover the source" rule is
-      // no longer sufficient.
+      // dividend/divisor/quotient chain there, so the old "columns cover the
+      // source" rule is no longer sufficient.
       const bool is_int32 = src_type->dtype_ == DataType::INT32;
-      const bool high_precision = op->GetKwarg<bool>("high_precision", false);
       const auto row_stride = ir::arith::TryEvaluateIntConstant(src_type->shape_[1]);
-      const auto valid_cols = ir::arith::TryEvaluateIntConstant(src_valid_shape[1]);
-      // The base window depends only on the physical row stride. Enforce it
-      // even when the valid-column count is symbolic: the two extents are
+      // The window depends only on the physical row stride. Enforce it even
+      // when the valid-column count is symbolic: the two extents are
       // independent, and a proven "tmp valid columns cover source valid
-      // columns" does not prove the scratch window. The high-precision budget
-      // falls back to the row stride, which bounds the valid columns.
-      const auto required_cols = row_stride
-                                     ? ir::RemainderTmpRequiredCols(pto_op_name == "pto.trem", is_int32,
-                                                                    high_precision, *row_stride, valid_cols)
-                                     : std::nullopt;
+      // columns" does not prove the scratch window.
+      const auto required_cols =
+          row_stride ? ir::RemainderTmpRequiredCols(pto_op_name == "pto.trem", is_int32, *row_stride)
+                     : std::nullopt;
       if (required_cols) {
         const auto required_col_expr =
             std::make_shared<ir::ConstInt>(*required_cols, DataType::INDEX, op->span_);
@@ -571,14 +566,18 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
     }
   }
 
-  std::string result;
   if (precision_attr_kind != nullptr) {
-    result = MakePrecisionCodegenPTO(pto_op_name, arity, precision_attr_kind, op, codegen_base);
-  } else {
-    result = MakeNaryCodegenPTO(pto_op_name, arity, op, codegen_base);
+    // A2/A3 high-precision TREM is not a supported PyPTO mode: the pinned
+    // PTO-ISA would run it from a much larger scratch than PyPTO contracts
+    // for, so drop the selector and warn as for the other ignored modes.
+    if (!is_a5 && pto_op_name == "pto.trem" && op->GetKwarg<bool>("high_precision", false)) {
+      codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
+      codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+      return "";
+    }
+    return MakePrecisionCodegenPTO(pto_op_name, arity, precision_attr_kind, op, codegen_base);
   }
-
-  return result;
+  return MakeNaryCodegenPTO(pto_op_name, arity, op, codegen_base);
 }
 
 // Helper function for full op
