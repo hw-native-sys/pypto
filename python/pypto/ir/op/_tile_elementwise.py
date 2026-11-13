@@ -151,11 +151,16 @@ def rem(
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
         tmp: Same-dtype 2D scratch tile. On A2/A3 its physical and valid
-            capacity must provably provide at least two rows and cover every
-            ``lhs`` column, and it must not overlap either source.
+            capacity must provably provide at least two rows and the scratch
+            columns below, where ``R`` is the dividend physical row stride and
+            ``mask = 8 * ceil(R / 256)``: ``3R + mask + 8`` for INT32,
+            ``R + mask + 8`` for FP32. For example an FP32 ``[16, 64]``
+            dividend needs a ``[2, 80]`` tmp. It must not overlap either
+            source.
         span: Optional source span for debugging (auto-captured if not provided)
         high_precision: Whether to select PTOAS's high-precision TREM mode.
-            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
+            This mode is defined only for FP32; A5 honors it, while A2/A3
+            compilation drops the selector and warns.
 
     Returns:
         Call expression for element-wise remainder
@@ -176,8 +181,12 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
         tmp: Same-dtype 2D scratch tile. On A2/A3 its physical and valid
-            capacity must provably provide at least one row and cover every
-            ``lhs`` column, and it must not overlap ``lhs``.
+            capacity must provably provide at least one row and the scratch
+            columns below, where ``R`` is the dividend physical row stride and
+            ``mask = 8 * ceil(R / 256)``: ``2R + mask + 8`` for INT32,
+            ``R + mask + 8`` for FP32. For example an FP32 ``[16, 64]``
+            dividend needs a ``[1, 80]`` tmp, or ``[1, 144]`` for INT32. It
+            must not overlap ``lhs``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

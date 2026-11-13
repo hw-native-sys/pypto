@@ -9,17 +9,22 @@
 
 """``high_precision=True`` is reported when the target backend will drop it.
 
-The request survives every layer below the DSL: PyPTO writes ``precisionType``
-into the PTO IR and PTOAS keeps it as a ``HIGH_PRECISION`` template argument.
-Only PTO-ISA decides whether to read it, and Ascend910's ``TDIV_IMPL`` /
-``TLOG_IMPL`` / ``TREM_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
-without ever branching on it — the op computes the default result and nothing
-downstream says so. Ascend950 selects a separate compensated algorithm.
+For the precision-selector ops, the request survives every layer below the
+DSL: PyPTO writes ``precisionType`` into the PTO IR and PTOAS keeps it as a
+``HIGH_PRECISION`` template argument. Only PTO-ISA decides whether to read it.
+Ascend950 selects a separate compensated algorithm for all of these ops. On
+Ascend910 the ``TDIV_IMPL`` / ``TLOG_IMPL`` / ``TFMOD_IMPL`` implementations
+accept the template parameter without ever branching on it — the op computes
+the default result and nothing downstream says so. ``TREM_IMPL`` does read it
+in the pinned ISA, but A2/A3 high-precision TREM is not a supported PyPTO
+mode: the codegen drops the selector (so PTOAS cannot choose the
+high-precision template argument) and emits the same warning.
 
-So the attribute alone proves nothing about what runs, and these tests assert
-the two halves of that separately: the attribute is still emitted on both
-backends (PTOAS's input must not change), and the warning appears on exactly
-the backend that ignores it.
+So the attribute alone proves nothing about what runs, and the div/log/recip
+tests assert the two halves of that separately: the attribute is still emitted
+on both backends (PTOAS's input must not change), and the warning appears on
+exactly the backend that ignores it. The TREM test asserts the stronger PyPTO
+behavior: A2/A3 drops the selector outright.
 
 ``tile.rsqrt`` is deliberately absent from this warning hook. Its explicit
 ``high_precision=True`` flag requires scratch and emits the selector for A5;
@@ -120,6 +125,30 @@ class HighPrecisionRecip:
     ) -> pl.Tensor[[N, N], pl.FP32]:
         ta: pl.Tile[[N, N], pl.FP32] = pl.load(a, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
         tc: pl.Tile[[N, N], pl.FP32] = pl.recip(ta, high_precision=True)
+        return pl.store(tc, [0, 0], output)
+
+
+@pl.program
+class HighPrecisionRem:
+    """A2/A3 drops the selector outright; A5 emits and honours it.
+
+    The default-contract scratch for the 64-wide dividend is
+    `R + mask + 8 = 64 + 8 + 8 = 80` columns, so `[2, 80]` is enough here.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[N, N], pl.FP32],
+        b: pl.Tensor[[N, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+    ) -> pl.Tensor[[N, N], pl.FP32]:
+        ta: pl.Tile[[N, N], pl.FP32] = pl.load(a, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
+        tb: pl.Tile[[N, N], pl.FP32] = pl.load(b, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
+        tmp: pl.Tile[[2, 80], pl.FP32] = pl.tile.create(
+            [2, 80], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+        )
+        tc: pl.Tile[[N, N], pl.FP32] = pl.tile.rem(ta, tb, tmp, high_precision=True)
         return pl.store(tc, [0, 0], output)
 
 
@@ -273,6 +302,24 @@ def test_ascend910b_warns_naming_the_op_and_the_arch(program_cls, op_name, capfd
 @pytest.mark.parametrize("program_cls", [HighPrecisionDiv, HighPrecisionLog, HighPrecisionRecip])
 def test_ascend950_stays_silent_because_it_honours_the_request(program_cls, capfd):
     _incore_mlir(program_cls, BackendType.Ascend950)
+    assert _warnings(capfd) == []
+
+
+def test_a2a3_trem_drops_high_precision_and_warns(capfd):
+    """A2/A3 high-precision TREM is not supported, so the selector is dropped."""
+    mlir = _incore_mlir(HighPrecisionRem, BackendType.Ascend910)
+
+    assert "precisionType" not in mlir, mlir
+    warnings = _warnings(capfd)
+    assert len(warnings) == 1, f"expected exactly one warning, got {warnings}"
+    assert "tile.rem(high_precision=True)" in warnings[0], warnings[0]
+    assert "a2a3" in warnings[0], warnings[0]
+
+
+def test_a5_trem_stays_silent_because_it_honours_the_request(capfd):
+    mlir = _incore_mlir(HighPrecisionRem, BackendType.Ascend950)
+
+    assert "precisionType = #pto<rem_precision high_precision>" in mlir, mlir
     assert _warnings(capfd) == []
 
 
