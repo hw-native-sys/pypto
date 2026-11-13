@@ -1891,8 +1891,10 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
     "control-flow body tail must be YieldStmt when return_vars is non-empty".
 
     Both branches of the ``if`` do cube work whose Vec-moved result is the
-    branch's carried value, so after the AIC/AIV split each AIV branch reduces
-    to ``tpop_from_aic`` -> ``tfree_to_aic`` -> ``yield``.
+    branch's carried value. The received data must be copied to independent
+    storage before its slot is released: ``tpop`` -> ``move`` -> ``tfree`` ->
+    ``yield``. Keeping only the terminator order would still allow a later
+    phi copy to read an already released slot.
     """
 
     @pl.program
@@ -1945,6 +1947,13 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
         assert _op_name(stmts[0]) == "tile.tpop_from_aic", (
             f"{label} branch should open with tile.tpop_from_aic, got {_op_name(stmts[0])!r}"
         )
+        assert _op_name(stmts[-3]) == "tile.move", f"{label} branch must copy before releasing the slot"
+        received = stmts[0]
+        assert isinstance(received, ir.AssignStmt)
+        copy = stmts[-3]
+        assert isinstance(copy, ir.AssignStmt) and isinstance(copy.value, ir.Call)
+        assert copy.value.args[0].same_as(received.var)
+        assert stmts[-1].value[0].same_as(copy.var)
 
 
 def test_gm_sync_hoisted_before_consumer_loop_on_a2a3():

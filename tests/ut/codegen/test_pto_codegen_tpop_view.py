@@ -185,6 +185,86 @@ def test_different_borrowed_if_sources_keep_phi_copy(
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("ordinary_else", [False, True])
+def test_branch_local_borrowed_result_copied_before_free(
+    tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType, ordinary_else: bool
+):
+    """A branch-local received view must be copied before its slot is released."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+
+    if ordinary_else:
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                if flag:
+                    received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    view = pl.reshape(received, [8, 32])
+                    selected = pl.yield_(view)
+                else:
+                    ordinary = pl.tile.full([8, 32], pl.FP32, 1.0)
+                    selected = pl.yield_(ordinary)
+                out = pl.store(selected, [0, 0], out)
+                return out
+
+    else:
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                if flag:
+                    received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    view = pl.reshape(received, [8, 32])
+                    selected = pl.yield_(view)
+                else:
+                    other: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    other_view = pl.reshape(other, [8, 32])
+                    selected = pl.yield_(other_view)
+                out = pl.store(selected, [0, 0], out)
+                return out
+
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
+    # Group is a host dispatch wrapper; PTO codegen takes its device members.
+    members = [
+        func
+        for func in optimized.functions.values()
+        if func.func_type in (ir.FunctionType.AIC, ir.FunctionType.AIV)
+    ]
+    assert len(members) == 2
+    device_program = ir.Program(members, optimized.name, optimized.span)
+    mlir = PTOCodegen().generate(device_program, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert isinstance(mlir, str)
+    body = _function_body(mlir, "kernel_aiv")
+    # A2/A3 may also emit a secondary-lane handshake replay. Check the first
+    # execution of each original branch, where the result feeds the store.
+    branch_count = 1 if ordinary_else else 2
+    pops = list(re.finditer("pto.tpop_from_aic", body))
+    assert len(pops) >= branch_count, body
+    for pop in pops[:branch_count]:
+        view = body.index("pto.treshape", pop.end())
+        copy = body.index("pto.tmov", view)
+        release = body.index("pto.tfree_from_aic", pop.end())
+        assert pop.start() < view < copy < release, body
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_borrowed_fillpad_writeback_codegen(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
 ):

@@ -359,6 +359,12 @@ including a later scope or Tile store. Releases preserve pop order within each
 pipe, so a later pop cannot return credit before an earlier live slot. Retiming
 an authored free preserves its explicit attributes.
 
+In Tile-only functions, a branch or loop that yields a locally received Tile
+first copies the yielded value or view into independent storage. Its order is
+`tpop` → view/consumers → `tile.move` → `tfree` → `yield`. The branch result
+therefore survives the release, and later phi lowering never needs to read
+the freed slot. `yield` remains the final statement in the body.
+
 In functions containing `RegScope`, a receive created inside a branch or loop
 body must not escape that body through
 `yield`; returning borrowed storage from the function is also rejected, including

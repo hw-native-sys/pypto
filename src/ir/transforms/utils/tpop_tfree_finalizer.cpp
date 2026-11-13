@@ -34,6 +34,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -41,6 +42,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -513,18 +515,37 @@ std::vector<StmtPtr> FinalizeTpopTfreesImpl(const std::vector<StmtPtr>& stmts, c
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
     auto deferred_it = deferred_tfrees.find(i);
     const bool has_deferred = deferred_it != deferred_tfrees.end();
-    // A YieldStmt is the mandatory terminator of a control-flow body — nothing
-    // may follow it. When a tpop tile's last use is the yield itself (the body
-    // carries the tile out as a return value), emit the deferred tfree *before*
-    // the yield so the yield stays the body tail. Appending it after would
-    // break the "body ends with YieldStmt" invariant and crash downstream
-    // passes such as Simplify's StripTrailingYield.
-    const bool is_terminator = As<YieldStmt>(normalized_inputs[i]) != nullptr;
+    auto result_stmt = normalized_inputs[i];
+    const auto yield = As<YieldStmt>(result_stmt);
+    const bool is_terminator = yield != nullptr;
     if (has_deferred && is_terminator) {
+      // A branch/loop-local receive cannot outlive its release. Materialize
+      // Tile-only yield values before the frees, so later phi lowering reads
+      // independent storage. Copy the yielded view, not just its FIFO root.
+      // RegScope functions already reject these escapes above.
+      auto copied_yield = MutableCopy(yield);
+      for (auto& value : copied_yield->value_) {
+        VarPtr received;
+        if (!try_resolve_canonical_tpop(value, local_tpop_var_remap, &received)) continue;
+        auto tile = As<TileType>(received->GetType());
+        INTERNAL_CHECK_SPAN(tile && tile->memory_space_.has_value(), yield->span_)
+            << "Internal error: received Tile must have a memory space before FIFO yield materialization";
+        auto copy = OpRegistry::GetInstance().Create(
+            "tile.move", {value}, {{"target_memory", std::any(*tile->memory_space_)}}, yield->span_);
+        auto source = AsVarLike(value);
+        auto name =
+            auto_name::AddQualifier(source ? source->name_hint_ : received->name_hint_, "fifo_result");
+        auto copied = std::make_shared<Var>(name, copy->GetType(), yield->span_);
+        result.push_back(std::make_shared<AssignStmt>(copied, copy, yield->span_));
+        value = copied;
+      }
+      result_stmt = copied_yield;
+      // Keep YieldStmt last: downstream control-flow passes require it to be
+      // the terminator even when the last FIFO consumer was a yielded value.
       result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
     }
     if (!remove_existing_tfree[i]) {
-      result.push_back(normalized_inputs[i]);
+      result.push_back(result_stmt);
     }
     if (has_deferred && !is_terminator) {
       result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
