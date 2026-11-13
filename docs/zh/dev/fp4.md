@@ -77,7 +77,7 @@ Mat→Left/Right 搬运随布局切换打包轴，不进行数值转换。直接
 PTOAS v0.72 已包含 [Cube 逻辑维度修复](https://gitcode.com/cann/pto-as/pull/381)。
 PyPTO 保留上述载体 ABI，在输出 PTO 时扩展 Mat/Left/Right 的打包轴物理和有效维度。
 GM 和 Vec 描述符仍使用载体维度，分配字节数不变。生成可执行代码前会探测所选汇编器的
-操作数、累加器和 scale 逻辑维度。可通过 `PTOAS_ROOT` 选择正式 v0.72 或兼容的新版本/补丁构建；
+操作数、累加器和 scale 逻辑维度。可通过 `PTOAS_ROOT` 选择正式 v0.74 或兼容的新版本/补丁构建；
 旧的 Cube 载体维度开发构建不兼容。仅生成 IR（`skip_ptoas=True`）仍可用于检查。
 
 ## 数值转换限制

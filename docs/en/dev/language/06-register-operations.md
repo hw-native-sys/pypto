@@ -369,7 +369,7 @@ they do not establish static initialization proofs. VF helpers capture the
 whole accessed Tile conservatively (`read` for gather, `readwrite` for scatter).
 Mixed-dtype captures use typed pointers derived from the same UB base.
 
-Indexed codegen relies on PTOAS 0.72 or newer to synchronize unknown indexed
+Indexed codegen relies on PTOAS v0.74 or newer to synchronize unknown indexed
 footprints within a vecscope, including RAW, WAR and WAW dependencies. This
 version includes the fix for [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730),
 so PyPTO emits no per-access `VV_ALL` fences. PTOAS owns VF dependency analysis;
