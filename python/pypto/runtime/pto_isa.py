@@ -227,6 +227,9 @@ def _ensure_trem_patch(pinned: str) -> str:
             # commit.gpgSign: signing can fail without a key/agent (blocking
             # every resolution) and would otherwise perturb the cache identity.
             "--no-gpg-sign",
+            # Likewise, repository hooks (core.hooksPath) must not gate an
+            # internal cache commit.
+            "--no-verify",
             "-a",
             "-m",
             f"PyPTO TREM fallback {patch_id}\n\nBase pin: {pin_revision}",

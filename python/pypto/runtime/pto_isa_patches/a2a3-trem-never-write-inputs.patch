@@ -1,5 +1,5 @@
 diff --git a/include/pto/npu/a2a3/TRem.hpp b/include/pto/npu/a2a3/TRem.hpp
-index f95eca493..e9c8b7590 100644
+index f95eca493..b82ed50ec 100644
 --- a/include/pto/npu/a2a3/TRem.hpp
 +++ b/include/pto/npu/a2a3/TRem.hpp
 @@ -43,6 +43,15 @@ constexpr float FMOD_HP_SCALE1[FMOD_ITERATION_NUM_MAX_A2A3] = {16777216.0f, 1677
@@ -207,7 +207,7 @@ index f95eca493..e9c8b7590 100644
 +    pipe_barrier(PIPE_V);
 +    vmins(c4, c4, bSafe, rep, 1, 1, 8, 8);
 +    pipe_barrier(PIPE_V);
-+    vcmpvs_le(s.cmpMask, bTmp, c4, rep, 1, 1, 8, 8);
++    vcmpv_le(s.cmpMask, bTmp, c4, rep, 1, 1, 1, 8, 8, 8);
 +    pipe_barrier(PIPE_V);
 +    HpSelect(state, c0, c7, s, rep, lanes); // bounded ? compensated : fallback
 +}

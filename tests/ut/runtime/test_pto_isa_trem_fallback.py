@@ -42,6 +42,8 @@ def _init_checkout(root: Path, content: str) -> None:
         "-c",
         "user.email=test@example.com",
         "commit",
+        "--no-gpg-sign",
+        "--no-verify",
         "-q",
         "-m",
         "pin",
