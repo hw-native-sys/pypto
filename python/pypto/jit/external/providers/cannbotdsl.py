@@ -98,14 +98,21 @@ def _arguments(cb: Any, kernel: object, request: KernelRequest) -> list[Any]:
     )
     values: dict[str, Any] = dict(constants)
     symbols: dict[str, Any] = {}
+    stride_symbols = {
+        stride
+        for parameter in request.parameters
+        if isinstance(parameter.type, TensorSpec)
+        for stride in parameter.type.strides
+        if isinstance(stride, str)
+    }
 
     def dimension(value: int | str) -> Any:
         if isinstance(value, int):
             return value
         if value not in symbols:
-            # Generic dimensions admit zero. Using the DSL default min=1 would
-            # silently change the request and break empty runtime views.
-            symbols[value] = cb.Dim(value, min=0)
+            # Extent-only symbols admit empty views. A symbol used anywhere as
+            # a stride must be positive, including when shared with an extent.
+            symbols[value] = cb.Dim(value, min=1 if value in stride_symbols else 0)
         return symbols[value]
 
     for p in request.parameters:
@@ -170,7 +177,10 @@ def _artifact(cb: Any, source: str, manifest: dict[str, Any]) -> SourceArtifact:
         )
         path = (root / relative).resolve()
         _require(path.is_relative_to(root), f"DSL header escapes include directory: {name!r}")
-        content = path.read_bytes()
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise ContractError(f"CANNBotDSL: cannot read declared DSL header {name!r}: {error}") from error
         _require(hashlib.sha256(content).hexdigest() == digest, f"DSL header digest mismatch: {name!r}")
         files.append(_file(f"include/{name}", content))
     return SourceArtifact(tuple(files), "device_callable.hpp", manifest["symbol"], ("include",))

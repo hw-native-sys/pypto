@@ -165,7 +165,39 @@ def test_dynamic_symbols_and_scalar_types_are_shared_without_addresses(compiler)
     assert args[1].shape[0] is args[2].shape[0]
     assert args[1].stride[0] is args[2].stride[0]
     assert args[1].shape[0].min == 0
+    assert args[1].stride[0].min == 1
     assert args[1].stride[-1] == 1
+
+
+def test_symbol_shared_by_extent_and_stride_is_positive(compiler):
+    request = _request()
+    tensor = TensorSpec(("rows", 32), DataType.FP32, strides=("rows", 1))
+    request = replace(
+        request,
+        parameters=(request.parameters[0], ParameterSpec("x", tensor), ParameterSpec("out", tensor)),
+    )
+    adapter.CANNBotDSLProvider().prepare(_kernel, request)
+    _, args, _ = compiler.calls[0]
+    assert args[1].shape[0] is args[1].stride[0]
+    assert args[1].shape[0] is args[2].shape[0]
+    assert args[1].shape[0].min == 1
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_declared_header_read_failure_is_a_contract_error(compiler, monkeypatch, unreadable):
+    if unreadable:
+
+        def deny_read(path):
+            raise PermissionError("header is not readable")
+
+        monkeypatch.setattr(adapter.Path, "read_bytes", deny_read)
+    else:
+        (compiler.include / "asc_ext/b64.h").unlink()
+    with pytest.raises(
+        ContractError, match="CANNBotDSL: cannot read declared DSL header 'asc_ext/b64.h'"
+    ) as error:
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+    assert isinstance(error.value.__cause__, PermissionError if unreadable else FileNotFoundError)
 
 
 def test_artifact_owns_headers_and_retains_execution_requirements(compiler):

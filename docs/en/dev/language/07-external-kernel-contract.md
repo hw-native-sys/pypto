@@ -99,7 +99,8 @@ compiler. This stage supports A5/CCEC, explicit positional parameters, tensor an
 runtime scalar descriptors, and named constexpr values. Tensor requests must use
 ND layout with explicit positive strides and innermost stride 1; unconstrained
 strides are rejected rather than assumed contiguous. Shared dimension symbols
-remain shared, including zero extents. Compiler options are not yet accepted.
+remain shared. Extent-only symbols admit zero; symbols used in any stride have
+minimum 1, including when also used as an extent. Compiler options are not yet accepted.
 
 For example, a `(rows, 32)` tensor whose row stride is dynamic is described as
 `TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))`. A runtime-bound

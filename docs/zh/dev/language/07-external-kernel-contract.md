@@ -83,7 +83,8 @@ Provider 不接触实际 context、AST、globals 或 tensor 地址。这是 PR #
 `prepare(kernel, request)`。导入适配器不会导入编译器。本阶段支持 A5/CCEC、
 无默认值的显式位置参数、tensor 和运行时 scalar 描述符，以及命名 constexpr 值。
 Tensor 请求必须采用 ND 布局，明确给出正步长且最内层步长为 1；未约束的步长会被
-拒绝，不会推断为连续布局。共享维度符号保持共享，并允许零长度。暂不接受编译选项。
+拒绝，不会推断为连续布局。共享维度符号保持共享；仅用作长度的符号允许为零，
+用作任一步长的符号最小值为 1，即使该符号同时用作长度。暂不接受编译选项。
 
 例如，行步长动态的 `(rows, 32)` tensor 可描述为
 `TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))`。
