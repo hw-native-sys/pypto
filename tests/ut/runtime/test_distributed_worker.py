@@ -3353,6 +3353,15 @@ class _PersistentRunResources:
         self.requires_ordered_cleanup = False
 
 
+class _PersistentHostMapping:
+    def __init__(self, data: bytearray) -> None:
+        self.data = data
+
+    @property
+    def buf(self) -> memoryview:
+        return memoryview(self.data)
+
+
 class _PersistentDomainHandle:
     def __init__(
         self,
@@ -3379,6 +3388,7 @@ class _PersistentDomainHandle:
                     int(spec.nbytes),
                     owner_worker_id=worker_id,
                 )
+                setattr(named_buffers[spec.name], "shm", _PersistentHostMapping(self.host_data[worker_id]))
                 offset += int(spec.nbytes)
             self.contexts[worker_id] = SimpleNamespace(
                 local_window_base=local_window_base,
@@ -3404,16 +3414,7 @@ class _PersistentDomainHandle:
         raise KeyError(name)
 
     def member(self, rank):
-        data = self.host_data[self.workers[rank]]
-
-        class Mapping:
-            @property
-            def buf(self):
-                return memoryview(data)
-
-        return SimpleNamespace(
-            buffers={spec.name: SimpleNamespace(shm=Mapping()) for spec in self.buffer_specs}
-        )
+        return self.contexts[self.workers[rank]]
 
     def __getitem__(self, worker_id: int):
         return self.contexts[worker_id]
@@ -3458,6 +3459,7 @@ class _PersistentOrch:
         self.allocate_calls: list[dict[str, Any]] = []
         self.reuse_calls: list[dict[str, Any]] = []
         self.copy_calls: list[tuple[_FakeBuffer, _FakeBuffer, bytes]] = []
+        self.host_buffer_ids: set[int] = set()
         self.handles: list[_PersistentDomainHandle] = []
         self.resources: list[_PersistentRunResources] = []
         self.worker.close.side_effect = self._close_live_domains
@@ -3526,6 +3528,10 @@ class _PersistentOrch:
                 resources,
                 list(kwargs["buffers"]),
             )
+            if kwargs.get("memory_source") == "host":
+                self.host_buffer_ids.update(
+                    id(buffer) for context in handle.contexts.values() for buffer in context.buffers.values()
+                )
             if initializer := kwargs.get("initializer"):
                 initializer(handle)
             self.handles.append(handle)
@@ -3538,6 +3544,10 @@ class _PersistentOrch:
         return handle
 
     def copy_to(self, dst: _FakeBuffer, src: _FakeBuffer) -> None:
+        if id(dst) in self.host_buffer_ids:
+            raise ValueError(
+                "Worker.copy_to: use Buffer.shm.buf for CPU copies of Host-source domain buffers"
+            )
         payload = ctypes.string_at(int(src.base), int(src.nbytes))
         self.copy_calls.append((dst, src, payload))
 
@@ -3645,30 +3655,38 @@ class TestPersistentDistributedWorker:
 
         m["worker"].submit.side_effect = worker_submit
         handles = []
-        m["load_entry"].return_value = (_persistent_entry(256, handles, memory_source="host"), None)
+        m["load_entry"].return_value = (
+            _persistent_entry(256, handles, buffer_nbytes=(64, 192), memory_source="host"),
+            None,
+        )
         compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
         rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=reset)
         arg = _resident(rt, (16, 16))
         try:
             rt(arg)
+            for worker_id, data in handles[0].host_data.items():
+                data[:] = b"\xa5" * 320
+                handles[0][worker_id].actual_window_size = 320
+            m["worker"].create_buffer.reset_mock()
             rt(arg)
             assert handles[0] is handles[1]
             assert len(orch.allocate_calls) == 1
             assert orch.allocate_calls[0]["memory_source"] == "host"
             assert orch.allocate_calls[0]["workspace_engines"] == ("urma",)
-            expected_copies = [] if reset is False else [(0, 256)]
-            assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == (
-                expected_copies
-            )
-            assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
+            assert orch.copy_calls == []
+            m["worker"].create_buffer.assert_not_called()
+            expected_window = b"\xa5" * 256 if reset is False else bytes(256)
+            for data in handles[0].host_data.values():
+                assert data == expected_window + b"\xa5" * 64
+                # A leaked memoryview export would prevent resizing on cleanup.
+                data.extend(b"done")
         finally:
             rt.close()
 
     @pytest.mark.parametrize("tensor_source", [False, True])
     @pytest.mark.parametrize("reset", [None, False, True])
-    def test_initialized_host_and_device_reuse_share_reset_policy(
-        self, patched_setup, monkeypatch, tensor_source, reset
-    ):
+    def test_initialized_host_and_device_reuse_share_reset_policy(self, patched_setup, tensor_source, reset):
         from pypto.runtime.window_sources import make_window_initializer  # noqa: PLC0415
 
         m = patched_setup
@@ -3679,16 +3697,6 @@ class TestPersistentDistributedWorker:
         source = torch.tensor(list(b"table"), dtype=torch.uint8) if tensor_source else io.BytesIO(b"table")
         device_entry = _persistent_entry(64, [])
         loaded = []
-        record_copy = orch.copy_to
-
-        def copy_to(dst, src):
-            record_copy(dst, src)
-            # Model the Host reset's bytes as well as recording its destination,
-            # so the second dispatch observes zeroing rather than a stale table.
-            if dst.owner_worker_id == 1:
-                orch.handles[0].host_data[1][: dst.nbytes] = ctypes.string_at(src.base, src.nbytes)
-
-        monkeypatch.setattr(orch, "copy_to", copy_to)
 
         def entry(orch, *args, _window_sources, _domain_provider, **kwargs):
             initializer = make_window_initializer(_window_sources, (("data", "engram", 5),), 1)
@@ -3721,9 +3729,9 @@ class TestPersistentDistributedWorker:
             rt(arg)
             assert loaded == [b"table", b"table" if reset is False else bytes(5)]
             assert len(orch.allocate_calls) == 2
-            # One Host window on worker 1 and one Device window on worker 0:
-            # both follow the same reset flag, including its default value.
-            expected_copies = [] if reset is False else [(1, 64), (0, 64)]
+            # Host bytes above follow the same reset policy as the Device
+            # window, but only the Device window may use orch.copy_to.
+            expected_copies = [] if reset is False else [(0, 64)]
             assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == (
                 expected_copies
             )

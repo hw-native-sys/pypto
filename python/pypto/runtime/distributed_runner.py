@@ -2345,11 +2345,11 @@ class DistributedWorker(Worker):
     ) -> None:
         """Restore all retained communication buffers to zero, regardless of backing.
 
-        The host Buffers are created before ``Worker.run`` and released after it;
-        this callback only issues copies while Simpler holds its submit lock.
+        Device windows use staged zero buffers; Host windows are zeroed through
+        their CPU mappings while Simpler holds its submit lock.
         """
         for domain_name, (spec, handle) in domains.items():
-            _workers, window_nbytes, buffer_specs, *_resource_spec = spec
+            _workers, window_nbytes, buffer_specs, memory_source, *_resource_spec = spec
             for worker_id in handle.workers:
                 actual_window_size = int(handle[worker_id].actual_window_size)
                 # Physical mappings can be rounded up to the platform's allocation
@@ -2361,7 +2361,6 @@ class DistributedWorker(Worker):
                     )
             for buffer_name, _dtype, _count, buffer_nbytes in buffer_specs:
                 nbytes = int(buffer_nbytes)
-                zero_buffer = reset_buffers[nbytes]
                 for worker_id in handle.workers:
                     dst_buffer = handle[worker_id].buffers[buffer_name]
                     if int(dst_buffer.nbytes) != nbytes:
@@ -2369,16 +2368,29 @@ class DistributedWorker(Worker):
                             f"persistent CommDomain buffer {buffer_name!r} changed size: "
                             f"{dst_buffer.nbytes} != {nbytes}"
                         )
-                    orch.copy_to(dst_buffer, zero_buffer)
+                    if memory_source == "host":
+                        # Each named buffer's shm covers the whole rank window.
+                        # Apply its offset and leave physical padding untouched.
+                        offset, _ = handle.buffer_range(buffer_name)
+                        with dst_buffer.shm.buf[offset : offset + nbytes] as target:
+                            if len(target) != nbytes:
+                                raise RuntimeError(
+                                    f"persistent Host buffer {buffer_name!r} mapping is too small: "
+                                    f"{len(target)} < {nbytes}"
+                                )
+                            if nbytes:
+                                ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(target)), 0, nbytes)
+                    else:
+                        orch.copy_to(dst_buffer, reset_buffers[nbytes])
 
     def _prepare_persistent_reset_buffers(
         self,
         domains: dict[str, tuple[tuple[Any, ...], Any]],
         reset_buffers: dict[int, Any],
     ) -> None:
-        """Create zero-filled host Buffers, shared by every named buffer of the same size."""
+        """Stage zeros for Device windows; Host windows need no staging allocation."""
         for domain_name, (spec, _handle) in domains.items():
-            _workers, window_nbytes, buffer_specs, *_resource_spec = spec
+            _workers, window_nbytes, buffer_specs, memory_source, *_resource_spec = spec
             named_nbytes = sum(int(buffer_spec[3]) for buffer_spec in buffer_specs)
             if named_nbytes != int(window_nbytes):
                 raise RuntimeError(
@@ -2386,6 +2398,8 @@ class DistributedWorker(Worker):
                     "to cover its window: "
                     f"named bytes {named_nbytes} != window size {window_nbytes}"
                 )
+            if memory_source == "host":
+                continue
             for _name, _dtype, _count, buffer_nbytes in buffer_specs:
                 nbytes = int(buffer_nbytes)
                 if nbytes in reset_buffers:
