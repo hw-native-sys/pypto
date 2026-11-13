@@ -1,7 +1,8 @@
 name: CI Full
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
-      && format('CI full PR #{0} @{1} base:{2}', inputs.pr_number, inputs.head_sha, inputs.base_sha)
+      && format('CI full PR #{0} @{1} base:{2}{3}', inputs.pr_number, inputs.head_sha, inputs.base_sha,
+                inputs.request_id && format(' request:{0}', inputs.request_id) || '')
       || format('CI {0} {1}', github.event_name, github.ref_name) }}
 
 on:
@@ -23,6 +24,10 @@ on:
         default: ''
       merge_sha:
         description: Immutable test merge SHA with base/head parents
+        type: string
+        default: ''
+      request_id:
+        description: CI Command run ID and attempt identifying the pending request
         type: string
         default: ''
 

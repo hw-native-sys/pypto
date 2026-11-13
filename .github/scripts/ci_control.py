@@ -31,7 +31,9 @@ LINT_WORKFLOW = ".github/workflows/ci.yml"
 # Old full runs keep their original workflow path during native reruns. They
 # remain eligible for recovery, but new requests always use the full workflow.
 FULL_WORKFLOWS = {WORKFLOW, LINT_WORKFLOW}
-FULL_TITLE = re.compile(r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})")
+FULL_TITLE = re.compile(
+    r"CI full PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})(?: request:([1-9][0-9]*-[1-9][0-9]*))?"
+)
 LINT_TITLE = re.compile(r"CI lint PR #([1-9][0-9]*) @([0-9a-f]{40}) base:([0-9a-f]{40})")
 UNFINISHED = ("queued", "in_progress", "requested", "waiting", "pending")
 REQUIRED = {
@@ -161,10 +163,18 @@ def newer_status_exists(repo: str, number: int, head: str, run: dict[str, Any]) 
         return False
     if (
         status.get("state") == "pending"
-        and status.get("description") == "Full CI requested; waiting for dispatch"
         and status.get("target_url") == f"https://github.com/{repo}/pull/{number}"
     ):
-        return True  # An authorized command has not yet bound its replacement run.
+        marker = re.fullmatch(
+            r"Full CI requested; waiting for dispatch(?: \(request ([1-9][0-9]*-[1-9][0-9]*)\))?",
+            status.get("description") or "",
+        )
+        if marker:
+            source = FULL_TITLE.fullmatch(run.get("display_title") or "")
+            # A lost dispatch response or binding write must not strand the
+            # accepted run. Only that command attempt can recover its marker;
+            # legacy markers have no identity and remain protected.
+            return not (source and marker[1] and source[4] == marker[1])
     target = re.fullmatch(
         rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)(?:/attempts/([1-9][0-9]*))?",
         status.get("target_url") or "",
@@ -299,7 +309,7 @@ def unfinished_request_exists(repo: str, title: str, start: datetime, end: datet
         for page in range(1, 11):
             runs = api(f"{path}&page={page}")["workflow_runs"]
             if any(
-                run.get("display_title") == title
+                re.sub(r" request:[1-9][0-9]*-[1-9][0-9]*$", "", run.get("display_title") or "") == title
                 and run.get("head_branch") == "main"
                 and run.get("event") == "workflow_dispatch"
                 and run.get("path") in FULL_WORKFLOWS
@@ -358,9 +368,21 @@ def matching_lint_run(repo: str, pr: dict[str, Any]) -> dict[str, Any]:
         and run.get("repository", {}).get("full_name") == repo
         and run.get("head_repository", {}).get("id") == pr["head"]["repo"]["id"]
     ]
-    if not candidates:
+    base = current_base(repo)
+    ancestry = {base: True}
+    run = None
+    for candidate in sorted(candidates, key=lambda item: item["run_number"], reverse=True):
+        match = LINT_TITLE.fullmatch(candidate["display_title"])
+        assert match is not None
+        lint_base = match[3]
+        if lint_base not in ancestry:
+            comparison = api(f"repos/{repo}/compare/{lint_base}...{base}?per_page=1")
+            ancestry[lint_base] = comparison.get("merge_base_commit", {}).get("sha") == lint_base
+        if ancestry[lint_base]:
+            run = candidate
+            break
+    if run is None:
         raise ValueError("No matching PR lint run; update the PR branch and wait for lint before /ci full")
-    run = max(candidates, key=lambda item: item["run_number"])
     # Wait for the attempt to finish so not-yet-indexed rerun jobs cannot make
     # an earlier success look reusable while that check is actually rerunning.
     if run["status"] != "completed":
@@ -403,7 +425,7 @@ def already_running_or_passed(repo: str, pr: dict[str, Any]) -> bool:
         rf"https://github\.com/{re.escape(repo)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
         status.get("target_url") or "",
     )
-    if status.get("state") not in ("pending", "success") or not target:
+    if not target:
         return False
     run = api(f"repos/{repo}/actions/runs/{target[1]}")
     match = FULL_TITLE.fullmatch(run.get("display_title") or "")
@@ -561,6 +583,9 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
     if unfinished_request_exists(repo, title, created, cutoff):
         report(f"Full CI for PR #{number} at {head} is already queued or running.")
         return
+    request_id = f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+    if not re.fullmatch(r"[1-9][0-9]*-[1-9][0-9]*", request_id):
+        raise ValueError("Expected positive command run and attempt IDs")
     # Close the old-green window before creating another run. If this write
     # fails, do not dispatch; if dispatch fails, keep the gate pending for retry.
     api(
@@ -568,7 +593,7 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
         {
             "context": "ci/full",
             "state": "pending",
-            "description": "Full CI requested; waiting for dispatch",
+            "description": f"Full CI requested; waiting for dispatch (request {request_id})",
             "target_url": f"https://github.com/{repo}/pull/{number}",
         },
     )
@@ -583,15 +608,18 @@ def dispatch(repo: str, event: dict[str, Any]) -> None:
                 "head_sha": head,
                 "base_sha": base,
                 "merge_sha": merge,
+                "request_id": request_id,
             },
         },
     )
     run_id = dispatched.get("workflow_run_id") if isinstance(dispatched, dict) else None
     if type(run_id) is not int or run_id <= 0:
-        raise ValueError("Dispatch did not return a valid run ID; pending request remains blocked")
+        raise ValueError(
+            "Dispatch did not return a valid run ID; an accepted full run can recover its status"
+        )
     # Bind ownership before releasing the shared queue, even if run-history
-    # searches have not indexed the new run yet. Lost acknowledgements retain
-    # the unbound marker; an older publisher must not clear it.
+    # searches have not indexed the new run yet. If this fails, the request ID
+    # lets this run's publisher recover the marker while excluding older runs.
     api(
         f"repos/{repo}/statuses/{head}",
         {

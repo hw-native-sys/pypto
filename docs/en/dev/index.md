@@ -74,7 +74,8 @@ verifies both GitHub's current test-merge SHA and its parents before any tests s
 The full-test base comes from the live `refs/heads/main` ref. GitHub's PR
 `base.sha` can remain behind that ref even after the test merge is current;
 that snapshot is not used to select lint. Lint selection uses the newest automatic
-run for the same PR head. Full dispatch still pins and verifies the live merge.
+run for the same PR head whose base remains in live main history. Full dispatch
+still pins and verifies the live merge.
 Before allowing full CI, the command compares the pinned PR head with live main:
 **0–4 commits behind is allowed; 5 or more is rejected**. Only commits present on
 main but missing from the PR count; the PR's own commits do not. A rejected
@@ -99,7 +100,9 @@ not trigger the command. Check whether dispatch already created a full run befor
 retrying an API failure.
 An identical request already queued/running is not dispatched again. The command
 validates the run linked by the current status before searching run history,
-so a bound pending request is honored even before the run list indexes it.
+so a bound request is honored even before the run list indexes it. This also
+recognizes a native rerun while the status still shows its previous failure,
+including when main has advanced.
 A verified successful full result for the same head that still meets the freshness
 limit also makes the comment a no-op,
 so another commenter cannot reset a green gate. Comment
@@ -112,15 +115,19 @@ the publisher's PR/head queue. Inside that queue, the command checks the PR
 and its revision again, writes pending, dispatches, and binds the pending status to
 the returned run ID. A moved head is rejected rather than written under the wrong lock.
 If the initial status write fails, no run is dispatched. If dispatch or run-ID
-binding fails, the unbound pending marker is retained and older publishers cannot
-clear it. Retry `/ci full`; if a run was accepted despite a lost response, wait for
-that run to finish before retrying. Publishers preserve the bound newer run even
-when run-history searches have not yet indexed it.
+binding fails, the pending marker and full run title share the command run ID
+and attempt. An accepted run can therefore publish its own result even after a
+lost response; older runs cannot clear a newer command's marker. If no run was
+created, retry `/ci full`. Legacy markers without a request ID still require
+manual recovery. Publishers preserve the bound newer run even when run-history
+searches have not yet indexed it.
 
 The comment opens the downstream test stage after `pre-commit` and `clang-tidy`
 have passed in the latest matching automatic PR run. Matching includes the PR
 number, head SHA, workflow identity and fork identity. Event base snapshots may
-differ; the newest run wins across them, including failures and cancellations. A docs-only PR
+differ; only bases that are ancestors of live main are eligible. The newest
+eligible run wins, including failures and cancellations, so rewritten main
+history cannot reuse orphaned lint. A docs-only PR
 may reuse a skipped `clang-tidy` after its changed paths are verified. Missing,
 running or failed lint rejects the request; it does not reserve a runner while
 waiting. Changes to the PR head require matching lint again. Main advancing
