@@ -121,6 +121,17 @@ def _copy_region_attrs(src, dst):
     return dst
 
 
+def _pad_row_major(tile, pad_width):
+    # Underscore-prefixed so _unique_name() (which strips leading/trailing
+    # underscores from every IR-sourced hint) can never generate a variable
+    # name that collides with this one -- unlike a bare `torch.nn.functional
+    # .pad(...)` call, which a result legitimately named `torch` would shadow
+    # in the *caller's* scope. Referencing `torch` here resolves through this
+    # function's own module scope regardless of what the caller named its
+    # locals (issue #3319).
+    return torch.nn.functional.pad(tile, (0, pad_width))
+
+
 # pto-isa TileSplitAxis codes carried by the cross-core ``split`` attr:
 # 0 = no split, 1 = up/down, 2 = left/right, 3 / 4 = the same two axes over an
 # ODD extent (lane 0 takes the ceil half, lane 1 the floor one).
@@ -1202,9 +1213,31 @@ def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
 # Build the dispatch table
 _OP_MAP: dict[str, OpHandler] = {}
 
+# tile.row_sum/row_max/row_min/row_prod's torch method, keyed by IR op name.
+# out_layout=row_major needs the *IR* dtype's byte width to compute its pad
+# width, which visit_call's special case below reads directly off the
+# declared TileType shape; see _register_reductions for the col_major (no
+# padding needed) form these also cover.
+_ROW_REDUCTION_METHODS = {
+    _ir.get_op("tile.row_sum").name: "sum",
+    _ir.get_op("tile.row_max").name: "amax",
+    _ir.get_op("tile.row_min").name: "amin",
+    _ir.get_op("tile.row_prod").name: "prod",
+}
+
 
 def _register_reductions(m: dict[str, OpHandler], prefix: str) -> None:
-    """Register row/col reduction handlers (tile forms may carry an ignored tmp_tile)."""
+    """Register row/col reduction handlers (tile forms may carry an ignored tmp_tile).
+
+    A row-major tile.row_* result's out_layout=row_major case is intercepted
+    earlier, in visit_call, because padding its shape correctly needs the
+    call's IR dtype -- not the Torch carrier dtype these string-only handlers
+    see, which can be wider for a dtype torch has no native match for (e.g.
+    UINT16 upcasts to torch.int32, a 4-byte carrier, even though the IR
+    dtype's own 2-byte width is what out_layout=row_major pads against).
+    These handlers therefore only ever run for the unpadded, default
+    col_major case.
+    """
     m[f"{prefix}.row_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-1, keepdim=True)"
     m[f"{prefix}.row_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-1, keepdim=True)"
     m[f"{prefix}.row_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-1, keepdim=True)"
@@ -1899,6 +1932,28 @@ class TorchCodegen(_ir.IRVisitor):
                     self._expr_result = f"{arg_strs[0]}.mT"
                 else:
                     self._expr_result = arg_strs[0]
+        elif op_name in _ROW_REDUCTION_METHODS and kw.get("out_layout") == _ir.TileLayout.row_major:
+            # DeduceTileRowReductionType's pad width comes from the call's IR
+            # dtype, which can disagree with the Torch carrier dtype a plain
+            # string handler would derive it from at runtime (e.g. UINT16
+            # upcasts to torch.int32, a 4-byte carrier, even though the IR
+            # dtype's own 2-byte width is what was actually padded against).
+            # Read the already-correct pad width straight off the declared
+            # TileType shape instead of recomputing it (issue #3319).
+            result_type = op.type
+            assert isinstance(result_type, _ir.TileType), (
+                f"{op_name}: out_layout=row_major expects a TileType result, got {type(result_type).__name__}"
+            )
+            pad_cols = result_type.shape[-1]
+            assert isinstance(pad_cols, _ir.ConstInt), (
+                f"{op_name}: out_layout=row_major requires a static padded shape, got {pad_cols}"
+            )
+            method = _ROW_REDUCTION_METHODS[op_name]
+            base = f"{arg_strs[0]}.{method}(dim=-1, keepdim=True)"
+            # _pad_row_major, not a bare torch.nn.functional.pad(...): a
+            # result legitimately named `torch` would otherwise shadow the
+            # module in *this* generated statement's own scope.
+            self._expr_result = f"_pad_row_major({base}, {pad_cols.value - 1})"
         elif handler is not None:
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):

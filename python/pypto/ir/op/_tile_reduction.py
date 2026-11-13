@@ -9,12 +9,15 @@
 
 """Tile row/column reductions and broadcasts."""
 
+from typing import Any
+
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Call,
     Expr,
     Span,
+    TileLayout,
 )
 
 from ..utils import (
@@ -337,80 +340,164 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
 # ============================================================================
 
 
-def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def _row_reduction_kwargs(out_layout: TileLayout | None) -> dict[str, Any]:
+    """Build the kwargs dict for a row-reduction op call.
+
+    Omits ``out_layout`` entirely when not given, so the emitted IR for an
+    existing caller that doesn't pass it is unchanged byte-for-byte.
+    """
+    kwargs: dict[str, Any] = {}
+    if out_layout is not None:
+        kwargs["out_layout"] = out_layout
+    return kwargs
+
+
+def row_max(
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
+) -> Call:
     """Row-wise max reduction of a tile (reduces along the last axis, maps to TROWMAX).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType)
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            ``pl.store`` writes them from the tile's own padding lanes
+            regardless of what the destination held before, so a caller
+            cannot make them safe by zero-initializing the destination;
+            treat anything landing there as undefined until #3319's
+            pad-zeroing follow-up lands.
 
     Returns:
         Call expression for row-wise max reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_max", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.row_max", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
-def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def row_sum(
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
+) -> Call:
     """Row-wise sum reduction of a tile (reduces along the last axis, maps to TROWSUM).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType)
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            ``pl.store`` writes them from the tile's own padding lanes
+            regardless of what the destination held before, so a caller
+            cannot make them safe by zero-initializing the destination;
+            treat anything landing there as undefined until #3319's
+            pad-zeroing follow-up lands.
 
     Returns:
         Call expression for row-wise sum reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_sum", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.row_sum", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
-def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def row_min(
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
+) -> Call:
     """Row-wise min reduction (reduces along the last axis, maps to TROWMIN).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            ``pl.store`` writes them from the tile's own padding lanes
+            regardless of what the destination held before, so a caller
+            cannot make them safe by zero-initializing the destination;
+            treat anything landing there as undefined until #3319's
+            pad-zeroing follow-up lands.
 
     Returns:
-        Call expression for row-wise min reduction (TileType, e.g. [M, 1])
+        Call expression for row-wise min reduction (shape depends on out_layout, see above)
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.row_min", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
-def row_prod(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def row_prod(
+    tile: Expr, tmp_tile: Expr, span: Span | None = None, *, out_layout: TileLayout | None = None
+) -> Call:
     """Row-wise product reduction (reduces along the last axis, maps to TROWPROD).
 
-    Reduces the last axis with keepdim, producing output shape
-    ``input_shape[:-1] + [1]`` (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input).
+    Reduces the last axis with keepdim. The output shape depends on
+    ``out_layout``: ``input_shape[:-1] + [1]`` for the default ``col_major``
+    (e.g. ``[rows, 1]`` for a 2D ``[rows, cols]`` input), or
+    ``input_shape[:-1] + [pad_cols]`` for ``row_major`` (e.g. ``[rows, 8]``
+    for FP32) -- see ``out_layout`` below.
 
     Args:
         tile: Input tile (TileType, e.g. [M, N])
         tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
             every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
+        out_layout: Optional block layout for the result tile. Defaults to
+            ``TileLayout.col_major`` (a padding-free ``[rows, 1]`` tile). Passing
+            ``TileLayout.row_major`` instead pads the physical last dim to one
+            Vec burst (e.g. 8 for FP32) and reports that whole burst as valid, so
+            ``pl.store`` can honor a destination window's row stride (issue
+            #3319). Columns 1..pad-1 are **not currently guaranteed zero** --
+            ``pl.store`` writes them from the tile's own padding lanes
+            regardless of what the destination held before, so a caller
+            cannot make them safe by zero-initializing the destination;
+            treat anything landing there as undefined until #3319's
+            pad-zeroing follow-up lands.
 
     Returns:
-        Call expression for row-wise product reduction (TileType, e.g. [M, 1])
+        Call expression for row-wise product reduction (shape depends on out_layout, see above)
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_prod", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.row_prod", [tile, tmp_tile], _row_reduction_kwargs(out_layout), actual_span
+    )
 
 
 def col_sum(tile: Expr, tmp_tile: Expr | None = None, span: Span | None = None) -> Call:

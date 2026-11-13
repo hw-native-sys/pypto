@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -94,10 +95,23 @@ const char* OperandError(const BufferRowRecipe& recipe, const std::vector<ir::Bu
   return nullptr;
 }
 
+// out_layout=col_major is this recipe's only supported result layout, and it
+// is also the implicit default when the kwarg is omitted entirely -- the
+// result-type check above (IsColumnVectorBuffer) already rejects a row_major
+// result on its own, so a call that explicitly spells out col_major behaves
+// identically to one that never mentions out_layout. Reject only a kwarg this
+// recipe doesn't understand, rather than any kwarg at all (issue #3319).
+bool HasOnlyDefaultOutLayoutKwarg(const ir::CallPtr& call) {
+  for (const auto& [key, value] : call->kwargs_) {
+    if (key != "out_layout" || AnyCast<ir::TileLayout>(value) != ir::TileLayout::col_major) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 bool SupportsLogicalBufferRow(const BufferRowRecipe& recipe, const ir::CallPtr& call) {
-  if (call->args_.size() != 2 || !call->kwargs_.empty()) return false;
+  if (call->args_.size() != 2 || !HasOnlyDefaultOutLayoutKwarg(call)) return false;
   std::vector<ir::BufferTypePtr> types;
   for (const auto& arg : call->args_) types.push_back(StaticLogicalBufferDescriptor(arg->GetType()));
   types.push_back(StaticLogicalBufferDescriptor(call->GetType()));

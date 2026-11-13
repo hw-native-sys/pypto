@@ -1366,10 +1366,11 @@ class StandaloneSetter:
         )
 
 
-def _softmax_program(shape, valid, dtype="FP32"):
+def _softmax_program(shape, valid, dtype="FP32", out_layout=None):
     rows, cols = shape
     valid_rows, valid_cols = valid
     scalar_param = "cols: pl.Scalar[pl.INDEX], " if isinstance(valid_cols, str) else ""
+    layout_kwarg = f", out_layout=pl.TileLayout.{out_layout}" if out_layout else ""
     return pl.parse_program(f"""
 @pl.program
 class Softmax:
@@ -1379,14 +1380,34 @@ class Softmax:
                ) -> pl.Tensor[[{2 * rows}, {cols}], pl.{dtype}]:
         source = pl.load(a, [0, 0], [{rows}, {cols}], valid_shape=[{valid_rows}, {valid_cols}])
         scratch = pl.create_tile([{rows}, {cols}], dtype=pl.{dtype}, target_memory=pl.MemorySpace.Vec)
-        maximum = pl.row_max(source, scratch)
+        maximum = pl.row_max(source, scratch{layout_kwarg})
         shifted = pl.row_expand_sub(source, maximum)
         exponent = pl.exp(shifted)
-        total = pl.row_sum(exponent, scratch)
+        total = pl.row_sum(exponent, scratch{layout_kwarg})
         result = pl.row_expand_div(exponent, total)
         out = pl.store(result, [0, 0], out)
         return pl.store(source, [{rows}, 0], out)
 """)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_explicit_default_out_layout_still_selects_buffer_row_recipe(planner):
+    """An explicit, behaviorally-default out_layout=col_major must not lose
+    the fast buffer-row recipe path (issue #3319): SupportsLogicalBufferRow
+    used to reject any call with non-empty kwargs, even one that only
+    restates the implicit default, so spelling out_layout=col_major on
+    row_max/row_sum silently fell back to the general Buffer IR path (or
+    Tile IR) instead of the dedicated recipe this otherwise-identical kernel
+    already uses -- compare test_default_fp32_softmax_preserves_live_input_and_partial_output.
+    """
+    program = _softmax_program((64, 64), (64, 64), out_layout="col_major")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    text = codegen.PTOCodegen().generate(
+        lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    for operation in ("trowmax", "trowsum"):
+        assert text.count(f"pto.{operation} ins(") == 1
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
