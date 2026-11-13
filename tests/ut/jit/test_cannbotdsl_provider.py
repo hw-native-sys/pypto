@@ -105,7 +105,14 @@ def compiler(monkeypatch, tmp_path):
             "ddr_barrier": True,
             "publication": "consumer_after_all_participants_return",
         },
-        "contract": {"tensor_views": {"pointer": "first_valid_element", "offset_applied_by": "consumer"}},
+        "contract": {
+            "parameters": [
+                {"name": "alpha", "role": "runtime", "argument": {"kind": "scalar", "element": "f32"}},
+                {"name": "x", "role": "runtime", "argument": {"kind": "tensor", "element": "f32"}},
+                {"name": "out", "role": "runtime", "argument": {"kind": "tensor", "element": "f32"}},
+            ],
+            "tensor_views": {"pointer": "first_valid_element", "offset_applied_by": "consumer"},
+        },
         "resources": {
             "gm_write_isolation": {"granularity_bytes": 64, "rule": "serialize_conflicting_cache_lines"}
         },
@@ -253,6 +260,38 @@ def test_incompatible_exports_fail_before_handoff(compiler, change, match):
         adapter.CANNBotDSLProvider().prepare(_kernel, _request())
 
 
+@pytest.mark.parametrize("attribute", ["manifest", "source"])
+def test_missing_export_attributes_raise_contract_error(compiler, attribute):
+    delattr(compiler.export, attribute)
+    with pytest.raises(ContractError, match=f"invalid device export:.*{attribute}") as error:
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+    assert isinstance(error.value.__cause__, AttributeError)
+
+
+@pytest.mark.parametrize(
+    "argument,match",
+    [
+        ({"kind": "scalar", "element": "i32"}, "scalar dtype mismatch: expected f32, got 'i32'"),
+        ({"kind": "tensor", "element": "f32"}, "scalar contract kind mismatch"),
+        ({"kind": "scalar"}, "invalid device export"),
+        (None, "invalid device export"),
+    ],
+)
+def test_scalar_contract_must_match_request_even_at_same_byte_width(compiler, argument, match):
+    compiler.manifest["contract"]["parameters"][0]["argument"] = argument
+    scalar = compiler.manifest["parameters"][2]
+    assert scalar["size"] == scalar["alignment"] == 4
+    with pytest.raises(ContractError, match=match):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
+@pytest.mark.parametrize("names", [[], ["x", "alpha", "out"], ["alpha", "alpha", "out"]])
+def test_logical_runtime_parameters_must_match_request(compiler, names):
+    compiler.manifest["contract"]["parameters"] = [{"name": name, "role": "runtime"} for name in names]
+    with pytest.raises(ContractError, match="runtime contract parameter names/order"):
+        adapter.CANNBotDSLProvider().prepare(_kernel, _request())
+
+
 @pytest.mark.parametrize(
     "field,value,match",
     [
@@ -305,12 +344,15 @@ def test_request_does_not_silently_assume_contiguity(compiler, spec, match):
 
 
 def test_constexpr_values_follow_declared_order(compiler):
-    def kernel(alpha, scale, x, out):
+    def kernel(scale, alpha, x, out):
         pass
 
+    compiler.manifest["contract"]["parameters"].insert(
+        0, {"name": "scale", "role": "constexpr", "argument": None}
+    )
     request = replace(_request(), constants=(("scale", 2.5),))
     prepared = adapter.CANNBotDSLProvider().prepare(kernel, request)
-    assert compiler.calls[0][1][1] == 2.5
+    assert compiler.calls[0][1][0] == 2.5
     assert prepared.request.constants == (("scale", 2.5),)
     assert len(prepared.native_abi.parameters) == 3
 

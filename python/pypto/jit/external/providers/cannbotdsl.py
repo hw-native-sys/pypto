@@ -208,6 +208,11 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
         "participants",
     ):
         _require(isinstance(manifest.get(section), dict), f"missing or invalid {section} metadata")
+    logical = [p for p in manifest["contract"]["parameters"] if p["role"] == "runtime"]
+    _require(
+        [p["name"] for p in logical] == [p.name for p in request.parameters],
+        "runtime contract parameter names/order differ from the request",
+    )
     physical = manifest["parameters"]
     indices = [p["logical_index"] for p in physical]
     _require(
@@ -247,6 +252,17 @@ def _prepare_export(cb: Any, export: Any, request: KernelRequest) -> PreparedKer
             # An access mask proves a write exists, never that every element of
             # the argument is overwritten. Retain incoming dependencies.
             effects[index] = TensorEffect(index, access, coverage)
+        else:
+            # Scalar element tags live in the logical contract, not the native
+            # slot. Equal byte widths do not imply compatible scalar types.
+            argument = logical[index]["argument"]
+            _require(argument["kind"] == "scalar", f"parameter {index} scalar contract kind mismatch")
+            expected_element = _DTYPES[parameter.type.dtype][1]
+            _require(
+                argument["element"] == expected_element,
+                f"parameter {index} scalar dtype mismatch: expected {expected_element}, "
+                f"got {argument['element']!r}",
+            )
     cores = {"aic": (Core.AIC,), "aiv": (Core.AIV,), "mixed": (Core.AIC, Core.AIV)}
     core_type = manifest["core_type"]
     _require(core_type in cores, f"unsupported core type {core_type!r}")
@@ -320,7 +336,7 @@ class CANNBotDSLProvider:
         export = cb.export_device(kernel, *_arguments(cb, kernel, request), arch="dav-3510")
         try:
             return _prepare_export(cb, export, request)
-        except (KeyError, TypeError, ValueError) as error:
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
             if isinstance(error, ContractError):
                 raise
             raise ContractError(f"CANNBotDSL: invalid device export: {error}") from error

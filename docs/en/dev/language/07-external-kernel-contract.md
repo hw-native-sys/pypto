@@ -112,6 +112,9 @@ descriptor ABI, preserving the export's physical argument order. Public returns
 are empty. Every tensor write creates an internal writeback with unknown coverage,
 so an access mask cannot discard dependencies on untouched data. AIC/AIV/MIX
 participants come from the export, including two AIV lanes for MIX.
+Scalar element tags in the logical runtime contract must match the request;
+equal byte widths alone are insufficient. Malformed exports, including missing
+`manifest` or `source` attributes, raise `ContractError` before handoff.
 
 The owned artifact contains `device_callable.hpp`, the complete
 `device_manifest.json`, and digest-checked copies of DSL extension headers. The

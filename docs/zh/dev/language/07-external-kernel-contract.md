@@ -95,6 +95,8 @@ Tensor 请求必须采用 ND 布局，明确给出正步长且最内层步长为
 保留导出的物理参数顺序。公开返回为空；每个 tensor 写入都产生内部写回，覆盖范围
 保守设为未知，避免仅凭访问掩码丢弃未写入数据的依赖。AIC/AIV/MIX 参与核来自导出，
 其中 MIX 包含两个 AIV lane。
+逻辑运行时契约中的 scalar 元素类型必须与请求一致，不能仅比较字节宽度。
+格式错误的导出（包括缺少 `manifest` 或 `source` 属性）会在交接前抛出 `ContractError`。
 
 产物拥有 `device_callable.hpp`、完整的 `device_manifest.json`，以及经过摘要校验的
 DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状态修改、独占资源、
