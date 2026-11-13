@@ -1,0 +1,701 @@
+diff --git a/include/pto/npu/a2a3/TRem.hpp b/include/pto/npu/a2a3/TRem.hpp
+index f95eca493..188843f41 100644
+--- a/include/pto/npu/a2a3/TRem.hpp
++++ b/include/pto/npu/a2a3/TRem.hpp
+@@ -43,6 +43,15 @@ constexpr float FMOD_HP_SCALE1[FMOD_ITERATION_NUM_MAX_A2A3] = {16777216.0f, 1677
+ constexpr float FMOD_HP_SCALE2[FMOD_ITERATION_NUM_MAX_A2A3] = {
+     1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 16777216.0f, 2.8147e14f, 4.7224e21f, 7.9228e28f, 1.3292e36f};
+ constexpr float FMOD_HP_POST_SCALE = 5.9604645e-8f; // 2^-24
++// Compensation batching of the final peel iteration (HpFusedSub): the staged
++// final pass advances this many vectors per batched call; 1 reproduces the
++// per-vector behavior. The comp scratch scales with it (512 floats per
++// vector pair - see HpScratchRequiredColsV).
++#ifndef TREM_HP_FUSED_CHUNK_A2A3_OVERRIDE
++constexpr uint32_t TREM_HP_FUSED_CHUNK_A2A3 = 8;
++#else
++constexpr uint32_t TREM_HP_FUSED_CHUNK_A2A3 = TREM_HP_FUSED_CHUNK_A2A3_OVERRIDE;
++#endif
+ 
+ // Scratch contract, in floats from the tmp tile base, for a capacity of C
+ // 64-element vectors (C = full vectors per row for the staged passes, 1 for
+@@ -70,6 +79,7 @@ struct HpScratchA2A3 {
+     __ubuf__ uint32_t* addrBuf;
+     __ubuf__ float* state; // per-vector path (cap == 1) only
+     __ubuf__ float* div;   // TREM only: |src1| row, live through one pass
++    __ubuf__ float* comp;  // 5 vectors: final-iteration compensated subtract
+ };
+ 
+ PTO_INTERNAL unsigned HpScratchMaskFloats(unsigned capVecs)
+@@ -84,7 +94,10 @@ PTO_INTERNAL unsigned HpScratchMaskFloats(unsigned capVecs)
+ //   and state (cap == 1 only) after them.
+ PTO_INTERNAL unsigned HpScratchRequiredColsV(unsigned capVecs)
+ {
+-    return 192 * capVecs + HpScratchMaskFloats(capVecs) + 8 + (capVecs == 1 ? 64 : 0);
++    // + the compensation window of the final-iteration HpFusedSub: eight
++    // vectors per batched chunk (clamped to the row's vector count)
++    unsigned chunk = capVecs < TREM_HP_FUSED_CHUNK_A2A3 ? capVecs : TREM_HP_FUSED_CHUNK_A2A3;
++    return 192 * capVecs + HpScratchMaskFloats(capVecs) + 8 + (capVecs == 1 ? 64 : 0) + 8 * 64 * chunk;
+ }
+ 
+ PTO_INTERNAL void HpScratchInitV(HpScratchA2A3& s, __ubuf__ float* tmp, unsigned capVecs)
+@@ -96,6 +109,7 @@ PTO_INTERNAL void HpScratchInitV(HpScratchA2A3& s, __ubuf__ float* tmp, unsigned
+     s.cmpMask = reinterpret_cast<__ubuf__ uint8_t*>(tmp + 3 * v);
+     s.addrBuf = reinterpret_cast<__ubuf__ uint32_t*>(tmp + 3 * v + HpScratchMaskFloats(capVecs));
+     s.state = reinterpret_cast<__ubuf__ float*>(s.addrBuf + BIT_TO_BYTE);
++    s.comp = s.state + (capVecs == 1 ? 64 : 0);
+ }
+ 
+ // set_cmpmask dereferences a full 64-bit address (see TRemS.hpp: duplicating
+@@ -166,6 +180,152 @@ PTO_INTERNAL void HpRoundToInt(__ubuf__ float* k, unsigned rep)
+     pipe_barrier(PIPE_V);
+ }
+ 
++// Compensated `state -= k * bTmp` for the FINAL peel iteration:
++// single-rounding semantics, matching A5's fused vmula. a2a3 has no fused
++// multiply-add (vmla rounds the product first - probe: 4580025 +
++// (-631727)*7.25 gives 4.0, not the exact 4.25), so the plain vmul+vsub pair
++// loses the product's low bits whenever k*bTmp needs more than 24
++// significand bits: 4580025 % -7.25 returned -3.25 instead of -3.0.
++// k (an integer < 2^24) and bTmp are split into 12-bit halves, the four
++// partial products are exact in f32, and full 6-op TwoSum chains (the 3-op
++// Fast2Sum variant loses the residual when the partial products overlap in
++// magnitude - e.g. 4573184.0 + 6836.75) reassemble k*bTmp exactly as
++// (hi, lo). Then r1 = state - hi is Sterbenz-exact (k = floor(state/bTmp)
++// keeps hi in (state/2, state] for k >= 1, and k = 0 gives hi = 0), so
++// r1 - lo rounds once and equals RN(state - k*bTmp) - the true remainder,
++// which is always f32-representable. Lanes whose bTmp would overflow the
++// Veltkamp split (|bTmp| > FLT_MAX/4097) keep the plain two-op result: there
++// the product error stays below half an ulp of the dividend, the tolerated
++// error class for quotients beyond 2^24. Needs s.comp (8 vectors) live.
++PTO_INTERNAL void HpFusedSub(
++    __ubuf__ float* state, __ubuf__ float* k, __ubuf__ float* bTmp, HpScratchA2A3& s, unsigned rep)
++{
++    // plain locals: the bisheng variadic intrinsic checker rejects
++    // constexpr-qualified scalar operands
++    float pow2m12 = 0.000244140625f; // 2^-12
++    float pow2p12 = 4096.0f;
++    float splitC = 4097.0f; // Veltkamp constant 2^12 + 1
++    float bSafe = FMOD_HP_MAXVALUE / 4097.0f;
++    unsigned lanes = rep * REPEAT_BYTE / sizeof(float);
++    unsigned v = lanes;
++
++    // c0..c7; c7 doubles as the plain two-op fallback (fb) buffer
++    __ubuf__ float* c0 = s.comp;
++    __ubuf__ float* c1 = s.comp + v;
++    __ubuf__ float* c2 = s.comp + 2 * v;
++    __ubuf__ float* c3 = s.comp + 3 * v;
++    __ubuf__ float* c4 = s.comp + 4 * v;
++    __ubuf__ float* c5 = s.comp + 5 * v;
++    __ubuf__ float* c6 = s.comp + 6 * v;
++    __ubuf__ float* c7 = s.comp + 7 * v;
++
++    // plain two-op fallback for the overflow-guard lanes: fb in c7
++    vmul(c7, k, bTmp, rep, 1, 1, 1, 8, 8, 8);
++    pipe_barrier(PIPE_V);
++    vsub(c7, state, c7, rep, 1, 1, 1, 8, 8, 8);
++    pipe_barrier(PIPE_V);
++
++    // split the integer k (< 2^24) into 12-bit halves: k = kh*2^12 + kl
++    vmuls(c0, k, pow2m12, rep, 1, 1, 8, 8); // kh = k >> 12 (exact scale)
++    pipe_barrier(PIPE_V);
++    HpRoundToInt<false>(c0, rep);
++    vmuls(c1, c0, pow2p12, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    vsub(c2, k, c1, rep, 1, 1, 1, 8, 8, 8); // kl < 2^12, exact
++    pipe_barrier(PIPE_V);
++
++    // Veltkamp split of bTmp: t = RN(b*4097), q = RN(t - b), bH = RN(t - q),
++    // bL = RN(b - bH); bH holds 12 significant bits and bH + bL == bTmp
++    vmuls(c1, bTmp, splitC, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    vsub(c3, c1, bTmp, rep, 1, 1, 1, 8, 8, 8); // q
++    pipe_barrier(PIPE_V);
++    vsub(c1, c1, c3, rep, 1, 1, 1, 8, 8, 8); // bH in c1
++    pipe_barrier(PIPE_V);
++    vsub(c3, bTmp, c1, rep, 1, 1, 1, 8, 8, 8); // bL in c3
++    pipe_barrier(PIPE_V);
++
++    // four exact partial products (12x12 significant bits each); the two kh
++    // products carry the 2^12 digit scale. Order matters: p4 consumes bL
++    // before c3 is reused, p2 consumes kh before c0 is reused.
++    vmul(c4, c2, c1, rep, 1, 1, 1, 8, 8, 8); // p3 = kl*bH -> c4
++    pipe_barrier(PIPE_V);
++    vmul(c2, c2, c3, rep, 1, 1, 1, 8, 8, 8); // p4 = kl*bL -> c2
++    pipe_barrier(PIPE_V);
++    vmul(c5, c0, c1, rep, 1, 1, 1, 8, 8, 8); // p1 = kh*bH -> c5
++    pipe_barrier(PIPE_V);
++    vmul(c0, c0, c3, rep, 1, 1, 1, 8, 8, 8); // p2 = kh*bL -> c0
++    pipe_barrier(PIPE_V);
++    vmuls(c5, c5, pow2p12, rep, 1, 1, 8, 8); // p1 = kh*bH*2^12 (exact)
++    pipe_barrier(PIPE_V);
++    vmuls(c0, c0, pow2p12, rep, 1, 1, 8, 8); // p2 = kh*bL*2^12 (exact)
++    pipe_barrier(PIPE_V);
++
++    // exact reassembly via three full TwoSum chains. TwoSum(a, b):
++    //   s = a + b; a' = s - a; b' = a + a'; err = (b - a') + (b' - s)
++    // (every step exact; the residual pair (s, err) sums to a + b). Chain:
++    // c0..c2 = (p1', p2') -> (s1, e1); c3..c4 = (s1, p3) -> (s2, e2);
++    // c1..c2 = (s2, p4) -> (hi, e3).
++    vadd(c1, c5, c0, rep, 1, 1, 1, 8, 8, 8); // s1
++    pipe_barrier(PIPE_V);
++    vsub(c3, c1, c5, rep, 1, 1, 1, 8, 8, 8); // a'
++    pipe_barrier(PIPE_V);
++    vadd(c6, c5, c3, rep, 1, 1, 1, 8, 8, 8); // b'
++    pipe_barrier(PIPE_V);
++    vsub(c0, c0, c3, rep, 1, 1, 1, 8, 8, 8); // b - a'
++    pipe_barrier(PIPE_V);
++    vsub(c3, c6, c1, rep, 1, 1, 1, 8, 8, 8); // b' - s1
++    pipe_barrier(PIPE_V);
++    vadd(c0, c0, c3, rep, 1, 1, 1, 8, 8, 8); // e1 in c0
++    pipe_barrier(PIPE_V);
++
++    vadd(c3, c1, c4, rep, 1, 1, 1, 8, 8, 8); // s2
++    pipe_barrier(PIPE_V);
++    vsub(c5, c3, c1, rep, 1, 1, 1, 8, 8, 8); // a'
++    pipe_barrier(PIPE_V);
++    vadd(c6, c1, c5, rep, 1, 1, 1, 8, 8, 8); // b'
++    pipe_barrier(PIPE_V);
++    vsub(c4, c4, c5, rep, 1, 1, 1, 8, 8, 8); // b - a'
++    pipe_barrier(PIPE_V);
++    vsub(c5, c6, c3, rep, 1, 1, 1, 8, 8, 8); // b' - s2
++    pipe_barrier(PIPE_V);
++    vadd(c4, c4, c5, rep, 1, 1, 1, 8, 8, 8); // e2 in c4
++    pipe_barrier(PIPE_V);
++
++    vadd(c1, c3, c2, rep, 1, 1, 1, 8, 8, 8); // s3 (hi) in c1
++    pipe_barrier(PIPE_V);
++    vsub(c5, c1, c3, rep, 1, 1, 1, 8, 8, 8); // a'
++    pipe_barrier(PIPE_V);
++    vadd(c6, c3, c5, rep, 1, 1, 1, 8, 8, 8); // b'
++    pipe_barrier(PIPE_V);
++    vsub(c2, c2, c5, rep, 1, 1, 1, 8, 8, 8); // b - a'
++    pipe_barrier(PIPE_V);
++    vsub(c5, c6, c1, rep, 1, 1, 1, 8, 8, 8); // b' - s3
++    pipe_barrier(PIPE_V);
++    vadd(c2, c2, c5, rep, 1, 1, 1, 8, 8, 8); // e3 in c2
++    pipe_barrier(PIPE_V);
++
++    // lo = e1 + e2 + e3 (rounds at the 2^-48-relative level - negligible)
++    vadd(c3, c0, c4, rep, 1, 1, 1, 8, 8, 8);
++    pipe_barrier(PIPE_V);
++    vadd(c3, c3, c2, rep, 1, 1, 1, 8, 8, 8); // lo in c3
++    pipe_barrier(PIPE_V);
++
++    // r1 = state - hi is Sterbenz-exact; r = r1 - lo rounds once
++    vsub(c0, state, c1, rep, 1, 1, 1, 8, 8, 8); // r1 in c0
++    pipe_barrier(PIPE_V);
++    vsub(c0, c0, c3, rep, 1, 1, 1, 8, 8, 8); // compensated r in c0
++    pipe_barrier(PIPE_V);
++
++    // overflow guard: lanes with |bTmp| > FLT_MAX/4097 keep the fallback
++    // (the Veltkamp split would produce inf/NaN there)
++    set_mask_norm();
++    set_vector_mask(-1, -1);
++    vcmpvs_le(s.cmpMask, bTmp, bSafe, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    HpSelect(state, c0, c7, s, rep, lanes); // bTmp <= bSafe ? compensated : fallback
++}
++
+ // ---- TREM (vector divisor) variants ----
+ // Same digit-peeling iteration, but the divisor comes from a |src1| row
+ // buffer and the subnormal regime is decided per element (A5 semantics:
+@@ -218,11 +378,16 @@ PTO_INTERNAL void HpSolveScaleV(__ubuf__ float* state, __ubuf__ float* div, HpSc
+         pipe_barrier(PIPE_V);
+     }
+ 
+-    // state -= k * bTmp (positive k; see HpSolveScaleS)
+-    vmul(s.k, s.k, s.bTmp, rep, 1, 1, 1, 8, 8, 8);
+-    pipe_barrier(PIPE_V);
+-    vsub(state, state, s.k, rep, 1, 1, 1, 8, 8, 8);
+-    pipe_barrier(PIPE_V);
++    if constexpr (iterationNum == 1) {
++        // final iteration: compensated single-rounding subtract (HpFusedSub)
++        HpFusedSub(state, s.k, s.bTmp, s, rep);
++    } else {
++        // state -= k * bTmp (positive k; see HpSolveScaleS)
++        vmul(s.k, s.k, s.bTmp, rep, 1, 1, 1, 8, 8, 8);
++        pipe_barrier(PIPE_V);
++        vsub(state, state, s.k, rep, 1, 1, 1, 8, 8, 8);
++        pipe_barrier(PIPE_V);
++    }
+ 
+     if constexpr (iterationNum == 1) {
+         // r = r + (r < 0) * bTmp, reusing the k region (quotient dead)
+@@ -313,6 +478,22 @@ PTO_INTERNAL void HpPostV(
+     vadd(s.k, state, src1, rep, 1, 1, 1, 8, 8, 8);
+     pipe_barrier(PIPE_V);
+     HpSelect(state, s.k, state, s, rep, lanes);
++    // inf-divisor lanes keep src0: x % +-inf = x, and the probe r*(+-inf)
++    // above overflows to +-inf and corrupts the correction for x < 0.
++    vabs(s.k, src1, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    vcmpvs_eq(s.cmpMask, s.k, HpInf(), rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    HpSelect(state, src0, state, s, rep, lanes);
++    // ... but that select clobbers the both-inf NaN from the exception chain,
++    // so re-apply it (|src0| == inf -> NaN).
++    vabs(s.k, src0, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    vcmpvs_eq(s.cmpMask, s.k, HpInf(), rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    vector_dup(s.bTmp, HpNan(), rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    HpSelect(state, s.bTmp, state, s, rep, lanes);
+     set_mask_norm();
+     set_vector_mask(-1, -1);
+ }
+@@ -423,12 +604,36 @@ PTO_INTERNAL void TRemVStageSeqV(
+     unsigned fullPerRow)
+ {
+     (void)src0;
+-    for (unsigned row = 0; row < validRows; ++row) {
+-        vabs(s.div, src1 + row * src1RowStride, fullPerRow, 1, 1, 8, 8);
+-        pipe_barrier(PIPE_V);
+-        HpSolveScaleV<isFmod, iterationNum>(dst + row * dstRowStride, s.div, s, fullPerRow);
+-    }
+-    if constexpr (iterationNum > 1) {
++    constexpr unsigned elemsPerRepeat = REPEAT_BYTE / sizeof(float);
++    if constexpr (iterationNum == 1) {
++        // final iteration: the compensated subtract runs in chunks of
++        // TREM_HP_FUSED_CHUNK_A2A3 vectors (its scratch window scales with
++        // the chunk; see HpFusedSub). The chunk selects leave a count mask
++        // behind; restore the full mask before each row's batched vabs.
++        for (unsigned row = 0; row < validRows; ++row) {
++            set_mask_norm();
++            set_vector_mask(-1, -1);
++            vabs(s.div, src1 + row * src1RowStride, fullPerRow, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            for (unsigned j = 0; j < fullPerRow; j += TREM_HP_FUSED_CHUNK_A2A3) {
++                unsigned rep = fullPerRow - j;
++                if (rep > TREM_HP_FUSED_CHUNK_A2A3) {
++                    rep = TREM_HP_FUSED_CHUNK_A2A3;
++                }
++                // the previous chunk's selects leave a count mask behind;
++                // dup/vmuls would be clipped to it, so restore the full mask
++                set_mask_norm();
++                set_vector_mask(-1, -1);
++                HpSolveScaleV<isFmod, 1>(
++                    dst + row * dstRowStride + j * elemsPerRepeat, s.div + j * elemsPerRepeat, s, rep);
++            }
++        }
++    } else {
++        for (unsigned row = 0; row < validRows; ++row) {
++            vabs(s.div, src1 + row * src1RowStride, fullPerRow, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            HpSolveScaleV<isFmod, iterationNum>(dst + row * dstRowStride, s.div, s, fullPerRow);
++        }
+         TRemVStageSeqV<isFmod, iterationNum - 1, dstRowStride, src0RowStride, src1RowStride>(
+             dst, src0, src1, s, validRows, fullPerRow);
+     }
+@@ -545,62 +750,63 @@ struct RemOp {
+         pipe_barrier(PIPE_V);
+     }
+ 
++    // INT32 remainder in a strictly read-only-src form: the float-domain
++    // dividend (row [0,R)), divisor (row [R,2R), reused by the epilogue probe)
++    // and the quotient/rint chain (row [2R,3R)) all live in tmp. Neither src
++    // tile is ever written; dst receives rint(a) as src0's last read
++    // completes. tmp contract: 3*dstRowStride + maskF + 8 floats.
+     PTO_INTERNAL static void RemInt32Instr(
+         __ubuf__ int32_t* dst, __ubuf__ int32_t* src0, __ubuf__ int32_t* src1, __ubuf__ int32_t* tmp,
+         unsigned repeatTimes, unsigned validCols)
+     {
+         __ubuf__ float* dst_f = reinterpret_cast<__ubuf__ float*>(dst);
+-        __ubuf__ float* src0_f = reinterpret_cast<__ubuf__ float*>(src0);
+-        __ubuf__ float* src1_f = reinterpret_cast<__ubuf__ float*>(src1);
+-        __ubuf__ float* tmp_f = reinterpret_cast<__ubuf__ float*>(tmp);
++        __ubuf__ float* rowA_f = reinterpret_cast<__ubuf__ float*>(tmp);
++        __ubuf__ float* rowY_f = rowA_f + dstRowStride;
++        __ubuf__ float* rowQ_f = rowY_f + dstRowStride;
++        __ubuf__ int32_t* rowA_i = reinterpret_cast<__ubuf__ int32_t*>(rowA_f);
++        __ubuf__ int32_t* rowQ_i = reinterpret_cast<__ubuf__ int32_t*>(rowQ_f);
+ 
+         set_mask_count();
+         set_vector_mask(0, validCols);
+ 
+-        vconv_s322f32(src0_f, src0, 1, 1, 1, 8, 8);
+-        vconv_s322f32(src1_f, src1, 1, 1, 1, 8, 8);
++        vconv_s322f32(rowA_f, src0, 1, 1, 1, 8, 8); // rowA = float(a); src0 untouched
++        vconv_s322f32(rowY_f, src1, 1, 1, 1, 8, 8); // rowY = float(y); src1 untouched
+         pipe_barrier(PIPE_V);
+ 
+-        vdiv(tmp_f, src0_f, src1_f, 1, 1, 1, 1, 8, 8, 8);
++        vconv_f322s32r(dst, rowA_f, 1, 1, 1, 8, 8); // dst = rint(a) (src0's last read above)
+         pipe_barrier(PIPE_V);
+ 
+-        vconv_f322s32f(tmp, tmp_f, 1, 1, 1, 8, 8);
++        vdiv(rowQ_f, rowA_f, rowY_f, 1, 1, 1, 1, 8, 8, 8); // rowQ = q_f
+         pipe_barrier(PIPE_V);
+-
+-        // round-reconvert the dividend into dst (tmp keeps q): dst may alias
+-        // src0, and this is src0's last read, so dst is safe to write from
+-        // here on. src1 never aliases dst, so its in-place reconvert is fine.
+-        vconv_f322s32r(dst, src0_f, 1, 1, 1, 8, 8);
+-        vconv_f322s32r(src1, src1_f, 1, 1, 1, 8, 8);
++        vconv_f322s32f(rowQ_i, rowQ_f, 1, 1, 1, 8, 8); // floor quotient q (int)
+         pipe_barrier(PIPE_V);
+-        vmul(tmp, tmp, src1, 1, 1, 1, 1, 8, 8, 8);
++        vconv_f322s32r(rowA_i, rowY_f, 1, 1, 1, 8, 8); // y' = rint(y) int into rowA (a_f dead)
++        pipe_barrier(PIPE_V);
++        vmul(rowA_i, rowQ_i, rowA_i, 1, 1, 1, 1, 8, 8, 8); // rowA = q * y'
+         pipe_barrier(PIPE_V);
+ 
+-        vsub(dst, dst, tmp, 1, 1, 1, 1, 8, 8, 8); // r = rint(src0) - q*y'
++        vsub(dst, dst, rowA_i, 1, 1, 1, 1, 8, 8, 8); // r = rint(a) - q*y'
+         pipe_barrier(PIPE_V);
+ 
+         vconv_s322f32(dst_f, dst, 1, 1, 1, 8, 8);
+-        vconv_s322f32(src1_f, src1, 1, 1, 1, 8, 8);
+         pipe_barrier(PIPE_V);
+-        vmul(tmp_f, dst_f, src1_f, 1, 1, 1, 1, 8, 8, 8);
++        vmul(rowQ_f, dst_f, rowY_f, 1, 1, 1, 1, 8, 8, 8); // sign probe: r * float(y)
+         pipe_barrier(PIPE_V);
+ 
+-        // Same norm-mode compare with explicit repeatTimes as the f32 path.
+-        __ubuf__ uint8_t* cmpMask = reinterpret_cast<__ubuf__ uint8_t*>(tmp + dstRowStride);
++        __ubuf__ uint8_t* cmpMask = reinterpret_cast<__ubuf__ uint8_t*>(rowQ_f + dstRowStride);
+         set_mask_norm();
+         set_vector_mask(-1, -1);
+-        vcmpvs_lt(cmpMask, tmp_f, 0.0f, repeatTimes, 1, 1, 8, 8);
++        vcmpvs_lt(cmpMask, rowQ_f, 0.0f, repeatTimes, 1, 1, 8, 8);
+         pipe_barrier(PIPE_V);
+         set_mask_count();
+         set_vector_mask(0, validCols);
+ 
+-        vadd(tmp_f, dst_f, src1_f, 1, 1, 1, 1, 8, 8, 8);
++        vadd(rowQ_f, dst_f, rowY_f, 1, 1, 1, 1, 8, 8, 8); // candidate r + y
+         pipe_barrier(PIPE_V);
+ 
+-        // VSEL_TENSOR_TENSOR_MODE (2): same true 64-bit address store as the f32 path.
+         unsigned maskByte = CeilDivision(dstRowStride, BIT_TO_BYTE); // shape
+         unsigned maskFloat = CeilDivision(maskByte, BLOCK_BYTE_SIZE) * BIT_TO_BYTE;
+-        __ubuf__ uint32_t* addrBufs = reinterpret_cast<__ubuf__ uint32_t*>(tmp + dstRowStride + maskFloat);
++        __ubuf__ uint32_t* addrBufs = reinterpret_cast<__ubuf__ uint32_t*>(rowQ_f + dstRowStride + maskFloat);
+         set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+         wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+         *(reinterpret_cast<__ubuf__ uint64_t*>(addrBufs)) = static_cast<uint64_t>(reinterpret_cast<int64_t>(cmpMask));
+@@ -609,7 +815,7 @@ struct RemOp {
+         set_cmpmask(addrBufs);
+         pipe_barrier(PIPE_V);
+         set_vector_mask(0, validCols);
+-        vsel(dst_f, tmp_f, dst_f, 1, 1, 1, 1, 8, 8, 8, 2);
++        vsel(dst_f, rowQ_f, dst_f, 1, 1, 1, 1, 8, 8, 8, 2);
+         pipe_barrier(PIPE_V);
+ 
+         vconv_f322s32z(dst, dst_f, 1, 1, 1, 8, 8);
+@@ -705,7 +911,11 @@ PTO_INTERNAL void TRemCheck(
+     // packed bitmask (32-byte aligned), then an 8-element (32-byte) address buffer.
+     unsigned maskBytes = CeilDivision(TileDataDst::RowStride, BIT_TO_BYTE);
+     unsigned maskFloats = CeilDivision(maskBytes, BLOCK_BYTE_SIZE) * BIT_TO_BYTE;
+-    unsigned tmpRequiredCols = TileDataDst::RowStride + maskFloats + BIT_TO_BYTE;
++    // the int path keeps the float-domain dividend, divisor and quotient
++    // chain in tmp (both src tiles are read-only), so it needs two rows more
++    // than the float path
++    unsigned tmpRequiredCols =
++        (std::is_same_v<T, int32_t> ? 3 * TileDataDst::RowStride : TileDataDst::RowStride) + maskFloats + BIT_TO_BYTE;
+     PTO_ASSERT(
+         tmp.GetValidRow() >= 1 && tmp.GetValidCol() >= tmpRequiredCols,
+         "Fix: TREM tmp tile must have at least 1 row and enough columns for candidate, mask and address buffer.");
+diff --git a/include/pto/npu/a2a3/TRemS.hpp b/include/pto/npu/a2a3/TRemS.hpp
+index 19fb77171..3406277ea 100644
+--- a/include/pto/npu/a2a3/TRemS.hpp
++++ b/include/pto/npu/a2a3/TRemS.hpp
+@@ -23,8 +23,11 @@ namespace pto {
+ PTO_INTERNAL unsigned HpScratchRequiredCols(unsigned capVecs)
+ {
+     // the extra 64 floats of per-vector state keep the fallback's footprint
+-    // negligible instead of scaling with the staged capacity
+-    return 128 * capVecs + HpScratchMaskFloats(capVecs) + 8 + (capVecs == 1 ? 64 : 0);
++    // negligible instead of scaling with the staged capacity; the final term
++    // is the compensation window of the final-iteration HpFusedSub (eight
++    // vectors per batched chunk, clamped to the row's vector count)
++    unsigned chunk = capVecs < TREM_HP_FUSED_CHUNK_A2A3 ? capVecs : TREM_HP_FUSED_CHUNK_A2A3;
++    return 128 * capVecs + HpScratchMaskFloats(capVecs) + 8 + (capVecs == 1 ? 64 : 0) + 8 * 64 * chunk;
+ }
+ 
+ PTO_INTERNAL void HpScratchInit(HpScratchA2A3& s, __ubuf__ float* tmp, unsigned capVecs)
+@@ -36,6 +39,7 @@ PTO_INTERNAL void HpScratchInit(HpScratchA2A3& s, __ubuf__ float* tmp, unsigned
+     s.addrBuf = reinterpret_cast<__ubuf__ uint32_t*>(tmp + 2 * v + HpScratchMaskFloats(capVecs));
+     s.state = reinterpret_cast<__ubuf__ float*>(s.addrBuf + BIT_TO_BYTE);
+     s.div = nullptr; // TREMS: the divisor is dup'd per iteration from scalars
++    s.comp = s.state + (capVecs == 1 ? 64 : 0);
+ }
+ 
+ // One SolveScale iteration over `rep` batched vectors with a scalar divisor.
+@@ -52,16 +56,22 @@ PTO_INTERNAL void HpSolveScaleS(__ubuf__ float* state, float scalarAbs, bool div
+     unsigned lanes = rep * REPEAT_BYTE / sizeof(float);
+ 
+     if constexpr (iterationNum == 1) {
++        float one = 1.0f;
+         if (divIsSub) {
+             // subnormal-divisor regime: lift divisor and state by 2^24 (the
+             // post pass rescales by 2^-24)
+             float lift = FMOD_HP_SCALE1[0];
+             vmuls(state, state, lift, rep, 1, 1, 8, 8);
+             pipe_barrier(PIPE_V);
+-            vector_dup(s.bTmp, scalarAbs * lift, rep, 1, 1, 8, 8);
++            vector_dup(s.bTmp, one, rep, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            vmuls(s.bTmp, s.bTmp, scalarAbs * lift, rep, 1, 1, 8, 8);
+             pipe_barrier(PIPE_V);
+         } else {
+-            vector_dup(s.bTmp, scalarAbs, rep, 1, 1, 8, 8);
++            // dup(1) + vmuls: vector_dup of an +-inf scalar poisons to NaN
++            vector_dup(s.bTmp, one, rep, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            vmuls(s.bTmp, s.bTmp, scalarAbs, rep, 1, 1, 8, 8);
+             pipe_barrier(PIPE_V);
+         }
+     } else {
+@@ -69,7 +79,10 @@ PTO_INTERNAL void HpSolveScaleS(__ubuf__ float* state, float scalarAbs, bool div
+         if constexpr (iterationNum > 5) {
+             bScale = bScale * FMOD_HP_SCALE2[iterationNum - 1];
+         }
+-        vector_dup(s.bTmp, bScale, rep, 1, 1, 8, 8);
++        float one = 1.0f;
++        vector_dup(s.bTmp, one, rep, 1, 1, 8, 8);
++        pipe_barrier(PIPE_V);
++        vmuls(s.bTmp, s.bTmp, bScale, rep, 1, 1, 8, 8);
+         pipe_barrier(PIPE_V);
+     }
+ 
+@@ -82,12 +95,20 @@ PTO_INTERNAL void HpSolveScaleS(__ubuf__ float* state, float scalarAbs, bool div
+         pipe_barrier(PIPE_V);
+     }
+ 
+-    // state -= k * bTmp. A5 spells this vneg(k) + vmula(state += -k*bTmp);
+-    // the manual decomposition keeps k positive and subtracts directly.
+-    vmul(s.k, s.k, s.bTmp, rep, 1, 1, 1, 8, 8, 8);
+-    pipe_barrier(PIPE_V);
+-    vsub(state, state, s.k, rep, 1, 1, 1, 8, 8, 8);
+-    pipe_barrier(PIPE_V);
++    if constexpr (iterationNum == 1) {
++        // final iteration: compensated single-rounding subtract. A5 computes
++        // state -= k * bTmp as one fused vmula; a2a3 has no fused op, so the
++        // plain vmul+vsub pair loses the product's low bits whenever k*bTmp
++        // needs more than 24 significand bits (see HpFusedSub in TRem.hpp).
++        HpFusedSub(state, s.k, s.bTmp, s, rep);
++    } else {
++        // state -= k * bTmp. A5 spells this vneg(k) + vmula(state += -k*bTmp);
++        // the manual decomposition keeps k positive and subtracts directly.
++        vmul(s.k, s.k, s.bTmp, rep, 1, 1, 1, 8, 8, 8);
++        pipe_barrier(PIPE_V);
++        vsub(state, state, s.k, rep, 1, 1, 1, 8, 8, 8);
++        pipe_barrier(PIPE_V);
++    }
+ 
+     if constexpr (iterationNum == 1) {
+         // r = r + (r < 0) * bTmp, without dedicated one/zero/sign buffers:
+@@ -170,16 +191,58 @@ PTO_INTERNAL void HpPostS(
+ 
+     // remainder sign correction: if state * scalar < 0, state += scalar.
+     // t holds the probe only until vcmp consumes it, then becomes the
+-    // candidate - no second temp buffer needed.
+-    vmuls(s.k, state, scalar, rep, 1, 1, 8, 8);
+-    pipe_barrier(PIPE_V);
++    // candidate - no second temp buffer needed. Skipped for an inf scalar:
++    // x % +-inf = x (the exception chain above already fixed those lanes),
++    // and the probe r*(+-inf) overflows to +-inf and would corrupt the pick.
++    if (!HpScalarIsInf(scalar)) {
++        vmuls(s.k, state, scalar, rep, 1, 1, 8, 8);
++        pipe_barrier(PIPE_V);
++        set_mask_norm();
++        set_vector_mask(-1, -1);
++        vcmpvs_lt(s.cmpMask, s.k, 0.0f, rep, 1, 1, 8, 8);
++        pipe_barrier(PIPE_V);
++        vadds(s.k, state, scalar, rep, 1, 1, 8, 8);
++        pipe_barrier(PIPE_V);
++        HpSelect(state, s.k, state, s, rep, lanes);
++    }
+     set_mask_norm();
+     set_vector_mask(-1, -1);
+-    vcmpvs_lt(s.cmpMask, s.k, 0.0f, rep, 1, 1, 8, 8);
+-    pipe_barrier(PIPE_V);
+-    vadds(s.k, state, scalar, rep, 1, 1, 8, 8);
+-    pipe_barrier(PIPE_V);
+-    HpSelect(state, s.k, state, s, rep, lanes);
++}
++
++// x % +-inf short-circuit: dst = |src| inf ? NaN : src (fmod semantics).
++// The per-iteration divisor dups and the sign-correction probe both
++// misbehave when the scalar itself is +-inf, so an inf scalar never enters
++// the iteration chain.
++template <unsigned dstRowStride, unsigned srcRowStride>
++PTO_INTERNAL void TRemSInfScalar(
++    __ubuf__ float* dst, __ubuf__ float* src, __ubuf__ float* tmp, unsigned validRows, unsigned validCols)
++{
++    constexpr unsigned elementsPerRepeat = REPEAT_BYTE / sizeof(float);
++    unsigned fullPerRow = validCols / elementsPerRepeat;
++    unsigned tailCount = validCols - fullPerRow * elementsPerRepeat;
++    HpScratchA2A3 s;
++    HpScratchInit(s, tmp, 1);
++    for (unsigned row = 0; row < validRows; ++row) {
++        __ubuf__ float* dstRow = dst + row * dstRowStride;
++        __ubuf__ float* srcRow = src + row * srcRowStride;
++        for (unsigned j = 0; j <= fullPerRow; ++j) {
++            unsigned count = (j < fullPerRow) ? elementsPerRepeat : tailCount;
++            if (count == 0) {
++                break;
++            }
++            __ubuf__ float* d = dstRow + j * elementsPerRepeat;
++            __ubuf__ float* x = srcRow + j * elementsPerRepeat;
++            set_mask_norm();
++            set_vector_mask(-1, -1);
++            vabs(s.k, x, 1, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            vcmpvs_eq(s.cmpMask, s.k, HpInf(), 1, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            vector_dup(s.k, HpNan(), 1, 1, 1, 8, 8);
++            pipe_barrier(PIPE_V);
++            HpSelect(d, s.k, x, s, 1, count);
++        }
++    }
+     set_mask_norm();
+     set_vector_mask(-1, -1);
+ }
+@@ -259,10 +322,28 @@ template <bool isFmod, int32_t iterationNum, unsigned dstRowStride, unsigned src
+ PTO_INTERNAL void TRemSStageSeqS(
+     __ubuf__ float* dst, float scalarAbs, bool divIsSub, HpScratchA2A3& s, unsigned validRows, unsigned fullPerRow)
+ {
+-    for (unsigned row = 0; row < validRows; ++row) {
+-        HpSolveScaleS<isFmod, iterationNum>(dst + row * dstRowStride, scalarAbs, divIsSub, s, fullPerRow);
+-    }
+-    if constexpr (iterationNum > 1) {
++    constexpr unsigned elemsPerRepeat = REPEAT_BYTE / sizeof(float);
++    if constexpr (iterationNum == 1) {
++        // final iteration: the compensated subtract runs in chunks of
++        // TREM_HP_FUSED_CHUNK_A2A3 vectors (its scratch window scales with
++        // the chunk; see HpFusedSub)
++        for (unsigned row = 0; row < validRows; ++row) {
++            for (unsigned j = 0; j < fullPerRow; j += TREM_HP_FUSED_CHUNK_A2A3) {
++                unsigned rep = fullPerRow - j;
++                if (rep > TREM_HP_FUSED_CHUNK_A2A3) {
++                    rep = TREM_HP_FUSED_CHUNK_A2A3;
++                }
++                // the previous chunk's selects leave a count mask behind;
++                // dup/vmuls would be clipped to it, so restore the full mask
++                set_mask_norm();
++                set_vector_mask(-1, -1);
++                HpSolveScaleS<isFmod, 1>(dst + row * dstRowStride + j * elemsPerRepeat, scalarAbs, divIsSub, s, rep);
++            }
++        }
++    } else {
++        for (unsigned row = 0; row < validRows; ++row) {
++            HpSolveScaleS<isFmod, iterationNum>(dst + row * dstRowStride, scalarAbs, divIsSub, s, fullPerRow);
++        }
+         TRemSStageSeqS<isFmod, iterationNum - 1, dstRowStride, srcRowStride>(
+             dst, scalarAbs, divIsSub, s, validRows, fullPerRow);
+     }
+@@ -401,49 +482,49 @@ struct RemSOp {
+         pipe_barrier(PIPE_V);
+     }
+ 
++    // INT32 remainder in a strictly read-only-src form: the float-domain
++    // dividend and the divisor/quotient chain live in tmp (rows [0,R) and
++    // [R,2R)), src is never written, and dst receives rint(a) as src's last
++    // read completes. tmp contract: 2*dstRowStride + maskF + 8 floats.
+     PTO_INTERNAL static void RemSInt32Instr(
+         __ubuf__ int32_t* dst, __ubuf__ int32_t* src, int32_t x, __ubuf__ int32_t* tmp, unsigned dstRowStride,
+         unsigned repeatTimes, unsigned validCols)
+     {
+         __ubuf__ float* dst_f = reinterpret_cast<__ubuf__ float*>(dst);
+-        __ubuf__ float* src_f = reinterpret_cast<__ubuf__ float*>(src);
+-        __ubuf__ float* tmp_f = reinterpret_cast<__ubuf__ float*>(tmp);
++        __ubuf__ float* rowA_f = reinterpret_cast<__ubuf__ float*>(tmp);
++        __ubuf__ float* rowQ_f = rowA_f + dstRowStride;
++        __ubuf__ int32_t* rowQ_i = reinterpret_cast<__ubuf__ int32_t*>(rowQ_f);
+ 
+-        vconv_s322f32(src_f, src, 1, 1, 1, 8, 8);
+-        vector_dup(tmp_f, (float)x, 1, 1, 1, 8, 8);
++        vconv_s322f32(rowA_f, src, 1, 1, 1, 8, 8); // rowA = float(a); src untouched
++        vector_dup(rowQ_f, (float)x, 1, 1, 1, 8, 8);
+         pipe_barrier(PIPE_V);
+ 
+-        vdiv(tmp_f, src_f, tmp_f, 1, 1, 1, 1, 8, 8, 8);
++        vconv_f322s32r(dst, rowA_f, 1, 1, 1, 8, 8); // dst = rint(a) (src's last read above)
+         pipe_barrier(PIPE_V);
+ 
+-        vconv_f322s32f(tmp, tmp_f, 1, 1, 1, 8, 8); // floor quotient
+-        // round-reconvert dividend into dst (tmp keeps q): dst may alias src,
+-        // and this is src's last read, so dst is safe to write from here on
+-        vconv_f322s32r(dst, src_f, 1, 1, 1, 8, 8);
++        vdiv(rowQ_f, rowA_f, rowQ_f, 1, 1, 1, 1, 8, 8, 8); // rowQ = q_f (divisor consumed)
+         pipe_barrier(PIPE_V);
+-
+-        vmuls(tmp, tmp, x, 1, 1, 1, 8, 8); // floor(src/x) * x (int)
++        vconv_f322s32f(rowQ_i, rowQ_f, 1, 1, 1, 8, 8); // floor quotient q (int)
+         pipe_barrier(PIPE_V);
+-
+-        vsub(dst, dst, tmp, 1, 1, 1, 1, 8, 8, 8); // r = rint(src) - q*x
++        vmuls(rowQ_i, rowQ_i, x, 1, 1, 1, 8, 8); // q * x (int)
++        pipe_barrier(PIPE_V);
++        vsub(dst, dst, rowQ_i, 1, 1, 1, 1, 8, 8, 8); // r = rint(a) - q*x
+         pipe_barrier(PIPE_V);
+ 
+         vconv_s322f32(dst_f, dst, 1, 1, 1, 8, 8);
+-        vconv_s322f32(tmp_f, tmp, 1, 1, 1, 8, 8);
+         pipe_barrier(PIPE_V);
+-
+-        vmuls(tmp_f, dst_f, (float)x, 1, 1, 1, 8, 8); // sign probe: r * s
++        vmuls(rowQ_f, dst_f, (float)x, 1, 1, 1, 8, 8); // sign probe: r * x
+         pipe_barrier(PIPE_V);
+ 
+         unsigned maskBytes = CeilDivision(dstRowStride, BIT_TO_BYTE);
+         unsigned maskFloats = CeilDivision(maskBytes, BLOCK_BYTE_SIZE) * BIT_TO_BYTE;
+-        __ubuf__ uint8_t* cmpMask = reinterpret_cast<__ubuf__ uint8_t*>(tmp_f + dstRowStride);
++        __ubuf__ uint8_t* cmpMask = reinterpret_cast<__ubuf__ uint8_t*>(rowQ_f + dstRowStride);
+         set_mask_norm();
+         set_vector_mask(-1, -1);
+-        vcmpvs_lt(cmpMask, tmp_f, 0.0f, repeatTimes, 1, 1, 8, 8);
++        vcmpvs_lt(cmpMask, rowQ_f, 0.0f, repeatTimes, 1, 1, 8, 8);
+         pipe_barrier(PIPE_V);
+ 
+-        __ubuf__ uint32_t* addrBuf = reinterpret_cast<__ubuf__ uint32_t*>(tmp_f + dstRowStride + maskFloats);
++        __ubuf__ uint32_t* addrBuf = reinterpret_cast<__ubuf__ uint32_t*>(rowQ_f + dstRowStride + maskFloats);
+         set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+         wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+         *(reinterpret_cast<__ubuf__ uint64_t*>(addrBuf)) = static_cast<uint64_t>(reinterpret_cast<int64_t>(cmpMask));
+@@ -454,10 +535,10 @@ struct RemSOp {
+ 
+         set_mask_count();
+         set_vector_mask(0, validCols);
+-        vadds(tmp_f, dst_f, (float)x, 1, 1, 1, 8, 8); // candidate r + s
++        vadds(rowQ_f, dst_f, (float)x, 1, 1, 1, 8, 8); // candidate r + x
+         pipe_barrier(PIPE_V);
+ 
+-        vsel(dst_f, tmp_f, dst_f, 1, 1, 1, 1, 8, 8, 8, 2);
++        vsel(dst_f, rowQ_f, dst_f, 1, 1, 1, 1, 8, 8, 8, 2);
+         pipe_barrier(PIPE_V);
+ 
+         vconv_f322s32z(dst, dst_f, 1, 1, 1, 8, 8);
+@@ -482,7 +563,17 @@ __tf__ PTO_INTERNAL void TRemS(
+         PrecisionType == RemSAlgorithm::HIGH_PRECISION && (std::is_same_v<T, float> || std::is_same_v<T, float32_t>)) {
+         // High precision remainder (issue #2): staged loop inversion when the
+         // tile has enough full vectors and dst does not alias src, per-vector
+-        // iterations otherwise (see the staged drivers above).
++        // iterations otherwise (see the staged drivers above). An inf scalar
++        // short-circuits: x % +-inf = x (NaN where |x| = inf) - the iteration
++        // chain's divisor dups and sign-correction probe misbehave with it.
++        if (HpScalarIsInf((float)x)) {
++            TRemSInfScalar<dstRowStride, srcRowStride>(
++                reinterpret_cast<__ubuf__ float*>(dstPtr), reinterpret_cast<__ubuf__ float*>(srcPtr),
++                reinterpret_cast<__ubuf__ float*>(tmpPtr), validRows, validCols);
++            set_mask_norm();
++            set_vector_mask(-1, -1);
++            return;
++        }
+         unsigned capVecs = validCols / elementsPerRepeat;
+         if (capVecs == 0) {
+             capVecs = 1; // per-vector path scratch
+@@ -553,7 +644,10 @@ PTO_INTERNAL void TREMS_IMPL(TileDataDst& dst, TileDataSrc& src, typename TileDa
+     // BIT_TO_BYTE bits per byte, packed mask rounded up to BLOCK_BYTE_SIZE bytes
+     constexpr unsigned maskBytes = (dstRowStride + BIT_TO_BYTE - 1) / BIT_TO_BYTE;
+     constexpr unsigned maskFloats = ((maskBytes + BLOCK_BYTE_SIZE - 1) / BLOCK_BYTE_SIZE) * (BLOCK_BYTE_SIZE / 4);
+-    constexpr unsigned tmpRequiredCols = dstRowStride + maskFloats + BIT_TO_BYTE;
++    // the int path keeps the float-domain dividend and the quotient chain in
++    // tmp (src is read-only), so it needs one row more than the float path
++    constexpr unsigned tmpRequiredCols =
++        (std::is_same_v<T, int32_t> ? 2 * dstRowStride : dstRowStride) + maskFloats + BIT_TO_BYTE;
+     // The high precision path needs the larger scratch contract from
+     // HpScratchRequiredCols above, sized for the staged capacity (full vectors per
+     // row, at least 1 for the per-vector fallback).
