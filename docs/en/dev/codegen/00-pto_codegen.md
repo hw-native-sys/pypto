@@ -17,7 +17,6 @@ Use the PTO-ISA revision selected by `runtime/pto_isa.pin` (`90a37965`),
 which provides that API. The runtime submodule is pinned to `c1c234667` so
 runtime builds and generated kernels use the same compatible headers.
 
-
 On A2/A3, TREM and TREMS require a disjoint, same-dtype scratch tile with
 at least one physical and valid row. For source row stride `S` (rounded to
 8 elements), the default scratch column count is `S + 8*ceil(S/256) + 8`.

@@ -15,7 +15,6 @@ PTOAS v0.74 还会为 A2/A3 行收集操作生成 `pto::GatherSync::Async`。
 请使用 `runtime/pto_isa.pin` 指定的 PTO-ISA 版本（`90a37965`），该版本提供此 API。
 runtime 子模块固定为 `c1c234667`，确保运行时构建与生成内核使用相同的兼容头文件。
 
-
 A2/A3 的 TREM 和 TREMS 要求与输入不重叠、类型相同的 scratch tile，物理行数和有效
 行数都至少为 1。设源行跨度 `S` 按 8 个元素对齐，默认所需列数为
 `S + 8*ceil(S/256) + 8`。A2/A3 现在支持 FP32 TREM 高精度模式，其所需列数是该值与
