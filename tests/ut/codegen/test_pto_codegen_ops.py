@@ -1551,8 +1551,8 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 784], pl.FP32] = pl.tile.create(
-                        [2, 784], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 32], pl.FP32] = pl.tile.create(
+                        [2, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     return pl.store(result, [0, 0], out)
@@ -1577,9 +1577,11 @@ class TestRemainderFamilyCodegen:
             return FmodProgram
 
         make_program = make_rem_program if op_name == "rem" else make_fmod_program
+        # A2/A3 drops the TREM selector (see the warning test); A5 honours it.
+        backend_type = BackendType.Ascend950 if op_name == "rem" else BackendType.Ascend910
 
-        default_line = self._op_line(self._generate_mlir(make_program(False)), pto_name)
-        high_precision_line = self._op_line(self._generate_mlir(make_program(True)), pto_name)
+        default_line = self._op_line(self._generate_mlir(make_program(False), backend_type), pto_name)
+        high_precision_line = self._op_line(self._generate_mlir(make_program(True), backend_type), pto_name)
         assert "precisionType" not in default_line
         assert f"{{precisionType = #pto<{attr_kind} high_precision>}}" in high_precision_line
         assert high_precision_line.index("outs(") < high_precision_line.index("precisionType")

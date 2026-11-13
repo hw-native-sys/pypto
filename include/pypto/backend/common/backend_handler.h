@@ -229,9 +229,9 @@ class BackendHandler {
    * PTO-ISA backends select a different algorithm from it. Ascend910's
    * `TDIV_IMPL` / `TLOG_IMPL` / `TFMOD_IMPL` accept the template parameter and
    * never read it, so the request is silently dropped and the result is
-   * bit-identical to the default algorithm. `TREM_IMPL` is the exception: the
-   * pinned PTO-ISA implements a real A2/A3 high-precision remainder algorithm,
-   * so `WarnIfHighPrecisionIgnored` exempts `pto.trem` from the warning.
+   * bit-identical to the default algorithm. The pinned `TREM_IMPL` does read
+   * it, but PyPTO does not support A2/A3 high-precision TREM: the selector is
+   * dropped before PTOAS and the same warning is emitted.
    *
    * `tile.rsqrt` is not covered by this hook. Its explicit `high_precision`
    * attribute requires scratch and emits `precisionType` for A5. A2/A3 honour

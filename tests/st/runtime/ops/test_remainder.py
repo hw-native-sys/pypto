@@ -18,10 +18,10 @@ current pinned PTO-ISA contract:
 * TREM uses a same-dtype scratch tile with two valid rows, TREMS one. The
   scratch columns follow the pinned A2/A3 single-row data/mask/address
   layout: ``3R + mask + 8`` for INT32 TREM, ``2R + mask + 8`` for INT32
-  TREMS, ``R + mask + 8`` for FP32, and the larger high-precision TREM
-  contract (see ``_remainder_scratch_cols``).
+  TREMS, and ``R + mask + 8`` for FP32 (see ``_remainder_scratch_cols``).
 * TREM/TFMOD cover default and ``high_precision`` PTOAS attributes; A2/A3
-  honors the TREM high-precision path and still ignores it for TFMOD.
+  runs the default algorithm and warns for both (PyPTO drops TREM's selector;
+  the ISA ignores TFMOD's).
 * For A2/A3 INT32 TREM/TREMS, every source element and scalar must stay in
   the inclusive PTO-ISA domain ``[-2**24, 2**24]``.
 * INT32 TREM/TREMS store their source tiles again after the instruction to
@@ -56,21 +56,12 @@ def _remainder_mask_floats(row_stride: int) -> int:
     return ((mask_bytes + 31) // 32) * 8
 
 
-def _remainder_scratch_cols(op_name: str, dtype: DataType, valid_cols: int, high_precision: bool) -> int:
+def _remainder_scratch_cols(op_name: str, dtype: DataType) -> int:
     """Scratch columns for the pinned A2/A3 TREM/TREMS single-row contract."""
     is_trem = op_name == "rem"
     is_int32 = dtype == DataType.INT32
     data_areas = (3 if is_trem else 2) if is_int32 else 1
-    cols = data_areas * N + _remainder_mask_floats(N) + 8
-    if high_precision and not is_int32:
-        cap_vecs = max(valid_cols // 64, 1)
-        hp_mask = ((cap_vecs * 8 + 31) // 32) * 8
-        chunk = min(cap_vecs, 8)
-        hp = (
-            (192 if is_trem else 128) * cap_vecs + hp_mask + 8 + (64 if cap_vecs == 1 else 0) + 8 * 64 * chunk
-        )
-        cols = max(cols, hp)
-    return cols
+    return data_areas * N + _remainder_mask_floats(N) + 8
 
 
 _PL_DT = {
@@ -139,7 +130,7 @@ def _make_program(
     valid = list(valid_shape)
 
     if op_name == "rem":
-        rem_tmp_cols = _remainder_scratch_cols("rem", dtype, valid[1], high_precision)
+        rem_tmp_cols = _remainder_scratch_cols("rem", dtype)
         if dtype == DataType.INT32:
 
             @pl.program
@@ -217,7 +208,7 @@ def _make_program(
 
     if op_name == "rems":
         assert scalar is not None
-        rems_tmp_cols = _remainder_scratch_cols("rems", dtype, valid[1], False)
+        rems_tmp_cols = _remainder_scratch_cols("rems", dtype)
 
         if dtype == DataType.INT32:
 
