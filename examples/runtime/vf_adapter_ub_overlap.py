@@ -124,7 +124,7 @@ def _prepare(directory: Path) -> CompiledProgram:
 def _check_tile_sync(directory: Path, wrapper: str) -> None:
     """Check the production caller/adapter contract without rewriting sources."""
     manifest = json.loads((directory / "vpto/body/manifest.json").read_text())
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert manifest["synchronization"] == "ptoas-insert-sync"
     assert manifest["effect_scope"] == "whole-tile"
     helper = manifest["helpers"][0]
