@@ -345,10 +345,12 @@ TypePtr Fused(const Args& a, const Kwargs& k, const std::string& name) {
 TypePtr Paired(const Args& a, const Kwargs& k, const std::string& name) {
   const bool carry = name == "addc" || name == "subc" || name == "addcs" || name == "subcs";
   const bool carry_in = name == "addcs" || name == "subcs";
-  CHECK(a.size() == (carry_in ? 4 : 3)) << "reg." << name << " has invalid operand count";
+  const bool interleave = name == "intlv" || name == "dintlv";
+  CHECK(a.size() == (carry_in ? 4 : 3) || (interleave && a.size() == 2))
+      << "reg." << name << " has invalid operand count";
   auto x = Register(a[0], RegKind::VecReg);
   Match(x, Register(a[1], RegKind::VecReg));
-  Mask(a.back(), x);
+  if (a.size() >= 3) Mask(a.back(), x);
   if (carry_in) Mask(a[2], x);
   if (carry || name == "mull") {
     CHECK(x->dtype_ == DataType::INT32 || x->dtype_ == DataType::UINT32)
@@ -370,7 +372,11 @@ TileTypePtr IndexedMemory(const Args& a, bool read) {
   // count. Validate the storage geometry only; bounds and initialization of
   // active indexed addresses are runtime obligations, as with dynamic offsets.
   auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, a[0]->span_);
-  auto tile = Memory({a[0], zero}, 1, false);
+  const size_t base_index = read ? 3 : 4;
+  // Shift the scalar pointer, not the unsigned lane indices. This preserves
+  // narrow index ranges and lets dynamic row origins stay scalar arithmetic.
+  auto base = a.size() > base_index ? a[base_index] : zero;
+  auto tile = Memory({a[0], base}, 1, false);
   auto offsets = Register(a[1], RegKind::VecReg);
   CHECK(offsets->dtype_ == DataType::UINT16 || offsets->dtype_ == DataType::UINT32)
       << "Indexed register memory requires UINT16/UINT32 element offsets";
@@ -379,7 +385,7 @@ TileTypePtr IndexedMemory(const Args& a, bool read) {
   const auto offset_dtype = tile->dtype_.GetBit() == 32 ? DataType::UINT32 : DataType::UINT16;
   CHECK(offsets->dtype_ == offset_dtype)
       << "Indexed memory requires UINT16 offsets for 8/16-bit data and UINT32 offsets for 32-bit data";
-  Mask(a.back(), offsets);
+  Mask(a[read ? 2 : 3], offsets);
   if (!read) {
     auto value = Register(a[2], RegKind::VecReg);
     CHECK(value->shape_ == offsets->shape_) << "Indexed value/offset lane mismatch";
@@ -808,7 +814,9 @@ static bool RegisterPairedOps() {
         .add_argument("lhs", "VecReg")
         .add_argument("rhs", "VecReg");
     if (name == "addcs" || name == "subcs") e.add_argument("carry_in", "Carry/not-borrow MaskReg");
-    e.add_argument("mask", "MaskReg").set_output_arity(2).no_arg_writes();
+    e.add_argument("mask", name == "intlv" || name == "dintlv" ? "Optional MaskReg" : "MaskReg")
+        .set_output_arity(2)
+        .no_arg_writes();
     if (name == "mull" || name == "intlv" || name == "dintlv") e.set_attr<std::string>("pmode");
     e.f_deduce_type([name](const Args& a, const Kwargs& k) { return Paired(a, k, name); });
   }
@@ -823,11 +831,12 @@ REGISTER_OP("reg.gather")
     .add_argument("tile", "Source Vec Tile")
     .add_argument("offsets", "Unsigned index VecReg")
     .add_argument("mask", "MaskReg")
+    .add_argument("base_offset", "Optional scalar INDEX element offset")
     .set_attr<std::string>("pmode")
     .set_input_memory(0, MemorySpace::Vec)
     .set_arg_effect(0, ArgEffect::Read)
     .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
-      CHECK(a.size() == 3) << "reg.gather expects tile, offsets, mask";
+      CHECK(a.size() == 3 || a.size() == 4) << "reg.gather expects tile, offsets, mask, optional base_offset";
       auto tile = IndexedMemory(a, true);
       auto indices = Register(a[1], RegKind::VecReg);
       auto dtype = tile->dtype_;
@@ -847,12 +856,14 @@ REGISTER_OP("reg.scatter")
     .add_argument("offsets", "Unsigned index VecReg")
     .add_argument("value", "VecReg")
     .add_argument("mask", "MaskReg")
+    .add_argument("base_offset", "Optional scalar INDEX element offset")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .set_arg_effect(0, ArgEffect::Write)
     .set_output_reuses_input(0)
     .f_deduce_type([](const Args& a, const Kwargs&) -> TypePtr {
-      CHECK(a.size() == 4) << "reg.scatter expects tile, offsets, value, mask";
+      CHECK(a.size() == 4 || a.size() == 5)
+          << "reg.scatter expects tile, offsets, value, mask, optional base_offset";
       return IndexedMemory(a, false);
     });
 
@@ -876,12 +887,13 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
   // An absent root or endpoint means unknown, never an empty/zero access.
   // Optional static initialization analysis converts these coordinates to
   // bytes; codegen emits the pointer-relative offset independently.
-  RegMemoryEffect result{call->args_[0],
-                         tile->memref_ ? (*tile->memref_)->base_ : nullptr,
-                         load ? ArgEffect::Read : ArgEffect::Write,
-                         std::nullopt,
-                         std::nullopt,
-                         indexed ? call->args_.back() : (call->args_.size() == 4 ? call->args_[3] : nullptr)};
+  RegMemoryEffect result{
+      call->args_[0],
+      tile->memref_ ? (*tile->memref_)->base_ : nullptr,
+      load ? ArgEffect::Read : ArgEffect::Write,
+      std::nullopt,
+      std::nullopt,
+      indexed ? call->args_[load ? 2 : 3] : (call->args_.size() == 4 ? call->args_[3] : nullptr)};
   // An index vector describes an unknown set, never a contiguous lane interval.
   if (indexed) return result;
   auto offset = As<ConstInt>(call->args_[1]);

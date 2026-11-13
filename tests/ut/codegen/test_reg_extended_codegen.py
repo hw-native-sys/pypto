@@ -42,8 +42,17 @@ CASES = [
     ("gather", "INT8", "y = pl.reg.gather(src, indices, m)"),
     ("scatter", "FP32", "out = pl.reg.scatter(dst, indices, x, m)"),
     ("scatter", "INT8", "out = pl.reg.scatter(dst, indices, x, m)"),
+    ("gather", "FP32", "y = pl.reg.gather(src, indices, m, base_offset=64)"),
+    ("gather", "FP16", "y = pl.reg.gather(src, indices, m, base_offset=64)"),
+    ("scatter", "FP32", "out = pl.reg.scatter(dst, indices, x, m, base_offset=64)"),
+    ("scatter", "FP16", "out = pl.reg.scatter(dst, indices, x, m, base_offset=64)"),
     ("intlv", "FP32", "y, second = pl.reg.intlv(x, x, m)"),
     ("dintlv", "FP32", "y, second = pl.reg.dintlv(x, x, m)"),
+    *[
+        (name, dtype, f"y, second = pl.reg.{name}(x, x)")
+        for name in ("intlv", "dintlv")
+        for dtype in ("BF16", "FP32")
+    ],
     *[
         (name, dtype, f"y, second = pl.reg.{name}(x, x, m)")
         for name in ("intlv", "dintlv")
@@ -133,11 +142,13 @@ def test_roundtrip_and_codegen(name, dtype, statement):
         assert "pmode" not in line
         assert "xpred>" in line.split(" -> ", 1)[1]
     if name in ("intlv", "dintlv"):
-        # PTOAS drops the rearrangement mask; both results need explicit zeroing.
-        assert source.count("pto.vmi.vsel") == 2
-        assert "interleave_zero" in source
+        masked = ", m)" in statement
+        # PTOAS drops the rearrangement mask. Only explicitly masked calls
+        # require result zeroing; all-active calls keep the load-fusion pattern.
+        assert source.count("pto.vmi.vsel") == (2 if masked else 0)
+        assert ("interleave_zero" in source) == masked
         if dtype == "BF16":
-            assert source.count("pto.vmi.vinterpret_cast") == 4
+            assert source.count("pto.vmi.vinterpret_cast") == (4 if masked else 0)
     if name == "expdif":
         assert line.endswith("!pto.vmi.vreg<64xf32>")
     if name == "scatter":
@@ -261,7 +272,8 @@ def test_builder_defaults_roundtrip(op_name):
 
 
 @pytest.mark.ptoas_compile
-def test_indexed_view_origin_and_scatter_alias_compile(tmp_path):
+@pytest.mark.parametrize("base_offset", [0, 16])
+def test_indexed_view_origin_and_scatter_alias_compile(tmp_path, base_offset):
     builder = IRBuilder()
     with builder.function("kernel", type=ir.FunctionType.AIV) as function:
         view = ir.TileView([128], [1], ir.ConstInt(32, DataType.INDEX, SPAN))
@@ -278,15 +290,17 @@ def test_indexed_view_origin_and_scatter_alias_compile(tmp_path):
                 {"lanes": 64, "dtype": DataType.UINT32},
             )
             m = builder.emit_reg("m", "reg.full_mask", [], {"lanes": 64})
-            value = builder.emit_reg("value", "reg.gather", [src, indices, m])
-            updated = builder.emit_reg("updated", "reg.scatter", [src, indices, value, m])
-            builder.emit_reg("reread", "reg.gather", [updated, indices, m])
+            base = [ir.ConstInt(base_offset, DataType.INDEX, SPAN)] if base_offset else []
+            value = builder.emit_reg("value", "reg.gather", [src, indices, m, *base])
+            updated = builder.emit_reg("updated", "reg.scatter", [src, indices, value, m, *base])
+            builder.emit_reg("reread", "reg.gather", [updated, indices, m, *base])
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([function.get_result()], "View", SPAN))
         program = passes.allocate_memory_addr()(program)
     source = codegen.PTOCodegen().generate(program, emit_source_loc=False)
     assert source.count("pto.tile_buf_addr") == 1
-    assert source.count("pto.addptr") == 3  # Each access adds its view origin once.
+    # Each access adds its view origin once and, when present, the scalar base.
+    assert source.count("pto.addptr") == (6 if base_offset else 3)
     # The pinned PTOAS handles unknown indexed dependencies, including aliases.
     assert 'pto.mem_bar "VV_ALL"' not in source
     compiler = find_ptoas_binary()
@@ -456,3 +470,162 @@ def kernel(n: pl.Scalar[pl.INDEX]):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("name", ["gather", "scatter"])
+def test_indexed_scalar_base_offset_codegen(name):
+    statement = (
+        "y = pl.reg.gather(src, indices, m, base_offset=64)"
+        if name == "gather"
+        else "out = pl.reg.scatter(dst, indices, x, m, base_offset=64)"
+    )
+    function = frontend(name, "FP32", statement)
+    printed = python_print(function, format=False)
+    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert "reg_indexed_offset_base" in source
+    assert source.count("pto.addptr") == 1
+    assert source.count(f"pto.vmi.v{name}") == 1
+    # Pointer movement must not create a vector add or broadcast of the base.
+    assert "pto.vmi.vadds" not in source
+
+
+def test_dynamic_indexed_scalar_base_codegen():
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(base: pl.Scalar[pl.INDEX]):
+    src = pl.tile.full([256], pl.FP32, 1)
+    dst = pl.tile.full([256], pl.FP32, 0)
+    with pl.reg_scope():
+        indices = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+        mask = pl.reg.full_mask(lanes=64)
+        value = pl.reg.gather(src, indices, mask, base_offset=base)
+        out = pl.reg.scatter(dst, indices, value, mask, base_offset=base)
+    consumer = pl.tile.add(out, out)
+""")
+    printed = python_print(function, format=False)
+    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert source.count("pto.addptr") == 2
+    assert "pto.vmi.vadds" not in source
+    assert source.count("pto.vmi.vgather") == 1
+    assert source.count("pto.vmi.vscatter") == 1
+
+
+@pytest.mark.ptoas_compile
+def test_unmasked_deinterleave_fuses_bf16_load_and_grouped_reduction(tmp_path):
+    # Masked deinterleave needs result-clearing selects. They break the A5
+    # paired-load pattern and can exhaust the layout search for this chain.
+    # Omitting the mask allows PTOAS to pick DINTLV_B16 and EVEN/ODD conversions.
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel():
+    src = pl.tile.full([256], pl.BF16, 1)
+    dst = pl.tile.full([128], pl.FP32, 0)
+    with pl.reg_scope():
+        first = pl.reg.load(src, offset=0, lanes=128)
+        second = pl.reg.load(src, offset=128, lanes=128)
+        even, odd = pl.reg.dintlv(first, second)
+        x = pl.reg.convert(even, dtype=pl.FP32)
+        y = pl.reg.convert(odd, dtype=pl.FP32)
+        mask = pl.reg.full_mask(lanes=128)
+        mx = pl.reg.abs(x, mask)
+        my = pl.reg.abs(y, mask)
+        mag = pl.reg.maximum(mx, my, mask)
+        maximum = pl.reg.reduce_max(mag, mask, group_size=16)
+        spread = pl.reg.group_broadcast(maximum, lanes=128)
+        out = pl.reg.store(dst, value=spread)
+    consumer = pl.tile.add(out, out)
+""")
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    assert "interleave_zero" not in source
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    path = tmp_path / "deinterleave.pto"
+    output = tmp_path / "deinterleave.vpto"
+    path.write_text(source)
+    result = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lowered = output.read_text()
+    assert lowered.count('"DINTLV_B16"') == 1
+    assert lowered.count('part = "EVEN"') == 2
+    assert lowered.count('part = "ODD"') == 2
+    assert lowered.count("pto.vcgmax") == 1
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("kind", ["scale_pairs", "float_payload"])
+def test_compact_scale_packing_and_float_payload_interleave(kind, tmp_path):
+    # vselr does not accept compact exponent vectors in PTOAS 0.72. These
+    # same-source unmasked deinterleaves preserve the low four packed pairs
+    # using only supported logical operations. For payloads, interleave before
+    # FP8 conversion: interleave_store over two logical 128-byte vectors has no
+    # registered layout relation in the pinned PTOAS.
+    bodies = {
+        "scale_pairs": """
+    dst = pl.tile.full([128], pl.UINT16, 0)
+    with pl.reg_scope():
+        exp = pl.reg.index_gen(0, lanes=8, dtype=pl.INT32)
+        even, odd = pl.reg.dintlv(exp, exp)
+        mask = pl.reg.full_mask(lanes=8)
+        odd_shift = pl.reg.shift_lefts(odd, 8, mask)
+        packed = pl.reg.bitwise_or(even, odd_shift, mask)
+        halves = pl.reg.interpret_cast(packed, dtype=pl.UINT16)
+        pairs, unused = pl.reg.dintlv(halves, halves)
+        lane = pl.reg.index_gen(0, lanes=16, dtype=pl.UINT16)
+        full = pl.reg.full_mask(lanes=16)
+        offsets = pl.reg.shift_lefts(lane, 4, full)
+        first_four = pl.reg.active_mask(4, lanes=16)
+        out = pl.reg.scatter(dst, offsets, pairs, first_four)
+    consumer = pl.tile.add(out, out)
+""",
+        "float_payload": """
+    src = pl.tile.full([256], pl.BF16, 1)
+    dst = pl.tile.full([256], pl.INT8, 0)
+    with pl.reg_scope():
+        first = pl.reg.load(src, offset=0, lanes=128)
+        second = pl.reg.load(src, offset=128, lanes=128)
+        even, odd = pl.reg.dintlv(first, second)
+        x = pl.reg.convert(even, dtype=pl.FP32)
+        y = pl.reg.convert(odd, dtype=pl.FP32)
+        lo, hi = pl.reg.intlv(x, y)
+        ql = pl.reg.convert(lo, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
+        qh = pl.reg.convert(hi, dtype=pl.FP8E4M3FN, rounding="R", saturate=False)
+        bl = pl.reg.interpret_cast(ql, dtype=pl.INT8)
+        bh = pl.reg.interpret_cast(qh, dtype=pl.INT8)
+        updated = pl.reg.store(dst, offset=0, value=bl)
+        out = pl.reg.store(updated, offset=128, value=bh)
+    consumer = pl.tile.add(out, out)
+""",
+    }
+    function = pl.parse("@pl.function(type=pl.FunctionType.AIV)\ndef kernel():\n" + bodies[kind])
+    source = codegen.PTOCodegen().generate(lower(function), emit_source_loc=False)
+    compiler = find_ptoas_binary()
+    if compiler is None:
+        pytest.skip("PTOAS is unavailable")
+    path = tmp_path / f"{kind}.pto"
+    output = tmp_path / f"{kind}.vpto"
+    path.write_text(source)
+    result = subprocess.run(
+        [compiler, str(path), "--pto-arch=a5", "--pto-level=level3", "--emit-vpto", "-o", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lowered = output.read_text()
+    assert "pto.vmi." not in lowered
+    if kind == "scale_pairs":
+        assert lowered.count("pto.vdintlv") == 2
+        assert lowered.count("pto.vscatter") == 1
+    else:
+        assert lowered.count('"DINTLV_B16"') == 1
+        assert lowered.count("pto.vcvt") == 4

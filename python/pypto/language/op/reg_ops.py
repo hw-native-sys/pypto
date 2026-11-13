@@ -555,27 +555,37 @@ def mull(
 def intlv(
     lhs: Reg | ir.Expr,
     rhs: Reg | ir.Expr,
-    mask: Reg | ir.Expr,
+    mask: Reg | ir.Expr | None = None,
     *,
     pmode: str = "zero",
 ) -> tuple[Reg, Reg]:
     """Interleave two matching even-length vectors; return (low, high).
 
-    Each result has the input lane count and dtype. Inactive lanes are zero."""
-    return _pair("intlv", [_expr(lhs), _expr(rhs), _expr(mask)], pmode=pmode)
+    Each result has the input lane count and dtype. With a mask, inactive
+    lanes are zero. Omitting the mask rearranges all lanes without clearing
+    either result."""
+    args = [_expr(lhs), _expr(rhs)]
+    if mask is not None:
+        args.append(_expr(mask))
+    return _pair("intlv", args, pmode=pmode)
 
 
 def dintlv(
     lhs: Reg | ir.Expr,
     rhs: Reg | ir.Expr,
-    mask: Reg | ir.Expr,
+    mask: Reg | ir.Expr | None = None,
     *,
     pmode: str = "zero",
 ) -> tuple[Reg, Reg]:
     """Deinterleave two matching even-length vectors; return (even, odd).
 
-    Each result has the input lane count and dtype. Inactive lanes are zero."""
-    return _pair("dintlv", [_expr(lhs), _expr(rhs), _expr(mask)], pmode=pmode)
+    Each result has the input lane count and dtype. With a mask, inactive
+    lanes are zero. Omitting the mask rearranges all lanes without clearing
+    either result."""
+    args = [_expr(lhs), _expr(rhs)]
+    if mask is not None:
+        args.append(_expr(mask))
+    return _pair("dintlv", args, pmode=pmode)
 
 
 def addc(
@@ -632,25 +642,50 @@ def subcs(
     return _pair("subcs", [_expr(lhs), _expr(rhs), _expr(carry_in), _expr(mask)])
 
 
-def gather(tile: Tile | ir.Expr, offsets: Reg | ir.Expr, mask: Reg | ir.Expr, *, pmode: str = "zero") -> Reg:
+def gather(
+    tile: Tile | ir.Expr,
+    offsets: Reg | ir.Expr,
+    mask: Reg | ir.Expr,
+    base_offset: Scalar | ir.Expr | int = 0,
+    *,
+    pmode: str = "zero",
+) -> Reg:
     """Gather active elements from a contiguous Vec Tile; inactive lanes are zero.
 
-    Offsets are UINT16/UINT32 element indices relative to the Tile view origin.
+    Offsets are UINT16/UINT32 element indices relative to the Tile view origin
+    plus the scalar INDEX base_offset (also measured in elements).
     Use UINT16 offsets for 8/16-bit sources and UINT32 for 32-bit sources.
     INT8/UINT8 sources are zero-extended
     to INT16/UINT16 respectively. The caller must ensure active indices are
     in bounds and initialized; the mask suppresses inactive memory accesses.
     """
-    return Reg(_call("gather", [_expr(tile), _expr(offsets), _expr(mask)], pmode=pmode))
+    args = [_expr(tile), _expr(offsets), _expr(mask)]
+    if isinstance(base_offset, bool):
+        raise TypeError("base_offset must be an INDEX scalar or integer, not bool")
+    if not isinstance(base_offset, int) or base_offset != 0:
+        args.append(_expr(base_offset))
+    return Reg(_call("gather", args, pmode=pmode))
 
 
-def scatter(tile: Tile | ir.Expr, offsets: Reg | ir.Expr, value: Reg | ir.Expr, mask: Reg | ir.Expr) -> Tile:
+def scatter(
+    tile: Tile | ir.Expr,
+    offsets: Reg | ir.Expr,
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr,
+    base_offset: Scalar | ir.Expr | int = 0,
+) -> Tile:
     """Scatter active lanes and return an alias of the destination Vec Tile.
 
-    Offsets are UINT16/UINT32 element indices relative to the Tile view origin.
+    Offsets are UINT16/UINT32 element indices relative to the Tile view origin
+    plus the scalar INDEX base_offset (also measured in elements).
     Use UINT16 offsets for 8/16-bit values and UINT32 for 32-bit values.
     Values must match the Tile dtype. Value, offsets and mask lane counts must
     agree. Active indices must be in bounds and pairwise distinct. Unwritten
     elements retain their previous contents; valid_shape is not enlarged.
     """
-    return Tile(expr=_call("scatter", [_expr(tile), _expr(offsets), _expr(value), _expr(mask)]))
+    args = [_expr(tile), _expr(offsets), _expr(value), _expr(mask)]
+    if isinstance(base_offset, bool):
+        raise TypeError("base_offset must be an INDEX scalar or integer, not bool")
+    if not isinstance(base_offset, int) or base_offset != 0:
+        args.append(_expr(base_offset))
+    return Tile(expr=_call("scatter", args))

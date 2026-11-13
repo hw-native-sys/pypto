@@ -66,9 +66,10 @@ described in [VF execution](../codegen/03-vpto-vf-integration.md#required-hardwa
 | `pmode` | Inactive-result policy. Only `"zero"` is accepted, so inactive vector lanes become zero. |
 
 `*` in a signature starts keyword-only parameters. Omitted optional masks mean
-all lanes participate. Except for conversion, reinterpretation, histograms, reduction, `expdif` and byte `gather`, results preserve the
-input vector dtype and lanes. There is no implicit vector promotion or lane
-broadcasting. DSL numeric literals are normalized to the requested scalar dtype;
+all lanes participate. Except for conversion, reinterpretation, histograms,
+reduction, `expdif` and byte `gather`, results preserve the input vector dtype
+and lanes. There is no implicit vector promotion or lane broadcasting. DSL
+numeric literals are normalized to the requested scalar dtype;
 Python `bool` is not accepted as an integer argument. Raw IR and Builder operands
 must already have the required dtype.
 
@@ -304,7 +305,8 @@ where required; the defaults above are supplied by the DSL wrapper.
 ## Extended VMI operations
 
 These APIs live under `pl.reg` and emit the corresponding `pto.vmi.v*` operation.
-All require a governing mask except `mula`, whose mask is optional. Arithmetic
+The masks of `mula`, `intlv`, and `dintlv` are optional; the other operations
+require a governing mask. Arithmetic
 `pmode` is `"zero"`; carry operations and `scatter` expose no `pmode` argument.
 Vector operands must agree in dtype, signedness and lane count unless explicitly
 specified below. Existing scalar SSA values are never implicitly cast; Python
@@ -322,10 +324,10 @@ scalar literals for `axpy`/`lrelu` are normalized to the vector dtype.
 | `subc(lhs, rhs, mask)` | `vsubc` | `(result, not_borrow)`; INT32/UINT32 |
 | `addcs(lhs, rhs, carry_in, mask)` | `vaddcs` | `(result, carry_out)` for `lhs + rhs + carry_in`; INT32/UINT32 |
 | `subcs(lhs, rhs, carry_in, mask)` | `vsubcs` | `(result, not_borrow_out)` for `lhs - rhs - (1 - carry_in)`; INT32/UINT32 |
-| `gather(tile, offsets, mask)` | `vgather` | Masked indexed UB read; inactive result lanes are zero |
-| `scatter(tile, offsets, value, mask)` | `vscatter` | Masked indexed UB write; returns the destination Tile alias |
-| `intlv(lhs, rhs, mask)` | `vintlv` | `(low, high)` interleaved vectors; even lane count |
-| `dintlv(lhs, rhs, mask)` | `vdintlv` | `(even, odd)` deinterleaved vectors; even lane count |
+| `gather(tile, offsets, mask, base_offset=0)` | `vgather` | Masked indexed UB read; inactive result lanes are zero |
+| `scatter(tile, offsets, value, mask, base_offset=0)` | `vscatter` | Masked indexed UB write; returns the destination Tile alias |
+| `intlv(lhs, rhs, mask=None)` | `vintlv` | `(low, high)` interleaved vectors; even lane count |
+| `dintlv(lhs, rhs, mask=None)` | `vdintlv` | `(even, odd)` deinterleaved vectors; even lane count |
 
 Unknown indexed or dynamic reads do not disable initialization checks for known
 static reads on the same allocation. Their own safety remains the caller's responsibility.
@@ -436,3 +438,15 @@ byte/halfword consumers, including histograms. Other dynamic granularities
 are rejected by PTOAS lowering. VF helpers support mixed Tile dtypes through
 typed pointers derived from one shared UB base; offsets use each Tile's own
 element width.
+
+The optional `base_offset` is a scalar INDEX offset in source/destination elements,
+added to the Tile view origin before applying the unsigned vector indices.
+It shifts the UB pointer without broadcasting the offset or widening the indices.
+Dynamic active addresses and initialization remain the caller's responsibility;
+masked-off lanes are not accessed. Existing calls default to a zero base offset.
+
+`intlv` and `dintlv` accept an omitted mask for all-active rearrangement.
+Explicit masks retain zero-inactive-result semantics; omitted masks do not need
+result-clearing selects. Two adjacent BF16 loads followed by unmasked `dintlv`
+can therefore lower to A5 `DINTLV_B16`, with `convert` selecting the required
+EVEN/ODD parts automatically. Physical conversion parts remain a backend choice.
