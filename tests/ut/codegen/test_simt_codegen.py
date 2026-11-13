@@ -205,8 +205,9 @@ def test_unsupported_unsigned_arithmetic_fails_before_native_compilation():
         codegen.PTOCodegen().generate_bundle(make_copy(dtype=DataType.UINT32))
 
 
-def scalar_program(body, dtype="INT32"):
+def scalar_program(body, dtype="INT32", *, preamble=""):
     program = parse_program(f"""
+{preamble}
 @pl.program
 class Scalars:
     @pl.function(type=pl.FunctionType.SIMT)
@@ -649,6 +650,135 @@ def test_collectives_text_round_trip_and_keywords(keyword):
     """)
     )
     ir.assert_structural_equal(program, parse_program(ir.python_print(program)))
+
+
+@pytest.mark.parametrize(
+    "name,native,arity",
+    [
+        ("abs", "absf", 1),
+        ("min", "minf", 2),
+        ("max", "maxf", 2),
+        ("exp", "exp", 1),
+        ("log", "log", 1),
+        ("sqrt", "sqrt", 1),
+        ("sin", "sin", 1),
+        ("cos", "cos", 1),
+        ("ceil", "ceil", 1),
+        ("floor", "floor", 1),
+        ("rint", "rint", 1),
+        ("round", "round", 1),
+        ("pow", "pow", 2),
+        ("fma", "fma", 3),
+        ("prmt", "prmt", 3),
+        ("mulhi", "mulhi", 2),
+    ],
+)
+def test_math_canonical_parser_codegen_round_trip(name, native, arity):
+    dtype = "INT32" if name in {"prmt", "mulhi"} else "FP32"
+    body = f"""
+        x = pl.simt.load(dst, (0, 0))
+        result = pl.simt.{name}({", ".join(["x"] * arity)})
+        pl.simt.store(dst, (0, 0), result)
+    """
+    program = scalar_program(body, dtype)
+    restored = parse_program(str(program))
+    ir.assert_structural_equal(program, restored)
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    assert f"pto.{native} " in source
+
+
+@pytest.mark.parametrize("rounding", ["r", "a", "f", "c", "z"])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_explicit_conversion_codegen(rounding, unsigned):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        integer = pl.simt.ftoi(x, rounding="{rounding}", unsigned={unsigned})
+        result = pl.simt.itof(integer, rounding="{rounding}", unsigned={unsigned})
+        pl.simt.store(dst, (0, 0), result)
+    """,
+        "FP32",
+    )
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    signedness = "unsigned" if unsigned else "signed"
+    assert f"{signedness} round({rounding}) sat : f32 -> i32" in source
+    assert f"{signedness} round({rounding}) : i32 -> f32" in source
+
+
+@pytest.mark.parametrize(
+    "positional,keyword",
+    [
+        ("abs(-0.0)", "abs(value=-0.0)"),
+        ("min(x, 0.0)", "min(lhs=x, rhs=0.0)"),
+        ("max(x, -1.5)", "max(x, rhs=-1.5)"),
+        ("pow(x, 2.0)", "pow(rhs=2.0, lhs=x)"),
+        ("fma(x, 2.0, -1.5)", "fma(lhs=x, rhs=2.0, acc=-1.5)"),
+        (
+            'ftoi(1.5, rounding="f", unsigned=True)',
+            'ftoi(value=1.5, rounding="f", unsigned=True)',
+        ),
+        ("itof(pl.const(3, pl.INT32))", "itof(value=pl.const(3, pl.INT32))"),
+        (
+            "mulhi(pl.const(3, pl.INT32), pl.const(2, pl.INT32), unsigned=True)",
+            "mulhi(lhs=pl.const(3, pl.INT32), rhs=pl.const(2, pl.INT32), unsigned=True)",
+        ),
+        (
+            "prmt(pl.const(1, pl.INT32), pl.const(2, pl.INT32), pl.const(3, pl.INT32))",
+            "prmt(lhs=pl.const(1, pl.INT32), rhs=pl.const(2, pl.INT32), selector=pl.const(3, pl.INT32))",
+        ),
+    ],
+)
+def test_math_keyword_operands_match_positional_parsing(positional, keyword):
+    # Both spellings must preserve expression dtypes; rounding/signedness
+    # remain compile-time values, even when all operands are passed by name.
+    programs = [
+        scalar_program(f"x = pl.simt.load(dst, (0, 0))\nresult = pl.simt.{expr}", "FP32")
+        for expr in (positional, keyword)
+    ]
+    ir.assert_structural_equal(programs[0], programs[1])
+    assert (
+        codegen.PTOCodegen().generate_bundle(programs[0]).helpers[0].source
+        == codegen.PTOCodegen().generate_bundle(programs[1]).helpers[0].source
+    )
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+@pytest.mark.parametrize(
+    "name,attribute,operand,dtype",
+    [
+        ("sin", "math.pi", "{value}", "FP32"),
+        ("cos", "math.e", "{value}", "FP32"),
+        ("sin", "-math.pi", "{value}", "FP32"),
+        ("abs", "math.inf", "{value}", "FP32"),
+        ("abs", "-math.inf", "{value}", "FP32"),
+        ("abs", "math.nan", "{value}", "FP32"),
+        ("ftoi", "math.pi", "{value}", "INT32"),
+        ("itof", "sys.hash_info.width", "pl.cast({value}, pl.INT32)", "FP32"),
+    ],
+)
+def test_math_numeric_attribute_operands(name, attribute, operand, dtype, keyword):
+    # Numeric closure names already become typed IR constants. Attribute and
+    # negated-attribute spellings must produce exactly the same IR and PTO,
+    # including inside a cast whose dtype argument must remain wrapper metadata.
+    preamble = f"import math\nimport sys\nVALUE = {attribute}\n"
+    programs = []
+    for value in (attribute, "VALUE"):
+        argument = operand.replace("{value}", value)
+        if keyword:
+            argument = f"value={argument}"
+        programs.append(
+            scalar_program(
+                f"result = pl.simt.{name}({argument})\npl.simt.store(dst, (0, 0), result)",
+                dtype,
+                preamble=preamble,
+            )
+        )
+    ir.assert_structural_equal(programs[0], programs[1])
+    ir.assert_structural_equal(programs[0], parse_program(ir.python_print(programs[0])))
+    assert (
+        codegen.PTOCodegen().generate_bundle(programs[0]).helpers[0].source
+        == codegen.PTOCodegen().generate_bundle(programs[1]).helpers[0].source
+    )
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ typed axis, positional or `axis=`; `lane_id()` takes none. Dimensions are three
 positive compile-time integers. They describe threads, not an element allocation
 or grid; bounds checks remain explicit. GM Tensor and Vec/UB Tile operands use
 their existing storage. The initial API supports the backend's scalar subset;
-INT32/FP32 lane collectives, atomics and synchronization are described below. Expanded math remains a separate milestone.
+INT32/FP32 lane collectives, atomics and synchronization are described below. Scalar math and explicit conversions are described below.
 
 Scalar assignments are thread-private, including shadowing an outer scalar.
 A private scalar cannot be read after the scope. Stores automatically rebind the
@@ -105,6 +105,59 @@ views carry their existing strides and offsets; fractal layouts are rejected.
 Explicitly non-Vec Tile storage is rejected. GM accepts PTOAS `l1cache` policies
 `cache`/`uncache` and separate load/store `l2cache` policy sets. Cache attributes
 on UB accesses are invalid.
+
+## Math, bit operations and explicit conversion
+
+All operations below are available in both `pl.simt` and `pypto.ir.op.simt`.
+They operate independently in each thread and add no synchronization.
+
+| API | Operand / result | Contract |
+| --- | ---------------- | -------- |
+| `abs(x)` | FP32 → FP32 | Clear the sign bit |
+| `min(x, y)`, `max(x, y)` | FP32 → FP32 | minNum/maxNum; one NaN yields the numeric operand |
+| `exp`, `log`, `sqrt`, `sin`, `cos` | FP32 → FP32 | Natural exponential/logarithm; trigonometric input in radians |
+| `ceil`, `floor`, `rint`, `round` | FP32 → FP32 | Toward +∞ / −∞ / nearest-even / nearest-away; retain FP32 |
+| `pow(x, y)`, `fma(x, y, z)` | FP32 → FP32 | Power; fused multiply-add with one final rounding |
+| `prmt(x, y, selector)` | INT32 → INT32 | Byte permutation using four low selector nibbles |
+| `mulhi(x, y, *, unsigned=False)` | INT32 → INT32 | High 32 bits of a signed/unsigned 64-bit product |
+| `ftoi(x, *, rounding="z", unsigned=False)` | FP32 → INT32 | Saturating float-to-integer conversion |
+| `itof(x, *, rounding="r", unsigned=False)` | INT32 → FP32 | Integer-to-float conversion with explicit rounding |
+
+`rounding` is a compile-time string: `r` = nearest, ties to even; `a` = nearest,
+ties away from zero; `f` = toward −∞; `c` = toward +∞; `z` = toward zero.
+Other tokens and non-boolean `unsigned` are rejected. FP32-to-integer saturation
+is mandatory in PTOAS: out-of-range values clamp to the destination integer
+range. On A5, saturated NaN conversion yields zero. `unsigned=True` interprets
+the INT32 carrier as 32 unsigned bits; the IR type remains INT32, so ordinary
+arithmetic and comparisons on that result are still signed. This flag does not
+enable UINT32 storage or general unsigned arithmetic.
+
+The text parser treats positional and keyword scalar operands identically.
+Evaluated numeric attributes such as `math.pi`, `math.inf`, and `-math.inf`
+become typed IR constants, just like numeric literals and closure names.
+Printing and reparsing raw IR preserves omitted conversion attributes; their
+defaults apply during lowering without adding attributes to the parsed IR.
+
+For `prmt`, each low selector nibble controls one result byte, from least to
+most significant. Its low three bits select bytes 0–3 of `y` or 4–7 of `x` (the
+right operand supplies the low bytes of the combined source). Nibble bit 3 and
+bits above the low 16 selector bits are ignored on A5.
+
+PTOAS sin/cos use software math with FP32 range reduction. Numerical acceptance
+covers angles in `[-4, 4]` radians; large-angle accuracy is not guaranteed.
+
+No implicit dtype promotion is performed. FP16/BF16, INT64, packed values and
+additional conversion pairs remain outside this executable subset; packed
+support belongs to the short-vector milestone. Floating functions follow target
+math accuracy and special-value behavior, without portable NaN payload guarantees.
+`pl.cast`, signed floor division/modulo and the diagnostic for scalar `**` retain
+their existing semantics; use `pl.simt.pow` for explicitly supported FP32 power.
+
+```python
+# Inside pl.simt_scope; x is an FP32 scalar loaded from storage.
+y = pl.const(1.0, pl.FP32) / (pl.const(1.0, pl.FP32) + pl.simt.exp(-x))
+index = pl.simt.ftoi(y, rounding="f")
+```
 
 ## Warp collectives
 

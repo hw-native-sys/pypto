@@ -317,3 +317,160 @@ def threadfence_block() -> ir.Call:
     Does not wait for other threads; use syncthreads for a rendezvous.
     This does not replace outer MTE/Vector pipeline synchronization."""
     return _simt.threadfence_block()
+
+
+def abs(value: Scalar | ir.Expr) -> Scalar:
+    """Absolute value; clears the FP32 sign bit.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.abs(_unwrap(value)))
+
+
+def min(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr) -> Scalar:
+    """FP32 minimum with minNum semantics; one NaN yields the numeric operand.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.min(_unwrap(lhs), _unwrap(rhs)))
+
+
+def max(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr) -> Scalar:
+    """FP32 maximum with maxNum semantics; one NaN yields the numeric operand.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.max(_unwrap(lhs), _unwrap(rhs)))
+
+
+def exp(value: Scalar | ir.Expr) -> Scalar:
+    """Compute the FP32 natural exponential using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.exp(_unwrap(value)))
+
+
+def log(value: Scalar | ir.Expr) -> Scalar:
+    """Compute the FP32 natural logarithm using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.log(_unwrap(value)))
+
+
+def sqrt(value: Scalar | ir.Expr) -> Scalar:
+    """Compute the FP32 square root using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.sqrt(_unwrap(value)))
+
+
+def sin(value: Scalar | ir.Expr) -> Scalar:
+    """Compute the FP32 sine in radians using target math.
+
+    PTOAS uses FP32 software range reduction; large angles lose accuracy.
+    Numerical acceptance covers [-4, 4]; no full-range accuracy is promised.
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.sin(_unwrap(value)))
+
+
+def cos(value: Scalar | ir.Expr) -> Scalar:
+    """Compute the FP32 cosine in radians using target math.
+
+    PTOAS uses FP32 software range reduction; large angles lose accuracy.
+    Numerical acceptance covers [-4, 4]; no full-range accuracy is promised.
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.cos(_unwrap(value)))
+
+
+def ceil(value: Scalar | ir.Expr) -> Scalar:
+    """Round FP32 toward positive infinity, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.ceil(_unwrap(value)))
+
+
+def floor(value: Scalar | ir.Expr) -> Scalar:
+    """Round FP32 toward negative infinity, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.floor(_unwrap(value)))
+
+
+def rint(value: Scalar | ir.Expr) -> Scalar:
+    """Round FP32 to nearest integer, ties to even, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.rint(_unwrap(value)))
+
+
+def round(value: Scalar | ir.Expr) -> Scalar:
+    """Round FP32 to nearest integer, ties away from zero, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.round(_unwrap(value)))
+
+
+def pow(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr) -> Scalar:
+    """Compute FP32 power using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.pow(_unwrap(lhs), _unwrap(rhs)))
+
+
+def fma(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr, acc: Scalar | ir.Expr) -> Scalar:
+    """Compute FP32 lhs * rhs + acc with one final rounding.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return Scalar(expr=_simt.fma(_unwrap(lhs), _unwrap(rhs), _unwrap(acc)))
+
+
+def prmt(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr, selector: Scalar | ir.Expr) -> Scalar:
+    """Permute bytes from two INT32 bit carriers with an INT32 selector.
+
+    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    The low three bits of each low selector nibble pick a byte from rhs
+    (0-3) or lhs (4-7). Other selector bits are ignored on A5.
+    """
+    return Scalar(expr=_simt.prmt(_unwrap(lhs), _unwrap(rhs), _unwrap(selector)))
+
+
+def mulhi(lhs: Scalar | ir.Expr, rhs: Scalar | ir.Expr, *, unsigned: bool = False) -> Scalar:
+    """Return the high 32 bits of the signed or unsigned 64-bit product.
+
+    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    unsigned=True interprets both carriers as unsigned; the result stays INT32.
+    """
+    return Scalar(expr=_simt.mulhi(_unwrap(lhs), _unwrap(rhs), unsigned=unsigned))
+
+
+def ftoi(value: Scalar | ir.Expr, *, rounding: str = "z", unsigned: bool = False) -> Scalar:
+    """Convert FP32 to a saturated INT32 bit carrier with explicit rounding.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
+    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    Saturation is mandatory: out-of-range values clamp to the integer limits.
+    NaN conversion follows the target contract; NaN payloads are not preserved.
+    """
+    return Scalar(expr=_simt.ftoi(_unwrap(value), rounding=rounding, unsigned=unsigned))
+
+
+def itof(value: Scalar | ir.Expr, *, rounding: str = "r", unsigned: bool = False) -> Scalar:
+    """Convert an INT32 bit carrier to FP32 with explicit rounding.
+
+    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
+    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    """
+    return Scalar(expr=_simt.itof(_unwrap(value), rounding=rounding, unsigned=unsigned))

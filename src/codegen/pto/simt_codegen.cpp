@@ -417,6 +417,51 @@ bool PTOCodegen::TryEmitSimtCall(const ir::CallPtr& call) {
     fs_.current_expr_value.clear();
     return true;
   }
+  // Explicit scalar math remains in the SIMT execution domain. Validate names
+  // through the registry just like the existing collective dispatch.
+  struct MathOp {
+    const char* name;
+    const char* native;
+    bool same_type_syntax;
+    size_t arity;
+  };
+  static const MathOp math_ops[] = {
+      {"simt.abs", "absf", true, 1},     {"simt.min", "minf", true, 2},   {"simt.max", "maxf", true, 2},
+      {"simt.exp", "exp", false, 1},     {"simt.log", "log", false, 1},   {"simt.sqrt", "sqrt", false, 1},
+      {"simt.sin", "sin", false, 1},     {"simt.cos", "cos", false, 1},   {"simt.ceil", "ceil", false, 1},
+      {"simt.floor", "floor", false, 1}, {"simt.rint", "rint", false, 1}, {"simt.round", "round", false, 1},
+      {"simt.pow", "pow", false, 2},     {"simt.fma", "fma", false, 3},   {"simt.prmt", "prmt", false, 3},
+      {"simt.mulhi", "mulhi", false, 2}, {"simt.ftoi", "ftoi", false, 1}, {"simt.itof", "itof", false, 1},
+  };
+  for (const auto& spec : math_ops) {
+    if (!ir::IsOp(call, spec.name)) continue;
+    INTERNAL_CHECK_SPAN(call->args_.size() == spec.arity, call->span_)
+        << "Internal error: SIMT scalar math arity for " << spec.name;
+    std::vector<std::string> operands;
+    std::vector<std::string> types;
+    for (const auto& arg : call->args_) {
+      operands.push_back(GetExprAsCode(arg));
+      types.push_back(GetExprTypeAnnotation(arg));
+    }
+    std::string attributes;
+    const bool ftoi = ir::IsOp(call, "simt.ftoi");
+    const bool itof = ir::IsOp(call, "simt.itof");
+    if (ftoi || itof || ir::IsOp(call, "simt.mulhi")) {
+      attributes = call->GetKwarg<bool>("unsigned", false) ? " unsigned" : " signed";
+    }
+    if (ftoi || itof) {
+      attributes += " round(" + call->GetKwarg<std::string>("rounding", ftoi ? "z" : "r") + ")";
+      // PTOAS requires saturation for FP32 -> integer; ordinary pl.cast keeps
+      // its existing contract and does not use this explicit conversion API.
+      if (ftoi) attributes += " sat";
+    }
+    const auto result = NewTemp();
+    const auto signature =
+        spec.same_type_syntax ? types.front() : Join(types) + " -> " + GetExprTypeAnnotation(call);
+    Emit(result + " = pto." + spec.native + " " + Join(operands) + attributes + " : " + signature);
+    fs_.current_expr_value = result;
+    return true;
+  }
   // Keep the collective at its original control-flow location: its implicit
   // active-lane mask changes across branches and loop iterations.
   const bool vote = ir::IsOp(call, "simt.vote_all") || ir::IsOp(call, "simt.vote_any") ||

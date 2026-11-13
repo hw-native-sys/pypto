@@ -557,10 +557,6 @@ def test_public_warp_collectives_native_compile(tmp_path, pytestconfig, entry_na
         backend.reset_for_testing()
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("entry_name", ["atomic_entry", "barrier_entry", "integer_entry", "floating_entry"])
 def test_public_atomics_native_compile(tmp_path, pytestconfig, entry_name):
@@ -684,3 +680,76 @@ def test_atomic_nd_address_and_nested_calls_native(tmp_path, pytestconfig):
         assert values == [7, 1, 2, 1, 2, 1, 2]
     finally:
         backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+def test_public_math_native_compile(tmp_path, pytestconfig):
+    binary = find_ptoas_binary()
+    if binary is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    source = Path(__file__).resolve().parents[2] / "st/runtime/vpto/test_simt_math_onboard.py"
+    pytestconfig.addinivalue_line("markers", "platforms(*ids, reason): supported ST platforms")
+    fixture = runpy.run_path(str(source))
+    backend.reset_for_testing()
+    try:
+        compiled = fixture["compile_math"](tmp_path)
+        assert isinstance(compiled, CompiledProgram)
+        helpers = list((tmp_path / "vpto").rglob("*.pto"))
+        assert len(helpers) == 1
+        text = helpers[0].read_text()
+        for op in (
+            "absf",
+            "minf",
+            "maxf",
+            "exp",
+            "log",
+            "sqrt",
+            "sin",
+            "cos",
+            "ceil",
+            "floor",
+            "rint",
+            "round",
+            "pow",
+            "fma",
+            "prmt",
+            "mulhi",
+            "ftoi",
+            "itof",
+        ):
+            assert f"pto.{op} " in text
+        output = tmp_path / "math.ll"
+        result = subprocess.run(
+            [
+                binary,
+                str(helpers[0]),
+                "--pto-arch=a5",
+                "--pto-backend=vpto",
+                "--emit-vpto-llvm-ir",
+                "-o",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        llvm = output.read_text()
+        for intrinsic in (
+            "fp32.to.s32",
+            "fp32.to.u32",
+            "s32.to.fp32",
+            "u32.to.fp32",
+            "prmt",
+            "mulhi.i",
+            "mulhi.ui",
+        ):
+            assert f"@llvm.hivm.{intrinsic}" in llvm
+        assert "@llvm.fma.f32" in llvm
+    finally:
+        backend.reset_for_testing()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
