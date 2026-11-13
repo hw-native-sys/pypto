@@ -66,7 +66,8 @@ kwarg，这与 Pass 合成的 cast 形状一致。正是这一点让打印出的
 这个解析刻意放在发射边界，而不是放进 IR 默认值。若把 IR 默认值也放宽成 `OFF`，浮点
 目标上显式的 `saturation_mode="off"` 就变成了非偏离，于是不再被记录——而那些询问
 "作者是否提出过要求"的 Pass（`CastFoldableToFixpipeMat`）也就看不到它了。A2/A3 上
-固定的 PTO-ISA 不再写 TREM 的 source，因此编译器不再为 `INT32` `pto.trem` 合成还原 `rhs` 的 `pto.tcvt`。
+生效的 PTO-ISA（pinned checkout 加上临时 A2/A3 TREM backport）不再写 TREM 的
+source，因此编译器不再为 `INT32` `pto.trem` 合成还原 `rhs` 的 `pto.tcvt`。
 
 两种模式仅在目标类型本就能表示的值上一致，所以对整数目标而言，这个默认值是一次行为
 选择，而非空操作：依赖目标平台自身非饱和溢出行为的 kernel 现在必须显式写 `"off"`。

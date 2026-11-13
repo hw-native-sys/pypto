@@ -50,6 +50,20 @@ _TREM_PINNED_HEADER = Path("include") / "pto" / "npu" / "a2a3" / "TRem.hpp"
 _TREM_FIX_MARKER = "read-only-src form"
 _TREM_PATCH_DISABLE_ENV = "PYPTO_DISABLE_PTO_ISA_TREM_PATCH"
 _TREM_PATCH_AUTHOR = ("PyPTO TREM fallback", "pypto-trem-fallback@localhost")
+# Git repository-location variables override even `-C`; a hook or wrapper that
+# exports them must not redirect the worktree or commit into another checkout.
+_GIT_LOCATION_ENV = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    }
+)
 
 
 def ensure_pto_isa_root() -> str:
@@ -241,9 +255,13 @@ def _git_output(root: Path, *args: str) -> str:
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    # Strip repository-location overrides: they win over `-C`, so a Git hook or
+    # wrapper could otherwise redirect this resolver into the caller's checkout.
+    environment = {key: value for key, value in os.environ.items() if key not in _GIT_LOCATION_ENV}
     return subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True,
         text=True,
+        env=environment,
         check=check,
     )

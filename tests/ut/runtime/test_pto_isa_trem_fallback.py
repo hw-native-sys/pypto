@@ -9,6 +9,7 @@
 
 """Tests for the temporary A2/A3 TREM PTO-ISA fallback."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -16,9 +17,13 @@ import pytest
 from pypto.runtime import pto_isa
 
 
+def _git_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in pto_isa._GIT_LOCATION_ENV}
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True, env=_git_env()
     ).stdout.strip()
 
 
@@ -26,7 +31,9 @@ def _init_checkout(root: Path, content: str) -> None:
     header = root / pto_isa._TREM_PINNED_HEADER
     header.parent.mkdir(parents=True)
     header.write_text(content, encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "init", "-q", str(root)], check=True, capture_output=True, text=True, env=_git_env()
+    )
     _git(root, "add", ".")
     _git(
         root,

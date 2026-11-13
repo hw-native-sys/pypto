@@ -74,8 +74,9 @@ purpose. Widening the IR default to `OFF` would make an explicit
 `saturation_mode="off"` on a float destination a non-deviation, so it would stop
 being recorded — and the passes that ask whether the author requested a mode
 (`CastFoldableToFixpipeMat`) would stop seeing it. The compiler no longer synthesizes a
-`pto.tcvt` to restore `rhs` after an A2/A3 `INT32` `pto.trem`: the pinned
-PTO-ISA never writes the TREM sources, so there is no conversion to undo.
+`pto.tcvt` to restore `rhs` after an A2/A3 `INT32` `pto.trem`: the effective
+PTO-ISA — the pinned checkout plus the temporary A2/A3 TREM backport — never
+writes the TREM sources, so there is no conversion to undo.
 
 The two modes agree only on values the destination can already represent, so for
 integer destinations this default is a behavioural choice, not a no-op: a kernel
