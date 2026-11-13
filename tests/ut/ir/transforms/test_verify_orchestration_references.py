@@ -84,8 +84,39 @@ class TestOrchestrationReferencesResolvedVerifier:
         errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
         assert errors == []
 
+    def test_async_transfer_in_host_body_fails(self):
+        """put_async/get_async must run in InCore, not a host (Opaque) body."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
+        put = ir.Call(ir.GlobalVar("pld.tensor.put_async"), [x], ir.TupleType([]), span)
+        body = ir.SeqStmts([ir.EvalStmt(put, span), ir.ReturnStmt([], span)], span)
+        host = ir.Function("host_main", [x], [], body, span)  # default Opaque
+        prog = ir.Program([host], "test_async_host_placement", span)
+
+        diagnostics = passes.PropertyVerifierRegistry.verify(_orch_refs_props(), prog)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert len(errors) == 1, [e.message for e in errors]
+        assert "host_main" in errors[0].message
+        assert "pld.tensor.put_async" in errors[0].message
+        assert "non-InCore" in errors[0].message
+
+    def test_async_transfer_in_orchestration_body_fails(self):
+        """put_async/get_async are also invalid in an Orchestration body."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
+        get = ir.Call(ir.GlobalVar("pld.tensor.get_async"), [x], ir.TupleType([]), span)
+        body = ir.SeqStmts([ir.EvalStmt(get, span), ir.ReturnStmt([], span)], span)
+        orch = ir.Function("orch_main", [x], [], body, span, type=ir.FunctionType.Orchestration)
+        prog = ir.Program([orch], "test_async_orch_placement", span)
+
+        diagnostics = passes.PropertyVerifierRegistry.verify(_orch_refs_props(), prog)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert len(errors) == 1, [e.message for e in errors]
+        assert "pld.tensor.get_async" in errors[0].message
+        assert "non-InCore" in errors[0].message
+
     def test_non_orchestration_functions_are_skipped(self):
-        """Non-Orchestration (e.g. Opaque) functions are NOT verified by this property."""
+        """Non-Orchestration (e.g. Opaque) functions are not checked for undefined callees."""
         span = ir.Span.unknown()
         x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
         ghost_call = ir.Call(ir.GlobalVar("ghost"), [x], ir.TupleType([]), span)

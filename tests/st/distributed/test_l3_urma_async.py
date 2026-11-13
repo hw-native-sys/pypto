@@ -588,6 +588,38 @@ def _build_bad_peer(n_ranks: int):
     return host_orch
 
 
+def _build_undersized_window(n_ranks: int):
+    """A window view whose backing allocation is four bytes short."""
+
+    @pl.jit.incore
+    def publish(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]:
+        return data
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+        return publish(inp, data)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(n_ranks * SIZE * pl.FP32.get_byte() - 4)
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [n_ranks, SIZE], dtype=pl.FP32)
+            chip_orch(inputs[r], outputs[r], data, device=r)
+        return outputs
+
+    return host_orch
+
+
 def _build_out_of_range(n_ranks: int):
     """A PUT whose runtime column offset lands past the tensor's own extent."""
 
@@ -1204,13 +1236,14 @@ class TestL3UrmaAsync:
             test_config, device_ids, n_ranks, _build_put_get_no_handshake
         )
         expected = _expected_exchange(n_ranks)
-        # Without a notification, a peer's fill may not have happened when this
-        # rank's GET is served, so only the locally written rows are ordered.
+        # Every PUT row has a single writer and the readback depends on the PUT
+        # task, so the full PUT matrix is ordered. The GET is ordered only after
+        # this rank's own PUT, not after the peers' fills, so only its local row
+        # is deterministic.
+        assert torch.allclose(outputs_put, expected), (
+            f"PUT P={n_ranks} mismatch: max diff = {(outputs_put - expected).abs().max().item()}"
+        )
         for r in range(n_ranks):
-            assert torch.allclose(outputs_put[r, r], expected[r, r]), (
-                f"PUT local row mismatch on rank {r}: "
-                f"max diff = {(outputs_put[r, r] - expected[r, r]).abs().max().item()}"
-            )
             assert torch.allclose(outputs_get[r, r], expected[r, r]), (
                 f"GET local row mismatch on rank {r}: "
                 f"max diff = {(outputs_get[r, r] - expected[r, r]).abs().max().item()}"
@@ -1240,8 +1273,10 @@ class TestL3UrmaAsync:
     def test_put_only_fp16(self, test_config, device_ids, n_ranks):
         """A second element type crosses the same PUT path.
 
-        Values stay below 2048 so every integer is exactly representable in
-        FP16 and the golden can be compared without tolerance.
+        The values exercise FP16 rounding (some exceed 2048 in the wider
+        ladder); the input and golden are built with the same dtype
+        arithmetic, so this checks the transfer path bit-exactly rather than
+        acting as an independent FP16 math oracle.
         """
         if len(device_ids) < n_ranks:
             pytest.skip(f"URMA async FP16 PUT P={n_ranks} needs {n_ranks} devices")
@@ -1371,6 +1406,15 @@ class TestL3UrmaAsync:
             capfd,
             expected_error="ASYNC_REGISTRATION_FAILED",
         )
+
+    def test_undersized_window_fails_at_compile_time(self, test_config, device_ids):
+        """A window view larger than its backing allocation is rejected before codegen."""
+        n_ranks = 2
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"URMA async capacity case needs {n_ranks} devices")
+
+        with pytest.raises(ValueError, match="exceeds backing window slot"):
+            _compile_invalid(test_config, device_ids, n_ranks, _build_undersized_window)
 
 
 def _build_early_resolve(n_ranks: int):

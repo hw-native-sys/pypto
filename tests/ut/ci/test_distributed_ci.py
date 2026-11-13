@@ -73,6 +73,8 @@ def test_distributed_job_routes_and_propagates_failure(
         assert "task-submit --device auto --device-num 4" in executed
         assert "tests/st/distributed/test_l3_urma_async.py" in executed
         assert "test_ci_placeholder.py" not in executed
+    # Preserve the device placeholder for expansion inside task-submit.
+    assert "--device=$TASK_DEVICE" in executed
 
 
 if __name__ == "__main__":

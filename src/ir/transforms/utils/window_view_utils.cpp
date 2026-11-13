@@ -14,7 +14,6 @@
 #include <string>
 
 #include "pypto/ir/arith/const_fold.h"
-#include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/type.h"
 
@@ -27,16 +26,32 @@ WindowViewFitResult EvaluateWindowViewFit(const DistributedTensorType& view, con
   // The slot's logical size is the addressable extent. Physical allocations
   // are rounded up to a cache line, but that padding is not part of a view.
   const auto slot_bytes = arith::TryEvaluateIntConstant(slot.size_);
-  if (slot_bytes && *slot_bytes >= 0) result.slot_bytes = slot_bytes;
+  if (slot_bytes) {
+    if (*slot_bytes < 0) {
+      result.fit = WindowViewFit::kViolation;
+      result.invalid_reason = "has a negative backing window slot '" + slot.name_hint_ + "' size";
+      return result;
+    }
+    result.slot_bytes = slot_bytes;
+  }
 
   const int64_t dtype_bytes = static_cast<int64_t>(view.dtype_.GetByte());
-  if (dtype_bytes <= 0) return result;
+  if (dtype_bytes <= 0) {
+    result.fit = WindowViewFit::kViolation;
+    result.invalid_reason = "has a non-positive element size";
+    return result;
+  }
 
   // pld.window creates a dense view from shape and dtype only.
   int64_t elements = 1;
   for (const auto& extent : view.shape_) {
     const auto dim = arith::TryEvaluateIntConstant(extent);
-    if (!dim || *dim <= 0) return result;
+    if (!dim) return result;  // symbolic: a host-side guard must check it
+    if (*dim <= 0) {
+      result.fit = WindowViewFit::kViolation;
+      result.invalid_reason = "has a non-positive static extent";
+      return result;
+    }
     if (__builtin_mul_overflow(elements, *dim, &elements)) return result;
   }
 
@@ -55,6 +70,7 @@ WindowViewFitResult EvaluateWindowViewFit(const DistributedTensorType& view, con
 std::string DescribeWindowViewFit(const std::string& view_name, const WindowBuffer& slot,
                                   const WindowViewFitResult& result) {
   const std::string subject = view_name.empty() ? "window view" : "window view '" + view_name + "'";
+  if (!result.invalid_reason.empty()) return subject + " " + result.invalid_reason;
   if (result.fit == WindowViewFit::kViolation && result.view_bytes && result.slot_bytes) {
     return subject + " of " + std::to_string(*result.view_bytes) + " bytes exceeds backing window slot '" +
            slot.name_hint_ + "' of " + std::to_string(*result.slot_bytes) + " bytes";

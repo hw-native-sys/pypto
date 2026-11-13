@@ -2401,7 +2401,7 @@ def test_put_async_rejects_subbyte_element_type_before_byte_offset_codegen():
         ):
             pld.tensor.put_async(dst, peer, src)
 
-    with pytest.raises(RuntimeError, match="byte-sized element types"):
+    with pytest.raises(ValueError, match="byte-sized element types"):
         _generate_mlir_a5(P)
 
 

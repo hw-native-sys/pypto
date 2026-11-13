@@ -77,13 +77,6 @@ class DistributedCodegen : public CodegenBase {
   int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
   std::string GetVarName(const ir::VarPtr& var) const override;
 
-  /// Public hook for op codegen functions registered via
-  /// :c:macro:`REGISTER_DISTRIBUTED_OP`. Marks @p var_name as emitted so the
-  /// surrounding ``AssignStmt`` visitor does not re-emit ``var = ...`` on
-  /// the fall-through path. Mirrors the manual ``declared_vars_.insert(...)``
-  /// performed by in-class emitters such as :func:`EmitTensorCreate`.
-  void MarkDeclared(const std::string& var_name) { declared_vars_.insert(var_name); }
-
   /// Return builtin chip-callable variants requested while emitting the HOST
   /// orchestrator. Python's backend materializes these specs under
   /// ``next_levels/<variant>/`` so runtime assembly can keep scanning the
@@ -124,6 +117,9 @@ class DistributedCodegen : public CodegenBase {
   /// Emit a dynamic capacity check at a window declaration. Statically fitting
   /// windows need no runtime check; Tensor construction stays at dispatch sites.
   void EmitWindowCapacityCheck(const ir::CallPtr& call);
+  /// Same check for a window-bound type that does not go through the window
+  /// handler (e.g. a shape-changing alias of an existing window view).
+  void EmitWindowCapacityCheck(const ir::TypePtr& type, const ir::Span& span);
 
   /// Return a Python-safe identifier derived from an IR/runtime name hint.
   [[nodiscard]] std::string SanitizeName(const std::string& name) const;
@@ -304,7 +300,6 @@ class DistributedCodegen : public CodegenBase {
   ir::FunctionPtr current_func_;
   std::string current_target_var_;
   std::string current_expr_value_;
-  std::set<std::string> declared_vars_;
   std::set<std::string> window_source_keys_;
   bool requires_host_domain_ = false;
   bool is_worker_context_{false};

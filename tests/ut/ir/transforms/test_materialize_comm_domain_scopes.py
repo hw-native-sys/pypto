@@ -2648,5 +2648,60 @@ def test_verifier_dedupes_repeated_window_view():
     assert len(errors) == 1
 
 
+def test_materialize_rejects_non_positive_window_extent():
+    """A zero static extent is invalid, not merely unverifiable."""
+    program = pl.parse_program(
+        textwrap.dedent(
+            """
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, dst: pld.DistributedTensor[[16], pl.FP32], peer: pl.Scalar[pl.INT32]):
+                    return dst
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(self, dst: pld.DistributedTensor[[16], pl.FP32]):
+                    self.kernel(dst, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    buf = pld.alloc_window_buffer(64)
+                    live = pld.window(buf, [16], dtype=pl.FP32)
+                    bad = pld.window(buf, [0], dtype=pl.FP32)
+                    self.chip(live, device=0)
+            """
+        )
+    )
+    with pytest.raises(ValueError, match="non-positive static extent"):
+        _apply(program)
+
+
+def test_materialize_rejects_negative_window_slot():
+    """A negative allocation size is invalid, not merely unverifiable."""
+    program = pl.parse_program(
+        textwrap.dedent(
+            """
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, dst: pld.DistributedTensor[[16], pl.FP32], peer: pl.Scalar[pl.INT32]):
+                    return dst
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(self, dst: pld.DistributedTensor[[16], pl.FP32]):
+                    self.kernel(dst, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    buf = pld.alloc_window_buffer(-64)
+                    data = pld.window(buf, [16], dtype=pl.FP32)
+                    self.chip(data, device=0)
+            """
+        )
+    )
+    with pytest.raises(ValueError, match="negative backing window slot"):
+        _apply(program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

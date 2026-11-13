@@ -272,7 +272,6 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_alloc_window_buffer, "pld.tensor.alloc_window
 REGISTER_DISTRIBUTED_OP(pld_tensor_window, "pld.tensor.window") {
   auto& dist_codegen = dynamic_cast<DistributedCodegen&>(codegen);
   dist_codegen.EmitWindowCapacityCheck(op);
-  dist_codegen.MarkDeclared(codegen.GetCurrentResultTarget());
   return "";
 }
 
@@ -526,7 +525,6 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
   std::ostringstream line;
   line << "tensors[\"" << lhs << "\"] = tensors[\"" << input_name << "\"][" << indices.str() << "]";
   codegen.Emit(line.str());
-  dist_codegen.MarkDeclared(lhs);
   return "";
 }
 
@@ -607,7 +605,6 @@ REGISTER_DISTRIBUTED_OP(tensor_assemble, "tensor.assemble") {
   if (lhs != target_name) {
     codegen.Emit("tensors[\"" + lhs + "\"] = tensors[\"" + target_name + "\"]");
   }
-  dist_codegen.MarkDeclared(lhs);
   return "";
 }
 

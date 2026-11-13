@@ -1140,7 +1140,7 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   // counts. Both operands are element addresses, so the factor is the element
   // size in bytes.
   const size_t element_bits = dtype.GetBit();
-  INTERNAL_CHECK_SPAN(element_bits >= 8 && element_bits % 8 == 0, op->span_)
+  CHECK_SPAN(element_bits >= 8 && element_bits % 8 == 0, op->span_)
       << op_name << " supports only byte-sized element types, got " << dtype.ToString() << " ("
       << element_bits << " bits)";
   const int64_t element_bytes = static_cast<int64_t>(element_bits / 8);
@@ -1188,7 +1188,11 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
       const auto coordinate = constant_int(offsets[i]);
       const auto stride = constant_int(strides[i]);
       if (!coordinate.has_value() || !stride.has_value()) return std::nullopt;
-      total += *coordinate * *stride;
+      int64_t term = 0;
+      if (__builtin_mul_overflow(*coordinate, *stride, &term) ||
+          __builtin_add_overflow(total, term, &total)) {
+        return std::nullopt;
+      }
     }
     return total;
   };
@@ -1213,7 +1217,11 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
   const std::string element_bytes_index = codegen.GetOrEmitConstant(element_bytes, DataType::INDEX);
   auto emit_byte_offset = [&](const std::string& elements_index, std::optional<int64_t> known_elements) {
     if (known_elements.has_value()) {
-      return codegen.GetOrEmitConstant(*known_elements * element_bytes, DataType::INT64);
+      int64_t known_bytes = 0;
+      if (!__builtin_mul_overflow(*known_elements, element_bytes, &known_bytes)) {
+        return codegen.GetOrEmitConstant(known_bytes, DataType::INT64);
+      }
+      // Overflow: fall through to the runtime multiply rather than wrap.
     }
     const std::string bytes_index = codegen.NewTemp();
     codegen.Emit(bytes_index + " = arith.muli " + elements_index + ", " + element_bytes_index + " : index");
@@ -1226,10 +1234,12 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
     int64_t elements = 1;
     for (const auto& dim : shape) {
       const auto extent = constant_int(dim);
-      if (!extent.has_value()) return std::nullopt;
-      elements *= *extent;
+      if (!extent.has_value() || *extent <= 0) return std::nullopt;
+      if (__builtin_mul_overflow(elements, *extent, &elements)) return std::nullopt;
     }
-    return elements * element_bytes;
+    int64_t bytes = 0;
+    if (__builtin_mul_overflow(elements, element_bytes, &bytes)) return std::nullopt;
+    return bytes;
   };
   auto emit_byte_count = [&](const std::vector<ExprPtr>& shape, std::optional<int64_t> known) {
     if (known.has_value()) return codegen.GetOrEmitConstant(*known, DataType::INT64);
@@ -1262,10 +1272,16 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
     for (size_t i = 0; i < type->shape_.size(); ++i) {
       const auto dim = constant_int(type->shape_[i]);
       const auto stride = constant_int(strides[i]);
-      if (!dim.has_value() || !stride.has_value()) return std::nullopt;
-      elements += (*dim - 1) * *stride;
+      if (!dim.has_value() || !stride.has_value() || *dim <= 0) return std::nullopt;
+      int64_t span = 0;
+      if (__builtin_mul_overflow(*dim - 1, *stride, &span) ||
+          __builtin_add_overflow(elements, span, &elements)) {
+        return std::nullopt;
+      }
     }
-    return elements * element_bytes;
+    int64_t bytes = 0;
+    if (__builtin_mul_overflow(elements, element_bytes, &bytes)) return std::nullopt;
+    return bytes;
   };
   auto emit_span_bytes = [&](const std::shared_ptr<const ir::DistributedTensorType>& type) -> std::string {
     const auto known = static_span_bytes(type);
@@ -1401,9 +1417,9 @@ static std::string MakeAsyncTransferCodegenPTO(const CallPtr& op, codegen::Codeg
 
   const std::string pointer_type = "!pto.ptr<" + codegen.GetTypeString(dtype) + ">";
   const std::string adapter = codegen.RegisterUrmaTransferAdapter(is_put, dtype);
-  // PUT resolves its remote endpoint from dst and GET from src; those operands
-  // can belong to different communication domains, so the helper must receive
-  // the context of the endpoint it samples for the peer mapping.
+  // PUT resolves its remote endpoint from dst and GET from src. The helper
+  // samples that endpoint's CommDomain context for the peer mapping; endpoints
+  // materialized in different communication domains are rejected at runtime.
   const std::string comm_ctx_ssa = is_put ? dst_binding.ctx_ssa : src_binding.ctx_ssa;
   codegen.Emit("func.call @" + adapter + "(" + raw_args + ", " + comm_ctx_ssa + ", " +
                dst_binding.local_ptr_ssa + ", " + src_binding.local_ptr_ssa + ", " + dst_byte_offset + ", " +

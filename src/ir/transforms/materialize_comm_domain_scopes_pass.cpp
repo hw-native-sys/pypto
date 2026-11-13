@@ -1038,14 +1038,19 @@ class WindowViewFitChecker : public IRVisitor {
   }
 
   void CheckView(const DistributedTensorType& view, const WindowBuffer& slot, const Span& span) {
+    // Every reference to a view visits this expression with the same type;
+    // cache by (slot, view type) so the rank scan happens once per distinct view.
+    if (!checked_views_.emplace(&slot, &view).second) return;
     const auto fit = EvaluateWindowViewFit(view, slot);
-    if (fit.fit != WindowViewFit::kViolation || !fit.view_bytes) return;
-    if (!seen_.emplace(&slot, *fit.view_bytes).second) return;
+    if (fit.fit != WindowViewFit::kViolation) return;
+    const int64_t view_bytes = fit.view_bytes.value_or(-1);
+    if (!seen_.emplace(&slot, view_bytes).second) return;
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
                               DescribeWindowViewFit("", slot, fit), span);
   }
 
   std::vector<Diagnostic>& diagnostics_;
+  std::set<std::pair<const WindowBuffer*, const DistributedTensorType*>> checked_views_;
   std::set<std::pair<const WindowBuffer*, int64_t>> seen_;
 };
 

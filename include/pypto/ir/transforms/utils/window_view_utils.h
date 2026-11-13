@@ -25,7 +25,7 @@ class WindowBuffer;
 /// the logical size of the allocation that backs it.
 enum class WindowViewFit {
   kFits,         ///< The view's size is statically known to fit the slot.
-  kViolation,    ///< The view's size is statically known to exceed the slot.
+  kViolation,    ///< The view is invalid or statically exceeds the slot.
   kUnverifiable  ///< The view or slot is symbolic; a host-side guard must check it.
 };
 
@@ -33,6 +33,8 @@ struct WindowViewFitResult {
   WindowViewFit fit = WindowViewFit::kUnverifiable;
   std::optional<int64_t> view_bytes;
   std::optional<int64_t> slot_bytes;
+  /// Set when the view or slot itself is malformed (non-positive extent/size).
+  std::string invalid_reason;
 };
 
 /**

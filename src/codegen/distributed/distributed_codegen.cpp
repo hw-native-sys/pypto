@@ -276,7 +276,6 @@ void DistributedCodegen::EmitImports() {
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
-  declared_vars_.clear();
   window_source_keys_.clear();
   requires_host_domain_ = false;
   task_args_counter_ = 0;
@@ -687,7 +686,6 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
 void DistributedCodegen::EmitEntryFunction() {
   if (!entry_func_) return;
 
-  declared_vars_.clear();
   task_args_counter_ = 0;
   current_func_ = entry_func_;
 
@@ -721,7 +719,6 @@ void DistributedCodegen::EmitEntryMarker(const std::string& func_name) {
 void DistributedCodegen::RegisterParamsAndEmitScalarBindings(const ir::FunctionPtr& func) {
   for (const auto& param : func->params_) {
     std::string name = SanitizeName(param->name_hint_);
-    declared_vars_.insert(name);
     if (ir::As<ir::ScalarType>(param->GetType()) || ir::IsA<ir::CommCtxType>(param->GetType())) {
       emitter_.EmitLine(name + " = tensors[\"" + name + "\"]");
     }
@@ -776,7 +773,6 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   // value has already been emitted in the alloc function. Register the SSA
   // name for downstream tensors[...] references but emit nothing here.
   if (host_orch_body_after_hoist_ && hoisted_allocs_.count(op.get())) {
-    declared_vars_.insert(var_name);
     return;
   }
 
@@ -791,7 +787,6 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
     // the type's window_buffer_ and never lives in the tensors dict — emitting
     // a tensors[...] alias here would KeyError at run time.
     if (ir::As<ir::DistributedTensorType>(op->var_->GetType())) {
-      declared_vars_.insert(var_name);
       current_target_var_ = "";
       return;
     }
@@ -815,7 +810,6 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
           << "for tuple var '" << tuple_var << "' index " << tge->index_;
       emitter_.EmitLine("tensors[\"" + var_name + "\"] = tensors[\"" + it->second + "\"]");
     }
-    declared_vars_.insert(var_name);
     current_target_var_ = "";
     return;
   }
@@ -825,13 +819,14 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
                                         ir::As<ir::DistributedTensorType>(op->value_->GetType()) &&
                                         !value_call;
   if (distributed_tensor_alias) {
-    declared_vars_.insert(var_name);
+    // A shape-changing alias of a window view bypasses the window handler, so
+    // guard its capacity here as well.
+    EmitWindowCapacityCheck(op->var_->GetType(), op->span_);
     current_target_var_ = "";
     current_expr_value_ = "";
     return;
   }
   if (value_call && ir::IsOp(value_call, "pld.system.get_comm_ctx")) {
-    declared_vars_.insert(var_name);
     current_target_var_ = "";
     current_expr_value_ = "";
     return;
@@ -842,7 +837,6 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
 
   // Check if the value is a Call to a hierarchy function or chip function
   if (TryEmitHierarchyCall(op->value_)) {
-    declared_vars_.insert(var_name);
     current_target_var_ = "";
     return;
   }
@@ -857,7 +851,6 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
     VisitExpr(op->value_);
     if (!current_expr_value_.empty()) {
       emitter_.EmitLine("tensors[\"" + var_name + "\"] = tensors[\"" + current_expr_value_ + "\"]");
-      declared_vars_.insert(var_name);
       current_expr_value_ = "";
     }
     current_target_var_ = "";
@@ -869,7 +862,6 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
 
   if (!current_expr_value_.empty()) {
     emitter_.EmitLine(var_name + " = " + current_expr_value_);
-    declared_vars_.insert(var_name);
     current_expr_value_ = "";
   }
 
@@ -905,7 +897,6 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
 
   std::string loop_var = SanitizeName(op->loop_var_->name_hint_);
-  declared_vars_.insert(loop_var);
 
   VisitExpr(op->start_);
   std::string start = current_expr_value_;
@@ -959,7 +950,6 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
       } else {
         emitter_.EmitLine(phi + " = " + val);
       }
-      declared_vars_.insert(phi);
     }
   };
 
@@ -1576,7 +1566,6 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
   emitter_.EmitLine("tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." + torch_dtype +
                     ").share_memory_()");
 
-  declared_vars_.insert(target);
   current_expr_value_ = "";
 }
 
@@ -1737,7 +1726,7 @@ void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& h
     // Falls through the normal AssignStmt → Call → EmitTensorCreate path.
     // host_orch_body_after_hoist_ is FALSE here so EmitTensorCreate runs
     // unchanged. The subsequent EmitFunction(host_orch) call resets visitor
-    // state (declared_vars_, current_func_, ...), so no save/restore needed.
+    // state (current_func_, ...), so no save/restore needed.
     current_func_ = host_orch;
     for (const auto& stmt : TopLevelStmts(UnwrapLeadingCommDomainScopes(host_orch->body_))) {
       auto assign = std::dynamic_pointer_cast<const ir::AssignStmt>(stmt);
@@ -1851,20 +1840,27 @@ std::string DistributedCodegen::FormatShapeTuple(const std::vector<ir::ExprPtr>&
 }
 
 void DistributedCodegen::EmitWindowCapacityCheck(const ir::CallPtr& call) {
-  auto type = ir::As<ir::DistributedTensorType>(call->GetType());
-  INTERNAL_CHECK_SPAN(type && type->window_buffer_.has_value(), call->span_)
-      << "Internal error: window capacity check requires a materialized WindowBuffer";
-  const auto& window = *type->window_buffer_;
-  const auto fit = ir::EvaluateWindowViewFit(*type, *window);
-  INTERNAL_CHECK_SPAN(fit.fit != ir::WindowViewFit::kViolation, call->span_)
+  EmitWindowCapacityCheck(call->GetType(), call->span_);
+}
+
+void DistributedCodegen::EmitWindowCapacityCheck(const ir::TypePtr& type, const ir::Span& span) {
+  auto dist_type = ir::As<ir::DistributedTensorType>(type);
+  INTERNAL_CHECK_SPAN(dist_type, span)
+      << "Internal error: window capacity check requires a DistributedTensorType";
+  const auto window = dist_type->window_buffer_.value_or(nullptr);
+  // A discarded `pld.window(...)` expression statement is a no-op: the
+  // materialization pass records only live views, so there is nothing to guard.
+  if (!window) return;
+  const auto fit = ir::EvaluateWindowViewFit(*dist_type, *window);
+  INTERNAL_CHECK_SPAN(fit.fit != ir::WindowViewFit::kViolation, span)
       << "DistributedCodegen: " << ir::DescribeWindowViewFit("", *window, fit);
   if (fit.fit == ir::WindowViewFit::kFits) return;
 
   // Validate once where the view is declared, before any consumer. The check
   // depends only on shape/dtype and logical capacity, not a dispatch rank.
   emitter_.EmitLine("check_window_capacity(name=\"" + SanitizeName(window->name_hint_) +
-                    "\", shapes=" + FormatShapeTuple(type->shape_) +
-                    ", element_bytes=" + std::to_string(type->dtype_.GetByte()) + ", slot_nbytes=(" +
+                    "\", shapes=" + FormatShapeTuple(dist_type->shape_) +
+                    ", element_bytes=" + std::to_string(dist_type->dtype_.GetByte()) + ", slot_nbytes=(" +
                     GetCommSlotSizeAsCode(window->size_) + "))");
 }
 
