@@ -101,7 +101,8 @@ def ensure_pto_isa_root() -> str:
         OSError: If the pinned checkout cannot be obtained.
     """
     pinned = _resolve_pinned_pto_isa_root()
-    resolved = _resolve_effective_pto_isa_root(pinned)
+    disabled = os.environ.get(_TREM_PATCH_DISABLE_ENV) == "1"
+    resolved = _resolve_effective_pto_isa_root(pinned, disabled)
     os.environ["PTO_ISA_ROOT"] = resolved
     return resolved
 
@@ -167,15 +168,17 @@ def _resolve_pinned_pto_isa_root() -> str:
     return str(Path(_resolve(verbose=True)).resolve())
 
 
-@lru_cache(maxsize=1)
-def _resolve_effective_pto_isa_root(pinned: str) -> str:
-    """Return the tree PyPTO must compile against for *pinned*.
+@lru_cache(maxsize=2)
+def _resolve_effective_pto_isa_root(pinned: str, disabled: bool) -> str:
+    """Return the tree PyPTO must compile against for this pin and switch.
 
+    The switch is part of the cache key: a long-lived process that flips
+    ``PYPTO_DISABLE_PTO_ISA_TREM_PATCH`` must not reuse the previous selection.
     The pinned tree is returned unchanged when it already carries both the TREM
     fix and the overflow guard, when the fallback is disabled, or when it is not
     a PTO-ISA checkout.
     """
-    if os.environ.get(_TREM_PATCH_DISABLE_ENV) == "1":
+    if disabled:
         return pinned
     return _ensure_trem_patch(pinned)
 
@@ -231,13 +234,15 @@ def _ensure_trem_patch(pinned: str) -> str:
             f"user.name={_TREM_PATCH_AUTHOR[0]}",
             "-c",
             f"user.email={_TREM_PATCH_AUTHOR[1]}",
+            # --no-verify skips pre-commit and commit-msg only; prepare-commit-msg
+            # still runs. Neutralize the hook path for all internal hooks.
+            "-c",
+            "core.hooksPath=/dev/null",
             "commit",
             # This machine-generated commit must not inherit an ambient
             # commit.gpgSign: signing can fail without a key/agent (blocking
             # every resolution) and would otherwise perturb the cache identity.
             "--no-gpg-sign",
-            # Likewise, repository hooks (core.hooksPath) must not gate an
-            # internal cache commit.
             "--no-verify",
             "-a",
             "-m",

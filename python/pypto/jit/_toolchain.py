@@ -991,6 +991,8 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
         build_context = (
             policy,
             os.environ.get("PYPTO_CACHE_EPOCH"),
+            # The temporary PTO-ISA backport switch changes which headers compile.
+            os.environ.get("PYPTO_DISABLE_PTO_ISA_TREM_PATCH"),
             platform,
             runtime_name,
             sanitizers,

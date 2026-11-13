@@ -42,6 +42,8 @@ def _init_checkout(root: Path, content: str) -> None:
         "user.name=test",
         "-c",
         "user.email=test@example.com",
+        "-c",
+        "core.hooksPath=/dev/null",
         "commit",
         "--no-gpg-sign",
         "--no-verify",
@@ -114,6 +116,8 @@ def test_patch_creates_a_clean_reusable_worktree(tmp_path, monkeypatch):
         "user.name=test",
         "-c",
         "user.email=test@example.com",
+        "-c",
+        "core.hooksPath=/dev/null",
         "commit",
         "--no-gpg-sign",
         "--no-verify",
@@ -135,7 +139,7 @@ def test_disabled_fallback_returns_the_pin(tmp_path, monkeypatch):
     _init_checkout(pin, "original\n")
     monkeypatch.setenv(pto_isa._TREM_PATCH_DISABLE_ENV, "1")
 
-    assert pto_isa._resolve_effective_pto_isa_root(str(pin)) == str(pin)
+    assert pto_isa._resolve_effective_pto_isa_root(str(pin), True) == str(pin)
 
 
 @pytest.mark.parametrize("missing", ["not-a-checkout"])
