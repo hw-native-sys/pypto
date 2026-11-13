@@ -60,6 +60,13 @@ program_outlined = outline_pass(program)
 8. **Promote the parent**: an Opaque parent that outlined at least one scope becomes
    `Orchestration` — and its param dyn-dim reads are folded first (below)
 
+Value-use analysis starts from each complete function body. The outliner passes
+subsequent references through control-flow and scope wrappers, then passes the
+selected outputs into an extracted body's nested scopes. An empty requirement
+set means no external value uses; it does not trigger speculative returns of
+local definitions or write aliases. Captured `tile.store` destinations are
+handled independently, so their effects remain visible even without a later read.
+
 **Scalar outputs are hoisted into the caller**: the runtime has no scalar output
 channel — `Arg::add_scalar` passes a scalar *in* by value and `TaskOutputTensors`
 returns only tensors — so a `ScalarType` in an outlined function's

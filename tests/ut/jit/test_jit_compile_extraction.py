@@ -54,8 +54,34 @@ def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     return c
 
 
+@jit
+def add_returns_nothing(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    M, N = a.shape
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(a, [0, 0], [M, N]), pl.load(b, [0, 0], [M, N])), [0, 0], c)
+
+
 class TestCompileReturnsCompiledProgram:
     """Verify ``kernel.compile(*sample_args)`` returns a usable CompiledProgram."""
+
+    def test_compile_valueless_scope_with_local_write_alias(self):
+        """A local in-place Tile result must survive the pipeline without escaping.
+
+        Compile through codegen: lower() alone does not verify that the
+        orchestration caller can represent the outlined kernel's interface.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def copy_with_padding(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            M, N = a.shape
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [M, N])
+                padded = pl.tile.fillpad_inplace(tile)
+                pl.store(padded, [0, 0], out)
+
+        compiled = copy_with_padding.compile(torch.zeros(16, 32), torch.empty(16, 32))
+        assert isinstance(compiled, CompiledProgram)
 
     def test_compile_returns_compiled_program_instance(self):
         torch = pytest.importorskip("torch")
@@ -123,6 +149,21 @@ class TestCompileReturnsCompiledProgram:
 
 class TestLowerReturnsProgram:
     """Verify ``lower()`` specializes and runs passes without compiling."""
+
+    def test_lower_runs_the_pipeline_for_a_valueless_entry(self):
+        """A kernel that writes its Out parameter and returns nothing lowers.
+
+        The InCore outliner used to export the terminal scope's dead
+        intermediates as tile-typed returns, which the tile conversion
+        rejects with an INTERNAL_CHECK — a bug-class failure for this legal
+        entry shape.
+        """
+        torch = pytest.importorskip("torch")
+        a = torch.zeros(24, 24)
+        b = torch.zeros(24, 24)
+        c = torch.empty(24, 24)
+        program = add_returns_nothing.lower(a, b, c)
+        assert isinstance(program, ir.Program)
 
     def test_lower_returns_post_pass_program_without_compiling(self, monkeypatch):
         torch = pytest.importorskip("torch")
