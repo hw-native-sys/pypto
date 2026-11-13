@@ -121,6 +121,10 @@ class DistributedCodegen : public CodegenBase {
   /// Format a DistributedTensor's shape as a Python tuple literal.
   [[nodiscard]] std::string FormatShapeTuple(const std::vector<ir::ExprPtr>& shape);
 
+  /// Emit a dynamic capacity check at a window declaration. Statically fitting
+  /// windows need no runtime check; Tensor construction stays at dispatch sites.
+  void EmitWindowCapacityCheck(const ir::CallPtr& call);
+
   /// Return a Python-safe identifier derived from an IR/runtime name hint.
   [[nodiscard]] std::string SanitizeName(const std::string& name) const;
 

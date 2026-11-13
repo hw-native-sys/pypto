@@ -2488,11 +2488,11 @@ jobs:
           checkout-path: a5-checkout
 
   onboard-tests-a5-distributed:
-    timeout-minutes: 110
-    # Bootstrap the trusted main-branch job before adding hardware acceptance
-    # tests. /ci full loads this workflow from main, so a PR cannot introduce
-    # and exercise a new job in the same dispatched run. Select the real suite
-    # from the test checkout when present; otherwise run the bootstrap dummy.
+    timeout-minutes: 50
+    # The trusted full-tier lane installed by #3389 runs the real A5 URMA
+    # acceptance suite. /ci full loads this workflow from main, so the suite
+    # comes from the PR merge checkout; a missing suite fails loudly instead
+    # of silently passing a bootstrap placeholder.
     needs: [changes, toolchain, lint-gate]
     if: >-
       !cancelled() &&
@@ -2541,26 +2541,24 @@ jobs:
           toolchain: bundle
 
       - name: Run distributed tests
-        timeout-minutes: 70
+        timeout-minutes: 40
         run: |
           source activate.sh
-          # This switch must already be on main before the test-only follow-up:
-          # editing a PR's workflow cannot change a trusted /ci full command.
-          if [ -f tests/st/distributed/test_l3_urma_async.py ]; then
-            LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
-            mkdir -p "$LOGDIR"
-            export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
-            # Four cards select the P=4 cases. No --forked: JIT compilation can
-            # leave a child that pytest-forked waits on beyond its timeout.
-            task-submit --device auto --device-num 4 --timeout 3900 --max-time 1800 \
-              --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
-                tests/st/distributed/test_l3_urma_async.py \
-                -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
-                --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-distributed-junit.xml"
-          else
-            python -m pytest tests/lint/test_ci_placeholder.py -v \
-              --junitxml=ci-distributed-junit.xml
-          fi
+          LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
+          mkdir -p "$LOGDIR"
+          export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
+          # Four cards select the P=4 cases. No --forked: JIT compilation can
+          # leave a child that pytest-forked waits on beyond its timeout.
+          # The suite passes in ~5.5 min (slow path ~12 min). Bound a hung
+          # case at 15 min of execution and 20 min of card-queue wait so a
+          # failure reaches the log quickly instead of after the old 65/30-min caps.
+          # Stop at the first failing case (-x): a device failure otherwise
+          # repeats its ~2.5 min failure path for every remaining case.
+          task-submit --device auto --device-num 4 --timeout 1200 --max-time 900 \
+            --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
+              tests/st/distributed/test_l3_urma_async.py \
+              -v -x --platform=a5 --device=\$TASK_DEVICE --durations=0 \
+              --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-distributed-junit.xml"
 
       - name: Upload distributed test results
         if: always()

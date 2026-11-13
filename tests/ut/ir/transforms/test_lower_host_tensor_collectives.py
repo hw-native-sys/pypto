@@ -1916,7 +1916,10 @@ def test_host_all_to_all_v_rejects_aliased_target_recv_counts_windows():
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            # `data` aliases this allocation, so the allocation must fit its
+            # [8, 256] FP32 view before the aliasing check can be exercised;
+            # every window view must fit its backing allocation.
+            recv_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)

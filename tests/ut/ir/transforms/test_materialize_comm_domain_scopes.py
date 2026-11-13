@@ -2111,6 +2111,65 @@ def test_verifier_flags_duplicate_slot_across_scopes():
     assert errors[0].rule_name == "CommDomainScopesMaterialized"
 
 
+# ---------------------------------------------------------------------------
+# CommDomainScopesMaterialized verifier: window-view capacity
+# ---------------------------------------------------------------------------
+
+
+def _comm_domain_errors(program: ir.Program) -> list:
+    """Run the property verifier and return its error diagnostics."""
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.CommDomainScopesMaterialized)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    return [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+
+
+def _build_async_window_program(
+    op_name: str,
+    dst_window_bytes: int,
+    src_window_bytes: int,
+) -> ir.Program:
+    """``host_orch -> chip_orch -> InCore kernel`` with two window views.
+
+    The parsed source lets the op name and byte counts be parameters. The
+    window-view capacity invariant is checked at materialization, independent of
+    which op (sync or async) consumes the views.
+    """
+    call = f"pld.tensor.{op_name}(dst, peer, src)"
+    return pl.parse_program(
+        textwrap.dedent(
+            f"""
+            @pl.program
+            class P:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                    peer: pl.Scalar[pl.INT32],
+                ):
+                    {call}
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def chip(
+                    self,
+                    dst: pld.DistributedTensor[[16], pl.FP32],
+                    src: pld.DistributedTensor[[16], pl.FP32],
+                ):
+                    self.kernel(dst, src, 1)
+
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host_orch(self):
+                    a = pld.alloc_window_buffer({dst_window_bytes})
+                    b = pld.alloc_window_buffer({src_window_bytes})
+                    x = pld.window(a, [16], dtype=pl.FP32)
+                    y = pld.window(b, [16], dtype=pl.FP32)
+                    self.chip(x, y, device=0)
+            """
+        )
+    )
+
+
 @pytest.mark.parametrize("explicit_layout", [False, True])
 def test_materialized_program_text_roundtrip(explicit_layout):
     """Print and parse a complete program without re-running any lowering pass."""
@@ -2358,6 +2417,88 @@ def test_signed_scope_attribute_roundtrip(value):
     assert scope.attrs["saved"] == value
     assert isinstance(scope.attrs["index_expr"], ir.ConstInt)
     assert scope.attrs["index_expr"].value == -1
+
+
+@pytest.mark.parametrize("op_name", ["put_async", "get_async"])
+def test_materialize_rejects_window_view_exceeding_slot(op_name):
+    """A 64-byte view in a 60-byte logical slot is rejected at materialization."""
+    with pytest.raises(
+        ValueError, match=r"window view .* of 64 bytes exceeds backing window slot .* of 60 bytes"
+    ):
+        _apply(_build_async_window_program(op_name, 60, 64))
+
+
+def test_materialize_accepts_exact_and_overallocated_slot():
+    program = _apply(_build_async_window_program("put_async", 64, 128))
+    assert _comm_domain_errors(program) == []
+
+
+def test_materialize_rejects_alignment_padding_as_capacity():
+    """The 64-byte physical alignment of a 60-byte slot is not addressable."""
+    with pytest.raises(
+        ValueError, match=r"window view .* of 64 bytes exceeds backing window slot .* of 60 bytes"
+    ):
+        _apply(_build_async_window_program("put_async", 64, 60))
+
+
+def test_materialize_rejects_sync_only_oversized_window():
+    """The capacity invariant applies to synchronous transfers too."""
+    with pytest.raises(ValueError, match=r"window view .* of 64 bytes exceeds backing window slot"):
+        _apply(_build_async_window_program("put", 60, 64))
+
+
+def test_verifier_rejects_hand_built_oversized_window_view():
+    """The verifier also catches a reparsed/programmatic oversized view."""
+    program = pl.parse_program(
+        textwrap.dedent(
+            """
+            @pl.program
+            class P:
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host(self):
+                    with pl._dump.comm_domain(
+                        name="d", devices=[0],
+                        slots=[pl._dump.window_buffer("w", base="buf", size=32)],
+                    ):
+                        buf: pl.Ptr = pl._dump.alloc_window_buffer(32, name="buf")
+                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")] = pl._dump.call(
+                            "pld.tensor.window", [buf, [16]],
+                            pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")],
+                            kwargs={"dtype": pl.FP32},
+                        )
+                        return x
+            """
+        )
+    )
+    errors = _comm_domain_errors(program)
+    assert any("64 bytes exceeds backing window slot" in e.message for e in errors)
+
+
+def test_verifier_dedupes_repeated_window_view():
+    """Using the same view twice reports one capacity error, not one per use."""
+    program = pl.parse_program(
+        textwrap.dedent(
+            """
+            @pl.program
+            class P:
+                @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+                def host(self):
+                    with pl._dump.comm_domain(
+                        name="d", devices=[0],
+                        slots=[pl._dump.window_buffer("w", base="buf", size=32)],
+                    ):
+                        buf: pl.Ptr = pl._dump.alloc_window_buffer(32, name="buf")
+                        x: pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")] = pl._dump.call(
+                            "pld.tensor.window", [buf, [16]],
+                            pld.DistributedTensor[[16], pl.FP32, pl._dump.window_ref("w")],
+                            kwargs={"dtype": pl.FP32},
+                        )
+                        return x, x
+            """
+        )
+    )
+    errors = [e for e in _comm_domain_errors(program) if "64 bytes exceeds backing window slot" in e.message]
+    assert len(errors) == 1
 
 
 if __name__ == "__main__":
