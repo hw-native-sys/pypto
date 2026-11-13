@@ -230,13 +230,20 @@ Defines the tile-level instruction set for the target hardware. Provides C++ hea
 **Interface:** C++ header library defining the instruction API. Downstream consumers `#include` pto-isa headers; the hardware vendor provides the target-specific implementations that back these headers.
 
 `runtime/pto_isa.pin` is the single source of truth for the revision, and
-simpler owns the only resolver (`simpler_setup.pto_isa.ensure_pto_isa_root`):
+simpler owns the pin resolver (`simpler_setup.pto_isa.ensure_pto_isa_root`):
 it manages one checkout under the runtime's `build/pto-isa`, reuses it only when
 that tree is clean and already at the pin, re-clones it otherwise, and verifies
-`HEAD` before returning. PyPTO delegates to it rather than resolving the pin
-itself — a second resolver could hand the kernel compiler an off-pin tree, and
-the compiler skips its own revision re-check precisely because the resolver
-already guaranteed the pin. To change the revision, update the runtime-side pin.
+`HEAD` before returning. PyPTO delegates pin resolution to it rather than
+resolving the pin itself — a second resolver could hand the kernel compiler an
+off-pin tree, and the compiler skips its own revision re-check precisely because
+the resolution guaranteed the tree it returned.
+
+While the pinned headers need a temporary backport (currently the A2/A3
+TREM/TREMS fix), `pypto.runtime.pto_isa.ensure_pto_isa_root()` derives a
+detached worktree of that same verified pin, applies the reviewed patch, and
+commits it locally; the patch is removed and the fallback disables itself as
+soon as the pin carries the fix. To change the revision, update the runtime-side
+pin.
 
 `PTO_ISA_ROOT` is *exported* with the resolved path so downstream consumers that
 build extern CCE kernels can find the ISA headers, but it is never *read*: an

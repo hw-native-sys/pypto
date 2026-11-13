@@ -97,3 +97,37 @@ def test_non_checkout_is_left_untouched(tmp_path, missing):
     root.mkdir()
 
     assert pto_isa._ensure_trem_patch(str(root)) == str(root)
+
+
+def test_effective_revision_appends_the_patch_id(monkeypatch):
+    monkeypatch.delenv(pto_isa._TREM_PATCH_DISABLE_ENV, raising=False)
+
+    revision = pto_isa.effective_pto_isa_revision("90a37965")
+
+    assert revision.startswith("90a37965+trem-patch:")
+    assert len(revision.rsplit(":", 1)[1]) == 12
+
+
+def test_effective_revision_honors_the_disable_knob(monkeypatch):
+    monkeypatch.setenv(pto_isa._TREM_PATCH_DISABLE_ENV, "1")
+
+    assert pto_isa.effective_pto_isa_revision("90a37965") == "90a37965"
+
+
+def test_effective_revision_tracks_the_patch_contents(tmp_path, monkeypatch):
+    monkeypatch.delenv(pto_isa._TREM_PATCH_DISABLE_ENV, raising=False)
+    first = tmp_path / "first.patch"
+    second = tmp_path / "second.patch"
+    first.write_text("patch one\n", encoding="utf-8")
+    second.write_text("patch two\n", encoding="utf-8")
+
+    monkeypatch.setattr(pto_isa, "_TREM_PATCH_PATH", first)
+    first_revision = pto_isa.effective_pto_isa_revision("pin")
+    monkeypatch.setattr(pto_isa, "_TREM_PATCH_PATH", second)
+    second_revision = pto_isa.effective_pto_isa_revision("pin")
+
+    assert first_revision != second_revision
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

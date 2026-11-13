@@ -718,13 +718,15 @@ def _unaccounted_checkout_state(checkout: Path) -> str:
 
 
 def _pto_isa_component(isa_root: Path) -> ComponentInputs:
-    """Identify the ISA checkout by the pin its own resolution already verified.
+    """Identify the ISA checkout by the revision its resolution verified.
 
-    ``ensure_pto_isa_root`` returns a checkout only after proving it is clean
-    and at the pinned commit -- git objects are content-addressed, so a clean
-    tree at ``HEAD == pin`` *is* the pinned tree -- and re-clones it from the
-    pin otherwise, never checking out over a dirty tree. Reading the same
-    ~5.8k files again re-proves what that resolution established.
+    ``ensure_pto_isa_root`` returns a clean checkout whose HEAD is the pin, or
+    -- while the temporary A2/A3 TREM/TREMS backport is active -- a clean
+    detached worktree of that pin whose HEAD is the local backport commit.
+    Either way the tree is clean and git accounts for every path in it, so its
+    HEAD identifies the exact sources the compiler uses; re-clones from the pin
+    never check out over a dirty tree. Reading the same ~5.8k files again
+    re-proves what that resolution established.
 
     That resolution decides cleanliness with ``git status --porcelain``, which
     omits paths the checkout ignores -- a build writing generated files into the
@@ -916,9 +918,10 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     else:
         device_component = _component(device)
     # The ISA checkout lives inside the installed runtime package, and
-    # _pto_isa_component already identifies it -- by its verified revision, or
-    # by reading it when that cannot be trusted. Inventorying it here as well
-    # reads ~5.8k files a second time to prove what that component establishes.
+    # _pto_isa_component already identifies it -- by its verified revision (the
+    # pin, or a temporary backport worktree's local commit), or by reading it
+    # when that cannot be trusted. Inventorying it here as well reads ~5.8k
+    # files a second time to prove what that component establishes.
     return ToolchainInputs(
         _component(pypto),
         _component(_without_subtree(runtime, isa)),

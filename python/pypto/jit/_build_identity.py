@@ -420,6 +420,13 @@ def _compiler_identity(selected: str, cwd: Path | None = None) -> tuple[Any, ...
     return (str(invoked), reported_version, invoked_id, driver_id, programs)
 
 
+def _effective_pto_isa_revision(pin: str) -> str:
+    """Include a temporary PTO-ISA header backport in the persistent identity."""
+    from pypto.runtime.pto_isa import effective_pto_isa_revision  # noqa: PLC0415
+
+    return effective_pto_isa_revision(pin)
+
+
 def _local_builds(
     compiler: Any, runtime_name: str, pypto_sources: list[tuple[str, str]]
 ) -> tuple[ComponentInputs, ComponentInputs, ComponentInputs, ComponentInputs]:
@@ -482,8 +489,14 @@ def _local_builds(
                 runtime_build,
             )
         ),
-        # This is the effective version selected by the resolver, not an extra
-        # compatibility gate. A hit needs neither a checkout nor a git status.
-        _reported(importlib.import_module("simpler_setup.pto_isa").read_pto_isa_pin(root / "pto_isa.pin")),
+        # This is the effective identity selected by the resolver: the pin, or
+        # the pin plus the temporary TREM backport id while that fallback is
+        # active. It is not an extra compatibility gate; a hit needs neither a
+        # checkout nor a git status.
+        _reported(
+            _effective_pto_isa_revision(
+                importlib.import_module("simpler_setup.pto_isa").read_pto_isa_pin(root / "pto_isa.pin")
+            )
+        ),
         _reported(device),
     )

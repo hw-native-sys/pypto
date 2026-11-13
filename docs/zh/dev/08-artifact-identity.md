@@ -68,10 +68,11 @@ JIT 适配器在发布前重新验证可变源码，进程内的安装输入必�
 **同一次解析中**已由其他机制证明该组件的字节**就是**该版本时，才可以设置它。安装
 自报的版本不构成这种证明，路径里带版本号同样不构成。
 
-目前只有 PTO-ISA 满足条件。`ensure_pto_isa_root()` 只在证明 checkout 干净且位于
-pin 提交之后才返回，否则从 pin 重新 clone；git 对象按内容寻址，因此"干净且
-`HEAD == pin`"的工作树与 pin 逐字节相同。再哈一遍这棵树，是在重复证明该解析已经
-确立的事实。
+目前只有 PTO-ISA 满足条件。`ensure_pto_isa_root()` 返回的干净 checkout 的 `HEAD`
+是 pin；而在临时 A2/A3 TREM/TREMS backport 生效期间，返回的是该 pin 的干净
+detached worktree，其 `HEAD` 是本地 backport commit。两种情况都经解析确认 git 能
+交代树中的每个路径；git 对象按内容寻址，因此 `HEAD` 版本标识了编译器实际使用的
+源码。再哈一遍这棵树，是在重复证明该解析已经确立的事实。
 
 该解析用 `git status --porcelain` 判定干净与否，而它不报告 checkout 所忽略的
 路径——若有构建把生成文件写进 ISA 树，它不会被惊动。因此适配器会带 `--ignored`

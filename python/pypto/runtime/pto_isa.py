@@ -106,6 +106,32 @@ def pto_isa_include_dir() -> Path:
     return Path(ensure_pto_isa_root()) / "include"
 
 
+def effective_pto_isa_revision(pin: str) -> str:
+    """Return the persistent identity of the PTO-ISA tree PyPTO compiles against.
+
+    The pin alone is not enough while the temporary TREM backport is active:
+    artifacts built against the patched headers must not be reused for the
+    pristine pin, or vice versa. The patch id keeps the two trees distinct
+    without requiring the checkout, so a cache hit still needs neither a
+    checkout nor a git status. Once the fallback is disabled or removed, the
+    identity is the pin again.
+
+    Args:
+        pin: The revision read from the runtime's ``pto_isa.pin``.
+
+    Returns:
+        ``pin`` when the fallback is disabled or its patch is missing, otherwise
+        ``<pin>+trem-patch:<sha12>``.
+    """
+    if os.environ.get(_TREM_PATCH_DISABLE_ENV) == "1":
+        return pin
+    try:
+        patch_id = hashlib.sha256(_TREM_PATCH_PATH.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return pin
+    return f"{pin}+trem-patch:{patch_id}"
+
+
 @lru_cache(maxsize=1)
 def _resolve_pinned_pto_isa_root() -> str:
     """Resolve the pin once per process (the underlying call takes a file lock)."""
@@ -179,6 +205,10 @@ def _ensure_trem_patch(pinned: str) -> str:
             "-c",
             f"user.email={_TREM_PATCH_AUTHOR[1]}",
             "commit",
+            # This machine-generated commit must not inherit an ambient
+            # commit.gpgSign: signing can fail without a key/agent (blocking
+            # every resolution) and would otherwise perturb the cache identity.
+            "--no-gpg-sign",
             "-a",
             "-m",
             f"PyPTO TREM fallback {patch_id}\n\nBase pin: {pin_revision}",
