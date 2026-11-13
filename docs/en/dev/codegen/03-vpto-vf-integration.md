@@ -33,6 +33,19 @@ under `vpto/<kernel>/`, with a manifest describing symbols, parameter types,
 effects and offsets. `kernel_config.py` attaches their paths as `vpto_sources`.
 Multiple explicit scopes produce multiple helpers linked into the same kernel.
 
+The bundle separates helper artifacts from their callers. `helpers` stores each
+artifact once; its historical `VFHelper` type also carries SIMT helpers through
+`kind="simt"`. `entry_helpers` maps every emitted InCore function name to its
+helper symbols, with sorted entry names and no duplicate symbols within a list.
+Lists follow first-use order; entries without helpers have empty lists. SIMT
+definitions and adapters are not entries. A cached SIMT artifact can appear in
+several entries' lists without duplicating its source. Each codegen invocation
+resets this relation, and previously returned bundles retain their own metadata.
+The execution driver retains this relation in the version-4 helper manifest
+and uses emitted entry names when attaching `vpto_sources` to kernel configs.
+For a mixed Group, only the AIV entry links VF helpers; the AIC entry has no
+helper dependencies. Grouped SIMT execution remains unsupported.
+
 The helper emitter reuses `PTOCodegen`'s register operation lowering. Its UB
 pointers denote planned MemRef bases; the VMI emitter adds each Tile view's
 element origin exactly once. Captures from different statically allocated
@@ -98,18 +111,49 @@ is position independent; helpers still have to obey the device-call ABI.
 | Property | Current support |
 | -------- | --------------- |
 | Target | A5, AIV, ONBOARD, PyPTO Tile memory planner |
+| Grouping | Standalone AIV or a mixed Group with one AIC function and one AIV function; the AIV may execute on one or both vector lanes |
 | Scope | Register operations and canonical hardware loops nested up to four levels |
 | Memory | Register loads/stores and indexed accesses supported by the frontend and PTOAS; mixed Tile dtypes share one UB base |
 | Aliasing | Common UB base, static view displacements and store SSA aliases |
 | Masks and scalars | Runtime masks and supported scalar captures |
 | Packaging | Source artifact relocation, helper-aware binary cache |
 
-Grouped/peer functions, CPU simulation of device objects, Bridge calls and
-general helper control flow remain outside the current executable frontend.
+Mixed Group VF captures must refer to statically planned local UB allocations.
+A cast/copy after a C2V receive can materialize such an allocation; reshaping a
+FIFO receive does not. Direct FIFO-backed captures, parameter-backed Tiles,
+ungrouped peers, broader Group layouts, grouped SIMT, CPU simulation of device
+objects, Bridge calls and general helper control flow remain unsupported.
 Memory-mode and alignment constraints are checked by the
 frontend and toolchain; supported combinations require compiler and hardware
 coverage. See the [register operation reference](../language/06-register-operations.md)
 for dtype, mask and indexed-access contracts.
+
+For example, the BF16 cast in this mixed region materializes local UB before
+the register epilogue. The scope doubles only the first 64 values; the other
+960 values retain the rounded matmul result:
+
+```python
+@pl.jit
+def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
+              b: pl.Tensor[[32, 32], pl.BF16],
+              out: pl.Out[pl.Tensor[[32, 32], pl.BF16]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        product = pl.matmul(pl.load(a, [0, 0], [32, 32]),
+                            pl.load(b, [0, 0], [32, 32]))
+        local = pl.cast(product, pl.BF16, mode="rint")
+        flat = pl.reshape(pl.tile.move(local, target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            value = pl.reg.load(flat, lanes=64)
+            flat = pl.reg.store(flat, value=pl.reg.add(value, value))
+        out = pl.store(pl.reshape(flat, [32, 32]), [0, 0], out)
+    return out
+```
+
+`tests/st/runtime/vpto/test_mixed_reg_onboard.py` covers this path and a split-AIV
+variant with two helpers. It checks full-output numerics, untouched regions,
+AIC symbol isolation, AIV linking, cache hits, helper-content invalidation and
+artifact relocation. Direct FIFO capture requires separate storage-lifetime
+and completion validation and is not enabled by this support.
 
 ## Required hardware loops
 

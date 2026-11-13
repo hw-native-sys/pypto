@@ -116,6 +116,7 @@ def test_gm_bundle_preserves_native_abi_and_physical_stride():
     bundle = codegen.PTOCodegen().generate_bundle(make_copy(), emit_source_loc=False)
     assert len(bundle.helpers) == 1
     helper = bundle.helpers[0]
+    assert bundle.entry_helpers == {"kernel": [helper.symbol]}
     assert helper.kind == "simt"
     assert helper.parameter_types == ["!pto.ptr<f32, gm>", "!pto.ptr<f32, gm>", "i32"]
     assert helper.parameter_effects == ["read", "readwrite", "none"]
@@ -163,11 +164,77 @@ def test_repeated_launches_share_one_helper_and_preserve_results():
     generator = codegen.PTOCodegen()
     bundle = generator.generate_bundle(program, emit_source_loc=False)
     assert len(bundle.helpers) == 1
+    assert bundle.entry_helpers == {"kernel": [bundle.helpers[0].symbol]}
     assert bundle.caller_source.count("func.call @" + bundle.helpers[0].adapter_symbol) == 2
     combined = generator.generate(program, emit_source_loc=False)
     assert combined.count("pto.simt_launch @") == 2
     assert combined.count("attributes {pto.simt_entry,") == 1
     assert "__pypto_simt_" not in combined
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_multi_entry_bundle_records_simt_ownership_on_cache_hits(shared):
+    # Low-level bundle metadata must cover every entry even though the
+    # executable Python backend still rejects grouped SIMT execution.
+    program = make_copy(repeats=2)
+    kernel = program.get_function("kernel")
+    assert kernel is not None and isinstance(kernel.body, ir.SeqStmts)
+    launch = kernel.body.stmts[0]
+    assert isinstance(launch, ir.SimtLaunchStmt)
+    helper = program.get_function(launch.callee.name)
+    assert helper is not None
+    other = ir.Function(
+        "other_copy",
+        list(zip(helper.params, helper.param_directions, strict=True)),
+        helper.return_types,
+        helper.body,
+        SPAN,
+        ir.FunctionType.SIMT,
+        attrs=helper.attrs,
+    )
+    peer_launch = ir.SimtLaunchStmt(
+        launch.callee if shared else ir.GlobalVar(other.name),
+        launch.block_dims,
+        launch.args,
+        [ir.Var(f"peer_result_{i}", result.type, SPAN) for i, result in enumerate(launch.results)],
+        launch.result_param_indices,
+        SPAN,
+    )
+    peer = ir.Function(
+        "peer",
+        list(zip(kernel.params, kernel.param_directions, strict=True)),
+        [],
+        ir.SeqStmts([peer_launch, launch], SPAN),
+        SPAN,
+        ir.FunctionType.AIV,
+    )
+    cube = ir.Function("cube", [], [], ir.SeqStmts([], SPAN), SPAN, ir.FunctionType.AIC)
+    functions = [*program.functions.values(), other, peer, cube]
+    multi = ir.Program(functions, "MultiEntry", SPAN)
+    generator = codegen.PTOCodegen()
+    bundle = generator.generate_bundle(multi, emit_source_loc=False)
+    assert len(bundle.helpers) == (1 if shared else 2)
+    expected = {
+        "cube": [],
+        "kernel": [bundle.helpers[0].symbol],
+        # For distinct helpers, this entry uses them in the opposite order to
+        # bundle emission. Ownership follows local use order, not artifact order.
+        "peer": [bundle.helpers[0].symbol]
+        if shared
+        else [bundle.helpers[1].symbol, bundle.helpers[0].symbol],
+    }
+    assert bundle.entry_helpers == expected
+    assert list(bundle.entry_helpers) == sorted(expected)
+    # Helper definitions (including the unused one) are not caller entries.
+    # A cache hit creates another dependency, never a duplicate artifact.
+    for artifact in bundle.helpers:
+        assert bundle.caller_source.count(f"func.func private @{artifact.symbol}(") == 1
+        assert artifact.source.count(f"func.func @{artifact.symbol}(") == 1
+    generator.generate(multi, emit_source_loc=False)
+    again = generator.generate_bundle(multi, emit_source_loc=False)
+    assert again.entry_helpers == bundle.entry_helpers == expected
+    assert again.caller_source == bundle.caller_source
+    assert [artifact.source for artifact in again.helpers] == [artifact.source for artifact in bundle.helpers]
 
 
 @pytest.mark.parametrize(
@@ -203,6 +270,19 @@ def test_unused_simt_definition_does_not_select_vpto():
 def test_unsupported_unsigned_arithmetic_fails_before_native_compilation():
     with pytest.raises(ValueError, match="SIMT.*currently supports"):
         codegen.PTOCodegen().generate_bundle(make_copy(dtype=DataType.UINT32))
+
+
+def test_grouped_simt_execution_remains_rejected():
+    program = make_copy()
+    cube = ir.Function("cube", [], [], ir.SeqStmts([], SPAN), SPAN, ir.FunctionType.AIC)
+    with pytest.raises(ValueError, match="SIMT execution does not yet support grouped functions"):
+        pto_backend._generate_pto_bundle(
+            ir.Program([*program.functions.values(), cube], "MixedSimt", SPAN),
+            skip_ptoas=False,
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            emit_source_loc=False,
+            is_group=True,
+        )
 
 
 def scalar_program(body, dtype="INT32"):

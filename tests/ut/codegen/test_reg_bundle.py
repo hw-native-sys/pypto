@@ -74,6 +74,7 @@ def test_bundle_preserves_call_order_storage_and_diagnostic_output(tmp_path):
     compile_vf_bundle(bundle, tmp_path)
     assert len(bundle.helpers) == 1
     helper = bundle.helpers[0]
+    assert bundle.entry_helpers == {"register_kernel": [helper.symbol]}
     assert helper.parameter_types == ["!pto.ptr<f32, ub>"]
     assert helper.parameter_effects == ["read", "readwrite"]
     assert all(t.startswith("!pto.tile_buf<") for t in helper.caller_parameter_types)
@@ -102,6 +103,36 @@ def test_bundle_preserves_call_order_storage_and_diagnostic_output(tmp_path):
     again = generator.generate_bundle(program, emit_source_loc=False)
     assert again.caller_source == caller
     assert again.helpers[0].source == helper.source
+    assert again.entry_helpers == bundle.entry_helpers
+
+
+def test_bundle_ownership_resets_after_other_programs_and_failed_generation():
+    generator = codegen.PTOCodegen()
+    program = build_kernel()
+    bundle = generator.generate_bundle(program, emit_source_loc=False)
+    expected = {"register_kernel": [bundle.helpers[0].symbol]}
+    assert bundle.entry_helpers == expected
+    entries = [
+        ir.Function(name, [], [], ir.SeqStmts([], SPAN), SPAN, type=function_type)
+        for name, function_type in (
+            ("cube", ir.FunctionType.AIC),
+            ("vector", ir.FunctionType.AIV),
+            ("incore", ir.FunctionType.InCore),
+        )
+    ]
+    empty = generator.generate_bundle(ir.Program(entries, "NoHelpers", SPAN))
+    assert empty.helpers == []
+    assert empty.entry_helpers == {"cube": [], "incore": [], "vector": []}
+
+    main = program.get_function("register_kernel")
+    assert main is not None
+    with pytest.raises(ValueError, match="grouped/peer functions"):
+        generator.generate_bundle(ir.Program([*entries, main], "UnsupportedPeers", SPAN))
+    # A failed invocation and diagnostic generation must not leak entries or
+    # mutate a bundle already returned to the caller.
+    generator.generate(program, emit_source_loc=False)
+    again = generator.generate_bundle(program, emit_source_loc=False)
+    assert again.entry_helpers == bundle.entry_helpers == expected
 
 
 @pytest.mark.ptoas_compile
@@ -409,8 +440,8 @@ def test_execution_driver_rejects_unsupported_planners(planner):
         _generate_pto_bundle(build_kernel(), skip_ptoas=False, memory_planner=planner, emit_source_loc=False)
 
 
-def test_execution_driver_rejects_grouped_function():
-    with pytest.raises(ValueError, match="grouped functions"):
+def test_execution_driver_rejects_group_without_aic():
+    with pytest.raises(ValueError, match="exactly one AIC and one AIV"):
         _generate_pto_bundle(
             build_kernel(),
             skip_ptoas=False,
@@ -418,6 +449,90 @@ def test_execution_driver_rejects_grouped_function():
             emit_source_loc=False,
             is_group=True,
         )
+
+
+def mixed_local_program():
+    vector = build_kernel().get_function("register_kernel")
+    assert vector is not None
+    cube = ir.Function("cube", [], [], ir.SeqStmts([], SPAN), SPAN, type=ir.FunctionType.AIC)
+    return ir.Program([cube, vector], "MixedLocal", SPAN)
+
+
+@pytest.mark.ptoas_compile
+def test_mixed_local_bundle_compiles_and_owns_helpers_only_on_aiv(tmp_path):
+    program = mixed_local_program()
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    compile_vf_bundle(bundle, tmp_path)
+    expected = {"cube": [], "register_kernel": [bundle.helpers[0].symbol]}
+    assert bundle.entry_helpers == expected
+    caller, helpers, owners = _generate_pto_bundle(
+        program,
+        skip_ptoas=False,
+        memory_planner=passes.MemoryPlanner.PYPTO,
+        emit_source_loc=False,
+        is_group=True,
+    )
+    assert caller == bundle.caller_source
+    assert [h.symbol for h in helpers] == expected["register_kernel"]
+    assert owners == expected
+    with pytest.raises(ValueError, match="ungrouped peer functions"):
+        _generate_pto_bundle(
+            program,
+            skip_ptoas=False,
+            memory_planner=passes.MemoryPlanner.PYPTO,
+            emit_source_loc=False,
+        )
+
+
+def test_group_packaging_routes_helpers_by_entry_not_group_name(tmp_path, monkeypatch):
+    entries = list(mixed_local_program().functions.values())
+    group = ir.Function(
+        "mixed_group",
+        [],
+        [],
+        ir.SeqStmts([ir.EvalStmt(ir.Call(ir.GlobalVar(f.name), [], SPAN), SPAN) for f in entries], SPAN),
+        SPAN,
+        type=ir.FunctionType.Group,
+    )
+    main = ir.Function(
+        "main",
+        [],
+        [],
+        ir.EvalStmt(ir.Call(ir.GlobalVar(group.name), [], SPAN), SPAN),
+        SPAN,
+        type=ir.FunctionType.Orchestration,
+    )
+    program = ir.Program([*entries, group, main], "Mixed", SPAN)
+    # build_kernel is a direct-codegen fixture with explicit Tile view types,
+    # rather than a frontend program satisfying every generic pass property.
+    with passes.PassContext([]):
+        program = passes.materialize_runtime_scopes()(program)
+    captured = {}
+    original = pto_backend._generate_config_file
+
+    def record_config(*args, **kwargs):
+        captured.update(kwargs["func_name_to_vpto_sources"])
+        return original(*args, **kwargs)
+
+    # Exercise production partitioning/manifest/config routing; native compiler
+    # and device correctness are covered separately by the mixed JIT acceptance.
+    monkeypatch.setattr(pto_backend, "_generate_config_file", record_config)
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *args, **kwargs: "")
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: None)
+    files = pto_backend.generate(program, str(tmp_path))
+    manifest = json.loads(files["vpto/mixed_group/manifest.json"])
+    assert manifest["schema_version"] == 4
+    symbols = manifest["entry_helpers"]["register_kernel"]
+    assert len(symbols) == 1
+    path = f"vpto/mixed_group/{symbols[0]}.pto"
+    assert captured == {"cube": [], "register_kernel": [path]}
+    assert manifest["entry_helpers"]["cube"] == []
+    assert path in files and "pto.vmi.vadd" in files[path]
+    assert "kernels/aic/cube.cpp" in files and "kernels/aiv/register_kernel.cpp" in files
+    config = files["kernel_config.py"]
+    assert config.count('"vpto_sources"') == 1
+    assert symbols[0] in config
 
 
 def test_bundle_rejects_peer_functions():
@@ -516,6 +631,7 @@ def test_multiple_explicit_scopes_have_distinct_symbols_and_order(tmp_path):
     assert len(bundle.helpers) == 2
     first, second = bundle.helpers
     assert first.symbol != second.symbol
+    assert bundle.entry_helpers == {"two_scopes": [first.symbol, second.symbol]}
     assert bundle.caller_source.index(f"func.call @{first.adapter_symbol}") < bundle.caller_source.index(
         f"func.call @{second.adapter_symbol}"
     )
@@ -727,12 +843,14 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
         is_group=False,
         stage_record=pto_backend.StageRecord(name="test", start=0),
         helpers=tuple(bundle.helpers),
+        entry_helpers=bundle.entry_helpers,
     )
     monkeypatch.setattr(pto_backend, "_emit_single_function_output", lambda *args: None)
     result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
     assert result.error is None
     manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
+    assert manifest["entry_helpers"] == bundle.entry_helpers
     assert manifest["effect_scope"] == "whole-tile"
     assert manifest["synchronization"] == "ptoas-insert-sync"
     entry = manifest["helpers"][0]
@@ -757,6 +875,7 @@ def test_execution_rejects_old_ptoas_before_emitting_tile_adapter(tmp_path, monk
         is_group=False,
         stage_record=pto_backend.StageRecord(name="test", start=0),
         helpers=tuple(bundle.helpers),
+        entry_helpers=bundle.entry_helpers,
     )
     monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: "old-ptoas")
 

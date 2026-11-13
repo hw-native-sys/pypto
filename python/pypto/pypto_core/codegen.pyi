@@ -44,6 +44,13 @@ class PTOCodegenBundle:
     def caller_source(self) -> str: ...
     @property
     def helpers(self) -> list[VFHelper]: ...
+    @property
+    def entry_helpers(self) -> dict[str, list[str]]:
+        """Sorted emitted InCore entries mapped to unique helper symbols in first-use order.
+
+        Entries without helpers have empty lists. Shared VF/SIMT artifacts are
+        stored once in ``helpers`` and referenced by symbol from each caller.
+        """
 
 class PTOCodegen:
     """Code generator that transforms PyPTO IR to PTO assembly (.pto format).

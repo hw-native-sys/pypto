@@ -87,7 +87,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
                  fs_.current_function->func_type_ == ir::FunctionType::AIV,
              scope->span_)
       << "VF execution requires an A5 AIV function";
-  CHECK_SPAN(single_vf_function_, scope->span_) << "VF execution does not yet support grouped/peer functions";
+  CHECK_SPAN(supported_vf_entries_, scope->span_)
+      << "VF execution does not support grouped/peer functions other than one AIC/AIV pair";
   CHECK_SPAN(emit_tile_addr_ && !fs_.buffer_ir, scope->span_)
       << "VF execution requires the PyPTO Tile memory planner";
   VFOperands operands;
@@ -162,6 +163,10 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
         << "VF shared-base captures do not support parameter-backed Tiles or their views";
     CHECK_SPAN(!operands.var_defs.count(root.get()), call->span_)
         << "VF Tile storage must be defined outside RegScope";
+    // FIFO receives and their views have runtime bases. Diagnose this storage
+    // limitation before memory-effect analysis reports an unknown access range.
+    CHECK_SPAN(tile->memref_.has_value(), call->span_)
+        << "VF captures require statically planned local UB; FIFO-backed Tiles are not supported";
     // Check every access, including later uses of an already captured Tile.
     // Loop offsets need not be static. Preserve capture provenance, but leave
     // loop access ranges and synchronization to the caller and PTOAS respectively.
@@ -298,6 +303,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     const auto ctx = GetCommCtxSSAFor(root.get());
     if (!ctx.empty()) RegisterCommCtxFor(result, ctx);
   }
+  RecordEntryHelperUse(artifact.symbol);
   vf_helpers_.push_back(std::move(artifact));
 }
 

@@ -129,7 +129,7 @@ class TestMxMatmulCodegen:
         with pytest.raises(RuntimeError, match="missing native FP4 capability"):
             generate_bundle(False)
         monkeypatch.setattr(pto_backend, "check_native_fp4_mx_support", lambda: None)
-        source, _ = generate_bundle(False)
+        source, _, _ = generate_bundle(False)
         assert "pto.tmatmul.mx.acc" in source
         if find_ptoas_binary() is not None:
             cpp = pto_backend._compile_pto_module(source, "native_fp4", str(tmp_path))

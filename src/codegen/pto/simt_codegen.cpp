@@ -281,6 +281,8 @@ void PTOCodegen::VisitStmt_(const ir::SimtLaunchStmtPtr& launch) {
       vf_helpers_.push_back(std::move(artifact));
     }
     const auto& emitted = vf_helpers_[existing->second];
+    // Artifact reuse across entries must still record every caller's dependency.
+    RecordEntryHelperUse(emitted.symbol);
     Emit("func.call @" + emitted.adapter_symbol + "(" + Join(arguments) + ") : (" +
          Join(emitted.caller_parameter_types) + ") -> ()");
   } else {

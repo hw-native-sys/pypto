@@ -51,7 +51,9 @@ void BindCodegen(nb::module_& m) {
       .def_ro("capture_byte_offsets", &VFHelper::capture_byte_offsets);
   nb::class_<PTOCodegenBundle>(codegen_module, "PTOCodegenBundle")
       .def_ro("caller_source", &PTOCodegenBundle::caller_source)
-      .def_ro("helpers", &PTOCodegenBundle::helpers);
+      .def_ro("helpers", &PTOCodegenBundle::helpers)
+      .def_ro("entry_helpers", &PTOCodegenBundle::entry_helpers,
+              "Every emitted InCore entry mapped to helper symbols in first-use order, without duplicates");
 
   // PTOCodegen - PTO assembly code generator
   nb::class_<PTOCodegen>(

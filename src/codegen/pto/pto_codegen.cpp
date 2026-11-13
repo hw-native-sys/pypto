@@ -1003,11 +1003,24 @@ PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit
                                             bool emit_source_loc) {
   separate_vf_ = true;
   auto caller = GenerateImpl(program, emit_tile_addr, emit_source_loc);
-  return {std::move(caller), vf_helpers_};
+  return {std::move(caller), vf_helpers_, entry_helpers_};
+}
+
+void PTOCodegen::RecordEntryHelperUse(const std::string& symbol) {
+  INTERNAL_CHECK(fs_.current_function) << "Internal error: helper use requires a current entry";
+  const auto& function = fs_.current_function;
+  const auto entry = entry_helpers_.find(function->name_);
+  INTERNAL_CHECK_SPAN(entry != entry_helpers_.end(), function->span_)
+      << "Internal error: helper use requires an emitted InCore entry: " << function->name_;
+  if (entry_helper_uses_.emplace(function->name_, symbol).second) {
+    entry->second.push_back(symbol);
+  }
 }
 
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   vf_helpers_.clear();
+  entry_helpers_.clear();
+  entry_helper_uses_.clear();
   simt_functions_.clear();
   simt_effects_.clear();
   simt_artifacts_.clear();
@@ -1015,9 +1028,15 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
   reg_addresses_.clear();
   reg_tuple_values_.clear();
   inside_reg_scope_ = false;
-  single_vf_function_ =
-      std::count_if(program->functions_.begin(), program->functions_.end(),
-                    [](const auto& entry) { return ir::IsInCoreType(entry.second->func_type_); }) == 1;
+  size_t incore_count = 0, aic_count = 0, aiv_count = 0;
+  for (const auto& [_, function] : program->functions_) {
+    incore_count += ir::IsInCoreType(function->func_type_);
+    aic_count += function->func_type_ == ir::FunctionType::AIC;
+    aiv_count += function->func_type_ == ir::FunctionType::AIV;
+  }
+  // A mixed Group has one AIC function and one AIV function, even when both
+  // vector lanes execute the AIV. Broader multi-entry VF execution is unqualified.
+  supported_vf_entries_ = incore_count == 1 || (incore_count == 2 && aic_count == 1 && aiv_count == 1);
   VerifyVFInfrastructureCodegenPreconditions(program);
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
@@ -1058,6 +1077,9 @@ std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_a
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
+    // Keep empty entries as well, so consumers can distinguish an emitted
+    // function with no helper dependencies from a missing ownership record.
+    entry_helpers_.try_emplace(func->name_);
     GenerateFunction(func);
   }
   if (!separate_vf_) {

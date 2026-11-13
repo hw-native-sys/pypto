@@ -31,6 +31,17 @@ flowchart TD
 effects 与偏移的 manifest。`kernel_config.py` 通过 `vpto_sources` 关联这些路径。
 多个显式作用域生成多个 helper，最终链接进同一个 kernel。
 
+Bundle 将 helper 产物与调用入口分开记录。`helpers` 中每个产物只保存一次；
+沿用的 `VFHelper` 类型也通过 `kind="simt"` 承载 SIMT helper。
+`entry_helpers` 将每个已生成的 InCore 函数名映射到它使用的 helper 符号列表，
+入口名称按字典序排列，同一列表中的符号不重复，并按首次使用顺序排列。
+没有 helper 的入口对应空列表；SIMT 定义和 adapter 不属于入口。
+复用的 SIMT 产物可以出现在多个入口的列表中，无需重复生成源码。
+每次代码生成都会重置该关系，已返回的 bundle 保留各自的元数据。
+执行驱动将该关系保存在第 4 版 helper manifest 中，并按生成的入口名称向
+kernel 配置添加 `vpto_sources`。对于 mixed Group，只有 AIV 入口链接 VF helper，
+AIC 入口没有 helper 依赖。Grouped SIMT 执行仍不受支持。
+
 Helper 发射复用 `PTOCodegen` 的寄存器操作 lowering。UB 指针对应内存规划得到的
 MemRef 基址；VMI 发射器为每次访问加上 Tile view 的元素起点，且只加一次。
 不同静态分配 view 的捕获项通过一个公共 UB 基址和常量位移重建，使独立编译后的
@@ -90,15 +101,44 @@ object。LLVM 导出与 Bisheng 编译分步进行，以便链接前检查 helpe
 | 属性 | 当前支持 |
 | ---- | -------- |
 | 目标 | A5、AIV、ONBOARD、PyPTO Tile 内存规划器 |
+| 分组 | 独立 AIV，或包含一个 AIC 函数和一个 AIV 函数的 mixed Group；同一个 AIV 函数可以在一个或两个 vector lane 上执行 |
 | 作用域 | 寄存器操作和最多四层嵌套的规范硬件循环 |
 | 内存 | 前端与 PTOAS 支持的寄存器读写和索引访存；不同 Tile dtype 共用 UB 基址 |
 | 别名 | 公共 UB 基址、静态 view 位移、store SSA 别名 |
 | Mask 与标量 | 运行时 mask 与受支持的标量捕获 |
 | 打包 | 源码 artifact 迁移、包含 helper 标识的二进制缓存 |
 
-Grouped/peer 函数、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流
-仍不在当前可执行前端的支持范围内。访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
+Mixed Group 的 VF 捕获项必须指向静态规划的局部 UB 分配。
+C2V 接收之后的 cast/copy 可以物化这样的分配；仅对 FIFO 接收结果做 reshape 并不会。
+直接捕获 FIFO 缓冲区、参数支持的 Tile、未分组 peer、更广泛的 Group 组合、
+grouped SIMT、设备对象的 CPU 模拟执行、Bridge 调用及一般 helper 控制流仍不受支持。
+访存模式与对齐约束由前端和工具链检查，支持的组合需要编译与硬件测试覆盖。
 具体 dtype、mask 与索引访存契约见[寄存器操作参考](../language/06-register-operations.md)。
+
+例如，下面 mixed 区域中的 BF16 cast 会先物化局部 UB，再执行寄存器尾处理。
+该作用域只将前 64 个值乘以 2，其余 960 个值保留舍入后的 matmul 结果：
+
+```python
+@pl.jit
+def mixed_reg(a: pl.Tensor[[32, 32], pl.BF16],
+              b: pl.Tensor[[32, 32], pl.BF16],
+              out: pl.Out[pl.Tensor[[32, 32], pl.BF16]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        product = pl.matmul(pl.load(a, [0, 0], [32, 32]),
+                            pl.load(b, [0, 0], [32, 32]))
+        local = pl.cast(product, pl.BF16, mode="rint")
+        flat = pl.reshape(pl.tile.move(local, target_memory=pl.MemorySpace.Vec), [1024])
+        with pl.reg_scope():
+            value = pl.reg.load(flat, lanes=64)
+            flat = pl.reg.store(flat, value=pl.reg.add(value, value))
+        out = pl.store(pl.reshape(flat, [32, 32]), [0, 0], out)
+    return out
+```
+
+`tests/st/runtime/vpto/test_mixed_reg_onboard.py` 覆盖这条路径，以及包含两个 helper
+的 split-AIV 变体。测试检查完整输出数值、未修改区域、AIC 符号隔离、AIV 链接、
+缓存命中、helper 内容变更失效和产物迁移。直接 FIFO 捕获还需要单独验证存储生命周期
+和操作完成条件，本次支持范围不包含它。
 
 ## Required hardware loops
 
