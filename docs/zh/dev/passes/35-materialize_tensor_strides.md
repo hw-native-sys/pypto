@@ -4,6 +4,10 @@
 
 > **状态**：本 Pass 已注册（`passes.materialize_tensor_strides()`）、有单测覆盖，并自 RFC #1300 P6 起接入默认 tile/PTO pipeline，位置在 `CanonicalizeIOOrder` 与 `InitMemRef` 之间。
 
+默认流水线中的 MX 视图经 [LegalizeMxScaleTensorViews](17-block_mx_scale_tensor_views.md)
+处理后保持逻辑 rank-2，stride 为 `[cols, 1]`，物理打包由 PTOAS 完成。
+该 pass 仍接受显式旧版分块的 rank-5 MX 视图，但不会在默认流水线中将其输出给 PTOAS v0.74。
+
 ## 概述
 
 PyPTO IR 上 `TensorType.tensor_view_` 当前可以处于两种等价形态：

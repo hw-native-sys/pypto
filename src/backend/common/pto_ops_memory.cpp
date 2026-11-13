@@ -167,10 +167,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
 
-  // PTOAS needs the MX layout on tload in addition to the source TensorView.
-  // BlockMxScaleTensorViews has already rewritten MX TensorTypes / load windows into
-  // packed rank-5 coordinates, so the generic partition_view path applies —
-  // there is no hand-rolled EmitMxPhysicalView.
+  // PTOAS v0.74 owns MX packing. Both the source view and load window are
+  // logical rank-2; retaining the MX tag selects the physical scale layout.
   std::string pto_layout;
   if (tensor_type->tensor_view_.has_value()) {
     if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ) {
@@ -181,16 +179,18 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   }
   const bool is_mx_load = !pto_layout.empty();
   if (is_mx_load) {
-    INTERNAL_CHECK_SPAN(ir::tensor_view_semantics::IsBlockedMxShape(tensor_type->shape_), op->span_)
-        << "Internal error: MX tile.load reached codegen with an unblocked logical shape — "
-        << "BlockMxScaleTensorViews did not run or missed it";
+    INTERNAL_CHECK_SPAN(
+        ir::tensor_view_semantics::IsLogicalMxShape(tensor_type->shape_, tensor_type->tensor_view_->layout),
+        op->span_)
+        << "Internal error: MX tile.load reached codegen without a canonical logical rank-2 shape — "
+        << "use LegalizeMxScaleTensorViews for PTOAS v0.74";
   }
 
   // RFC #1300 P7: the IR's offsets / shapes / valid_shape are already in
   // canonical coordinates (matching the source TensorType's shape). There is
   // no implicit dn_swap here — earlier passes ensure all coordinate systems
-  // match before codegen. For MX, BlockMxScaleTensorViews sets args[3] to the
-  // fractal-aligned blocked shapes window when logical valid_shape was
+  // match before codegen. For MX, LegalizeMxScaleTensorViews sets args[3] to the
+  // fractal-aligned logical shapes window when logical valid_shape was
   // narrowed, so partition sizes stay SFractal-safe.
   std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
@@ -386,30 +386,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
-  } else if (tensor_type->tensor_view_.has_value() &&
-             ir::IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
-    // MX scale tiles are logically [M,G] / [G,N], while their GM destination
-    // is the rank-5 SFractal view made explicit by BlockMxScaleTensorViews.
-    // A DMA store addresses that physical box directly. Each source scale
-    // tile must cover complete 16x2 boxes, so its logical valid extents map
-    // one-to-one onto a rank-5 partition with the same byte count.
-    auto height = As<ir::ConstInt>(valid_shape[0]);
-    auto width = As<ir::ConstInt>(valid_shape[1]);
-    INTERNAL_CHECK_SPAN(height && width && height->value_ > 0 && width->value_ > 0, op->span_)
-        << "MX tile.store requires static positive scale-tile valid dimensions";
-    const bool is_a = tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ;
-    const int64_t row_extent = is_a ? height->value_ : width->value_;
-    const int64_t group_extent = is_a ? width->value_ : height->value_;
-    INTERNAL_CHECK_SPAN(row_extent % 16 == 0 && group_extent % 2 == 0, op->span_)
-        << "MX tile.store requires complete 16x2 scale boxes";
-    const std::vector<std::string> physical_shape = {"1", std::to_string(row_extent / 16),
-                                                     std::to_string(group_extent / 2), "16", "2"};
-    partition_type = MakePartitionTensorViewType(physical_shape, dtype_str);
-    partition_view =
-        EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
-                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen), physical_shape, codegen);
   } else {
-    // Standard 1D/2D path
+    // Logical 1D/2D path, including MX views whose packing PTOAS owns.
     std::string height_dim = "?", width_dim = "?";
     if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
     if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
@@ -1141,8 +1119,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     // The result SSA name (auto-allocated by VisitStmt_(AssignStmt) for the
     // backend-dispatched RHS Call) doubles as the tensor_view SSA name —
     // register it in tensor_to_view so ordinary tile.load lookups resolve.
-    // ND→MX aliases are blocked to packed rank-5 by BlockMxScaleTensorViews before
-    // codegen, so they share this ordinary make_tensor_view path.
+    // ND→MX aliases retain logical rank-2 coordinates for PTOAS-owned packing,
+    // so they share this ordinary make_tensor_view path.
     codegen.RegisterTensorView(lhs_var, result_buf);
     codegen.RegisterVarToMlir(lhs_var, result_buf);
 

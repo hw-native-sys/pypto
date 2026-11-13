@@ -2,6 +2,16 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
+PyPTO requires PTOAS v0.74 or newer. For `div(high_precision=True)`, both
+Tile and Buffer codegen emit `#pto<div_precision diff_compensation>`, the
+renamed division algorithm. The Python API is unchanged; `log` and `recip`
+retain their `high_precision` attributes.
+
+MX tensor views retain logical rank-2 shapes, strides, and partition offsets
+through [LegalizeMxScaleTensorViews](../passes/17-block_mx_scale_tensor_views.md).
+PTOAS v0.74 constructs their packed physical descriptors from `mx_a_zz` /
+`mx_b_nn`; these views must not be relabeled as ordinary ND memory.
+
 ## Design Principle: Strict 1-to-1 Mapping
 
 Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each IR node maps directly to its corresponding output construct — no optimization, analysis, or indirection transformation should occur in the codegen layer.

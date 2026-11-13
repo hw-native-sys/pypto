@@ -2,6 +2,15 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
+PyPTO 要求 PTOAS v0.74 或更新版本。对于 `div(high_precision=True)`，
+Tile 和 Buffer 代码生成均输出 `#pto<div_precision diff_compensation>`，
+对应重命名后的除法算法。Python API 保持不变；`log` 和 `recip`
+仍使用 `high_precision` 属性。
+
+MX tensor view 通过 [LegalizeMxScaleTensorViews](../passes/17-block_mx_scale_tensor_views.md)
+保留逻辑 rank-2 形状、stride 和分区偏移。PTOAS v0.74 根据
+`mx_a_zz` / `mx_b_nn` 构造物理打包描述符，不能将这些视图改标为普通 ND 内存。
+
 ## 设计原则：严格的 1-to-1 映射
 
 代码生成必须是从 IR 到生成代码的**严格 1-to-1 转换**。每个 IR 节点直接映射到对应的输出代码结构——代码生成层不应执行优化、分析或间接转换。

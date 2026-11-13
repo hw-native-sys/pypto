@@ -86,15 +86,17 @@ void CheckNzViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& sh
       << "]), got rank " << shape.size() << " — BlockNzTensorViews did not run or missed it";
 }
 
-/// Assert that an MX scale view has already been rewritten into its packed
-/// rank-5 form. Same rationale as ``CheckNzViewIsBlocked``.
-void CheckMxViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& shape, const Span& span) {
+/// Accept logical MX views for PTOAS v0.74 and explicit legacy blocked views.
+void CheckMxViewIsCanonical(const TensorView& view, const std::vector<ExprPtr>& shape, const Span& span) {
   if (!IsMxTensorLayout(view.layout)) return;
-  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsBlockedMxShape(shape), span)
-      << "Internal error: MaterializeTensorStrides found an MX tensor whose shape is not blocked "
-      << "(expected static [1, positive block count, positive group count, "
+  INTERNAL_CHECK_SPAN(tensor_view_semantics::IsLogicalMxShape(shape, view.layout) ||
+                          tensor_view_semantics::IsBlockedMxShape(shape),
+                      span)
+      << "Internal error: MaterializeTensorStrides found an MX tensor whose shape is not canonical "
+      << "(expected an aligned logical rank-2 shape or static [1, positive block count, positive group "
+         "count, "
       << tile_view_semantics::kMXSFractalRows << ", " << tile_view_semantics::kMXSFractalCols
-      << "]) — BlockMxScaleTensorViews did not run or missed it";
+      << "]) — LegalizeMxScaleTensorViews did not run or missed it";
 }
 
 /// Rewrite a TensorType (or recursively a TupleType containing TensorTypes)
@@ -119,7 +121,7 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
     // ordering: an unblocked NZ view is invalid whether or not its stride is
     // explicit.
     CheckNzViewIsBlocked(view, dist_type->shape_, dist_type->dtype_, span);
-    CheckMxViewIsBlocked(view, dist_type->shape_, span);
+    CheckMxViewIsCanonical(view, dist_type->shape_, span);
     if (!view.stride.empty()) {
       return type;
     }
@@ -138,7 +140,7 @@ TypePtr MaterializeType(const TypePtr& type, const Span& span) {
     }
     const TensorView& view = *tensor_type->tensor_view_;
     CheckNzViewIsBlocked(view, tensor_type->shape_, tensor_type->dtype_, span);
-    CheckMxViewIsBlocked(view, tensor_type->shape_, span);
+    CheckMxViewIsCanonical(view, tensor_type->shape_, span);
     if (!view.stride.empty()) {
       // Already explicit.
       return type;

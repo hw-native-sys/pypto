@@ -1651,7 +1651,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         continue;
       }
       if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
-      // BlockMxScaleTensorViews rewrites MX TensorTypes into packed rank-5 form;
+      // LegalizeMxScaleTensorViews keeps MX TensorTypes in logical rank-2 form;
       // bind a parameter view like NZ so EmitMakeTensorViews / tile.load share
       // the same make_tensor_view (no hand-rolled EmitMxPhysicalView).
       RegisterBasePtr(var, GetVarName(var));

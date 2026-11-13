@@ -464,7 +464,7 @@ class TestMxScaleMemSpaces:
         )
         assert isinstance(call.type, ir.TileType)
 
-    def test_mx_load_pto_codegen_uses_packed_source_view(self):
+    def test_mx_load_pto_codegen_uses_logical_source_view(self):
         span = ir.Span.unknown()
         tensor_type = ir.TensorType(
             _const_shape(16, 2),
@@ -487,18 +487,18 @@ class TestMxScaleMemSpaces:
             builder.return_stmt(scale)
 
         program = ir.Program([function.get_result()], "mx_load_codegen", span)
-        program = passes.block_mx_scale_tensor_views()(program)
+        program = passes.legalize_mx_scale_tensor_views()(program)
         program = passes.materialize_tensor_strides()(program)
         pto = codegen.PTOCodegen().generate(program)
-        # The ordinary tensor-view path emits the packed rank-5 descriptor after
-        # BlockMxScaleTensorViews and MaterializeTensorStrides establish its contract.
+        # The ordinary tensor-view path emits logical rank-2 descriptors; PTOAS
+        # translates their MX layout into physical packed addressing.
         assert pto.count("pto.make_tensor_view") == 1
         assert "pto.make_tensor_view %arg0" in pto
         assert "mx5d_view" not in pto
-        # Logical [16, 2] MX_A_ZZ -> physical [1, 16/16, 2/2, 16, 2]
-        assert "shape = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in pto
-        assert "strides = [%c32_index, %c32_index, %c32_index, %c2_index, %c1_index]" in pto
-        assert "!pto.tensor_view<?x?x?x?x?x!pto.f8E8M0>" in pto
+        # Preserve the logical [16, 2] MX_A_ZZ shape and contiguous logical strides.
+        assert "shape = [%c16_index, %c2_index]" in pto
+        assert "strides = [%c2_index, %c1_index]" in pto
+        assert "!pto.tensor_view<?x?x!pto.f8E8M0>" in pto
         assert "pto.tload" in pto
         assert "{layout = #pto.layout<mx_a_zz>}" in pto
 

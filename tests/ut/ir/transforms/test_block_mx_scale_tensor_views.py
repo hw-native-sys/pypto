@@ -36,9 +36,11 @@ _PREFIX = [
 ]
 
 
-def _run(program: ir.Program) -> ir.Program:
+def _run(program: ir.Program, *, logical_views: bool = False) -> ir.Program:
     """Run the default pipeline prefix through BlockMxScaleTensorViews."""
     for factory in _PREFIX:
+        if logical_views and factory is passes.block_mx_scale_tensor_views:
+            factory = passes.legalize_mx_scale_tensor_views
         program = factory()(program)
     return program
 
@@ -383,6 +385,46 @@ def test_submit_return_type_is_blocked_and_launch_fields_survive():
     assert after_submit.deps == [dep]
     assert after_submit.core_num is core_num
     assert after_submit.sync_start and after_submit.allow_early_resolve
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_modes_share_offset_safety_checks(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scale: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ]):
+            _ = pl.load(scale, [1, 0], [16, 2], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match="non-negative multiple of 16"):
+        _run(Before, logical_views=logical_views)
+
+
+def test_logical_mx_preserves_windows_and_narrowed_tile_valid_shape():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+            b: pl.Tensor[[4, 64], pl.FP8E8M0, pl.MX_B_NN],
+        ):
+            _a = pl.load(a, [16, 2], [32, 2], valid_shape=[16, 2], target_memory=pl.Mem.Mat)
+            _b = pl.load(b, [2, 16], [2, 32], target_memory=pl.Mem.Mat)
+
+    result = _run(Before, logical_views=True)
+    a, b = _mx_loads(result)
+    assert isinstance(a.args[0].type, ir.TensorType)
+    assert isinstance(b.args[0].type, ir.TensorType)
+    assert _values(a.args[0].type.shape) == [64, 4]
+    assert _values(b.args[0].type.shape) == [4, 64]
+    assert _values(_elements(a.args[1])) == [16, 2]
+    assert _values(_elements(b.args[1])) == [2, 16]
+    # DMA covers a full aligned box; the tile's logical active region stays narrowed.
+    assert _values(_elements(a.args[3])) == [32, 2]
+    assert isinstance(a.type, ir.TileType)
+    assert a.type.tile_view is not None
+    assert _values(a.type.tile_view.valid_shape) == [16, 2]
+    assert passes.legalize_mx_scale_tensor_views()(result) is result
 
 
 if __name__ == "__main__":
