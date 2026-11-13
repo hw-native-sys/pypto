@@ -59,6 +59,12 @@ assert isinstance(simple_add, pypto.ir.Function)
 `pl.const` 要求编译期数值，不能用于转换运行时标量变量。
 `@pl.jit` 同样解析 `math.nan` 和 `math.inf`（包括模块别名），在特化源码中
 保留它们的位模式，并将其值纳入缓存键。
+算子的直接参数保留 Python 数值语义：FP16 张量与 `math.inf` 相加时，标量推导为
+FP16，`pl.full` 也可将它用作填充值。打印的 IR 对非有限操作数显式使用
+`pl.const`，以保留已有类型。数值属性求值会拒绝复合基表达式中的运行时引用，
+例如 `(x + 1.0).real`，避免用闭包中的同名值替代运行时 `x`。
+算子参数仍支持张量和 Tile 的类型属性，例如 `pl.cast(x, y.dtype)`：
+它们直接从 IR 类型元数据解析，无需进行 Python 求值。
 
 所有参数和局部变量需要类型标注：
 

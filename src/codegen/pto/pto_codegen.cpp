@@ -119,7 +119,9 @@ std::string FormatFloatConstant(double value, DataType dtype) {
   if (source_fraction != 0 && fraction == 0) fraction = 1;
   const uint64_t bits = ((source_bits >> 63) << (width - 1)) |
                         (((uint64_t{1} << exponent_bits) - 1) << fraction_bits) | fraction;
-  os << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(width / 4) << bits;
+  // Supported widths are 16 or 32 bits; setw takes a signed character count.
+  os << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(static_cast<int>(width / 4))
+     << bits;
   return os.str();
 }
 

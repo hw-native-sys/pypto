@@ -67,6 +67,13 @@ values follow the same dtype rules as other Python float constants. `pl.const`
 requires a compile-time numeric value; it does not convert runtime scalar variables.
 `@pl.jit` also resolves `math.nan` and `math.inf` (including module aliases),
 preserves their bits in specialized source, and includes their values in the cache key.
+Raw operator arguments keep Python-number semantics: adding `math.inf` to an FP16
+tensor infers an FP16 scalar, and `pl.full` accepts it as a fill value. Printed IR
+uses explicit `pl.const` for non-finite operands to preserve their existing dtype.
+Numeric attribute evaluation rejects runtime references even inside compound bases
+such as `(x + 1.0).real`; a same-named closure value never substitutes for runtime `x`.
+Tensor and tile dtype attributes remain supported in operator arguments, such as
+`pl.cast(x, y.dtype)`: they resolve from IR type metadata without Python evaluation.
 
 All parameters and local variables require type annotations:
 

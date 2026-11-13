@@ -109,6 +109,30 @@ def constant(value: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
 """)
 
 
+@pytest.mark.parametrize("attribute", ["(x + 1.0).real", "values[x].real"])
+@pytest.mark.parametrize(
+    "usage",
+    [
+        "{value}",
+        "pl.const({value}, pl.FP32)",
+        "pl.add(x, {value})",
+        "pl.add(x, -{value})",
+        "pl.full([1, 16], pl.FP32, value={value})",
+    ],
+)
+def test_compound_attribute_rejects_runtime_binding(attribute, usage):
+    """Compound bases must not read a closure x instead of the runtime parameter."""
+    expression = usage.replace("{value}", attribute)
+    with pytest.raises(UnsupportedFeatureError, match="attribute access not supported on IR variable"):
+        pl.parse(f"""
+x = 0
+values = [2.0]
+@pl.function
+def constant(x: pl.Scalar[pl.INT32]):
+    result = {expression}
+""")
+
+
 def _first_call(func: ir.Function) -> ir.Call:
     """Return the RHS of the function body's first binding, asserting it is a Call."""
     body = func.body

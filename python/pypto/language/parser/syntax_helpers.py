@@ -15,6 +15,19 @@ from typing import TypeGuard
 
 from pypto.pypto_core import DataType, ir
 
+
+def references_ir_binding(node: ast.AST, lookup: Callable[[str], object | None]) -> bool:
+    """Check every loaded name before evaluating an expression against Python globals.
+
+    Following only an attribute chain misses compound bases such as
+    ``(x + 1.0).real`` or ``values[x].real`` when x is a runtime binding.
+    """
+    return any(
+        isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) and lookup(child.id) is not None
+        for child in ast.walk(node)
+    )
+
+
 # Canonical pld.<category>.<op> middle segments. Kept in sync with the
 # submodules exposed by pypto.language.distributed.op (system_ops / tensor_ops
 # / tile_ops); also surfaced as the hint in _parse_pld_category_op.

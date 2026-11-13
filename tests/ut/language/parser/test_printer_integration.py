@@ -451,6 +451,21 @@ class TestTextFormRoundtrip:
         assert isinstance(result, ir.ConstFloat)
         assert struct.pack(">d", result.value).hex() == bits
 
+    @pytest.mark.parametrize("bits", ["7ff0000000000000", "fff0000000000000", "7ff8000000000012"])
+    def test_nonfinite_fp32_operand_stays_typed_with_fp16_tensor(self, bits):
+        """Raw operator literals infer FP16, but an existing FP32 IR operand must stay FP32."""
+        program = pl.parse_program(f"""
+@pl.program
+class TypedConstant:
+    @pl.function
+    def f(self, x: pl.Tensor[[1, 16], pl.FP16]):
+        y = pl.add(x, pl.const(pl._dump.float64("{bits}"), pl.FP32))
+        return y
+""")
+        printed = ir.python_print(program)
+        assert "pl.const(pl._dump.float64(" in printed
+        ir.assert_structural_equal(program, pl.parse_program(printed))
+
     @pytest.mark.parametrize(
         "left,right,equal",
         [

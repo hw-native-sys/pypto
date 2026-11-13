@@ -794,6 +794,56 @@ class TestRenderFreeValue:
 
 
 class TestSpecializer:
+    @pytest.mark.parametrize("expression", ["math.nan", "math.inf", "-math.inf", "m.inf"])
+    @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.BF16])
+    def test_nonfinite_jit_literal_preserves_operand_dtype(self, expression, dtype):
+        """A raw math constant must infer the same dtype before and after JIT."""
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=f"def kernel(a: pl.Tensor):\n    result = pl.add(a, {expression})\n    return result\n",
+            func_type="opaque",
+            param_names=["a"],
+            tensor_meta={"a": TensorMeta((1, 16), dtype)},
+            auto_scope=False,
+        )
+        ctx.py_globals = {"math": math, "m": math}
+        program = pl.parse(specialize("Nonfinite", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("kernel")
+        assert func is not None and isinstance(func.body, ir.SeqStmts)
+        binding = func.body.stmts[0]
+        assert isinstance(binding, ir.AssignStmt) and isinstance(binding.value, ir.Call)
+        constant = binding.value.args[1]
+        assert isinstance(constant, ir.ConstFloat) and constant.dtype == dtype
+        assert isinstance(binding.value.type, ir.TensorType) and binding.value.type.dtype == dtype
+        ir.assert_structural_equal(program, pl.parse(python_print(program, format=False)))
+
+    @pytest.mark.parametrize("expression", ["math.nan", "math.inf", "-math.inf"])
+    @pytest.mark.parametrize("keyword", [False, True])
+    def test_nonfinite_jit_full_accepts_python_number(self, expression, keyword):
+        """Lossless specialized values must reach full's Python-number slot as numbers."""
+        value_arg = f"value={expression}" if keyword else expression
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=f"def kernel():\n    result = pl.full([1, 16], pl.FP32, {value_arg})\n    return result\n",
+            func_type="opaque",
+            auto_scope=False,
+        )
+        ctx.py_globals = {"math": math}
+        program = pl.parse(specialize("Nonfinite", [ctx]))
+        assert isinstance(program, ir.Program)
+        func = program.get_function("kernel")
+        assert func is not None and isinstance(func.body, ir.SeqStmts)
+        binding = func.body.stmts[0]
+        assert isinstance(binding, ir.AssignStmt) and isinstance(binding.value, ir.Call)
+        constant = binding.value.args[1]
+        assert isinstance(constant, ir.ConstFloat)
+        if expression == "math.nan":
+            assert math.isnan(constant.value)
+        else:
+            assert constant.value == (-math.inf if expression.startswith("-") else math.inf)
+        ir.assert_structural_equal(program, pl.parse(python_print(program, format=False)))
+
     def test_nonfinite_math_module_is_shadowed_by_runtime_parameter(self):
         ctx = _make_ctx(
             func_name="kernel",

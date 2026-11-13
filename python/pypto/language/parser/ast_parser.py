@@ -65,6 +65,7 @@ from .syntax_helpers import (
     is_pl_call,
     is_pld_call,
     is_simt_launch,
+    references_ir_binding,
 )
 from .type_resolver import (
     TypeResolver,
@@ -2040,10 +2041,7 @@ class ASTParser:
         # Resolve numeric module/closure attributes using the same dtype rules
         # as named closure constants (e.g. math.nan, math.inf, or an import alias).
         # An IR binding takes precedence over a same-named Python module.
-        root = attr.value
-        while isinstance(root, ast.Attribute):
-            root = root.value
-        if isinstance(root, ast.Name) and self.scope_manager.lookup_var(root.id) is not None:
+        if references_ir_binding(attr, self.scope_manager.lookup_var):
             raise UnsupportedFeatureError(
                 f"Standalone attribute access not supported on IR variable: {ast.unparse(attr)}",
                 span=self.span_tracker.get_span(attr),
