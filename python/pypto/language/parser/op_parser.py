@@ -18,6 +18,7 @@ from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import prefetch_ops as _dsl_prefetch
 from pypto.language.op import reg_ops as _dsl_reg
 from pypto.language.op import simt_ops as _dsl_simt
+from pypto.language.op import sync_ops as _dsl_sync
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
@@ -216,10 +217,10 @@ class OpParser:
             op_name = attrs[2]
             return self.parse_array_op(op_name, call)
 
-        # pl.prefetch.{operation} (3-segment)
-        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "prefetch":
-            op_name = attrs[2]
-            return self.parse_prefetch_op(op_name, call)
+        # These families use the same checked wrappers as direct DSL calls.
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] in ("prefetch", "sync"):
+            module = _dsl_sync if attrs[1] == "sync" else _dsl_prefetch
+            return self.dispatch_op(module, f"pl.{attrs[1]}", attrs[2], call)
 
         # pl.const(value, dtype) — typed constant literal
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
@@ -237,7 +238,7 @@ class OpParser:
         if (
             len(attrs) >= 2
             and attrs[0] == "pl"
-            and attrs[1] not in ("tensor", "tile", "system", "array", "prefetch")
+            and attrs[1] not in ("tensor", "tile", "system", "array", "prefetch", "sync")
         ):
             op_name = attrs[1]
             return self.parse_unified_op(op_name, call)
@@ -932,10 +933,6 @@ class OpParser:
     def parse_array_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse array operation (create / get_element / update_element)."""
         return self.dispatch_op(_dsl_array, "pl.array", op_name, call)
-
-    def parse_prefetch_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse async-prefetch operation (make_context / async_prefetch / session / wait)."""
-        return self.dispatch_op(_dsl_prefetch, "pl.prefetch", op_name, call)
 
     def validate_pld_op_call(self, op_name: str, call: ast.Call) -> None:
         """Parser-context checks shared by 2-segment and 3-segment pld paths.

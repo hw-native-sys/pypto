@@ -13,7 +13,7 @@
 | **TensorOp** | TensorType | 支持广播的 N 维张量 (Tensor) 操作 | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | 硬件优化的 Tile 操作 | `src/ir/op/tile_ops/` |
 | **BufferOp** | BufferType, VoidType | 内部显式存储与目标写入 | `src/ir/op/buffer_ops/` |
-| **SyncOp** | UnknownType（屏障）；ScalarType（task / 启动形状查询） | 流水线屏障、同步、TaskId 与 SPMD 启动形状查询 | `src/ir/op/sync_ops/` |
+| **SyncOp** | SyncTokenType、VoidType、ScalarType；旧 UnknownType | 逻辑完成依赖、屏障、TaskId 与启动形状查询 | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV 跨核通信 | `src/ir/op/sync_ops/cross_core.cpp` |
 | **PrefetchOp** | 不透明句柄 (opaque handle) | GM→L2 异步预取 | `src/ir/op/prefetch/prefetch_async.cpp` |
 
@@ -138,7 +138,9 @@ auto dynamic_dim = make_int(kDynamicDim);
 | **TensorType** | N 维 | 通用张量、函数参数/返回值 | DDR（可选 MemRef） |
 | **TileType** | N 维 | 统一缓冲区中的硬件优化 Tile | 统一缓冲区（可选 MemRef） |
 | **ScalarType** | 0 维 | 标量值 | 寄存器 |
-| **UnknownType** | 无 | 无返回值（同步操作） | 无 |
+| **SyncTokenType** | 无 | 不可变流水完成事实 | 无 |
+| **VoidType** | 无 | 明确声明没有 SSA 结果 | 无 |
+| **UnknownType** | 无 | 旧同步操作的结果占位符 | 无 |
 
 ## REGISTER_OP 流式 API
 
@@ -592,6 +594,15 @@ UINT32 + INT32 → INT32 (signed precedence)
 [Tensor 与 Tile 算子](05-tensor-tile-ops.md)。
 
 ## SyncOp：同步操作
+
+`sync.*` 逻辑操作使用 `SyncTokenType` 表达完成事实，
+`ScalarType(BOOL)` 表达地址重叠谓词，`VoidType` 表达等待与 VF 屏障。
+语句形式的 SyncOp 即使处于 Functional 阶段，也可以声明 `set_output_arity(0)`；
+它们通过 `EvalStmt` 执行，不能赋值。这个例外不改变普通 Functional 数据算子
+必须至少产生一个结果的要求。完整契约见[逻辑同步 IR](12-logical-sync.md)。
+未降低的逻辑同步不能编译。
+
+下面已有的 `system.*` 操作保留各自的物理同步／查询契约：
 
 **用途**：硬件同步与屏障，以及共用 `system.` 命名空间的 TaskId 与 SPMD 启动形状查询
 **类型**：屏障类为 `UnknownType`（无返回值，在 `EvalStmt` 中使用）；查询类为 `ScalarType`，会绑定一个值（`task_invalid`、`task_is_valid`、`available_cluster_count`、`available_aiv_count`）

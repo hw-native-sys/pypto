@@ -41,6 +41,7 @@ from pypto.language.typing import (
     Ptr,
     Reg,
     Scalar,
+    SyncToken,
     Tensor,
     Tile,
 )
@@ -101,6 +102,8 @@ def _wrap_arg(arg: Any) -> Any:
         return CommCtx(expr=arg)
     if isinstance(t, ir.PrefetchAsyncContextType):
         return PrefetchAsyncContext(expr=arg)
+    if isinstance(t, ir.SyncTokenType):
+        return SyncToken(arg)
     if isinstance(t, ir.AsyncEventType):
         return AsyncEvent(expr=arg)
     if isinstance(t, ir.AsyncSessionType):
@@ -120,7 +123,19 @@ def _unwrap_result(value: Any) -> Any:
     """
     if isinstance(
         value,
-        (Reg, Tensor, Tile, Scalar, Array, Ptr, CommCtx, PrefetchAsyncContext, AsyncEvent, AsyncSession),
+        (
+            Reg,
+            Tensor,
+            Tile,
+            Scalar,
+            Array,
+            Ptr,
+            CommCtx,
+            PrefetchAsyncContext,
+            AsyncEvent,
+            AsyncSession,
+            SyncToken,
+        ),
     ):
         return value.unwrap()
     if (

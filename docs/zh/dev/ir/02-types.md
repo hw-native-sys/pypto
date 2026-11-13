@@ -93,7 +93,8 @@ Buffer 类型 dump 使用原生 `pypto.ir.BufferType(...)` 构造表达式，
 算子注册默认为 `OpIRStage::Functional`。内部 buffer 算子显式选择
 `OpIRStage::Buffer` 并调用 `set_internal_only()`。结果数量必须声明：
 零结果要求 `VoidType`，单结果使用原生类型，多结果使用数量匹配的
-`TupleType`。Functional 注册仍按现有契约要求至少一个结果。
+`TupleType`。Functional 注册要求至少一个结果，只有语句形式的 SyncOp
+例外：它们声明零结果并使用 `VoidType`。
 
 每个 buffer 操作数通过 `set_buffer_arg_effect(i, data, metadata)`
 分别声明数据与元数据访问；标量操作数使用 `set_buffer_non_memory_arg(i)`。
@@ -533,6 +534,14 @@ pipe_m = ir.PipeType(ir.PipeType.M)    # Matrix pipe
 pipe_all = ir.PipeType(ir.PipeType.ALL) # All pipes
 ```
 
+### SyncTokenType
+
+`ir.SyncTokenType(ir.PipeType.MTE2)` 描述一条源流水的非消费 SSA 完成事实。
+所属已特化 AIC/AIV 叶子函数确定核与执行实例；类型没有 `core_type` 或 event ID。
+DSL 标注为 `pl.SyncToken[pl.PipeType.MTE2]`。这些值是局部 IR 基础设施，
+不能用于函数 ABI，硬件降低尚不可用。
+六个操作、控制流规则、顺序效果与验证契约见[逻辑同步](12-logical-sync.md)。
+
 ### UnknownType
 
 未知或待推断类型的占位符。
@@ -724,6 +733,7 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 | **VoidType** | - | - | 确定不存在 SSA 结果 |
 | **TupleType** | - | - | 多返回值 |
 | **PipeType** | - | - | 硬件同步 |
+| **SyncTokenType** | - | - | 局部 SSA 流水完成事实 |
 | **UnknownType** | - | - | 类型推断占位符 |
 
 ## 常用模式

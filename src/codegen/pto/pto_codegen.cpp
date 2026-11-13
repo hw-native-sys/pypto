@@ -12,6 +12,7 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 
 #include <algorithm>
+#include <any>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -50,6 +52,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/sync.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -61,9 +64,11 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/type_metadata.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "pypto/ir/verifier/sync.h"
 
 namespace pypto {
 namespace codegen {
@@ -1007,6 +1012,87 @@ PTOCodegenBundle PTOCodegen::GenerateBundle(const ProgramPtr& program, bool emit
 }
 
 std::string PTOCodegen::GenerateImpl(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+  // Logical completion values have no physical event protocol yet. Check the
+  // entire input before outlining VF helpers or emitting no-result calls so a
+  // pending wait cannot disappear behind a backend boundary.
+  class LogicalSyncCheck : public ir::IRVisitor {
+   public:
+    // Presence is context-independent, unlike token ownership. Shared values
+    // and metadata need only one expansion in this pre-lowering boundary scan.
+    void VisitExpr(const ir::ExprPtr& expression) override {
+      if (!expression || !expressions_.insert(expression.get()).second) return;
+      VisitType(expression->GetType());
+      ir::IRVisitor::VisitExpr(expression);
+    }
+
+    void VisitFunction(const ir::FunctionPtr& function) override {
+      for (const auto& type : function->return_types_) VisitType(type);
+      ir::IRVisitor::VisitFunction(function);
+    }
+
+    void VisitStmt(const ir::StmtPtr& statement) override {
+      if (!statement) return;
+      if (const auto loop = ir::As<ir::ForStmt>(statement)) VisitMetadata(loop->attrs_);
+      if (const auto scope = ir::As<ir::ScopeStmt>(statement)) VisitMetadata(scope->attrs_);
+      ir::IRVisitor::VisitStmt(statement);
+    }
+
+   protected:
+    // The entry above checks every scope, including RuntimeScopeStmt, whose
+    // base visitor does not traverse attributes. Avoid walking other scopes twice.
+    [[nodiscard]] bool ShouldVisitScopeAttr(const std::string&) const override { return false; }
+
+    // VisitType owns geometry traversal; Var uses must not rescan their shapes.
+    void VisitVarLike_(const ir::VarPtr&) override {}
+    void VisitExpr_(const ir::MemRefPtr& descriptor) override { VisitStorage(descriptor); }
+    void VisitExpr_(const ir::WindowBufferPtr& descriptor) override { VisitStorage(descriptor); }
+    void VisitExpr_(const ir::CallPtr& operation) override {
+      CheckNoLogicalSync(operation->op_, operation->span_);
+      ir::IRVisitor::VisitExpr_(operation);
+      VisitMetadata(operation->kwargs_);
+    }
+
+    void VisitExpr_(const ir::SubmitPtr& submit) override {
+      CheckNoLogicalSync(submit->op_, submit->span_);
+      ir::IRVisitor::VisitExpr_(submit);
+      VisitMetadata(submit->kwargs_);
+    }
+
+   private:
+    static void CheckNoLogicalSync(const ir::OpPtr& operation, const ir::Span& span) {
+      CHECK_SPAN(ir::GetLogicalSyncKind(operation) == ir::LogicalSyncKind::None, span)
+          << "Logical synchronization requires LowerSync before PTO code generation; "
+             "completion tokens do not own hardware events";
+    }
+
+    void VisitMetadata(const std::vector<std::pair<std::string, std::any>>& metadata) {
+      for (const auto& [key, value] : metadata) {
+        ir::ForEachAttrExpr(value, [this](const ir::ExprPtr& expression) { VisitExpr(expression); });
+      }
+    }
+
+    void VisitType(const ir::TypePtr& type) {
+      if (!type || !types_.insert(type.get()).second) return;
+      ir::type_metadata::ForEachTypeMetadataChild(
+          type, [this](const ir::TypePtr& element) { VisitType(element); },
+          [this](const ir::ExprPtr& expression) { VisitExpr(expression); },
+          [this](const ir::ExprPtr& descriptor) { VisitExpr(descriptor); });
+    }
+
+    void VisitStorage(const ir::ExprPtr& descriptor) {
+      ir::type_metadata::ForEachStorageMetadataExpr(
+          descriptor, [this](const ir::ExprPtr& expression, ir::type_metadata::StorageMetadataField) {
+            VisitExpr(expression);
+          });
+    }
+
+    std::unordered_set<const ir::Expr*> expressions_;
+    std::unordered_set<const ir::Type*> types_;
+  };
+  LogicalSyncCheck().VisitProgram(program);
+  // A hand-built signature or expression can contain a token without any
+  // defining sync call. Validate these escapes before choosing a backend ABI.
+  for (const auto& [gvar, function] : program->functions_) ir::CheckLogicalSync(function);
   vf_helpers_.clear();
   simt_functions_.clear();
   simt_effects_.clear();

@@ -24,6 +24,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -230,6 +231,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
   if (As<AsyncEventType>(type)) {
     return prefix_ + ".AsyncEvent";
+  }
+
+  if (auto token_type = As<SyncTokenType>(type)) {
+    return prefix_ + ".SyncToken[" + prefix_ + ".PipeType." + PipeTypeToString(token_type->pipe_) + "]";
   }
 
   if (As<AsyncSessionType>(type)) {

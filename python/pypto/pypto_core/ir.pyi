@@ -1108,6 +1108,13 @@ class PrefetchAsyncContextType(Type):
         """Get the shared singleton PrefetchAsyncContextType instance."""
         ...
 
+class SyncTokenType(Type):
+    """Immutable pipeline completion fact; waits do not consume it."""
+
+    pipe: Final[PipeType]
+
+    def __init__(self, pipe: PipeType) -> None: ...
+
 class AsyncEventType(Type):
     """Singleton marker type for ``prefetch.async_prefetch`` outputs.
 

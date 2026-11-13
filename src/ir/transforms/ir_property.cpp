@@ -135,6 +135,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "SimtOutputsMaterialized";
     case IRProperty::SimtSpecialized:
       return "SimtSpecialized";
+    case IRProperty::LogicalSyncValid:
+      return "LogicalSyncValid";
     default:
       return "Unknown";
   }
@@ -182,6 +184,7 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::SimtOutputsMaterialized,
                                    IRProperty::SimtSpecialized,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::LogicalSyncValid,
                                    IRProperty::HardwareLoopContractValid,
                                    IRProperty::InlineFunctionsEliminated,
                                    IRProperty::MixedKernelExpanded,
@@ -232,6 +235,7 @@ const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked,
                                    IRProperty::SimtValid,
                                    IRProperty::RegScopeValid,
+                                   IRProperty::LogicalSyncValid,
                                    IRProperty::HardwareLoopContractValid,
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
@@ -249,19 +253,12 @@ const IRPropertySet& GetStructuralProperties() {
 }
 
 const IRPropertySet& GetDefaultVerifyProperties() {
-  static const IRPropertySet props{IRProperty::SSAForm,
-                                   IRProperty::TypeChecked,
-                                   IRProperty::SimtValid,
-                                   IRProperty::RegScopeValid,
-                                   IRProperty::HardwareLoopContractValid,
-                                   IRProperty::NoNestedCalls,
-                                   IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks,
-                                   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed,
-                                   IRProperty::NoNestedInCore,
-                                   IRProperty::TileTypeCoherence,
-                                   IRProperty::ArrayNotEscaped};
+  static const IRPropertySet props{
+      IRProperty::SSAForm,           IRProperty::TypeChecked,         IRProperty::SimtValid,
+      IRProperty::RegScopeValid,     IRProperty::LogicalSyncValid,    IRProperty::HardwareLoopContractValid,
+      IRProperty::NoNestedCalls,     IRProperty::BreakContinueValid,  IRProperty::NoRedundantBlocks,
+      IRProperty::UseAfterDef,       IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
+      IRProperty::TileTypeCoherence, IRProperty::ArrayNotEscaped};
   return props;
 }
 

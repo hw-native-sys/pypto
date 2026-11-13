@@ -50,6 +50,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/simt.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/sync.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/python_printer.h"
@@ -901,6 +902,9 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   const bool mgather_kw_scratch = mgather && mgather_coalesce == 1 && op->args_.size() >= 3;
   const bool mgather_kw_valid = mgather && ((mgather_coalesce == 0 && op->args_.size() == 3) ||
                                             (mgather_coalesce == 1 && op->args_.size() == 4));
+  // Range bounds are SSA operands in IR and keyword-only in the public DSL.
+  const bool sync_kw_bounds =
+      GetLogicalSyncKind(op->op_) == LogicalSyncKind::MemoryOverlaps && op->args_.size() == 6;
 
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
@@ -911,6 +915,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (sort32_kw_tmp && i == 2) continue;
     if (a2av_kw_core_num && i + 1 == op->args_.size()) continue;
     if (mgather && i >= 2) continue;
+    if (sync_kw_bounds && i >= 2) continue;
     if (i > 0) stream_ << ", ";
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
@@ -929,6 +934,13 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
+  if (sync_kw_bounds) {
+    static constexpr const char* names[] = {"first_begin", "first_end", "second_begin", "second_end"};
+    for (size_t i = 0; i < 4; ++i) {
+      stream_ << ", " << names[i] << "=";
+      VisitExpr(op->args_[i + 2]);
+    }
+  }
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);
@@ -1016,7 +1028,11 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     if (value.type() == typeid(int)) {
       int int_val = AnyCast<int>(value, "printing kwarg: " + key);
       // Print pipe kwargs as PipeType enum names for readability
+      const auto sync_kind = GetLogicalSyncKind(op->op_);
       if (key == "set_pipe" || key == "wait_pipe" ||
+          (key == "dst_pipe" && sync_kind == LogicalSyncKind::Wait) ||
+          (key == "pipe" &&
+           (sync_kind == LogicalSyncKind::Record || sync_kind == LogicalSyncKind::Completed)) ||
           (key == "pipe" && (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")))) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
       } else if (key == "mode") {

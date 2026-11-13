@@ -355,6 +355,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp
     src/ir/verifier/verify_reg_scope.cpp
+    src/ir/verifier/verify_sync.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
     src/ir/verifier/verify_inline_functions_eliminated.cpp
     src/ir/verifier/verify_use_after_def.cpp

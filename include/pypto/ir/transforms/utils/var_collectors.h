@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <memory>
-#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -22,6 +21,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/type_metadata.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -168,52 +168,32 @@ inline std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt
 // Type expression visitors
 // ============================================================================
 
-/// Visit all expression fields embedded in a type using the given visitor.
+/// Visit the type expressions that count as ordinary lexical SSA uses.
 ///
 /// Covers: TensorType/DistributedTensorType::shape_, tensor_view_.{valid_shape, stride};
 ///         TileType::shape_, tile_view_.{valid_shape, stride, start_offset};
-///         TupleType elements (recursively).
+///         MemRef slot_index_; TupleType elements (recursively).
+/// Allocation bases, resolved byte offsets and window descriptors deliberately
+/// remain outside this contract. Metadata validators use the shallow enumerator
+/// directly when they must inspect those additional fields.
 inline void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
   if (!type) return;
+  // Keep the existing SSA contract restricted to tensor, tile and tuple types;
+  // the broader metadata enumerator also accepts bare ShapedType.
+  if (!AsTensorTypeLike(type) && !As<TileType>(type) && !As<TupleType>(type)) return;
 
-  auto visit_exprs = [&visitor](const std::vector<ExprPtr>& exprs) {
-    for (const auto& e : exprs) {
-      if (e) visitor.VisitExpr(e);
-    }
-  };
-
-  // A declared allocation's slot index may be a runtime expression (`l0c[i % 2]`),
-  // which names SSA values exactly like a shape or view expression does. Skipping it
-  // hides a dangling or out-of-scope slot Var from every verifier built on this
-  // walk (use-after-def, SSA scope checking).
-  auto visit_memref = [&visitor](const std::optional<MemRefPtr>& memref) {
-    if (!memref.has_value() || !*memref) return;
-    const auto& slot_index = (*memref)->slot_index_;
-    if (slot_index.has_value() && *slot_index) visitor.VisitExpr(*slot_index);
-  };
-
-  if (auto tensor_type = AsTensorTypeLike(type)) {
-    visit_memref(tensor_type->memref_);
-    visit_exprs(tensor_type->shape_);
-    if (tensor_type->tensor_view_.has_value()) {
-      const auto& tv = tensor_type->tensor_view_.value();
-      visit_exprs(tv.valid_shape);
-      visit_exprs(tv.stride);
-    }
-  } else if (auto tile_type = As<TileType>(type)) {
-    visit_memref(tile_type->memref_);
-    visit_exprs(tile_type->shape_);
-    if (tile_type->tile_view_.has_value()) {
-      const auto& tv = tile_type->tile_view_.value();
-      visit_exprs(tv.valid_shape);
-      visit_exprs(tv.stride);
-      if (tv.start_offset) visitor.VisitExpr(tv.start_offset);
-    }
-  } else if (auto tuple_type = As<TupleType>(type)) {
-    for (const auto& elem : tuple_type->types_) {
-      VisitTypeExprFields(visitor, elem);
-    }
-  }
+  type_metadata::ForEachTypeMetadataChild(
+      type, [&visitor](const TypePtr& element) { VisitTypeExprFields(visitor, element); },
+      [&visitor](const ExprPtr& expression) { visitor.VisitExpr(expression); },
+      [&visitor](const ExprPtr& descriptor) {
+        if (!As<MemRef>(descriptor)) return;
+        type_metadata::ForEachStorageMetadataExpr(
+            descriptor, [&visitor](const ExprPtr& expression, type_metadata::StorageMetadataField field) {
+              // Runtime slot selection is a lexical use (`l0c[i % 2]`), unlike
+              // allocation identity or its resolved physical byte offset.
+              if (field == type_metadata::StorageMetadataField::SlotIndex) visitor.VisitExpr(expression);
+            });
+      });
 }
 
 /// Collect all Var pointers from a type's expression fields (shape, view, etc.).
