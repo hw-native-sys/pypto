@@ -8,6 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Exercise CI routing and merge-gate failures without GitHub writes or devices."""
 
+# Smoke PR: exercise the merged CI status and rebase policy on GitHub.
+
 import copy
 import importlib.util
 import json
