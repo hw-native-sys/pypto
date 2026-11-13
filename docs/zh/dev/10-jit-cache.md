@@ -140,7 +140,7 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 | ---- | -------- |
 | PyPTO | Python 包源码与打包的代码生成模板内容、实际导入扩展的完整 GNU ELF Build-ID、运行中 Python 解释器的版本及 ABI、解析后的可执行文件路径与原生 Build-ID（或内容摘要）。 |
 | Runtime | 干净的源码 checkout 版本或安装构建版本、实际原生扩展 Build-ID、Python 源码及可用的 runtime/PTO-ISA 构建元数据；源码 checkout 有未提交更改时绕过持久缓存。 |
-| PTO-ISA | runtime 的 `pto_isa.pin` 选定的版本；仅编译未命中时获取并校验 checkout。 |
+| PTO-ISA | runtime 的 `pto_isa.pin` 选定的版本；当 PyPTO 为 pinned 头文件打临时补丁（当前为 A2/A3 TREM 修复）时，改用该 pin 的临时 backport worktree 的本地 commit；仅编译未命中时获取并校验 checkout。 |
 | PTOAS | 标准 wheel 启动器使用选中的 Python 解释器版本、ABI 缓存标记和原生 Build-ID（或内容摘要），以及该解释器实际选中的 PTOAS wheel 的 `METADATA`/`WHEEL`/`RECORD`、NumPy wheel 记录、原生编译器 Build-ID、启动 `.pth` 文件与探测实际观察到的非标准库启动模块；`ptoas`、`ptodsl`、`TileOps` 和 `SoftOps` 的包来源及搜索路径必须位于该 wheel 内，外部重定向会绕过持久缓存。仅支持 PTOAS→NumPy、NumPy→无依赖，其他声明的依赖会绕过持久缓存。缺少启动或 wheel 证据、不支持的启动器也会绕过持久缓存。独立 ELF 使用 Build-ID。 |
 | 设备及编排工具链 | 选中的编译器路径/版本、调用入口及实际执行的 GCC 驱动的 Build-ID、GCC 辅助程序 Build-ID、CANN 安装构建版本及链接器 Build-ID；无法识别编译器 wrapper、实际执行的 GCC 驱动或 CCEC 编译器或设备链接器为非 ELF 启动脚本，或缺少 CANN 构建版本时绕过持久缓存。CCEC 编译器和设备链接器必须是可执行的 ELF 文件；没有 Build-ID 的 ELF 文件使用内容摘要。 |
 
