@@ -300,7 +300,7 @@ def test_vpto_rejects_unsupported_targets(compiler_module, tmp_path, platform, c
         compiler.compile_incore(_source(tmp_path), core_type=core, vpto_sources=["helper.pto"])
 
 
-@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "bridge", "simt_asm"])
+@pytest.mark.parametrize("helper_kind", ["empty", "ssa_writeback", "memory_attrs", "bridge", "simt_asm"])
 def test_vpto_compilation_links_helpers_and_rejects_bridge(
     compiler_module, monkeypatch, tmp_path, helper_kind
 ):
@@ -323,6 +323,10 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
     llvm = {
         "empty": "define void @helper() {\n  ret void\n}\n",
         "ssa_writeback": writeback,
+        "memory_attrs": (
+            "declare float @llvm.fabs.f32(float) #0\n"
+            'attributes #0 = { nounwind memory(none) "comment"="memory(none)" }\n'
+        ),
         "bridge": "declare void @bridge()",
         "simt_asm": 'define simt_entry void @helper() {\n call void asm sideeffect "nop", ""()\n ret void\n}',
     }[helper_kind]
@@ -343,7 +347,8 @@ define void @helper(ptr addrspace(6) %base, <256 x i1> %mask) {
             output.write_text(llvm)
         else:
             if command[0] == "bisheng":
-                assert Path(command[command.index("ir") + 1]).read_text() == llvm
+                expected_llvm = llvm.replace("nounwind memory(none) ", "nounwind ")
+                assert Path(command[command.index("ir") + 1]).read_text() == expected_llvm
             if command[0] == "linker":
                 order = next(
                     arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering-file=")
@@ -472,6 +477,17 @@ def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypa
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
     compiler = compiler_module.KernelCompiler("a2a3")
     assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == b"binary"
+
+
+@pytest.mark.parametrize("effect", ["none", "read", "write", "argmem: read, inaccessiblemem: write"])
+def test_bisheng_memory_annotations_preserve_other_llvm_text(effect):
+    from pypto.runtime._vpto import prepare_llvm_for_bisheng  # noqa: PLC0415
+
+    group = f'attributes #3 = {{ nounwind memory({effect}) "note"="memory(none)" }}'
+    prefix = '; memory(none) in a comment\n@name = private constant [12 x i8] c"memory(none)"\n'
+    text = prefix + group + "\n"
+    expected = prefix + 'attributes #3 = { nounwind "note"="memory(none)" }\n'
+    assert prepare_llvm_for_bisheng(text) == expected
 
 
 if __name__ == "__main__":
