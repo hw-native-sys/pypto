@@ -12,6 +12,7 @@
 import ast
 import importlib
 import inspect
+import math
 import re
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -1439,6 +1440,31 @@ class TestConstexprParameters:
 
         assert records, "the dep's own binding must still be recorded"
         assert all(len(record) == 5 for record in records)
+
+
+def test_nonfinite_math_constant_cache_tracks_value_and_snapshot(monkeypatch):
+    """Qualified math constants share one value across hashing and specialization."""
+
+    @pl.jit
+    def kernel(x: pl.Tensor[[32], pl.FP32]):
+        return pl.add(x, math.inf)
+
+    initial = kernel._get_source_hash()
+    with capture_namespaces():
+        assert kernel._get_source_hash() == initial
+        monkeypatch.setattr(math, "inf", 1.0)
+        assert kernel._get_source_hash() == initial
+    assert kernel._get_source_hash() != initial
+
+
+def test_nonfinite_math_constant_cache_respects_shadowing(monkeypatch):
+    @pl.jit
+    def kernel(math: pl.Tensor[[32], pl.FP32]):
+        return pl.add(math, 1.0)
+
+    initial = kernel._get_source_hash()
+    monkeypatch.setattr(math, "inf", 1.0)
+    assert kernel._get_source_hash() == initial
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ from .region_context import RegionContext
 from .syntax_helpers import (
     ENUM_VALUE_TYPES,
     PLD_CATEGORIES,
+    references_ir_binding,
 )
 from .type_resolver import (
     _is_dump_call,  # noqa: PLC2701
@@ -446,11 +447,23 @@ class OpParser:
         Everything else falls through to ``parse_expression``, which keeps
         Tensor/Tile/Scalar var lookups, list literals, etc. unchanged.
         """
+        dumped_float = self.parse_dump_float_arg(arg)
+        if dumped_float is not None:
+            return dumped_float
         if isinstance(arg, ast.Attribute):
+            # Tensor/Tile x.dtype comes from IR type metadata, not closure
+            # evaluation. Preserve this path before guarding Python evaluation.
             try:
                 return self.services.type_resolver.resolve_dtype(arg)
             except ParserError:
                 pass
+        attribute = arg.operand if isinstance(arg, ast.UnaryOp) and isinstance(arg.op, ast.USub) else arg
+        if isinstance(attribute, ast.Attribute):
+            # Closure evaluation must not bypass a runtime binding that shadows
+            # any name in a compound base, including the operand of -math.inf.
+            if references_ir_binding(attribute, self.services.scope_manager.lookup_var):
+                return self.callbacks.expression(arg)
+        if isinstance(arg, ast.Attribute):
             success, value = self.services.expr_evaluator.try_eval_expr(arg)
             # bool subclasses int — a positional ``True`` is not a numeric
             # constant slot, so leave it on the expression path.
@@ -473,6 +486,22 @@ class OpParser:
                 if success and isinstance(value, (int, float)) and not isinstance(value, bool):
                     return -value
         return self.callbacks.expression(arg)
+
+    def parse_dump_float_arg(self, arg: ast.expr) -> float | None:
+        """Decode a lossless float spelling as an untyped Python operator argument.
+
+        Operators choose literal dtypes from their inputs (e.g. FP16 adds), and
+        full/padding slots require a Python number. Explicit ``pl.const`` keeps
+        its typed IR path; the IR printer uses it to preserve constant dtypes.
+        """
+        operand = arg
+        while isinstance(operand, ast.UnaryOp) and isinstance(operand.op, ast.USub):
+            operand = operand.operand
+        if not _is_dump_call(operand, "float64"):
+            return None
+        constant = self.callbacks.expression(arg)
+        assert isinstance(constant, ir.ConstFloat)
+        return constant.value
 
     def parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
@@ -502,6 +531,8 @@ class OpParser:
             # Handle dtype specially
             if key == "dtype":
                 kwargs[key] = self.services.type_resolver.resolve_dtype(value)
+            elif (dumped_float := self.parse_dump_float_arg(value)) is not None:
+                kwargs[key] = dumped_float
             elif isinstance(value, ast.Constant):
                 kwargs[key] = value.value
             elif isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
@@ -512,11 +543,6 @@ class OpParser:
                 kwargs[key] = self.resolve_attribute_kwarg(value)
             elif isinstance(value, ast.List):
                 kwargs[key] = self.resolve_list_kwarg(value)
-            elif _is_dump_call(value, "float64"):
-                # Same value semantics as a float literal in an op kwarg.
-                float_expr = self.callbacks.expression(value)
-                assert isinstance(float_expr, ir.ConstFloat)
-                kwargs[key] = float_expr.value
             else:
                 kwargs[key] = self.callbacks.expression(value)
         return kwargs
@@ -525,7 +551,7 @@ class OpParser:
         """Resolve a unary op kwarg value (e.g., -1)."""
         if isinstance(value.operand, ast.Constant) and isinstance(value.operand.value, (int, float)):
             return -value.operand.value
-        return self.callbacks.expression(value)
+        return self.parse_op_positional_arg(value)
 
     def resolve_name_kwarg(self, value: ast.Name) -> Any:
         """Resolve a Name kwarg value via scope lookup or closure eval."""
@@ -557,6 +583,8 @@ class OpParser:
                 return self.callbacks.expression(value)
 
         # Not a dtype or buffer attr — evaluate as a general expression from closure.
+        if references_ir_binding(value, self.services.scope_manager.lookup_var):
+            return self.callbacks.expression(value)
         return self.services.expr_evaluator.eval_expr(value)
 
     def track_buffer_meta(self, var_name: str, call: ast.Call) -> None:
@@ -1175,21 +1203,17 @@ class OpParser:
             if not dtype.is_float():
                 raise ParserTypeError("float64 constants require a floating-point dtype", span=span)
             return ir.ConstFloat(value_expr.value, dtype, span)
-        negate = False
-        if isinstance(value_node, ast.UnaryOp) and isinstance(value_node.op, ast.USub):
-            negate = True
-            value_node = value_node.operand
-
-        if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, (int, float)):
+        # Reuse expression parsing so literals, numeric closure bindings, and
+        # math.nan / +/-math.inf follow one resolution path. Runtime IR values
+        # still cannot be reinterpreted as compile-time constants.
+        constant = self.callbacks.expression(call.args[0])
+        if not isinstance(constant, (ir.ConstInt, ir.ConstFloat, ir.ConstBool)):
             raise ParserSyntaxError(
-                "pl.const() first argument must be a numeric literal",
+                "pl.const() first argument must be a compile-time numeric constant",
                 span=span,
-                hint="Use an int or float literal: pl.const(42, pl.INT32)",
+                hint="Use a numeric literal or Python constant, such as pl.const(math.inf, pl.FP32)",
             )
-
-        value = value_node.value
-        if negate:
-            value = -value
+        value = constant.value
 
         # Resolve dtype from second argument
         dtype = self.services.type_resolver.resolve_dtype(call.args[1])

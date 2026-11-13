@@ -269,7 +269,10 @@ void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
 }
 
 void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
-  if (op->dtype() != DataType::DEFAULT_CONST_FLOAT) {
+  // A bare float64 dump in an operator slot is a Python numeric literal, whose
+  // dtype the operator may infer from another operand. Keep non-finite IR
+  // constants explicitly typed even at the default dtype to preserve roundtrip.
+  if (op->dtype() != DataType::DEFAULT_CONST_FLOAT || !std::isfinite(op->value_)) {
     stream_ << prefix_ << ".const(" << FormatFloatValue(op->value_, prefix_) << ", " << prefix_ << "."
             << DataTypeToString(op->dtype()) << ")";
   } else {

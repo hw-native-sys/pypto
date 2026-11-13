@@ -584,6 +584,11 @@ class BodyTransformer(ast.NodeTransformer):
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
         """Replace a.shape → tuple and a.dtype → pl.XXX."""
+        reference = values.math_constant_reference(node)
+        if reference is not None and reference.split(".", 1)[0] not in self._used_names:
+            folded = values.fold_free_name(reference, self._py_globals, node)
+            if folded is not None:
+                return folded
         if (
             isinstance(node.value, ast.Name)
             and (param_name := self._known_tensor_name(node.value.id)) is not None

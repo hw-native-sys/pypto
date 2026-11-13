@@ -59,6 +59,22 @@ assert isinstance(simple_add, pypto.ir.Function)
 
 ### Type Annotations
 
+Python numeric module attributes such as `math.nan`, `math.inf`, and `-math.inf`
+are accepted in assignments and operator arguments. Import `math` in the enclosing
+Python scope; import aliases also work. Use `pl.const(math.nan, pl.FP32)` (or
+`pl.FP16` / `pl.BF16`) to specify a dtype explicitly. Without `pl.const`, these
+values follow the same dtype rules as other Python float constants. `pl.const`
+requires a compile-time numeric value; it does not convert runtime scalar variables.
+`@pl.jit` also resolves `math.nan` and `math.inf` (including module aliases),
+preserves their bits in specialized source, and includes their values in the cache key.
+Raw operator arguments keep Python-number semantics: adding `math.inf` to an FP16
+tensor infers an FP16 scalar, and `pl.full` accepts it as a fill value. Printed IR
+uses explicit `pl.const` for non-finite operands to preserve their existing dtype.
+Numeric attribute evaluation rejects runtime references even inside compound bases
+such as `(x + 1.0).real`; a same-named closure value never substitutes for runtime `x`.
+Tensor and tile dtype attributes remain supported in operator arguments, such as
+`pl.cast(x, y.dtype)`: they resolve from IR type metadata without Python evaluation.
+
 All parameters and local variables require type annotations:
 
 ```python

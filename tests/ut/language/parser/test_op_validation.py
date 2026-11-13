@@ -248,6 +248,35 @@ class TestFullPythonCallingConvention:
         _Collect().visit_program(Prog)
         assert len(cast_calls) == 2, f"expected 2 cast calls, got {len(cast_calls)}"
 
+    @pytest.mark.parametrize("kind", ["Tensor", "Tile"])
+    @pytest.mark.parametrize("dtype_source, expected_dtype", [("x", pl.FP32), ("y", pl.FP16)])
+    @pytest.mark.parametrize("keyword", [False, True])
+    def test_ir_dtype_attribute_works_positional_and_keyword(
+        self, kind, dtype_source, expected_dtype, keyword
+    ):
+        """IR type metadata must resolve before the guard against closure evaluation."""
+        dtype_arg = f"{dtype_source}.dtype"
+        input_name = "y" if dtype_source == "x" else "x"
+        if keyword:
+            dtype_arg = f"target_type={dtype_arg}"
+        func = pl.parse(f"""
+@pl.function
+def cast_dtype(x: pl.{kind}[[16, 16], pl.FP32], y: pl.{kind}[[16, 16], pl.FP16]):
+    result = pl.cast({input_name}, {dtype_arg})
+    return result
+""")
+        assert isinstance(func, ir.Function)
+        assert isinstance(func.body, ir.SeqStmts)
+        binding = func.body.stmts[0]
+        assert isinstance(binding, ir.AssignStmt)
+        assert isinstance(binding.value, ir.Call)
+        assert binding.value.op.name == ir.get_op(f"{kind.lower()}.cast").name
+        result_type = binding.value.type
+        assert isinstance(result_type, (ir.TensorType, ir.TileType))
+        # Use the other parameter's dtype: same-dtype casts are invalid, and
+        # success must not mask a fallback that silently keeps the input dtype.
+        assert result_type.dtype == expected_dtype
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
