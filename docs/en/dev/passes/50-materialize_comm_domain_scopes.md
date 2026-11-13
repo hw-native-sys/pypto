@@ -123,6 +123,9 @@ The pass raises `pypto::ValueError` (carrying the alloc's span) if:
 
 - An allocation has no `pld.tensor.window` materialisation (dead alloc).
 - An allocation has at least one view but no chip-orch dispatch consumes it.
+- A `pld.tensor.window` view's dense byte size (`product(shape) * dtype_bytes`)
+  exceeds its allocation's logical size. The physical cache-line alignment
+  padding is not addressable through a view.
 - The `device=` expression on a dispatch is something other than `ConstInt`
   or a recognised `pl.range` induction var.
 - Two allocations within the same comm domain share a `name_hint_` (the
@@ -144,6 +147,11 @@ After the pass:
 - Every `pld.tensor.window` result Var's type is a `DistributedTensorType` whose
   `window_buffer_` field points to the corresponding `WindowBuffer`, and the
   defining Call carries that same type — both sides of the assignment agree.
+- Every `DistributedTensorType` carrying a `window_buffer_` has a dense byte
+  size no larger than that slot's logical size. Dynamic capacity is checked
+  by host codegen at the window declaration, independently of dispatch sites.
+  Host operation support is checked in codegen: slice/assemble accept only
+  plain Tensor operands; view/reshape have no registered host lowering.
 - Every host-level `pld.tensor.allreduce` call has two positional arguments
   after [`SynthesizeAllReduceSignals`](49-synthesize_allreduce_signals.md) runs.
   For an omitted user signal, the second argument is a synthesized Var produced
