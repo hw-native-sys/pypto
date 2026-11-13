@@ -309,6 +309,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             else_yield && i < else_yield->value_.size() ? ir::AsVarLike(else_yield->value_[i]) : nullptr;
         std::string ret_name =
             TryGetSharedTileBufHandle(tile_type, alloc_fields.type_str, then_value, else_value);
+        const std::string shared_view = IsTileViewName(ret_name) ? ret_name : std::string{};
         if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already
@@ -328,7 +329,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // producers and the synthetic tmov below share this exact target.
         ret_name = PrepareTileDestination(return_var, ret_name, "if result").name;
         BindVarToMlir(return_var, ret_name);
-        if (has_dynamic_valid_shape) {
+        // A proven pass-through view already carries its runtime validity at
+        // its dominating definition. Only an allocation-backed phi needs the
+        // restoration below; set_validshape cannot mutate a dynamic subview.
+        // Keep the exemption tied to the exact shared handle, not a new view
+        // that destination preparation might introduce.
+        if (has_dynamic_valid_shape && ret_name != shared_view) {
           deferred_tile_valid_shapes.emplace_back(ret_name, std::move(logical_fields));
         }
       } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
@@ -651,6 +657,11 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     BindVarToMlir(iter_arg, init_mlir_name);
     BindVarToMlir(return_var, init_mlir_name);
+    // Tile carries alias an already live init descriptor, not an SCF block arg.
+    // Return variables become available only after the loop has been emitted.
+    if (As<TileType>(iter_arg->GetType())) {
+      fs_.tile_descriptor_scope[GetVarKey(iter_arg)] = fs_.tile_alloc_scope_stack.back();
+    }
 
     if (tensor_type) {
       BindTensorView(iter_arg, init_mlir_name);
@@ -839,6 +850,11 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
 
     BindVarToMlir(iter_arg, init_mlir_name);
     BindVarToMlir(return_var, init_mlir_name);
+    // Tile carries alias an already live init descriptor, not an SCF block arg.
+    // Return variables become available only after the loop has been emitted.
+    if (As<TileType>(iter_arg->GetType())) {
+      fs_.tile_descriptor_scope[GetVarKey(iter_arg)] = fs_.tile_alloc_scope_stack.back();
+    }
 
     if (tensor_type) {
       BindTensorView(iter_arg, init_mlir_name);

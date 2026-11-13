@@ -196,6 +196,226 @@ class SimtTileProvenanceChecker : public ir::IRVisitor {
   std::vector<ir::SimtLaunchStmtPtr> launches_;
 };
 
+// Infer scale/data pairing from the existing internal bindings, not from names
+// or allocation order. A fixed pair whose scale is filled outside its consumer
+// region needs an early physical-address bind: PTOAS only normalizes a matching
+// fill in the same block. Indexing and memoized alias resolution are O(N log N).
+class MxScaleFillBindingCollector : public ir::IRVisitor {
+ public:
+  using Plan = std::map<const ir::Var*, std::tuple<VarPtr, ir::TileTypePtr, bool>>;
+
+  Plan Collect(const StmtPtr& body) {
+    VisitStmt(body);
+    Plan plan;
+    for (const auto& use : bindings_) {
+      // Changing carries are not aliases, but trace their complete initial
+      // chain to identify an outer fill and reject unsafe cross-region forms.
+      const auto [scale, uncertain_carry] = ResolveInitialRoot(use.scale);
+      CHECK_SPAN(unsupported_results_.count(scale.get()) == 0, use.scale->span_)
+          << "MX scale bindings through branch or changing loop results are not supported; "
+             "fill the scale in the consumer scope instead of returning its descriptor";
+      const auto producer = producers_.find(scale.get());
+      if (producer == producers_.end()) continue;
+      CHECK_SPAN(producer->second == use.region || !HasUnsupportedScaleView(use.scale), use.scale->span_)
+          << "MX scale views consumed across a loop or branch are not supported; "
+             "fill the scale in the consumer scope instead of aliasing its descriptor";
+      const auto data = ResolveAlias(use.data);
+      auto [entry, fresh] =
+          plan.emplace(scale.get(), std::make_tuple(data, As<TileType>(use.data->GetType()), false));
+      if (uncertain_carry || (!fresh && std::get<0>(entry->second).get() != data.get())) {
+        std::get<0>(entry->second).reset();
+      }
+      std::get<2>(entry->second) |= producer->second != use.region;
+    }
+    return plan;
+  }
+
+  void VisitExpr(const ExprPtr&) override {}
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    const bool scope = As<ir::ScopeStmt>(stmt) != nullptr;
+    const auto previous = region_;
+    if (scope) region_ = ++next_region_;
+    IRVisitor::VisitStmt(stmt);
+    region_ = previous;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto alias = ir::AsVarLike(op->value_)) {
+      aliases_[op->var_.get()] = alias;
+      return;
+    }
+    auto call = As<ir::Call>(op->value_);
+    if (!call) return;
+    if (ir::IsOp(call, "tile.tget_scale_addr")) {
+      INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_)
+          << "tile.tget_scale_addr requires 2 arguments (dst_scale, src)";
+      const auto scale = ir::AsVarLike(call->args_[0]);
+      const auto data = ir::AsVarLike(call->args_[1]);
+      INTERNAL_CHECK_SPAN(scale && data, op->span_)
+          << "Internal error: MX scale binding operands must be variables";
+      bindings_.push_back({scale, data, region_});
+      aliases_[op->var_.get()] = scale;
+    } else if (ir::IsOp(call, "tile.set_validshape")) {
+      INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
+          << "tile.set_validshape requires a tile argument";
+      if (auto source = ir::AsVarLike(call->args_[0])) aliases_[op->var_.get()] = source;
+    } else if (ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+      INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_) << "Buffer-aliasing view requires a source tile";
+      const auto type = As<TileType>(op->var_->GetType());
+      if (type && (type->GetMemorySpace() == ir::MemorySpace::LeftScale ||
+                   type->GetMemorySpace() == ir::MemorySpace::RightScale)) {
+        if (auto source = ir::AsVarLike(call->args_[0])) {
+          // Every buffer-aliasing tile view preserves its source allocation.
+          // Until address-offset-aware prebinding exists, keep the whole chain
+          // and reject cross-region use rather than silently binding only the view.
+          aliases_[op->var_.get()] = source;
+          unsupported_scale_views_.insert(op->var_.get());
+        }
+      }
+    } else if (ir::IsOp(call, "tile.move")) {
+      const auto type = As<TileType>(op->var_->GetType());
+      if (type && (type->GetMemorySpace() == ir::MemorySpace::LeftScale ||
+                   type->GetMemorySpace() == ir::MemorySpace::RightScale)) {
+        producers_[op->var_.get()] = region_;
+      }
+    }
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitRegion(op->then_body_);
+    if (op->else_body_) VisitRegion(*op->else_body_);
+    // A merged descriptor does not identify one branch's producer. Until its
+    // alternative producer/data pairs can be proven, reject a later scale
+    // consumer rather than losing both fills and silently rebinding too late.
+    for (const auto& result : op->return_vars_) unsupported_results_.insert(result.get());
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override { VisitLoop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitLoop(op); }
+
+ private:
+  struct BindingUse {
+    VarPtr scale;
+    VarPtr data;
+    size_t region;
+  };
+
+  void VisitRegion(const StmtPtr& body) {
+    const auto previous = region_;
+    region_ = ++next_region_;
+    VisitStmt(body);
+    region_ = previous;
+  }
+
+  template <typename Loop>
+  void VisitLoop(const Loop& op) {
+    VisitRegion(op->body_);
+    auto tail = op->body_;
+    if (auto sequence = As<ir::SeqStmts>(tail); sequence && !sequence->stmts_.empty()) {
+      tail = sequence->stmts_.back();
+    }
+    const auto yield = As<ir::YieldStmt>(tail);
+    if (!yield || yield->value_.size() != op->iter_args_.size()) return;
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      // Only a direct self-yield proves the carry invariant, including a zero
+      // trip loop. A changing result must remain visible to the safety check
+      // even when the only MX consumer is after the loop.
+      if (ir::AsVarLike(yield->value_[i]).get() != op->iter_args_[i].get()) {
+        if (i < op->return_vars_.size()) unsupported_results_.insert(op->return_vars_[i].get());
+        continue;
+      }
+      auto initial = ir::AsVarLike(op->iter_args_[i]->initValue_);
+      if (!initial) continue;
+      aliases_[op->iter_args_[i].get()] = initial;
+      if (i < op->return_vars_.size()) aliases_[op->return_vars_[i].get()] = initial;
+    }
+  }
+
+  [[nodiscard]] bool HasUnsupportedScaleView(const VarPtr& value) {
+    std::vector<const ir::Var*> path;
+    std::set<const ir::Var*> seen;
+    auto current = value;
+    bool unsupported = false;
+    while (current) {
+      const auto cached = unsupported_scale_view_cache_.find(current.get());
+      if (cached != unsupported_scale_view_cache_.end()) {
+        unsupported = cached->second;
+        break;
+      }
+      if (unsupported_scale_views_.count(current.get()) != 0) {
+        unsupported = true;
+        unsupported_scale_view_cache_[current.get()] = true;
+        break;
+      }
+      if (!seen.insert(current.get()).second) break;
+      path.push_back(current.get());
+      const auto alias = aliases_.find(current.get());
+      if (alias == aliases_.end()) break;
+      current = alias->second;
+    }
+    // Cache both positive and negative provenance for every visited alias. A
+    // later lookup that shares this suffix then costs one map lookup instead
+    // of walking the same chain again.
+    for (const auto* var : path) unsupported_scale_view_cache_[var] = unsupported;
+    return unsupported;
+  }
+
+  VarPtr ResolveAlias(const VarPtr& value) {
+    if (!value) return nullptr;
+    std::vector<const ir::Var*> path;
+    std::set<const ir::Var*> seen;
+    auto current = value;
+    while (true) {
+      const auto cached = roots_.find(current.get());
+      if (cached != roots_.end()) {
+        current = cached->second;
+        break;
+      }
+      const auto alias = aliases_.find(current.get());
+      if (alias == aliases_.end() || alias->second.get() == current.get()) break;
+      INTERNAL_CHECK_SPAN(seen.insert(current.get()).second, value->span_)
+          << "Internal error: cyclic MX scale alias provenance";
+      path.push_back(current.get());
+      current = alias->second;
+    }
+    for (const auto* var : path) roots_[var] = current;
+    roots_[value.get()] = current;
+    return current;
+  }
+
+  std::pair<VarPtr, bool> ResolveInitialRoot(const VarPtr& value) {
+    auto current = ResolveAlias(value);
+    std::vector<const ir::Var*> path;
+    std::set<const ir::Var*> seen;
+    while (auto carry = As<ir::IterArg>(current)) {
+      const auto cached = initial_roots_.find(current.get());
+      if (cached != initial_roots_.end()) {
+        current = cached->second;
+        break;
+      }
+      INTERNAL_CHECK_SPAN(seen.insert(current.get()).second, value->span_)
+          << "Internal error: cyclic MX scale loop initial provenance";
+      path.push_back(current.get());
+      current = ResolveAlias(ir::AsVarLike(carry->initValue_));
+    }
+    for (const auto* carry : path) initial_roots_[carry] = current;
+    return {current, !path.empty() || initial_roots_.count(ResolveAlias(value).get()) != 0};
+  }
+
+  size_t region_ = 0;
+  size_t next_region_ = 0;
+  std::map<const ir::Var*, size_t> producers_;
+  std::map<const ir::Var*, VarPtr> aliases_;
+  std::map<const ir::Var*, VarPtr> roots_;
+  std::map<const ir::Var*, VarPtr> initial_roots_;
+  std::map<const ir::Var*, bool> unsupported_scale_view_cache_;
+  std::set<const ir::Var*> unsupported_results_;
+  std::set<const ir::Var*> unsupported_scale_views_;
+  std::vector<BindingUse> bindings_;
+};
+
 // Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
 // this name reserved in modules that use deferred completion so a user kernel
 // cannot silently collide with the private adapter declaration.
@@ -1256,6 +1476,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   fs_.Reset();
   fs_.current_function = func;
+  IndexMxScaleFillBindings(func);
 
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into
@@ -1654,6 +1875,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       BindVarToMlir(param, handle);
       RegisterTileBufType(handle, fields.type_str, tile_type);
       RegisterMutableTileName(handle);
+      fs_.tile_descriptor_scope[GetVarKey(param)] = fs_.tile_alloc_scope_stack.back();
       auto memref = ir::GetDefinedMemRef(tile_type);
       if (memref) parameter_backed_tile_bases_.insert(memref->base_.get());
     }
@@ -2649,6 +2871,9 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
 }
 
 bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields) {
+  // A dominating view already has a body declaration (e.g. pto.subview or
+  // pto.treshape). It is a usable shared phi handle, but never an allocation.
+  if (IsTileViewName(ssa_name)) return false;
   if (!fs_.emitted_tile_alloc_names.insert(ssa_name).second) {
     return false;  // already declared — in the head, or inline earlier in the body
   }
@@ -2674,6 +2899,9 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
 }
 
 void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::string& reshape_source) {
+  // Views declare real handles too. Preserve their own declaration region,
+  // rather than borrowing the base allocation's dominance or losing offsets.
+  fs_.tile_alloc_scope.try_emplace(ssa_name, fs_.tile_alloc_scope_stack.back());
   const auto source = fs_.tile_view_names.find(reshape_source);
   fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
                                       ? source->second
@@ -2857,6 +3085,109 @@ bool PTOCodegen::IsDualAivDispatchFunction() const {
          fs_.current_function->GetAttr<bool>(ir::kAttrDualAivDispatch, false);
 }
 
+void PTOCodegen::IndexMxScaleFillBindings(const FunctionPtr& func) {
+  MxScaleFillBindingCollector collector;
+  fs_.mx_scale_fill_bindings = collector.Collect(func->body_);
+}
+
+void PTOCodegen::EmitMxScaleFillBinding(const CallPtr& call, const VarPtr& destination) {
+  if (!ir::IsOp(call, "tile.move")) return;
+  const auto found = fs_.mx_scale_fill_bindings.find(destination.get());
+  if (found == fs_.mx_scale_fill_bindings.end() || !std::get<2>(found->second)) return;
+  const auto& data = std::get<0>(found->second);
+  CHECK_SPAN(data, call->span_)
+      << "MX scale cross-scope fill requires a unique paired data tile; multiple data pairings "
+         "or changing loop carries require separate scale fills in the consumer scope";
+
+  // All tile Vars have names reserved at function entry. PTOAS can even assign
+  // an unvisited view the already declared base handle. Require the specific
+  // data descriptor's definition as well as its handle to dominate this write;
+  // otherwise a later reshape would bind using the base's shape and metadata.
+  const auto named = fs_.var_to_mlir.find(GetVarKey(data));
+  const auto declared =
+      named == fs_.var_to_mlir.end() ? fs_.tile_alloc_scope.end() : fs_.tile_alloc_scope.find(named->second);
+  const auto descriptor = fs_.tile_descriptor_scope.find(GetVarKey(data));
+  CHECK_SPAN(descriptor != fs_.tile_descriptor_scope.end() &&
+                 fs_.active_tile_alloc_scopes.count(descriptor->second) != 0 &&
+                 declared != fs_.tile_alloc_scope.end() &&
+                 fs_.active_tile_alloc_scopes.count(declared->second) != 0,
+             call->span_)
+      << "MX scale cross-scope fill requires its paired data tile to dominate the fill; "
+         "define the paired data view before the fill, or move the fill into the consumer scope";
+
+  // The physical destination handle is declared immediately before this point,
+  // although the functional Tile IR producer has not executed yet. Emitting the
+  // existing DPS bind here is SSA-safe and ensures the following TMOV writes the
+  // address consumed by matmul. Keep consumer rebindings for later buffer reuse.
+  BindVarToMlir(destination, fs_.current_result_buf);
+  VarPtr binding_data = data;
+  const auto& consumer_type = std::get<1>(found->second);
+  const auto data_type = As<TileType>(data->GetType());
+  const auto scale_type = As<TileType>(destination->GetType());
+  INTERNAL_CHECK_SPAN(data_type && consumer_type && scale_type, call->span_)
+      << "Internal error: MX scale data and destination descriptors must be TileTypes";
+  // Bind the fill's own validity, not an arbitrary later consumer's narrowed
+  // view. The scale's valid M (Left) or N (Right) determines the paired data
+  // extent; keep the root's K and physical layout. Later aliases can narrow
+  // both operands independently without changing this producer's descriptor.
+  auto binding_view = ir::tile_view_semantics::GetEffectiveTileView(*data_type);
+  const auto scale_view = ir::tile_view_semantics::GetEffectiveTileView(*scale_type);
+  const size_t paired_axis =
+      scale_type->GetMemorySpace() == ir::MemorySpace::LeftScale ? size_t{0} : size_t{1};
+  INTERNAL_CHECK_SPAN(binding_view.valid_shape.size() == 2 && scale_view.valid_shape.size() == 2, call->span_)
+      << "Internal error: MX scale binding requires rank-2 validity";
+  auto paired_valid = scale_view.valid_shape[paired_axis];
+  const auto data_memory_space = data_type->GetMemorySpace();
+  INTERNAL_CHECK_SPAN(data_memory_space.has_value(), call->span_)
+      << "Internal error: MX scale binding data tile has no memory space";
+  const auto packed_axis = GetPtoFp4LogicalAxis(MemorySpaceToMLIR(data_memory_space.value()),
+                                                GetTypeString(data_type->dtype_), binding_view.blayout);
+  if (packed_axis && *packed_axis == paired_axis) {
+    // Scales count logical values, while the paired packed TileType counts
+    // byte carriers. Reuse the existing complete-pair conversion contract.
+    paired_valid =
+        ir::AdjustPackedFp4CastLastDim({paired_valid}, DataType::FP32, data_type->dtype_, call->span_)[0];
+  }
+  binding_view.valid_shape[paired_axis] = paired_valid;
+  const auto binding_type = std::make_shared<TileType>(
+      data_type->shape_, data_type->dtype_, data_type->memref_, binding_view, data_type->GetMemorySpace());
+  if (!ir::structural_equal(ir::CloneTypeWithoutMemRef(data_type),
+                            ir::CloneTypeWithoutMemRef(binding_type))) {
+    const auto source = ExtractTileTypeInfo(*data_type, GetTypeString(data_type->dtype_));
+    const auto target = ExtractTileTypeInfo(*consumer_type, GetTypeString(consumer_type->dtype_));
+    CHECK_SPAN(data_type->GetMemorySpace() == consumer_type->GetMemorySpace() &&
+                   source.dtype_str == target.dtype_str && source.rows == target.rows &&
+                   source.cols == target.cols && source.blayout == target.blayout &&
+                   source.slayout == target.slayout && source.fractal == target.fractal &&
+                   source.compact == target.compact && !data_type->dtype_.IsPackedFp4(),
+               call->span_)
+        << "MX scale cross-scope metadata aliases require identical unpacked physical data storage";
+    CHECK_SPAN(std::all_of(binding_view.valid_shape.begin(), binding_view.valid_shape.end(),
+                           [](const ExprPtr& dim) { return As<ir::ConstInt>(dim) != nullptr; }),
+               call->span_)
+        << "MX scale cross-scope metadata aliases require static producer valid_shape";
+    // A real zero-copy descriptor matches the producer scale's validity while
+    // dominating its fill. Do not spoof an SSA annotation or mutate the root
+    // data handle's metadata; both PyPTO and PTOAS validate the resulting pair.
+    const auto data_view = EnsureTileView(named->second, GetExprTypeAnnotation(data), binding_type,
+                                          data->name_hint_ + "_mx_scale_view");
+    binding_data = std::make_shared<ir::Var>(data->name_hint_ + "_mx_scale_view", binding_type, call->span_);
+    BindVarToMlir(binding_data, data_view);
+  }
+  // var_to_mlir stores raw Var keys. The proxy is not part of the persistent
+  // IR, so remove its entry on success and exceptions before its owner dies.
+  struct ProxyBindingGuard {
+    std::map<const ir::Var*, std::string>& names;
+    VarPtr proxy;
+    ~ProxyBindingGuard() {
+      if (proxy) names.erase(proxy.get());
+    }
+  } proxy_binding_guard{fs_.var_to_mlir, binding_data.get() != data.get() ? binding_data : nullptr};
+  const auto binding = ir::OpRegistry::GetInstance().Create("tile.tget_scale_addr",
+                                                            {destination, binding_data}, {}, call->span_);
+  VisitExpr(binding);
+}
+
 void PTOCodegen::EmitExtraAllocTiles() {
   // Regions first: every `pto.multi_tile_get` in the body reads one, so the
   // declaration has to dominate them all.
@@ -2903,6 +3234,14 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
   // they frequently rebuild the Call underneath it with a coarser span.
   SpanScope stmt_loc(this, &stmt->span_);
   ir::IRVisitor::VisitStmt(stmt);
+  // Register only after emission: preassigned Var names and shared allocations
+  // do not prove descriptor readiness. The nonrecursive collector also covers
+  // control-flow results, which become visible after their entire statement.
+  for (const auto* var : ir::var_collectors::CollectStmtDefinedVars(stmt)) {
+    if (As<TileType>(var->GetType())) {
+      fs_.tile_descriptor_scope[var] = fs_.tile_alloc_scope_stack.back();
+    }
+  }
   if (region_boundary) fs_.slot_index_ssa.clear();
 }
 
@@ -3038,7 +3377,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         const auto destination = PrepareTileDestination(op->var_, storage, call->op_->name_);
         fs_.current_result_buf = destination.name;
       }
-      if (!elide_move) VisitExpr(op->value_);
+      if (!elide_move) {
+        EmitMxScaleFillBinding(call, op->var_);
+        VisitExpr(op->value_);
+      }
       // If codegen changed the result buffer (e.g., reshape allocated a new tile),
       // update variable mapping so subsequent references use the new buffer
       if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {
