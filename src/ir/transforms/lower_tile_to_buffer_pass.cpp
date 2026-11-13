@@ -32,6 +32,7 @@
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
+#include "pypto/backend/common/gather_compare_scratch.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -55,6 +56,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_indexed_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/buffer_tuple_results.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
@@ -231,6 +233,11 @@ class StorageIndex : public IRVisitor {
       const auto& source = IsOp(call, "tile.slice") ? call->args_[0] : ExprPtr(assign->var_);
       if (auto tile = As<TileType>(source->GetType())) window_sources_.insert(tile.get());
     }
+    if (const auto call = As<Call>(assign->value_); IsOp(call, "tile.gather_compare")) {
+      if (const auto scratch = As<TileType>(call->args_[2]->GetType())) {
+        gather_workspaces_.insert(scratch.get());
+      }
+    }
     IRVisitor::VisitStmt_(assign);
   }
 
@@ -333,8 +340,20 @@ class StorageIndex : public IRVisitor {
     const bool has_column =
         std::any_of(storage.members.begin(), storage.members.end(),
                     [](const auto& member) { return backend::IsColumnVectorBuffer(member.descriptor); });
-    if (backend::IsMatrixBufferSpace(*memory_space) || has_column) {
-      FinalizeTypedRoot(base, storage, capacity, origin, span);
+    const auto gather_workspace =
+        std::find_if(storage.members.begin(), storage.members.end(),
+                     [&](const auto& member) { return gather_workspaces_.count(member.tile.get()) != 0; });
+    // Aliases and reuse can give scratch different descriptors over one allocation.
+    // The native mask prefix must view the workspace directly, never a reshape.
+    if (backend::IsMatrixBufferSpace(*memory_space) || has_column ||
+        gather_workspace != storage.members.end()) {
+      // Addressless typed storage allocates its first member and reshapes other
+      // interpretations. A backing tile may precede its workspace reshape, so
+      // explicitly choose the workspace as the native subview's allocation root.
+      const size_t root_index = !addressed_ && gather_workspace != storage.members.end()
+                                    ? static_cast<size_t>(gather_workspace - storage.members.begin())
+                                    : 0;
+      FinalizeTypedRoot(base, storage, capacity, origin, span, root_index);
       return;
     }
     CHECK_SPAN(origin, span) << "LowerTileToBuffer: addressed storage needs a full-capacity MemRef anchor; "
@@ -517,7 +536,7 @@ class StorageIndex : public IRVisitor {
   // planner decided. Without addresses, one allocation can carry only one
   // window, relabelled in place by same-size reshapes (NZ <-> ZN).
   void FinalizeTypedRoot(const Var* base, BufferStorage& storage, uint64_t capacity,
-                         std::optional<int64_t> origin, const Span& span) {
+                         std::optional<int64_t> origin, const Span& span, size_t root_index) {
     std::map<TypedKey, VarPtr> handles_by_window;
     std::vector<std::pair<TypedKey, BufferTypePtr>> member_keys;
     for (const auto& member : storage.members) {
@@ -537,7 +556,9 @@ class StorageIndex : public IRVisitor {
     }
     VarPtr root;
     uint64_t root_offset = 0;
-    for (size_t i = 0; i < storage.members.size(); ++i) {
+    // Start with the selected allocation descriptor without moving storage members.
+    for (size_t step = 0; step < storage.members.size(); ++step) {
+      const size_t i = (root_index + step) % storage.members.size();
       const auto& [key, descriptor] = member_keys[i];
       auto [entry, inserted] = handles_by_window.emplace(key, nullptr);
       if (inserted) {
@@ -581,6 +602,7 @@ class StorageIndex : public IRVisitor {
   // Tiles that windows are cut from. PTOAS cannot legalize a subview of a
   // byte-root relabel, so in addressed storage they get their own allocation.
   std::unordered_set<const TileType*> window_sources_;
+  std::unordered_set<const TileType*> gather_workspaces_;
   std::unordered_set<const TileType*> types_;
   std::unordered_map<const Var*, CallPtr> declarations_;
 };
@@ -655,7 +677,8 @@ class TileToBufferMutator : public IRMutator {
       : storage_(storage),
         guarded_valid_(guarded_valid),
         local_accumulators_(local_accumulators),
-        indexed_(body) {}
+        indexed_(body),
+        tuples_(body) {}
 
   StmtPtr VisitStmt(const StmtPtr& stmt) override {
     auto lowered = IRMutator::VisitStmt(stmt);
@@ -707,6 +730,9 @@ class TileToBufferMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
+    // Destinations are emitted at the producer; projections are only logical
+    // names for those same planned storage windows.
+    if (tuples_.IsProjection(assign)) return Empty(assign->span_);
     if (auto call = As<Call>(assign->value_)) {
       return LowerDefinition(call, assign->var_);
     }
@@ -1065,6 +1091,47 @@ class TileToBufferMutator : public IRMutator {
     if (const auto* indexed = backend::FindLogicalBufferIndexedRecipe(call->op_->name_)) {
       CHECK_SPAN(result && backend::SupportsLogicalBufferIndexed(*indexed, call), call->span_)
           << "LowerTileToBuffer: unsupported indexed operands";
+      if (indexed->compare) {
+        const auto outputs = tuples_.Get(result);
+        CHECK_SPAN(outputs, call->span_)
+            << "LowerTileToBuffer: gather_compare requires every ordered output binding";
+        auto workspace = Handle(call->args_[2]);
+        const auto source = backend::StaticLogicalBufferDescriptor(call->args_[0]->GetType());
+        const auto plan =
+            backend::PlanGatherCompareScratch(source->shape_[0], source->shape_[1], source->dtype_.GetByte());
+        INTERNAL_CHECK_SPAN(plan.has_value(), call->span_)
+            << "Internal error: validated gather scratch plan is unavailable";
+        std::vector<StmtPtr> out;
+        const int64_t mask_bytes = plan->rows * plan->mask_cols;
+        const auto prefix_type =
+            std::make_shared<BufferType>(std::vector<int64_t>{1, mask_bytes}, DataType::UINT8,
+                                         MemorySpace::Vec, std::vector<int64_t>{1, mask_bytes});
+        // Slice the contiguous byte prefix before reshaping it. The native
+        // manual pipeline cannot lower a subview whose parent is a reshape.
+        const auto prefix = DefineWindow(
+            workspace->name_hint_ + "_gather_prefix", workspace, ZeroOffsets(call->span_), prefix_type,
+            std::make_shared<MakeTuple>(
+                std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, call->span_),
+                                     std::make_shared<ConstInt>(mask_bytes, DataType::INDEX, call->span_)},
+                call->span_),
+            out, call->span_);
+        const auto mask_type =
+            std::make_shared<BufferType>(std::vector<int64_t>{plan->rows, plan->mask_cols}, DataType::UINT8,
+                                         MemorySpace::Vec, std::vector<int64_t>{plan->rows, plan->mask_cols});
+        const auto mask =
+            std::make_shared<Var>(workspace->name_hint_ + "_gather_mask", mask_type, call->span_);
+        out.push_back(std::make_shared<AssignStmt>(
+            mask,
+            OpRegistry::GetInstance().CreateInternal("buffer.reshape", {prefix}, {}, mask_type, call->span_),
+            call->span_));
+        out.push_back(Operation(
+            indexed->buffer_op,
+            {Handle(call->args_[0]), VisitExpr(call->args_[1]), mask, workspace, Handle(outputs->outputs[0]),
+             Handle(outputs->outputs[1])},
+            call->span_,
+            {{"cmp_mode", call->GetKwarg<int>("cmp_mode")}, {"offset", call->GetKwarg<int>("offset", 0)}}));
+        return std::make_shared<SeqStmts>(out, call->span_);
+      }
       CHECK_SPAN(!indexed->scatter || indexed_.HasExclusiveZeroBase(call), call->span_)
           << "LowerTileToBuffer: scatter requires an exclusively consumed zero destination";
       std::vector<ExprPtr> args;
@@ -1435,6 +1502,7 @@ class TileToBufferMutator : public IRMutator {
   std::vector<StmtPtr> use_definitions_;
   const LocalAccumulatorIndex* local_accumulators_;
   BufferIndexedAnalysis indexed_;
+  BufferTupleResults tuples_;
   std::unordered_map<const Stmt*, std::vector<StmtPtr>> local_definitions_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;

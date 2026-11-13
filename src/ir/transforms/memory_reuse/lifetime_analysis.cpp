@@ -35,6 +35,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_tuple_results.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -96,6 +97,7 @@ class LifetimeAnalyzer : public IRVisitor {
       var_def_order_[var] = current_order_;
     }
 
+    tuple_results_ = BufferTupleResults(func_body);
     // Phase 1: Walk IR tree
     if (func_body) {
       VisitStmt(func_body);
@@ -124,10 +126,19 @@ class LifetimeAnalyzer : public IRVisitor {
   // Leaf statements: assign order + collect defs/uses
   void VisitStmt_(const AssignStmtPtr& op) override {
     int order = current_order_++;
+    if (const auto tuple = tuple_results_.Get(op->var_)) {
+      // Native multi-result writes happen together at the call, even when a
+      // projection is delayed or unread. Never start a lifetime at projection.
+      for (const auto& output : tuple->outputs) {
+        ordered_defs_.push_back(output);
+        var_def_order_[output] = order;
+        var_def_stmt_[output] = op;
+      }
+    }
 
     // Record TileType variable definitions
     auto tile_type = As<TileType>(op->var_->GetType());
-    if (tile_type) {
+    if (tile_type && !tuple_results_.IsProjection(op)) {
       ordered_defs_.push_back(op->var_);
       var_def_order_[op->var_] = order;
       var_def_stmt_[op->var_] = op;
@@ -266,6 +277,7 @@ class LifetimeAnalyzer : public IRVisitor {
 
   // Variable tracking (Phase 1)
   std::vector<VarPtr> ordered_defs_;
+  BufferTupleResults tuple_results_;
   std::map<VarPtr, int> var_def_order_;
   std::map<VarPtr, int> var_raw_last_use_;  // Raw last use (without loop extension)
   std::map<VarPtr, StmtPtr> var_def_stmt_;

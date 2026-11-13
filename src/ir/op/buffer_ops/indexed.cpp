@@ -33,13 +33,22 @@ namespace pypto::ir {
         .set_output_arity(0)
         .set_buffer_result_behavior(BufferResultBehavior::None);
     for (size_t i = 0; i < recipe.input_count; ++i) {
-      entry.add_argument("input" + std::to_string(i), "Explicit indexed operand")
-          .set_buffer_arg_effect(i, !recipe.scatter && i == 2 ? BufferAccess::Write : BufferAccess::Read,
-                                 BufferAccess::Read);
+      entry.add_argument("input" + std::to_string(i), "Explicit indexed operand");
+      if (recipe.compare && i == 1) {
+        entry.set_buffer_non_memory_arg(i);
+      } else {
+        // The full backing operand describes every native scratch write. The
+        // mask view supplies row pitch and shares that backing at byte zero.
+        entry.set_buffer_arg_effect(i, !recipe.scatter && i >= 2 ? BufferAccess::Write : BufferAccess::Read,
+                                    BufferAccess::Read);
+      }
     }
-    entry.add_argument("destination", "Explicit destination buffer")
-        .set_buffer_arg_effect(recipe.input_count, BufferAccess::Write, BufferAccess::Read);
-    if (!recipe.scatter) entry.set_workspace_arg(2);
+    for (size_t i = 0; i < (recipe.compare ? 2U : 1U); ++i) {
+      entry.add_argument("destination" + std::to_string(i), "Ordered explicit destination buffer")
+          .set_buffer_arg_effect(recipe.input_count + i, BufferAccess::Write, BufferAccess::Read);
+    }
+    if (!recipe.scatter) entry.set_workspace_arg(recipe.compare ? 3 : 2);
+    if (recipe.compare) entry.set_attr<int>("cmp_mode").set_attr<int>("offset");
     entry.f_deduce_type([recipe](const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
       backend::ValidateBufferIndexedOperands(recipe, args, kwargs);

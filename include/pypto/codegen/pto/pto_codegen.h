@@ -995,6 +995,9 @@ class PTOCodegen : public CodegenBase {
   std::string EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataType target);
   std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs, const ir::ExprPtr& destination,
                                   const std::string& attributes = "");
+  std::string BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
+                                  const std::vector<ir::ExprPtr>& destinations,
+                                  const std::string& attributes = "");
 
   /**
    * @brief Collect deterministic GM slot buffer byte offsets for frontend pipe ids in a module.

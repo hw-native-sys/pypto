@@ -188,7 +188,14 @@ def gather_compare(
     Args:
         src: Source tile (FP16/FP32/INT16/INT32, 2D).
         kvalue: Scalar threshold (dtype must match ``src``; applied to every row).
-        tmp: Workspace tile (UINT8) sized for the codegen kernel.
+        tmp: Full-valid dense UINT8 workspace. On A2/A3 use shape ``[1, bytes]``.
+            For source ``[R, C]`` with element width ``E`` bytes, set
+            ``M = ceil(C / 256) * 32`` and reserve at least
+            ``round_up(R * (M + 4*C + E), M)`` bytes for masks, indices and
+            converted thresholds. The workspace width must be divisible by ``M``
+            and the workspace must not overlap the source or either output.
+            Scratch contents are not a result. PTOAS may use a private workspace
+            when this operand aliases storage used by other operations.
         cmp_mode: ``"eq"`` / ``"ne"`` / ``"lt"`` / ``"le"`` / ``"gt"`` /
             ``"ge"`` or int ``0..5``. Defaults to ``"eq"``.
         offset: Starting index offset (default 0).
