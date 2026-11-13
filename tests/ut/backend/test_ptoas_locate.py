@@ -485,7 +485,9 @@ def test_native_fp4_probe_rejects_old_geometry(fp4_probe, monkeypatch, returncod
         stderr="" if returncode == 0 else "incompatible accumulator shape",
     )
     monkeypatch.setattr(_ptoas_fp4.subprocess, "run", lambda *args, **kwargs: result)
-    with pytest.raises(RuntimeError, match=r"Native FP4 MX.*v0.74.*PTOAS #1700.*Set PTOAS_ROOT to the released v0.74"):
+    with pytest.raises(
+        RuntimeError, match=r"Native FP4 MX.*v0.74.*PTOAS #1700.*Set PTOAS_ROOT to the released v0.74"
+    ):
         _ptoas_fp4.check_native_fp4_mx_support()
     assert not _ptoas_fp4._verified_binaries
 
