@@ -209,3 +209,94 @@ absent definitions are outside this contract. Legacy informational
 - DSL: [`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
   [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
   [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py).
+
+## Host DDR windows
+
+`pld.alloc_window_buffer(size, memory_source="host")` selects Host DDR backing;
+`"device"` remains the default. The shape/dtype overload accepts the same keyword.
+`WindowBuffer.memory_source` preserves this property through cloning, serialization,
+and the private `window_buffer` text descriptor. Slots are grouped by both device
+coverage and memory source: Host and Device allocations never share a physical domain.
+
+Host codegen requests `AddressSpace.HOST` and `workspace_engines=("urma",)` from
+Simpler, and obtains the per-rank context with the URMA workspace. This requires
+Simpler #2913 or later and its supported same-machine A5 `tensormap_and_ringbuffer`
+configuration. Runtime API capabilities are checked once when loading the generated
+entry during worker setup, including `initializer` support when needed; dispatch does
+not repeat signature inspection. Simpler validates the platform and runtime combination. The current runtime submodule already provides this API.
+
+The owning rank may use its device-mapped tensor locally. Host peer windows are not
+MTE mappings: peer access requires URMA. Existing peer-MTE primitives and collectives
+are rejected when their remote operands originate from Host windows, including through
+forwarded chip/InCore parameters. URMA asynchronous operators are not classified as
+peer MTE. Host peer URMA reads remain a separate execution feature.
+
+The check also covers CHIP `all_to_all_v` and `indexed_all_to_all_v` after builtin
+lowering: `target` supplies the peer-mapped context, and `signal` / `send_counts`
+are accessed directly on peers. These operands cannot use Host windows, including
+`send_counts` whose synthesized formal is a plain Tensor. Local-only `input` and
+`recv_counts` may use Host windows.
+
+### Runtime source initialization
+
+Declare a runtime source key with `pld.alloc_window_buffer(size, memory_source="host",
+init="engram_l1")`. Compilation records the key and logical byte count; it never opens
+or reads files. After compilation, bind one open binary file per domain rank:
+
+```python
+from contextlib import ExitStack
+from pypto.runtime import DistributedWorker
+
+compiled = program.compile(...)  # no shard files needed here
+with ExitStack() as stack:
+    shard_files = [stack.enter_context(open(path, "rb")) for path in shard_paths]
+    with DistributedWorker(compiled, persistent=True, reset_persistent_windows=False,
+                           window_sources={"engram_l1": shard_files}) as worker:
+        worker(...)  # creates the domain and loads the files before submitting chip tasks
+        worker(...)  # reuses the loaded Host domain
+```
+
+`init` must be a non-empty string and is supported only for Host windows. The
+`window_sources` mapping belongs to the worker (also accepted by `compiled.prepare`).
+The source sequence follows **domain rank order**, including domains covering a subset
+of workers. Missing/unused source keys and a wrong rank count raise errors.
+
+The same mapping accepts contiguous CPU `torch.Tensor` sources, or a mixture of
+files and tensors: `window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`.
+Tensor data is copied as raw bytes, starting at its view's storage offset, without
+dtype conversion or a staging clone. BF16 and FP8 are supported. Non-CPU,
+noncontiguous, sparse, quantized, conjugate and negative views are rejected.
+The source must contain at least the logical window byte count; trailing bytes are
+ignored. Binding retains the tensor object, not a snapshot of its contents: data is
+read at domain creation, so keep sources stable until that dispatch completes.
+
+Codegen emits `(buffer_name, init_key, logical_nbytes)` bindings and calls the fixed
+`make_window_initializer` helper with the worker's source map. The helper creates an
+internal callback; Simpler invokes it after all rank mappings exist. For each binding,
+it copies `window_sources[init_key][domain_rank]` into the corresponding named
+buffer, using `domain.buffer_range(buffer_name)` for its byte offset. No Python
+function is generated from file handles or tensor contents.
+
+Simpler #2939 supplies the creation-time initializer. PyPTO reads each source from
+file offset zero directly into the named buffer's Host mapping, in bounded chunks,
+and restores the original file position. It copies exactly the logical byte count;
+alignment padding is untouched and trailing file bytes are ignored. A short file
+fails domain creation; all CPU memoryview exports are released so Simpler can roll
+back. No complete table-sized staging allocation is made. Files must be readable,
+seekable binary streams; the caller owns them and must keep them open until the
+first dispatch completes. Do not mutate or concurrently access these streams while
+initialization runs.
+
+Persistent reuse does not invoke the initializer, so files can be closed after the
+first successful dispatch. A newly created domain reads its files again. Without
+`persistent=True`, each dispatch creates and initializes a new domain, so keep the
+files open. Source bindings are snapshotted at worker creation; changing the original
+mapping/list does not reload a retained table. Create a new worker to load new data.
+
+Persistent execution validates memory source, workspace engines and initializer
+bindings when reusing domains. Host and Device windows use the same policy:
+`persistent=True` retains allocations, and `reset_persistent_windows` controls
+zeroing before reuse (enabled by default). Initialization is not repeated after
+zeroing. Set `reset_persistent_windows=False` to retain the loaded Engram table;
+this also disables reset for Device scratch/signal buffers, whose state the caller
+must then manage. Domain release remains owned by Simpler.

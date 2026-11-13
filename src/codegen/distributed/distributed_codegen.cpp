@@ -33,6 +33,7 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/core/python_string.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -275,6 +276,8 @@ void DistributedCodegen::EmitImports() {
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   declared_vars_.clear();
+  window_source_keys_.clear();
+  requires_host_domain_ = false;
   task_args_counter_ = 0;
   current_func_ = func;
 
@@ -299,7 +302,7 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   std::ostringstream sig;
   sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size";
   if (ir::LevelToLinquLevel(func->level_.value_or(ir::Level::AIV)) >= 3) {
-    sig << ", _domain_provider=None";
+    sig << ", _domain_provider=None, _window_sources=None";
   }
   sig << "):";
   emitter_.EmitLine(sig.str());
@@ -342,6 +345,16 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   }
 
   emitter_.DecreaseIndent();
+  if (requires_host_domain_) emitter_.EmitLine(func->name_ + "._requires_host_domain = True");
+  // Validate runtime bindings before Worker initialization without opening files
+  // during compilation or serializing process-local handles into the artifact.
+  if (!window_source_keys_.empty()) {
+    std::ostringstream keys;
+    keys << func->name_ << "._window_source_keys = (";
+    for (const auto& key : window_source_keys_) keys << QuotePythonString(key) << ",";
+    keys << ")";
+    emitter_.EmitLine(keys.str());
+  }
   emitter_.EmitLine("");
   is_worker_context_ = false;
 }
@@ -590,10 +603,42 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
     window_size_expr << "(" << slot_alloc_nbytes[i] << ")";
   }
 
+  if (op->slots_.front()->memory_source_ == "host") {
+    requires_host_domain_ = true;
+    emitter_.EmitLine("from simpler.task_interface import AddressSpace");
+  }
+  // One Simpler callback initializes all named slots after every rank is mapped.
+  // Keep logical extents separate from the aligned physical buffer sizes below.
+  std::ostringstream initializers;
+  for (size_t i = 0; i < op->slots_.size(); ++i) {
+    const auto& slot = op->slots_[i];
+    if (slot->init_.empty()) continue;
+    window_source_keys_.insert(slot->init_);
+    initializers << "(" << QuotePythonString(SanitizeName(slot->name_hint_)) << ", "
+                 << QuotePythonString(slot->init_) << ", " << slot_nbytes[i] << "),";
+  }
+  if (!initializers.str().empty()) {
+    emitter_.EmitLine("from pypto.runtime.window_sources import make_window_initializer");
+  }
   emitter_.EmitLine("with (_domain_provider or orch.allocate_domain)(");
   emitter_.IncreaseIndent();
   emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
   emitter_.EmitLine("workers=" + workers.str() + ",");
+  const auto& memory_source = op->slots_.front()->memory_source_;
+  for (const auto& slot : op->slots_) {
+    CHECK_SPAN(slot->memory_source_ == memory_source, op->span_)
+        << "CommDomain slots must have the same memory_source";
+  }
+  if (memory_source == "host") {
+    emitter_.EmitLine("memory_source=AddressSpace.HOST,");
+    INTERNAL_CHECK_SPAN(std::find(op->engines_.begin(), op->engines_.end(), "urma") != op->engines_.end(),
+                        op->span_)
+        << "Internal error: Host communication domain is missing its URMA engine requirement";
+  }
+  if (!initializers.str().empty()) {
+    emitter_.EmitLine("initializer=make_window_initializer(_window_sources, (" + initializers.str() +
+                      "), len(" + workers.str() + ")),");
+  }
   emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
   if (!op->engines_.empty()) {
     std::ostringstream engines;
@@ -1785,6 +1830,9 @@ std::string DistributedCodegen::ResolveCommCtxArg(const ir::ExprPtr& arg, const 
   INTERNAL_CHECK_SPAN(window_buffer.has_value(), get_ctx->span_)
       << "pld.system.get_comm_ctx host lowering requires a window-bound DistributedTensor";
   const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(*window_buffer));
+  if ((*window_buffer)->memory_source_ == "host") {
+    return handle_var + ".device_context(" + rank_expr + ", workspace_engines=(\"urma\",))";
+  }
   return handle_var + "[" + rank_expr + "].device_ctx";
 }
 
