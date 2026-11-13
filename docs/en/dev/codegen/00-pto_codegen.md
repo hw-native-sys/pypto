@@ -29,6 +29,14 @@ Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each 
 
 ### Generation Order
 
+Floating-point constants use decimal scientific notation for finite values and
+target-width hexadecimal bit patterns for NaN and infinity. For example,
+`pl.const(math.nan, pl.FP32)` emits `arith.constant 0x7FC00000 : f32`;
+`math.inf` and `-math.inf` emit `0x7F800000` and `0xFF800000`. Non-finite
+constants support FP32, FP16, and BF16. Narrowing preserves the sign and high
+NaN payload bits, retaining a nonzero payload if all payload bits would be lost.
+Other dtypes receive a diagnostic rather than an invalid floating-point literal.
+
 The codegen generates MLIR in the following fixed order:
 
 1. **Constants**: `arith.constant` for index and float values

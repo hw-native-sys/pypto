@@ -14,12 +14,99 @@ in function calls inside @pl.function bodies are resolved correctly.
 """
 
 import ast
+import math
 
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics import ParserTypeError, UndefinedVariableError
+from pypto.language.parser.diagnostics import (
+    ParserSyntaxError,
+    ParserTypeError,
+    UndefinedVariableError,
+    UnsupportedFeatureError,
+)
 from pypto.language.parser.expr_evaluator import ExprEvaluator
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [("math.nan", math.nan), ("math.inf", math.inf), ("-math.inf", -math.inf)],
+)
+@pytest.mark.parametrize("typed", [False, True])
+def test_nonfinite_constant_assignment(expression, expected, typed):
+    """Module attributes work as standalone and explicitly typed constants."""
+    value = f"pl.const({expression}, pl.FP32)" if typed else expression
+    func = pl.parse(f"""
+import math
+@pl.function
+def constant() -> pl.Scalar[pl.FP32]:
+    result = {value}
+    return result
+""")
+    assert isinstance(func, ir.Function)
+    assert isinstance(func.body, ir.SeqStmts)
+    binding = func.body.stmts[0]
+    assert isinstance(binding, ir.AssignStmt)
+    assert isinstance(binding.value, ir.ConstFloat)
+    assert binding.value.dtype == pl.FP32
+    if math.isnan(expected):
+        assert math.isnan(binding.value.value)
+    else:
+        assert binding.value.value == expected
+
+
+@pytest.mark.parametrize(
+    "imports, expression, expected",
+    [
+        ("import math", "math.nan", math.nan),
+        ("import math", "math.inf", math.inf),
+        ("import math", "-math.inf", -math.inf),
+        ("import math as m", "m.nan", math.nan),
+        ("from math import inf as infinity", "-infinity", -math.inf),
+    ],
+)
+def test_nonfinite_operator_argument(imports, expression, expected):
+    """Numeric constants resolve through their Python bindings, including aliases."""
+    func = pl.parse(f"""
+{imports}
+@pl.function
+def add_constant(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result = pl.add(x, {expression})
+    return result
+""")
+    assert isinstance(func, ir.Function)
+    constant = _first_call(func).args[1]
+    assert isinstance(constant, ir.ConstFloat)
+    if math.isnan(expected):
+        assert math.isnan(constant.value)
+    else:
+        assert constant.value == expected
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["math.inf", "pl.const(math.inf, pl.FP32)", "pl.add(math, math.inf)", "pl.add(math, -math.inf)"],
+)
+def test_nonfinite_attribute_respects_ir_shadowing(expression):
+    """A runtime parameter named math takes precedence over the imported module."""
+    with pytest.raises(UnsupportedFeatureError, match="attribute access not supported on IR variable"):
+        pl.parse(f"""
+import math
+@pl.function
+def constant(math: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+    result = {expression}
+    return result
+""")
+
+
+def test_typed_constant_rejects_runtime_scalar():
+    with pytest.raises(ParserSyntaxError, match="compile-time numeric constant"):
+        pl.parse("""
+@pl.function
+def constant(value: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+    result = pl.const(value, pl.FP32)
+    return result
+""")
 
 
 def _first_call(func: ir.Function) -> ir.Call:

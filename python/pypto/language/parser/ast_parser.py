@@ -2037,11 +2037,24 @@ class ASTParser:
                 ]
                 return ir.MakeTuple(dimensions, span)
 
-        # Try to evaluate as a Python enum value (e.g., pl.MemorySpace.Vec -> ConstInt)
+        # Resolve numeric module/closure attributes using the same dtype rules
+        # as named closure constants (e.g. math.nan, math.inf, or an import alias).
+        # An IR binding takes precedence over a same-named Python module.
+        root = attr.value
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name) and self.scope_manager.lookup_var(root.id) is not None:
+            raise UnsupportedFeatureError(
+                f"Standalone attribute access not supported on IR variable: {ast.unparse(attr)}",
+                span=self.span_tracker.get_span(attr),
+                hint="Use a Python module or closure constant for numeric attributes",
+            )
         try:
             value = self.expr_evaluator.eval_expr(attr)
             if isinstance(value, ir.MemorySpace):
                 return ir.ConstInt(value.value, DataType.INDEX, self.span_tracker.get_span(attr))
+            if isinstance(value, (bool, int, float)):
+                return self.expr_evaluator.python_value_to_ir(value, self.span_tracker.get_span(attr))
         except BUG_CLASS_EXCEPTIONS:
             # This eval is speculative, so its failure is normally not worth reporting - but a
             # failed internal invariant is, and swallowing it here would replace the diagnostic

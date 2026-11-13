@@ -16,7 +16,9 @@ changed captured value cannot change the source without changing its key.
 import ast
 import enum
 import functools
+import math
 import operator
+import struct
 import types
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
@@ -24,7 +26,7 @@ from typing import Any, cast
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
 
-from ._source import _UNBOUND
+from ._source import _UNBOUND, cache_in_snapshot
 
 # ---------------------------------------------------------------------------
 # Free-name folding
@@ -128,12 +130,42 @@ def render_free_value(value: Any) -> ast.expr | None:
     return ast.parse(path, mode="eval").body if path else None
 
 
+def math_constant_reference(node: ast.AST) -> str | None:
+    """Identify a qualified math constant candidate without resolving its binding."""
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, ast.Load)
+        and isinstance(node.value, ast.Name)
+        and node.attr in ("nan", "inf")
+    ):
+        return f"{node.value.id}.{node.attr}"
+    return None
+
+
+@cache_in_snapshot
+def _math_constant_value(name: str) -> Any:
+    """Keep the cache key and generated source on the same per-request value."""
+    return getattr(math, name)
+
+
 def _bind_free_name(name: str, py_globals: Mapping[str, Any]) -> ast.expr | None:
     """Render what ``name`` is bound to in ``py_globals``, or None if it does not fold.
 
     None covers all three ways a name can fail to fold: it is not bound here, it
     is an unbound closure cell, or its value has no source form.
     """
+    if "." in name:
+        root, attribute = name.split(".", 1)
+        # Match the bound module, not its spelling: aliases work, while a local
+        # or unrelated object's .nan/.inf must not become a math constant.
+        if py_globals.get(root) is math and attribute in ("nan", "inf"):
+            value = _math_constant_value(attribute)
+            if isinstance(value, float) and not math.isfinite(value):
+                # ast.unparse(nan) uses inf-inf, which loses its sign/payload.
+                bits = struct.pack(">d", value).hex()
+                return ast.parse(f"pl._dump.float64('{bits}')", mode="eval").body
+            return render_free_value(value)
+        return None
     if name not in py_globals:
         return None
     value = py_globals[name]

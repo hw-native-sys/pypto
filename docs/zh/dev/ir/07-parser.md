@@ -52,6 +52,14 @@ assert isinstance(simple_add, pypto.ir.Function)
 
 ### 类型 (Type) 标注
 
+赋值和算子参数支持 `math.nan`、`math.inf`、`-math.inf` 等 Python 数值模块属性。
+在外层 Python 作用域导入 `math` 即可，也支持导入别名。
+使用 `pl.const(math.nan, pl.FP32)`（或 `pl.FP16` / `pl.BF16`）显式指定类型。
+未使用 `pl.const` 时，类型规则与其他 Python 浮点常量相同。
+`pl.const` 要求编译期数值，不能用于转换运行时标量变量。
+`@pl.jit` 同样解析 `math.nan` 和 `math.inf`（包括模块别名），在特化源码中
+保留它们的位模式，并将其值纳入缓存键。
+
 所有参数和局部变量需要类型标注：
 
 ```python

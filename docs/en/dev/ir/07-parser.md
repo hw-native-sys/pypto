@@ -59,6 +59,15 @@ assert isinstance(simple_add, pypto.ir.Function)
 
 ### Type Annotations
 
+Python numeric module attributes such as `math.nan`, `math.inf`, and `-math.inf`
+are accepted in assignments and operator arguments. Import `math` in the enclosing
+Python scope; import aliases also work. Use `pl.const(math.nan, pl.FP32)` (or
+`pl.FP16` / `pl.BF16`) to specify a dtype explicitly. Without `pl.const`, these
+values follow the same dtype rules as other Python float constants. `pl.const`
+requires a compile-time numeric value; it does not convert runtime scalar variables.
+`@pl.jit` also resolves `math.nan` and `math.inf` (including module aliases),
+preserves their bits in specialized source, and includes their values in the cache key.
+
 All parameters and local variables require type annotations:
 
 ```python

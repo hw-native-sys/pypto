@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -20,6 +21,7 @@
 #include <iomanip>
 #include <ios>
 #include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <optional>
@@ -91,6 +93,35 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// MLIR accepts non-finite FloatAttrs as target-width IEEE bit patterns, not
+// the "nan" / "inf" spellings produced by iostreams. ConstFloat stores a
+// double even for narrower dtypes; preserve its sign and high payload bits.
+std::string FormatFloatConstant(double value, DataType dtype) {
+  std::ostringstream os;
+  os.imbue(std::locale::classic());
+  if (std::isfinite(value)) {
+    os << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    return os.str();
+  }
+
+  CHECK(dtype == DataType::FP32 || dtype == DataType::FP16 || dtype == DataType::BF16)
+      << "Non-finite floating-point constants require FP32, FP16, or BF16, got " << dtype.ToString();
+  const unsigned fraction_bits = dtype == DataType::FP32 ? 23 : (dtype == DataType::FP16 ? 10 : 7);
+  const unsigned exponent_bits = dtype == DataType::FP16 ? 5 : 8;
+  const unsigned width = 1 + exponent_bits + fraction_bits;
+  uint64_t source_bits;
+  std::memcpy(&source_bits, &value, sizeof(source_bits));
+  const uint64_t source_fraction = source_bits & ((uint64_t{1} << 52) - 1);
+  uint64_t fraction = source_fraction >> (52 - fraction_bits);
+  // A signaling NaN whose entire payload was truncated must remain NaN,
+  // rather than acquiring the all-zero fraction encoding of infinity.
+  if (source_fraction != 0 && fraction == 0) fraction = 1;
+  const uint64_t bits = ((source_bits >> 63) << (width - 1)) |
+                        (((uint64_t{1} << exponent_bits) - 1) << fraction_bits) | fraction;
+  os << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(width / 4) << bits;
+  return os.str();
+}
 
 // Validate the borrowed-Tile ABI using IR value flow, before allocation and phi
 // handles erase view identity. Each dependency edge is visited once by a
@@ -2559,10 +2590,8 @@ std::string PTOCodegen::GetOrEmitConstant(double value, DataType dt) {
   } else {
     name = NewTemp();
   }
-  std::ostringstream val_str;
-  val_str << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
-  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << val_str.str() << " : "
-                        << mlir_type << "\n";
+  fs_.constants_section << fs_.constants_indent << name << " = arith.constant "
+                        << FormatFloatConstant(value, dt) << " : " << mlir_type << "\n";
   fs_.emitted_numeric_constants[key] = name;
   return name;
 }

@@ -446,6 +446,15 @@ class OpParser:
         Everything else falls through to ``parse_expression``, which keeps
         Tensor/Tile/Scalar var lookups, list literals, etc. unchanged.
         """
+        attribute = arg.operand if isinstance(arg, ast.UnaryOp) and isinstance(arg.op, ast.USub) else arg
+        if isinstance(attribute, ast.Attribute):
+            root = attribute.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            # Closure evaluation must not bypass a runtime binding that shadows
+            # a module, including the operand of -math.inf.
+            if isinstance(root, ast.Name) and self.services.scope_manager.lookup_var(root.id) is not None:
+                return self.callbacks.expression(arg)
         if isinstance(arg, ast.Attribute):
             try:
                 return self.services.type_resolver.resolve_dtype(arg)
@@ -1175,21 +1184,17 @@ class OpParser:
             if not dtype.is_float():
                 raise ParserTypeError("float64 constants require a floating-point dtype", span=span)
             return ir.ConstFloat(value_expr.value, dtype, span)
-        negate = False
-        if isinstance(value_node, ast.UnaryOp) and isinstance(value_node.op, ast.USub):
-            negate = True
-            value_node = value_node.operand
-
-        if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, (int, float)):
+        # Reuse expression parsing so literals, numeric closure bindings, and
+        # math.nan / +/-math.inf follow one resolution path. Runtime IR values
+        # still cannot be reinterpreted as compile-time constants.
+        constant = self.callbacks.expression(call.args[0])
+        if not isinstance(constant, (ir.ConstInt, ir.ConstFloat, ir.ConstBool)):
             raise ParserSyntaxError(
-                "pl.const() first argument must be a numeric literal",
+                "pl.const() first argument must be a compile-time numeric constant",
                 span=span,
-                hint="Use an int or float literal: pl.const(42, pl.INT32)",
+                hint="Use a numeric literal or Python constant, such as pl.const(math.inf, pl.FP32)",
             )
-
-        value = value_node.value
-        if negate:
-            value = -value
+        value = constant.value
 
         # Resolve dtype from second argument
         dtype = self.services.type_resolver.resolve_dtype(call.args[1])

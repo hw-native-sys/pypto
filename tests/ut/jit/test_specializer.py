@@ -794,6 +794,45 @@ class TestRenderFreeValue:
 
 
 class TestSpecializer:
+    def test_nonfinite_math_module_is_shadowed_by_runtime_parameter(self):
+        ctx = _make_ctx(
+            func_name="kernel",
+            source="def kernel(math: pl.Tensor):\n    return pl.add(math, math.inf)\n",
+            param_names=["math"],
+            tensor_meta={"math": TensorMeta((32, 32), DataType.FP32)},
+            auto_scope=False,
+        )
+        ctx.py_globals = {"math": math}
+        generated = specialize("Shadowed", [ctx])
+        assert "math.inf" in generated
+
+    @pytest.mark.parametrize(
+        "expression, expected_bits",
+        [
+            ("math.nan", "7ff8000000000000"),
+            ("math.inf", "7ff0000000000000"),
+            ("-math.inf", "fff0000000000000"),
+            ("m.inf", "7ff0000000000000"),
+        ],
+    )
+    def test_nonfinite_jit_constants(self, expression, expected_bits):
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=(
+                "def kernel(a: pl.Tensor):\n"
+                f"    result = pl.add(a, pl.const({expression}, pl.FP32))\n"
+                "    return result\n"
+            ),
+            param_names=["a"],
+            tensor_meta={"a": TensorMeta((32, 32), DataType.FP32)},
+            auto_scope=False,
+        )
+        ctx.py_globals = {"math": math, "m": math}
+        generated = specialize("Nonfinite", [ctx])
+        program = pl.parse(generated)
+        assert isinstance(program, ir.Program)
+        assert expected_bits in python_print(program, format=False)
+
     def _specialize_simple(
         self,
         func_source: str,

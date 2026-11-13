@@ -19,8 +19,10 @@ Tests verify:
 - SSA form with correct variable naming
 """
 
+import math
 import re
 import shutil
+import struct
 import subprocess
 
 import pypto.language as pl
@@ -1624,6 +1626,109 @@ def test_pto_codegen_tile_adds():
     # Verify scalar constant generation
     assert "arith.constant" in mlir_code
     assert ": f32" in mlir_code
+
+
+@pytest.mark.parametrize(
+    "dtype, mlir_type, encodings",
+    [
+        (DataType.FP32, "f32", ("0x7FC00000", "0x7F800000", "0xFF800000")),
+        (DataType.FP16, "f16", ("0x7E00", "0x7C00", "0xFC00")),
+        (DataType.BF16, "bf16", ("0x7FC0", "0x7F80", "0xFF80")),
+    ],
+)
+@pytest.mark.parametrize("index, value", [(0, math.nan), (1, math.inf), (2, -math.inf)])
+@pytest.mark.ptoas_compile
+def test_nonfinite_constants_ptoas(tmp_path, dtype, mlir_type, encodings, index, value):
+    """Non-finite constants retain their target type and are accepted by PTOAS."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([4, 8], dtype)
+    ib = IRBuilder()
+    with ib.function("constant_store", type=ir.FunctionType.InCore) as f:
+        dest = f.param("dest", tensor_type)
+        f.return_type(tensor_type)
+        constant = ir.ConstFloat(value, dtype, span)
+        first = ib.let("first", tensor_ops.write(dest, [0, 0], constant))
+        result = ib.let("result", tensor_ops.write(first, [0, 1], constant))
+        ib.return_stmt(result)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "Constants", span))
+    assert mlir.count(f"arith.constant {encodings[index]} : {mlir_type}") == 1
+    assert "arith.constant nan" not in mlir
+    assert "arith.constant inf" not in mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "constant_store", str(tmp_path))
+    assert "constant_store" in cpp
+
+
+@pytest.mark.parametrize(
+    "source_bits, expected",
+    [(0xFFF8000000000000, "0xFFC00000"), (0x7FF0000000000001, "0x7F800001")],
+)
+def test_nonfinite_nan_sign_and_payload(source_bits, expected):
+    """Narrowing retains NaN sign and never turns a truncated payload into infinity."""
+    value = struct.unpack(">d", source_bits.to_bytes(8, "big"))[0]
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([4, 8], DataType.FP32)
+    ib = IRBuilder()
+    with ib.function("nan_store", type=ir.FunctionType.InCore) as f:
+        dest = f.param("dest", tensor_type)
+        f.return_type(tensor_type)
+        result = ib.let("result", tensor_ops.write(dest, [0, 0], ir.ConstFloat(value, DataType.FP32, span)))
+        ib.return_stmt(result)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NaN", span))
+    assert f"arith.constant {expected} : f32" in mlir
+
+
+@pytest.mark.ptoas_compile
+def test_float_constant_finite_values_and_signed_zero_ptoas(tmp_path):
+    """Special-value formatting must retain finite values and distinct signed zeros."""
+    span = ir.Span.unknown()
+    dtype = DataType.FP32
+    tensor_type = ir.TensorType([4, 8], dtype)
+    ib = IRBuilder()
+    with ib.function("finite_store", type=ir.FunctionType.InCore) as f:
+        dest = f.param("dest", tensor_type)
+        f.return_type(tensor_type)
+        for index, value in enumerate([0.0, -0.0, 1.25, 5.8774717541114375e-39]):
+            dest = ib.let(
+                f"write_{index}", tensor_ops.write(dest, [0, index], ir.ConstFloat(value, dtype, span))
+            )
+        ib.return_stmt(dest)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "Finite", span))
+    literals = re.findall(r"arith.constant (\S+) : f32", mlir)
+    assert len(literals) == 4
+    values = [float(literal) for literal in literals]
+    assert values == [0.0, -0.0, 1.25, 5.8774717541114375e-39]
+    assert math.copysign(1.0, values[0]) == 1.0
+    assert math.copysign(1.0, values[1]) == -1.0
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "finite_store", str(tmp_path))
+    assert "finite_store" in cpp
+
+
+@pytest.mark.parametrize("expression", ["math.nan", "math.inf", "-math.inf"])
+@pytest.mark.ptoas_compile
+def test_nonfinite_select_ptoas(tmp_path, expression):
+    """Issue 3401: a typed non-finite select operand compiles through PTOAS."""
+    program = pl.parse(f"""
+import math
+@pl.program
+class SelectConstant:
+    @pl.function(type=pl.FunctionType.InCore)
+    def select_constant(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
+        value = pl.load(a, [0, 0], [32, 32])
+        mask = pl.tile.cmps(value, 0.0, cmp_type=0)
+        result = pl.tile.select(mask, pl.const({expression}, pl.FP32), value)
+        pl.store(result, [0, 0], b)
+""")
+    assert isinstance(program, ir.Program)
+    mlir = _generate_default_mlir(program)
+    assert "pto.tsel" in mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "select_constant", str(tmp_path))
+    assert "select_constant" in cpp
 
 
 def test_pto_codegen_tile_int_literal_scalar_is_not_index():

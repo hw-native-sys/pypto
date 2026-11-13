@@ -29,6 +29,13 @@ PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO
 
 ### 生成顺序
 
+有限浮点常量使用十进制科学计数法，NaN 和无穷使用目标类型位宽的十六进制位模式。
+例如，`pl.const(math.nan, pl.FP32)` 生成 `arith.constant 0x7FC00000 : f32`；
+`math.inf` 和 `-math.inf` 分别生成 `0x7F800000` 和 `0xFF800000`。
+非有限常量支持 FP32、FP16 和 BF16。窄化保留符号及 NaN 载荷的高位；
+若载荷被全部截断，则保留非零载荷，避免变成无穷。
+其他类型会收到诊断，不会生成非法浮点字面量。
+
 代码生成按以下固定顺序生成 MLIR:
 
 1. **常量**: 索引和浮点值的 `arith.constant`

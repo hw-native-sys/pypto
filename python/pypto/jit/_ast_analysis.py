@@ -19,6 +19,7 @@ import textwrap
 from typing import Any
 
 from ._call_syntax import dependency_call
+from ._specialize_values import math_constant_reference
 from .specializer import (
     DynDim,
     _collect_annotation_dynamic_dims,
@@ -208,6 +209,15 @@ def constant_dependency_names(func: Any) -> tuple[str, ...]:
         for node in ast.walk(statement)
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in local_names
     }
+    # Qualified constants fold as a unit during specialization, so fingerprint
+    # the same qualified reference rather than only its opaque module binding.
+    names.update(
+        reference
+        for statement in definition.body
+        for node in ast.walk(statement)
+        if (reference := math_constant_reference(node)) is not None
+        and reference.split(".", 1)[0] not in local_names
+    )
     annotations = [arg.annotation for arg in ast.walk(definition.args) if isinstance(arg, ast.arg)]
     annotations.append(definition.returns)
     for annotation in annotations:
