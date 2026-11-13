@@ -1,5 +1,5 @@
 diff --git a/include/pto/npu/a2a3/TRem.hpp b/include/pto/npu/a2a3/TRem.hpp
-index f95eca493..188843f41 100644
+index f95eca493..e9c8b7590 100644
 --- a/include/pto/npu/a2a3/TRem.hpp
 +++ b/include/pto/npu/a2a3/TRem.hpp
 @@ -43,6 +43,15 @@ constexpr float FMOD_HP_SCALE1[FMOD_ITERATION_NUM_MAX_A2A3] = {16777216.0f, 1677
@@ -46,7 +46,7 @@ index f95eca493..188843f41 100644
  }
 
  // set_cmpmask dereferences a full 64-bit address (see TRemS.hpp: duplicating
-@@ -166,6 +180,152 @@ PTO_INTERNAL void HpRoundToInt(__ubuf__ float* k, unsigned rep)
+@@ -166,6 +180,168 @@ PTO_INTERNAL void HpRoundToInt(__ubuf__ float* k, unsigned rep)
      pipe_barrier(PIPE_V);
  }
 
@@ -64,9 +64,11 @@ index f95eca493..188843f41 100644
 +// keeps hi in (state/2, state] for k >= 1, and k = 0 gives hi = 0), so
 +// r1 - lo rounds once and equals RN(state - k*bTmp) - the true remainder,
 +// which is always f32-representable. Lanes whose bTmp would overflow the
-+// Veltkamp split (|bTmp| > FLT_MAX/4097) keep the plain two-op result: there
-+// the product error stays below half an ulp of the dividend, the tolerated
-+// error class for quotients beyond 2^24. Needs s.comp (8 vectors) live.
++// Veltkamp split (|bTmp| > FLT_MAX/4097), or whose product k*bTmp is within
++// 0.1% of FLT_MAX (the rounded-up bH overflows the 2^12-scaled partial
++// product), keep the plain two-op result: there the product error stays below
++// half an ulp of the dividend, the tolerated error class for quotients beyond
++// 2^24. Needs s.comp (8 vectors) live.
 +PTO_INTERNAL void HpFusedSub(
 +    __ubuf__ float* state, __ubuf__ float* k, __ubuf__ float* bTmp, HpScratchA2A3& s, unsigned rep)
 +{
@@ -76,6 +78,11 @@ index f95eca493..188843f41 100644
 +    float pow2p12 = 4096.0f;
 +    float splitC = 4097.0f; // Veltkamp constant 2^12 + 1
 +    float bSafe = FMOD_HP_MAXVALUE / 4097.0f;
++    // The Veltkamp high part can round above bTmp by up to 2^-12 relative, so
++    // a product at the very top of the range makes the 2^12-scaled partial
++    // product overflow even though k*bTmp itself is finite. Keep a 0.1%
++    // margin and take the plain path there. 0.999 < 4096/4097.
++    float prodSafe = FMOD_HP_MAXVALUE * 0.999f;
 +    unsigned lanes = rep * REPEAT_BYTE / sizeof(float);
 +    unsigned v = lanes;
 +
@@ -187,19 +194,28 @@ index f95eca493..188843f41 100644
 +    vsub(c0, c0, c3, rep, 1, 1, 1, 8, 8, 8); // compensated r in c0
 +    pipe_barrier(PIPE_V);
 +
-+    // overflow guard: lanes with |bTmp| > FLT_MAX/4097 keep the fallback
-+    // (the Veltkamp split would produce inf/NaN there)
++    // overflow guard: lanes with |bTmp| > FLT_MAX/4097 keep the fallback (the
++    // Veltkamp split would produce inf/NaN there), as do lanes whose product
++    // k*bTmp is within 0.1% of FLT_MAX (the rounded-up bH makes the scaled
++    // partial product overflow). c4 is free here and holds the per-lane bound
++    // min(prodSafe/k, bSafe); k = 0 gives +inf and falls back to bSafe.
 +    set_mask_norm();
 +    set_vector_mask(-1, -1);
-+    vcmpvs_le(s.cmpMask, bTmp, bSafe, rep, 1, 1, 8, 8);
++    vector_dup(c4, prodSafe, rep, 1, 1, 8, 8);
 +    pipe_barrier(PIPE_V);
-+    HpSelect(state, c0, c7, s, rep, lanes); // bTmp <= bSafe ? compensated : fallback
++    vdiv(c4, c4, k, rep, 1, 1, 1, 8, 8, 8);
++    pipe_barrier(PIPE_V);
++    vmins(c4, c4, bSafe, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    vcmpvs_le(s.cmpMask, bTmp, c4, rep, 1, 1, 8, 8);
++    pipe_barrier(PIPE_V);
++    HpSelect(state, c0, c7, s, rep, lanes); // bounded ? compensated : fallback
 +}
 +
  // ---- TREM (vector divisor) variants ----
  // Same digit-peeling iteration, but the divisor comes from a |src1| row
  // buffer and the subnormal regime is decided per element (A5 semantics:
-@@ -218,11 +378,16 @@ PTO_INTERNAL void HpSolveScaleV(__ubuf__ float* state, __ubuf__ float* div, HpSc
+@@ -218,11 +394,16 @@ PTO_INTERNAL void HpSolveScaleV(__ubuf__ float* state, __ubuf__ float* div, HpSc
          pipe_barrier(PIPE_V);
      }
 
@@ -221,7 +237,7 @@ index f95eca493..188843f41 100644
 
      if constexpr (iterationNum == 1) {
          // r = r + (r < 0) * bTmp, reusing the k region (quotient dead)
-@@ -313,6 +478,22 @@ PTO_INTERNAL void HpPostV(
+@@ -313,6 +494,22 @@ PTO_INTERNAL void HpPostV(
      vadd(s.k, state, src1, rep, 1, 1, 1, 8, 8, 8);
      pipe_barrier(PIPE_V);
      HpSelect(state, s.k, state, s, rep, lanes);
@@ -244,7 +260,7 @@ index f95eca493..188843f41 100644
      set_mask_norm();
      set_vector_mask(-1, -1);
  }
-@@ -423,12 +604,36 @@ PTO_INTERNAL void TRemVStageSeqV(
+@@ -423,12 +620,36 @@ PTO_INTERNAL void TRemVStageSeqV(
      unsigned fullPerRow)
  {
      (void)src0;
@@ -287,7 +303,7 @@ index f95eca493..188843f41 100644
          TRemVStageSeqV<isFmod, iterationNum - 1, dstRowStride, src0RowStride, src1RowStride>(
              dst, src0, src1, s, validRows, fullPerRow);
      }
-@@ -545,62 +750,63 @@ struct RemOp {
+@@ -545,62 +766,63 @@ struct RemOp {
          pipe_barrier(PIPE_V);
      }
 
@@ -374,7 +390,7 @@ index f95eca493..188843f41 100644
          set_flag(PIPE_V, PIPE_S, EVENT_ID0);
          wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
          *(reinterpret_cast<__ubuf__ uint64_t*>(addrBufs)) = static_cast<uint64_t>(reinterpret_cast<int64_t>(cmpMask));
-@@ -609,7 +815,7 @@ struct RemOp {
+@@ -609,7 +831,7 @@ struct RemOp {
          set_cmpmask(addrBufs);
          pipe_barrier(PIPE_V);
          set_vector_mask(0, validCols);
@@ -383,7 +399,7 @@ index f95eca493..188843f41 100644
          pipe_barrier(PIPE_V);
 
          vconv_f322s32z(dst, dst_f, 1, 1, 1, 8, 8);
-@@ -705,7 +911,11 @@ PTO_INTERNAL void TRemCheck(
+@@ -705,7 +927,11 @@ PTO_INTERNAL void TRemCheck(
      // packed bitmask (32-byte aligned), then an 8-element (32-byte) address buffer.
      unsigned maskBytes = CeilDivision(TileDataDst::RowStride, BIT_TO_BYTE);
      unsigned maskFloats = CeilDivision(maskBytes, BLOCK_BYTE_SIZE) * BIT_TO_BYTE;

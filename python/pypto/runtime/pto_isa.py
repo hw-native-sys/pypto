@@ -28,10 +28,12 @@ Temporary A2/A3 TREM fallback
 The pinned PTO-ISA predates ``3d36366a0`` ("trem/trems(a2a3): never write the
 input tiles"), whose fix first shipped in pto-isa ``8fb67fa7e``. Until the
 managed pin moves, :func:`ensure_pto_isa_root` returns a detached worktree of
-the pin with that commit backported. The worktree is committed locally so its
-HEAD is a distinct, stable kernel-cache identity; the managed checkout is never
-modified. The fallback disables itself as soon as the pinned headers carry the
-fix. Set ``PYPTO_DISABLE_PTO_ISA_TREM_PATCH=1`` to resolve the pristine pin.
+the pin with that commit backported, plus a PyPTO-local product-range guard in
+``HpFusedSub`` for the upstream overflow when ``k*bTmp`` is within 0.1% of
+``FLT_MAX``. The worktree is committed locally so its HEAD is a distinct,
+stable kernel-cache identity; the managed checkout is never modified. The
+fallback disables itself as soon as the pinned headers carry the fix. Set
+``PYPTO_DISABLE_PTO_ISA_TREM_PATCH=1`` to resolve the pristine pin.
 """
 
 import fcntl
@@ -43,8 +45,10 @@ from functools import lru_cache
 from pathlib import Path
 
 # Provenance: cann/pto-isa 3d36366a0 "trem/trems(a2a3): never write the input
-# tiles" (GitCode !2081), first released in pto-isa 8fb67fa7e. Remove this
-# directory and the resolver hook once the managed pin contains it.
+# tiles" (GitCode !2081), first released in pto-isa 8fb67fa7e, plus a local
+# HpFusedSub product-range guard for the upstream overflow when k*bTmp is within
+# 0.1% of FLT_MAX. Remove this directory and the resolver hook once the managed
+# pin contains both.
 _TREM_PATCH_PATH = Path(__file__).resolve().parent / "pto_isa_patches" / "a2a3-trem-never-write-inputs.patch"
 _TREM_PINNED_HEADER = Path("include") / "pto" / "npu" / "a2a3" / "TRem.hpp"
 _TREM_FIX_MARKER = "read-only-src form"

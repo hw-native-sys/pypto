@@ -53,6 +53,8 @@ def test_patch_targets_the_remainder_headers_and_marks_the_fix():
     assert "include/pto/npu/a2a3/TRem.hpp" in text
     assert "include/pto/npu/a2a3/TRemS.hpp" in text
     assert pto_isa._TREM_FIX_MARKER in text
+    # Local guard for the upstream HpFusedSub partial-product overflow.
+    assert "prodSafe" in text
 
 
 def test_fix_already_present_leaves_the_pin_untouched(tmp_path):
