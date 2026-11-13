@@ -58,7 +58,6 @@ def scale(
         out[:] = pl.mul(x, 2.0)
     return out
 
-
 out = torch.zeros(256, 128, dtype=torch.float32)
 scale(X, out, config=CFG)
 torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
@@ -130,7 +129,6 @@ def spmd_add(
             out,
         )
     return out
-
 
 out = torch.zeros(256, 128, dtype=torch.float32)
 spmd_add(X, Y, out, config=CFG)
@@ -378,8 +376,13 @@ preserve their authored order, so PyPTO rejects either flag in such a loop.
 Use `pl.range` when manually synchronizing work inside a loop.
 
 For a pipeline barrier, use `pl.system.barrier(*, pipe)`. The required keyword
-accepts only `pl.PipeType.V`, `M`, or `ALL`. A `V` or `M` barrier orders
-preceding and following work on that pipeline. `ALL` waits for preceding work
+accepts any `pl.PipeType` member. A single-pipe barrier orders preceding and
+following work on that pipeline, which is the cheap way to order a buffer reuse
+against an in-flight transfer without spending an event slot. A barrier drains
+a *pipe*, not an operation, so pick the pipe your transfer rides: `MTE2` for
+GM → UB/L1 loads, `MTE3` for UB → GM stores (and the A5 UB → L1 route), `MTE1`
+for the L1 → L0A/L0B operand feed, `FIX` for the L0C writeback. `ALL` waits for
+preceding work
 across all pipelines on the current core. For example, an `ALL` barrier after
 both loads above would wait for `b` as well as `a` before vector computation.
 Barriers neither allocate nor consume event slots; an outstanding `set_flag`
@@ -397,6 +400,64 @@ The old wrappers are no longer available. The Python IR printer emits the unifie
 spelling for all three forms, with the same internal IR and native barriers.
 `ALL` does not synchronize different cores; cross-core arrival uses
 `pl.system.syncall(...)` as described below.
+
+### Choosing a synchronization primitive
+
+`pl.system` exposes five mechanisms. They are not interchangeable — each orders a
+different thing, and only two of them cost an event slot.
+
+| Primitive | What it orders | Scope | Event slot | Use it when |
+| --------- | -------------- | ----- | ---------- | ----------- |
+| `barrier(pipe=...)` | Drains one hardware pipeline: everything already issued on that pipe completes before anything after it | One core, one pipe | No | You need a coarse "this pipe is done" fence, and the dependency you are ordering is *on that pipe* |
+| `barrier(pipe=pl.PipeType.ALL)` | Drains every pipeline on the current core | One core, all pipes | No | The phases touch several pipes and you do not want to enumerate them |
+| `set_flag` / `wait_flag` | One directed producer → consumer handoff between two pipes | One core, two pipes | Yes (0-7) | You want to order *one* dependency without stalling the whole pipe — strictly cheaper at runtime than a barrier, strictly more expensive in slots |
+| `sync_set` / `sync_wait` | A directed event between the cube and vector **cores** | Cross-core, one direction | Yes | Two lanes must hand off explicitly and you are writing the protocol yourself |
+| `syncall(...)` | Arrival of every participating core | Cross-core, all participants | No | All cores must reach the same point; note it orders *arrival only*, not data visibility |
+| `fence()` | Makes global-memory writes visible | One core, GM | No | A GM buffer is written by one lane and read by another; pair it with cache maintenance |
+
+Two distinctions are worth keeping straight:
+
+- **Barrier vs. flag pair — not interchangeable.** A barrier drains *one pipe*; a flag
+  pair orders *one producer → consumer dependency between two pipes*. A barrier is
+  therefore **not** a drop-in replacement for a flag pair on a cross-pipeline handoff:
+  draining MTE3 says the stores issued so far have completed, it does not by itself gate
+  a vector consumer. Reach for a barrier at a phase boundary on a single pipe, a flag
+  pair (or `ALL`) for a cross-pipeline handoff. This matters most in a function that
+  already contains static flags, where PTOAS skips automatic synchronization and your
+  explicit ordering is the only ordering.
+- **`barrier(ALL)` vs. `syncall`.** `ALL` is *one core, every pipe*. `syncall` is *every
+  core, arrival only*. Neither implies the other, and neither makes GM writes visible —
+  that is `fence()` plus cache maintenance.
+
+`PipeType.S` is accepted for completeness but orders nothing in practice: both of
+PTOAS's synchronization allocators treat a scalar-to-scalar pair as already ordered
+on every architecture, so the scalar pipe sequences its own operations. It is
+expressible and reaches the emitted code; it just buys you nothing.
+
+Barriers are **rejected inside `pl.pipeline`**, exactly as explicit flags are: a barrier
+has no operand, so pipeline scheduling has no dependency edge to hold it in place and
+could order it before the transfer it was written to follow. Use `pl.range` when you need
+to place one inside a loop.
+
+### Barriers inside a mixed kernel
+
+A mixed InCore function is expanded into two kernels, an AIC and an AIV one, and the two
+lanes own different pipelines: FIX and MTE1 are cube-side, V is vector-side. A barrier
+carries no operand, so nothing in it says which lane it belongs to — by default it is
+duplicated into **both** kernels, and the lane that does not own the pipe executes a
+barrier for a pipe it never uses.
+
+Pin it with `core_type`, the same keyword `set_flag` / `wait_flag` take:
+
+```python
+pl.system.barrier(pipe=pl.PipeType.FIX, core_type=pl.KernelType.AIC)   # cube lane only
+pl.system.barrier(pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)     # vector lane only
+```
+
+Omit `core_type` in a function already typed `AIC` or `AIV`: there is only one kernel to
+land in, so there is nothing to disambiguate. `KernelType.MIX` is rejected — it names a
+participant set, which is meaningful for `syncall` but not for a single-core pipe drain;
+omitting the keyword is how a barrier reaches both lanes.
 
 AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
 is what the transfer is — but nothing orders a cube-lane write against a vector-lane read

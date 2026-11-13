@@ -5711,7 +5711,7 @@ class TestPipeBarrierCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.barrier <PIPE_M>" in mlir, f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
 
-    @pytest.mark.parametrize("pipe", ["V", "M", "ALL"])
+    @pytest.mark.parametrize("pipe", ["MTE1", "MTE2", "MTE3", "M", "V", "S", "FIX", "ALL"])
     def test_barriers_do_not_emit_flags(self, pipe):
         source = """
 import pypto.language as pl

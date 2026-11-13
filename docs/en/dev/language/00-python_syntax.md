@@ -383,7 +383,13 @@ pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=
 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 pl.system.barrier(pipe=pl.PipeType.V)     # Vector pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.M)     # Matrix pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.S)     # Scalar pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.MTE1)  # L1 -> L0A/L0B operand feed
+pl.system.barrier(pipe=pl.PipeType.MTE2)  # GM -> UB/L1 load pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.MTE3)  # UB -> GM store pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.FIX)   # L0C writeback pipeline barrier
 pl.system.barrier(pipe=pl.PipeType.ALL)   # All pipelines on the current core
+pl.system.barrier(pipe=pl.PipeType.FIX, core_type=pl.KernelType.AIC)  # cube lane only
 
 # Cross-core operations (TPUSH/TPOP protocol)
 pl.tpush_to_aic(tile0, split=0, id=0)        # Vector → Cube push on pipe 0
@@ -405,7 +411,12 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
 
-`pl.system.barrier(*, pipe)` requires a `pl.PipeType.V`, `M`, or `ALL` member.
+`pl.system.barrier(*, pipe, core_type=None)` requires a `pl.PipeType` member; every
+member is accepted. `core_type` (`pl.KernelType.AIC` / `.AIV`) pins the barrier to one
+lane when a mixed InCore function is expanded into an AIC and an AIV kernel — the two
+lanes own different pipelines, and an operand-free barrier is otherwise duplicated into
+both. Omit it in an already typed AIC/AIV function. A barrier is rejected inside
+`pl.pipeline`, as explicit flags are.
 It orders preceding and following work on the selected pipeline(s), without
 using an event slot. `ALL` covers the current core, not other cores; use
 `pl.system.syncall(...)` for a cross-core barrier. The old `bar_v()`,

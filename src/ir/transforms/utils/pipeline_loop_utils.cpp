@@ -27,6 +27,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
 namespace pypto {
@@ -50,6 +51,15 @@ class ExplicitFlagPlacementChecker : public IRVisitor {
           << "Explicit set_flag/wait_flag cannot be used inside pl.pipeline: pipeline scheduling does not "
              "preserve their source order. Use pl.range for manual flags until pipeline scheduling supports "
              "them.";
+      // Same defect, different op: a pipe barrier has no operand, so the def-use
+      // graph gives CanonicalizeIOOrder no edge to hold it in place. Authoring
+      // `store(...); barrier(pipe=MTE3)` inside a pipeline loop yields the
+      // barrier BEFORE the store -- it drains ahead of the transfer it was meant
+      // to wait for, which is silently wrong rather than merely unordered.
+      CHECK_SPAN(!core_affinity::IsPipeBarrier(op), op->span_)
+          << "pl.system.barrier cannot be used inside pl.pipeline: pipeline scheduling does not preserve "
+             "its source order, so the barrier can be scheduled before the transfer it was written to "
+             "follow. Use pl.range for manual barriers until pipeline scheduling supports them.";
     }
     IRVisitor::VisitExpr_(op);
   }

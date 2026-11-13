@@ -1295,8 +1295,13 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
       return std::string("");
     });
   };
-  register_pipe_barrier("system.bar_v", "PIPE_V");
+  register_pipe_barrier("system.bar_mte1", "PIPE_MTE1");
+  register_pipe_barrier("system.bar_mte2", "PIPE_MTE2");
+  register_pipe_barrier("system.bar_mte3", "PIPE_MTE3");
   register_pipe_barrier("system.bar_m", "PIPE_M");
+  register_pipe_barrier("system.bar_v", "PIPE_V");
+  register_pipe_barrier("system.bar_s", "PIPE_S");
+  register_pipe_barrier("system.bar_fix", "PIPE_FIX");
   register_pipe_barrier("system.bar_all", "PIPE_ALL");
 }
 }  // namespace backend

@@ -50,7 +50,6 @@ def scale(
         out[:] = pl.mul(x, 2.0)
     return out
 
-
 out = torch.zeros(256, 128, dtype=torch.float32)
 scale(X, out, config=CFG)
 torch.testing.assert_close(out, X * 2.0, rtol=1e-4, atol=1e-4)
@@ -122,7 +121,6 @@ def spmd_add(
             out,
         )
     return out
-
 
 out = torch.zeros(256, 128, dtype=torch.float32)
 spmd_add(X, Y, out, config=CFG)
@@ -333,9 +331,12 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 显式 flag 必须放在 `pl.pipeline` 循环之外。当前流水线调度无法保持它们的源码顺序，
 因此 PyPTO 会拒绝循环中的任一 flag。需要在循环内手工同步时，请使用 `pl.range`。
 
-流水线屏障统一使用 `pl.system.barrier(*, pipe)`，必选关键字仅接受
-`pl.PipeType.V`、`M` 或 `ALL`。`V`、`M` 为对应流水线的前后工作建立顺序；
-`ALL` 等待当前核所有流水线此前的工作完成。例如，若在上面两次加载后使用
+流水线屏障统一使用 `pl.system.barrier(*, pipe)`，必选关键字接受 `pl.PipeType`
+的任意成员。单流水线屏障为对应流水线的前后工作建立顺序，这是在不占用事件槽的
+前提下，把缓冲区复用与在途搬运定序的低成本写法。屏障排空的是**流水**而非某个
+算子，因此要按搬运实际承载的流水来选：`MTE2` 对应 GM → UB/L1 搬入，`MTE3`
+对应 UB → GM 搬出（以及 A5 的 UB → L1 路由），`MTE1` 对应 L1 → L0A/L0B 的操作数
+喂入，`FIX` 对应 L0C 写回。`ALL` 等待当前核所有流水线此前的工作完成。例如，若在上面两次加载后使用
 `ALL` 屏障，就需要等 `a`、`b` 都完成加载，再执行向量计算。屏障既不分配也不
 消费事件槽；尚未配对的 `set_flag` 仍须对应一次 `wait_flag`。
 
@@ -350,6 +351,55 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 原有包装接口不再可用。Python IR printer 将三种形式统一打印为新写法，内部 IR
 及原生屏障保持相同。`ALL` 不表示跨核同步；跨核到达同步使用下文的
 `pl.system.syncall(...)`。
+
+### 如何选择同步原语
+
+`pl.system` 提供五类机制。它们不可互换 —— 各自定序的对象不同，其中只有两类会占用事件槽。
+
+| 原语 | 定序对象 | 作用范围 | 占事件槽 | 适用场景 |
+| ---- | -------- | -------- | -------- | -------- |
+| `barrier(pipe=...)` | 排空一条硬件流水：该流水上已发出的全部工作完成后，其后的工作才开始 | 单核、单流水 | 否 | 需要粗粒度的「这条流水已完成」栅栏，且待定序的依赖*就在这条流水上* |
+| `barrier(pipe=pl.PipeType.ALL)` | 排空当前核的所有流水 | 单核、全流水 | 否 | 两个阶段涉及多条流水，又不想逐条列举 |
+| `set_flag` / `wait_flag` | 两条流水之间一次有向的生产者 → 消费者交接 | 单核、两条流水 | 是（0-7） | 只想为**单个**依赖定序而不阻塞整条流水 —— 运行时开销严格低于 barrier，事件槽开销严格高于 barrier |
+| `sync_set` / `sync_wait` | cube 与 vector **核之间**一个有向事件 | 跨核、单向 | 是 | 两个 lane 需要显式交接，且协议由你自己编写 |
+| `syncall(...)` | 所有参与核的到达 | 跨核、全体参与者 | 否 | 所有核必须到达同一个点；注意它只定序**到达**，不保证数据可见 |
+| `fence()` | 使全局内存写入可见 | 单核、GM | 否 | 一个 lane 写 GM、另一个 lane 读；需与 cache 维护配合使用 |
+
+有两组区别值得记清楚：
+
+- **barrier 与 flag 配对 —— 不可互相替代。** barrier 排空的是*一条流水*；flag 配对定序的是
+  *两条流水之间一次生产者 → 消费者的依赖*。因此在跨流水交接上,barrier **不能**直接替换
+  flag 配对:排空 MTE3 只说明此前发出的搬出已完成,它本身并不拦住一个向量消费者。
+  单条流水的阶段边界用 barrier,跨流水交接用 flag 配对(或 `ALL`)。在已经含有静态 flag 的
+  函数里尤其要注意 —— 那里 PTOAS 会跳过自动同步,你写的顺序就是唯一的顺序。
+- **`barrier(ALL)` 与 `syncall`。** `ALL` 是*单核、所有流水*；`syncall` 是*所有核、仅到达*。
+  两者互不蕴含，且都不保证 GM 写入可见 —— 那是 `fence()` 加 cache 维护的职责。
+
+`PipeType.S` 为完整性而接受，但实际上不建立任何顺序：PTOAS 的两个同步分配器在所有架构上
+都把标量到标量的配对视为已定序，即标量流水自己保证自身操作的顺序。它可以写、也会出现在
+最终代码里，只是不会带来任何额外保证。
+
+barrier 在 **`pl.pipeline` 内被拒绝**,与显式 flag 一致:barrier 没有操作数,流水线调度
+缺少依赖边把它固定住,可能将其排到它本该跟随的那次搬运之前。需要在循环内放置时,请用
+`pl.range`。
+
+### 混合核中的 barrier
+
+混合 InCore 函数会被展开成 AIC 和 AIV 两个 kernel，而两个 lane 拥有不同的流水：FIX、MTE1
+属于 cube 侧，V 属于 vector 侧。barrier 不带任何操作数，其本身无法表明归属哪个 lane ——
+默认它会被**同时复制到两个 kernel**，于是不拥有该流水的那个 lane 也会执行一条它从不使用的
+流水的 barrier。
+
+用 `core_type` 把它钉住，关键字与 `set_flag` / `wait_flag` 一致：
+
+```python
+pl.system.barrier(pipe=pl.PipeType.FIX, core_type=pl.KernelType.AIC)   # 仅 cube lane
+pl.system.barrier(pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)     # 仅 vector lane
+```
+
+在已显式声明为 `AIC` 或 `AIV` 的函数中请省略 `core_type`：那里只有一个 kernel 可落，无需区分。
+`KernelType.MIX` 会被拒绝 —— 它表示参与者集合，对 `syncall` 有意义，对单核的流水排空没有意义；
+要让 barrier 覆盖两个 lane，省略该关键字即可。
 
 AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定序 —— 这正是这次传输的含义 ——
 但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序。先发布 producer

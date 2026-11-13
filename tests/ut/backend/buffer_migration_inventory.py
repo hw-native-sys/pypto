@@ -308,7 +308,12 @@ MIGRATION_FAMILIES = (
         "G19: Barriers, cache and core synchronization",
         (
             "system.bar_all",
+            "system.bar_fix",
             "system.bar_m",
+            "system.bar_mte1",
+            "system.bar_mte2",
+            "system.bar_mte3",
+            "system.bar_s",
             "system.bar_v",
             "system.fence",
             "system.cacheinvalid",

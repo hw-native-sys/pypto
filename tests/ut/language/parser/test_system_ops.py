@@ -17,6 +17,7 @@ from pypto import ir
 from pypto.ir.op import system_ops
 from pypto.ir.utils import use_parser_span
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir_core
 
 
 class TestSystemOpsParsing:
@@ -134,7 +135,19 @@ class TestSystemOpsParsing:
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
-    @pytest.mark.parametrize("pipe", [pl.PipeType.V, pl.PipeType.M, pl.PipeType.ALL])
+    @pytest.mark.parametrize(
+        "pipe",
+        [
+            pl.PipeType.MTE1,
+            pl.PipeType.MTE2,
+            pl.PipeType.MTE3,
+            pl.PipeType.M,
+            pl.PipeType.V,
+            pl.PipeType.S,
+            pl.PipeType.FIX,
+            pl.PipeType.ALL,
+        ],
+    )
     def test_barrier_round_trip(self, pipe):
         """The unified spelling round-trips without changing the barrier IR."""
 
@@ -149,7 +162,19 @@ class TestSystemOpsParsing:
         assert f"pl.system.barrier(pipe=pl.PipeType.{pipe.name})" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
-    @pytest.mark.parametrize("pipe", [pl.PipeType.V, pl.PipeType.M, pl.PipeType.ALL])
+    @pytest.mark.parametrize(
+        "pipe",
+        [
+            pl.PipeType.MTE1,
+            pl.PipeType.MTE2,
+            pl.PipeType.MTE3,
+            pl.PipeType.M,
+            pl.PipeType.V,
+            pl.PipeType.S,
+            pl.PipeType.FIX,
+            pl.PipeType.ALL,
+        ],
+    )
     def test_barrier_printer_respects_custom_prefix(self, pipe):
         """Both the canonical operation and its pipe enum use the requested alias."""
         call = system_ops.barrier(pipe=pipe)
@@ -159,8 +184,13 @@ class TestSystemOpsParsing:
     @pytest.mark.parametrize(
         "pipe, op_name",
         [
-            (pl.PipeType.V, "system.bar_v"),
+            (pl.PipeType.MTE1, "system.bar_mte1"),
+            (pl.PipeType.MTE2, "system.bar_mte2"),
+            (pl.PipeType.MTE3, "system.bar_mte3"),
             (pl.PipeType.M, "system.bar_m"),
+            (pl.PipeType.V, "system.bar_v"),
+            (pl.PipeType.S, "system.bar_s"),
+            (pl.PipeType.FIX, "system.bar_fix"),
             (pl.PipeType.ALL, "system.bar_all"),
         ],
     )
@@ -207,12 +237,76 @@ class TestSystemOpsParsing:
             barrier_api(pipe=pipe)
 
     @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
-    @pytest.mark.parametrize(
-        "pipe", [pl.PipeType.MTE1, pl.PipeType.MTE2, pl.PipeType.MTE3, pl.PipeType.S, pl.PipeType.FIX]
-    )
-    def test_barrier_rejects_unsupported_pipe(self, barrier_api, pipe):
-        with pytest.raises(ValueError, match=r"PipeType\.V.*PipeType\.M.*PipeType\.ALL"):
-            barrier_api(pipe=pipe)
+    @pytest.mark.parametrize("core_type, attr", [(pl.KernelType.AIC, "aic"), (pl.KernelType.AIV, "aiv")])
+    def test_barrier_core_type_pins_one_kernel(self, barrier_api, core_type, attr):
+        """core_type reaches the IR as the kwarg ExpandMixedKernel dispatches on."""
+        call = barrier_api(pipe=pl.PipeType.FIX, core_type=core_type)
+        assert call.op.name == _ir_core.get_op("system.bar_fix").name
+        assert call.kwargs["core_type"] == attr
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_omitted_core_type_leaves_no_kwarg(self, barrier_api):
+        """The default stays a bare call, so existing barrier IR is unchanged."""
+        assert "core_type" not in barrier_api(pipe=pl.PipeType.FIX).kwargs
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_rejects_mix_core_type(self, barrier_api):
+        """MIX names a participant set; a single-core pipe drain has no such notion."""
+        with pytest.raises(ValueError, match="system.barrier core_type must be one of"):
+            barrier_api(pipe=pl.PipeType.FIX, core_type=pl.KernelType.MIX)
+
+    @pytest.mark.parametrize("pipe", ["MTE1", "V", "FIX", "ALL"])
+    @pytest.mark.parametrize("kernel", ["AIC", "AIV"])
+    def test_barrier_core_type_round_trip(self, pipe, kernel):
+        """The canonical spelling keeps core_type through print -> parse."""
+        source = f"""
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        pl.system.barrier(pipe=pl.PipeType.{pipe}, core_type=pl.KernelType.{kernel})
+        return x
+"""
+        before = pl.parse_program(source)
+        printed = before.as_python()
+        assert f"pl.system.barrier(pipe=pl.PipeType.{pipe}, core_type=pl.KernelType.{kernel})" in printed
+        ir.assert_structural_equal(before, pl.parse_program(printed))
+
+    def test_barrier_raw_ir_rejects_malformed_calls(self):
+        """The op contract is enforced at construction, not left to a later pass.
+
+        `.no_argument()` documents the arity but does not enforce it on a functional
+        `create_op_call`, and `set_attr` validates only the value's type. Without the
+        barrier deducer a bogus `core_type` falls through ClassifyCallAffinity's lane
+        arms to SHARED -- silently duplicating the barrier onto both kernels -- and an
+        operand surfaces much later as an internal error with no user-facing span.
+        """
+        span = ir.Span("barrier.py", 1, 1)
+        operand = _ir_core.Var("e", _ir_core.ScalarType(DataType.INT32), span)
+
+        with pytest.raises(ValueError, match="takes no operands"):
+            _ir_core.create_op_call("system.bar_v", [operand], {}, span)
+        with pytest.raises(ValueError, match=r'core_type must be "aic" or "aiv"'):
+            _ir_core.create_op_call("system.bar_v", [], {"core_type": "bogus"}, span)
+
+        # The valid spellings still build and keep the kwarg.
+        for lane in ("aic", "aiv"):
+            call = _ir_core.create_op_call("system.bar_fix", [], {"core_type": lane}, span)
+            assert call.kwargs["core_type"] == lane
+
+    @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
+    def test_barrier_accepts_every_pipe_type(self, barrier_api):
+        """Every PipeType member maps to a registered operator.
+
+        The op table in ``system_ops.barrier`` must stay exhaustive over the enum:
+        a member without an entry would raise KeyError, not the documented
+        TypeError, so a new PipeType must arrive with its system.bar_* operator.
+        """
+        for pipe in pl.PipeType.__members__.values():
+            call = barrier_api(pipe=pipe)
+            assert call.op.name.startswith("system.bar_")
 
     @pytest.mark.parametrize("barrier_api", [pl.system.barrier, system_ops.barrier], ids=["dsl", "ir"])
     def test_barrier_requires_pipe_keyword(self, barrier_api):
@@ -221,7 +315,7 @@ class TestSystemOpsParsing:
         with pytest.raises(TypeError, match="positional"):
             barrier_api(pl.PipeType.V)
 
-    @pytest.mark.parametrize("pipe", ["V", "M", "ALL"])
+    @pytest.mark.parametrize("pipe", ["MTE1", "MTE2", "MTE3", "M", "V", "S", "FIX", "ALL"])
     def test_barrier_compiler_attrs_round_trip(self, pipe):
         """Canonical barrier printing preserves attrs attached by compiler passes."""
         source = f"""
@@ -240,7 +334,9 @@ class Before:
         assert f'pl.system.barrier(pipe=pl.PipeType.{pipe}, attrs={{"barrier_marker": 7}})' in printed
         ir.assert_structural_equal(before, pl.parse_program(printed))
 
-    @pytest.mark.parametrize("name", ["bar_v", "bar_m", "bar_all"])
+    @pytest.mark.parametrize(
+        "name", ["bar_mte1", "bar_mte2", "bar_mte3", "bar_m", "bar_v", "bar_s", "bar_fix", "bar_all"]
+    )
     def test_removed_barrier_names(self, name):
         """Only the parameterized barrier API is exposed at either Python layer."""
         assert not hasattr(pl.system, name)
