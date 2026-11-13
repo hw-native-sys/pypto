@@ -146,6 +146,46 @@ def test_host_dispatch_materializes_comm_ctx_args():
     assert [assign.var.name_hint for assign in ctx_assigns] == ["data_ctx", "signal_ctx"]
 
 
+def test_async_transfer_preserves_comm_ctx_args():
+    """A chip orchestration containing put_async still gets per-window ctx args."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            dst_buf = pld.alloc_window_buffer(16 * 64 * pl.FP16.get_byte())
+            src_buf = pld.alloc_window_buffer(16 * 64 * pl.FP16.get_byte())
+            dst = pld.window(dst_buf, [16, 64], dtype=pl.FP16)
+            src = pld.window(src_buf, [16, 64], dtype=pl.FP16)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(dst, src, 1, device=r)
+            return 0
+
+    result = _apply(P)
+    chip = _get_func(result, "chip_orch")
+    host = _get_func(result, "host_orch")
+
+    assert [type(param.type) for param in chip.params][-2:] == [ir.CommCtxType, ir.CommCtxType]
+    assert list(chip.param_directions)[-2:] == [ir.ParamDirection.In, ir.ParamDirection.In]
+
+    calls = _collect_calls(host.body, "chip_orch")
+    assert len(calls) == 1
+    call = calls[0]
+    assert len(call.args) == 5
+    assert isinstance(call.args[3].type, ir.CommCtxType)
+    assert isinstance(call.args[4].type, ir.CommCtxType)
+    assert list(call.arg_directions)[-2:] == [ir.ArgDirection.Scalar, ir.ArgDirection.Scalar]
+
+
 # ---------------------------------------------------------------------------
 # Manual Spmd / Group wrapper chain: main -> wrapper -> inner.
 #
