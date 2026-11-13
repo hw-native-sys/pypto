@@ -69,25 +69,15 @@ namespace ir {
 namespace {
 
 // A tile owns no general-pool buffer ("buffer-less by design") when its defining
-// value is a cross-core tpop result, or a non-permuting zero-copy view / plain
-// alias chained off a buffer-less source. `source_buffer_less` reports whether a
+// value is a cross-core tpop result, or a zero-copy view, physical writeback,
+// or plain alias chained off a buffer-less source. `source_buffer_less` reports whether a
 // source Var is itself buffer-less (the MemRef-creating mutator queries the type;
 // the HasMemRefs verifier consults its tracked set). tile.transpose is excluded —
 // pto.ttrans is not in-place safe and always needs a fresh buffer.
 template <typename SourceBufferLess>
 bool ProducesBufferLessTile(const ExprPtr& value, const SourceBufferLess& source_buffer_less) {
-  if (auto call = std::dynamic_pointer_cast<const Call>(value)) {
-    if (!call->op_) return false;
-    if (IsOp(call, "tile.tpop_from_aic") || IsOp(call, "tile.tpop_from_aiv")) {
-      return true;
-    }
-    if (op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
-      auto in = AsVarLike(call->args_[0]);
-      return in && source_buffer_less(in.get());
-    }
-    return false;
-  }
-  auto v = AsVarLike(value);
+  if (op_predicates::IsTPop(As<Call>(value))) return true;
+  auto v = AsVarLike(op_predicates::GetBufferAliasSource(value));
   return v && source_buffer_less(v.get());
 }
 
@@ -715,7 +705,7 @@ class InitMemRefMutator : public IRMutator {
 
   // Rebuild an AssignStmt whose LHS tile var keeps its TileType + memory_space but
   // carries no MemRef. Used for tiles that own no general-pool buffer: cross-core
-  // tpop results and zero-copy views over them (codegen lowers those to
+  // tpop results and their physical writebacks / zero-copy views (codegen lowers views to
   // pto.treshape over the source rather than a fresh alloc_tile).
   StmtPtr MakeMemRefLessAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {
     auto var_expr = std::static_pointer_cast<const Expr>(op->var_);
@@ -740,9 +730,22 @@ class InitMemRefMutator : public IRMutator {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
 
+    auto call = As<Call>(op->value_);
+    if (call) {
+      // A physical alias cannot choose another buffer. Check before the
+      // buffer-less shortcut as well, so a FIFO writeback never silently drops
+      // an author-declared allocation on its result.
+      CHECK_SPAN(!op_predicates::OutputInheritsSourceBuffer(call->op_->name_) ||
+                     !HasUserBinding(op->var_->GetType()),
+                 op->var_->span_)
+          << "Tile '" << op->var_->name_hint_ << "' is produced by '" << call->op_->name_
+          << "', which lands in its source tile's allocation, so it cannot be given one of its own. "
+             "Bind the source tile instead.";
+    }
+
     // A tile that owns no general-pool buffer — a cross-core tpop result (its
     // data lives in the reserved C2V/V2C slot, addressed via the pipe), or a
-    // zero-copy view / plain alias chained off one — stays MemRef-less, so
+    // zero-copy view / physical writeback / plain alias chained off one — stays MemRef-less, so
     // AllocateMemoryAddr reserves no phantom buffer and no fresh, disconnected
     // buffer is created.
     if (As<TileType>(op->var_->GetType()) && ProducesBufferLessTile(new_value, [](const Var* v) {
@@ -752,19 +755,9 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Check if the RHS is a Call expression
-    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
+    if (call) {
       LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
                 << call->op_->name_;
-
-      // A view / in-place result physically IS its source's buffer, so binding
-      // it to a different one cannot be honored. Say so instead of silently
-      // dropping the binding — the user asked for something impossible.
-      CHECK_SPAN(!op_predicates::OutputInheritsSourceBuffer(call->op_->name_) ||
-                     !HasUserBinding(op->var_->GetType()),
-                 op->var_->span_)
-          << "Tile '" << op->var_->name_hint_ << "' is produced by '" << call->op_->name_
-          << "', which lands in its source tile's allocation, so it cannot be given one of its own. "
-             "Bind the source tile instead.";
 
       // Handle view operations: output should share MemRef with input tile.
       // A pure metadata view (slice/reshape/...) inherits its input's buffer.  A
@@ -985,7 +978,9 @@ class InitMemRefMutator : public IRMutator {
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
       auto yield_var = get_yield_var(i);
-      auto yield_tile = yield_var ? GetTileTypeWithMemRef(yield_var->GetType()) : nullptr;
+      // A borrowed FIFO value deliberately has no MemRef. Control-flow results
+      // must inherit that absence too, rather than keep a fresh allocation.
+      auto yield_tile = yield_var ? As<TileType>(yield_var->GetType()) : nullptr;
       if (As<TileType>(new_return_vars[i]->GetType()) && yield_tile) {
         auto new_type = CloneTypeWithMemRef(new_return_vars[i]->GetType(), yield_tile->memref_,
                                             yield_tile->GetMemorySpace());
@@ -1157,6 +1152,34 @@ class HasMemRefsVerifier : public IRVisitor {
  public:
   explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
+  void VisitExpr_(const IterArgPtr& op) override {
+    IRVisitor::VisitExpr_(op);
+    TrackBufferLessAlias(op, op->initValue_);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    TrackLoopResults(op->return_vars_, op->iter_args_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    TrackLoopResults(op->return_vars_, op->iter_args_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    auto then_yield = FindYieldStmt(op->then_body_);
+    auto else_yield = op->else_body_ ? FindYieldStmt(*op->else_body_) : nullptr;
+    if (!then_yield || !else_yield) return;
+    for (size_t i = 0;
+         i < op->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size(); ++i) {
+      if (IsBufferLessByDesign(else_yield->value_[i])) {
+        TrackBufferLessAlias(op->return_vars_[i], then_yield->value_[i]);
+      }
+    }
+  }
+
   void VisitStmt_(const SimtLaunchStmtPtr& op) override {
     for (const auto& result : op->results_) {
       if (As<TileType>(result->GetType()) && !GetTypeMemRef(result->GetType())) {
@@ -1171,7 +1194,7 @@ class HasMemRefsVerifier : public IRVisitor {
     if (!op || !op->var_ || !op->var_->GetType()) return;
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
     if (tile_type && !tile_type->memref_.has_value()) {
-      if (IsBufferLessByDesign(op)) {
+      if (IsBufferLessByDesign(op->value_)) {
         buffer_less_.insert(op->var_.get());
       } else {
         diagnostics_.emplace_back(
@@ -1183,12 +1206,23 @@ class HasMemRefsVerifier : public IRVisitor {
   }
 
  private:
+  void TrackBufferLessAlias(const VarPtr& var, const ExprPtr& source) {
+    auto tile = As<TileType>(var->GetType());
+    if (tile && !tile->memref_ && IsBufferLessByDesign(source)) buffer_less_.insert(var.get());
+  }
+
+  void TrackLoopResults(const std::vector<VarPtr>& results, const std::vector<IterArgPtr>& iter_args) {
+    for (size_t i = 0; i < results.size() && i < iter_args.size(); ++i) {
+      TrackBufferLessAlias(results[i], iter_args[i]);
+    }
+  }
+
   // A cross-core tpop result (its data lives in the reserved C2V/V2C slot, not a
-  // tile MemRef) and any zero-copy view / plain alias chained off such a result
+  // tile MemRef) and any view / physical writeback / plain alias chained off such a result
   // legitimately carry no MemRef. Shares the rule with the MemRef-creating mutator
   // via ProducesBufferLessTile; here a source is buffer-less iff it is tracked.
-  [[nodiscard]] bool IsBufferLessByDesign(const AssignStmtPtr& op) const {
-    return ProducesBufferLessTile(op->value_, [this](const Var* v) { return buffer_less_.count(v) > 0; });
+  [[nodiscard]] bool IsBufferLessByDesign(const ExprPtr& value) const {
+    return ProducesBufferLessTile(value, [this](const Var* v) { return buffer_less_.count(v) > 0; });
   }
 
   std::set<const Var*> buffer_less_;

@@ -48,6 +48,13 @@ bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3);
 ///         or @p arg_count is too small for the declared index
 [[nodiscard]] std::optional<size_t> BuiltinWritebackArgIndex(const OpPtr& op, size_t arg_count);
 
+/// Immediate source of a physical buffer alias: a Var/IterArg, an in-place
+/// view's first operand, or the registry-declared writeback operand. Returns
+/// nullptr for fresh storage or unknown provenance. This is a storage relation,
+/// not host return lineage; inheriting only a memory space does not suffice.
+/// Shared by borrowed-storage classification and FIFO lifetime analysis.
+[[nodiscard]] ExprPtr GetBufferAliasSource(const ExprPtr& value);
+
 /// True if the Call targets a tpop op (tile.tpop_from_aic / tile.tpop_from_aiv).
 /// Decided by the registry's CrossCoreRole, not by op-name string matching.
 bool IsTPop(const CallPtr& call);

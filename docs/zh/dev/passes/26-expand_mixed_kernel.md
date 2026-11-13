@@ -295,6 +295,20 @@ A5 拒绝显式本地深度，即使其值等于 `slot_num`，因为 PTOAS 的�
 `tile.tpop_from_aiv` 结果还需要做同侧 `tile.move`（例如 Mat -> Left/Right/Bias），
 则生成的 `system.tfree_to_aiv(...)` 会改写为释放 canonical 的 popped tile，并可被延后到这条 carrier 链之后。
 
+生命周期追踪也覆盖物理写回别名（physical writeback alias），包括带 mask 的
+`reg.store` 和 `reg.scatter`，并将 `RegScope` 内定义的别名传递给后续消费者。
+该作用域保持为不可拆分的单条语句：释放点位于接收值及其所有别名的最后一次使用
+之后，包括后续作用域和 Tile store。同一 pipe 按 pop 顺序释放，后一次 pop 不能
+在前一个槽位仍被使用时归还 credit。移动用户编写的 free 时保留其显式属性。
+
+对于包含 `RegScope` 的函数，在分支或循环体内部创建的接收值不能通过
+`yield` 逃逸出该区域；函数也不能返回
+借用存储。在终结语句之前释放这样的值会使逃逸的别名失效，必须先物化独立存储
+再导出该值。外部接收值可以通过分支或循环结果传递，但每条路径必须保留同一个
+槽位，包括零次执行循环的初始值；与其他槽位或独立存储合并会被拒绝。
+这些规则保证编译器层面的生命周期，不构成硬件完成条件的证明：
+直接 FIFO VF 捕获仍需验证运行时指针 ABI 和同步后才能开放。
+
 对于 Ascend910（a2a3），该 Pass 也支持**没有函数级 split 模式**的 mixed kernel（`split` 未设置或为
 `SplitMode.None`）。此时 Pass 会保留单个 AIV kernel body，并为其打上**双 AIV 派发**标记；后续 lowering
 会基于运行时 `subblock_idx` 插入分支：AIV lane 0 执行原始函数体，AIV lane 1 重放跨核握手，并将 tile-producing
