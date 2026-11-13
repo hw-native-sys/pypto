@@ -71,8 +71,19 @@ repository write access, can post exactly this comment in the PR conversation:
 The `CI Command` workflow requires an open PR targeting this repository's `main`
 branch and dispatches `CI Full` from trusted `main`. It fixes the PR head, base and test-merge SHAs and
 verifies both GitHub's current test-merge SHA and its parents before any tests start. Fork PRs are supported.
+The full-test base comes from the live `refs/heads/main` ref. GitHub's PR
+`base.sha` can remain behind that ref even after the test merge is current;
+that older snapshot is used only to match the original lint run. Full dispatch,
+duplicate detection, progress and final publication all check the live ref.
+Before allowing full CI, the command compares the pinned PR head with live main:
+**0–4 commits behind is allowed; 5 or more is rejected**. Only commits present on
+main but missing from the PR count; the PR's own commits do not. A rejected
+comment receives a reply with the count and instructions to rebase onto latest
+main, wait for lint, and post `/ci full` again. The check runs before dispatch or
+writing pending, and full preparation repeats it so manual PR dispatch cannot
+bypass the limit. Automatic lint and main push CI are unaffected.
 When GitHub is still computing the merge or reports merge parents that do not
-match the current PR snapshot, the command polls every five seconds within a
+match the pinned head and live main revision, the command polls every five seconds within a
 60-second retry window on a GitHub-hosted runner. It keeps the initial head and
 base fixed: a changed revision, closed PR, invalid target or confirmed merge
 conflict stops the request. A conflict requires updating the branch, waiting for
@@ -107,10 +118,12 @@ when run-history searches have not yet indexed it.
 
 The comment opens the downstream test stage after `pre-commit` and `clang-tidy`
 have passed in the latest matching automatic PR run. Matching includes the PR
-number, head SHA, base SHA, workflow identity and fork identity. A docs-only PR
+number, head SHA, recorded PR base SHA, workflow identity and fork identity. A docs-only PR
 may reuse a skipped `clang-tidy` after its changed paths are verified. Missing,
 running or failed lint rejects the request; it does not reserve a runner while
-waiting. Pushes or base changes require matching lint again.
+waiting. Changes to the PR snapshot require matching lint again. Main advancing
+without changing that snapshot does not rerun lint; full tests use the current
+main merge while reusing the lint result from the recorded PR snapshot.
 
 The downstream run skips both lint jobs. A lightweight gate verifies their
 reuse before tests start; revision checks and toolchain preparation still run.
@@ -122,9 +135,16 @@ jobs build locally if necessary; every applicable test must succeed.
 
 ### Results and retries
 
-The PR keeps its original lint checks and displays each downstream job as
-`full / <job name>`, including matrix legs and links to job logs. `CI Full Progress`
-reads GitHub metadata on a GitHub-hosted runner and refreshes these checks roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
+The PR keeps its original lint checks and displays each downstream job as an
+independent `full / <job name>` commit status in the PR checks list, including
+matrix legs and direct links to the original job logs. These are not jobs added
+to the lint workflow. Commit statuses avoid the check-suite grouping and
+overridden Details links of check runs created with Actions' `GITHUB_TOKEN`.
+Queued and running jobs both display pending, with the phase in the description;
+skipped/neutral jobs display success with their actual conclusion in the description.
+Only `ci/full` determines whether the required tests passed.
+`CI Full Progress` reads GitHub metadata on a GitHub-hosted runner and refreshes
+these statuses roughly once a minute for one active full run, without executing PR code or giving test jobs write tokens. No
 monitor runs while waiting for a comment. Polling slows down with concurrent
 monitors and the shared API budget, reserving 200 requests for gate writers and
 other automation; transient API errors, including initial run-ID resolution,
@@ -133,11 +153,13 @@ hours; the finalizer explicitly dispatches reconciliation even after a monitor
 failure or timeout. Progress checks are informational: require `ci/full` for
 merge, not every `full / ...` check (some tests are conditional or advisory).
 
-Native reruns update the existing `full / ...` records for the same full run,
-including results retained from earlier attempts. They do not append another
-set of checks. The full workflow retains the execution history and each record
-links to its effective job. Records duplicated by older publishers remain in
-history; reconciliation reuses the latest record for each job.
+Native reruns publish to the same `full / ...` contexts, including results retained
+from earlier attempts. GitHub displays the latest value once per context; its
+status history is append-only. Unchanged results are not posted repeatedly.
+The full workflow retains execution history, and each status links to its effective
+job. A trusted router serializes progress writers per PR commit, so old runs cannot
+overwrite newer writers. Historical check runs from the previous publisher remain
+on their original commit; update the PR branch to get a clean status-only display.
 
 `ci/full` is a commit status on the PR head, initialized by `CI Command` and
 updated by `CI Full Status`. After binding the full run ID, `CI Command` explicitly
@@ -209,8 +231,9 @@ creation-time ranges at GitHub’s search limit. Moving between unfinished statu
 cannot hide an existing request from that scan.
 A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances
-before result publication, the old-base result fails. Update the PR branch,
-wait for matching lint and post `/ci full` again. This check is made at publication time; an already published success
+before result publication, the old-base result fails. Post `/ci full` again to
+test the current main merge; update the PR branch and wait for lint if no matching
+lint result is available. This check is made at publication time; an already published success
 is not automatically invalidated by a later main push. Requiring an up-to-date
 branch at merge time is a separate ruleset policy, unchanged by this PR.
 Changed-path classification compares the pinned base and head SHAs, so later
