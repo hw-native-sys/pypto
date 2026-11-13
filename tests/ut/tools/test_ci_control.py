@@ -8,6 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Exercise CI routing and merge-gate failures without GitHub writes or devices."""
 
+# Smoke PR: keep this branch behind main to exercise the rebase-required reply.
+
 import copy
 import importlib.util
 import json
