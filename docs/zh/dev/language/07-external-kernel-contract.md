@@ -76,6 +76,41 @@ Provider 不接触实际 context、AST、globals 或 tensor 地址。这是 PR #
 适配边界，不安装该 PR 的 runtime wrapper，也不让任意注册对象直接在 JIT 程序中执行。
 将任意注册对象连接到可执行 runtime wrapper，以及真实 DSL 迁移，仍属于后续任务。
 
+## CANNBotDSL 准备阶段（任务 34.5，第一阶段）
+
+`pypto.jit.external.providers.cannbotdsl.CANNBotDSLProvider` 通过可选包的公开
+`inspect_kernel`、`export_device` 和 `get_include` API 实现直接调用
+`prepare(kernel, request)`。导入适配器不会导入编译器。本阶段支持 A5/CCEC、
+无默认值的显式位置参数、tensor 和运行时 scalar 描述符，以及命名 constexpr 值。
+Tensor 请求必须采用 ND 布局，明确给出正步长且最内层步长为 1；未约束的步长会被
+拒绝，不会推断为连续布局。共享维度符号保持共享；仅用作长度的符号允许为零，
+用作任一步长的符号最小值为 1，即使该符号同时用作长度。暂不接受编译选项。
+
+例如，行步长动态的 `(rows, 32)` tensor 可描述为
+`TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))`。
+运行时 view offset 仍保留在请求中；后续 bridge 在构造提供方的首个有效元素指针时，
+必须且只能应用一次 offset。
+
+结果为使用 `cannbotdsl.device_callable` v1 描述符 ABI 的 `PreparedKernel`，
+保留导出的物理参数顺序。公开返回为空；每个 tensor 写入都产生内部写回，覆盖范围
+保守设为未知，避免仅凭访问掩码丢弃未写入数据的依赖。AIC/AIV/MIX 参与核来自导出，
+其中 MIX 包含两个 AIV lane。
+逻辑运行时契约中的 scalar 元素类型必须与请求一致，不能仅比较字节宽度。
+格式错误的导出（包括缺少 `manifest` 或 `source` 属性）会在交接前抛出 `ContractError`。
+
+产物拥有 `device_callable.hpp`、完整的 `device_manifest.json`，以及经过摘要校验的
+DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状态修改、独占资源、
+缓存行写隔离、完成条件和二进制加载要求。CANN SDK 头文件仍由消费端工具链提供。
+每次准备都重新导出；由于尚未建立完整的 Python 闭包/输入快照，身份明确标记为不完整。
+因此该 provider 尚未注册到仅支持 capture 的 registry，也不声明 preparation 缓存复用。
+
+**本阶段尚未启用 JIT 程序中的调用或设备执行。** 现有 `c_pointer` TMR bridge 会拒绝
+该描述符 ABI。34.5 的后续工作需要实现检查完整 manifest 的 bridge、正确管理产物
+生命周期的 JIT 绑定及相关兼容回归。尤其不能在接入 runtime 时丢弃资源和 64 字节 GM
+写隔离要求。设备完成可见性、数值和性能验收仍由 34.7 跟踪。
+`test_cannbotdsl_provider.py` 使用 fake 公开导出器验证交接边界，并在安装了可选包时
+使用真实公开编译器导出验证；这些测试不代表二进制验收。
+
 ## 请求与编译结果
 
 `KernelRequest` 包含有序 `ParameterSpec`、编译期常量、`CompileTarget` 和有效选项。
