@@ -160,7 +160,7 @@ def matmul(
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
             chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
@@ -231,7 +231,7 @@ def matmul_acc(
         rhs: Right-hand side tile
         init_cond: Optional predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
             chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
@@ -287,7 +287,7 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
         bias: Bias tile [1, N] with the accumulator dtype (FP32 for
             floating-point matrix operands, INT32 for integer matrix operands)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
 
     Returns:
         Tile wrapping the matmul_bias operation
