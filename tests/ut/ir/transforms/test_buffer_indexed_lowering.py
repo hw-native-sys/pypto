@@ -20,8 +20,11 @@ from pypto.debug import torch_codegen
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
+from .buffer_test_utils import statements
+
 pytestmark = pytest.mark.usefixtures("ascend_backend")
 _PLANNERS = (passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS)
+_BUFFER_GATHER_COMPARE = ir.get_op("buffer.gather_compare").name
 
 
 def _lower(program, planner, enabled=None):
@@ -92,7 +95,9 @@ def _native(program, tmp_path, planner):
     restored = ir.deserialize(ir.serialize(program))
     assert isinstance(restored, ir.Program)
     ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
-    text = codegen.PTOCodegen().generate(restored, emit_tile_addr=False, emit_source_loc=False)
+    text = codegen.PTOCodegen().generate(
+        restored, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
     if find_ptoas_binary() is not None:
         source = tmp_path / "indexed.pto"
         source.write_text(text)
@@ -251,10 +256,16 @@ def test_indexed_replay_checks_bounds_before_writing_output(kind, bad_index):
     assert torch.all(out == -777)
 
 
-def _compare_program(dtype="FP32", mode="gt", *, unused="", scratch_bytes=4096):
+def _compare_program(dtype="FP32", mode="gt", *, unused="", scratch_bytes=4096, reshape_workspace=False):
     threshold = "1" if dtype == "INT32" else "1.0"
     count_store = "" if unused == "counts" else "pl.store(counts, [0, 0], count_out)"
     index_store = "" if unused == "indices" else "pl.store(indices, [0, 0], index_out)"
+    workspace = (
+        f"backing = pl.create_tile([32, {scratch_bytes // 32}], dtype=pl.UINT8)\n"
+        f"        scratch = pl.tile.reshape(backing, [1, {scratch_bytes}])"
+        if reshape_workspace
+        else f"scratch = pl.create_tile([1, {scratch_bytes}], dtype=pl.UINT8)"
+    )
     return pl.parse_program(f"""
 @pl.program
 class CompareGather:
@@ -264,7 +275,7 @@ class CompareGather:
                count_out: pl.Out[pl.Tensor[[1, 8], pl.INT32]],
                live_out: pl.Out[pl.Tensor[[8, 128], pl.{dtype}]]):
         source = pl.load(a, [0, 0], [8, 128])
-        scratch = pl.create_tile([1, {scratch_bytes}], dtype=pl.UINT8)
+        {workspace}
         indices, counts = pl.tile.gather_compare(source, pl.const({threshold}, pl.{dtype}), scratch,
                                                 cmp_mode="{mode}", out_cols=128, offset=7)
         {index_store}
@@ -296,6 +307,78 @@ def test_compare_gather_default_two_results_and_complete_workspace(tmp_path, pla
         matched = torch.nonzero(original[row] > 1 if mode == "gt" else original[row] == 1).flatten()
         assert counts[0, row] == matched.numel()
         torch.testing.assert_close(indices[row, : matched.numel()], (matched + row * 128 + 7).int())
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compare_gather_reshaped_workspace_is_native_window_root(tmp_path, planner, enabled):
+    # The [32, 256] backing is visited before its [1, 8192] workspace alias.
+    # An addressless root selected from that first descriptor leaves the mask
+    # prefix viewing a reshape, which PTOAS cannot compile.
+    program = _lower(_compare_program(scratch_bytes=8192, reshape_workspace=True), planner, enabled)
+    if not enabled:
+        assert _kernel(program).ir_stage == ir.FunctionIRStage.Functional
+        _native(program, tmp_path, planner)
+        return
+    assert _kernel(program).ir_stage == ir.FunctionIRStage.Buffer
+    definitions = {
+        statement.var.name_hint: statement.value
+        for statement in statements(program)
+        if isinstance(statement, ir.AssignStmt)
+    }
+    gather = next(
+        statement.expr
+        for statement in statements(program)
+        if isinstance(statement, ir.EvalStmt)
+        and isinstance(statement.expr, ir.Call)
+        and statement.expr.op.name == _BUFFER_GATHER_COMPARE
+    )
+    workspace = gather.args[3]
+    assert isinstance(workspace, ir.Var)
+    allocation = definitions[workspace.name_hint]
+    assert isinstance(allocation, ir.Call) and allocation.op.name == ir.get_op("buffer.alloc").name
+    _native(program, tmp_path, planner)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compare_gather_workspace_preserves_other_window_parents(tmp_path, planner, enabled):
+    # The FP32 backing is a slice parent before being reinterpreted as scratch.
+    # Selecting the UINT8 workspace as its allocation root invalidates the slice.
+    program = pl.parse_program("""
+@pl.program
+class SharedSlice:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[8,128],pl.FP32],
+               out: pl.Out[pl.Tensor[[8,128],pl.INT32]],
+               counts_out: pl.Out[pl.Tensor[[1,8],pl.INT32]],
+               slice_out: pl.Out[pl.Tensor[[8,64],pl.FP32]]):
+        backing = pl.tile.full([32,64],pl.FP32,3.0)
+        window = pl.tile.slice(backing,[8,64],[0,0],valid_shape=[8,64])
+        pl.store(window,[0,0],slice_out)
+        bytes_view = pl.tile.reinterpret_view(backing,pl.UINT8)
+        workspace = pl.tile.reshape(bytes_view,[1,8192])
+        source = pl.load(a,[0,0],[8,128])
+        indices,counts = pl.tile.gather_compare(source,pl.const(1.0,pl.FP32),workspace,
+                                               cmp_mode="gt",out_cols=128)
+        pl.store(indices,[0,0],out)
+        pl.store(counts,[0,0],counts_out)
+""")
+    lowered = _lower(program, planner, enabled)
+    expected_stage = ir.FunctionIRStage.Buffer if enabled else ir.FunctionIRStage.Functional
+    assert _kernel(lowered).ir_stage == expected_stage
+    _native(lowered, tmp_path, planner)
+    if not enabled:
+        return  # The Torch reference backend implements the Buffer recipe only.
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    indices = torch.empty((8, 128), dtype=torch.int32)
+    counts = torch.empty((1, 8), dtype=torch.int32)
+    sliced = torch.empty((8, 64))
+    namespace["kernel"](torch.full((8, 128), 2.0), indices, counts, sliced)
+    torch.testing.assert_close(sliced, torch.full((8, 64), 3.0))
+    torch.testing.assert_close(indices, torch.arange(1024, dtype=torch.int32).reshape(8, 128))
+    torch.testing.assert_close(counts, torch.full((1, 8), 128, dtype=torch.int32))
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)

@@ -27,6 +27,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/op_rules.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -200,23 +201,72 @@ ExprPtr MakeStaticShape(const std::vector<int64_t>& dims, const Span& span) {
   return std::make_shared<MakeTuple>(std::move(elements), span);
 }
 
+// A private tile.create used only as scratch can keep its allocation. Other
+// uses (including view construction and loop initializers) may require a
+// differently typed native window parent over the same storage.
+class PrivateScratchAnalysis : public IRVisitor {
+ public:
+  explicit PrivateScratchAnalysis(const StmtPtr& body) { VisitStmt(body); }
+
+  [[nodiscard]] bool IsPrivate(const ExprPtr& expression) const {
+    const auto var = AsVarLike(expression);
+    const auto tile = var ? As<TileType>(var->GetType()) : nullptr;
+    return var && created_.count(var.get()) && !other_uses_.count(var.get()) && tile &&
+           (!tile->memref_ || !(*tile->memref_)->is_pinned_);
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& statement) override {
+    if (IsOp(As<Call>(statement->value_), "tile.create")) created_.insert(statement->var_.get());
+    VisitExpr(statement->value_);
+  }
+  void VisitExpr_(const CallPtr& call) override {
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      if (i != 2 || !IsOp(call, "tile.gather_compare")) VisitExpr(call->args_[i]);
+    }
+  }
+  void VisitVarLike_(const VarPtr& var) override { other_uses_.insert(var.get()); }
+  void VisitExpr_(const IterArgPtr& argument) override { other_uses_.insert(argument.get()); }
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+  void VisitStmt_(const WhileStmtPtr& loop) override {
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+
+ private:
+  std::set<const Var*> created_;
+  std::set<const Var*> other_uses_;
+};
+
 struct PtoScratchSpec {
   ExprPtr shape;
   DataType dtype;
   std::string name_component;
+  std::optional<size_t> replace_arg = std::nullopt;
 };
 
-/// Materialize level3 scratch before MemRef collection.
+/// Materialize scratch before MemRef collection.
+///
+/// In addressless A2/A3 code, aliased gather scratch gets a private allocation.
+/// Workspace operands carry no caller-readable result (the registry contract),
+/// so no copy is needed. This keeps native window parents valid in both Tile
+/// and Buffer IR without moving allocations into either emitter.
 ///
 /// Optional compiler-owned scratch (`tile.ci`, narrowing `tile.cast`, required
 /// `tile.sort32`) is inserted only when absent. Caller-owned tmp operands on
 /// `tile.sel` / `tile.sels` / `tile.prelu` are preserved when present; those
 /// ops require an explicit tmp in the IR, so this pass never synthesizes one
 /// for them. `tile.col_sum` / `tile.row_expand_add` likewise keep caller tmp.
-class MaterializePtoLevel3ScratchMutator : public IRMutator {
+class MaterializePtoScratchMutator : public IRMutator {
  public:
-  explicit MaterializePtoLevel3ScratchMutator(const backend::Backend* target)
-      : backend_(target), materialize_a2a3_scratch_(target->GetHandler()->RequiresLevel3TmpScratch()) {}
+  explicit MaterializePtoScratchMutator(const backend::Backend* target,
+                                        const StmtPtr& addressless_body = nullptr)
+      : backend_(target), materialize_a2a3_scratch_(target->GetHandler()->RequiresLevel3TmpScratch()) {
+    if (addressless_body) private_scratch_.emplace(addressless_body);
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -237,7 +287,11 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
     auto scratch_assign = std::make_shared<AssignStmt>(scratch_var, scratch_create, op->span_);
 
     std::vector<ExprPtr> args = call->args_;
-    args.push_back(scratch_var);
+    if (spec->replace_arg) {
+      args[*spec->replace_arg] = scratch_var;
+    } else {
+      args.push_back(scratch_var);
+    }
     auto new_call = std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, call->attrs_,
                                            call->GetType(), call->span_);
     auto new_assign = MutableCopy(op);
@@ -247,6 +301,20 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
 
  private:
   std::optional<PtoScratchSpec> GetScratchSpec(const CallPtr& call, const Span& span) const {
+    if (private_scratch_) {
+      if (!IsOp(call, "tile.gather_compare") || call->args_.size() != 3 ||
+          private_scratch_->IsPrivate(call->args_[2])) {
+        return std::nullopt;
+      }
+      const auto workspace = backend::StaticLogicalBufferDescriptor(call->args_[2]->GetType());
+      // Preserve caller validation: do not silently repair invalid shapes,
+      // layouts, validity, or capacity while isolating an otherwise dense alias.
+      if (!backend::IsAlignedDenseVecBuffer(workspace) || workspace->dtype_ != DataType::UINT8 ||
+          workspace->shape_[0] != 1 || workspace->valid_shape_ != workspace->shape_) {
+        return std::nullopt;
+      }
+      return PtoScratchSpec{MakeStaticShape(workspace->shape_, span), DataType::UINT8, "gather", 2};
+    }
     if (IsOp(call, "tile.ci") && call->args_.size() == 2) {
       if (!materialize_a2a3_scratch_) return std::nullopt;
       auto result_type = As<TileType>(call->GetType());
@@ -289,6 +357,7 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
   }
 
   const backend::Backend* backend_;
+  std::optional<PrivateScratchAnalysis> private_scratch_;
   bool materialize_a2a3_scratch_ = false;
   std::size_t scratch_counter_ = 0;
 };
@@ -1044,7 +1113,10 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // requirements come from the backend, while TSORT32 scratch is level-driven.
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
   if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
-    MaterializePtoLevel3ScratchMutator materializer(target);
+    MaterializePtoScratchMutator materializer(target);
+    normalized_func = materializer.VisitFunction(normalized_func);
+  } else if (handler != nullptr && planner == MemoryPlanner::PtoAS && handler->RequiresLevel3TmpScratch()) {
+    MaterializePtoScratchMutator materializer(target, normalized_func->body_);
     normalized_func = materializer.VisitFunction(normalized_func);
   }
 

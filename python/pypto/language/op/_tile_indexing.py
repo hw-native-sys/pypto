@@ -192,8 +192,10 @@ def gather_compare(
             For source ``[R, C]`` with element width ``E`` bytes, set
             ``M = ceil(C / 256) * 32`` and reserve at least
             ``round_up(R * (M + 4*C + E), M)`` bytes for masks, indices and
-            converted thresholds. The workspace must not overlap the source
-            or either output.
+            converted thresholds. The workspace width must be divisible by ``M``
+            and the workspace must not overlap the source or either output.
+            Scratch contents are not a result. PTOAS may use a private workspace
+            when this operand aliases storage used by other operations.
         cmp_mode: ``"eq"`` / ``"ne"`` / ``"lt"`` / ``"le"`` / ``"gt"`` /
             ``"ge"`` or int ``0..5``. Defaults to ``"eq"``.
         offset: Starting index offset (default 0).

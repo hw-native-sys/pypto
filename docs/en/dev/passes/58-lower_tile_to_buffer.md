@@ -634,3 +634,9 @@ TGATHER a `[R,M]` mask view of its byte-zero prefix. The mask and backing must
 share their origin. Source, backing and both destinations must be disjoint.
 Only the matched index prefix and the logical count entries are defined; the
 remaining index entries and count padding are unspecified.
+
+For the PTOAS planner, `InitMemRef` gives aliased or otherwise shared gather
+scratch a private allocation before storage planning. Workspace operands carry
+no caller-readable result, so no copy is needed. Private `tile.create` scratch
+used only by gather calls retains its allocation. This applies to both Tile
+fallback and Buffer selection and preserves other native window parents.
