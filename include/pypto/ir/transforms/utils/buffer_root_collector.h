@@ -12,11 +12,15 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
+#include <cstddef>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -33,12 +37,18 @@ enum class AmbiguousRootPolicy {
   /// Record no root. Safe for fusion / aliasing: never assert a false alias
   /// that could corrupt a differently-typed buffer (issue #1564 / #1580).
   kSkip,
+  /// Trace returned backing storage for parameter-direction inference.
+  kTraceReturn,
   /// Fall back to the first Out/InOut root. Dependency analysis
   /// (DeriveCallDirections) must keep *some* root so a later write to the
   /// returned var still promotes to InOut and the WAW/InOut dependency is not
   /// dropped — a missing root silently degrades to OutputExisting.
   kFirstOutput,
 };
+
+/// Candidate parameter positions per result of an already analyzed callee.
+using ReturnedRootCandidates =
+    std::unordered_map<const Function*, std::unordered_map<size_t, std::vector<size_t>>>;
 
 /**
  * @brief Determine the canonical buffer root for every Var in a function body.
@@ -58,9 +68,13 @@ enum class AmbiguousRootPolicy {
 class BufferRootCollector : public IRVisitor {
  public:
   explicit BufferRootCollector(ProgramPtr program,
-                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip);
+                               AmbiguousRootPolicy ambiguous_policy = AmbiguousRootPolicy::kSkip,
+                               bool follow_reshape = false,
+                               const ReturnedRootCandidates* returned_candidates = nullptr);
 
   void Initialize(const std::vector<VarPtr>& params);
+  [[nodiscard]] std::unordered_map<size_t, std::vector<size_t>> CollectAmbiguousReturnedParams(
+      const FunctionPtr& func) const;
 
   /// Var* -> owning buffer-root Var*. Populated by Initialize + VisitStmt.
   std::unordered_map<const Var*, const Var*> buffer_roots;
@@ -80,6 +94,8 @@ class BufferRootCollector : public IRVisitor {
   /// single unambiguous answer or (under `kFirstOutput`) an arbitrary pick.
   [[nodiscard]] const std::vector<const Var*>& RootCandidatesOf(const Var* var) const {
     static const std::vector<const Var*> kNone;
+    auto alias = reshape_candidate_sources_.find(var);
+    if (alias != reshape_candidate_sources_.end()) var = alias->second;
     auto it = root_candidates_.find(var);
     return it == root_candidates_.end() ? kNone : it->second;
   }
@@ -107,9 +123,14 @@ class BufferRootCollector : public IRVisitor {
     TypePtr type;
   };
 
+  [[nodiscard]] std::optional<RootInfo> ResolveReturnedCandidates(const CallPtr& call, size_t position) const;
+  [[nodiscard]] std::pair<RootCandidates, bool> ResolveReturnedValue(const ExprPtr& expr,
+                                                                     size_t position) const;
+  [[nodiscard]] RootInfo ResolveCallTupleField(const CallPtr& call, size_t position) const;
   [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
   [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
   void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
+  void ForwardReshapeCandidates(const VarPtr& var, const ExprPtr& source);
   [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
       const std::vector<IterArgPtr>& iter_args);
   void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
@@ -124,7 +145,7 @@ class BufferRootCollector : public IRVisitor {
   // making tensor.create -> tensor.slice(output) alias and corrupt the result.
   // When no unambiguous match exists, the fallback follows ambiguous_policy_.
   [[nodiscard]] RootInfo SelectReturnRootInfo(const std::vector<OutputRoot>& out_roots,
-                                              const TypePtr& return_type) const;
+                                              const CallPtr& call) const;
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
@@ -132,8 +153,17 @@ class BufferRootCollector : public IRVisitor {
 
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
+  bool follow_reshape_;
+  const ReturnedRootCandidates* returned_candidates_;
   std::unordered_map<const Var*, RootCandidates> root_candidates_;
+  // Reshapes share their source's immutable candidate set, including chains.
+  std::unordered_map<const Var*, const Var*> reshape_candidate_sources_;
   std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
+  std::unordered_map<const Var*, CallPtr> tuple_calls_;
+  std::unordered_map<const Var*, ExprPtr> tuple_aliases_;
+  std::unordered_map<const Var*, std::pair<ExprPtr, ExprPtr>> tuple_joins_;
+  mutable std::unordered_map<const Var*, std::unordered_map<size_t, RootInfo>> tuple_join_fields_;
+  mutable std::unordered_map<const Function*, std::vector<size_t>> writable_param_indices_;
 };
 
 }  // namespace buffer_root

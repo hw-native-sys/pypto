@@ -1107,6 +1107,48 @@ class TestDeriveDirectionMatrix:
         After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_reshaped_aliases_share_prior_writer(self):
+        """Two full-buffer reshapes of one destination share a write dependency."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                tile = pl.load(x, [0, 0], [1, 64])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]):
+                first = pl.reshape(dst, [1, 64])
+                self.kernel(x, first)
+                second = pl.reshape(dst, [1, 64])
+                self.kernel(x, second)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                tile = pl.tile.load(x, [0, 0], [1, 64], [1, 64])
+                return pl.tile.store(tile, [0, 0], out)
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 64], pl.FP32], dst: pl.Tensor[[64], pl.FP32]):
+                first = pl.reshape(dst, [1, 64])
+                self.kernel(x, first, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                second = pl.reshape(dst, [1, 64])
+                self.kernel(x, second, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_out_param_enclosing_inout_declaration_promoted(self):
         """R-enclosing: explicit ``pl.InOut`` on the enclosing param promotes to ``InOut``.
 
