@@ -51,7 +51,7 @@ static_assert(kRankNumOffset == 4, "CommContext.rankNum offset drift");
 static_assert(kWindowsInOffset == 16, "CommContext.windowsIn offset drift");
 static_assert(kWindowsOutOffset == 528, "CommContext.windowsOut offset drift");
 static_assert(kWindowSlotStride == 8, "CommContext window slot stride drift");
-static_assert(kCommCtxSize == 1088, "CommContext size drift");
+static_assert(kCommCtxSize == 1104, "CommContext size drift");
 
 }  // namespace comm_layout
 }  // namespace distributed
