@@ -26,6 +26,8 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/backend/common/gather_compare_scratch.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -774,6 +776,47 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string kv_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string tmp_ty = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+  if (codegen.GetBackendHandler()->RequiresLevel3TmpScratch()) {
+    const auto scratch = StaticLogicalBufferDescriptor(op->args_[2]->GetType());
+    // Runtime valid extents do not change the physical workspace layout.
+    const auto source_tile = As<ir::TileType>(op->args_[0]->GetType());
+    const auto rows = As<ir::ConstInt>(source_tile->shape_[0]);
+    const auto cols = As<ir::ConstInt>(source_tile->shape_[1]);
+    const auto plan =
+        rows && cols ? PlanGatherCompareScratch(rows->value_, cols->value_, source_tile->dtype_.GetByte())
+                     : std::nullopt;
+    CHECK_SPAN(plan && scratch && scratch->dtype_ == DataType::UINT8 && scratch->shape_[0] == 1 &&
+                   IsAlignedDenseVecBuffer(scratch) && scratch->valid_shape_ == scratch->shape_,
+               op->span_)
+        << "gather_compare requires a full-valid dense UINT8 workspace";
+    const auto capacity = ir::storage_size::StaticStorageBytes(
+        static_cast<uint64_t>(scratch->shape_[0]) * scratch->shape_[1], DataType::UINT8);
+    CHECK_SPAN(
+        capacity && *capacity >= static_cast<uint64_t>(plan->bytes) && *capacity % plan->mask_cols == 0,
+        op->span_)
+        << "gather_compare workspace must reserve mask, indices and thresholds: requires at least "
+        << plan->bytes << " bytes, aligned to " << plan->mask_cols << " bytes";
+    auto type_string = [&](int64_t r, int64_t c) {
+      return codegen::FormatTileBufTypeString("vec", "ui8", r, c, ir::TileLayout::row_major,
+                                              ir::TileLayout::none_box, 512, ir::PadValue::null,
+                                              ir::CompactMode::null, r, c);
+    };
+    // These are descriptor-only views of the already planned workspace. Passing
+    // the full backing descriptor to TGATHER would place its private tables
+    // beyond the allocation and use the backing width as the mask row pitch.
+    const int64_t mask_bytes = plan->rows * plan->mask_cols;
+    const auto prefix_type = type_string(1, mask_bytes);
+    const auto prefix = codegen.NewNamedTemp("gather_workspace_prefix");
+    const auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    codegen.Emit(prefix + " = pto.subview " + tmp + "[" + zero + ", " + zero + "] sizes [1, " +
+                 std::to_string(mask_bytes) + "] : " + tmp_ty + " -> " + prefix_type);
+    const auto mask = codegen.NewNamedTemp("gather_mask");
+    const auto mask_type = type_string(plan->rows, plan->mask_cols);
+    codegen.Emit(mask + " = pto.treshape " + prefix + " : " + prefix_type + " -> " + mask_type);
+    tmp = mask;
+    tmp_ty = mask_type;
+  }
 
   std::ostringstream oss;
   oss << "pto.tgather ins(" << src << ", " << kvalue << ", " << tmp;

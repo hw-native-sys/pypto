@@ -101,7 +101,7 @@ in the same loop region. Nonzero bases, live old aliases and window operands
 retain Tile IR. Destination preservation is expressed by the existing
 zero-base scatter, written-mask comparison and select chain; it is never
 reconstructed by the emitter. Mask/byte-offset gather, mask scatter and
-multi-result gather remain outside this indexed rollout.
+other multi-result operations remain outside this indexed rollout.
 
 Structured If/For/While regions may carry Tiles, scalars and aliases of one GM
 parameter. Both branch arms must resolve a GM result to the same parameter;
@@ -607,3 +607,30 @@ The queue chooses an available device. On other hosts, omit the queue options
 and select an available device with `--device`. The saved-artifact checks also
 require scalar-only native loop results and the expected explicit operations;
 native compilation alone does not establish numerical correctness.
+
+## Compare gather and ordered results
+
+A2/A3 default selection supports `tile.gather_compare` with full-valid dense
+FP16/FP32 sources (EQ or GT) or INT32 sources (EQ). Physical rows contain a
+whole number of 256-byte comparison repeats. Indices and counts are INT32;
+the index destination has room for every source column. Runtime/empty valid
+state, window operands, other comparison modes and A5 retain Tile IR.
+
+Each tuple result must have one direct projection in the producer's sequence.
+Both output lifetimes begin at the call, including unread results. Lowering
+removes the tuple and emits both ordered destination handles explicitly; it
+never recovers outputs or allocates scratch in the Buffer emitter.
+
+The A2/A3 native workspace contains a mask, an INT32 index table and converted
+thresholds. For source `[R,C]` with element width `E`, mask row width is
+`M = ceil(C / 256) * 32` bytes and the required capacity is
+`round_up(R * (M + 4*C + E), M)`. Tensor lowering allocates this full capacity
+before planning. Explicit Tile scratch must be full-valid dense UINT8
+`[1,bytes]` with at least that capacity and a width divisible by `M`.
+Undersized scratch is diagnosed instead of letting native code write beyond it.
+
+Buffer IR keeps the entire workspace as a write-effect operand and gives native
+TGATHER a `[R,M]` mask view of its byte-zero prefix. The mask and backing must
+share their origin. Source, backing and both destinations must be disjoint.
+Only the matched index prefix and the logical count entries are defined; the
+remaining index entries and count padding are unspecified.

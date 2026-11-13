@@ -28,6 +28,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/gather_compare_scratch.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -2132,9 +2133,20 @@ void OpConversionRegistry::RegisterGatherOps() {
 
         std::vector<StmtPtr> prologue;
 
-        // Synthesize tmp: UINT8 workspace shaped like src (1 byte per element).
-        // Final size requirement is enforced by the codegen kernel.
-        auto tmp_shape_tuple = std::make_shared<MakeTuple>(src_tile->shape_, span);
+        // The native compare gather writes a mask, an index table and converted
+        // thresholds. Reserve the complete workspace before memory planning.
+        auto scratch_shape = src_tile->shape_;
+        if (const auto* handler = GetActiveBackendHandler(); handler && handler->RequiresLevel3TmpScratch()) {
+          const auto rows = As<ConstInt>(src_tile->shape_[0]);
+          const auto cols = As<ConstInt>(src_tile->shape_[1]);
+          const auto plan = rows && cols ? backend::PlanGatherCompareScratch(rows->value_, cols->value_,
+                                                                             src_tile->dtype_.GetByte())
+                                         : std::nullopt;
+          CHECK_SPAN(plan, span) << "gather_compare requires a representable static scratch capacity";
+          scratch_shape = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                           std::make_shared<ConstInt>(plan->bytes, DataType::INDEX, span)};
+        }
+        auto tmp_shape_tuple = std::make_shared<MakeTuple>(scratch_shape, span);
         std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
             {"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}};
         auto tmp_create = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_create_kwargs, span);

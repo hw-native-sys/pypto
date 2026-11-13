@@ -659,6 +659,16 @@ def _buffer_gather(source, indices, destination):
         raise ValueError("buffer.gather index is outside the source allocation")
     _buffer_write(destination, source.reshape(-1)[index])
 
+def _buffer_gather_compare(source, threshold, indices, counts, mode, offset):
+    values = _buffer_active(source)
+    matches = values == threshold if mode == 0 else values > threshold
+    for row in range(values.shape[0]):
+        columns = torch.nonzero(matches[row], as_tuple=False).flatten()
+        counts[0, row] = columns.numel()
+        # Native gather defines only the matching prefix. Neither the unused
+        # index tail nor count padding is implicitly initialized.
+        indices[row, :columns.numel()] = columns + row * source.shape[1] + offset
+
 def _buffer_scatter(source, indices, destination):
     index = _buffer_active(indices).to(torch.int64).reshape(-1)
     if torch.any(index < 0) or torch.any(index >= destination.numel()):
@@ -1411,6 +1421,9 @@ def _register_ops() -> None:  # noqa: PLR0915
             f"{fn([f'_buffer_active({a[0]})', f'torch.as_tensor({a[1]}, dtype={a[0]}.dtype)'], kw)})"
         )
     m["buffer.full"] = lambda a, _kw: f"_buffer_active({a[1]}).fill_({a[0]})"
+    m["buffer.gather_compare"] = lambda a, kw: (
+        f"_buffer_gather_compare({a[0]}, {a[1]}, {a[4]}, {a[5]}, {kw['cmp_mode']}, {kw.get('offset', 0)})"
+    )
     m["buffer.gather"] = lambda a, _kw: f"_buffer_gather({a[0]}, {a[1]}, {a[3]})"
     m["buffer.scatter"] = lambda a, _kw: f"_buffer_scatter({a[0]}, {a[1]}, {a[2]})"
     m["buffer.cast"] = lambda a, _kw: f"_buffer_write({a[1]}, _buffer_active({a[0]}).to({a[1]}.dtype))"

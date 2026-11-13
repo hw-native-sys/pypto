@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_indexed_analysis.h"
+#include "pypto/ir/transforms/utils/buffer_tuple_results.h"
 #include "pypto/ir/transforms/utils/buffer_valid_analysis.h"
 #include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -63,7 +64,10 @@ namespace {
 class BufferKernelSupport : public IRVisitor {
  public:
   explicit BufferKernelSupport(const FunctionPtr& function)
-      : return_types_(function->return_types_), views_(function->body_), indexed_(function->body_) {
+      : return_types_(function->return_types_),
+        views_(function->body_),
+        indexed_(function->body_),
+        tuples_(function->body_) {
     for (size_t i = 0; i < function->params_.size(); ++i) {
       const auto& param = function->params_[i];
       if (As<TensorType>(param->GetType())) {
@@ -162,6 +166,7 @@ class BufferKernelSupport : public IRVisitor {
     }
     CheckType(expr->GetType());
     if (const auto var = AsVarLike(expr)) {
+      if (As<TupleType>(var->GetType())) supported = false;
       if (const auto tile = As<TileType>(var->GetType())) {
         if (const auto memory = tile->memref_.value_or(nullptr)) {
           const auto offset = As<ConstInt>(memory->byte_offset_);
@@ -210,6 +215,19 @@ class BufferKernelSupport : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
+    if (As<TupleType>(assign->var_->GetType())) {
+      const auto result = tuples_.Get(assign->var_);
+      supported &= result && result->call == assign->value_;
+      if (result) {
+        for (const auto& output : result->outputs) CheckType(output->GetType());
+        VisitExpr(result->call);
+      }
+      return;
+    }
+    if (tuples_.IsProjection(assign)) {
+      VisitExpr(assign->var_);
+      return;
+    }
     IRVisitor::VisitStmt_(assign);
     if (!supported) return;
     if (As<ScalarType>(assign->var_->GetType())) {
@@ -697,6 +715,7 @@ class BufferKernelSupport : public IRVisitor {
   const std::vector<TypePtr>& return_types_;
   BufferViewAnalysis views_;
   BufferIndexedAnalysis indexed_;
+  BufferTupleResults tuples_;
   std::unordered_map<const Var*, int64_t> scalar_multiples_;
   std::unordered_map<const Expr*, int64_t> expression_multiples_;
   std::unordered_map<const Var*, TileTypePtr> window_parents_;

@@ -568,6 +568,12 @@ std::string PTOCodegen::EmitBufferIntegerOperand(const ir::ExprPtr& expr, DataTy
 
 std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
                                             const ir::ExprPtr& destination, const std::string& attributes) {
+  return BufferInsOutsClause(inputs, std::vector<ir::ExprPtr>{destination}, attributes);
+}
+
+std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inputs,
+                                            const std::vector<ir::ExprPtr>& destinations,
+                                            const std::string& attributes) {
   std::ostringstream clause;
   clause << "ins(";
   for (size_t i = 0; i < inputs.size(); ++i) {
@@ -578,7 +584,15 @@ std::string PTOCodegen::BufferInsOutsClause(const std::vector<ir::ExprPtr>& inpu
   for (size_t i = 0; i < inputs.size(); ++i) {
     clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(inputs[i]);
   }
-  clause << ") outs(" << GetExprAsCode(destination) << " : " << GetExprTypeAnnotation(destination) << ")";
+  clause << ") outs(";
+  for (size_t i = 0; i < destinations.size(); ++i) {
+    clause << (i == 0 ? "" : ", ") << GetExprAsCode(destinations[i]);
+  }
+  clause << " : ";
+  for (size_t i = 0; i < destinations.size(); ++i) {
+    clause << (i == 0 ? "" : ", ") << GetExprTypeAnnotation(destinations[i]);
+  }
+  clause << ")";
   return clause.str();
 }
 
@@ -687,8 +701,20 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     Emit(load ? "pto.tload ins(" + tensor_operand + ") outs(" + buffer_operand + ")"
               : "pto.tstore ins(" + buffer_operand + ") outs(" + tensor_operand + ")");
   } else if (const auto* indexed = backend::FindBufferIndexedRecipe(call->op_->name_)) {
-    Emit(std::string(indexed->native_op) + " " +
-         BufferInsOutsClause({call->args_.begin(), call->args_.end() - 1}, call->args_.back()));
+    if (indexed->compare) {
+      // The complete scratch backing is an explicit effect operand. Native
+      // TGATHER receives its mask view; the remaining scratch regions follow
+      // that view in the same allocation, as checked by the Buffer verifier.
+      const std::string mode = call->GetKwarg<int>("cmp_mode") == 0 ? "eq" : "gt";
+      Emit(std::string(indexed->native_op) + " " +
+           BufferInsOutsClause({call->args_[0], call->args_[1], call->args_[2]},
+                               std::vector<ir::ExprPtr>{call->args_[4], call->args_[5]}) +
+           " {cmpMode = #pto<cmp " + mode +
+           ">, offset = " + std::to_string(call->GetKwarg<int>("offset", 0)) + " : i32}");
+    } else {
+      Emit(std::string(indexed->native_op) + " " +
+           BufferInsOutsClause({call->args_.begin(), call->args_.end() - 1}, call->args_.back()));
+    }
   } else if (const auto* conversion = backend::FindBufferConversionRecipe(call->op_->name_)) {
     std::string attributes;
     using K = backend::BufferConversionKind;
