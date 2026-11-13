@@ -369,3 +369,166 @@ def threadfence_block(span: Span | None = None) -> Call:
     Does not wait for other threads; use syncthreads for a rendezvous.
     This does not replace outer MTE/Vector pipeline synchronization."""
     return _ir_core.create_op_call("simt.threadfence_block", [], {}, _get_span_or_capture(span))
+
+
+def abs(value: Expr, span: Span | None = None) -> Call:
+    """Absolute value; clears the FP32 sign bit.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.abs", [value], {}, _get_span_or_capture(span))
+
+
+def min(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """FP32 minimum with minNum semantics; one NaN yields the numeric operand.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.min", [lhs, rhs], {}, _get_span_or_capture(span))
+
+
+def max(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """FP32 maximum with maxNum semantics; one NaN yields the numeric operand.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.max", [lhs, rhs], {}, _get_span_or_capture(span))
+
+
+def exp(value: Expr, span: Span | None = None) -> Call:
+    """Compute the FP32 natural exponential using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.exp", [value], {}, _get_span_or_capture(span))
+
+
+def log(value: Expr, span: Span | None = None) -> Call:
+    """Compute the FP32 natural logarithm using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.log", [value], {}, _get_span_or_capture(span))
+
+
+def sqrt(value: Expr, span: Span | None = None) -> Call:
+    """Compute the FP32 square root using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.sqrt", [value], {}, _get_span_or_capture(span))
+
+
+def sin(value: Expr, span: Span | None = None) -> Call:
+    """Compute the FP32 sine in radians using target math.
+
+    PTOAS uses FP32 software range reduction; large angles lose accuracy.
+    Numerical acceptance covers [-4, 4]; no full-range accuracy is promised.
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.sin", [value], {}, _get_span_or_capture(span))
+
+
+def cos(value: Expr, span: Span | None = None) -> Call:
+    """Compute the FP32 cosine in radians using target math.
+
+    PTOAS uses FP32 software range reduction; large angles lose accuracy.
+    Numerical acceptance covers [-4, 4]; no full-range accuracy is promised.
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.cos", [value], {}, _get_span_or_capture(span))
+
+
+def ceil(value: Expr, span: Span | None = None) -> Call:
+    """Round FP32 toward positive infinity, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.ceil", [value], {}, _get_span_or_capture(span))
+
+
+def floor(value: Expr, span: Span | None = None) -> Call:
+    """Round FP32 toward negative infinity, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.floor", [value], {}, _get_span_or_capture(span))
+
+
+def rint(value: Expr, span: Span | None = None) -> Call:
+    """Round FP32 to nearest integer, ties to even, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.rint", [value], {}, _get_span_or_capture(span))
+
+
+def round(value: Expr, span: Span | None = None) -> Call:
+    """Round FP32 to nearest integer, ties away from zero, retaining FP32.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.round", [value], {}, _get_span_or_capture(span))
+
+
+def pow(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    """Compute FP32 power using target math.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.pow", [lhs, rhs], {}, _get_span_or_capture(span))
+
+
+def fma(lhs: Expr, rhs: Expr, acc: Expr, span: Span | None = None) -> Call:
+    """Compute FP32 lhs * rhs + acc with one final rounding.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    """
+    return _ir_core.create_op_call("simt.fma", [lhs, rhs, acc], {}, _get_span_or_capture(span))
+
+
+def prmt(lhs: Expr, rhs: Expr, selector: Expr, span: Span | None = None) -> Call:
+    """Permute bytes from two INT32 bit carriers with an INT32 selector.
+
+    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    The low three bits of each low selector nibble pick a byte from rhs
+    (0-3) or lhs (4-7). Other selector bits are ignored on A5.
+    """
+    return _ir_core.create_op_call("simt.prmt", [lhs, rhs, selector], {}, _get_span_or_capture(span))
+
+
+def mulhi(lhs: Expr, rhs: Expr, *, unsigned: bool = False, span: Span | None = None) -> Call:
+    """Return the high 32 bits of the signed or unsigned 64-bit product.
+
+    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    unsigned=True interprets both carriers as unsigned; the result stays INT32.
+    """
+    return _ir_core.create_op_call(
+        "simt.mulhi", [lhs, rhs], {"unsigned": unsigned}, _get_span_or_capture(span)
+    )
+
+
+def ftoi(value: Expr, *, rounding: str = "z", unsigned: bool = False, span: Span | None = None) -> Call:
+    """Convert FP32 to a saturated INT32 bit carrier with explicit rounding.
+
+    Operands must have FP32 scalar dtype; no implicit promotion is performed.
+    Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
+    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    Saturation is mandatory: out-of-range values clamp to the integer limits.
+    NaN conversion follows the target contract; NaN payloads are not preserved.
+    """
+    return _ir_core.create_op_call(
+        "simt.ftoi", [value], {"rounding": rounding, "unsigned": unsigned}, _get_span_or_capture(span)
+    )
+
+
+def itof(value: Expr, *, rounding: str = "r", unsigned: bool = False, span: Span | None = None) -> Call:
+    """Convert an INT32 bit carrier to FP32 with explicit rounding.
+
+    Operands must have INT32 scalar dtype; no implicit promotion is performed.
+    Rounding: r = nearest even, a = nearest away, f = floor, c = ceil,
+    z = toward zero. unsigned interprets the integer carrier as UINT32.
+    """
+    return _ir_core.create_op_call(
+        "simt.itof", [value], {"rounding": rounding, "unsigned": unsigned}, _get_span_or_capture(span)
+    )

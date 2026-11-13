@@ -203,10 +203,6 @@ def test_vote_accepts_python_bool_predicate(name, predicate):
     ir.assert_structural_equal(call, getattr(pl.simt, name)(predicate).unwrap())
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 ATOMICS = ("atomic_add", "atomic_min", "atomic_max", "atomic_exch", "atomic_cas")
 
 
@@ -279,3 +275,98 @@ def test_synchronization_void_and_round_trip(name):
     ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
     with pytest.raises(ValueError, match="no arguments"):
         ir.create_op_call(f"simt.{name}", [simt.lane_id()], {}, SPAN)
+
+
+MATH_ARITIES = {
+    "abs": 1,
+    "min": 2,
+    "max": 2,
+    "exp": 1,
+    "log": 1,
+    "sqrt": 1,
+    "sin": 1,
+    "cos": 1,
+    "ceil": 1,
+    "floor": 1,
+    "rint": 1,
+    "round": 1,
+    "pow": 2,
+    "fma": 3,
+    "prmt": 3,
+    "mulhi": 2,
+    "ftoi": 1,
+    "itof": 1,
+}
+
+
+@pytest.mark.parametrize("name,arity", MATH_ARITIES.items())
+def test_scalar_math_types_and_round_trip(name, arity):
+    dtype = DataType.INT32 if name in {"prmt", "mulhi", "itof"} else DataType.FP32
+    args = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(arity)]
+    call = getattr(simt, name)(*args)
+    expected = DataType.INT32 if name == "ftoi" else DataType.FP32 if name == "itof" else dtype
+    assert call.type.dtype == expected
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    ir.assert_structural_equal(call, getattr(pl.simt, name)(*args).unwrap())
+    for count in (0, arity + 1):
+        with pytest.raises(ValueError, match="requires exactly"):
+            ir.create_op_call(f"simt.{name}", (args * 4)[:count], {}, SPAN)
+    with pytest.raises(ValueError, match="does not accept|Unknown|unknown"):
+        ir.create_op_call(f"simt.{name}", args, {"fastmath": True}, SPAN)
+
+
+@pytest.mark.parametrize("name,arity", MATH_ARITIES.items())
+@pytest.mark.parametrize(
+    "dtype", [DataType.FP16, DataType.BF16, DataType.INT64, DataType.UINT32, DataType.BOOL]
+)
+def test_scalar_math_rejects_unverified_dtypes(name, arity, dtype):
+    args = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(arity)]
+    with pytest.raises(ValueError, match="scalar operands"):
+        getattr(simt, name)(*args)
+
+
+@pytest.mark.parametrize("name", ["ftoi", "itof"])
+@pytest.mark.parametrize("rounding", ["r", "a", "f", "c", "z"])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_explicit_conversion_controls(name, rounding, unsigned):
+    dtype = DataType.FP32 if name == "ftoi" else DataType.INT32
+    arg = ir.Var("x", ir.ScalarType(dtype), SPAN)
+    call = getattr(simt, name)(arg, rounding=rounding, unsigned=unsigned)
+    assert call.kwargs == {"rounding": rounding, "unsigned": unsigned}
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("name", ["ftoi", "itof"])
+@pytest.mark.parametrize("rounding", ["", "R", "nearest", "o", "h", 1, True])
+def test_conversion_rejects_invalid_rounding(name, rounding):
+    dtype = DataType.FP32 if name == "ftoi" else DataType.INT32
+    arg = ir.Var("x", ir.ScalarType(dtype), SPAN)
+    with pytest.raises((ValueError, TypeError), match="rounding|type"):
+        getattr(simt, name)(arg, rounding=rounding)
+
+
+@pytest.mark.parametrize("name", ["ftoi", "itof", "mulhi"])
+@pytest.mark.parametrize("unsigned", [1, "unsigned"])
+def test_conversion_signedness_is_boolean(name, unsigned):
+    dtype = DataType.FP32 if name == "ftoi" else DataType.INT32
+    args = [ir.Var("x", ir.ScalarType(dtype), SPAN)] * MATH_ARITIES[name]
+    with pytest.raises((ValueError, TypeError), match="unsigned|type"):
+        getattr(simt, name)(*args, unsigned=unsigned)
+
+
+@pytest.mark.parametrize("name,arity", MATH_ARITIES.items())
+def test_scalar_math_rejects_storage_and_mixed_operands(name, arity):
+    dtype = DataType.INT32 if name in {"prmt", "mulhi", "itof"} else DataType.FP32
+    values = [ir.Var(f"x{i}", ir.ScalarType(dtype), SPAN) for i in range(arity)]
+    invalid = [
+        ir.Var("storage", ir.TensorType([32], dtype), SPAN),
+        ir.Var("wrong", ir.ScalarType(DataType.FP32 if dtype == DataType.INT32 else DataType.INT32), SPAN),
+    ]
+    for value in invalid:
+        # Put the mismatch last so a deducer checking only the first operand fails.
+        with pytest.raises(ValueError, match="scalar operands"):
+            getattr(simt, name)(*values[:-1], value)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

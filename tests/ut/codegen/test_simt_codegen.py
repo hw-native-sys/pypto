@@ -651,5 +651,58 @@ def test_collectives_text_round_trip_and_keywords(keyword):
     ir.assert_structural_equal(program, parse_program(ir.python_print(program)))
 
 
+@pytest.mark.parametrize(
+    "name,native,arity",
+    [
+        ("abs", "absf", 1),
+        ("min", "minf", 2),
+        ("max", "maxf", 2),
+        ("exp", "exp", 1),
+        ("log", "log", 1),
+        ("sqrt", "sqrt", 1),
+        ("sin", "sin", 1),
+        ("cos", "cos", 1),
+        ("ceil", "ceil", 1),
+        ("floor", "floor", 1),
+        ("rint", "rint", 1),
+        ("round", "round", 1),
+        ("pow", "pow", 2),
+        ("fma", "fma", 3),
+        ("prmt", "prmt", 3),
+        ("mulhi", "mulhi", 2),
+    ],
+)
+def test_math_canonical_parser_codegen_round_trip(name, native, arity):
+    dtype = "INT32" if name in {"prmt", "mulhi"} else "FP32"
+    body = f"""
+        x = pl.simt.load(dst, (0, 0))
+        result = pl.simt.{name}({", ".join(["x"] * arity)})
+        pl.simt.store(dst, (0, 0), result)
+    """
+    program = scalar_program(body, dtype)
+    restored = parse_program(str(program))
+    ir.assert_structural_equal(program, restored)
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    assert f"pto.{native} " in source
+
+
+@pytest.mark.parametrize("rounding", ["r", "a", "f", "c", "z"])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_explicit_conversion_codegen(rounding, unsigned):
+    program = scalar_program(
+        f"""
+        x = pl.simt.load(dst, (0, 0))
+        integer = pl.simt.ftoi(x, rounding="{rounding}", unsigned={unsigned})
+        result = pl.simt.itof(integer, rounding="{rounding}", unsigned={unsigned})
+        pl.simt.store(dst, (0, 0), result)
+    """,
+        "FP32",
+    )
+    source = codegen.PTOCodegen().generate_bundle(program).helpers[0].source
+    signedness = "unsigned" if unsigned else "signed"
+    assert f"{signedness} round({rounding}) sat : f32 -> i32" in source
+    assert f"{signedness} round({rounding}) : i32 -> f32" in source
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

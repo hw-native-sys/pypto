@@ -9,6 +9,7 @@
 
 """Build contract for separately compiled, self-contained A5 VPTO helpers."""
 
+import re
 import struct
 from collections.abc import Sequence
 from pathlib import Path
@@ -42,6 +43,24 @@ DEVICE_FLAGS = (
     "-mllvm",
     "-cce-dyn-kernel-stack-size=true",
 )
+
+
+def prepare_llvm_for_bisheng(text: str) -> str:
+    """Drop newer memory-effect annotations, as PTOAS object emission does.
+
+    LLVM text export retains LLVM 19's memory(...) attribute, which CANN
+    Bisheng cannot parse. Removing an optimization annotation is conservative;
+    preserve instructions, other attributes and quoted attribute values.
+    """
+
+    def clean_group(group: re.Match[str]) -> str:
+        return re.sub(
+            r'"(?:[^"\\]|\\.)*"|\bmemory\([^()\n]*\) *',
+            lambda token: token[0] if token[0].startswith('"') else "",
+            group[0],
+        )
+
+    return re.sub(r"^attributes #[0-9]+ = \{[^\n]*\}$", clean_group, text, flags=re.MULTILINE)
 
 
 def source_paths(value: object) -> tuple[str, ...]:

@@ -296,6 +296,7 @@ class KernelCompiler:
             metadata=(
                 # Revalidate binaries admitted before the SIMT inline-asm check.
                 "intrinsic-simt-abi-v1",
+                "bisheng-memory-attrs-v1",
                 check_ptoas_version(ptoas),
                 result.stdout,
                 result.stderr,
@@ -337,6 +338,7 @@ class KernelCompiler:
                     f"VPTO helper {source} is not self-contained: {', '.join(unsupported)}. "
                     "Bridge operations and external helper dependencies are not supported."
                 )
+            llvm.write_text(_vpto.prepare_llvm_for_bisheng(llvm_text))
             # PTOAS owns VF dependency analysis, including ordering through SSA
             # values. Do not re-infer synchronization from emitted LLVM text.
             self._run(
