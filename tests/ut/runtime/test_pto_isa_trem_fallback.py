@@ -9,6 +9,7 @@
 
 """Tests for the temporary A2/A3 TREM PTO-ISA fallback."""
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -55,15 +56,23 @@ def test_patch_targets_the_remainder_headers_and_marks_the_fix():
     assert "include/pto/npu/a2a3/TRem.hpp" in text
     assert "include/pto/npu/a2a3/TRemS.hpp" in text
     assert pto_isa._TREM_FIX_MARKER in text
-    # Local guard for the upstream HpFusedSub partial-product overflow.
-    assert "prodSafe" in text
+    # Local result-finiteness guard for the upstream HpFusedSub overflow (#435).
+    assert pto_isa._TREM_GUARD_MARKER in text
+    assert "vabs(c1, c0" in text
 
 
 def test_fix_already_present_leaves_the_pin_untouched(tmp_path):
     pin = tmp_path / "pin"
-    _init_checkout(pin, f"// {pto_isa._TREM_FIX_MARKER}\n")
+    _init_checkout(pin, f"// {pto_isa._TREM_FIX_MARKER}\n// {pto_isa._TREM_GUARD_MARKER}\n")
 
     assert pto_isa._ensure_trem_patch(str(pin)) == str(pin)
+
+
+def test_partial_fix_is_not_treated_as_fixed(tmp_path):
+    pin = tmp_path / "pin"
+    _init_checkout(pin, f"// {pto_isa._TREM_FIX_MARKER}\n")
+
+    assert not pto_isa._trem_fix_present(pin)
 
 
 def test_patch_creates_a_clean_reusable_worktree(tmp_path, monkeypatch):
@@ -76,9 +85,10 @@ def test_patch_creates_a_clean_reusable_worktree(tmp_path, monkeypatch):
         "diff --git a/include/pto/npu/a2a3/TRem.hpp b/include/pto/npu/a2a3/TRem.hpp\n"
         "--- a/include/pto/npu/a2a3/TRem.hpp\n"
         "+++ b/include/pto/npu/a2a3/TRem.hpp\n"
-        "@@ -1 +1,2 @@\n"
+        "@@ -1 +1,3 @@\n"
         " original\n"
-        f"+// {pto_isa._TREM_FIX_MARKER}\n",
+        f"+// {pto_isa._TREM_FIX_MARKER}\n"
+        f"+// {pto_isa._TREM_GUARD_MARKER}\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(pto_isa, "_TREM_PATCH_PATH", patch)
@@ -86,12 +96,38 @@ def test_patch_creates_a_clean_reusable_worktree(tmp_path, monkeypatch):
     patched = Path(pto_isa._ensure_trem_patch(str(pin)))
 
     assert patched != pin
-    assert pto_isa._TREM_FIX_MARKER in (patched / pto_isa._TREM_PINNED_HEADER).read_text(encoding="utf-8")
+    patched_text = (patched / pto_isa._TREM_PINNED_HEADER).read_text(encoding="utf-8")
+    assert pto_isa._TREM_FIX_MARKER in patched_text
+    assert pto_isa._TREM_GUARD_MARKER in patched_text
     assert _git(patched, "status", "--porcelain") == ""
     assert _git(patched, "rev-parse", "HEAD") != pin_revision
 
     # The patched tree is reused rather than rebuilt.
     assert pto_isa._ensure_trem_patch(str(pin)) == str(patched)
+
+    # A committed extra change invalidates the cached worktree.
+    (patched / pto_isa._TREM_PINNED_HEADER).write_text(patched_text + "// tamper\n", encoding="utf-8")
+    _git(patched, "add", ".")
+    _git(
+        patched,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "--no-gpg-sign",
+        "--no-verify",
+        "-q",
+        "-m",
+        "tamper",
+    )
+    patch_id = hashlib.sha256(patch.read_bytes()).hexdigest()[:12]
+    assert not pto_isa._is_patched_worktree(patched, pin_revision, patch_id)
+
+    restored = Path(pto_isa._ensure_trem_patch(str(pin)))
+    restored_text = (restored / pto_isa._TREM_PINNED_HEADER).read_text(encoding="utf-8")
+    assert pto_isa._TREM_GUARD_MARKER in restored_text
+    assert "// tamper" not in restored_text
 
 
 def test_disabled_fallback_returns_the_pin(tmp_path, monkeypatch):
