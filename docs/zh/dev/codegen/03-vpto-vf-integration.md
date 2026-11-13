@@ -60,7 +60,7 @@ PyPTO 将生成的 LLVM 交给 Bisheng，不再重新推导访存依赖或施加
 PTOAS/Bisheng 的错误会传递给调用者。下述独立的外部符号与设备镜像检查负责
 保证 helper 的打包契约。
 
-索引 gather/scatter 依赖固定的 PTOAS 0.72 或更新版本，对同一 vecscope 内
+索引 gather/scatter 依赖当前 checkout 固定的 PTOAS 版本，对同一 vecscope 内
 未知访存范围的 RAW/WAR/WAW 依赖进行保守同步。该版本包含
 [PTOAS #1730](https://github.com/hw-native-sys/PTOAS/issues/1730) 的修复，
 PyPTO 不再为每次索引访问添加 `VV_ALL` 屏障。Caller/helper 边界与 GM 同步
@@ -122,7 +122,7 @@ LLVM 计数器、不插入内存屏障，也不增加链接后指令校验。后
 
 ## 运行完整示例
 
-在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 PTOAS v0.72 或更新版本，
+在当前 checkout 构建 PyPTO 及其固定版本 runtime，选择 `toolchain/versions.env` 固定的 PTOAS 版本，
 配置匹配的 CANN/Bisheng 工具链，保持 runtime pin 检查开启。先预约空闲 A5 设备，
 再运行以下命令：
 
