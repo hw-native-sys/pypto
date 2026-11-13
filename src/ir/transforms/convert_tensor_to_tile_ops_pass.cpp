@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/utils/call_shape_binding.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 #include "src/ir/transforms/tensor_to_tile/internal.h"
 
@@ -159,27 +160,21 @@ Pass ConvertTensorToTileOps() {
     // This phase mutates Function::param_directions_ (function signature)
     // only. Per-call-site arg directions (Call::attrs_["arg_directions"]) are
     // owned by the later DeriveCallDirections pass and are not touched here.
-    //
-    // Fixed-point iteration handles multi-level chains.
+    // Analyze callees first so provisional In parameters in wrappers do not
+    // count as content reads before the wrappers' directions are resolved.
     {
-      std::unordered_map<std::string, FunctionPtr> func_map;
-      for (const auto& func : functions_phase2b) {
-        func_map[func->name_] = func;
+      std::unordered_map<std::string, size_t> function_indices;
+      for (size_t i = 0; i < functions_phase2b.size(); ++i) {
+        function_indices.emplace(functions_phase2b[i]->name_, i);
       }
 
-      // Everything derived from a *body* is computed once, before the fixed
-      // point. The loop below only rewrites `param_directions_` — it replaces a
-      // function with a `MutableCopy` whose body is the same node — so the
-      // parameter index, the buffer lineage and the call list are all invariant
-      // across rounds. Rebuilding them per round made the added analysis cost
-      // O(rounds x program), over the O(N log N) bound
-      // `.claude/rules/pass-complexity.md` sets; hoisting leaves the loop
-      // proportional to the call arguments it actually re-reads.
+      auto effect_program = std::make_shared<Program>(functions_phase2b, program->name_, program->span_);
+
       struct CallerFacts {
         std::unordered_map<const Var*, size_t> param_idx;
         std::vector<CallPtr> calls;
+        std::vector<CallPtr> builtins;
         std::unordered_map<const Var*, const Var*> buffer_roots;
-        std::unordered_map<const Var*, std::vector<const Var*>> candidates;
       };
       std::unordered_map<std::string, CallerFacts> facts_by_name;
       for (const auto& func : functions_phase2b) {
@@ -190,27 +185,10 @@ Pass ConvertTensorToTileOps() {
           f.param_idx[func->params_[i].get()] = i;
         }
 
-        // An argument rarely *is* the parameter. `for acc in ...: acc =
-        // kernel(x, acc)` forwards a loop-carried `IterArg` whose value is the
-        // parameter's buffer, and looking the IterArg up in `param_idx` finds
-        // nothing — so the enclosing signature kept declaring `In` for a buffer
-        // the call chain writes. Resolving the argument to its owning buffer
-        // first is what makes the propagation reach through a carry, and it is
-        // the same resolution the InParamWritten warning uses to decide which
-        // parameter a write lands on.
-        buffer_root::BufferRootCollector roots(program, buffer_root::AmbiguousRootPolicy::kSkip);
-        roots.Initialize(func->params_);
-        roots.VisitStmt(func->body_);
-        f.buffer_roots = roots.buffer_roots;
-        // An ambiguous var is exactly the case the single-root map cannot
-        // answer, so keep the candidates it does have.
-        for (const Var* var : roots.ambiguous_buffer_vars) {
-          f.candidates[var] = roots.RootCandidatesOf(var);
-        }
-
         class CallScanner : public IRVisitor {
          public:
           std::vector<CallPtr> calls;
+          std::vector<CallPtr> builtins;
           void VisitExpr_(const CallPtr& call) override {
             Record(call);
             IRVisitor::VisitExpr_(call);
@@ -234,87 +212,102 @@ Pass ConvertTensorToTileOps() {
           void Record(const CallPtr& call) {
             if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
               calls.push_back(call);
+            } else {
+              builtins.push_back(call);
             }
           }
         };
         CallScanner scanner;
         scanner.VisitStmt(func->body_);
         f.calls = std::move(scanner.calls);
+        f.builtins = std::move(scanner.builtins);
 
         facts_by_name[func->name_] = std::move(f);
       }
 
-      bool changed = true;
-      while (changed) {
-        changed = false;
-        for (auto& func : functions_phase2b) {
-          if (func->ir_stage_ == FunctionIRStage::Buffer || func->func_type_ == FunctionType::InCore) {
-            continue;
-          }
-          auto facts_it = facts_by_name.find(func->name_);
-          if (facts_it == facts_by_name.end()) continue;
-          const CallerFacts& facts = facts_it->second;
-
-          auto new_dirs = func->param_directions_;
-          for (const auto& call : facts.calls) {
-            auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-            if (!gv) continue;
-            auto callee_it = func_map.find(gv->name_);
-            if (callee_it == func_map.end()) continue;
-            const auto& callee = callee_it->second;
-            for (size_t ai = 0; ai < call->args_.size() && ai < callee->param_directions_.size(); ++ai) {
-              // AsVarLike, not As<Var>: an IterArg has its own ObjectKind and
-              // does not match As<Var> (.claude/rules/ir-kind-traits.md).
-              auto arg_var = AsVarLike(call->args_[ai]);
-              if (!arg_var) continue;
-              const ParamDirection callee_dir = callee->param_directions_[ai];
-              if (callee_dir != ParamDirection::Out && callee_dir != ParamDirection::InOut) continue;
-
-              // Control flow can leave a value naming more than one buffer:
-              //
-              //     t = a if cond else b
-              //     self.writer(src, t)      # writer declares its slot Out
-              //
-              // The callee writes whichever `t` turned out to be, so *both* `a`
-              // and `b` may be written and both must be upgraded. Skipping the
-              // ambiguous var — which is what this did — drops the dependency
-              // for every candidate at once, and that is the direction that
-              // fails silently: an under-declared `In` loses the RAW edge and
-              // races on device, where an over-declared `Out` only over-orders.
-              // Under `kSkip` such a var has no `buffer_roots` entry by
-              // construction, so the candidate list is the only place the answer
-              // exists.
-              auto cand_it = facts.candidates.find(arg_var.get());
-              std::vector<const Var*> arg_roots;
-              if (cand_it != facts.candidates.end()) {
-                arg_roots = cand_it->second;
-              } else {
-                auto root_it = facts.buffer_roots.find(arg_var.get());
-                arg_roots.push_back(root_it == facts.buffer_roots.end() ? arg_var.get() : root_it->second);
-              }
-
-              for (const Var* arg_root : arg_roots) {
-                auto pi = facts.param_idx.find(arg_root);
-                if (pi == facts.param_idx.end()) continue;
-                ParamDirection& caller_dir = new_dirs[pi->second];
-                if (callee_dir == ParamDirection::Out && caller_dir == ParamDirection::In) {
-                  caller_dir = ParamDirection::Out;
-                } else if (callee_dir == ParamDirection::InOut && caller_dir != ParamDirection::InOut) {
-                  caller_dir = ParamDirection::InOut;
-                }
-              }
+      return_lineage::ScopedTraceCache lineage_cache;
+      buffer_root::ReturnedRootCandidates returned_candidates;
+      std::vector<bool> visiting(functions_phase2b.size(), false);
+      std::vector<bool> resolved(functions_phase2b.size(), false);
+      const auto infer = [&](auto&& self, size_t index) -> void {
+        if (resolved[index]) return;
+        auto& func = functions_phase2b[index];
+        const auto facts_it = facts_by_name.find(func->name_);
+        if (facts_it == facts_by_name.end()) return;
+        CHECK_SPAN(!visiting[index], func->span_) << "Recursive call graph cannot infer parameter directions";
+        visiting[index] = true;
+        for (const auto& call : facts_it->second.calls) {
+          const auto callee = function_indices.find(call->op_->name_);
+          if (callee != function_indices.end()) self(self, callee->second);
+        }
+        auto& facts = facts_it->second;
+        buffer_root::BufferRootCollector roots(effect_program, buffer_root::AmbiguousRootPolicy::kTraceReturn,
+                                               /*follow_reshape=*/true, &returned_candidates);
+        roots.Initialize(func->params_);
+        roots.VisitStmt(func->body_);
+        auto result_candidates = roots.CollectAmbiguousReturnedParams(func);
+        facts.buffer_roots = std::move(roots.buffer_roots);
+        std::vector<bool> reads(func->params_.size(), false);
+        std::vector<bool> writes(func->params_.size(), false);
+        auto new_dirs = func->param_directions_;
+        for (const auto& call : facts.calls) {
+          const auto callee_it = function_indices.find(call->op_->name_);
+          if (callee_it == function_indices.end()) continue;
+          const auto& directions = functions_phase2b[callee_it->second]->param_directions_;
+          for (size_t ai = 0; ai < call->args_.size() && ai < directions.size(); ++ai) {
+            auto arg = AsVarLike(call->args_[ai]);
+            if (!arg || !AsTensorTypeLike(arg->GetType())) continue;
+            const auto direction = directions[ai];
+            const auto record_access = [&](const Var* root) {
+              const auto param = facts.param_idx.find(root);
+              if (param == facts.param_idx.end()) return;
+              const size_t i = param->second;
+              if (direction != ParamDirection::Out) reads[i] = true;
+              if (direction != ParamDirection::In) writes[i] = true;
+              if (direction == ParamDirection::InOut) new_dirs[i] = ParamDirection::InOut;
+            };
+            if (roots.ambiguous_buffer_vars.count(arg.get())) {
+              for (const auto* root : roots.RootCandidatesOf(arg.get())) record_access(root);
+            } else {
+              const auto root = facts.buffer_roots.find(arg.get());
+              record_access(root == facts.buffer_roots.end() ? arg.get() : root->second);
             }
           }
-
-          if (new_dirs != func->param_directions_) {
-            changed = true;
-            auto new_func = MutableCopy(func);
-            new_func->param_directions_ = std::move(new_dirs);
-            func = new_func;
-            func_map[func->name_] = func;
+        }
+        // Direct orchestration reads consume data. View construction and other
+        // descriptor operations do not.
+        for (const auto& call : facts.builtins) {
+          if (!IsOp(call, "tensor.read") || call->args_.empty()) continue;
+          const auto arg = AsVarLike(call->args_[0]);
+          if (!arg) continue;
+          const auto mark_read = [&](const Var* root) {
+            const auto it = facts.param_idx.find(root);
+            if (it != facts.param_idx.end()) reads[it->second] = true;
+          };
+          if (roots.ambiguous_buffer_vars.count(arg.get())) {
+            for (const auto* root : roots.RootCandidatesOf(arg.get())) mark_read(root);
+          } else {
+            const auto root = facts.buffer_roots.find(arg.get());
+            mark_read(root == facts.buffer_roots.end() ? arg.get() : root->second);
           }
         }
-      }
+        for (size_t i = 0; i < new_dirs.size(); ++i) {
+          if (new_dirs[i] == ParamDirection::In && writes[i]) {
+            new_dirs[i] = reads[i] ? ParamDirection::InOut : ParamDirection::Out;
+          }
+        }
+        resolved[index] = true;
+        if (new_dirs != func->param_directions_) {
+          auto updated = MutableCopy(func);
+          updated->param_directions_ = std::move(new_dirs);
+          effect_program->functions_.at(effect_program->GetGlobalVar(func->name_)) = updated;
+          func = std::move(updated);
+        }
+        if (!result_candidates.empty()) {
+          returned_candidates.emplace(func.get(), std::move(result_candidates));
+        }
+      };
+      for (size_t i = 0; i < functions_phase2b.size(); ++i) infer(infer, i);
     }
 
     // 2D tensor.matmul already propagates valid M/N, but carries are still typed

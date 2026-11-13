@@ -72,10 +72,14 @@ std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramP
 ///         one entry per return position (nullopt = not a param writeback).
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program);
 
-/// Strict HOST-only map for the elements of one returned tuple value.
-/// The ordinary return map continues to treat the tuple as one result.
+/// Map the elements of one returned tuple value for strict HOST codegen.
 std::vector<std::optional<size_t>> ReturnedTupleElementParamIndices(const FunctionPtr& func,
                                                                     const ProgramPtr& program);
+
+/// Borrow the backing-parameter map for tensor results inside a ScopedTraceCache.
+/// Reshape and view preserve storage even when they change the writeback type.
+const std::vector<std::optional<size_t>>& CachedReturnedStorageParamIndices(const FunctionPtr& func,
+                                                                            const ProgramPtr& program);
 
 /// One declared return position, retaining its value independently of storage lineage.
 struct ReturnedValueBinding {

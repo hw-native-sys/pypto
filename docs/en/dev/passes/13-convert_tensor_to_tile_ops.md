@@ -224,6 +224,10 @@ function or a wrapper that absorbed output params in Phase 2a:
 InCore, AIC, AIV, Spmd, and Group functions are skipped from this phase — they were
 already rewritten in Phase 1 / 2a.
 
+### Phase 3: Propagate Parameter Directions
+
+The pass resolves callees before callers. If one child reads a buffer and another writes it, the caller's inferred direction is `InOut`. Calls through a zero-copy `tensor.reshape` contribute to the original buffer's direction.
+
 ## Where a Bridged Load Lands
 
 An operand listed in a conversion's `input_reqs` reaches the converter as a tile:

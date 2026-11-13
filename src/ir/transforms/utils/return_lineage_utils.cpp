@@ -234,12 +234,16 @@ struct TraceContext {
   std::unordered_map<const Function*, size_t> trailing_ctx_counts;
   size_t query_depth = 0;
   bool require_terminal_returns = false;
+  bool trace_view_storage = false;
   // Strict queries must not reuse maps computed without recursive validation.
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> strict_memo;
 
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> storage_memo;
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> storage_tuple_memo;
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> strict_tuple_memo;
 
   auto& ReturnMaps(bool project_tuple = false) {
+    if (trace_view_storage) return project_tuple ? storage_tuple_memo : storage_memo;
     if (project_tuple) return strict_tuple_memo;
     return require_terminal_returns ? strict_memo : memo;
   }
@@ -247,6 +251,8 @@ struct TraceContext {
   void ClearCache() {
     memo.clear();
     strict_memo.clear();
+    storage_memo.clear();
+    storage_tuple_memo.clear();
     strict_tuple_memo.clear();
     trailing_ctx_counts.clear();
   }
@@ -429,7 +435,7 @@ ExprPtr ResolveTupleElement(const ExprPtr& tuple, int64_t position, const BodyIn
   // may ask for its separate element map through ordinary Calls. For an
   // unannotated Call, distinguish one inferred tuple value from flat results
   // using the flat map's arity and the parser's inferred Call type.
-  const bool can_project = Ctx().require_terminal_returns && As<Call>(source);
+  const bool can_project = (Ctx().require_terminal_returns || Ctx().trace_view_storage) && As<Call>(source);
   const bool declared_tuple = callee->return_types_.size() == 1 && As<TupleType>(callee->return_types_[0]);
   if (declared_tuple && !can_project) return nullptr;
   const bool inferred_tuple = can_project && callee->return_types_.empty() &&
@@ -515,6 +521,15 @@ std::optional<size_t> WritebackArgument(const CallPtr& call) {
   if (auto index = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) return index;
   // Composite collectives also declare their logical destination window.
   return ResultAliasedArgIndex(call);
+}
+
+std::optional<size_t> LineageArgument(const CallPtr& call) {
+  if (Ctx().trace_view_storage && call && !call->args_.empty() &&
+      (IsOp(call, "tensor.reshape") || IsOp(call, "tensor.view") || IsOp(call, "tensor.transpose") ||
+       IsOp(call, "tensor.slice"))) {
+    return 0;
+  }
+  return WritebackArgument(call);
 }
 
 template <typename Source, typename Trace>
@@ -710,7 +725,7 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       const std::string& op_name = call.op->name_;
       // Builtin output-side ops bind a fresh SSA var to an existing buffer, so
       // the result inherits that argument's param lineage.
-      const auto aliased = WritebackArgument(As<Call>(value));
+      const auto aliased = LineageArgument(As<Call>(value));
       if (aliased) {
         auto arg_var = AsVarLike(args[*aliased]);
         if (!arg_var) {
@@ -781,17 +796,17 @@ VarLineage TraceExpr(const ExprPtr& expr, const BodyIndexCollector& index, const
     if (auto merged = TraceTupleControlElement(projection->tuple_, projection->index_, index, param_indices,
                                                program, memo)) {
       lineage = *merged;
-    } else if (Ctx().require_terminal_returns || !transform_utils::ExprContainsCallLike(expr)) {
+    } else if (Ctx().require_terminal_returns || Ctx().trace_view_storage ||
+               !transform_utils::ExprContainsCallLike(expr)) {
       auto selected =
           ResolveTupleElement(projection->tuple_, projection->index_, index, program, memo.tuple_sources);
       lineage = TraceExpr(selected, index, param_indices, program, memo);
     }
-  } else if (Ctx().require_terminal_returns) {
-    // Raw HOST binding analyzes the callee without rewriting it. A direct
-    // call has no SSA result Var, but uses the same return and writeback
-    // contracts as assigned calls. Normalization must keep its side effects.
+  } else if (Ctx().require_terminal_returns || Ctx().trace_view_storage) {
+    // These queries analyze calls without rewriting them. An inline call has
+    // no SSA result Var, but follows the same lineage as an assigned call.
     if (const auto call = As<Call>(expr); call && AsTensorTypeLike(call->GetType())) {
-      if (const auto aliased = WritebackArgument(call)) {
+      if (const auto aliased = LineageArgument(call)) {
         lineage = TraceExpr(call->args_[*aliased], index, param_indices, program, memo);
         lineage.returned_type = call->GetType();
       } else if (!IsBuiltinOp(call->op_->name_)) {
@@ -818,7 +833,7 @@ std::vector<std::optional<size_t>> TraceIndexedExprsToParamIndices(
     if (expr) {
       auto lineage = TraceExpr(expr, index, param_indices, program, memo);
       if (lineage.root &&
-          (!AsTensorTypeLike(expr->GetType()) ||
+          (Ctx().trace_view_storage || !AsTensorTypeLike(expr->GetType()) ||
            (lineage.returned_type && structural_equal(lineage.returned_type, lineage.root->GetType())))) {
         auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
@@ -991,7 +1006,7 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
     // result identity. Keep it unknown even for non-strict pass queries:
     // canonicalizing a caller here would erase the helper before HOST's
     // later recursive validation can inspect its competing return paths.
-    if (!terminal_return) {
+    if (!terminal_return && !ctx.trace_view_storage) {
       return record(std::vector<std::optional<size_t>>(func->return_types_.size()));
     }
   }
@@ -1098,6 +1113,21 @@ std::vector<std::optional<size_t>> ReturnedTupleElementParamIndices(const Functi
                                                                     const ProgramPtr& program) {
   ScopedTraceCache guard(/*require_terminal_returns=*/true);
   return CachedReturnedParamIndices(func, program, /*project_tuple=*/true);
+}
+
+const std::vector<std::optional<size_t>>& CachedReturnedStorageParamIndices(const FunctionPtr& func,
+                                                                            const ProgramPtr& program) {
+  struct RestoreStorageMode {
+    bool previous = Ctx().trace_view_storage;
+    ~RestoreStorageMode() { Ctx().trace_view_storage = previous; }
+  } restore;
+  Ctx().trace_view_storage = true;
+  const auto& flat = CachedReturnedParamIndices(func, program);
+  if (flat.size() == 1 && !flat.front()) {
+    const auto& fields = CachedReturnedParamIndices(func, program, /*project_tuple=*/true);
+    if (!fields.empty()) return fields;
+  }
+  return flat;
 }
 
 // Locate the topmost ReturnStmt. Fast path: a function body is normally a
