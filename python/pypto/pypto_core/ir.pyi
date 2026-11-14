@@ -1052,6 +1052,8 @@ class MemorySpace(enum.Enum):
     """Bias buffer."""
     LeftScale = ...
     """L0A-side MX block-scale buffer (A5)."""
+    Scaling = ...
+    """Packed 64-bit Fixpipe control buffer (PTO loc=scaling)."""
     RightScale = ...
     """L0B-side MX block-scale buffer (A5)."""
 
@@ -1406,7 +1408,9 @@ class Call(Expr):
         """
 
     kwargs: Final[Mapping[str, Any]]
-    """Keyword arguments (metadata)."""
+    """Keyword arguments (metadata). Pipe init accepts a structured
+    ``acc_push_epilogue`` dict with ``layout``, ``quant`` and ``relu`` fields.
+    """
 
     @overload
     def __init__(self, op: Op, args: Sequence[Expr], span: Span) -> None:
@@ -3228,7 +3232,17 @@ def create_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3253,7 +3267,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     span: Span,
 ) -> Call:
@@ -3288,7 +3312,17 @@ def _create_internal_op_call(
     args: Sequence[Expr],
     kwargs: Mapping[
         str,
-        int | bool | str | float | DataType | MemorySpace | TensorLayout | TileLayout | PadValue | SimtAxis,
+        int
+        | bool
+        | str
+        | float
+        | DataType
+        | MemorySpace
+        | TensorLayout
+        | TileLayout
+        | PadValue
+        | SimtAxis
+        | dict[str, str],
     ],
     type: Type,
     span: Span,

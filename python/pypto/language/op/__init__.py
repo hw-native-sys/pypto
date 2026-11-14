@@ -34,6 +34,8 @@ from .system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
+    set_quant_scalar,
+    set_quant_vector,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
@@ -336,6 +338,8 @@ __all__ = [
     "get_block_num",
     "get_subblock_idx",
     # Promoted system ops
+    "set_quant_scalar",
+    "set_quant_vector",
     "aic_initialize_pipe",
     "aiv_initialize_pipe",
     "import_peer_buffer",

@@ -45,7 +45,7 @@ bool IsTileMoveEverSupported(MemorySpace src, MemorySpace dst) {
       // MTE1 feeds the cube operand and scale buffers. Mat -> Mat is absent:
       // there is no L1 -> L1 tmov.
       return dst == MemorySpace::Left || dst == MemorySpace::Right || dst == MemorySpace::Bias ||
-             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale;
+             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale || dst == MemorySpace::Scaling;
     case MemorySpace::Vec:
       // Vec -> Mat is A5-only; included because this is the union over targets.
       return dst == MemorySpace::Vec || dst == MemorySpace::Mat;
@@ -81,6 +81,7 @@ std::optional<MemorySpace> StagingSpaceForLoad(MemorySpace demand) {
     case MemorySpace::Bias:
     case MemorySpace::LeftScale:
     case MemorySpace::RightScale:
+    case MemorySpace::Scaling:
       // L1 is the only buffer a tload can fill that MTE1 can then move into the
       // cube operand buffers, so it is the staging space for all of them.
       return MemorySpace::Mat;
@@ -109,6 +110,8 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "Bias";
     case MemorySpace::LeftScale:
       return "LeftScale";
+    case MemorySpace::Scaling:
+      return "Scaling";
     case MemorySpace::RightScale:
       return "RightScale";
     case MemorySpace::ScalarLocal:
@@ -127,6 +130,7 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   if (str == "Acc") return MemorySpace::Acc;
   if (str == "Bias") return MemorySpace::Bias;
   if (str == "LeftScale") return MemorySpace::LeftScale;
+  if (str == "Scaling") return MemorySpace::Scaling;
   if (str == "RightScale") return MemorySpace::RightScale;
   if (str == "ScalarLocal") return MemorySpace::ScalarLocal;
   throw pypto::ValueError("Unknown MemorySpace: " + str);

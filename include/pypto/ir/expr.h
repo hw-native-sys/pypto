@@ -29,6 +29,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/simt.h"
@@ -116,7 +117,7 @@ class Op {
    * This is used for validation when creating Call expressions.
    *
    * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace,
-   * TensorLayout, and PadValue
+   * TensorLayout, TileLayout, PadValue, and AccPushEpilogue
    * This is enforced at compile-time via static_assert.
    *
    * @tparam T Expected type of the kwarg value (must be one of the allowed types)
@@ -129,9 +130,9 @@ class Op {
         std::is_same_v<T, bool> || std::is_same_v<T, int> || std::is_same_v<T, std::string> ||
             std::is_same_v<T, double> || std::is_same_v<T, DataType> || std::is_same_v<T, MemorySpace> ||
             std::is_same_v<T, TensorLayout> || std::is_same_v<T, TileLayout> || std::is_same_v<T, PadValue> ||
-            std::is_same_v<T, SimtAxis>,
+            std::is_same_v<T, SimtAxis> || std::is_same_v<T, AccPushEpilogue>,
         "SetAttrType only accepts: bool, int, std::string, double, DataType, MemorySpace, TensorLayout, "
-        "TileLayout, PadValue, SimtAxis");
+        "TileLayout, PadValue, SimtAxis, AccPushEpilogue");
 
     attrs_.emplace(key, std::type_index(typeid(T)));
   }

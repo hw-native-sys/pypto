@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 from pypto import ir, passes
+from pypto._target import _parse_platform
 from pypto.backend import (
     BackendType,
     get_backend_type,
@@ -485,6 +486,7 @@ def _compile_for_cache(
         output_dir=str(work_dir),
         strategy=test_case.get_strategy(),
         backend_type=backend_type,
+        execution_mode=_parse_platform(resolved_platform)[1],
         dump_passes=dump_passes,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         memory_planner=_resolve_case_memory_planner(test_case, session_memory_planner),
@@ -1695,6 +1697,7 @@ class TestRunner:
                 output_dir=str(work_dir),
                 strategy=strategy,
                 backend_type=backend_type,
+                execution_mode=_parse_platform(resolved_platform)[1],
                 dump_passes=self.config.dump_passes,
                 analyze_auto_scopes_for_deps=self.config.analyze_auto_scopes_for_deps,
                 memory_planner=_resolve_case_memory_planner(test_case, self.config.memory_planner),

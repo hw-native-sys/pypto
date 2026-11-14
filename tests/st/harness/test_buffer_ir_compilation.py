@@ -15,6 +15,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir, passes
+from pypto._target import ExecutionMode, _parse_platform
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.runtime.runner import RunConfig
@@ -110,6 +111,38 @@ def test_buffer_case_rejects_a_compiler_that_leaves_functional_device_ir(tmp_pat
     with pytest.raises(ValueError, match="did not select/convert every device function"):
         tr._compile_case_program(case, program, output_dir=str(tmp_path), memory_planner=None)
     assert not (tmp_path / "buffer_ir.msgpack").exists()
+
+
+class _CompileCaptured(RuntimeError):
+    pass
+
+
+@pytest.mark.parametrize("target_platform", ["a2a3", "a2a3sim", "a5", "a5sim"])
+@pytest.mark.parametrize("in_pool", [False, True], ids=["inline", "pool"])
+def test_compile_paths_forward_execution_mode(tmp_path, monkeypatch, target_platform, in_pool):
+    """An onboard request must never silently compile simulator artifacts."""
+    captured = {}
+
+    def capture(_case, _program, **kwargs):
+        captured.update(kwargs)
+        raise _CompileCaptured("compile target captured")
+
+    monkeypatch.setattr(tr, "_compile_case_program", capture)
+    case = _case(enabled=False)
+    case.platform = target_platform
+    arch, mode = _parse_platform(target_platform)
+    tr._install_backend(arch)
+    if in_pool:
+        with pytest.raises(_CompileCaptured, match="compile target captured"):
+            tr._compile_for_cache(case, tmp_path, target_platform, False, False)
+    else:
+        runner = tr.TestRunner(RunConfig(backend_type=arch, execution_mode=mode, codegen_only=True))
+        result = runner._run_inline(case, target_platform)
+        assert not result.passed and "compile target captured" in result.error
+    assert captured["backend_type"] == arch
+    assert captured["execution_mode"] == (
+        ExecutionMode.SIM if target_platform.endswith("sim") else ExecutionMode.ONBOARD
+    )
 
 
 if __name__ == "__main__":

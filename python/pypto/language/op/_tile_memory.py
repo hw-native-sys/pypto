@@ -485,7 +485,7 @@ def move(
     Args:
         tile: Input tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right,
-            .LeftScale, .RightScale)
+            .LeftScale, .RightScale, .Scaling)
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
 

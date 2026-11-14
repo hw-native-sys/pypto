@@ -379,15 +379,13 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
   std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string tmp_ssa = codegen.GetExprAsCode(op->args_[3]);
-  // Fall back to tmp's annotation when src lacks a MemRef (ForStmt result var, tile.reshape view).
-  if (src_type.empty()) {
-    src_type = codegen.GetExprTypeAnnotation(op->args_[3]);
-  }
-
-  // Both operands carry src's annotation (pto.ttrans requires a matched type
-  // pair); when src_type is empty, EmitInsOuts omits the whole `: types` clause.
+  std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[3]);
+  // A view may carry static valid extents while loop-local scratch allocations
+  // carry dynamic valid extents. Each use must match its own SSA declaration.
+  if (src_type.empty()) src_type = tmp_type;
+  if (tmp_type.empty()) tmp_type = src_type;
   EmitInsOuts(codegen, GetPtoNativeOpSpec("tile.transpose").native_op,
-              {{src_ssa, src_type}, {tmp_ssa, src_type}});
+              {{src_ssa, src_type}, {tmp_ssa, tmp_type}});
   return std::string("");
 }
 

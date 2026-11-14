@@ -678,6 +678,8 @@ def _build_pipe_init_kwargs(
     id: int | None,
     c2v_dtype: object,
     pre_relu: bool,
+    nosplit: bool | None,
+    acc_push_epilogue: dict[str, str] | None,
 ) -> dict[str, Any]:
     """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
 
@@ -686,6 +688,11 @@ def _build_pipe_init_kwargs(
     dir_mask / slot_size are handled, so they are not re-checked here.
     """
     kwargs: dict[str, Any] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if acc_push_epilogue is not None:
+        kwargs["acc_push_epilogue"] = acc_push_epilogue
+        kwargs["nosplit"] = True if nosplit is None else nosplit
+    elif nosplit is not None:
+        kwargs["nosplit"] = nosplit
     if slot_num is not None:
         kwargs["slot_num"] = slot_num
     if local_slot_num is not None:
@@ -695,6 +702,10 @@ def _build_pipe_init_kwargs(
     # Match store's compile-time ReLU semantics, without introducing a scale:
     # the pipe's payload dtype selects an unscaled FP32 conversion instead.
     _, relu = resolve_fixpipe_epilogue("initialize_pipe", None, pre_relu)
+    if acc_push_epilogue is not None and (c2v_dtype is not None or relu):
+        raise ValueError("initialize_pipe: acc_push_epilogue cannot be combined with c2v_dtype/pre_relu")
+    if c2v_dtype is not None and nosplit is False:
+        raise ValueError("initialize_pipe: c2v_dtype requires nosplit=true")
     if relu and c2v_dtype is None:
         raise ValueError("initialize_pipe: pre_relu=True requires an explicit c2v_dtype")
     if c2v_dtype is not None:
@@ -717,6 +728,8 @@ def aic_initialize_pipe(
     id: int | None = None,
     c2v_dtype: DataType | None = None,
     pre_relu: bool = False,
+    nosplit: bool | None = None,
+    acc_push_epilogue: dict[str, str] | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
@@ -739,10 +752,16 @@ def aic_initialize_pipe(
         pre_relu: Apply ReLU before conversion on every push in this pipe.
             Requires c2v_dtype. Like store's pre_relu, this is a compile-time
             setting. No scalar pre_quant scale is applied.
+        nosplit: Optional transport policy. Defaults to true with an epilogue;
+            otherwise omitted, preserving the PTOAS default.
+        acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
+            ``relu``. Requires C2V only and split=0 on every transfer.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu)
+    kwargs = _build_pipe_init_kwargs(
+        dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu, nosplit, acc_push_epilogue
+    )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
@@ -758,6 +777,8 @@ def aiv_initialize_pipe(
     id: int | None = None,
     c2v_dtype: DataType | None = None,
     pre_relu: bool = False,
+    nosplit: bool | None = None,
+    acc_push_epilogue: dict[str, str] | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
@@ -778,12 +799,41 @@ def aiv_initialize_pipe(
             Narrowing uses RNE; slot bytes describe the payload dtype.
         pre_relu: Apply ReLU before conversion on every push in this pipe.
             Must match the producer's initializer and requires c2v_dtype.
+        nosplit: Optional transport policy. Defaults to true with an epilogue;
+            otherwise omitted, preserving the PTOAS default.
+        acc_push_epilogue: Fixpipe record with exactly ``layout``, ``quant``,
+            ``relu``. Requires C2V only and split=0 on every transfer.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_init_kwargs(dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu)
+    kwargs = _build_pipe_init_kwargs(
+        dir_mask, slot_size, slot_num, local_slot_num, id, c2v_dtype, pre_relu, nosplit, acc_push_epilogue
+    )
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
+
+
+def set_quant_scalar(scale: Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set an FP32 scalar scale for a C2V Fixpipe pipe.
+
+    The matching init must select a scalar quant mode. Configure in the same
+    block before TPUSH; the state belongs to ``id``. This is separate from the
+    packed ``pre_quant`` operand of Acc-to-GM/Mat writebacks.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.set_quant_scalar", [scale], {"id": id}, actual_span)
+
+
+def set_quant_vector(controls: Expr, *, id: int = 0, span: Span | None = None) -> Call:
+    """Set packed 64-bit per-channel Fixpipe controls for a C2V pipe.
+
+    ``controls`` must be an INT64/UINT64 tile in MemorySpace.Scaling
+    (PTO loc=scaling), containing hardware control words, not floating scales.
+    The matching init must select deqf16_vec. Configure in the same block
+    before TPUSH; the state belongs to ``id``.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.set_quant_vector", [controls], {"id": id}, actual_span)
 
 
 def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> Call:

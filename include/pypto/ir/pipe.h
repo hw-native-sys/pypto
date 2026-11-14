@@ -85,7 +85,8 @@ enum CoreType : int {
  */
 inline bool IsCubeMemorySpace(MemorySpace space) {
   return space == MemorySpace::Left || space == MemorySpace::Right || space == MemorySpace::Acc ||
-         space == MemorySpace::Mat || space == MemorySpace::LeftScale || space == MemorySpace::RightScale;
+         space == MemorySpace::Mat || space == MemorySpace::LeftScale || space == MemorySpace::RightScale ||
+         space == MemorySpace::Scaling;
 }
 
 }  // namespace ir
