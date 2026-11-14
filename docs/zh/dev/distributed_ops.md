@@ -45,25 +45,7 @@ SSA 值而存在。
 
 ## 异步传输校验（Async Transfer Validation）
 
-`pld.tensor.put_async` 和 `pld.tensor.get_async` 在 A5 后端下降为按 dtype 后缀命名的
-外部 helper 调用（`pypto_urma_{put,get}_async_<dtype>`）。helper 会同时校验两端张量的
-范围与通信窗口，通过 IR `engines` 字段申请 URMA workspace，并复用现有运行时入口提交；
-它从不轮询。任务完成集成（由所属任务释放消费者）尚待实现。
-两端都必须是窗口绑定、稠密行主序（dense row-major）的 `DistributedTensor`。
-结果与 `dst` 共用存储；算子返回不代表传输完成。
-
-adapter 符号与 C++ 元素类型复用公共 dtype 转换。
-
-- Python builder 要求 `engine=pld.CommEngine.URMA`（也是默认值）。
-  整数、浮点数、布尔值、字符串及其他枚举在整数转换前即被拒绝。
-  原始 IR 将 engine 存储为整数 `1`。
-- `peer` 必须是整数/index 标量。负的常量 rank 会被拒绝；
-  该检查不保证通信域内运行时 rank 的边界合法。
-- `dst_offsets`、`src_offsets` 和 `shape` 必须一起提供。区域在两端都必须连续：
-  跳过传输形状开头已知等于一的维度，再要求第一个非单元素维度之后的各维取满。
-  动态长度可能大于一，因此不能跳过。
-  所以 `[16, 64]` 中的 `[1, 32]` 和 `[2, 4, 64]` 中的 `[1, 2, 64]` 连续，
-  而对应的 `[2, 32]` 和 `[2, 1, 64]` 不连续。
+支持的传输矩阵、使用模式、ABI 说明和失败诊断见[异步传输校验](distributed_async.md)。
 
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 
@@ -735,7 +717,7 @@ pld.system.defer_wait(signal, offsets, expected, *, cmp: int) -> Unknown
 释放物理 AIV，但 Simpler 会延迟这个普通 TaskId 的完成，直到所有条件就绪；kernel
 不会被恢复。
 
-V1 只接受直接作为参数传入、绑定 window 的 INT32 `DistributedTensor`，采用 ND/DN
+当前实现只接受直接作为参数传入、绑定 window 的 INT32 `DistributedTensor`，采用 ND/DN
 寻址，offset 与 threshold 为整数/index，且仅支持 `WaitCmp::kGe`。slice/view/SSA alias、
 NZ layout 与零维 signal 都会被拒绝。storage 是 INT32，但按无符号 `>=` 轮询；threshold
 和发布值必须在 `[0, INT32_MAX]` 内单调前进，`-1` 会呈现为 `UINT32_MAX` 并错误满足。

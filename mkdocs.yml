@@ -288,6 +288,7 @@ nav:
       - en/dev/08-entry-points.md
       - en/dev/runtime/kernel-mode.md
       - en/dev/distributed_ops.md
+      - en/dev/distributed_async.md
       - en/dev/ptoas-op-status.md
       - en/dev/fp4.md
       - IR:

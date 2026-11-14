@@ -18,6 +18,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -31,6 +32,10 @@ namespace {
 using op_predicates::IsBuiltinOp;
 using op_predicates::IsManagedTensorCollective;
 
+bool IsAsyncTransferCall(const CallPtr& call) {
+  return IsOp(call, "pld.tensor.put_async") || IsOp(call, "pld.tensor.get_async");
+}
+
 class OrchestrationCallTargetChecker : public IRVisitor {
  public:
   OrchestrationCallTargetChecker(ProgramPtr program, std::vector<Diagnostic>& diagnostics,
@@ -41,6 +46,10 @@ class OrchestrationCallTargetChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& call) override {
     IRVisitor::VisitExpr_(call);
     if (!call) return;
+    // The placement checker already rejects direct async ops outside InCore.
+    // They are not missing program functions; keep this exemption Call-only
+    // so Submit targets still require a defined callee.
+    if (IsAsyncTransferCall(call)) return;
     CheckCallee(call->op_, call->span_);
   }
 
@@ -92,6 +101,33 @@ class OrchestrationCallTargetChecker : public IRVisitor {
   std::string func_name_;
 };
 
+/// Async URMA transfers are only valid in the InCore body that owns the
+/// destination. Host and orchestration bodies must not contain the op: the host
+/// codegen emits the builtin name verbatim and the generated module has no
+/// `pld` import, so the failure would otherwise surface at runtime.
+class AsyncTransferPlacementChecker : public IRVisitor {
+ public:
+  AsyncTransferPlacementChecker(std::vector<Diagnostic>& diagnostics, std::string func_name)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    IRVisitor::VisitExpr_(call);
+    if (!IsAsyncTransferCall(call)) return;
+    const std::string& name = call->op_->name_;
+    diagnostics_.emplace_back(
+        DiagnosticSeverity::Error, "OrchestrationReferencesResolved", 0,
+        "Function '" + func_name_ + "' calls " + name +
+            " from a non-InCore body; asynchronous URMA transfers must run in the InCore body that "
+            "owns the destination.",
+        call->span_);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+  std::string func_name_;
+};
+
 class OrchestrationReferencesResolvedPropertyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "OrchestrationReferencesResolved"; }
@@ -100,6 +136,12 @@ class OrchestrationReferencesResolvedPropertyVerifierImpl : public PropertyVerif
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
+      // The async URMA ops are InCore-only. Check every non-InCore body,
+      // including the Opaque HOST orchestrators the callee check skips.
+      if (!IsInCoreType(func->func_type_)) {
+        AsyncTransferPlacementChecker placement(diagnostics, func->name_);
+        placement.VisitStmt(func->body_);
+      }
       // A Graph body's callees must be present in the Program for the same
       // reason an Orchestration body's must.
       if (!IsOrchestrationLike(func->func_type_)) continue;
