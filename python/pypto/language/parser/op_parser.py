@@ -597,8 +597,10 @@ class OpParser:
             if key == "attrs":
                 continue
 
-            # Handle dtype specially
-            if key in expression_keywords:
+            # A Fixpipe contract is a compile-time record, not a tile expression.
+            if key == "acc_push_epilogue" and isinstance(value, ast.Dict):
+                kwargs[key] = self.services.expr_evaluator.eval_expr(value)
+            elif key in expression_keywords:
                 # Operand literals need the same dtype as positional operands;
                 # compile-time attributes still use the value parsing below.
                 kwargs[key] = self.callbacks.expression(value)

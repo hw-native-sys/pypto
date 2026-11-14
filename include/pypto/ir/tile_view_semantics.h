@@ -284,6 +284,10 @@ inline TileLayoutSpec GetImplicitTileLayout(const std::vector<ExprPtr>& shape,
         layout.blayout = TileLayout::row_major;
         layout.slayout = TileLayout::row_major;
         break;
+      case MemorySpace::Scaling:
+        layout.blayout = TileLayout::row_major;
+        layout.slayout = TileLayout::none_box;
+        break;
       case MemorySpace::RightScale:
         // ISA TileRightScale: ColMajor / ColMajor.
         layout.blayout = TileLayout::col_major;

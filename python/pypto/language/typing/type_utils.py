@@ -70,6 +70,10 @@ def implicit_tile_view_defaults(
         default_blayout = _ir.TileLayout.row_major
         default_slayout = _ir.TileLayout.row_major
         default_fractal = 32
+    elif memory_space == _ir.MemorySpace.Scaling:
+        # Packed Fixpipe controls are flat; their layout does not follow shape.
+        default_blayout = _ir.TileLayout.row_major
+        default_slayout = _ir.TileLayout.none_box
     elif memory_space == _ir.MemorySpace.RightScale:
         # ISA TileRightScale: ColMajor / ColMajor, MX scale fractal size 32.
         default_blayout = _ir.TileLayout.col_major

@@ -12,6 +12,7 @@
 #include <any>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,12 +20,14 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -43,6 +46,56 @@ TypePtr DeduceI32ScalarType(const std::vector<ExprPtr>& args,
   (void)args;
   (void)kwargs;
   return std::make_shared<ScalarType>(DataType::INT32);
+}
+
+TypePtr DeduceInitializePipeType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  bool structured = false, shorthand = false;
+  std::optional<bool> nosplit;
+  for (const auto& [key, value] : kwargs) {
+    structured |= key == "acc_push_epilogue";
+    shorthand |= key == "c2v_dtype" || (key == "pre_relu" && AnyCast<bool>(value));
+    if (key == "nosplit") nosplit = AnyCast<bool>(value);
+  }
+  CHECK(!structured || !shorthand) << "acc_push_epilogue cannot be combined with c2v_dtype/pre_relu";
+  CHECK(!shorthand || !nosplit.has_value() || *nosplit) << "c2v_dtype requires nosplit=true";
+  for (const auto& [key, value] : kwargs) {
+    if (key != "acc_push_epilogue") continue;
+    const auto e = AnyCast<AccPushEpilogue>(value);
+    const auto error = ValidateAccPushEpilogue(e);
+    CHECK(error.empty()) << error;
+    CHECK(GetIntKwarg(kwargs, "dir_mask", -1) == 1) << "acc_push_epilogue requires dir_mask=1 (C2V only)";
+    bool nosplit = false;
+    for (const auto& [k, v] : kwargs)
+      if (k == "nosplit") nosplit = AnyCast<bool>(v);
+    CHECK(nosplit) << "acc_push_epilogue requires nosplit=true";
+  }
+  return GetUnknownType();
+}
+
+TypePtr DeduceQuantConfigType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs, bool vector) {
+  CHECK(args.size() == 1) << "set_quant requires exactly one operand";
+  CHECK(GetIntKwarg(kwargs, "id", 0) >= 0) << "set_quant pipe id must be non-negative";
+  if (vector) {
+    auto tile = As<TileType>(args[0]->GetType());
+    CHECK(tile && tile->memory_space_ == MemorySpace::Scaling &&
+          (tile->dtype_ == DataType::UINT64 || tile->dtype_ == DataType::INT64))
+        << "set_quant_vector requires packed 64-bit controls in loc=scaling "
+           "(MemorySpace.Scaling), not a floating-point scale tile";
+    CHECK(tile->shape_.size() == 2) << "set_quant_vector requires shape [1, N]";
+    auto rows = As<ConstInt>(tile->shape_[0]);
+    auto cols = As<ConstInt>(tile->shape_[1]);
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    CHECK(rows && rows->value_ == 1 && cols && cols->value_ > 0 && cols->value_ % 16 == 0)
+        << "set_quant_vector requires shape [1, N] with positive N % 16 == 0 (128-byte alignment)";
+    CHECK(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box)
+        << "set_quant_vector requires unboxed row-major packed controls";
+  } else {
+    auto scalar = As<ScalarType>(args[0]->GetType());
+    CHECK(scalar && scalar->dtype_ == DataType::FP32) << "set_quant_scalar requires an FP32 scalar";
+  }
+  return GetUnknownType();
 }
 
 constexpr int kMaxUserCrossCoreEventId = 13;
@@ -249,7 +302,9 @@ REGISTER_OP("system.aic_initialize_pipe")
     .set_attr<bool>("pre_relu")
     .set_attr<bool>("ptoas_plan_memory")
     .set_attr<bool>("ptoas_buffer_id_sync")
-    .f_deduce_type(DeduceUnknownType);
+    .set_attr<bool>("nosplit")
+    .set_attr<AccPushEpilogue>("acc_push_epilogue")
+    .f_deduce_type(DeduceInitializePipeType);
 
 // Initialize pipe on AIV side
 REGISTER_OP("system.aiv_initialize_pipe")
@@ -268,7 +323,32 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .set_attr<bool>("pre_relu")
     .set_attr<bool>("ptoas_plan_memory")
     .set_attr<bool>("ptoas_buffer_id_sync")
-    .f_deduce_type(DeduceUnknownType);
+    .set_attr<bool>("nosplit")
+    .set_attr<AccPushEpilogue>("acc_push_epilogue")
+    .f_deduce_type(DeduceInitializePipeType);
+
+// Stateful Fixpipe controls belong to the Cube; they are not tile writebacks.
+REGISTER_OP("system.set_quant_scalar")
+    .set_description("Set the FP32 scalar quantization state of a Fixpipe pipe")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("scale", "FP32 scalar scale")
+    .no_arg_writes()
+    .set_attr<int>("id")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceQuantConfigType(args, kwargs, false);
+    });
+
+REGISTER_OP("system.set_quant_vector")
+    .set_description("Set packed 64-bit per-channel Fixpipe quantization controls")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("controls", "Packed 64-bit loc=scaling tile")
+    .no_arg_writes()
+    .set_attr<int>("id")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceQuantConfigType(args, kwargs, true);
+    });
 
 // Reserve a named buffer in a kernel
 REGISTER_OP("system.reserve_buffer")

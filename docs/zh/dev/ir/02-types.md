@@ -601,6 +601,10 @@ class MyProgram:
 
 ### MemorySpace 枚举（别名：`Mem`）
 
+`Scaling` 保存 packed INT64/UINT64 Fixpipe 控制字（`loc=scaling`），
+与 MX 的 `LeftScale` / `RightScale` 独立。参见
+[C2V Fixpipe 契约](../passes/24-expand_mixed_kernel.md#c2v-fixpipe-契约)。
+
 | 值 | 说明 |
 | -- | ---- |
 | `DDR` | 主存储器（片外） |

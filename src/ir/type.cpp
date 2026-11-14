@@ -314,6 +314,7 @@ BufferType::BufferType(std::vector<int64_t> shape, DataType dtype, MemorySpace m
     case MemorySpace::Bias:
     case MemorySpace::LeftScale:
     case MemorySpace::RightScale:
+    case MemorySpace::Scaling:
       break;
     default:
       CHECK(false) << "BufferType requires an on-chip tile memory space, got "

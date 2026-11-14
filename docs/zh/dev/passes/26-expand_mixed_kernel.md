@@ -681,3 +681,124 @@ class After:
 | 自动生成 pipe setup | tensor 级 mixed kernel 无需手写 `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`；Pass 会根据跨核 tile 操作自动推导 |
 | 自动生成 tfree 链 | 消费侧拆分内核会补齐缺失的 `tfree`、将其改写为释放 canonical 的 popped tile，并在需要时把明显过早的 free 延后到同一个 block 内更靠后的位置；但不会重排彼此独立的 `tpop` 链顺序 |
 | Max-slot-size 策略 | 取所有 tile 字节大小的最大值作为单一 `initialize_pipe.slot_size`，对齐后端自动生成 setup 的假设，并保留旧有双向 `dir_mask=3` 行为 |
+
+## C2V Fixpipe 契约
+
+`system.aic_initialize_pipe` 与 `system.aiv_initialize_pipe` 新增 `nosplit`
+和结构化 `acc_push_epilogue`。记录必须完整包含三个字段，未知字段和值均报错：
+
+| Field | Supported values |
+| ----- | ---------------- |
+| `layout` | `nz2nd`, `nz2dn`, `nz2nz` |
+| `quant` | `no_convert`, `f32_f16`, `f32_bf16`, `deqf16_scalar`, `deqf16_vec`, `qf322f16_pre_scalar` |
+| `relu` | `no_relu`, `normal_relu` |
+
+跨核 Fixpipe epilogue 当前仅启用 A5；A2/A3 在数值契约验收之前明确报错。
+普通旧管道保留原有平台支持。
+
+启用组合有明确边界：`nz2nd`、`nz2dn` 支持表中全部 quant 模式及两种 ReLU；
+`no_convert` 接受 FP32 或 INT32。`nz2nz` 目前只启用 FP32 `no_convert`，
+支持两种 ReLU；其他 NZ2NZ quant/dtype 组合在发射前报错。
+字段 schema 保持稳定，没有数值证据的组合继续禁用。
+
+没有 epilogue 时，省略 `nosplit` 会保留 PTOAS 原有传输策略；提供 epilogue 时，
+Python API 将省略值设为 true。显式 false 会被拒绝，原始 IR 必须明确携带 true。
+Fixpipe 要求 `dir_mask=1`（仅 C2V）、Acc 输入，且 push/pop/free 的 `split=0`。
+这不放宽普通 V2C 或 AIV lane 契约。
+
+两端必须具有相同 epilogue、pipe id、slot_size 和 nosplit 策略。
+生产者导入消费者具名 reserve buffer。`MixedKernelExpanded` 验证两端契约、
+转换后的 dtype、物理形状、消费者布局，以及**转换后字节数**是否适合 slot。
+随后 PTOAS 还会独立验证。
+
+| Layout | Vec byte layout |
+| ------ | --------------- |
+| `nz2nd` | `row_major`, `none_box` |
+| `nz2dn` | `col_major`, `none_box` |
+| `nz2nz` | `col_major`, `row_major` |
+
+仅修改消费者声明不能转置实际字节。自动 Acc→Vec column-major move 会将请求的
+物理布局记录到管道元数据，在**两端** init 发出相同的 `no_convert` / `no_relu`
+契约，使生产者使用真正的 Fixpipe TPUSH 特化。
+自动管道内布局不一致、Fixpipe 双向传输、混入非 Acc 生产者或非零 split 均报错。
+应改用不同显式 pipe id，或 row-major move 加真实 transpose。
+默认管线（包括 Buffer IR 选择）保留该契约，普通 row-major pipe 保持原策略。
+
+对 popped view 执行真实 transpose 时，每个操作数使用自身注册的 SSA 类型：
+静态 view 与循环内 scratch 的 valid-shape 元数据可能不同，scratch 注解必须
+匹配其 allocation，不能直接复制 view 的类型。
+
+`system.set_quant_scalar(scale, id=...)` 接受 FP32 标量，必须在同一块 TPUSH 之前，
+并匹配支配该操作的同 id init 所选择的 scalar quant 模式。
+`deqf16_scalar` 为 INT32→FP16，`qf322f16_pre_scalar` 为 FP32→FP16；
+直接转换 `f32_f16` / `f32_bf16` 不要求量化状态。
+`no_convert` 保持 FP32 或 INT32 dtype。
+
+`system.set_quant_vector(controls, id=...)` 要求 `MemorySpace.Scaling`
+（`loc=scaling`、row-major 无分形）的 **packed INT64/UINT64 硬件控制字**，
+不能用浮点 scale tile 代替。Scaling 与 MX 的 `LeftScale`/`RightScale` 独立。
+先将控制字放入 row-major 无分形 Mat tile，再 move 到 Scaling；形状必须为
+`[1, N]`、`N > 0` 且 `N % 16 == 0`，满足 128 字节对齐。
+A5 PyPTO planner 为 Scaling 使用保守的 4 KiB 分配预算，这是分配策略，
+不是硬件容量声明。目前公开的向量模式为 `deqf16_vec`（INT32→FP16）。
+
+packed 控制字在对应 TPUSH 完成前必须保持不变，应在 ring 复用循环之外加载。
+量化状态按 pipe id 验证，不能仅在兄弟分支或前一个块配置；中间经过控制流块或
+带 `pre_quant` 的写回后，必须在下次 push 前重新配置。重新配置会使其他 id 的旧配置失效。`normal_relu` 是对 accumulator 应用 Fixpipe 前置 ReLU。
+此 API 与 `tile.store` / `tile.assemble` 的 `pre_quant`、`pre_relu` 写回参数独立。
+
+### 回归与证据
+
+`tests/ut/codegen/test_c2v_fixpipe.py` 检查 schema 往返、peer/状态/split/容量负例、
+自动 column-major lowering 和真实 PTOAS 编译。
+`tests/st/runtime/ops/test_c2v_fixpipe.py` 使用 BF16 `[32,32] @ [32,16]`、
+显式 DN move 与 transpose view，对比独立整数 golden，容差为零；
+row-major move 加真实 transpose 为正对照。覆盖两类整数输入和两种 Buffer IR 设置。
+CPU 模拟器按用户要求跳过。
+
+显式 AIC/AIV 用例使用 `@pl.program` 验证该 IR 契约，因为
+`jit.incore(level=AIC/AIV)` 不能声明这些函数类型；自动非方形回归使用 `@pl.jit`。
+量化用例在两个 slot 上循环五轮，输入标签和 packed 控制字按列变化，
+负 scalar scale 区分前置 ReLU 顺序。NZ2NZ 用另一条普通 V2C pipe 将实际 NZ
+字节送回 Cube，再乘 identity 验证布局；不引入 GlobalTensor FIFO。
+
+`tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` 只移除发射的 DN epilogue 属性，
+保留正确的独立转置 golden；诊断回放必须观测到精确的旧 row-major 字节模式，
+并由 golden 验证拒绝该结果。正常用例均断言 harness 返回的执行结果。
+ST harness 向 `ir.compile()` 传递解析后的 execution mode；真机产物 manifest
+必须标明 `a5`，原生对象与 task-submit 设备日志构成执行证据。
+
+数值证据必须来自设备执行。编译和字符串检查不能证明实际物理字节正确。
+设备权限或后端编译阻塞必须在 PR 验证记录中明确保留，不放宽精度或 golden。
+
+已记录的 A5 验证（2026-11-15）：PTOAS 0.65 和未更改的 runtime PTO-ISA pin
+`418de18dde8fa33773dc5c384fdfe5506463b628` 生成原生内核。
+T4 套件通过 46 个 `rtol=0, atol=0` 的正向真机用例，以及 1 个旧行为回放。
+回放有 509/512 个 FP32 元素不符合正确 golden，最大绝对误差为 465，
+并与旧 row-major 物理字节模式精确一致。
+已有的 scaled Acc-to-Mat 写回用例另行通过，保留原有容差。
+CPU 模拟器按用户要求跳过。
+
+准备固定版本的 A5 runtime 与 PTOAS 环境，并持有站点共享 build/device 锁后，
+可从仓库根目录复现：
+
+```bash
+source .claude/skills/testing/load-env.sh
+export PYTHONPATH="$PWD/python:$PWD/runtime/python:$PWD/runtime:$PWD/tests/st"
+python -m pytest tests/ut/codegen/test_c2v_fixpipe.py -n "$PYPTO_TEST_JOBS" -v
+python -m pytest tests/st/runtime/ops/test_c2v_fixpipe.py \
+  tests/st/runtime/ops/test_c2v_fixpipe_legacy.py --platform a5 \
+  --precompile-workers "$PYPTO_BUILD_JOBS" --execute-workers "$PYPTO_TEST_JOBS" \
+  --execute-via-task-submit --task-submit-device auto \
+  --task-max-time 120 --task-queue-timeout 30 --save-kernels \
+  --kernels-dir build_output/t4/onboard-final -v
+```
+
+### 后续 FIFO 工作的元数据
+
+`Call.kwargs["acc_push_epilogue"]` 是恰好包含 `layout`、`quant`、`relu` 的
+字符串字典，C++ 类型为 `ir::AccPushEpilogue`。序列化、结构比较/哈希和 Python
+打印均保留该值记录。`PipeDirectionMetadata.acc_push_layouts` 记录消费者物理布局，
+`has_acc_push`、`has_non_acc_push`、`has_nonzero_split` 限定自动 setup。
+`CreateInitializePipe` 接受可选 epilogue，在两端同时写入 epilogue 和 nosplit。
+本任务不引入 GlobalTensor FIFO entry 模型。

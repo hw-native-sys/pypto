@@ -10,6 +10,7 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -34,6 +35,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -178,6 +180,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else if (key == "acc_push_epilogue" && nb::isinstance<nb::dict>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<AccPushEpilogue>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
       // Lists/tuples carry exactly one element type, dispatched by attr key:
       //   - kAttrArgDirections             -> vector<ArgDirection>
@@ -812,6 +816,7 @@ void BindIR(nb::module_& m) {
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
       .value("LeftScale", MemorySpace::LeftScale, "L0A-side MX block-scale buffer (A5)")
+      .value("Scaling", MemorySpace::Scaling, "Packed 64-bit Fixpipe control buffer")
       .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
@@ -1470,6 +1475,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(std::string)) {
         result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(AccPushEpilogue)) {
+        result[key.c_str()] = nb::cast(AnyCast<AccPushEpilogue>(value));
       } else if (value.type() == typeid(double)) {
         result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(float)) {

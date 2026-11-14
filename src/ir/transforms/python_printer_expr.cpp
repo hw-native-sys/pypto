@@ -38,6 +38,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/core/python_string.h"
+#include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
@@ -312,6 +313,17 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     stream_ << (std::any_cast<bool>(value) ? "True" : "False");
   } else if (t == typeid(std::string)) {
     PrintStringLiteral(std::any_cast<std::string>(value));
+  } else if (t == typeid(AccPushEpilogue)) {
+    stream_ << "{";
+    bool first = true;
+    for (const auto& [key, field] : std::any_cast<AccPushEpilogue>(value)) {
+      if (!first) stream_ << ", ";
+      first = false;
+      PrintStringLiteral(key);
+      stream_ << ": ";
+      PrintStringLiteral(field);
+    }
+    stream_ << "}";
   } else if (t == typeid(double)) {
     stream_ << FormatFloatLiteral(std::any_cast<double>(value));
   } else if (t == typeid(float)) {
@@ -1097,6 +1109,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       } else {
         stream_ << "'" << str_val << "'";
       }
+    } else if (value.type() == typeid(AccPushEpilogue)) {
+      PrintAttrValue(value, op->span_);
     } else if (value.type() == typeid(double)) {
       stream_ << FormatFloatLiteral(AnyCast<double>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(float)) {

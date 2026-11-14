@@ -791,3 +791,146 @@ true last use of that tile.
 | Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
 | Auto-generated tfree chains | Consumer-side split kernels insert missing `tfree` calls, rewrite them to free the canonical popped tile value, and delay obviously early frees within the same block without reordering independent `tpop` chains |
 | Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one automatic reserve/import buffer per direction while preserving legacy bidirectional `dir_mask=3` behavior |
+
+## C2V Fixpipe contract
+
+`system.aic_initialize_pipe` and `system.aiv_initialize_pipe` accept
+`nosplit` and a structured `acc_push_epilogue` record. All three record fields
+are required; unknown fields or values are rejected:
+
+| Field | Supported values |
+| ----- | ---------------- |
+| `layout` | `nz2nd`, `nz2dn`, `nz2nz` |
+| `quant` | `no_convert`, `f32_f16`, `f32_bf16`, `deqf16_scalar`, `deqf16_vec`, `qf322f16_pre_scalar` |
+| `relu` | `no_relu`, `normal_relu` |
+
+Cross-core Fixpipe epilogues are currently enabled only on A5. A2/A3 targets
+are rejected until their numerical contract is validated; ordinary legacy pipes
+keep their existing target support.
+
+The enabled matrix is deliberately bounded. `nz2nd` and `nz2dn` support all
+listed quant modes and both ReLU modes; `no_convert` accepts FP32 or INT32.
+`nz2nz` currently supports FP32 `no_convert` with either ReLU mode. Other
+NZ2NZ quant/dtype combinations are rejected before emission. This keeps the
+schema stable while withholding combinations without numerical evidence.
+
+Without an epilogue, omitted `nosplit` stays omitted and preserves PTOAS's
+ordinary transport behavior. With an epilogue, the Python API defaults omitted
+`nosplit` to true. Explicit false is rejected. Raw IR must carry true explicitly.
+Fixpipe requires `dir_mask=1` (C2V only), Acc input, and `split=0` on push, pop
+and free. This does not expand the ordinary V2C or AIV lane contract.
+
+Both endpoints must carry identical epilogues, pipe ids, slot sizes and nosplit
+policy. The producer imports the named consumer reserve buffer. The
+`MixedKernelExpanded` verifier checks matching peer contracts, converted dtypes,
+physical shapes, consumer layouts, and capacity in **post-conversion bytes**.
+PTOAS performs its own verification again before lowering.
+
+| Layout | Physical Vec bytes (`blayout`, `slayout`) |
+| ------ | ----------------------------------------- |
+| `nz2nd` | `row_major`, `none_box` |
+| `nz2dn` | `col_major`, `none_box` |
+| `nz2nz` | `col_major`, `row_major` |
+
+Changing the consumer declaration alone does not transpose the bytes. For an
+automatic Acc-to-Vec column-major move, pipe metadata records the requested
+physical layout and emits the same `no_convert` / `no_relu` contract on **both**
+init calls. The resulting producer uses the actual Fixpipe TPUSH specialization.
+An automatic pipe requiring different layouts, a bidirectional Fixpipe pipe,
+a non-Acc producer mixed into that pipe, or a nonzero split is rejected. Use
+separate explicit pipe ids or a row-major move followed by a real transpose.
+The default pipeline, including Buffer IR selection, preserves this contract.
+
+A real transpose after a popped view uses each operand's registered SSA type: a
+static view and loop-local scratch can differ in valid-shape metadata. The scratch
+annotation must match its allocation rather than copying the view annotation.
+
+Ordinary row-major pipes keep their existing transport policy.
+
+`system.set_quant_scalar(scale, id=...)` accepts an FP32 scalar operand. It must
+precede TPUSH in the same block and match a scalar quant mode on a dominating
+init with the same id. `deqf16_scalar` converts INT32 to FP16;
+`qf322f16_pre_scalar` converts FP32 to FP16. Direct `f32_f16` / `f32_bf16`
+conversions need no quant state. `no_convert` keeps FP32 or INT32 unchanged.
+
+`system.set_quant_vector(controls, id=...)` accepts **packed INT64/UINT64 hardware
+control words** in `MemorySpace.Scaling` (`loc=scaling`, unboxed row-major), not
+a floating-point scale tile. This memory space is distinct from MX
+`LeftScale`/`RightScale`. Stage packed controls in a row-major unboxed Mat tile,
+then move to Scaling. The move requires `[1, N]` with positive `N % 16 == 0`
+(128-byte alignment). The A5 PyPTO planner reserves a conservative 4 KiB budget
+for Scaling allocations; this is an allocation policy, not a hardware capacity
+claim. The currently exposed vector mode is `deqf16_vec` (INT32 to FP16).
+
+Keep packed controls immutable until their TPUSH completes; stage them outside
+a ring reuse loop. Quant state belongs to the pipe id and cannot be supplied
+only in a sibling branch or a previous block. Intervening control-flow blocks
+and writebacks with `pre_quant` invalidate prior configuration; configure again
+before the next push. Reconfiguring quant state invalidates the preceding
+configuration for another id. `normal_relu` applies the Fixpipe pre-ReLU to the
+accumulator; this API is separate from `tile.store` / `tile.assemble`
+`pre_quant` and `pre_relu` writeback operands.
+
+### Regression and evidence
+
+`tests/ut/codegen/test_c2v_fixpipe.py` checks schema round trips, invalid peer,
+state, split and capacity contracts, automatic column-major lowering and real
+PTOAS compilation. `tests/st/runtime/ops/test_c2v_fixpipe.py` checks BF16
+`[32,32] @ [32,16]` followed by an explicit DN move and a transpose view against
+an independent integer golden with zero tolerance; row-major plus a real
+transpose is the control. Both integer input families and both default Buffer
+IR settings are included. CPU simulation is intentionally skipped.
+
+The explicit AIC/AIV cases use `@pl.program` to exercise that IR contract;
+`jit.incore(level=AIC/AIV)` does not declare those function types. The automatic
+non-square regression uses `@pl.jit`. Quantization cases reuse two slots for five
+iterations, vary input tags and per-channel packed controls, and include negative
+scalar scales to distinguish pre-ReLU ordering. NZ2NZ is checked by returning the
+physical NZ tile through an ordinary separate V2C pipe and multiplying by an
+identity matrix on Cube. This does not introduce a GlobalTensor FIFO.
+
+`tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` removes only the emitted DN
+epilogue attributes for a diagnostic replay. It keeps the correct independent
+transpose golden, requires the exact legacy row-major byte pattern, and requires
+golden validation to reject that result. Normal cases always assert the harness
+result. The ST harness forwards the resolved execution mode to `ir.compile()`;
+onboard manifests must identify `a5`, and native objects plus task-submit device
+logs supply the execution evidence.
+
+Device execution is required to establish numerical evidence. Compilation and
+emitted text checks alone do not establish physical-byte correctness. Pending
+device access or backend compilation failures must remain explicit in the PR's
+validation record; no tolerance or golden is relaxed.
+
+Recorded A5 validation (2026-11-15): PTOAS 0.65 and the unchanged runtime
+PTO-ISA pin `418de18dde8fa33773dc5c384fdfe5506463b628` produced native kernels.
+The T4 suite passed 46 positive device cases at `rtol=0, atol=0` plus one
+legacy replay. The replay differed from the correct golden in 509 of 512
+FP32 elements (maximum absolute error 465), and matched the old row-major byte
+pattern exactly. The existing scaled Acc-to-Mat writeback test passed separately
+with its original tolerance. CPU simulation was skipped by request.
+
+Reproduce from the repository root after preparing the pinned A5 runtime and
+PTOAS environment, while holding the site's shared build/device locks:
+
+```bash
+source .claude/skills/testing/load-env.sh
+export PYTHONPATH="$PWD/python:$PWD/runtime/python:$PWD/runtime:$PWD/tests/st"
+python -m pytest tests/ut/codegen/test_c2v_fixpipe.py -n "$PYPTO_TEST_JOBS" -v
+python -m pytest tests/st/runtime/ops/test_c2v_fixpipe.py \
+  tests/st/runtime/ops/test_c2v_fixpipe_legacy.py --platform a5 \
+  --precompile-workers "$PYPTO_BUILD_JOBS" --execute-workers "$PYPTO_TEST_JOBS" \
+  --execute-via-task-submit --task-submit-device auto \
+  --task-max-time 120 --task-queue-timeout 30 --save-kernels \
+  --kernels-dir build_output/t4/onboard-final -v
+```
+
+### Metadata for subsequent FIFO work
+
+`Call.kwargs["acc_push_epilogue"]` is a value-semantic string dictionary with
+exactly `layout`, `quant`, `relu`; C++ uses `ir::AccPushEpilogue`. Serialization,
+structural equality/hash, and Python printing preserve the record.
+`PipeDirectionMetadata.acc_push_layouts` records observed physical consumer
+layouts; `has_acc_push`, `has_non_acc_push`, and `has_nonzero_split` constrain
+automatic setup. `CreateInitializePipe` takes an optional epilogue and stamps
+both fields on both endpoints. No GlobalTensor FIFO entry model is introduced.
