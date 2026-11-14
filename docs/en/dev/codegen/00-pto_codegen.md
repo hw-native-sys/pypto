@@ -18,14 +18,16 @@ which provides that API. The runtime submodule is pinned to `c1c234667` so
 runtime builds and generated kernels use the same compatible headers.
 
 On A2/A3, TREM and TREMS require a disjoint, same-dtype scratch tile with
-at least one physical and valid row. For source row stride `S` (rounded to
+at least two physical and valid rows for TREM (PTOAS v0.74 requires this),
+and one row for TREMS. For source row stride `S` (rounded to
 8 elements), the default scratch column count is `S + 8*ceil(S/256) + 8`.
 High-precision FP32 TREM is now honoured on A2/A3 and requires the maximum of
 that count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)`, with
 `C = max(valid_cols // 64, 1)`; dynamic valid columns use the physical width
 as their capacity bound. Both physical and valid scratch columns must cover
-that count. The ISA restores INT32 source values itself; codegen must not
-emit the former extra FP32-to-INT32 divisor conversion.
+that count. The ISA leaves INT32 source buffers in FP32 representation:
+codegen restores both TREM sources and the TREMS dividend with explicit
+FP32-to-INT32 conversions before subsequent consumers.
 
 ## Design Principle: Strict 1-to-1 Mapping
 

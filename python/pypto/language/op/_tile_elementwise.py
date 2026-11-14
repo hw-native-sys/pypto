@@ -478,7 +478,7 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         tmp: Same-dtype scratch tile, disjoint from the sources on A2/A3.
-            Provide one physical and valid row with at least
+            Provide two physical and valid rows (required by PTOAS) with at least
             ``S + 8 * ceil(S / 256) + 8`` columns, where S is the source
             row stride rounded to 8 elements. High-precision rem requires
             ``max(default_cols, 192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0))``,
