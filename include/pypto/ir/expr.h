@@ -711,6 +711,9 @@ inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
  * later task needs to depend on the deferred completion.
  */
 inline constexpr const char* kAttrDeferredCompletionWaiter = "deferred_completion_waiter";
+// Proven by the waiter validator; exported with the callable, never inferred
+// from the number of registrations taken by one runtime branch.
+inline constexpr const char* kAttrDeferredCompletionMaxCount = "deferred_completion_max_count";
 
 /**
  * @brief Reserved attr key marking an internal dependency-only TaskId call.

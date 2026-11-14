@@ -22,10 +22,14 @@ is checked for syntactic validity with ``compile`` (which does not execute the
 """
 
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
-from pypto.backend.pto_backend import _generate_config_file
+from pypto.backend.pto_backend import (
+    _generate_config_file,
+    _generated_async_capability,
+    _KernelConfigMetadata,
+)
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes
 from pypto.pypto_core.codegen import KernelRegistration
@@ -228,6 +232,40 @@ def test_multiple_registrations_reference_one_source():
     builtin_text = _generate_config_file("main", registrations, unshared_code_names={"shared"})
     assert '"code_name"' not in builtin_text
     assert _is_valid_python(text) and _is_valid_python(builtin_text)
+
+
+@pytest.mark.parametrize("bound,capacity", [(1, 1), (63, 63), (64, 64)])
+def test_generated_waiter_exports_static_bound(bound, capacity):
+    func = SimpleNamespace(
+        name="waiter", attrs={"deferred_completion_waiter": True, "deferred_completion_max_count": bound}
+    )
+    capability = _generated_async_capability(cast(_ir_core.Function, func))
+    assert capability == dict(version=1, mode="DEFERRED", max_conditions=capacity, condition_types=1)
+    registration = _registration(
+        func_id=0, code_name="waiter", core_type=_ir_core.CoreType.VECTOR, signature=[]
+    )
+    text = _generate_config_file(
+        "main", [registration], kernel_metadata=_KernelConfigMetadata({}, {"waiter": capability})
+    )
+    namespace: dict[str, Any] = {"__file__": "kernel_config.py"}
+    exec(text, namespace)
+    assert namespace["KERNELS"][0]["async_capability"] == capability
+
+
+@pytest.mark.parametrize("bound", [None, -1, 0, 65, True])
+def test_waiter_marker_without_valid_bound_is_rejected(bound):
+    func = SimpleNamespace(
+        name="waiter", attrs={"deferred_completion_waiter": True, "deferred_completion_max_count": bound}
+    )
+    with pytest.raises(ValueError, match="validated static condition bound"):
+        _generated_async_capability(cast(_ir_core.Function, func))
+
+
+def test_generated_sync_and_opaque_source_have_distinct_capabilities():
+    generated = SimpleNamespace(name="generated", attrs={})
+    opaque = SimpleNamespace(name="opaque", attrs={"external_source": "opaque.cpp"})
+    assert _generated_async_capability(cast(_ir_core.Function, generated))["mode"] == "SYNCHRONOUS"
+    assert _generated_async_capability(cast(_ir_core.Function, opaque))["mode"] == "UNKNOWN"
 
 
 if __name__ == "__main__":

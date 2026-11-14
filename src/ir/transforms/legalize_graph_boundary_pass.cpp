@@ -97,8 +97,11 @@ constexpr size_t kMaxBoundaryTensors = 128;  ///< GRAPH_MAX_TENSOR_ARGS, host_bu
 constexpr size_t kMaxBoundaryScalars = 64;   ///< GRAPH_MAX_SCALAR_ARGS, host_build_graph/runtime/types.h
 constexpr size_t kMaxGraphNodes = 1024;      ///< GRAPH_MAX_NODES, common/host_build_graph/graph_execution.h
 
-/// True when `type` is a scalar, i.e. a candidate boundary scalar.
-[[nodiscard]] bool IsScalarType(const TypePtr& type) { return As<ScalarType>(type) != nullptr; }
+/// Materialized communication contexts use the same inherited scalar slots as
+/// scalar parameters; their opaque handle must remain invocation-specific.
+[[nodiscard]] bool IsScalarType(const TypePtr& type) {
+  return As<ScalarType>(type) != nullptr || IsA<CommCtxType>(type);
+}
 
 [[nodiscard]] bool IsBoundaryScalarType(const TypePtr& type) {
   return IsScalarType(type) || As<CommCtxType>(type) != nullptr;

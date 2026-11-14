@@ -20,6 +20,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import _generated_async_capability
 
 
 @pytest.fixture(autouse=True)
@@ -283,11 +284,13 @@ def test_valid_waiter_aiv_form_remains_valid_on_expand_rerun():
     assert waiter is not None
     assert waiter.func_type == ir.FunctionType.AIV
     assert waiter.attrs["deferred_completion_waiter"] is True
+    assert waiter.attrs["deferred_completion_max_count"] == 1
 
     rerun = passes.expand_mixed_kernel()(expanded)
     rerun_waiter = rerun.get_function("waiter")
     assert rerun_waiter is not None
     assert rerun_waiter.func_type == ir.FunctionType.AIV
+    assert rerun_waiter.attrs["deferred_completion_max_count"] == 1
 
 
 def test_validated_waiter_accepts_trailing_empty_return():
@@ -3273,6 +3276,31 @@ class Before:
     passes.run_verifier(properties)(before)
     After = passes.expand_mixed_kernel()(before)
     passes.run_verifier(properties)(After)
+
+
+@pytest.mark.parametrize("count", [1, 63, 64])
+def test_waiter_runtime_capacity_is_recomputed_from_actual_ir(count):
+    """A stale printable bound must not authorize a smaller or larger slab."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def waiter(self, signal: pld.DistributedTensor[[64, 1], pl.INT32]):
+            pl.func_attr({"deferred_completion_waiter": True, "deferred_completion_max_count": 999})
+            for peer in pl.range(count):
+                pld.system.defer_wait(signal, offsets=[peer, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, signal: pld.DistributedTensor[[64, 1], pl.INT32]):
+            self.waiter(signal)
+
+    expanded = _run_pipeline(Program)
+    waiter = expanded.get_function("waiter")
+    assert waiter is not None
+    assert waiter.attrs["deferred_completion_max_count"] == count
+    assert _generated_async_capability(waiter) == dict(
+        version=1, mode="DEFERRED", max_conditions=count, condition_types=1
+    )
 
 
 if __name__ == "__main__":

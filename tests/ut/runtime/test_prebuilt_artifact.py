@@ -1687,5 +1687,56 @@ def test_private_output_base_inside_cache_keeps_runtime_outside(
     assert not (root / "runs").exists()
 
 
+@pytest.mark.parametrize("capacity", [1, 64])
+def test_prebuilt_completion_metadata_uses_current_callable_registration(tmp_path, fake_runtime, capacity):
+    _chip(tmp_path)
+    config = read_kernel_config(tmp_path / "kernel_config.py")
+    capability = dict(version=1, mode="DEFERRED", max_conditions=capacity, condition_types=1)
+    kernels = [{**config.KERNELS[0], "async_capability": capability}]
+    _prebuilt.write_chip_binaries(
+        tmp_path, "a5sim", config.ORCHESTRATION, [(kernels[0], b"kernel")], b"orch", "test_runtime", {}
+    )
+    records = _prebuilt.read_prebuilt(tmp_path, "a5sim", BuildKind.SINGLE_CHIP)
+    assert records["."]["kernels"][0]["async_capability"] == capability
+    loaded = _prebuilt.load_prebuilt(tmp_path, "a5sim", BuildKind.SINGLE_CHIP)
+    core = loaded["."][0]["children"][0][1]
+    assert set(core) == {"signature", "binary"}
+    manifest = json.loads((tmp_path / "binary_manifest.json").read_text())
+    assert manifest["schema"] == 2
+    assert manifest["kernels"][0]["async_capability"] == capability
+
+
+def test_legacy_prebuilt_does_not_acquire_synchronous_qualification(tmp_path, fake_runtime):
+    _chip(tmp_path)
+    config = read_kernel_config(tmp_path / "kernel_config.py")
+    _prebuilt.write_chip_binaries(
+        tmp_path, "a5sim", config.ORCHESTRATION, [(config.KERNELS[0], b"kernel")], b"orch", "test_runtime", {}
+    )
+    path = tmp_path / "binary_manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["schema"] = 1
+    del manifest["kernels"][0]["async_capability"]
+    path.write_text(json.dumps(manifest))
+    loaded = _prebuilt.load_prebuilt(tmp_path, "a5sim", BuildKind.SINGLE_CHIP)
+    assert "async_capability" not in loaded["."][0]["children"][0][1]
+
+
+def test_prebuilt_invalid_completion_descriptor_is_rejected_before_reconstruction(tmp_path, fake_runtime):
+    _chip(tmp_path)
+    config = read_kernel_config(tmp_path / "kernel_config.py")
+    _prebuilt.write_chip_binaries(
+        tmp_path, "a5sim", config.ORCHESTRATION, [(config.KERNELS[0], b"kernel")], b"orch", "test_runtime", {}
+    )
+    path = tmp_path / "binary_manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["kernels"][0]["async_capability"] = dict(
+        version=1, mode="DEFERRED", max_conditions=65, condition_types=1
+    )
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="Invalid DEFERRED"):
+        _prebuilt.load_prebuilt(tmp_path, "a5sim", BuildKind.SINGLE_CHIP)
+    fake_runtime.interface.CoreCallable.build.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

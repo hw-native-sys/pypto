@@ -63,6 +63,28 @@ The runtime is also part of the `@pl.jit` cache key, so a `host_build_graph`
 call cannot reuse an artifact compiled for `tensormap_and_ringbuffer`, whose
 `kernel_config.py` names a runtime no matching worker would bind.
 
+### Callable completion metadata
+
+Generated `KERNELS` entries carry a versioned `async_capability` mapping. The
+verified `deferred_completion_waiter` contract exports its static bound as
+`deferred_completion_max_count`; the runtime descriptor uses `DEFERRED`, that
+capacity, and the COUNTER type. A branch that registers zero conditions still
+receives the same valid context and capacity.
+Ordinary PyPTO-generated kernels declare `SYNCHRONOUS`. External and builtin
+native sources remain `UNKNOWN` because their IR does not prove completion.
+
+Both normal assembly and prebuilt loading pass this descriptor to
+`CoreCallable.build`. Capacity and type participate in generated binary cache
+identity, and prebuilt schema 2 preserves the descriptor. Schema 1 artifacts
+remain readable with the native UNKNOWN default; missing metadata never
+qualifies an arbitrary old binary as synchronous. A qualified artifact requires
+a runtime exposing the versioned capability interface.
+
+This descriptor proves registration capacity only. It does not infer which
+payload a signal protects, authorize clean cache lines, or replace the runtime's
+resource/use and consumer declarations. Runtime admission still requires those
+independent contracts for deferred execution.
+
 ## Argument Unpacking
 
 The wrapper unpacks `int64_t* args` following the standard convention:

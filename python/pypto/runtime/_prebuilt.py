@@ -27,8 +27,10 @@ from pypto.jit._artifact_manifest import (
     encode_manifest,
 )
 
+from ._async_capability import validate_async_capability
+
 BINARY_MANIFEST = "binary_manifest.json"
-_BINARY_SCHEMA = 1
+_BINARY_SCHEMA = 2
 _DIRECTIONS = {"SCALAR", "IN", "OUT", "INOUT"}
 
 
@@ -95,6 +97,7 @@ def write_chip_binaries(
                 "func_id": kernel["func_id"],
                 "name": kernel.get("name", str(kernel["func_id"])),
                 "signature": _encode_signature(kernel.get("signature", [])),
+                "async_capability": validate_async_capability(kernel.get("async_capability")),
                 "binary": binary_record,
             }
         )
@@ -239,7 +242,7 @@ def _read_json(root: Path) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError(f"Unsupported prebuilt manifest schema: {root}")
     record_map = cast("dict[str, Any]", record)
-    if type(record_map.get("schema")) is not int or record_map["schema"] != 1:
+    if type(record_map.get("schema")) is not int or record_map["schema"] not in {1, _BINARY_SCHEMA}:
         raise ValueError(f"Unsupported prebuilt manifest schema: {root}")
     return record_map
 
@@ -316,7 +319,10 @@ def _read_chip(
         if not isinstance(kernel, dict):
             raise ValueError(f"Invalid prebuilt kernel record: {root}")
         kernel = cast("dict[str, Any]", kernel)
-        if set(kernel) != {"func_id", "name", "signature", "binary"}:
+        fields = {"func_id", "name", "signature", "binary"} | (
+            {"async_capability"} if record["schema"] >= 2 else set[str]()
+        )
+        if set(kernel) != fields:
             raise ValueError(f"Invalid prebuilt kernel record: {root}")
         fid = kernel["func_id"]
         if type(fid) is not int or not 0 <= fid < 2**31 or fid in seen:
@@ -325,6 +331,9 @@ def _read_chip(
         if not isinstance(kernel["name"], str) or not kernel["name"]:
             raise ValueError(f"Invalid prebuilt kernel name: {root}")
         _signature(kernel["signature"])
+        # Schema 1 has no completion proof. Preserve UNKNOWN at reconstruction
+        # instead of promoting old arbitrary binaries to synchronous kernels.
+        validate_async_capability(kernel.get("async_capability"))
         kernel["binary"] = _binary(root, kernel["binary"], validated_files, binary_cache)
     return record
 
@@ -393,7 +402,8 @@ def load_prebuilt(
             (
                 kernel["func_id"],
                 CoreCallable.build(
-                    signature=[getattr(ArgDirection, v) for v in kernel["signature"]], binary=kernel["binary"]
+                    signature=[getattr(ArgDirection, v) for v in kernel["signature"]],
+                    binary=kernel["binary"],
                 ),
             )
             for kernel in record["kernels"]

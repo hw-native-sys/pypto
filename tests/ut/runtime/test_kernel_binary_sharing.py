@@ -81,6 +81,34 @@ def test_two_signatures_compile_once(device_runner, monkeypatch, tmp_path):
     assert len(chips) == 1
 
 
+def test_assembly_keeps_completion_metadata_out_of_callable_abi(device_runner, monkeypatch, tmp_path):
+    kernels = registrations()
+    for kernel, count in zip(kernels, [1, 64], strict=True):
+        kernel["async_capability"] = dict(version=1, mode="DEFERRED", max_conditions=count, condition_types=1)
+    compiled, cores, _ = setup_assembly(device_runner, monkeypatch, tmp_path, kernels)
+    device_runner._compile_and_assemble_locked(tmp_path, "a2a3sim")
+    assert len(compiled) == 2
+    assert all(set(core) == {"signature", "binary"} for core in cores)
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_binary_cache_identity_includes_completion_contract(device_runner, tmp_path, external):
+    source = tmp_path / "step.cpp"
+    source.write_text("// identical source bytes")
+    kernel = registrations(external=external)[0]
+    kernel["source"] = str(source)
+    compiler = SimpleNamespace(get_incore_include_dirs=lambda: [], get_kernel_include_dirs=lambda _: [])
+
+    def path():
+        return device_runner._kernel_cache_file(tmp_path, kernel, "a2a3sim", "/pto-isa", "runtime", compiler)
+
+    legacy = path()
+    kernel["async_capability"] = dict(version=1, mode="DEFERRED", max_conditions=1, condition_types=1)
+    first = path()
+    kernel["async_capability"]["max_conditions"] = 64
+    assert len({legacy, first, path()}) == 3
+
+
 @pytest.mark.parametrize("change", [{"external": True}, {"builtin": True}, {"code_name": None}])
 def test_external_and_legacy_configs_keep_separate_compiles(device_runner, monkeypatch, tmp_path, change):
     compiled, _, _ = setup_assembly(device_runner, monkeypatch, tmp_path, registrations(**change))

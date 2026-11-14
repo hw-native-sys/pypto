@@ -60,6 +60,24 @@ runtime 同时是 `@pl.jit` 缓存键的一个维度：`host_build_graph` 的调
 `tensormap_and_ringbuffer` 编译出的产物 —— 后者 `kernel_config.py` 里写的
 runtime 没有任何匹配的 worker 会绑定。
 
+### Callable 完成能力元数据
+
+生成的 `KERNELS` 条目携带带版本的 `async_capability` 字典。已验证的
+`deferred_completion_waiter` 合同将静态上界导出为
+`deferred_completion_max_count`；运行时描述使用 `DEFERRED`、对应容量
+及 COUNTER 类型。运行时分支未登记条件时仍收到相同的有效上下文和容量。普通 PyPTO 生成 kernel 声明
+`SYNCHRONOUS`。外部及 builtin 原生源码保持 `UNKNOWN`，因为它们的 IR
+不能证明完成语义。
+
+普通组装和预编译加载都将该描述传给 `CoreCallable.build`。容量和类型进入
+生成二进制的缓存身份，预编译 schema 2 保留该描述。schema 1 产物仍可读取，
+但使用原生 UNKNOWN 默认值；缺失元数据绝不把任意旧二进制认定为同步。
+带明确能力的产物要求运行时提供带版本的能力接口。
+
+该描述仅证明条件登记容量，不推断 signal 保护哪些 payload，不授予缓存行
+clean 权限，也不替代运行时的资源/use 及消费者声明。deferred 执行的运行时
+准入仍要求这些独立合同。
+
 ## 参数解包
 
 包装器按照标准约定解包 `int64_t* args`:

@@ -2038,6 +2038,10 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   auto append_deferred_completion_waiter_attr = [&]() {
     if (deferred_wait.has_deferred_wait) {
       outlined_attrs.emplace_back(kAttrDeferredCompletionWaiter, true);
+      // The validated bound is <= 64; use the existing printable integer attr
+      // codec rather than introducing a separate int64_t attr representation.
+      outlined_attrs.emplace_back(kAttrDeferredCompletionMaxCount,
+                                  static_cast<int>(deferred_wait.static_max_count));
     }
   };
   // Resolve pl.set_cache_policy declarations onto the outlined function's params.

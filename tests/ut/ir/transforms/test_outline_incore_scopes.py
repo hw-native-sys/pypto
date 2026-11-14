@@ -1948,7 +1948,7 @@ class TestOutlineSubmitTaskId:
                 signal: pld.DistributedTensor[[8, 1], pl.INT32],
                 epoch: pl.Scalar[pl.INT32],
             ):
-                pl.func_attr({"deferred_completion_waiter": True})
+                pl.func_attr({"deferred_completion_waiter": True, "deferred_completion_max_count": 8})
                 idx_anchor: pl.Scalar[pl.INT32] = pl.tensor.read(indices, [0, 0])
                 for src in pl.range(8):
                     if src != pl.cast(my_rank, pl.INDEX):
@@ -2153,6 +2153,7 @@ class TestOutlineSubmitTaskId:
         waiter = after.get_function("waiter")
         assert waiter is not None
         assert waiter.attrs["deferred_completion_waiter"] is True
+        assert waiter.attrs["deferred_completion_max_count"] == 64
 
     def test_deferred_wait_rejects_more_than_64_static_conditions(self):
         @pl.program

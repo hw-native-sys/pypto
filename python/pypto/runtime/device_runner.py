@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import hashlib
 import importlib.util
 import logging
 import os
@@ -50,6 +51,7 @@ from pypto._external_source import external_source_digest, kernel_binary_cache_p
 from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
 from . import _callable_identity, _vpto
+from ._async_capability import async_capability_key
 from ._binary_cache import (
     BinaryCacheContext,
     binary_context_lock,
@@ -105,7 +107,7 @@ def _load_binary(path: Path) -> bytes | None:
         return None
 
 
-_GeneratedCodeKey = tuple[str, str, str, tuple[str, ...], str]
+_GeneratedCodeKey = tuple[str, str, str, tuple[str, ...], str, tuple[int, str, int, int] | None]
 
 
 def _generated_code_key(kernel: dict[str, Any]) -> _GeneratedCodeKey | None:
@@ -120,6 +122,7 @@ def _generated_code_key(kernel: dict[str, Any]) -> _GeneratedCodeKey | None:
         external_source_digest(_vpto.source_paths(kernel.get("vpto_sources")))
         if kernel.get("vpto_sources")
         else "",
+        async_capability_key(kernel.get("async_capability")),
     )
 
 
@@ -131,7 +134,9 @@ def _generated_cache_identity(kernel: dict[str, Any]) -> str | int:
     # code symbol identify generated files; the enclosing binary context checks
     # runtime, toolchain, target and PTO-ISA revisions before any cache lookup.
     contract = (key[0], Path(key[1]).name, key[2], key[3])
-    return external_source_digest([kernel["source"]], metadata=(repr(contract),), include_dirs=key[3])[:24]
+    # Preserve the existing cache identity for legacy unqualified sources.
+    metadata = (repr(contract),) if key[5] is None else (repr(contract), repr(key[5]))
+    return external_source_digest([kernel["source"]], metadata=metadata, include_dirs=key[3])[:24]
 
 
 def _kernel_cache_file(
@@ -167,6 +172,12 @@ def _kernel_cache_file(
     if helpers:
         identity = compiler.vpto_cache_identity(helpers, kernel["core_type"])
         path = path.with_name(f"{path.stem}_vpto_{identity[:24]}{path.suffix}")
+    capability = async_capability_key(kernel.get("async_capability"))
+    if capability is not None:
+        # External and legacy cache naming also needs the explicit descriptor;
+        # equal machine code is not proof of equal completion semantics.
+        identity = hashlib.sha256(repr(capability).encode()).hexdigest()[:24]
+        path = path.with_name(f"{path.stem}_async_{identity}{path.suffix}")
     return path
 
 
@@ -686,7 +697,10 @@ def _compile_and_assemble_locked(
     kernel_binaries = [
         (
             kernel["func_id"],
-            CoreCallable.build(signature=kernel.get("signature", []), binary=binaries[key]),
+            CoreCallable.build(
+                signature=kernel.get("signature", []),
+                binary=binaries[key],
+            ),
             binaries[key],
         )
         for kernel, key in zip(kernels, registration_keys, strict=True)

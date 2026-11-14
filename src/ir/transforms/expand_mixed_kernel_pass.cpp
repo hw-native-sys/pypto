@@ -2529,6 +2529,7 @@ Pass ExpandMixedKernel() {
     // AIV/AIC function, or a user-stamped marker without a validated waiter
     // body and task-level call site, must not bypass the deferred contract.
     std::unordered_set<std::string> deferred_waiter_names;
+    std::unordered_map<std::string, int64_t> deferred_waiter_capacities;
     for (const auto& [gvar, func] : program->functions_) {
       // Detect the real op independently of the printable compiler marker.
       if (!outline_utils::ContainsDeferredWait(func->body_)) continue;
@@ -2550,6 +2551,7 @@ Pass ExpandMixedKernel() {
       INTERNAL_CHECK_SPAN(contract.has_deferred_wait, func->span_)
           << "Internal error: deferred-wait finder/contract-validator disagreement";
       deferred_waiter_names.insert(func->name_);
+      deferred_waiter_capacities.emplace(func->name_, contract.static_max_count);
     }
 
     if (!deferred_waiter_names.empty()) {
@@ -2602,6 +2604,18 @@ Pass ExpandMixedKernel() {
 
     for (const auto& [gvar, original_func] : program->functions_) {
       auto func = original_func;
+      if (auto it = deferred_waiter_capacities.find(func->name_); it != deferred_waiter_capacities.end()) {
+        // Recompute at this verified boundary, including hand-authored AIV IR.
+        // A printable attribute alone cannot authorize the runtime capacity.
+        auto qualified = MutableCopy(func);
+        auto& attrs = qualified->attrs_;
+        attrs.erase(
+            std::remove_if(attrs.begin(), attrs.end(),
+                           [](const auto& kv) { return kv.first == kAttrDeferredCompletionMaxCount; }),
+            attrs.end());
+        attrs.emplace_back(kAttrDeferredCompletionMaxCount, static_cast<int>(it->second));
+        func = qualified;
+      }
       if (func->func_type_ != FunctionType::InCore) {
         new_functions.push_back(func);
         continue;
