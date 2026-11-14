@@ -70,15 +70,31 @@ Refined output view types propagate through store results, local aliases, tuple 
 
 **Declined when the pattern carries a FIXPIPE epilogue.** If the in-loop `tile.assemble` or the post-loop `tile.store` carries `pre_quant` / `pre_relu`, the whole pattern is left alone. The rewrite moves the write to a different destination *class* (an on-chip tile becomes a GM tensor, and the legal scale-bearing dtype pairs are keyed on exactly that) and a different destination *dtype* (which is what the packed scale word encodes against), so the kwargs cannot be carried across unchanged — and re-deriving legality would duplicate the backend tables inside an optimization. Declining costs this fusion and nothing else; dropping the kwargs would cost a ReLU or a dequantization scale silently, with `FixpipeEpilogueValid` unable to catch it afterwards because by then there would be no epilogue left to reject. The two copies of the match — the mutator and the dead-set scanner — share one predicate so they cannot decline on different conditions and leave a deleted store behind an unrewritten loop.
 
-### Pattern 4: Slice Input Strides (SliceInputStridesOptimizer)
+### Pattern 4: Slice Argument Strides (SliceArgumentStridesOptimizer)
 
-**Problem**: When orchestration passes a sliced tensor (`tensor.slice`) as an `In` argument to an InCore function, the InCore function's parameter has contiguous strides (computed from its own shape), not the parent tensor's strides. This causes incorrect memory access when the slice is a non-contiguous view of the parent.
+**Problem**: A sliced tensor can be an `In`, `Out`, or `InOut` argument. Its
+physical pitch belongs to the parent allocation, rather than the window's
+shape. For example, a `[16,32]` column window of a `[16,128]` parent needs
+strides `[128,1]` for both loads and stores. Treating an output window as
+packed writes its second row into the wrong part of the parent.
 
-**Solution**: Analyze `tensor.slice(parent, size, offset)` patterns in orchestration. When a slice result is passed as an `In` argument to an InCore call, attach the parent tensor's shape-derived strides via `TensorView` on the InCore function's `In` param type, so `tile.load` uses the correct memory layout.
+**Solution**: Seed statically known parent strides from `tensor.slice` and
+propagate them across ordinary calls, task submissions, aliases, and
+`Group`/`Spmd` forwarding wrappers. Refine the corresponding core parameter
+`TensorView` for every parameter direction. Store result types and local
+aliases are updated with the refined output type; existing layout,
+valid-shape and padding metadata are preserved. Rank-reduced slices honor
+`drop_dims`.
 
-Refined input view types also propagate through local aliases, tuple construction, and tuple projections, so subsequent uses retain the parent strides and assignments remain type-symmetric.
+Function lookup is cached. A worklist propagates each value at most twice
+(unknown to known to conflicting), so this analysis is linear in the IR
+and its argument edges, independent of function declaration order.
 
-An `In` param declared `pl.NZ` is skipped: its bytes are fractal-blocked, so row-major parent strides do not describe them. `BlockNzTensorViews` derives its strides from the blocked shape and rejects an explicit one.
+Explicit parameter strides remain unchanged. Inference requires a static,
+consistent pitch; dynamic or conflicting pitches retain their existing
+explicit descriptor contract. Parameters declared `pl.NZ` are skipped:
+`BlockNzTensorViews` derives physical strides from the blocked shape and
+rejects a user-provided explicit stride.
 
 ### Pattern 5: Static Window Externalization
 
@@ -291,7 +307,7 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | --------- | ---- |
 | `IterArgReuseOptimizer` | Pattern 1 — merges Out params into In params for loop-carried buffers |
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
-| `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
+| `SliceArgumentStridesOptimizer` | Pattern 4 — propagates static slice strides to core arguments and dispatch wrappers |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
 | `window_externalization::ApplyWindowExternalization` | Pattern 5 module — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |

@@ -70,15 +70,24 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **当模式携带 FIXPIPE epilogue 时放弃改写。** 若循环内的 `tile.assemble` 或循环后的 `tile.store` 带有 `pre_quant` / `pre_relu`，整个模式原样保留。这次改写把写入目标换成了另一个**类别**（片上 tile 变成 GM tensor，而带 scale 的合法 dtype 组合正是按这个类别区分的），同时也换成了另一个**目标 dtype**（打包后的 scale 字正是按它编码的），因此这些 kwarg 无法原样迁移；而在一个优化里重新推导合法性等于把后端表复制一份。放弃改写只损失这次融合，别的什么也不损失；而悄悄丢掉这些 kwarg 损失的是一个 ReLU 或一个反量化 scale，且 `FixpipeEpilogueValid` 事后也抓不到——那时已经没有 epilogue 可拒绝了。匹配逻辑有两份（改写器与死集扫描器），它们共用同一个判据，因此不会出现「一方放弃、另一方已把 store 标记为死代码」而留下未改写循环的情况。
 
-### 模式 4：切片输入步长（SliceInputStridesOptimizer）
+### 模式 4：切片参数步长（SliceArgumentStridesOptimizer）
 
-**问题**：当编排函数将切片张量（`tensor.slice`）作为 `In` 参数传递给 InCore 函数时，InCore 函数的参数使用连续步长（从自身形状计算），而非父张量的步长。当切片是父张量的非连续视图时，这会导致错误的内存访问。
+**问题**：切片张量既可以作为 `In`，也可以作为 `Out` 或 `InOut` 参数。
+其物理步长属于父分配，与窗口自身形状不同。例如，`[16,128]` 父张量中
+一个 `[16,32]` 列窗口的读取和写入都需要 `[128,1]` 步长。把输出窗口当作
+紧凑存储，会将第二行写到父张量中的错误位置。
 
-**方案**：分析编排函数中的 `tensor.slice(parent, size, offset)` 模式。当切片结果作为 `In` 参数传递给 InCore 调用时，将父张量形状推导出的步长通过 `TensorView` 附加到 InCore 函数的 `In` 参数类型上，使 `tile.load` 能使用正确的内存布局。
+**方案**：从 `tensor.slice` 提取已知的静态父步长，沿普通调用、任务提交、
+别名以及 `Group`/`Spmd` 转发包装层传播，并细化各个方向的核内参数
+`TensorView`。存储结果类型与局部别名一起更新；已有的布局、有效形状和
+填充元数据被保留。降秩切片按 `drop_dims` 投影步长。
 
-细化后的输入视图类型也会传播到局部别名、元组构造和元组投影，使后续使用保留父张量步长，并保持赋值两侧类型对称。
+函数查找使用缓存。工作列表让每个值最多变化两次（未知→已知→冲突），
+因此分析相对于 IR 及参数边的规模为线性复杂度，不依赖函数声明顺序。
 
-声明为 `pl.NZ` 的 `In` 参数会被跳过：其字节按分形分块排列，行主序的父张量步长无法描述它。`BlockNzTensorViews` 会从分块形状推导其步长，并拒绝显式步长。
+显式声明的参数步长保持不变。自动推导要求步长静态且一致；动态或冲突
+步长仍需已有的显式描述符约定。声明为 `pl.NZ` 的参数被跳过：
+`BlockNzTensorViews` 从分块形状推导物理步长，并拒绝用户提供的显式步长。
 
 ### 模式 5：静态窗口外提
 
@@ -285,7 +294,7 @@ class After:
 | ---- | ---- |
 | `IterArgReuseOptimizer` | 模式 1 — 合并 Out 参数到 In 参数以复用循环携带缓冲区 |
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
-| `SliceInputStridesOptimizer` | 模式 4 — 通过 TensorView 为切片输入的 In 参数附加父张量步长 |
+| `SliceArgumentStridesOptimizer` | 模式 4 — 将静态切片步长传播至核内参数及派发包装层 |
 | `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
 | `window_externalization::ApplyWindowExternalization` | 模式 5 模块 — 将 eligible 的局部 Out 写和 eligible In-window consumer 改写为显式 callsite slice |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
