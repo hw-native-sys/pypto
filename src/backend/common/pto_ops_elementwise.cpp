@@ -571,12 +571,14 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
     // disjoint from all inputs.
     const auto dst_var = codegen.GetCurrentResultVar();
     const auto dst_type = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
-    INTERNAL_CHECK_SPAN(dst_type && dst_type->memref_.has_value(), op->span_)
-        << "Internal error: remainder result must carry a MemRef";
+    const auto dst_memref = dst_type ? dst_type->memref_.value_or(nullptr) : nullptr;
+    INTERNAL_CHECK_SPAN(dst_memref, op->span_) << "Internal error: remainder result must carry a MemRef";
     const size_t source_count = pto_op_name == "pto.trem" ? 2 : 1;
     for (size_t i = 0; i < source_count; ++i) {
       const auto source_type = As<ir::TileType>(op->args_[i]->GetType());
-      INTERNAL_CHECK_SPAN(!ir::MemRef::MayAlias(*source_type->memref_, *dst_type->memref_), op->span_)
+      const auto source_memref = source_type->memref_.value_or(nullptr);
+      INTERNAL_CHECK_SPAN(source_memref, op->span_) << "Internal error: remainder source must carry a MemRef";
+      INTERNAL_CHECK_SPAN(!ir::MemRef::MayAlias(source_memref, dst_memref), op->span_)
           << "Internal error: remainder result must not alias its sources";
       const auto fp32_type =
           std::make_shared<ir::TileType>(source_type->shape_, DataType::FP32, source_type->memref_,
