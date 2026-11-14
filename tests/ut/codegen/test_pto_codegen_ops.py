@@ -1731,7 +1731,7 @@ class TestRemainderFamilyCodegen:
         if find_ptoas_binary() is None:
             pytest.skip("PTOAS is not available")
         cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
-        assert cpp.count("pto::TCVT") == len(restores)
+        assert cpp.count("TCVT(") == len(restores)
 
     @pytest.mark.parametrize("scalar", [-(2**24) - 1, 2**24 + 1])
     def test_a2a3_rejects_out_of_domain_int32_rems_constant(self, scalar):
@@ -2050,31 +2050,51 @@ class TestRemainderFamilyCodegen:
         is_rem = op_name == "rem"
         scratch_rows = 2 if is_rem else 1
 
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                lhs: pl.Tensor[[4, width], pl.FP32],
-                rhs: pl.Tensor[[4, width], pl.FP32],
-                out: pl.Tensor[[4, width], pl.FP32],
-            ) -> pl.Tensor[[4, width], pl.FP32]:
-                a = pl.load(lhs, [0, 0], [4, width])
-                b = pl.load(rhs, [0, 0], [4, width])
-                tmp = pl.tile.create(
-                    [scratch_rows, scratch_cols], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                if is_rem:
+        if is_rem:
+
+            @pl.program
+            class RemProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[4, width], pl.FP32],
+                    rhs: pl.Tensor[[4, width], pl.FP32],
+                    out: pl.Tensor[[4, width], pl.FP32],
+                ) -> pl.Tensor[[4, width], pl.FP32]:
+                    a = pl.load(lhs, [0, 0], [4, width])
+                    b = pl.load(rhs, [0, 0], [4, width])
+                    tmp = pl.tile.create(
+                        [scratch_rows, scratch_cols], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
                     value = pl.tile.rem(a, b, tmp, high_precision=high_precision)
-                else:
+                    return pl.store(value, [0, 0], out)
+
+            program_cls = RemProgram
+
+        else:
+
+            @pl.program
+            class RemsProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[4, width], pl.FP32],
+                    out: pl.Tensor[[4, width], pl.FP32],
+                ) -> pl.Tensor[[4, width], pl.FP32]:
+                    a = pl.load(lhs, [0, 0], [4, width])
+                    tmp = pl.tile.create(
+                        [scratch_rows, scratch_cols], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
                     value = pl.tile.rems(a, 3.0, tmp)
-                return pl.store(value, [0, 0], out)
+                    return pl.store(value, [0, 0], out)
+
+            program_cls = RemsProgram
 
         if shortfall:
             with pytest.raises(ValueError, match=r"tmp (physical|valid) columns"):
-                self._generate_mlir(Program)
+                self._generate_mlir(program_cls)
         else:
-            mlir = self._generate_mlir(Program)
+            mlir = self._generate_mlir(program_cls)
             assert ("pto.trem " if op_name == "rem" else "pto.trems ") in mlir
             if high_precision:
                 assert "#pto<rem_precision high_precision>" in mlir
@@ -2082,7 +2102,7 @@ class TestRemainderFamilyCodegen:
             if find_ptoas_binary() is None:
                 pytest.skip("PTOAS is not available")
             cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
-            assert ("pto::TREM" if is_rem else "pto::TREMS") in cpp
+            assert ("  TREM" if is_rem else "  TREMS") in cpp
 
 
 class TestTileReadWriteOffsetCodegen:
