@@ -18,25 +18,26 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize("has_suite", [False, True])
 @pytest.mark.parametrize("exit_code", [0, 1])
 @pytest.mark.parametrize("step_name", ["Run Host communication-domain tests", "Run distributed tests"])
 def test_distributed_job_routes_and_propagates_failure(
-    tmp_path: Path, has_suite: bool, exit_code: int, step_name: str
+    tmp_path: Path, exit_code: int, step_name: str
 ) -> None:
     """Run the actual workflow shell with recording substitutes for execution."""
-    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())
+    workflow_path = ROOT / ".github/workflows/ci-full.yml"
+    workflow_text = workflow_path.read_text()
+    workflow = yaml.safe_load(workflow_text)
     steps = workflow["jobs"]["onboard-tests-a5-distributed"]["steps"]
     command = next(step["run"] for step in steps if step.get("name") == step_name)
+    # A rename/move of either suite must not leave its unconditional lane green.
+    assert (ROOT / "tests/st/distributed/test_l3_urma_async.py").is_file()
+    assert (ROOT / "tests/st/distributed/test_l3_host_comm_domain.py").is_file()
+    # Both suites must run; the placeholder fallback is retired.
+    assert "test_ci_placeholder.py" not in workflow_text
+    assert "if [ -f tests/st/distributed/test_l3_urma_async.py ]" not in command
     checkout = tmp_path / "a5-dist-checkout"
     checkout.mkdir()
     (checkout / "activate.sh").touch()
-    if has_suite:
-        # Simulate a future test checkout; this file exists only under tmp_path.
-        # The recording task-submit below never executes its empty contents.
-        suite = checkout / "tests/st/distributed/test_l3_urma_async.py"
-        suite.parent.mkdir(parents=True)
-        suite.touch()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "commands.log"
@@ -68,13 +69,12 @@ def test_distributed_job_routes_and_propagates_failure(
         assert f"--junitxml={checkout}/ci-host-domain-junit.xml" in executed
         assert "test_l3_urma_async.py" not in executed
         assert "test_ci_placeholder.py" not in executed
-    elif has_suite:
+    else:
         assert "task-submit --device auto --device-num 4" in executed
         assert "tests/st/distributed/test_l3_urma_async.py" in executed
         assert "test_ci_placeholder.py" not in executed
-    else:
-        assert "python -m pytest tests/lint/test_ci_placeholder.py" in executed
-        assert "task-submit" not in executed
+    # Preserve the device placeholder for expansion inside task-submit.
+    assert "--device=$TASK_DEVICE" in executed
 
 
 if __name__ == "__main__":

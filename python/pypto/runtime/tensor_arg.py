@@ -49,6 +49,7 @@ the owner check below runs on every L2 conversion.
 """
 
 import weakref
+from collections.abc import Sequence
 from functools import cache
 from typing import Any, cast
 
@@ -196,3 +197,29 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
         object.__setattr__(arg, _WIRE_TENSOR_ATTR, wire)
         return wire
     return torch_interop.make_tensor_arg(worker, arg)
+
+
+def check_window_capacity(*, name: str, shapes: Sequence[int], element_bytes: int, slot_nbytes: int) -> None:
+    """Validate a dense window view when its declaration executes on the host.
+
+    Args:
+        name: Backing window slot name for diagnostics.
+        shapes: Window dimensions in elements.
+        element_bytes: Size of one element in bytes.
+        slot_nbytes: Logical allocation size, excluding alignment padding.
+
+    Raises:
+        ValueError: A dimension is non-positive or the view exceeds the slot.
+    """
+    # Python integers cannot overflow when symbolic dimensions become concrete.
+    elements = 1
+    for dim in shapes:
+        if int(dim) <= 0:
+            raise ValueError(f"window view '{name}' has a non-positive dimension: {int(dim)}")
+        elements *= int(dim)
+    nbytes = elements * int(element_bytes)
+    slot_bytes = int(slot_nbytes)
+    if nbytes > slot_bytes:
+        raise ValueError(
+            f"window view '{name}' of {nbytes} bytes exceeds its backing window slot of {slot_bytes} bytes"
+        )

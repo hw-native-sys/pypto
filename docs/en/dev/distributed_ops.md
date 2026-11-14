@@ -49,29 +49,7 @@ exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 ## Async transfer validation
 
-`pld.tensor.put_async` and `pld.tensor.get_async` lower on the A5 backend to a
-dtype-suffixed external helper call (`pypto_urma_{put,get}_async_<dtype>`). The
-helper validates the request against both endpoint tensor extents and the
-communication window, requests the URMA workspace from the IR `engines` field,
-and submits through the existing runtime entry point; it never polls. Task
-completion integration (the enclosing task releasing the consumer) is still
-pending. Both endpoints must be window-bound, dense row-major
-`DistributedTensor`s. The result aliases `dst`; returning from the op does not
-imply completion.
-
-Adapter symbols and C++ element types reuse the shared dtype conversions.
-
-- Python builders require `engine=pld.CommEngine.URMA` (also the default).
-  Integers, floats, booleans, strings, and unrelated enums are rejected before
-  integer conversion. Raw IR stores the engine as integer `1`.
-- `peer` must be an integer/index scalar. Negative constant ranks are rejected;
-  this check does not establish runtime rank bounds for a communication domain.
-- `dst_offsets`, `src_offsets`, and `shape` must be supplied together. A region
-  must be contiguous on both endpoints: skip leading transfer dimensions known
-  to equal one, then require every dimension after the first non-singleton to
-  span its full extent. Dynamic extents may exceed one and are not skipped.
-  Thus `[1, 32]` inside `[16, 64]` and `[1, 2, 64]` inside `[2, 4, 64]` are
-  contiguous, but `[2, 32]` and `[2, 1, 64]`, respectively, are not.
+See [Async transfer validation](distributed_async.md) for the supported transfer matrix, usage pattern, ABI notes and failure diagnostics.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
@@ -882,7 +860,7 @@ Registers a local counter condition without `pto.comm.twait`. The kernel can ret
 release its AIV, but Simpler delays the ordinary TaskId's completion until every condition
 is ready; the kernel is never resumed.
 
-V1 accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
+The current implementation accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
 addressing, integer/index offsets and threshold, and only `WaitCmp::kGe`.
 Slices/views/SSA aliases, NZ layout, and rank-zero signals are rejected. Counter
 storage is INT32 but polling is unsigned `>=`: thresholds and published values must
