@@ -36,7 +36,9 @@ Run on A5 TMR with two or four cards:
         --platform=a5 --device=0,1
 
 Compiled with CANN 9.1.0; record the runtime and pypto commits with the result.
-A skip on a non-A5 host is not evidence of correctness.
+This hardware acceptance suite skips under ``--codegen-only``; compiler-only
+coverage lives in ``tests/ut/codegen/distributed/``. A skip on a non-A5 host or
+in codegen-only mode is not evidence of runtime correctness.
 """
 
 import json
@@ -52,6 +54,13 @@ from pypto.runtime._artifact_runtime import runtime_output_directory
 
 SIZE = 4096
 REPEATS = 3
+
+
+@pytest.fixture(autouse=True)
+def _require_device_execution(test_config: RunConfig) -> None:
+    """Skip hardware acceptance before compilation or warmup in codegen-only mode."""
+    if test_config.codegen_only:
+        pytest.skip("URMA async hardware acceptance requires device execution; --codegen-only is unsupported")
 
 
 def _rank_inputs(n_ranks: int, *, round_index: int = 0) -> torch.Tensor:
@@ -268,10 +277,9 @@ def _build_put_only(n_ranks: int):
 def _build_put_get_no_handshake(n_ranks: int):
     """PUT and GET in one program without a cross-rank notification.
 
-    The GET is ordered after this rank's own PUT, but nothing orders it after
-    the peers' fills, so only the local row of the GET result is
-    deterministic. The PUT result must still show every row, because each row
-    has a single writer and the readback depends on the PUT task.
+    Both readbacks are ordered after this rank's own PUT, but nothing orders
+    them after the peers' fills or incoming PUTs. Only each rank's local row
+    is deterministic in either result; the handshake cases check peer rows.
     """
 
     @pl.jit.incore
@@ -809,16 +817,11 @@ def _run_put_only_typed(test_config: RunConfig, device_ids: list[int], n_ranks: 
 
 
 def _compile_invalid(test_config: RunConfig, device_ids: list[int], n_ranks: int, builder):
-    """Compile and assemble an invalid program before asserting its rejection.
-
-    Codegen-only runs deliberately skip device assembly and execution, so keep
-    the legacy compile-only path for that mode.
-    """
+    """Compile and assemble an invalid program before asserting its rejection."""
     inputs = _rank_inputs(n_ranks)
     outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
     host_orch = builder(n_ranks)
-    prepare = host_orch.compile if test_config.codegen_only else host_orch.warmup
-    compiled = prepare(
+    compiled = host_orch.warmup(
         inputs,
         outputs,
         config=RunConfig(
@@ -1227,7 +1230,7 @@ class TestL3UrmaAsync:
         )
 
     def test_put_get_no_handshake(self, test_config, device_ids):
-        """PUT and GET without a notification: only the local GET row is asserted."""
+        """PUT and GET without a notification: only local rows are deterministic."""
         n_ranks = 2
         if len(device_ids) < n_ranks:
             pytest.skip(f"URMA async PUT/GET needs {n_ranks} devices")
@@ -1236,14 +1239,13 @@ class TestL3UrmaAsync:
             test_config, device_ids, n_ranks, _build_put_get_no_handshake
         )
         expected = _expected_exchange(n_ranks)
-        # Every PUT row has a single writer and the readback depends on the PUT
-        # task, so the full PUT matrix is ordered. The GET is ordered only after
-        # this rank's own PUT, not after the peers' fills, so only its local row
-        # is deterministic.
-        assert torch.allclose(outputs_put, expected), (
-            f"PUT P={n_ranks} mismatch: max diff = {(outputs_put - expected).abs().max().item()}"
-        )
+        # Local completion orders this rank's readbacks, not incoming PUTs or
+        # peer fills. Full peer-row assertions require the handshake cases.
         for r in range(n_ranks):
+            assert torch.allclose(outputs_put[r, r], expected[r, r]), (
+                f"PUT local row mismatch on rank {r}: "
+                f"max diff = {(outputs_put[r, r] - expected[r, r]).abs().max().item()}"
+            )
             assert torch.allclose(outputs_get[r, r], expected[r, r]), (
                 f"GET local row mismatch on rank {r}: "
                 f"max diff = {(outputs_get[r, r] - expected[r, r]).abs().max().item()}"
