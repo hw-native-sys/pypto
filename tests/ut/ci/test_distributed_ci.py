@@ -20,13 +20,14 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.mark.parametrize("has_suite", [False, True])
 @pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("step_name", ["Run Host communication-domain tests", "Run distributed tests"])
 def test_distributed_job_routes_and_propagates_failure(
-    tmp_path: Path, has_suite: bool, exit_code: int
+    tmp_path: Path, has_suite: bool, exit_code: int, step_name: str
 ) -> None:
     """Run the actual workflow shell with recording substitutes for execution."""
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci-full.yml").read_text())
     steps = workflow["jobs"]["onboard-tests-a5-distributed"]["steps"]
-    command = next(step["run"] for step in steps if "-m pytest" in step.get("run", ""))
+    command = next(step["run"] for step in steps if step.get("name") == step_name)
     checkout = tmp_path / "a5-dist-checkout"
     checkout.mkdir()
     (checkout / "activate.sh").touch()
@@ -60,7 +61,14 @@ def test_distributed_job_routes_and_propagates_failure(
     )
     assert result.returncode == exit_code, result.stderr
     executed = log.read_text()
-    if has_suite:
+    if step_name == "Run Host communication-domain tests":
+        assert "task-submit --device auto --device-num 2" in executed
+        assert "tests/st/distributed/test_l3_host_comm_domain.py" in executed
+        assert "--platform=a5 --device=$TASK_DEVICE" in executed
+        assert f"--junitxml={checkout}/ci-host-domain-junit.xml" in executed
+        assert "test_l3_urma_async.py" not in executed
+        assert "test_ci_placeholder.py" not in executed
+    elif has_suite:
         assert "task-submit --device auto --device-num 4" in executed
         assert "tests/st/distributed/test_l3_urma_async.py" in executed
         assert "test_ci_placeholder.py" not in executed
