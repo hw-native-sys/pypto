@@ -2360,5 +2360,152 @@ def test_signed_scope_attribute_roundtrip(value):
     assert scope.attrs["index_expr"].value == -1
 
 
+@pytest.mark.parametrize(
+    "source,init", [("device", ""), ("host", ""), ("host", "engram_l1"), ("host", 'table"\\\nkey')]
+)
+def test_window_memory_source_roundtrip(source, init):
+    base = ir.Var("table", ir.PtrType(), ir.Span.unknown())
+    window = ir.WindowBuffer(
+        base, ir.ConstInt(256, DataType.INT64, ir.Span.unknown()), memory_source=source, init=init
+    )
+    assert window.memory_source == source
+    restored = ir.deserialize(ir.serialize(window))
+    ir.assert_structural_equal(window, restored, enable_auto_mapping=True)
+
+
+def test_host_and_device_windows_have_separate_domains():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[64], pl.FP32]) -> pld.DistributedTensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            h = pld.alloc_window_buffer([64], dtype=pl.FP32, memory_source="host", init="engram_l1")
+            d = pld.alloc_window_buffer(256)
+            h2 = pld.alloc_window_buffer(256, memory_source="host")
+            ht = pld.window(h, [64], dtype=pl.FP32)
+            dt = pld.window(d, [64], dtype=pl.FP32)
+            ht2 = pld.window(h2, [64], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip(ht, device=r)
+                self.chip(dt, device=r)
+                self.chip(ht2, device=r)
+            return ht
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip(
+            self, x__ssa_v0: pld.DistributedTensor[[64], pl.FP32]
+        ) -> pld.DistributedTensor[[64], pl.FP32]:
+            return x__ssa_v0
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            with pl._dump.comm_domain(
+                name="comm_d0",
+                devices=[],
+                slots=[
+                    pl._dump.window_buffer(
+                        "h__ssa_v0_window",
+                        base="h__ssa_v0",
+                        size=pl.const(256, pl.INT64),
+                        load_from_host=False,
+                        store_to_host=False,
+                        memory_source="host",
+                        init="engram_l1",
+                    ),
+                    pl._dump.window_buffer(
+                        "h2__ssa_v0_window",
+                        base="h2__ssa_v0",
+                        size=256,
+                        load_from_host=False,
+                        store_to_host=False,
+                        memory_source="host",
+                    ),
+                ],
+                engines=["urma"],
+            ):
+                with pl._dump.comm_domain(
+                    name="comm_d1",
+                    devices=[],
+                    slots=[
+                        pl._dump.window_buffer(
+                            "d__ssa_v0_window",
+                            base="d__ssa_v0",
+                            size=256,
+                            load_from_host=False,
+                            store_to_host=False,
+                        )
+                    ],
+                ):
+                    h__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(
+                        pl.const(256, pl.INT64), name="h", init="engram_l1", memory_source="host"
+                    )
+                    d__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(256, name="d")
+                    h2__ssa_v0: pl.Ptr = pl._dump.alloc_window_buffer(256, name="h2", memory_source="host")
+                    ht__ssa_v0: pld.DistributedTensor[
+                        [64], pl.FP32, pl._dump.window_ref("h__ssa_v0_window")
+                    ] = pl._dump.call(
+                        "pld.tensor.window",
+                        [h__ssa_v0, [64]],
+                        pld.DistributedTensor[[64], pl.FP32, pl._dump.window_ref("h__ssa_v0_window")],
+                        kwargs={"dtype": pl.FP32},
+                    )
+                    dt__ssa_v0: pld.DistributedTensor[
+                        [64], pl.FP32, pl._dump.window_ref("d__ssa_v0_window")
+                    ] = pl._dump.call(
+                        "pld.tensor.window",
+                        [d__ssa_v0, [64]],
+                        pld.DistributedTensor[[64], pl.FP32, pl._dump.window_ref("d__ssa_v0_window")],
+                        kwargs={"dtype": pl.FP32},
+                    )
+                    ht2__ssa_v0: pld.DistributedTensor[
+                        [64], pl.FP32, pl._dump.window_ref("h2__ssa_v0_window")
+                    ] = pl._dump.call(
+                        "pld.tensor.window",
+                        [h2__ssa_v0, [64]],
+                        pld.DistributedTensor[[64], pl.FP32, pl._dump.window_ref("h2__ssa_v0_window")],
+                        kwargs={"dtype": pl.FP32},
+                    )
+                    for r__idx_v0 in pl.range(pld.system.world_size()):
+                        self.chip(ht__ssa_v0, device=r__idx_v0)
+                        self.chip(dt__ssa_v0, device=r__idx_v0)
+                        self.chip(ht2__ssa_v0, device=r__idx_v0)
+                    return ht__ssa_v0
+
+    after = _apply(Before)
+    ir.assert_structural_equal(after, Expected)
+    scope = _get_func(after, "host").body
+    assert isinstance(scope, ir.CommDomainScopeStmt)
+    assert [slot.memory_source for slot in scope.slots] == ["host", "host"]
+    assert list(scope.engines) == ["urma"]
+    assert scope.slots[0].init == "engram_l1"
+    ir.assert_structural_equal(
+        scope.slots[0], ir.deserialize(ir.serialize(scope.slots[0])), enable_auto_mapping=True
+    )
+    assert isinstance(scope.body, ir.CommDomainScopeStmt)
+    assert [slot.memory_source for slot in scope.body.slots] == ["device"]
+    assert list(scope.body.engines) == []
+    ir.assert_structural_equal(after, passes.materialize_comm_domain_scopes()(after))
+    restored = pl.parse(ir.python_print(after))
+    ir.assert_structural_equal(after, restored)
+    assert ir.structural_hash(after) == ir.structural_hash(restored)
+
+
+@pytest.mark.parametrize("source", ["cpu", "HOST", "", 1])
+def test_invalid_window_memory_source(source):
+    with pytest.raises((ValueError, TypeError), match="memory_source"):
+        dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source)
+
+
+@pytest.mark.parametrize("init,source", [("", "host"), (3, "host"), ("table", "device")])
+def test_invalid_window_init(init, source):
+    with pytest.raises((ValueError, TypeError), match="init"):
+        dist_tensor_ops.alloc_window_buffer(256, name="table", memory_source=source, init=init)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

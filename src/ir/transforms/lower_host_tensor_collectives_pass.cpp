@@ -79,6 +79,9 @@ static constexpr size_t kMaxSupportedRanks = 16;
       << "LowerHostTensorCollectives: " << context << " must be DistributedTensorType";
   INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), expr->span_)
       << "LowerHostTensorCollectives: " << context << " must have materialized WindowBuffer back-references";
+  CHECK_SPAN((*dist_type->window_buffer_)->memory_source_ == "device", expr->span_)
+      << "Host communication windows require URMA for peer access; " << context
+      << " belongs to an MTE collective, which requires Device windows";
   return *dist_type->window_buffer_;
 }
 
