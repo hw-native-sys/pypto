@@ -2619,6 +2619,530 @@ class TestPropertyVerification:
 class TestAutoPipeSetup:
     """Test auto-generated reserve/import/initialize_pipe setup."""
 
+    def test_register_writeback_alias_keeps_tfree_after_scope_consumers(self):
+        """A second scope and a final Tile store still borrow the original slot."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                received = pl.move(
+                    product,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    mask = pl.reg.active_mask(32, lanes=64)
+                    updated = pl.reg.store(flat, value=value, mask=mask)
+                pl.tfree_to_aic(updated, id=0)
+                with pl.reg_scope():
+                    value2 = pl.reg.load(updated, lanes=64)
+                    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+                    mask2 = pl.reg.full_mask(lanes=64)
+                    scattered = pl.reg.scatter(updated, offsets, value2, mask2)
+                view = pl.reshape(scattered, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_aiv(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buffer = pl.reserve_buffer(name="main_c2v_slot_buffer", size=2048)
+                pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    mask = pl.reg.active_mask(32, lanes=64)
+                    updated = pl.reg.store(flat, value=value, mask=mask)
+                with pl.reg_scope():
+                    value2 = pl.reg.load(updated, lanes=64)
+                    offsets = pl.reg.index_gen(0, lanes=64, dtype=pl.UINT32)
+                    mask2 = pl.reg.full_mask(lanes=64)
+                    scattered = pl.reg.scatter(updated, offsets, value2, mask2)
+                view = pl.reshape(scattered, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                # Retiming keeps the authored pipe id, but frees the canonical pop.
+                pl.tfree_to_aic(received, id=0)
+                return out
+
+        _assert_function_equal(_expand_raw(Before), Expected, "main_aiv")
+
+    def test_register_writeback_preserves_fifo_prefix_release_order(self):
+        """The second pop cannot release the first slot while its alias is live."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                first = pl.move(
+                    product,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                second = pl.move(
+                    product,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                flat = pl.reshape(first, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                out = pl.store(second, [0, 0], out)
+                view = pl.reshape(updated, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_aiv(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buffer = pl.reserve_buffer(name="main_c2v_slot_buffer", size=2048)
+                pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+                first: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
+                second: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(first, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                out = pl.store(second, [0, 0], out)
+                view = pl.reshape(updated, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                pl.tfree_to_aic(first)
+                pl.tfree_to_aic(second)
+                return out
+
+        _assert_function_equal(_expand_raw(Before), Expected, "main_aiv")
+
+    def test_register_writeback_lifetime_is_local_to_each_loop_iteration(self):
+        """A nonescaping receive is freed after the store on every iteration."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                for _ in pl.range(4):
+                    received = pl.move(
+                        product,
+                        target_memory=pl.Mem.Vec,
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    )
+                    flat = pl.reshape(received, [256])
+                    with pl.reg_scope():
+                        value = pl.reg.load(flat, lanes=64)
+                        updated = pl.reg.store(flat, value=value)
+                    view = pl.reshape(updated, [16, 16])
+                    out = pl.store(view, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_aiv(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buffer = pl.reserve_buffer(name="main_c2v_slot_buffer", size=2048)
+                pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+                for _ in pl.range(4):
+                    received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(
+                        split=0
+                    )
+                    flat = pl.reshape(received, [256])
+                    with pl.reg_scope():
+                        value = pl.reg.load(flat, lanes=64)
+                        updated = pl.reg.store(flat, value=value)
+                    view = pl.reshape(updated, [16, 16])
+                    out = pl.store(view, [0, 0], out)
+                    pl.tfree_to_aic(received)
+                return out
+
+        _assert_function_equal(_expand_raw(Before), Expected, "main_aiv")
+
+    def test_register_writeback_loop_result_retains_outer_receive(self):
+        """An outer receive stays live through an invariant loop-carried alias."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                count: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                received = pl.move(
+                    product,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                flat = pl.reshape(received, [256])
+                for _, (carried,) in pl.range(count, init_values=(flat,)):
+                    with pl.reg_scope():
+                        value = pl.reg.load(carried, lanes=64)
+                        updated = pl.reg.store(carried, value=value)
+                    result = pl.yield_(updated)
+                view = pl.reshape(result, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_aiv(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                count: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buffer = pl.reserve_buffer(name="main_c2v_slot_buffer", size=2048)
+                pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, slot_num=2)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                for _, (carried,) in pl.range(count, init_values=(flat,)):
+                    with pl.reg_scope():
+                        value = pl.reg.load(carried, lanes=64)
+                        updated = pl.reg.store(carried, value=value)
+                    result = pl.yield_(updated)
+                view = pl.reshape(result, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                pl.tfree_to_aic(received)
+                return out
+
+        _assert_function_equal(_expand_raw(Before), Expected, "main_aiv")
+
+    def test_register_writeback_cannot_return_borrowed_slot(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, x: pl.Tensor[[16, 16], pl.BF16], y: pl.Tensor[[16, 16], pl.BF16]
+            ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                received = pl.move(
+                    product,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                return pl.reshape(updated, [16, 16])
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_cannot_yield_branch_local_slot(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                condition: pl.Scalar[pl.BOOL],
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                if condition:
+                    received = pl.move(
+                        product,
+                        target_memory=pl.Mem.Vec,
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    )
+                    flat = pl.reshape(received, [256])
+                    with pl.reg_scope():
+                        value = pl.reg.load(flat, lanes=64)
+                        updated = pl.reg.store(flat, value=value)
+                    selected = pl.reshape(updated, [16, 16])
+                else:
+                    selected = pl.tile.full([16, 16], pl.FP32, 1.0)
+                out = pl.store(selected, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_rejects_nested_if_return(self):
+        """The branch must inherit provenance from a writeback in the outer scope."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                with pl.reg_scope():
+                    value = pl.reg.load(received, lanes=64)
+                    updated = pl.reg.store(received, value=value)
+                if condition:
+                    return updated
+                return pl.tile.full([256], pl.FP32, 1.0)
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_rejects_nested_loop_return(self):
+        """A direct outer receive cannot escape through a doubly nested return."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                with pl.reg_scope():
+                    value = pl.reg.load(received, lanes=64)
+                    _updated = pl.reg.store(received, value=value)
+                for _ in pl.range(4):
+                    if condition:
+                        return received
+                return pl.tile.full([256], pl.FP32, 1.0)
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_rejects_nested_while_return(self):
+        """An outer writeback cannot escape through a while-body return."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, condition: pl.Scalar[pl.BOOL]) -> pl.Tile[[256], pl.FP32, pl.Mem.Vec]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[256], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                with pl.reg_scope():
+                    value = pl.reg.load(received, lanes=64)
+                    updated = pl.reg.store(received, value=value)
+                while condition:
+                    return updated
+                return pl.tile.full([256], pl.FP32, 1.0)
+
+        with pytest.raises(ValueError, match="FIFO-backed Tile cannot escape"):
+            _expand_raw(Before)
+
+    def test_register_writeback_nested_loop_pipe_overlap(self):
+        """A nested loop cannot release the still-live outer FIFO prefix."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                for _ in pl.range(4):
+                    inner: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    out = pl.store(inner, [0, 0], out)
+                    pl.tfree_to_aic(inner)
+                out = pl.store(pl.reshape(updated, [16, 16]), [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="nested body cannot reuse a pipe with an outstanding"):
+            _expand_raw(Before)
+
+    def test_register_writeback_nested_branch_pipe_overlap(self):
+        """A conditional receive cannot release the still-live outer FIFO prefix."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, condition: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                if condition:
+                    inner: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    out = pl.store(inner, [0, 0], out)
+                    pl.tfree_to_aic(inner)
+                out = pl.store(pl.reshape(updated, [16, 16]), [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="nested body cannot reuse a pipe with an outstanding"):
+            _expand_raw(Before)
+
+    def test_register_writeback_releases_outer_slot_before_nested_loop(self):
+        """Finishing the outer consumers before the loop makes same-pipe reuse safe."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                cube: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(cube)
+                received: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                flat = pl.reshape(received, [256])
+                with pl.reg_scope():
+                    value = pl.reg.load(flat, lanes=64)
+                    updated = pl.reg.store(flat, value=value)
+                out = pl.store(pl.reshape(updated, [16, 16]), [0, 0], out)
+                pl.tfree_to_aic(received)
+                for _ in pl.range(4):
+                    inner: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                    out = pl.store(inner, [0, 0], out)
+                    pl.tfree_to_aic(inner)
+                return out
+
+        after = _expand_raw(Before)
+        aiv = after.get_function("main_aiv")
+        assert aiv is not None
+        statements = _flatten_top_level_stmts(aiv.body)
+        free_index = next(
+            i for i, stmt in enumerate(statements) if _get_stmt_op_name(stmt) in _AUTO_TFREE_OPS
+        )
+        loop_index = next(i for i, stmt in enumerate(statements) if isinstance(stmt, ir.ForStmt))
+        assert free_index < loop_index
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(after), after)
+
+    def test_register_writeback_rejects_changing_loop_storage(self):
+        """A zero-trip loop still returns its initial FIFO slot."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                count: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                received = pl.move(product, target_memory=pl.Mem.Vec)
+                flat = pl.reshape(received, [256])
+                for _, (carried,) in pl.range(count, init_values=(flat,)):
+                    local = pl.tile.full([256], pl.FP32, 1.0)
+                    with pl.reg_scope():
+                        value = pl.reg.load(carried, lanes=64)
+                        updated = pl.reg.store(local, value=value)
+                    result = pl.yield_(updated)
+                view = pl.reshape(result, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="loop carry must preserve the same received slot"):
+            _expand_raw(Before)
+
+    def test_register_writeback_rejects_ambiguous_branch_storage(self):
+        """A branch result must not lose the borrowed alternative's lifetime."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                y: pl.Tensor[[16, 16], pl.BF16],
+                condition: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                rhs = pl.load(y, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                left = pl.move(lhs, target_memory=pl.Mem.Left)
+                right = pl.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.matmul(left, right)
+                received = pl.move(product, target_memory=pl.Mem.Vec)
+                flat = pl.reshape(received, [256])
+                if condition:
+                    with pl.reg_scope():
+                        value = pl.reg.load(flat, lanes=64)
+                        updated = pl.reg.store(flat, value=value)
+                    selected = updated
+                else:
+                    selected = pl.tile.full([256], pl.FP32, 1.0)
+                view = pl.reshape(selected, [16, 16])
+                out = pl.store(view, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="control-flow result must preserve the same received slot"):
+            _expand_raw(Before)
+
     def test_bidirectional_different_slot_sizes_uses_max(self):
         """Bidirectional kernels with different per-direction tile sizes use max as slot_size."""
 

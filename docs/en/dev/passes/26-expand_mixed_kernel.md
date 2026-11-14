@@ -351,6 +351,41 @@ block without reordering independent `tpop` chains. When AIC must post-process a
 same-side `tile.move` (for example Mat -> Left/Right/Bias), the generated `system.tfree_to_aiv(...)` is rewritten to
 free the canonical popped tile value and can be delayed past that carrier chain.
 
+Lifetime tracking also follows physical writeback aliases (`reg.store` and
+`reg.scatter`, including masked writes) and exports aliases defined inside
+`RegScope` to its later consumers. The scope remains one indivisible statement:
+the free belongs after the last use of the receive or any of its aliases,
+including a later scope or Tile store. Releases preserve pop order within each
+pipe, so a later pop cannot return credit before an earlier live slot. Retiming
+an authored free preserves its explicit attributes.
+
+In Tile-only functions, a branch or loop that yields a locally received Vec Tile
+first copies the yielded value or view into independent storage. Its order is
+`tpop` → view/consumers → `tile.move` → `tfree` → `yield`. The branch result
+therefore survives the release, and later phi lowering never needs to read
+the freed slot. `yield` remains the final statement in the body.
+This automatic copy is limited to Vec receives on both backends. Yielding a
+locally received Mat Tile or its view is rejected before materialization:
+Mat-to-Mat `TMOV` is unsupported on A2/A3, and no portable Mat copy strategy is
+implemented here. Consume the Mat receive inside its defining branch or loop
+before yielding.
+
+In functions containing `RegScope`, a receive created inside a branch or loop
+body must not escape that body through
+`yield`; returning borrowed storage from the function is also rejected, including
+an outer receive or writeback alias returned inside a nested branch or loop. Freeing
+such a value before the terminator would invalidate the escaped alias. Materialize
+independent storage before exporting the value. An outer receive can pass through
+a branch or loop result only when every path retains the same slot, including
+the initial value of a zero-trip loop; joins with a different slot or independent
+storage are rejected. A nested body cannot receive on the same pipe while an
+outer receive is still outstanding, because its free would release the older
+slot. Finish the outer consumers and release that slot before entering the
+nested body, or use a different pipe. A nested body also cannot release an outer
+receive. These are compiler lifetime
+rules, not a proof of hardware completion: direct FIFO capture by VF remains
+unsupported until its runtime-pointer ABI and synchronization are qualified.
+
 For Ascend910 (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
 supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
 emits a runtime `subblock_idx` branch: AIV lane 0 executes the original body, while AIV lane 1 replays the cross-core

@@ -1032,13 +1032,15 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   reg("tile.fillpad_inplace", [](const CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CheckArity(op, "pto.tfillpad", 1);
-    if (!codegen.EmitTileAddr()) {
-      const auto& result_var = codegen.GetCurrentResultVar();
-      INTERNAL_CHECK_SPAN(result_var, op->span_)
-          << "Internal error: tile.fillpad_inplace requires a result variable";
-      auto result_type = As<ir::TileType>(result_var->GetType());
-      INTERNAL_CHECK_SPAN(result_type, op->span_)
-          << "Internal error: tile.fillpad_inplace requires a TileType result";
+    const auto& result_var = codegen.GetCurrentResultVar();
+    INTERNAL_CHECK_SPAN(result_var, op->span_)
+        << "Internal error: tile.fillpad_inplace requires a result variable";
+    auto result_type = As<ir::TileType>(result_var->GetType());
+    INTERNAL_CHECK_SPAN(result_type, op->span_)
+        << "Internal error: tile.fillpad_inplace requires a TileType result";
+    // MemRef-less writebacks already have an input-derived destination view
+    // prepared by assignment codegen, regardless of the selected planner.
+    if (!codegen.EmitTileAddr() && result_type->memref_) {
       // Filling reads the source's original extent and makes the entire result
       // valid. Preserve that distinction even when both use the same pad mode.
       // Local allocations support later validity updates; subviews and loop-

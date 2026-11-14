@@ -1891,8 +1891,10 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
     "control-flow body tail must be YieldStmt when return_vars is non-empty".
 
     Both branches of the ``if`` do cube work whose Vec-moved result is the
-    branch's carried value, so after the AIC/AIV split each AIV branch reduces
-    to ``tpop_from_aic`` -> ``tfree_to_aic`` -> ``yield``.
+    branch's carried value. The received data must be copied to independent
+    storage before its slot is released: ``tpop`` -> ``move`` -> ``tfree`` ->
+    ``yield``. Keeping only the terminator order would still allow a later
+    phi copy to read an already released slot.
     """
 
     @pl.program
@@ -1945,6 +1947,81 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
         assert _op_name(stmts[0]) == "tile.tpop_from_aic", (
             f"{label} branch should open with tile.tpop_from_aic, got {_op_name(stmts[0])!r}"
         )
+        assert _op_name(stmts[-3]) == "tile.move", f"{label} branch must copy before releasing the slot"
+        received = stmts[0]
+        assert isinstance(received, ir.AssignStmt)
+        copy = stmts[-3]
+        assert isinstance(copy, ir.AssignStmt) and isinstance(copy.value, ir.Call)
+        assert copy.value.args[0].same_as(received.var)
+        assert stmts[-1].value[0].same_as(copy.var)
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+def test_branch_local_mat_fifo_yield_rejected(backend_type: BackendType):
+    """Automatic V2C receives cannot be materialized with a Mat-to-Mat copy."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            flag: pl.Scalar[pl.BOOL],
+            x: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            if flag:
+                vector = pl.load(x, [0, 0], [16, 16])
+                received = pl.move(vector, target_memory=pl.Mem.Mat)
+                selected = pl.yield_(received)
+            else:
+                ordinary = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                selected = pl.yield_(ordinary)
+            left = pl.move(selected, target_memory=pl.Mem.Left)
+            right_mat = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            right = pl.move(right_mat, target_memory=pl.Mem.Right)
+            product = pl.matmul(left, right)
+            out = pl.store(product, [0, 0], out)
+            return out
+
+    # Reject in ExpandMixedKernel, before memory planning or PTOAS can turn
+    # the branch-local receive into an unsupported Mat-to-Mat TMOV.
+    with pytest.raises(ValueError, match="FIFO-backed Tile is only supported in Vec memory"):
+        _run_pipeline(Before)
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+def test_loop_local_mat_fifo_view_yield_rejected(backend_type: BackendType):
+    """Views of explicit Mat receives retain the same materialization limit."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP16],
+            count: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            initial = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            for _, (_carried,) in pl.range(count, init_values=(initial,)):
+                vector = pl.load(x, [0, 0], [16, 16])
+                pl.tpush_to_aic(vector, split=0)
+                received: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tpop_from_aiv(split=0)
+                view = pl.reshape(received, [16, 16])
+                selected = pl.yield_(view)
+            left = pl.move(selected, target_memory=pl.Mem.Left)
+            right_mat = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            right = pl.move(right_mat, target_memory=pl.Mem.Right)
+            product = pl.matmul(left, right)
+            out = pl.store(product, [0, 0], out)
+            return out
+
+    with pytest.raises(ValueError, match="FIFO-backed Tile is only supported in Vec memory"):
+        _run_pipeline(Before)
 
 
 def test_gm_sync_hoisted_before_consumer_loop_on_a2a3():

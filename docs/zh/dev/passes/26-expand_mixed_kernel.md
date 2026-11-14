@@ -295,6 +295,33 @@ A5 拒绝显式本地深度，即使其值等于 `slot_num`，因为 PTOAS 的�
 `tile.tpop_from_aiv` 结果还需要做同侧 `tile.move`（例如 Mat -> Left/Right/Bias），
 则生成的 `system.tfree_to_aiv(...)` 会改写为释放 canonical 的 popped tile，并可被延后到这条 carrier 链之后。
 
+生命周期追踪也覆盖物理写回别名（physical writeback alias），包括带 mask 的
+`reg.store` 和 `reg.scatter`，并将 `RegScope` 内定义的别名传递给后续消费者。
+该作用域保持为不可拆分的单条语句：释放点位于接收值及其所有别名的最后一次使用
+之后，包括后续作用域和 Tile store。同一 pipe 按 pop 顺序释放，后一次 pop 不能
+在前一个槽位仍被使用时归还 credit。移动用户编写的 free 时保留其显式属性。
+
+对于仅包含 Tile 操作的函数，分支或循环若 yield 在本区域接收的 Vec Tile，
+会先将 yield 的值或 view 复制到独立存储。顺序为
+`tpop` → view/消费者 → `tile.move` → `tfree` → `yield`。
+因此槽位释放后分支结果仍然有效，后续 phi 降低无需读取已释放的槽位，
+且 `yield` 始终是区域的最后一条语句。
+两个后端都只对 Vec 接收值执行这种自动复制。在本区域接收的 Mat Tile
+及其 view 若被 yield，会在物化前被拒绝：A2/A3 不支持 Mat-to-Mat `TMOV`，
+这里也尚未实现可跨后端使用的 Mat 复制方案。应在定义该接收值的分支或
+循环内完成对它的消费，再 yield 结果。
+
+对于包含 `RegScope` 的函数，在分支或循环体内部创建的接收值不能通过
+`yield` 逃逸出该区域；函数也不能返回借用存储，包括在嵌套分支或循环中返回外层
+接收值及其写回别名。在终结语句之前释放这样的值会使逃逸的别名失效，必须先物化独立存储
+再导出该值。外部接收值可以通过分支或循环结果传递，但每条路径必须保留同一个
+槽位，包括零次执行循环的初始值；与其他槽位或独立存储合并会被拒绝。
+外层接收值尚未释放时，嵌套区域不能在同一 pipe 上继续接收，否则其 free 会释放
+较早的槽位。应在进入嵌套区域前完成外层消费者并释放槽位，或使用另一条 pipe。
+嵌套区域也不能释放外层接收值。
+这些规则保证编译器层面的生命周期，不构成硬件完成条件的证明：
+直接 FIFO VF 捕获仍需验证运行时指针 ABI 和同步后才能开放。
+
 对于 Ascend910（a2a3），该 Pass 也支持**没有函数级 split 模式**的 mixed kernel（`split` 未设置或为
 `SplitMode.None`）。此时 Pass 会保留单个 AIV kernel body，并为其打上**双 AIV 派发**标记；后续 lowering
 会基于运行时 `subblock_idx` 插入分支：AIV lane 0 执行原始函数体，AIV lane 1 重放跨核握手，并将 tile-producing

@@ -14,6 +14,7 @@ import re
 import subprocess
 from contextlib import ExitStack, nullcontext
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import pto_backend
@@ -533,6 +534,31 @@ def test_group_packaging_routes_helpers_by_entry_not_group_name(tmp_path, monkey
     config = files["kernel_config.py"]
     assert config.count('"vpto_sources"') == 1
     assert symbols[0] in config
+
+
+def test_bundle_still_rejects_fifo_register_writeback():
+    """Borrowed lifetime support does not enable the runtime-pointer VF ABI."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self):
+            buffer = pl.reserve_buffer(name="c2v", size=1024, base=0)
+            pl.aiv_initialize_pipe(buffer, pl.const(0, pl.INT32), dir_mask=1, slot_size=512, slot_num=2)
+            received: pl.Tile[[128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+            with pl.reg_scope():
+                value = pl.reg.load(received, lanes=64)
+                updated = pl.reg.store(received, value=value)
+            view = pl.reshape(updated, [128])
+            with pl.reg_scope():
+                value2 = pl.reg.load(view, lanes=64)
+                _written = pl.reg.store(view, value=value2)
+            pl.tfree_to_aic(received)
+
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(Before)
+    with pytest.raises(ValueError, match="FIFO-backed Tiles are not supported"):
+        codegen.PTOCodegen().generate_bundle(program)
 
 
 def test_bundle_rejects_peer_functions():
