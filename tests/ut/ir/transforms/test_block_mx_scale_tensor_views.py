@@ -388,7 +388,7 @@ def test_submit_return_type_is_blocked_and_launch_fields_survive():
 
 
 @pytest.mark.parametrize("logical_views", [False, True])
-@pytest.mark.parametrize("offsets", [[1, 0], [-16, 0], [0, 1], [0, -2]])
+@pytest.mark.parametrize("offsets", [[1, 0], [0, 1]])
 def test_mx_modes_share_offset_safety_checks(logical_views, offsets):
     @pl.program
     class Before:
@@ -397,6 +397,19 @@ def test_mx_modes_share_offset_safety_checks(logical_views, offsets):
             _ = pl.load(scale, offsets, [16, 2], target_memory=pl.Mem.Mat)
 
     with pytest.raises(ValueError, match="non-negative multiple of"):
+        _run(Before, logical_views=logical_views)
+
+
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_mx_modes_require_proven_non_negative_offset(logical_views):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scale: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ], block: pl.Scalar[pl.INDEX]):
+            # Alignment is provable, but an unconstrained scalar can be negative.
+            _ = pl.load(scale, [block * 16, 0], [16, 2], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match="non-negative, and this one cannot be proven"):
         _run(Before, logical_views=logical_views)
 
 

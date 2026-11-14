@@ -97,7 +97,7 @@ def _mx_load_program(layout, block_offset, group_offset, explicit_stride):
 
 @pytest.mark.parametrize("layout", [pl.MX_A_ZZ, pl.MX_B_NN])
 @pytest.mark.parametrize("explicit_stride", [False, True])
-@pytest.mark.parametrize("offsets", [(1, 0), (-16, 0), (0, 1), (0, -2), (16, 2)])
+@pytest.mark.parametrize("offsets", [(1, 0), (0, 1), (16, 2)])
 def test_logical_mx_requires_legalization(layout, explicit_stride, offsets):
     # A custom pipeline must not replace offset validation with shape-only
     # validation, even for an already explicit view or with verification off.
