@@ -9,6 +9,11 @@ MX views in the default pipeline remain logical rank-2 after
 are `[cols, 1]`, and PTOAS owns physical packing. Explicit legacy blocked
 rank-5 MX views remain valid for this pass, but are not emitted to PTOAS v0.74.
 
+Logical MX views require the containing function to carry the legalization
+stamp from `LegalizeMxScaleTensorViews`. This preserves its load-offset
+alignment and non-negativity checks in custom pipelines. The requirement
+also applies to explicit strides and when verification is disabled.
+
 ## Overview
 
 PyPTO's IR allows two equivalent forms for `TensorType.tensor_view_`:

@@ -388,14 +388,15 @@ def test_submit_return_type_is_blocked_and_launch_fields_survive():
 
 
 @pytest.mark.parametrize("logical_views", [False, True])
-def test_mx_modes_share_offset_safety_checks(logical_views):
+@pytest.mark.parametrize("offsets", [[1, 0], [-16, 0], [0, 1], [0, -2]])
+def test_mx_modes_share_offset_safety_checks(logical_views, offsets):
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def main(self, scale: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ]):
-            _ = pl.load(scale, [1, 0], [16, 2], target_memory=pl.Mem.Mat)
+            _ = pl.load(scale, offsets, [16, 2], target_memory=pl.Mem.Mat)
 
-    with pytest.raises(ValueError, match="non-negative multiple of 16"):
+    with pytest.raises(ValueError, match="non-negative multiple of"):
         _run(Before, logical_views=logical_views)
 
 
