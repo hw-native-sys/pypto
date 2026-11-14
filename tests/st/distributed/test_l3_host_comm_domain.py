@@ -7,10 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""A5 Host-source domain construction, URMA context, and local MTE smoke test.
+"""A5 Host-source domains: local MTE, initialization, and remote URMA transfers.
 
-No peer read is issued: allocation must establish the URMA resources, and each
-rank writes then reads its own mapped Host window through separate tasks.
+Peer GET/PUT use Host DDR for both endpoints and a separate Device signal
+domain for notify/wait, since Host peer windows do not support MTE access.
+Async completion is checked by reading the destination in a dependent task.
 """
 
 from contextlib import ExitStack
@@ -139,6 +140,141 @@ def test_host_domain_runtime_file_initialization(test_config, device_ids, tmp_pa
             worker(outputs)
             expected_reuse = expected if reset is False else torch.zeros_like(expected)
             assert torch.equal(outputs, expected_reuse)
+
+
+@pl.jit.incore
+def host_peer_announce(
+    data: pld.DistributedTensor[[1, 64], pl.FP32],
+    signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+) -> pld.DistributedTensor[[2, 1], pl.INT32]:
+    # The data input orders this task after the fill or completed async PUT.
+    rank = pld.rank(pld.get_comm_ctx(signal))
+    pld.system.notify(signal, peer=1 - rank, offsets=[rank, 0], value=1, op=pld.NotifyOp.Set)
+    return signal
+
+
+@pl.jit.incore
+def host_peer_wait(
+    signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+) -> pld.DistributedTensor[[2, 1], pl.INT32]:
+    rank = pld.rank(pld.get_comm_ctx(signal))
+    pld.system.wait(signal, offsets=[1 - rank, 0], expected=1, cmp=pld.WaitCmp.Ge)
+    return signal
+
+
+@pl.jit.incore
+def get_host_peer(
+    src: pld.DistributedTensor[[1, 64], pl.FP32],
+    signal: pld.DistributedTensor[[2, 1], pl.INT32],
+    dst: pl.InOut[pld.DistributedTensor[[1, 64], pl.FP32]],
+) -> pld.DistributedTensor[[1, 64], pl.FP32]:
+    # The signal dependency ensures the remote source has been filled.
+    rank = pld.rank(pld.get_comm_ctx(src))
+    return pld.tensor.get_async(dst, peer=1 - rank, src=src, engine=pld.CommEngine.URMA)
+
+
+@pl.jit.incore
+def put_host_peer(
+    src: pld.DistributedTensor[[1, 64], pl.FP32],
+    dst: pl.InOut[pld.DistributedTensor[[1, 64], pl.FP32]],
+) -> pld.DistributedTensor[[1, 64], pl.FP32]:
+    rank = pld.rank(pld.get_comm_ctx(dst))
+    return pld.tensor.put_async(dst, peer=1 - rank, src=src, engine=pld.CommEngine.URMA)
+
+
+@pl.jit.incore
+def read_host_peer(
+    dst: pld.DistributedTensor[[1, 64], pl.FP32],
+    signal: pld.DistributedTensor[[2, 1], pl.INT32],
+    out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+) -> pl.Tensor[[1, 64], pl.FP32]:
+    # PUT readback must also wait for the remote issuer's completion signal.
+    return pl.store(pl.load(dst, [0, 0], [1, 64]), [0, 0], out)
+
+
+@pl.jit
+def host_peer_get_chip(
+    inp: pl.Tensor[[1, 64], pl.FP32],
+    out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    src: pl.InOut[pld.DistributedTensor[[1, 64], pl.FP32]],
+    dst: pl.InOut[pld.DistributedTensor[[1, 64], pl.FP32]],
+    signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+) -> pl.Tensor[[1, 64], pl.FP32]:
+    filled = fill_host(inp, src)
+    announced = host_peer_announce(filled, signal)
+    waited = host_peer_wait(announced)
+    fetched = get_host_peer(filled, waited, dst)
+    return read_host(fetched, out)
+
+
+@pl.jit
+def host_peer_put_chip(
+    inp: pl.Tensor[[1, 64], pl.FP32],
+    out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    src: pl.InOut[pld.DistributedTensor[[1, 64], pl.FP32]],
+    dst: pl.InOut[pld.DistributedTensor[[1, 64], pl.FP32]],
+    signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+) -> pl.Tensor[[1, 64], pl.FP32]:
+    filled = fill_host(inp, src)
+    published = put_host_peer(filled, dst)
+    announced = host_peer_announce(published, signal)
+    waited = host_peer_wait(announced)
+    return read_host_peer(published, waited, out)
+
+
+def _build_host_peer_program(chip_orch):
+    """Keep both async endpoints in one Host domain and signals in Device GM."""
+
+    @pl.jit.host
+    def host_peer_program(
+        inputs: pl.Tensor[[2, 1, 64], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[2, 1, 64], pl.FP32]],
+    ) -> pl.Tensor[[2, 1, 64], pl.FP32]:
+        src_buf = pld.alloc_window_buffer([1, 64], dtype=pl.FP32, memory_source="host")
+        dst_buf = pld.alloc_window_buffer([1, 64], dtype=pl.FP32, memory_source="host")
+        signal_buf = pld.alloc_window_buffer([2, 1], dtype=pl.INT32, memory_source="device")
+        for r in pl.range(2):
+            src = pld.window(src_buf, [1, 64], dtype=pl.FP32)
+            dst = pld.window(dst_buf, [1, 64], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [2, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], outputs[r], src, dst, signal, device=r)
+        return outputs
+
+    return host_peer_program
+
+
+def _run_host_peer_transfer(test_config, device_ids, chip_orch):
+    if len(device_ids) < 2:
+        pytest.skip("Host peer URMA transfers require two A5 devices")
+    inputs = torch.arange(1, 129, dtype=torch.float32).reshape(2, 1, 64)
+    outputs = torch.full_like(inputs, -1)
+    compiled = _build_host_peer_program(chip_orch).compile(
+        inputs,
+        outputs,
+        config=RunConfig(
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
+        ),
+    )
+    if test_config.codegen_only:
+        pytest.skip("--codegen-only compiled Host peer URMA transfers without device execution")
+    for step in range(3):
+        inputs.add_(1000)
+        outputs.fill_(-1)
+        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        assert torch.equal(outputs, inputs.flip(0)), f"Host peer transfer mismatch on dispatch {step}"
+
+
+@pytest.mark.platforms("a5")
+def test_host_domain_urma_get_peer(test_config, device_ids):
+    """Each rank pulls the other rank's Host DDR source into its own Host DDR."""
+    _run_host_peer_transfer(test_config, device_ids, host_peer_get_chip)
+
+
+@pytest.mark.platforms("a5")
+def test_host_domain_urma_put_peer(test_config, device_ids):
+    """Each rank pushes its Host DDR source into the other rank's Host DDR."""
+    _run_host_peer_transfer(test_config, device_ids, host_peer_put_chip)
 
 
 if __name__ == "__main__":
