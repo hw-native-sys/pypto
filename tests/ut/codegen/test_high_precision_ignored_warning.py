@@ -11,10 +11,13 @@
 
 The request survives every layer below the DSL: PyPTO writes ``precisionType``
 into the PTO IR and PTOAS keeps it as a ``HIGH_PRECISION`` template argument.
-Only PTO-ISA decides whether to read it, and Ascend910's ``TDIV_IMPL`` /
-``TLOG_IMPL`` / ``TREM_IMPL`` / ``TFMOD_IMPL`` accept the template parameter
+Only PTO-ISA decides whether to read it. Ascend950 selects a separate
+compensated algorithm for all of these ops. On Ascend910 the ``TDIV_IMPL`` /
+``TLOG_IMPL`` / ``TFMOD_IMPL`` implementations accept the template parameter
 without ever branching on it — the op computes the default result and nothing
-downstream says so. Ascend950 selects a separate compensated algorithm.
+downstream says so. ``TREM_IMPL`` is the exception: the A2/A3 ``pto.trem``
+runs a high-precision algorithm from its tmp scratch, so that call site is
+exempt from the warning (and needs a correspondingly larger scratch).
 
 So the attribute alone proves nothing about what runs, and these tests assert
 the two halves of that separately: the attribute is still emitted on both
@@ -120,6 +123,30 @@ class HighPrecisionRecip:
     ) -> pl.Tensor[[N, N], pl.FP32]:
         ta: pl.Tile[[N, N], pl.FP32] = pl.load(a, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
         tc: pl.Tile[[N, N], pl.FP32] = pl.recip(ta, high_precision=True)
+        return pl.store(tc, [0, 0], output)
+
+
+@pl.program
+class HighPrecisionRem:
+    """A2/A3 `pto.trem` executes the high-precision algorithm from its scratch.
+
+    `C = max(64 // 64, 1) = 1`, so the A2/A3 window is
+    `192*C + mask + 8 + 64 + 512*min(C, 8) = 784` columns.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[N, N], pl.FP32],
+        b: pl.Tensor[[N, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+    ) -> pl.Tensor[[N, N], pl.FP32]:
+        ta: pl.Tile[[N, N], pl.FP32] = pl.load(a, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
+        tb: pl.Tile[[N, N], pl.FP32] = pl.load(b, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
+        tmp: pl.Tile[[2, 784], pl.FP32] = pl.tile.create(
+            [2, 784], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+        )
+        tc: pl.Tile[[N, N], pl.FP32] = pl.tile.rem(ta, tb, tmp, high_precision=True)
         return pl.store(tc, [0, 0], output)
 
 
@@ -273,6 +300,25 @@ def test_ascend910b_warns_naming_the_op_and_the_arch(program_cls, op_name, capfd
 @pytest.mark.parametrize("program_cls", [HighPrecisionDiv, HighPrecisionLog, HighPrecisionRecip])
 def test_ascend950_stays_silent_because_it_honours_the_request(program_cls, capfd):
     _incore_mlir(program_cls, BackendType.Ascend950)
+    assert _warnings(capfd) == []
+
+
+def test_a2a3_trem_honours_high_precision_and_stays_silent(capfd):
+    """The pinned pto-isa runs HP TREM on A2/A3, so the warning must not fire.
+
+    The selector is still emitted so PTOAS keeps choosing the HP template
+    argument; only the "backend drops it" diagnostic is gone.
+    """
+    mlir = _incore_mlir(HighPrecisionRem, BackendType.Ascend910)
+
+    assert "precisionType = #pto<rem_precision high_precision>" in mlir, mlir
+    assert _warnings(capfd) == []
+
+
+def test_a5_trem_stays_silent_because_it_honours_the_request(capfd):
+    mlir = _incore_mlir(HighPrecisionRem, BackendType.Ascend950)
+
+    assert "precisionType = #pto<rem_precision high_precision>" in mlir, mlir
     assert _warnings(capfd) == []
 
 

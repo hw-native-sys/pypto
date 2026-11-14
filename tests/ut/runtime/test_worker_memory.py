@@ -75,6 +75,38 @@ def worker(fake_simpler_worker):
 
 
 class TestMallocFree:
+    def test_exportable_malloc_is_explicit(self, fake_simpler_worker, worker):
+        fake_simpler_worker.malloc.return_value = FakeBuffer(0x4000)
+        assert worker.malloc(1024, exportable=True) == 0x4000
+        fake_simpler_worker.malloc.assert_called_once_with(1024, exportable=True)
+
+    def test_exportable_tensor_and_close_guard(self, fake_simpler_worker, worker):
+        fake_simpler_worker.malloc.return_value = FakeBuffer(0x4000)
+        tensor = worker.alloc_tensor((64,), torch.float32, exportable=True)
+        exported = worker.export_buffer(tensor)
+        fake_simpler_worker.export_buffer.assert_called_once_with(tensor.buffer)
+        fake_simpler_worker.check_exports_retired.side_effect = RuntimeError("external exports")
+        with pytest.raises(RuntimeError, match="external"):
+            worker.close()
+        assert worker.initialized and (0, tensor.data_ptr) in worker._owned_tensors
+        fake_simpler_worker.free.assert_not_called()
+        fake_simpler_worker.close.assert_not_called()
+        worker.release_export(exported)
+        fake_simpler_worker.release_export.assert_called_once_with(exported)
+        fake_simpler_worker.check_exports_retired.side_effect = None
+        worker.close()
+        assert not worker.initialized
+        fake_simpler_worker.free.assert_called_once_with(tensor.buffer)
+        fake_simpler_worker.close.assert_called_once()
+
+    def test_export_rejects_freed_tensor(self, fake_simpler_worker, worker):
+        fake_simpler_worker.malloc.return_value = FakeBuffer(0x4000)
+        tensor = worker.alloc_tensor((64,), torch.float32, exportable=True)
+        worker.free_tensor(tensor)
+        with pytest.raises(ValueError, match="live allocation"):
+            worker.export_buffer(tensor)
+        fake_simpler_worker.export_buffer.assert_not_called()
+
     def test_malloc_forwards_with_default_worker_id(self, fake_simpler_worker, worker):
         buffer = FakeBuffer(0x4000)
         fake_simpler_worker.malloc.return_value = buffer
