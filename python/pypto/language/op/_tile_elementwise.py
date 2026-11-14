@@ -472,7 +472,8 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
     """Element-wise remainder (modulo) of two tiles.
 
     Computes lhs % rhs element-wise. Maps to the TREM hardware intrinsic.
-    On A2/A3, every INT32 input element must be in ``[-2**24, 2**24]``.
+    On A2/A3, every INT32 input element must be in ``[-2**24, 2**24]``,
+    and the two INT32 source buffers must not overlap.
 
     Args:
         lhs: Left-hand side tile

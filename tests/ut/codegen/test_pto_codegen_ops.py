@@ -2011,6 +2011,36 @@ class TestRemainderFamilyCodegen:
         with pytest.raises(ValueError, match="tmp not to overlap source operand 0"):
             self._generate_mlir(Program, BackendType.Ascend910)
 
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    @pytest.mark.parametrize("dtype", [pl.INT32, pl.FP32])
+    @pytest.mark.parametrize("rhs_offset", [0, 8], ids=["same-view", "partial-overlap"])
+    def test_remainder_source_alias_contract(self, backend_type, dtype, rhs_offset):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                source: pl.Tensor[[2, 24], dtype],
+                out: pl.Tensor[[2, 16], dtype],
+                source_after: pl.Tensor[[2, 16], dtype],
+            ) -> tuple[pl.Tensor[[2, 16], dtype], pl.Tensor[[2, 16], dtype]]:
+                base = pl.load(source, [0, 0], [2, 24])
+                a = pl.tile.slice(base, [2, 16], [0, 0])
+                b = pl.tile.slice(base, [2, 16], [0, rhs_offset])
+                tmp = pl.tile.create([2, 32], dtype=dtype, target_memory=pl.MemorySpace.Vec)
+                value = pl.tile.rem(a, b, tmp)
+                out = pl.store(value, [0, 0], out)
+                source_after = pl.store(a, [0, 0], source_after)
+                return out, source_after
+
+        if backend_type == BackendType.Ascend910 and dtype == pl.INT32:
+            with pytest.raises(ValueError, match="INT32 sources not to overlap"):
+                self._generate_mlir(Program, backend_type)
+        else:
+            mlir = self._generate_mlir(Program, backend_type)
+            assert "pto.trem " in mlir
+            assert "pto.tcvt " not in mlir
+
     def test_a2a3_rem_rejects_tmp_aliasing_rhs(self):
         @pl.program
         class Program:

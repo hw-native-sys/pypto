@@ -27,7 +27,9 @@ that count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)`, with
 as their capacity bound. Both physical and valid scratch columns must cover
 that count. The ISA leaves INT32 source buffers in FP32 representation:
 codegen restores both TREM sources and the TREMS dividend with explicit
-FP32-to-INT32 conversions before subsequent consumers.
+FP32-to-INT32 conversions before subsequent consumers. A2/A3 INT32 TREM
+requires non-overlapping source buffers: the ISA converts both inputs in place,
+so overlapping storage would be converted twice before the operation itself.
 
 ## Design Principle: Strict 1-to-1 Mapping
 

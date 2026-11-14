@@ -530,6 +530,17 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
             << op->op_->name_ << " on A2/A3 requires tmp not to overlap source operand " << i;
       }
 
+      if (pto_op_name == "pto.trem" && src_type->dtype_ == DataType::INT32) {
+        const auto rhs_type = As<ir::TileType>(op->args_[1]->GetType());
+        // The ISA converts both operands in-place before computing the result.
+        // Overlap would convert the same storage twice, even if restores were
+        // deduplicated afterward.
+        CHECK_SPAN(
+            !ir::MemRef::MayAlias(src_type->memref_.value_or(nullptr), rhs_type->memref_.value_or(nullptr)),
+            op->span_)
+            << "tile.rem on A2/A3 requires INT32 sources not to overlap";
+      }
+
       const int64_t required_rows = pto_op_name == "pto.trem" ? 2 : 1;
       const int64_t required_columns =
           GetA2A3RemainderScratchColumns(src_type, op->GetKwarg<bool>("high_precision", false), op->span_);
