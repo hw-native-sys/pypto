@@ -2505,7 +2505,8 @@ jobs:
       needs.changes.outputs.full == 'true'
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, npu-a5]
+    # Pin the distributed lane to runner 2 to avoid runner 1's faulty card.
+    runs-on: [self-hosted, linux, npu-a5, 238PR-npu-a5-2]
     defaults:
       run:
         working-directory: a5-dist-checkout
