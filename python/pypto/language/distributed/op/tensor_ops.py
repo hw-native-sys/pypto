@@ -173,15 +173,29 @@ def _compute_window_buffer_bytes(shape: list[int | Expr], dtype: DataType) -> in
 
 
 @overload
-def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr: ...
+def alloc_window_buffer(
+    size: IntLike, *, name: str = "", memory_source: str = "device", init: str | None = None
+) -> Ptr: ...
 
 
 @overload
-def alloc_window_buffer(shape: Sequence[IntLike], *, dtype: DataType, name: str = "") -> Ptr: ...
+def alloc_window_buffer(
+    shape: Sequence[IntLike],
+    *,
+    dtype: DataType,
+    name: str = "",
+    memory_source: str = "device",
+    init: str | None = None,
+) -> Ptr: ...
 
 
 def alloc_window_buffer(  # type: ignore[no-redef]
-    size: IntLike | Sequence[IntLike], *, dtype: DataType | None = None, name: str = ""
+    size: IntLike | Sequence[IntLike],
+    *,
+    dtype: DataType | None = None,
+    name: str = "",
+    memory_source: str = "device",
+    init: str | None = None,
 ) -> Ptr:
     """Declare a per-rank HCCL window-buffer in a comm-domain scope slot.
 
@@ -210,6 +224,11 @@ def alloc_window_buffer(  # type: ignore[no-redef]
             sizes — ``int``, DSL ``Scalar``, or raw :class:`ir.Expr`.
         dtype: (Convenience form, required) Element data type. Must be
             ``None`` (default) in the canonical byte form.
+        memory_source: Physical backing, "device" (default) or "host". Host domains
+            require A5 TMR and automatically allocate URMA resources for peer access.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered binary files or
+            contiguous CPU tensors through DistributedWorker(window_sources=...) after compilation.
+            Sources are copied only when the domain is created, not on reuse.
         name: Unique buffer identifier. The parser injects this from the LHS
             of the surrounding assignment
             (``buf = pld.tensor.alloc_window_buffer(...)``); users **must not**
@@ -252,7 +271,9 @@ def alloc_window_buffer(  # type: ignore[no-redef]
             )
         shape_normalized: list[int | Expr] = _normalize_intlike(size)
         byte_size: int | Expr = _compute_window_buffer_bytes(shape_normalized, dtype)
-        call = _ir_tensor.alloc_window_buffer(_unwrap(byte_size), name=name)
+        call = _ir_tensor.alloc_window_buffer(
+            _unwrap(byte_size), name=name, memory_source=memory_source, init=init
+        )
         return Ptr(expr=call)
 
     if dtype is not None:
@@ -261,7 +282,7 @@ def alloc_window_buffer(  # type: ignore[no-redef]
             "(list / tuple), not a scalar byte size"
         )
 
-    call = _ir_tensor.alloc_window_buffer(_unwrap(size), name=name)
+    call = _ir_tensor.alloc_window_buffer(_unwrap(size), name=name, memory_source=memory_source, init=init)
     return Ptr(expr=call)
 
 

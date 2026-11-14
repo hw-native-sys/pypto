@@ -37,6 +37,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/core/python_string.h"
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
@@ -1064,6 +1065,8 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         stream_ << prefix_ << ".KernelType." << kernel;
       } else if (is_syncall && key == "mode") {
         stream_ << prefix_ << ".SyncAllMode." << AttrValueToEnumMember(str_val);
+      } else if (key == "init" && IsOp(op, "pld.tensor.alloc_window_buffer")) {
+        stream_ << QuotePythonString(str_val);
       } else {
         stream_ << "'" << str_val << "'";
       }

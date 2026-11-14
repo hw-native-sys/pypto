@@ -245,6 +245,8 @@ class DistParamAliasCollector : public IRVisitor {
   std::unordered_map<const Var*, VarPtr> alias_to_ctx;
   std::unordered_map<const Var*, std::vector<VarPtr>> tuple_to_ctx;
 
+  VarPtr ResolveCtx(const ExprPtr& expr) const { return LookupCtx(expr); }
+
  protected:
   void VisitStmt_(const SimtLaunchStmtPtr& op) override {
     // A writable GM launch result is a new SSA name for the same allocation.
@@ -705,6 +707,123 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
                                     func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
 }
 
+// Trace Host provenance along context forwarding edges. Each node/edge is
+// visited once; shared device functions can accept both Host and Device windows.
+// Reject only parameters used by peer-MTE operations, not unrelated HBM args.
+class HostPeerAccessChecker : public IRVisitor {
+ public:
+  HostPeerAccessChecker(ProgramPtr program, const std::unordered_map<std::string, FunctionCtxPlan>& plans)
+      : program_(std::move(program)), plans_(plans) {}
+
+  void Check() {
+    for (const auto& [gvar, func] : program_->functions_) {
+      auto it = plans_.find(func->name_);
+      DistParamAliasCollector aliases(program_, &plans_, it == plans_.end() ? nullptr : &it->second);
+      aliases.VisitStmt(func->body_);
+      aliases_ = &aliases;
+      VisitStmt(func->body_);
+    }
+    aliases_ = nullptr;
+    std::unordered_set<const Var*> visited;
+    while (!host_nodes_.empty()) {
+      const Var* node = host_nodes_.back();
+      host_nodes_.pop_back();
+      if (!visited.insert(node).second) continue;
+      auto bad = peer_uses_.find(node);
+      CHECK_SPAN(bad == peer_uses_.end(), node->span_)
+          << "Host communication windows require URMA for peer access; " << bad->second
+          << " uses peer MTE and cannot access memory_source='host'.";
+      auto edge = edges_.find(node);
+      if (edge != edges_.end()) {
+        host_nodes_.insert(host_nodes_.end(), edge->second.begin(), edge->second.end());
+      }
+    }
+  }
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    CheckCall(call->op_, call->args_);
+    IRVisitor::VisitExpr_(call);
+  }
+  void VisitExpr_(const SubmitPtr& submit) override {
+    CheckCall(submit->op_, submit->args_);
+    IRVisitor::VisitExpr_(submit);
+  }
+
+ private:
+  const Var* Resolve(const ExprPtr& expr) {
+    if (auto type = As<DistributedTensorType>(expr->GetType()); type && type->window_buffer_) {
+      const auto& window = *type->window_buffer_;
+      if (window->memory_source_ == "host") host_nodes_.push_back(window.get());
+      return window.get();
+    }
+    auto ctx = aliases_->ResolveCtx(expr);
+    return ctx.get();
+  }
+
+  void CheckBuiltinPeerAccess(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
+    const auto template_dir = callee->GetAttr<std::string>(kAttrBuiltinTemplateDir);
+    if (template_dir.empty()) return;
+    const auto& registry = OpRegistry::GetInstance();
+    if (template_dir != registry.GetEntry("builtin.tensor.all_to_all_v").GetTemplateDir() &&
+        template_dir != registry.GetEntry("pld.tensor.indexed_all_to_all_v").GetTemplateDir()) {
+      return;
+    }
+    // LowerL2TensorCollectives replaces these ops with return-only IR stubs.
+    // Both templates access peer signal/count memory directly, even though the
+    // indexed variant transfers payloads over URMA. Target supplies their ctx,
+    // which must also have peer-MTE mappings. Input/recv_counts are local-only.
+    // Inspect actual send_counts (arg 3): its canonical formal is plain Tensor,
+    // so distributed-parameter forwarding alone loses its Host provenance.
+    for (size_t index = 1; index <= 3 && index < args.size(); ++index) {
+      if (auto source = Resolve(args[index])) peer_uses_.emplace(source, callee->name_);
+    }
+  }
+
+  void CheckCall(const OpPtr& op, const std::vector<ExprPtr>& args) {
+    if (auto global = As<GlobalVar>(op)) {
+      auto callee = program_->GetFunction(global->name_);
+      if (!callee) return;
+      CheckBuiltinPeerAccess(callee, args);
+      auto plan = plans_.find(global->name_);
+      if (plan == plans_.end()) return;
+      for (size_t index : plan->second.dist_param_indices) {
+        if (index >= args.size()) continue;
+        if (auto source = Resolve(args[index])) {
+          edges_[source].push_back(plan->second.param_to_ctx.at(callee->params_[index].get()).get());
+        }
+      }
+      return;
+    }
+    if (!op || op->name_.rfind("pld.", 0) != 0) return;
+    if (IsOp(op, "pld.tensor.window") || IsOp(op, "pld.tensor.alloc_window_buffer") ||
+        IsOp(op, "pld.system.get_comm_ctx") || IsOp(op, "pld.system.rank") || IsOp(op, "pld.system.nranks") ||
+        IsOp(op, "pld.system.world_size") || IsOp(op, "pld.system.wait") ||
+        IsOp(op, "pld.system.defer_wait") || IsOp(op, "pld.tensor.put_async") ||
+        IsOp(op, "pld.tensor.get_async")) {
+      return;
+    }
+    std::optional<size_t> remote_arg;
+    if (IsOp(op, "pld.tensor.get") || IsOp(op, "pld.tile.get")) remote_arg = 2;
+    if (IsOp(op, "pld.tensor.put") || IsOp(op, "pld.tile.put") || IsOp(op, "pld.tile.remote_load") ||
+        IsOp(op, "pld.system.notify")) {
+      remote_arg = 0;
+    }
+    if (IsOp(op, "pld.tensor.remote_store") || IsOp(op, "pld.tile.remote_store")) remote_arg = 1;
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (remote_arg && i != *remote_arg) continue;
+      if (auto source = Resolve(args[i])) peer_uses_.emplace(source, op->name_);
+    }
+  }
+
+  ProgramPtr program_;
+  const std::unordered_map<std::string, FunctionCtxPlan>& plans_;
+  const DistParamAliasCollector* aliases_ = nullptr;
+  std::unordered_map<const Var*, std::vector<const Var*>> edges_;
+  std::unordered_map<const Var*, std::string> peer_uses_;
+  std::vector<const Var*> host_nodes_;
+};
+
 [[nodiscard]] ProgramPtr TransformProgram(const ProgramPtr& program) {
   std::unordered_map<std::string, FunctionCtxPlan> plans;
   for (const auto& [gvar, func] : program->functions_) {
@@ -712,6 +831,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     auto plan = BuildFunctionCtxPlan(func);
     if (!plan.dist_param_indices.empty()) plans.emplace(func->name_, std::move(plan));
   }
+  HostPeerAccessChecker(program, plans).Check();
   if (plans.empty()) return program;
 
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> extended;

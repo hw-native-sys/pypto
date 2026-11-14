@@ -30,7 +30,14 @@ from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 _ALLREDUCE_SIGNAL_MISSING = object()
 
 
-def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None) -> Call:
+def alloc_window_buffer(
+    size: int | Expr,
+    *,
+    name: str,
+    memory_source: str = "device",
+    init: str | None = None,
+    span: Span | None = None,
+) -> Call:
     """Build a ``pld.tensor.alloc_window_buffer(size)`` Call.
 
     The op's result type is the singleton :class:`ir.PtrType` (allocation
@@ -41,6 +48,9 @@ def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None
         size: Per-rank allocation size in bytes (``int`` or scalar
             :class:`ir.Expr`).
         name: Unique buffer identifier, kwarg-only.
+        memory_source: Physical backing, "device" or "host". Host requires URMA resources.
+        init: Non-empty runtime source key for a Host window. Bind rank-ordered binary files or
+            contiguous CPU tensors through DistributedWorker(window_sources=...) after compilation.
         span: Optional source span (auto-captured if absent).
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -48,7 +58,20 @@ def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None
         size_expr: Expr = _ir_core.ConstInt(size, DataType.INT64, actual_span)
     else:
         size_expr = size
-    return _ir_core.create_op_call("pld.tensor.alloc_window_buffer", [size_expr], {"name": name}, actual_span)
+    if memory_source not in ("device", "host"):
+        raise ValueError(
+            f"alloc_window_buffer memory_source must be 'device' or 'host', got {memory_source!r}"
+        )
+    if init is not None and (type(init) is not str or not init):
+        raise ValueError("alloc_window_buffer init must be a non-empty string or None")
+    if init is not None and memory_source != "host":
+        raise ValueError("alloc_window_buffer init requires memory_source='host'")
+    kwargs = {"name": name}
+    if init is not None:
+        kwargs["init"] = init
+    if memory_source != "device":
+        kwargs["memory_source"] = memory_source
+    return _ir_core.create_op_call("pld.tensor.alloc_window_buffer", [size_expr], kwargs, actual_span)
 
 
 def window(

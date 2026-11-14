@@ -2946,6 +2946,12 @@ class WindowBuffer(Var):
     :attr:`tile.alloc`'s size argument and the runtime's
     ``CommBufferSpec.nbytes`` field)."""
 
+    init: Final[str]
+    """Runtime initialization source key; empty means no initialization."""
+
+    memory_source: Final[str]
+    """Physical backing: ``device`` (HBM) or ``host`` (DDR, URMA peer access)."""
+
     load_from_host: Final[bool]
     """``True`` if this slot participates in pre-fork H2D staging."""
 
@@ -2959,6 +2965,8 @@ class WindowBuffer(Var):
         load_from_host: bool = False,
         store_to_host: bool = False,
         span: Span = ...,
+        memory_source: str = "device",
+        init: str = "",
     ) -> None:
         """Create a WindowBuffer wrapping the given Ptr ``base`` Var."""
 

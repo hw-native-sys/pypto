@@ -19,6 +19,7 @@ domains, handle-owned input lifetimes, and complete cleanup before publication.
 import ctypes
 import gc
 import importlib.util
+import io
 import json
 import sys
 import threading
@@ -56,7 +57,9 @@ from pypto.runtime.distributed_runner import (
     _register_callables,
     _reset_dfx_dispatch_state,
     _submit_chip,
+    _submit_dispatch,
     add_chip_tensor_arg,
+    validate_host_domain_runtime,
 )
 from pypto.runtime.runner import RunConfig
 
@@ -1888,6 +1891,28 @@ class TestLoadOrchEntry:
         assert entry_fn.__name__ == "moe_ep_l3"
         assert alloc_fn is None
 
+    @pytest.mark.parametrize("initialized", [False, True])
+    def test_host_capabilities_checked_at_load_not_dispatch(self, tmp_path, monkeypatch, initialized):
+        from pypto.runtime.distributed_runner import _load_orch_entry  # noqa: PLC0415
+
+        orch_type = object()
+        runtime = ModuleType("simpler.orchestrator")
+        setattr(runtime, "Orchestrator", orch_type)
+        monkeypatch.setitem(sys.modules, "simpler.orchestrator", runtime)
+        root = self._write_orch(
+            tmp_path,
+            "def host(orch, args, config, **kw):\n    return 'ok'\n"
+            "host._pypto_distributed_entry = True\n"
+            "host._requires_host_domain = True\n"
+            f"host._window_source_keys = {('table',) if initialized else ()!r}\n",
+        )
+        with patch("pypto.runtime.distributed_runner.validate_host_domain_runtime") as check:
+            entry, _ = _load_orch_entry(root)
+            check.assert_called_once_with(orch_type, initialized=initialized)
+            for _ in range(3):
+                assert entry(None, None, None) == "ok"
+            assert check.call_count == 1
+
     def test_returns_alloc_intermediates_when_present(self, tmp_path):
         from pypto.runtime.distributed_runner import _load_orch_entry  # noqa: PLC0415
 
@@ -2268,6 +2293,10 @@ class TestAssembleChipCallables:
         none_transfer = object()
         setattr(buffer_module, "TensorTransfer", SimpleNamespace(NONE=none_transfer))
         monkeypatch.setitem(sys.modules, "simpler.buffer", buffer_module)
+        # Inputs below are torch/DeviceTensor objects. Keep this registration
+        # unit test from importing native Simpler through the partially mocked
+        # package (which can retry an extension import after a failed import).
+        monkeypatch.setattr("pypto.runtime.distributed_runner._is_simpler_tensor", lambda tensor: False)
         tensor = torch.zeros(2)
         wire = object()
         args = MagicMock()
@@ -2522,7 +2551,7 @@ class TestDfxCounterWiring:
         worker._persistent = False
         worker._w = object()
         worker._dfx_dispatch_idx = {}
-        state = {"entry_fn": None, "chip_cids": {}, "sub_ids": {}, "device_nums": 1}
+        state = {"entry_fn": None, "chip_cids": {}, "sub_ids": {}, "device_nums": 1, "window_sources": {}}
 
         assert worker._submit_prepared_native(state, {}, None, [], []) == "handle"
         assert seen["dfx_dispatch_idx"] is worker._dfx_dispatch_idx
@@ -2558,6 +2587,7 @@ class TestDfxCounterWiring:
             "sub_ids": {},
             "device_nums": 1,
             "entry_fn": _entry,
+            "window_sources": {},
         }
 
         assert worker._submit_persistent(state, {}, None, [], []) == "handle"
@@ -3323,6 +3353,15 @@ class _PersistentRunResources:
         self.requires_ordered_cleanup = False
 
 
+class _PersistentHostMapping:
+    def __init__(self, data: bytearray) -> None:
+        self.data = data
+
+    @property
+    def buf(self) -> memoryview:
+        return memoryview(self.data)
+
+
 class _PersistentDomainHandle:
     def __init__(
         self,
@@ -3337,6 +3376,8 @@ class _PersistentDomainHandle:
         self.name = name
         self.workers = tuple(workers)
         self.contexts = {}
+        self.buffer_specs = buffers
+        self.host_data = {worker: bytearray(window_size) for worker in workers}
         for worker_id in workers:
             local_window_base = 0x10000000 + allocation_index * 0x100000 + worker_id * 0x10000
             offset = 0
@@ -3347,6 +3388,7 @@ class _PersistentDomainHandle:
                     int(spec.nbytes),
                     owner_worker_id=worker_id,
                 )
+                setattr(named_buffers[spec.name], "shm", _PersistentHostMapping(self.host_data[worker_id]))
                 offset += int(spec.nbytes)
             self.contexts[worker_id] = SimpleNamespace(
                 local_window_base=local_window_base,
@@ -3362,6 +3404,17 @@ class _PersistentDomainHandle:
         self.freed = False
         self.release_error: BaseException | None = None
         self.free_on_release = True
+
+    def buffer_range(self, name):
+        offset = 0
+        for spec in self.buffer_specs:
+            if spec.name == name:
+                return offset, spec.nbytes
+            offset += spec.nbytes
+        raise KeyError(name)
+
+    def member(self, rank):
+        return self.contexts[self.workers[rank]]
 
     def __getitem__(self, worker_id: int):
         return self.contexts[worker_id]
@@ -3406,6 +3459,7 @@ class _PersistentOrch:
         self.allocate_calls: list[dict[str, Any]] = []
         self.reuse_calls: list[dict[str, Any]] = []
         self.copy_calls: list[tuple[_FakeBuffer, _FakeBuffer, bytes]] = []
+        self.host_buffer_ids: set[int] = set()
         self.handles: list[_PersistentDomainHandle] = []
         self.resources: list[_PersistentRunResources] = []
         self.worker.close.side_effect = self._close_live_domains
@@ -3474,6 +3528,12 @@ class _PersistentOrch:
                 resources,
                 list(kwargs["buffers"]),
             )
+            if kwargs.get("memory_source") == "host":
+                self.host_buffer_ids.update(
+                    id(buffer) for context in handle.contexts.values() for buffer in context.buffers.values()
+                )
+            if initializer := kwargs.get("initializer"):
+                initializer(handle)
             self.handles.append(handle)
             self.worker._live_domains[handle.name] = handle
         # Public reuse registers the domain with each run and moves its
@@ -3484,6 +3544,10 @@ class _PersistentOrch:
         return handle
 
     def copy_to(self, dst: _FakeBuffer, src: _FakeBuffer) -> None:
+        if id(dst) in self.host_buffer_ids:
+            raise ValueError(
+                "Worker.copy_to: use Buffer.shm.buf for CPU copies of Host-source domain buffers"
+            )
         payload = ctypes.string_at(int(src.base), int(src.nbytes))
         self.copy_calls.append((dst, src, payload))
 
@@ -3504,6 +3568,7 @@ def _persistent_entry(
     seen_handles: list[Any],
     *,
     buffer_nbytes: tuple[int, ...] | None = None,
+    memory_source: str | None = None,
 ):
     sizes = (window_size,) if buffer_nbytes is None else buffer_nbytes
 
@@ -3521,7 +3586,11 @@ def _persistent_entry(
     ):
         del orch, _args, config, tensors, callables, sub_ids, _keep
         assert _domain_provider is not None
+        resource_kwargs = (
+            {} if memory_source is None else {"memory_source": memory_source, "workspace_engines": ("urma",)}
+        )
         with _domain_provider(
+            **resource_kwargs,
             name="comm_d0",
             workers=[*range(world_size)],
             window_size=window_size,
@@ -3535,7 +3604,140 @@ def _persistent_entry(
     return entry
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+def test_window_sources_are_forwarded_only_at_runtime(patched_setup, persistent):
+    m = patched_setup
+    seen = []
+
+    def entry(*args, _window_sources, _domain_provider=None, **kwargs):
+        seen.append(_window_sources)
+
+    setattr(entry, "_window_source_keys", ("engram",))
+    m["load_entry"].return_value = (entry, None)
+    compiled = _fake_compiled([_param("a", [16, 16])], [])
+    source = io.BytesIO(b"shard")
+    files = [source]
+    m["worker"].submit.side_effect = lambda fn: (fn(MagicMock(), None, None), _ImmediateNativeHandle())[1]
+    m["submit_dispatch"].side_effect = _submit_dispatch
+    with DistributedWorker(compiled, persistent=persistent, window_sources={"engram": files}) as rt:
+        files.clear()
+        rt(_resident(rt, (16, 16)))
+    assert seen == [{"engram": (source,)}]
+    assert not source.closed
+
+
+@pytest.mark.parametrize("bindings,pattern", [({}, "Missing window_sources"), ({"typo": []}, "not used")])
+def test_window_sources_validate_before_worker_init(patched_setup, bindings, pattern):
+    m = patched_setup
+
+    def entry(*args, **kwargs):
+        pass
+
+    setattr(entry, "_window_source_keys", ("engram",) if not bindings else ())
+    m["load_entry"].return_value = (entry, None)
+    compiled = _fake_compiled([_param("a", [16, 16])], [])
+    with pytest.raises(ValueError, match=pattern):
+        DistributedWorker(compiled, window_sources=bindings)
+    m["worker"].init.assert_not_called()
+
+
 class TestPersistentDistributedWorker:
+    @pytest.mark.parametrize("reset", [None, False, True])
+    def test_host_domain_reuse_and_reset_policy(self, patched_setup, reset):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
+        orch = _PersistentOrch(m["worker"])
+
+        def worker_submit(fn):
+            orch.run(fn)
+            return _ImmediateNativeHandle()
+
+        m["worker"].submit.side_effect = worker_submit
+        handles = []
+        m["load_entry"].return_value = (
+            _persistent_entry(256, handles, buffer_nbytes=(64, 192), memory_source="host"),
+            None,
+        )
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
+        rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=reset)
+        arg = _resident(rt, (16, 16))
+        try:
+            rt(arg)
+            for worker_id, data in handles[0].host_data.items():
+                data[:] = b"\xa5" * 320
+                handles[0][worker_id].actual_window_size = 320
+            m["worker"].create_buffer.reset_mock()
+            rt(arg)
+            assert handles[0] is handles[1]
+            assert len(orch.allocate_calls) == 1
+            assert orch.allocate_calls[0]["memory_source"] == "host"
+            assert orch.allocate_calls[0]["workspace_engines"] == ("urma",)
+            assert orch.copy_calls == []
+            m["worker"].create_buffer.assert_not_called()
+            expected_window = b"\xa5" * 256 if reset is False else bytes(256)
+            for data in handles[0].host_data.values():
+                assert data == expected_window + b"\xa5" * 64
+                # A leaked memoryview export would prevent resizing on cleanup.
+                data.extend(b"done")
+        finally:
+            rt.close()
+
+    @pytest.mark.parametrize("tensor_source", [False, True])
+    @pytest.mark.parametrize("reset", [None, False, True])
+    def test_initialized_host_and_device_reuse_share_reset_policy(self, patched_setup, tensor_source, reset):
+        from pypto.runtime.window_sources import make_window_initializer  # noqa: PLC0415
+
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
+        source = torch.tensor(list(b"table"), dtype=torch.uint8) if tensor_source else io.BytesIO(b"table")
+        device_entry = _persistent_entry(64, [])
+        loaded = []
+
+        def entry(orch, *args, _window_sources, _domain_provider, **kwargs):
+            initializer = make_window_initializer(_window_sources, (("data", "engram", 5),), 1)
+            spec = SimpleNamespace(name="data", dtype="opaque", count=5, nbytes=64)
+            with _domain_provider(
+                name="host_table",
+                workers=[1],
+                window_size=64,
+                buffers=[spec],
+                memory_source="host",
+                workspace_engines=("urma",),
+                initializer=initializer,
+            ) as domain:
+                loaded.append(domain.host_data[1][:5])
+            device_entry(orch, *args, _domain_provider=_domain_provider, **kwargs)
+
+        setattr(entry, "_window_source_keys", ("engram",))
+        m["load_entry"].return_value = (entry, None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        with DistributedWorker(
+            compiled, persistent=True, reset_persistent_windows=reset, window_sources={"engram": [source]}
+        ) as rt:
+            arg = _resident(rt, (16, 16))
+            rt(arg)
+            # Reuse must neither reread a closed file nor copy mutated tensor data.
+            if isinstance(source, torch.Tensor):
+                source.zero_()
+            else:
+                source.close()
+            rt(arg)
+            assert loaded == [b"table", b"table" if reset is False else bytes(5)]
+            assert len(orch.allocate_calls) == 2
+            # Host bytes above follow the same reset policy as the Device
+            # window, but only the Device window may use orch.copy_to.
+            expected_copies = [] if reset is False else [(0, 64)]
+            assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == (
+                expected_copies
+            )
+            assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
+            assert len(orch.reuse_calls) == 4
+
     def test_window_reset_requires_persistent_mode(self):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         with pytest.raises(ValueError, match="requires persistent=True"):
@@ -4638,6 +4840,39 @@ class TestDeviceMemoryInfo:
         with pytest.raises(RuntimeError, match="query failed"):
             rt.device_memory_info(0)
         rt.close()
+
+
+def test_host_domain_runtime_capability_check():
+    class OldOrch:
+        def allocate_domain(self, *, workers, window_size):
+            raise AssertionError("validation must not allocate")
+
+    class NewOrch:
+        def allocate_domain(self, *, memory_source, workspace_engines):
+            raise AssertionError("validation must not allocate")
+
+    setattr(NewOrch, "get_or_allocate_domain", NewOrch.allocate_domain)
+    with pytest.raises(RuntimeError, match="#2913"):
+        validate_host_domain_runtime(OldOrch())
+    validate_host_domain_runtime(NewOrch())
+    with pytest.raises(RuntimeError, match="#2939"):
+        validate_host_domain_runtime(NewOrch(), initialized=True)
+
+    class InitializingOrch:
+        def allocate_domain(self, *, memory_source, workspace_engines, initializer):
+            raise AssertionError("validation must not allocate")
+
+        get_or_allocate_domain = allocate_domain
+
+    validate_host_domain_runtime(InitializingOrch, initialized=True)
+
+
+def test_persistent_domain_identity_includes_source_and_workspace():
+    base = {"workers": [0, 1], "window_size": 256, "buffers": []}
+    device = DistributedWorker._persistent_domain_spec(base)
+    host = DistributedWorker._persistent_domain_spec({**base, "memory_source": "host"})
+    urma = DistributedWorker._persistent_domain_spec({**base, "workspace_engines": ("urma",)})
+    assert len({device, host, urma}) == 3
 
 
 if __name__ == "__main__":
