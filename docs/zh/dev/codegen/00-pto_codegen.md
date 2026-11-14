@@ -2,29 +2,20 @@
 
 PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO-ISA 方言的 MLIR 代码。它将高层 PyPTO 程序转换为适合加速器执行的低层 PTO 指令。
 
-PyPTO 要求 PTOAS v0.74 或更新版本。对于 `div(high_precision=True)`，
-Tile 和 Buffer 代码生成均输出 `#pto<div_precision diff_compensation>`，
-对应重命名后的除法算法。Python API 保持不变；`log` 和 `recip`
-仍使用 `high_precision` 属性。
+PyPTO 要求 PTOAS v0.74 或更新版本。Tile 与 Buffer 代码生成均为 `div(high_precision=True)` 发射 `#pto<div_precision diff_compensation>`；Python API 与 `log`/`recip` 的属性保持不变。Runtime `c1c234667` 通过 `runtime/pto_isa.pin` 固定 PTO-ISA `90a37965`，提供 PTOAS v0.74 为 A2/A3 行收集操作生成的 `pto::GatherSync::Async`。
 
-MX tensor view 通过 [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md)
-保留逻辑 rank-2 形状、stride 和分区偏移。PTOAS v0.74 根据
-`mx_a_zz` / `mx_b_nn` 构造物理打包描述符，不能将这些视图改标为普通 ND 内存。
+[LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) 保留 MX 的逻辑二维形状、步幅和偏移。PTOAS 根据 `mx_a_zz` / `mx_b_nn` 构造打包后的物理描述符；不能将这些视图重新标记为 ND。
 
-PTOAS v0.74 还会为 A2/A3 行收集操作生成 `pto::GatherSync::Async`。
-请使用 `runtime/pto_isa.pin` 指定的 PTO-ISA 版本（`90a37965`），该版本提供此 API。
-runtime 子模块固定为 `c1c234667`，确保运行时构建与生成内核使用相同的兼容头文件。
+A2/A3 余数操作的 scratch 类型必须与输入相同，且不能与输入重叠。物理范围与有效范围均须满足：
 
-A2/A3 的 TREM 和 TREMS 要求与输入不重叠、类型相同的 scratch tile，物理行数和有效
-行数对 TREM 都至少为 2（PTOAS v0.74 的要求），对 TREMS 至少为 1。
-设源行跨度 `S` 按 8 个元素对齐，默认所需列数为
-`S + 8*ceil(S/256) + 8`。A2/A3 现在支持 FP32 TREM 高精度模式，其所需列数是该值与
-`192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)` 的最大值，其中
-`C = max(valid_cols // 64, 1)`；有效列数动态变化时，用物理列数作为容量上界。
-scratch 的物理列数与有效列数都必须满足该容量。ISA 将 INT32 输入缓冲区留在 FP32
-表示；代码生成在后续使用前显式将 TREM 的两个输入和 TREMS 的被除数转换回 INT32。
-A2/A3 的 INT32 TREM 要求两个输入缓冲区不重叠：ISA 原地转换两个输入，重叠存储
-会在执行计算前被重复转换。
+| 操作 | 最小行数 | 最小列数 |
+| ---- | -------- | -------- |
+| TREM | 2（PTOAS 要求） | `S + 8*ceil(S/256) + 8` |
+| TREMS | 1 | `S + 8*ceil(S/256) + 8` |
+
+`S` 是按 8 个元素对齐的源行跨度。FP32 高精度 TREM 要求的列数是该值与 `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)` 的较大者，其中 `C = max(valid_cols // 64, 1)`；有效列数动态变化时，用物理宽度作为上界。
+
+ISA 将 INT32 输入留在 FP32 表示；代码生成在后续使用前恢复 TREM 的两个输入和 TREMS 的被除数。A2/A3 的 INT32 TREM 拒绝输入重叠，因为 ISA 会在计算结果前重复转换同一存储。
 
 ## 设计原则：严格的 1-to-1 映射
 

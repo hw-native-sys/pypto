@@ -2,34 +2,20 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
-PyPTO requires PTOAS v0.74 or newer. For `div(high_precision=True)`, both
-Tile and Buffer codegen emit `#pto<div_precision diff_compensation>`, the
-renamed division algorithm. The Python API is unchanged; `log` and `recip`
-retain their `high_precision` attributes.
+PyPTO requires PTOAS v0.74 or newer. Tile and Buffer codegen emit `#pto<div_precision diff_compensation>` for `div(high_precision=True)`; the Python API and `log`/`recip` attributes are unchanged. Runtime `c1c234667` pins PTO-ISA `90a37965` in `runtime/pto_isa.pin`, providing `pto::GatherSync::Async` for the A2/A3 row gathers emitted by PTOAS v0.74.
 
-MX tensor views retain logical rank-2 shapes, strides, and partition offsets
-through [LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md).
-PTOAS v0.74 constructs their packed physical descriptors from `mx_a_zz` /
-`mx_b_nn`; these views must not be relabeled as ordinary ND memory.
+[LegalizeMxScaleTensorViews](../passes/18-block_mx_scale_tensor_views.md) preserves logical rank-2 MX shapes, strides, and offsets. PTOAS constructs packed descriptors from `mx_a_zz` / `mx_b_nn`; do not relabel these views as ND.
 
-PTOAS v0.74 also emits `pto::GatherSync::Async` for A2/A3 row gathers.
-Use the PTO-ISA revision selected by `runtime/pto_isa.pin` (`90a37965`),
-which provides that API. The runtime submodule is pinned to `c1c234667` so
-runtime builds and generated kernels use the same compatible headers.
+A2/A3 remainder scratch must match the input dtype and be disjoint from its sources. Physical and valid extents must satisfy:
 
-On A2/A3, TREM and TREMS require a disjoint, same-dtype scratch tile with
-at least two physical and valid rows for TREM (PTOAS v0.74 requires this),
-and one row for TREMS. For source row stride `S` (rounded to
-8 elements), the default scratch column count is `S + 8*ceil(S/256) + 8`.
-High-precision FP32 TREM is now honoured on A2/A3 and requires the maximum of
-that count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)`, with
-`C = max(valid_cols // 64, 1)`; dynamic valid columns use the physical width
-as their capacity bound. Both physical and valid scratch columns must cover
-that count. The ISA leaves INT32 source buffers in FP32 representation:
-codegen restores both TREM sources and the TREMS dividend with explicit
-FP32-to-INT32 conversions before subsequent consumers. A2/A3 INT32 TREM
-requires non-overlapping source buffers: the ISA converts both inputs in place,
-so overlapping storage would be converted twice before the operation itself.
+| Operation | Minimum rows | Minimum columns |
+| --------- | ------------ | --------------- |
+| TREM | 2 (PTOAS requirement) | `S + 8*ceil(S/256) + 8` |
+| TREMS | 1 | `S + 8*ceil(S/256) + 8` |
+
+`S` is the source row stride rounded to 8 elements. FP32 high-precision TREM requires the larger of that column count and `192*C + 8*ceil(C/4) + 8 + (64 if C == 1 else 0)`, where `C = max(valid_cols // 64, 1)`; use physical width to bound dynamic valid columns.
+
+The ISA leaves INT32 sources as FP32: codegen restores both TREM inputs and the TREMS dividend before later consumers. A2/A3 INT32 TREM rejects overlapping sources because the ISA would convert the same storage twice before computing the result.
 
 ## Design Principle: Strict 1-to-1 Mapping
 
