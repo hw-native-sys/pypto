@@ -996,7 +996,184 @@ class TestAssembleLoopRewrite:
 
 
 class TestSliceInputStrides:
-    """Pattern 4: Attach parent-derived strides to In params for slice patterns."""
+    """Pattern 4: Preserve parent strides across core argument windows."""
+
+    @pytest.mark.parametrize("other_is_slice", [False, True], ids=["packed", "other-pitch"])
+    def test_output_with_different_callers_declines_inference(self, other_is_slice):
+        """One window's pitch cannot specialize a writer shared by other callers."""
+        other_width = 256 if other_is_slice else 32
+        other_argument = "pl.tensor.slice(other, [16, 32], [0, 0])" if other_is_slice else "other"
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        window: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        tile = pl.tile.load(data, [0, 0], [16, 32])
+        written = pl.tile.store(tile, [0, 0], window)
+        return written
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        out: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+        other: pl.InOut[pl.Tensor[[16, {other_width}], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        chunk = pl.tensor.slice(out, [16, 32], [0, 32])
+        first = self.kernel(data, chunk)
+        other_chunk = {other_argument}
+        second = self.kernel(data, other_chunk)
+        return out
+"""
+        before = pl.parse_program(source)
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, before)
+
+    @pytest.mark.parametrize("direction", ["Out", "InOut"])
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    @pytest.mark.parametrize("wrapper", [False, True], ids=["direct", "spmd"])
+    @pytest.mark.parametrize("core_type", ["InCore", "AIV"])
+    def test_written_slice_preserves_parent_stride(self, direction, submit, wrapper, core_type):
+        """Output windows retain their parent pitch through calls and SPMD wrappers."""
+        invocation = "result = self.kernel(data, chunk)"
+        if submit:
+            invocation = (
+                "with pl.manual_scope():\n            result, tid = pl.submit(self.kernel, data, chunk)"
+            )
+        wrapper_definition = ""
+        if wrapper:
+            wrapper_definition = f"""
+    @pl.function(type=pl.FunctionType.Spmd)
+    def wrapper(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        window: pl.{direction}[pl.Tensor[[16, 32], pl.FP32]],
+    ):
+        self.kernel(data, window)
+"""
+            invocation = "self.wrapper(data, chunk)"
+            if submit:
+                invocation = (
+                    "with pl.manual_scope():\n"
+                    "            tid = pl.spmd_submit(self.wrapper, data, chunk, core_num=1)"
+                )
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.{core_type})
+    def kernel(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        window: pl.{direction}[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        tile = pl.tile.load(data, [0, 0], [16, 32])
+        written = pl.tile.store(tile, [0, 0], window)
+        return written
+{wrapper_definition}
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        out: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        chunk = pl.tensor.slice(out, [16, 32], [0, 32])
+        {invocation}
+        return out
+"""
+        before = pl.parse_program(source)
+        # Declare the golden independently of the pass. Compact [32, 1]
+        # addresses parent element 64 on row 1; the correct element is 160.
+        expected = pl.parse_program(
+            source.replace(
+                f"window: pl.{direction}[pl.Tensor[[16, 32], pl.FP32]]",
+                f"window: pl.{direction}[pl.Tensor[[16, 32], pl.FP32, "
+                "pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]]",
+            )
+        )
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.parametrize("pitch", [128, 256])
+    def test_output_slice_preserves_explicit_parent_pitch(self, pitch):
+        """A parent can itself be a strided view rather than a packed tensor."""
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        window: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        tile = pl.tile.load(data, [0, 0], [16, 32])
+        written = pl.tile.store(tile, [0, 0], window)
+        return written
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        data: pl.Tensor[[16, 32], pl.FP32],
+        out: pl.InOut[pl.Tensor[[16, 128], pl.FP32, pl.TensorView(stride=[{pitch}, 1])]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        chunk = pl.tensor.slice(out, [16, 32], [0, 32])
+        result = self.kernel(data, chunk)
+        return out
+"""
+        before = pl.parse_program(source)
+        expected = pl.parse_program(
+            source.replace(
+                "window: pl.Out[pl.Tensor[[16, 32], pl.FP32]]",
+                "window: pl.Out[pl.Tensor[[16, 32], pl.FP32, "
+                f"pl.TensorView(stride=[{pitch}, 1], layout=pl.TensorLayout.ND)]]",
+            )
+        )
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.parametrize("axis", [0, 1], ids=["row", "column"])
+    def test_rank_reduced_output_slice_preserves_surviving_pitch(self, axis):
+        """Dropping the column axis retains the row pitch, not the last stride."""
+        width = 32 if axis == 0 else 16
+        shape = [1, 32] if axis == 0 else [16, 1]
+        offset = [4, 32] if axis == 0 else [0, 32]
+        pitch = 1 if axis == 0 else 128
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        data: pl.Tensor[[{width}], pl.FP32],
+        window: pl.Out[pl.Tensor[[{width}], pl.FP32]],
+    ) -> pl.Tensor[[{width}], pl.FP32]:
+        tile = pl.tile.load(data, [0], [{width}])
+        written = pl.tile.store(tile, [0], window)
+        return written
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        data: pl.Tensor[[{width}], pl.FP32],
+        out: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        chunk = pl.tensor.slice(out, {shape}, {offset}, drop_dims=[{axis}])
+        result = self.kernel(data, chunk)
+        return out
+"""
+        before = pl.parse_program(source)
+        expected = pl.parse_program(
+            source.replace(
+                f"window: pl.Out[pl.Tensor[[{width}], pl.FP32]]",
+                f"window: pl.Out[pl.Tensor[[{width}], pl.FP32, "
+                f"pl.TensorView(stride=[{pitch}], layout=pl.TensorLayout.ND)]]",
+            )
+        )
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
 
     @pytest.mark.parametrize(
         "access",
