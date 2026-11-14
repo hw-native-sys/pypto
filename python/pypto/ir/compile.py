@@ -126,6 +126,7 @@ class _PassPipelineResult(NamedTuple):
     memory_planner: _passes.MemoryPlanner
     backend_type: BackendType
     runtime: _passes.RuntimeKind
+    sync_strategy: _passes.AutoSyncStrategy
 
 
 class _CompilationResult(NamedTuple):
@@ -161,6 +162,7 @@ def _validate_pass_context_conflicts(
     memory_planner: _passes.MemoryPlanner | None,
     runtime: _passes.RuntimeKind | None = None,
     enable_software_pipeline: bool | None = None,
+    sync_strategy: _passes.AutoSyncStrategy | None = None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -189,6 +191,11 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with enable_software_pipeline while a PassContext is already active. "
             "Set enable_software_pipeline on the existing PassContext instead."
         )
+    if sync_strategy is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with sync_strategy while a PassContext is already active. "
+            "Set sync_strategy on the existing PassContext instead."
+        )
     return outer
 
 
@@ -206,6 +213,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     enable_pypto_l0c_double_buffer: bool | None = None,
     enable_software_pipeline: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
+    sync_strategy: _passes.AutoSyncStrategy | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
     inherit_outer_report_instruments: bool = True,
@@ -221,6 +229,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         memory_planner=memory_planner,
         runtime=runtime,
         enable_software_pipeline=enable_software_pipeline,
+        sync_strategy=sync_strategy,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -262,8 +271,25 @@ def _run_pass_pipeline(  # noqa: PLR0913
         # Software pipelining currently lowers Tile IR; leave the default Buffer
         # IR selection enabled for compilations that do not request this opt-in.
         buffer_ir = not software_pipeline
+    sync = (
+        sync_strategy
+        if sync_strategy is not None
+        else (outer.get_sync_strategy() if outer is not None else _passes.AutoSyncStrategy.EVENT)
+    )
+    from pypto.backend._sync_strategy import validate_sync_strategy  # noqa: PLC0415
+
+    validate_sync_strategy(sync, effective_backend_type)
     ctx = _passes.PassContext(
-        instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir, software_pipeline
+        instruments,
+        vlevel,
+        dphase,
+        disabled,
+        mplan,
+        dbc_flag,
+        rt,
+        buffer_ir,
+        software_pipeline,
+        sync_strategy=sync,
     )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
@@ -290,7 +316,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
                 output_dir=passes_dump_dir,
             )
 
-    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt)
+    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt, sync)
 
 
 def make_default_output_dir(name: str) -> str:
@@ -341,6 +367,7 @@ def compile(  # noqa: PLR0913
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    sync_strategy: _passes.AutoSyncStrategy | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -390,6 +417,9 @@ def compile(  # noqa: PLR0913
         disabled_diagnostics: Set of diagnostic checks to disable (covers both
             warnings and performance hints). None uses the default
             (UnusedControlFlowResult disabled, perf hints enabled).
+        sync_strategy: PTOAS auto synchronization policy. None inherits PassContext,
+            otherwise defaults to AutoSyncStrategy.EVENT. BUFID requires Ascend950 (A5).
+            An explicit value conflicts with an active PassContext.
         memory_planner: Who plans on-chip buffer memory. ``None`` uses the
             default (``MemoryPlanner.PYPTO`` — PyPTO's AllocateMemoryAddr bakes
             physical addresses and ptoas runs at ``--pto-level=level3``).
@@ -485,6 +515,7 @@ def compile(  # noqa: PLR0913
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
+        sync_strategy=sync_strategy,
     )
     lowered_program = result.lowered_program
     # Entry selection and execution wrappers belong to the public program API.
@@ -598,6 +629,7 @@ def _compile_to_files(  # noqa: PLR0913
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    sync_strategy: _passes.AutoSyncStrategy | None = None,
 ) -> _CompilationResult:
     """Run shared contract analysis, passes and codegen without execution wrappers."""
     from ._compile_contract import (  # noqa: PLC0415
@@ -626,6 +658,7 @@ def _compile_to_files(  # noqa: PLR0913
         memory_planner=memory_planner,
         runtime=runtime,
         enable_software_pipeline=enable_software_pipeline,
+        sync_strategy=sync_strategy,
     )
 
     # --- Compile profiling ---------------------------------------------------
@@ -659,6 +692,7 @@ def _compile_to_files(  # noqa: PLR0913
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
             enable_software_pipeline=enable_software_pipeline,
             runtime=runtime,
+            sync_strategy=sync_strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),
             dump_passes=dump_passes,
@@ -686,6 +720,7 @@ def _compile_to_files(  # noqa: PLR0913
                     output_dir,
                     skip_ptoas=skip_ptoas,
                     memory_planner=mplan,
+                    sync_strategy=pipeline.sync_strategy,
                     emit_source_loc=emit_source_loc,
                     dump_ptoas_passes=dump_ptoas_passes,
                     runtime=effective_runtime,

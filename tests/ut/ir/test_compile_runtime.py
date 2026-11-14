@@ -117,7 +117,7 @@ __global__ AICORE void stub_kernel(__gm__ float* v1) {}
 def stub_ptoas(monkeypatch):
     monkeypatch.setattr(
         "pypto.backend.pto_backend._compile_pto_module",
-        lambda _pto_code, _module_name, _output_dir, _memory_planner=None: _STUB_PTOAS_OUTPUT,
+        lambda _pto_code, _module_name, _output_dir, _memory_planner=None, **_kwargs: _STUB_PTOAS_OUTPUT,
     )
 
 

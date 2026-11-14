@@ -589,6 +589,7 @@ class PassManager:
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         software_pipeline = ctx.get_enable_software_pipeline() if ctx else False
+        sync = ctx.get_sync_strategy() if ctx else passes.AutoSyncStrategy.EVENT
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -605,6 +606,7 @@ class PassManager:
             runtime,
             buffer_ir,
             software_pipeline,
+            sync_strategy=sync,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -644,6 +646,7 @@ class PassManager:
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         software_pipeline = ctx.get_enable_software_pipeline() if ctx else False
+        sync = ctx.get_sync_strategy() if ctx else passes.AutoSyncStrategy.EVENT
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
@@ -661,6 +664,7 @@ class PassManager:
             runtime,
             buffer_ir,
             software_pipeline,
+            sync_strategy=sync,
         ):
             try:
                 return self._pipeline.run(input_ir)

@@ -204,6 +204,8 @@ def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
         kwargs["memory_planner"] = run_config.memory_planner
     if run_config.enable_software_pipeline is not None:
         kwargs["enable_software_pipeline"] = run_config.enable_software_pipeline
+    if run_config.sync_strategy is not None:
+        kwargs["sync_strategy"] = run_config.sync_strategy
     return kwargs
 
 
@@ -223,6 +225,12 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
     if ctx is not None:
         return ctx.get_memory_planner()
     return _passes.MemoryPlanner.PYPTO
+
+
+def _resolve_sync_strategy() -> _passes.AutoSyncStrategy:
+    """Resolve the context-inherited synchronization policy for cache identity."""
+    ctx = _passes.PassContext.current()
+    return ctx.get_sync_strategy() if ctx is not None else _passes.AutoSyncStrategy.EVENT
 
 
 def _resolve_enable_buffer_ir(software_pipeline: bool | None = None) -> bool:
@@ -295,7 +303,11 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         memory_planner=kwargs.get("memory_planner"),
         runtime=kwargs.get("runtime"),
         enable_software_pipeline=kwargs.get("enable_software_pipeline"),
+        sync_strategy=kwargs.get("sync_strategy"),
     )
+    from pypto.backend._sync_strategy import validate_sync_strategy  # noqa: PLC0415
+
+    validate_sync_strategy(kwargs.get("sync_strategy", _resolve_sync_strategy()), kwargs["backend_type"])
     bypass = (
         kwargs["dump_passes"] is not PassDumpLevel.NONE
         or kwargs["dump_ptoas_passes"]
@@ -1190,6 +1202,7 @@ class JITFunction:
                 compile_kwargs.get("enable_software_pipeline")
             ),
             runtime=_resolve_runtime(),
+            sync_strategy=compile_kwargs.get("sync_strategy", _resolve_sync_strategy()),
         )
 
         with self._cache_lock:

@@ -2850,7 +2850,7 @@ AICORE void split_vec() {
 
         monkeypatch.setattr(
             "pypto.backend.pto_backend._compile_pto_module",
-            lambda _pto_code, _module_name, _output_dir, _memory_planner=None: (
+            lambda _pto_code, _module_name, _output_dir, _memory_planner=None, **_kwargs: (
                 SAMPLE_GROUPED_SPLIT_PTOAS_OUTPUT
             ),
         )

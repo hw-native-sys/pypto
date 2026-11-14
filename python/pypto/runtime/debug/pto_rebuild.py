@@ -14,15 +14,17 @@ Invoked from :func:`pypto.runtime.debug.replay.replay` before the
 the subsequent cpp -> .so rebuild.
 
 The discriminator between the ``pto -> cpp -> .o`` path and the existing
-``cpp -> .o`` path is mtime, evaluated per ``.pto`` independently:
+``cpp -> .o`` path is mtime, evaluated per ``.pto`` independently. When a
+metadata sidecar exists, its mtime also invalidates the C++ stamp:
 
 - ``ptoas/<unit>.cpp`` mtime >= ``ptoas/<unit>.pto`` mtime  →  skip ptoas
   rerun for this unit (user only touched the kernel cpp, or nothing).
 - otherwise                                                  →  rerun ptoas
   and splice the new body into every matching ``kernels/<core>/<func>.cpp``.
 
-``ptoas/<unit>.cpp`` thus doubles as a per-unit "ptoas build stamp" — no
-extra metadata file is persisted.
+``ptoas/<unit>.cpp`` thus doubles as a per-unit "ptoas build stamp".
+The sibling ``<unit>.json`` preserves the synchronization policy and semantic
+PTOAS flags for replay. Artifacts predating that metadata use legacy event flags.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from pypto.backend._ptoas_config import get_ptoas_timeout
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
+from pypto.backend._sync_strategy import read_sync_metadata
 
 __all__ = ["rebuild_kernel_cpp_from_pto", "PTOAS_BODY_BEGIN", "PTOAS_BODY_END"]
 
@@ -75,10 +78,9 @@ def _ptoas_flags(pto_content: str) -> list[str]:
     (level2). This keeps the rebuild path in sync with whichever
     ``memory_planner`` produced the ``.pto``.
 
-    Backend-specific extras (from ``get_handler().get_extra_ptoas_flags()``)
-    are intentionally omitted — the rebuild path has no backend handler in
-    scope. Edits that rely on backend-specific flags require a fresh
-    ``ir.compile()`` instead of a ``.pto`` splice.
+    These are legacy defaults only. New compilations persist the complete
+    semantic flag list (including target/backend extras) in ``<unit>.json``;
+    ``_run_ptoas`` restores that list instead of these inferred defaults.
     """
     level = "level3" if _ALLOC_TILE_ADDR_RE.search(pto_content) else "level2"
     return ["--enable-insert-sync", f"--pto-level={level}"]
@@ -89,7 +91,8 @@ def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
     _check_ptoas_version(ptoas_bin)
     timeout = get_ptoas_timeout()
     pto_content = pto_path.read_text(encoding="utf-8")
-    cmd = [ptoas_bin, str(pto_path), "-o", str(out_cpp), *_ptoas_flags(pto_content)]
+    flags = read_sync_metadata(pto_path, _ptoas_flags(pto_content))
+    cmd = [ptoas_bin, str(pto_path), "-o", str(out_cpp), *flags]
     result = subprocess.run(  # noqa: S603 — args are constructed locally, no shell
         cmd,
         capture_output=True,
@@ -161,7 +164,16 @@ def _rebuild_one_dir(scan_dir: Path, rel_root: Path, ptoas_bin: str) -> list[str
         unit_name = pto_path.stem
         out_cpp = ptoas_dir / f"{unit_name}.cpp"
 
-        if out_cpp.exists() and out_cpp.stat().st_mtime >= pto_path.stat().st_mtime:
+        source_mtime = pto_path.stat().st_mtime
+        metadata_path = pto_path.with_suffix(".json")
+        if metadata_path.exists():
+            # Validate even when the PTO is unchanged: corrupt metadata must
+            # never be hidden by a fresh C++ build stamp. Metadata edits also
+            # invalidate that stamp.
+            read_sync_metadata(pto_path, _ptoas_flags(pto_path.read_text(encoding="utf-8")))
+            source_mtime = max(source_mtime, metadata_path.stat().st_mtime)
+
+        if out_cpp.exists() and out_cpp.stat().st_mtime >= source_mtime:
             continue
 
         print(f"[pto->cpp] regenerating from {pto_path.relative_to(rel_root)}")

@@ -309,7 +309,7 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
                          MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
                          RuntimeKind runtime, bool enable_buffer_ir, bool enable_software_pipeline,
-                         bool report_hardware_loops)
+                         bool report_hardware_loops, AutoSyncStrategy sync_strategy)
     : report_hardware_loops_(report_hardware_loops),
       instruments_(std::move(instruments)),
       verification_level_(verification_level),
@@ -320,6 +320,7 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
       runtime_(runtime),
       enable_buffer_ir_(enable_buffer_ir),
       enable_software_pipeline_(enable_software_pipeline),
+      sync_strategy_(sync_strategy),
       previous_(nullptr) {
   CHECK(!enable_software_pipeline_ || memory_planner_ == MemoryPlanner::PyPTO)
       << "enable_software_pipeline requires memory_planner=PYPTO";
@@ -328,6 +329,8 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
 }
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
+
+AutoSyncStrategy PassContext::GetSyncStrategy() const { return sync_strategy_; }
 
 MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
 

@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from importlib import resources
+from pathlib import Path
 
 # importlib.resources.abc is new in 3.11; older interpreters expose the same
 # protocol from importlib.abc. The version check keeps the import statically
@@ -66,6 +67,8 @@ from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
+
+from ._sync_strategy import sync_flag, validate_sync_flags, validate_sync_strategy, write_sync_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -1671,6 +1674,7 @@ def _build_group_mapping(
 def _get_ptoas_flags(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     passes_dump_dir: str | None = None,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
 
@@ -1682,7 +1686,7 @@ def _get_ptoas_flags(
     """
     level = "level2" if memory_planner == _passes.MemoryPlanner.PTOAS else "level3"
     flags = [
-        "--enable-insert-sync",
+        sync_flag(sync_strategy),
         f"--pto-level={level}",
     ]
     if passes_dump_dir is not None:
@@ -1694,6 +1698,7 @@ def _get_ptoas_flags(
             ]
         )
     flags.extend(_backend_core.get_handler().get_extra_ptoas_flags())
+    validate_sync_flags(sync_strategy, flags)
     return flags
 
 
@@ -1784,6 +1789,7 @@ def _compile_pto_module(
     output_dir: str,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> str:
     """Run PTOAS and return EmitC text; VPTO writes its object beside the PTO."""
     ptoas_dir = os.path.join(output_dir, "ptoas")
@@ -1798,6 +1804,9 @@ def _compile_pto_module(
         passes_dump_dir = os.path.join(output_dir, "ptoas_passes", unit_name)
         os.makedirs(passes_dump_dir, exist_ok=True)
 
+    write_sync_metadata(
+        Path(pto_path), sync_strategy, _get_ptoas_flags(memory_planner, sync_strategy=sync_strategy)
+    )
     # PTOCodegen stamps the top-level module attribute from structured IR.
     # Do not scan operation spellings: comments and source locations can contain
     # vecscope too. VPTO emits a host-linkable fat object, never C++ source.
@@ -1807,7 +1816,7 @@ def _compile_pto_module(
     _run_ptoas(
         pto_path,
         compiled_path,
-        ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir),
+        ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir, sync_strategy),
     )
 
     if is_vpto:
@@ -1842,6 +1851,7 @@ def _emit_single_function_output(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> None:
     """Emit output files for one InCore function."""
     suffix = "pto" if skip_ptoas else "cpp"
@@ -1857,9 +1867,12 @@ def _emit_single_function_output(
             output_dir,
             memory_planner,
             dump_ptoas_passes=True,
+            sync_strategy=sync_strategy,
         )
     else:
-        ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner)
+        ptoas_cpp = _compile_pto_module(
+            pto_code, func.name, output_dir, memory_planner, sync_strategy=sync_strategy
+        )
     if 'pto.backend = "vpto"' in pto_code.partition("\n")[0]:
         object_path = os.path.join(output_dir, "ptoas", f"{func.name}.o")
         with open(object_path, "rb") as object_file:
@@ -1878,6 +1891,7 @@ def _emit_group_output(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
     if skip_ptoas:
@@ -1891,9 +1905,12 @@ def _emit_group_output(
             output_dir,
             memory_planner,
             dump_ptoas_passes=True,
+            sync_strategy=sync_strategy,
         )
     else:
-        ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner)
+        ptoas_cpp = _compile_pto_module(
+            pto_code, group_name, output_dir, memory_planner, sync_strategy=sync_strategy
+        )
     if 'pto.backend = "vpto"' in pto_code.partition("\n")[0]:
         object_path = os.path.join(output_dir, "ptoas", f"{group_name}.o")
         with open(object_path, "rb") as object_file:
@@ -1970,6 +1987,7 @@ def _emit_unit(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> _EmitResult:
     """Run ptoas + wrapper generation for one codegen unit.
 
@@ -2031,6 +2049,7 @@ def _emit_unit(
                 skip_ptoas,
                 memory_planner,
                 dump_ptoas_passes,
+                sync_strategy,
             )
         else:
             _emit_single_function_output(
@@ -2041,6 +2060,7 @@ def _emit_unit(
                 skip_ptoas,
                 memory_planner,
                 dump_ptoas_passes,
+                sync_strategy,
             )
         ptoas_record.end = time.perf_counter()
         return _EmitResult(name=unit.name, files=local_files, ptoas_record=ptoas_record)
@@ -2085,6 +2105,7 @@ def _run_ptoas_phase(
     errors: list[tuple[str, Exception]],
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> None:
     """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
     max_workers = _get_max_workers()
@@ -2096,6 +2117,7 @@ def _run_ptoas_phase(
                 output_dir,
                 skip_ptoas,
                 memory_planner=memory_planner,
+                sync_strategy=sync_strategy,
                 dump_ptoas_passes=dump_ptoas_passes,
             )
             _collect_emit_result(result, unit, prof, result_files, errors)
@@ -2109,6 +2131,7 @@ def _run_ptoas_phase(
                     skip_ptoas,
                     memory_planner,
                     dump_ptoas_passes,
+                    sync_strategy,
                 )
                 for unit in units
             ]
@@ -2150,6 +2173,7 @@ def generate(
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    sync_strategy: _passes.AutoSyncStrategy | None = None,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -2167,6 +2191,8 @@ def generate(
         output_dir: Base output directory (used for ptoas intermediates when skip_ptoas=False)
         skip_ptoas: When True, skip the ptoas compilation step and return raw MLIR
             content in result_files with .pto extension instead of compiled .cpp wrappers.
+        sync_strategy: PTOAS auto synchronization policy. None inherits PassContext,
+            otherwise defaults to EVENT. BUFID requires A5.
         memory_planner: Who plans on-chip buffer memory. None uses ``MemoryPlanner.PYPTO``.
         emit_source_loc: When True, suffix each emitted ``.pto`` operation with an
             MLIR ``loc("file":line:col)`` from the IR Span so ptoas diagnostics
@@ -2182,6 +2208,10 @@ def generate(
     Returns:
         Dict mapping relative file paths to their content.
     """
+    if sync_strategy is None:
+        ctx = _passes.PassContext.current()
+        sync_strategy = ctx.get_sync_strategy() if ctx is not None else _passes.AutoSyncStrategy.EVENT
+    validate_sync_strategy(sync_strategy, _backend_core.get_backend_type())
     if memory_planner is None:
         memory_planner = _passes.MemoryPlanner.PYPTO
     if emit_source_loc is None:
@@ -2201,6 +2231,7 @@ def generate(
             output_dir,
             skip_ptoas,
             memory_planner=memory_planner,
+            sync_strategy=sync_strategy,
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
@@ -2216,6 +2247,7 @@ def generate(
             output_dir,
             skip_ptoas,
             memory_planner=memory_planner,
+            sync_strategy=sync_strategy,
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
@@ -2226,6 +2258,7 @@ def generate(
         output_dir,
         skip_ptoas,
         memory_planner=memory_planner,
+        sync_strategy=sync_strategy,
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
@@ -2241,6 +2274,7 @@ def _generate_with_distributed(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -2272,6 +2306,7 @@ def _generate_with_distributed(
                 chip_subdir,
                 skip_ptoas,
                 memory_planner=memory_planner,
+                sync_strategy=sync_strategy,
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
                 runtime=runtime,
@@ -2489,6 +2524,7 @@ def _generate_multi_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -2511,6 +2547,7 @@ def _generate_multi_chip(
             chip_subdir,
             skip_ptoas,
             memory_planner=memory_planner,
+            sync_strategy=sync_strategy,
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
@@ -2601,6 +2638,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    sync_strategy: _passes.AutoSyncStrategy = _passes.AutoSyncStrategy.EVENT,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2763,6 +2801,7 @@ def _generate_single_chip(
         result_files,
         errors,
         memory_planner=memory_planner,
+        sync_strategy=sync_strategy,
         dump_ptoas_passes=dump_ptoas_passes,
     )
 

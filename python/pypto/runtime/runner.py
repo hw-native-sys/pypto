@@ -60,7 +60,7 @@ from pypto._target import (
 )
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
-from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
+from pypto.pypto_core.passes import AutoSyncStrategy, DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
 
 from .device_tensor import DeviceTensor
 
@@ -347,6 +347,8 @@ class RunConfig:
             dependency analysis for AUTO runtime scopes during compilation.
             Defaults to ``False`` so existing runs keep using TensorMap fallback
             unless this behavior is explicitly requested.
+        sync_strategy: PTOAS auto synchronization policy. None inherits PassContext
+            or defaults to EVENT. BUFID requires Ascend950 (A5).
         memory_planner: Who plans on-chip buffer memory —
             :attr:`~pypto.pypto_core.passes.MemoryPlanner.PYPTO` (PyPTO runs
             ``MemoryReuse`` + ``AllocateMemoryAddr`` and bakes physical
@@ -400,6 +402,7 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
+    sync_strategy: AutoSyncStrategy | None = None
     dump_ptoas_passes: bool = False
     enable_software_pipeline: bool | None = None
 
@@ -448,6 +451,7 @@ class RunConfig:
             distributed_config: "DistributedConfig | None" = ...,
             analyze_auto_scopes_for_deps: bool = ...,
             memory_planner: MemoryPlanner | None = ...,
+            sync_strategy: AutoSyncStrategy | None = ...,
             dump_ptoas_passes: bool = ...,
             enable_software_pipeline: bool | None = ...,
         ) -> None: ...
@@ -606,6 +610,7 @@ class RunConfig:
             output_dir=self.save_kernels_dir,
             memory_planner=self.memory_planner,
             enable_software_pipeline=self.enable_software_pipeline,
+            sync_strategy=self.sync_strategy,
             distributed_config=self.distributed_config,
         )
 
@@ -922,6 +927,7 @@ class CompileOptions:
     # rejected while a ``PassContext`` is active, so unset values defer to it.
     output_dir: str | None = None
     memory_planner: MemoryPlanner | None = None
+    sync_strategy: AutoSyncStrategy | None = None
     distributed_config: "DistributedConfig | None" = None
     enable_software_pipeline: bool | None = None
 
@@ -950,7 +956,13 @@ class CompileOptions:
             "disabled_diagnostics": self.disabled_diagnostics,
             "analyze_auto_scopes_for_deps": self.analyze_auto_scopes_for_deps,
         }
-        for name in ("output_dir", "memory_planner", "distributed_config", "enable_software_pipeline"):
+        for name in (
+            "output_dir",
+            "memory_planner",
+            "sync_strategy",
+            "distributed_config",
+            "enable_software_pipeline",
+        ):
             value = getattr(self, name)
             if value is not None:
                 kwargs[name] = value

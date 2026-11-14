@@ -188,7 +188,7 @@ Its fields split three ways, and each way is a type:
 
 | Read by | Type | Fields |
 | ------- | ---- | ------ |
-| `ir.compile` | `CompileOptions` | `backend_type`, `execution_mode` (legacy `platform`), `strategy`, `dump_passes`, `dump_ptoas_passes`, `profiling` (`compile_profiling`), `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `output_dir` (`save_kernels_dir`), `memory_planner`, `distributed_config` |
+| `ir.compile` | `CompileOptions` | `backend_type`, `execution_mode` (legacy `platform`), `strategy`, `dump_passes`, `dump_ptoas_passes`, `profiling` (`compile_profiling`), `diagnostic_phase`, `disabled_diagnostics`, `analyze_auto_scopes_for_deps`, `output_dir` (`save_kernels_dir`), `memory_planner`, `sync_strategy`, `distributed_config` |
 | Dispatch | `RunOptions` | `platform`, `device_id`, `aicpu_thread_num`, the `ring_*` overrides ([Ring sizing](05-runtime-ring-sizing.md)), and a nested `DfxOptions` |
 | A dispatch's diagnostics | `DfxOptions` | `enable_chip_swimlane`, `enable_dump_args`, `enable_pmu`, `enable_dep_gen`, `enable_scope_stats` ([DFX](03-runtime-dfx.md)) |
 | The system-test harness only | — | `rtol`, `atol`, `golden_data_dir`, `save_kernels`, `codegen_only` |
@@ -283,6 +283,49 @@ Moving those five out to the harness is the step this does not take: they reach
 `compile_kwargs()` like every other caller, so a knob added to one is not
 silently missing from the other. `lower()` still has its own narrower mapping —
 it stops before codegen and targets the pass pipeline, not `ir.compile`.
+
+## Automatic synchronization: `sync_strategy`
+
+`passes.AutoSyncStrategy.EVENT` is the default on all targets and preserves
+`--enable-insert-sync`. `BUFID` selects PTOAS Buffer-ID analysis, allocation
+and insertion through `--enable-bufid_sync`, replacing the event flag. It is
+supported only by `BackendType.Ascend950` (A5); A2/A3 requests fail before
+passes/codegen. Unified synchronization is not a PyPTO policy in this release.
+
+```python
+from pypto import passes
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode
+
+with passes.PassContext([], sync_strategy=passes.AutoSyncStrategy.BUFID):
+    compiled = ir.compile(program, backend_type=BackendType.Ascend950,
+                          execution_mode=ExecutionMode.ONBOARD)
+```
+
+Without an active context, `ir.compile(..., sync_strategy=...)`,
+`CompileOptions(sync_strategy=...)` and `RunConfig(sync_strategy=...)` also
+accept the enum. An explicit compile option alongside an active `PassContext`
+is rejected; put the option on that context. Dumping and profiling inherit it.
+Memory planning remains independent: all three planners accept either policy
+on A5. The JIT cache includes the effective policy, including context selection.
+
+Every compiled `ptoas/<unit>.pto` has a sibling `<unit>.json` recording
+`sync_strategy` (`event` or `bufid`) and `ptoas_flags` (semantic flags including
+level and target, without dump paths). Debug replay restores these flags for
+root and per-rank units. Old artifacts with no metadata or strategy field use
+event; malformed metadata, unsupported policies, and inconsistent flags raise
+an error instead of silently switching policies. Keep the sidecar with the PTO
+file. To change policy or allocation level, recompile the program.
+
+With the PTOAS manual-sync guard, **any** hand-written `pto.get_buf`,
+`pto.rls_buf`, `pto.get_buf_dyn`, or `pto.rls_buf_dyn` makes automatic BufidSync
+skip the **entire function**, including unrelated accesses and nested regions.
+The programmer then owns every local dependency in that function. A remark
+reports the skip. Other functions in the module still receive automatic sync.
+This requires PTOAS with the static/dynamic guard; older versions detecting
+only static operations cannot safely combine dynamic manual synchronization
+with automatic BufidSync. This rule does not define a policy for mixing
+hand-written event protocols with automatic Buffer-ID insertion.
 
 ## Which way the layers point
 
