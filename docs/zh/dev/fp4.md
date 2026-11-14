@@ -58,7 +58,7 @@ PyPTO 提供两种不同的打包 FP4 数据类型。本页介绍它们共用的
 | `fillpad`、`fillpad_expand`、`fillpad_inplace` | 两种格式的 ND Vec；零值、最小值和最大值填充均保留有效载体矩形 |
 | DN 数值转换 | 完整静态连续的二维 BF16↔打包或打包↔打包转换；使用 PYPTO/DSA_RP 静态地址；部分有效、带填充及分块布局均被拒绝 |
 | 直接对打包类型执行 `reshape` 或 `transpose` | 不支持；在现有别名契约允许时，先对字节别名执行 reshape |
-| 原生打包 FP4 `matmul_mx` | Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要 PTOAS v0.72 的 Cube 逻辑维度约定 |
+| 原生打包 FP4 `matmul_mx` | Tile API 支持两种格式及 E2M1/E1M2 混合组合，使用 FP32 累加器；需要支持 Cube 逻辑维度的 PTOAS v0.74 或更新版本 |
 | MXFP4 `quant_mx` | 仅 E2M1，输入为 FP16/BF16，支持 OCP 和 axis0 上受支持的 NV 路径；使用 PYPTO/DSA_RP 静态分配 |
 | `pl.tile.quant_mx_raw` | 显式提供工作区，返回原生 E2M1 数据（MXFP8 返回 INT8）及原始 UINT8 指数；支持静态部分有效区域和 axis0 交错 |
 | Ascend910/A2A3 上执行打包 FP4 | 不支持 |
@@ -77,7 +77,7 @@ Mat→Left/Right 搬运随布局切换打包轴，不进行数值转换。直接
 PTOAS v0.72 已包含 [Cube 逻辑维度修复](https://gitcode.com/cann/pto-as/pull/381)。
 PyPTO 保留上述载体 ABI，在输出 PTO 时扩展 Mat/Left/Right 的打包轴物理和有效维度。
 GM 和 Vec 描述符仍使用载体维度，分配字节数不变。生成可执行代码前会探测所选汇编器的
-操作数、累加器和 scale 逻辑维度。可通过 `PTOAS_ROOT` 选择正式 v0.72 或兼容的新版本/补丁构建；
+操作数、累加器和 scale 逻辑维度。通过 `PTOAS_ROOT` 选择 `toolchain/versions.env` 固定的发布版本；
 旧的 Cube 载体维度开发构建不兼容。仅生成 IR（`skip_ptoas=True`）仍可用于检查。
 
 ## 数值转换限制

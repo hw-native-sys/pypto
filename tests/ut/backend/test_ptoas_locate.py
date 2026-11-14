@@ -459,7 +459,7 @@ def test_run_ptoas_timeout_reports_configured_deadline(monkeypatch):
 def fp4_probe(tmp_path, monkeypatch):
     binary = _make_executable(tmp_path / "ptoas")
     monkeypatch.setattr(_ptoas_fp4, "find_ptoas_binary", lambda: str(binary))
-    monkeypatch.setattr(_ptoas_fp4, "check_ptoas_version", lambda _: "ptoas 0.72+patched")
+    monkeypatch.setattr(_ptoas_fp4, "check_ptoas_version", lambda _: f"ptoas {_PINNED}+patched")
     _ptoas_fp4._verified_binaries.clear()
     return binary
 
@@ -485,8 +485,9 @@ def test_native_fp4_probe_rejects_old_geometry(fp4_probe, monkeypatch, returncod
         stderr="" if returncode == 0 else "incompatible accumulator shape",
     )
     monkeypatch.setattr(_ptoas_fp4.subprocess, "run", lambda *args, **kwargs: result)
-    with pytest.raises(RuntimeError, match=r"Native FP4 MX.*v0.72.*PTOAS #1700"):
+    with pytest.raises(RuntimeError, match=r"Native FP4 MX.*PTOAS #1700") as exc:
         _ptoas_fp4.check_native_fp4_mx_support()
+    assert f"released {PTOAS_MIN_VERSION} assembler" in str(exc.value)
     assert not _ptoas_fp4._verified_binaries
 
 

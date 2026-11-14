@@ -160,7 +160,7 @@ def matmul(
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
             chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
@@ -231,7 +231,7 @@ def matmul_acc(
         rhs: Right-hand side tile
         init_cond: Optional predicate selecting overwrite over accumulate
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
         acc_phase: Producer-side unit-flag phase. Use ``pl.AccPhase.Partial``
             for intermediate K chunks and ``pl.AccPhase.Final`` for the last
             chunk, paired with ``pl.store(..., st_phase=pl.STPhase.Final)``.
@@ -287,7 +287,7 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
         bias: Bias tile [1, N] with the accumulator dtype (FP32 for
             floating-point matrix operands, INT32 for integer matrix operands)
         tf32_mode: Optional HF32 input rounding: "round_even" or "round_away".
-            Requires 2D FP32 operands, Ascend950, and PTOAS 0.72+. None preserves FP32.
+            Requires 2D FP32 operands, Ascend950, and PTOAS 0.74+. None preserves FP32.
 
     Returns:
         Tile wrapping the matmul_bias operation
@@ -304,7 +304,7 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     E1M2x2). FP4 carrier extents expand along the contiguous axis; scales
     and the FP32 accumulator use logical value dimensions. Mixed FP4/FP8
     operands require an explicit FP4-to-FP8 cast. Native FP4 requires the
-    PTOAS v0.72 logical Cube geometry contract (issue #1700).
+    PTOAS logical Cube geometry contract introduced in v0.72 (issue #1700).
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN or packed FP4)

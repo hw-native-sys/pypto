@@ -140,9 +140,9 @@ yield 与结果的 valid 表达式保持相同。变化的有效尺寸通过普�
 不创建 Buffer-valued phi，也不导出分支局部视图。窗口 Tile carry、嵌套动态 valid
 窗口及动态 valid 的 relabel/assemble 仍不在默认选择范围内。
 
-原生标量交换需要 PTOAS 0.69 或更新版本，其中
-[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622) 的修复保持了
-循环 yield 的并行拷贝（parallel-copy）语义。仓库固定的 PTOAS 版本已包含该修复。
+原生标量交换依赖当前 checkout 固定的 PTOAS 版本，其中包含 PTOAS 0.69 引入的
+[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622) 修复，保持了
+循环 yield 的并行拷贝（parallel-copy）语义。
 验收会执行生成的 kernel；仅有正确的 Buffer IR 和成功的 native 编译，仍不足以
 证明数值正确性。
 

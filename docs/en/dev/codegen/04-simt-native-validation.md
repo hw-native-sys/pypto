@@ -37,8 +37,9 @@ contract before they can use this path. P3 rejects inline assembly explicitly.
 
 ## Focused acceptance
 
-Build PyPTO and the pinned runtime in the current checkout. Configure the pinned
-PTOAS v0.72 and an A5 CANN/Bisheng toolchain. Keep runtime pin checking enabled.
+Build PyPTO and the pinned runtime in the current checkout. Configure the PTOAS
+release pinned in `toolchain/versions.env` and an A5 CANN/Bisheng toolchain.
+Keep runtime pin checking enabled.
 The test uses the same opt-in gates as the [VF tests](03-vpto-vf-integration.md).
 
 The initial hardware acceptance passed on Ascend950DT with PTOAS v0.72,

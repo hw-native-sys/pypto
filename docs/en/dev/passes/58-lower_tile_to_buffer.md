@@ -193,12 +193,12 @@ does not invent a Buffer-valued phi or export a branch-local view. Window Tile
 carries, nested dynamic-valid windows and dynamic-valid relabels/assemble remain
 outside default selection.
 
-Native scalar swaps require PTOAS 0.69 or newer, which fixes
-[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622) by preserving
-parallel-copy semantics for loop yields. The repository's pinned PTOAS version
-includes this fix. Acceptance checks execute the generated kernels: correct
-Buffer IR and successful native compilation alone do not establish numerical
-correctness.
+Native scalar swaps rely on the checkout's pinned PTOAS release, which includes
+the fix introduced in PTOAS 0.69 for
+[PTOAS #1622](https://github.com/hw-native-sys/PTOAS/issues/1622), preserving
+parallel-copy semantics for loop yields. Acceptance checks execute the generated
+kernels: correct Buffer IR and successful native compilation alone do not
+establish numerical correctness.
 
 For example, `narrowed = pl.tile.set_validshape(loaded, 16, cols)` can be stored
 before reading `loaded` again: the second read restores `loaded`'s original
