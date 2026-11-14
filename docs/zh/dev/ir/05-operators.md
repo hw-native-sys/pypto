@@ -703,6 +703,46 @@ SHARED，两个 kernel 中都会出现。屏障在 **`pl.pipeline` 内被拒绝*
 
 在显式指定类型的 AIC/AIV kernel 中使用 `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` 和 `pl.system.sync_wait(event_id, pipe=...)`。在混合 InCore kernel 中，传入 `core_type=pl.KernelType.AIV` 或 `core_type=pl.KernelType.AIC`，以便 kernel 展开时将各事件操作保留在目标核通道上（IR 属性仍保存下沉后的 `"aiv"` / `"aic"` 拼写，那是 API 的产物，不是可接受的输入）。这里不接受 `pl.KernelType.MIX`——事件只钉一条 lane，两条都跑是通过省略 `core_type` 表达的。`system.syncall` 与事件算子最终都归入 `ClassifyCallAffinity` 的同一套 `KernelType` 分类，区别只在 IR 属性的拼写（`"aic_only"` 与 `"aic"`）。在 A3 上，每个参与同步的 AIC/AIV 函数都必须在首次显式事件操作前调用 `pl.system.set_ffts(workspace)`；`workspace` 必须是至少包含 256 个元素的一维 `INT64` 张量，并作为 PTOAS 的设置操作数。PyPTO 的常驻运行时会持续安装硬件 FFTS 控制地址，因此生成的运行时封装不会用该操作数覆盖此地址。A5 不需要该设置。`event_id` 可以是用户可用范围 0–13 内的整数，也可以是动态 `pl.Scalar[pl.INDEX]`；ID 14 和 15 为保留值。`sync_set` 的可选 `ffts_mode` 必须为 0、1 或 2。手写跨核协议的作者负责正确配对事件 ID 和 pipe。PyPTO 的常规核内自动依赖插入仍保持启用，并使用独立的 `set_flag`/`wait_flag` 机制，因此不会占用这些显式跨核事件 ID。
 
+### 具名 Intra-Block 事件
+
+`pl.system.set_intra_block` 和 `pl.system.wait_intra_block` 发射具名
+PTOAS 操作，独立于 `sync_set` 及其 FFTS mode 0/1/2，均无返回值。
+A5 静态 ID 范围为 **0–31**，动态 ID 必须是
+`pl.Scalar[pl.INT32]` 或 `pl.Scalar[pl.INT64]`。DSL 整数字面量仍保存为静态属性；
+动态 INDEX 标量需要显式转换；
+编译器不插入隐式转换或动态范围检查。A5 合法 pipe 为 `FIX`、`MTE1`、
+`MTE2`、`MTE3`、`V` 和 `S`，拒绝 `M` 和 `ALL`。`S` 还要求 PTOAS 的 A5 具名事件校验支持该 pipe；
+旧编译器可能拒绝已发射的 PTO。set/wait 可使用不同的
+合法 pipe：各自约束本核的生产/消费流水线，事件标识会合关系。
+A2/A3 的 PTOAS 路径使用 FFTS mode 2，ID 限于 0–15，且不支持 `S`；
+不能将 A5 的范围或单 AIV 语义推广到这些目标。
+
+```python
+# Placement example only, not a complete handshake.
+pl.system.set_intra_block(17, pipe=pl.PipeType.MTE1, core_type=pl.KernelType.AIC)
+pl.system.wait_intra_block(17, pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)
+```
+
+`core_type` 选择 AIC 或 AIV，**不选择 AIV0 或 AIV1**。混合核中应显式指定；
+展开时拒绝未指定归属的具名事件，避免复制其副作用。在明确标为 AIC/AIV 的
+函数中可以省略。Python API 不提供 lane 参数。本机 A5 PTO-ISA 的
+`TPush.hpp` 使用 16 个本地事件和 `VEC_CORE_ID_OFFSET = 16`：对于
+0–15 的本地事件 `e`，Cube 用 `e` 寻址 AIV0，用 `e + 16` 寻址 AIV1；
+各 AIV 使用本地 `e`。Cube 必须分别向参与的 AIV 发信号/等待，因此 Cube
+上的原始事件 17 对应 AIV1 的本地事件 1，而不是两个 AIV 的本地事件 17。
+仅在一个 AIV 执行还需要核函数中的 lane 控制。这些头文件证据不等于完整
+协议已通过真机验证。
+
+**资源归属：**这些调用不预留事件。TPipe 使用同一个 intra-block 命名空间：
+单向 pipe 消耗 `flag_base` 和 `flag_base + 1`，双向 pipe 还消耗 `+2` 和
+`+3`，Cube 端还有 AIV1 的 `+16` 别名。PTOAS 分配器仅统计 pipe 组件，
+不统计手写具名事件。必须避开所有存活的 pipe 区间及其别名，以及混合
+`SYNCALL` 使用的事件（以目标 PTO-ISA 常量为准；本机 A5 头文件使用本地 12/13 和 Cube
+端别名 28/29）。FFTS API 的 14/15 预留
+并不意味着具名事件可以自由使用这两个编号。自动核内 `set_flag`/`wait_flag`
+使用独立命名空间。协议作者负责分配不冲突的 ID、平衡各轮 set/wait，
+并保证负载可见性和缓冲区复用顺序。
+
 ### 数据传输操作
 
 | 操作 | 参数 | 描述 | Kwargs |

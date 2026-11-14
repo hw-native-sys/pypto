@@ -107,6 +107,46 @@ TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+// Named intra-block events have their own A5 contract; FFTS keeps 0..13/INDEX.
+TypePtr DeduceIntraBlockSyncType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  CHECK(args.size() <= 1) << op_name << " accepts at most one dynamic event-id operand, got " << args.size();
+  bool has_static_event_id = false;
+  bool has_pipe = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "event_id") {
+      const int event_id = AnyCast<int>(value, "kwarg key: event_id");
+      CHECK(event_id >= 0 && event_id <= 31)
+          << op_name << " static event_id must be in [0, 31] on A5, got " << event_id;
+      has_static_event_id = true;
+    } else if (key == "pipe") {
+      const int pipe = AnyCast<int>(value, "kwarg key: pipe");
+      CHECK(pipe == PipeType::FIX || pipe == PipeType::MTE1 || pipe == PipeType::MTE2 ||
+            pipe == PipeType::MTE3 || pipe == PipeType::V || pipe == PipeType::S)
+          << op_name << " pipe must be FIX, MTE1, MTE2, MTE3, V, or S on A5, got " << pipe;
+      has_pipe = true;
+    } else if (key == "core_type") {
+      const auto core_type = AnyCast<std::string>(value, "kwarg key: core_type");
+      CHECK(core_type == "aic" || core_type == "aiv")
+          << op_name << " core_type must be 'aic' or 'aiv', got '" << core_type << "'";
+    } else {
+      CHECK(false) << op_name << " does not support attribute '" << key << "'";
+    }
+  }
+  CHECK(has_pipe) << op_name << " requires a pipe attribute";
+  CHECK(has_static_event_id != (args.size() == 1))
+      << op_name << " requires exactly one static event_id attribute or dynamic event-id operand";
+  if (!args.empty()) {
+    auto type = As<ScalarType>(args[0]->GetType());
+    CHECK(type && (type->dtype_ == DataType::INT32 || type->dtype_ == DataType::INT64))
+        << op_name << " dynamic event id must have ScalarType(INT32) or ScalarType(INT64); got "
+        << (type ? type->dtype_.ToString() : args[0]->GetType()->TypeName())
+        << "; cast INDEX explicitly before calling";
+  }
+  return GetUnknownType();
+}
+
 }  // namespace
 
 // ============================================================================
@@ -146,6 +186,28 @@ REGISTER_OP("system.sync_wait")
     .set_attr<std::string>("core_type")
     .f_deduce_type([](const auto& args, const auto& kwargs) {
       return DeduceCrossCoreSyncType(args, kwargs, "system.sync_wait", false);
+    });
+
+REGISTER_OP("system.set_intra_block")
+    .set_description("Set a named intra-block synchronization event")
+    .set_op_category("CrossCoreOp")
+    .add_argument("event_id_dyn", "Optional dynamic event id (INT32 or INT64)")
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceIntraBlockSyncType(args, kwargs, "system.set_intra_block");
+    });
+
+REGISTER_OP("system.wait_intra_block")
+    .set_description("Wait for a named intra-block synchronization event")
+    .set_op_category("CrossCoreOp")
+    .add_argument("event_id_dyn", "Optional dynamic event id (INT32 or INT64)")
+    .set_attr<int>("pipe")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceIntraBlockSyncType(args, kwargs, "system.wait_intra_block");
     });
 
 // Release slot back to AIC producer (called by AIV consumer after tpop_from_aic)

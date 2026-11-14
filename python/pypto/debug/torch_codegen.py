@@ -1521,6 +1521,8 @@ def _register_ops() -> None:  # noqa: PLR0915
         "system.sync_dst",
         "system.sync_set",
         "system.sync_wait",
+        "system.set_intra_block",
+        "system.wait_intra_block",
         "system.set_flag",
         "system.wait_flag",
         "system.set_ffts",

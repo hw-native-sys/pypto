@@ -776,6 +776,50 @@ The `core_type` and `mode` attributes stay strings **in the IR**, but the Python
 
 Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_wait(event_id, pipe=...)` in explicitly typed AIC/AIV kernels. In a mixed InCore kernel, pass `core_type=pl.KernelType.AIV` or `core_type=pl.KernelType.AIC` to retain each event operation on the intended lane when the kernel is expanded (the IR attr keeps the lowered `"aiv"` / `"aic"` spelling, which is an output of the API, not an accepted input). `pl.KernelType.MIX` is rejected here — an event pins one lane, and both-lane placement is spelled by omitting `core_type`. Both `system.syncall` and the event ops feed the same `KernelType` classification in `ClassifyCallAffinity`; only their IR attr vocabularies differ (`"aic_only"` vs `"aic"`). On A3, call `pl.system.set_ffts(workspace)` in every participating AIC/AIV function before its first explicit event operation; `workspace` must be a one-dimensional `INT64` tensor with at least 256 elements and acts as the PTOAS setup operand. PyPTO's persistent runtime keeps the hardware FFTS control address installed, so generated runtime wrappers do not replace it with this operand. A5 does not require this setup. `event_id` may be an integer in the user-available range 0–13 or a dynamic `pl.Scalar[pl.INDEX]`; IDs 14 and 15 are reserved. `ffts_mode`, when supplied to `sync_set`, must be 0, 1, or 2. The author of a manual cross-core protocol is responsible for pairing event IDs and pipes. PyPTO's normal automatic intra-core dependency insertion remains enabled and uses the separate `set_flag`/`wait_flag` mechanism, so it does not allocate from these explicit cross-core event IDs.
 
+### Named Intra-Block Events
+
+`pl.system.set_intra_block` and `pl.system.wait_intra_block` emit the named
+PTOAS operations, independently of `sync_set` and its FFTS modes 0/1/2.
+They return no value. On A5 the static ID range is **0–31**, and a dynamic ID
+must be `pl.Scalar[pl.INT32]` or `pl.Scalar[pl.INT64]`. Bare DSL integer
+literals remain static attributes. Cast a dynamic INDEX scalar explicitly; no implicit conversion or dynamic range check is inserted.
+Legal A5 pipes are `FIX`, `MTE1`, `MTE2`, `MTE3`, `V`, and `S`; `M` and `ALL`
+are rejected. `S` requires a PTOAS build whose A5 named-event verifier accepts
+it; older assemblers can reject the emitted PTO. Set and wait may use different legal pipes: each pipe orders
+its local producer or consumer, while the event identifies the rendezvous.
+A2/A3 PTOAS uses FFTS mode 2, restricts IDs to 0–15, and rejects `S`; do not
+assume the A5 range or per-AIV semantics on those targets.
+
+```python
+# Placement example only, not a complete handshake.
+pl.system.set_intra_block(17, pipe=pl.PipeType.MTE1, core_type=pl.KernelType.AIC)
+pl.system.wait_intra_block(17, pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)
+```
+
+`core_type` selects AIC versus AIV, **not AIV0 versus AIV1**. Use it in mixed
+kernels; expansion rejects an unpinned named event rather than duplicating
+its side effect. In explicitly typed AIC/AIV functions it can be omitted.
+There is no Python lane parameter. The installed A5 PTO-ISA `TPush.hpp` uses
+16 local event IDs and `VEC_CORE_ID_OFFSET = 16`: Cube addresses AIV0 with
+`e` and AIV1 with `e + 16`, for `e` in 0–15; each AIV uses its local `e`.
+Cube must signal/wait separately for each participating AIV. A raw event 17
+on Cube therefore addresses AIV1's local event 1, not local event 17 on both
+AIVs. Executing on only one AIV also requires lane control in the kernel.
+This header evidence is not an on-device validation of a complete protocol.
+
+**Resource ownership:** these calls do not reserve IDs. TPipe uses the same
+intra-block namespace: a unidirectional pipe consumes `flag_base` and
+`flag_base + 1`, and a bidirectional pipe also consumes `+2` and `+3`, with
+Cube-side AIV1 aliases at `+16`. PTOAS's pipe allocator accounts for pipe
+components, not manual named events. Avoid every live pipe interval and its
+aliases, and the events used by mixed `SYNCALL` (consult the target
+PTO-ISA constants: the inspected A5 headers use local 12/13 and
+Cube-side aliases 28/29). The FFTS API's 14/15 reservation does not make those
+numbers free for named events. Automatic intra-core `set_flag`/`wait_flag`
+uses a separate namespace. The protocol author must allocate non-conflicting
+IDs, balance every set/wait across iterations, and provide appropriate
+payload visibility and buffer-reuse ordering.
+
 ### Data Transfer Operations
 
 | Operation | Args | Description | Kwargs |
