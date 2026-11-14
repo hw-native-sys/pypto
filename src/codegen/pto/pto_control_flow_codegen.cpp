@@ -487,6 +487,15 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
           if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
               branch_yields[i] != phi_it->second) {
+            if (yielded_tile && !yielded_tile->memref_) {
+              // Receives defined outside the branch bypass the finalizer's
+              // branch-local yield check. Copying them into a phi buffer is
+              // supported only in Vec: Mat-to-Mat tmov is not legal. Check at
+              // the copy site so same-slot borrowed handle yields remain valid.
+              CHECK_SPAN(yielded_tile->memory_space_ == ir::MemorySpace::Vec, op->span_)
+                  << "Merging a FIFO-backed Tile into an allocated if-result is only supported in Vec "
+                     "memory; consume each Mat receive inside its branch instead of yielding it";
+            }
             const std::string& phi = phi_it->second;
             // Annotate each operand with the type its own SSA value was defined
             // with. They can differ: a `pto.treshape` view carries static valid

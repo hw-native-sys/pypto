@@ -61,6 +61,23 @@ def _function_body(mlir: str, func_name: str) -> str:
     return "\n".join(out)
 
 
+def _generate_mixed_tile_mlir(program: ir.Program, planner: passes.MemoryPlanner) -> str:
+    """Lower a mixed InCore program through the legacy Tile pipeline."""
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    # Group is a host dispatch wrapper; PTO codegen takes its device members.
+    members = [
+        func
+        for func in optimized.functions.values()
+        if func.func_type in (ir.FunctionType.AIC, ir.FunctionType.AIV)
+    ]
+    assert len(members) == 2
+    device_program = ir.Program(members, optimized.name, optimized.span)
+    mlir = PTOCodegen().generate(device_program, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert isinstance(mlir, str)
+    return mlir
+
+
 def _compile_borrowed_program(
     program: ir.Program, planner: passes.MemoryPlanner, tmp_path: Path, backend_type: BackendType
 ) -> str:
@@ -182,6 +199,99 @@ def test_different_borrowed_if_sources_keep_phi_copy(
     assert mlir.rindex("pto.tmov") < mlir.index("pto.tfree_from_aic") < mlir.index("pto.tstore")
 
 
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_outer_mat_fifo_if_merge_rejected(planner: passes.MemoryPlanner, backend_type: BackendType):
+    """Automatic V2C receives before an if must not fall through to Mat-to-Mat copies."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            flag: pl.Scalar[pl.BOOL],
+            x: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            vector = pl.load(x, [0, 0], [16, 16])
+            first = pl.move(
+                vector,
+                target_memory=pl.Mem.Mat,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            vector2 = pl.add(vector, 1.0)
+            second = pl.move(
+                vector2,
+                target_memory=pl.Mem.Mat,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            if flag:
+                selected = pl.yield_(first)
+            else:
+                selected = pl.yield_(second)
+            left = pl.move(selected, target_memory=pl.Mem.Left)
+            right_mat = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            right = pl.move(right_mat, target_memory=pl.Mem.Right)
+            product = pl.matmul(left, right)
+            out = pl.store(product, [0, 0], out)
+            return out
+
+    # Expansion succeeds because both receives dominate the if. Codegen must
+    # diagnose its unsupported phi copy before handing invalid MLIR to PTOAS.
+    with pytest.raises(ValueError, match="Merging a FIFO-backed Tile.*only supported in Vec memory"):
+        _generate_mixed_tile_mlir(Program, planner)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_same_mat_fifo_if_result_codegen(
+    tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
+):
+    """Selecting one shared Mat receive remains legal because no phi copy is needed."""
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            flag: pl.Scalar[pl.BOOL],
+            x: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            vector = pl.load(x, [0, 0], [16, 16])
+            received = pl.move(
+                vector,
+                target_memory=pl.Mem.Mat,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            if flag:
+                selected = pl.yield_(received)
+            else:
+                selected = pl.yield_(received)
+            left = pl.move(selected, target_memory=pl.Mem.Left)
+            right_mat = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            right = pl.move(right_mat, target_memory=pl.Mem.Right)
+            product = pl.matmul(left, right)
+            out = pl.store(product, [0, 0], out)
+            return out
+
+    mlir = _generate_mixed_tile_mlir(Program, planner)
+    body = _function_body(mlir, "kernel_aic")
+    assert re.search(r"scf\.if .* -> \(!pto\.tile_buf<loc=mat", body), body
+    assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in body.splitlines()), body
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+
+
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
@@ -234,18 +344,7 @@ def test_branch_local_borrowed_result_copied_before_free(
                 out = pl.store(selected, [0, 0], out)
                 return out
 
-    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
-    # Group is a host dispatch wrapper; PTO codegen takes its device members.
-    members = [
-        func
-        for func in optimized.functions.values()
-        if func.func_type in (ir.FunctionType.AIC, ir.FunctionType.AIV)
-    ]
-    assert len(members) == 2
-    device_program = ir.Program(members, optimized.name, optimized.span)
-    mlir = PTOCodegen().generate(device_program, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
-    assert isinstance(mlir, str)
+    mlir = _generate_mixed_tile_mlir(Program, planner)
     body = _function_body(mlir, "kernel_aiv")
     # A2/A3 may also emit a secondary-lane handshake replay. Check the first
     # execution of each original branch, where the result feeds the store.
