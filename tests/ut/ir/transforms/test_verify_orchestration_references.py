@@ -84,11 +84,12 @@ class TestOrchestrationReferencesResolvedVerifier:
         errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
         assert errors == []
 
-    def test_async_transfer_in_host_body_fails(self):
+    @pytest.mark.parametrize("op_name", ["pld.tensor.put_async", "pld.tensor.get_async"])
+    def test_async_transfer_in_host_body_fails(self, op_name):
         """put_async/get_async must run in InCore, not a host (Opaque) body."""
         span = ir.Span.unknown()
         x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
-        put = ir.Call(ir.GlobalVar("pld.tensor.put_async"), [x], ir.TupleType([]), span)
+        put = ir.Call(ir.GlobalVar(op_name), [x], ir.TupleType([]), span)
         body = ir.SeqStmts([ir.EvalStmt(put, span), ir.ReturnStmt([], span)], span)
         host = ir.Function("host_main", [x], [], body, span)  # default Opaque
         prog = ir.Program([host], "test_async_host_placement", span)
@@ -97,23 +98,55 @@ class TestOrchestrationReferencesResolvedVerifier:
         errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
         assert len(errors) == 1, [e.message for e in errors]
         assert "host_main" in errors[0].message
-        assert "pld.tensor.put_async" in errors[0].message
+        assert op_name in errors[0].message
         assert "non-InCore" in errors[0].message
 
-    def test_async_transfer_in_orchestration_body_fails(self):
-        """put_async/get_async are also invalid in an Orchestration body."""
+    @pytest.mark.parametrize("op_name", ["pld.tensor.put_async", "pld.tensor.get_async"])
+    @pytest.mark.parametrize("func_type", [ir.FunctionType.Orchestration, ir.FunctionType.Graph])
+    def test_async_transfer_in_orchestration_body_fails(self, op_name, func_type):
+        """Placement errors must not also report the op as an undefined function."""
         span = ir.Span.unknown()
         x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
-        get = ir.Call(ir.GlobalVar("pld.tensor.get_async"), [x], ir.TupleType([]), span)
+        get = ir.Call(ir.GlobalVar(op_name), [x], ir.TupleType([]), span)
         body = ir.SeqStmts([ir.EvalStmt(get, span), ir.ReturnStmt([], span)], span)
-        orch = ir.Function("orch_main", [x], [], body, span, type=ir.FunctionType.Orchestration)
+        orch = ir.Function("orch_main", [x], [], body, span, type=func_type)
         prog = ir.Program([orch], "test_async_orch_placement", span)
 
         diagnostics = passes.PropertyVerifierRegistry.verify(_orch_refs_props(), prog)
         errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
         assert len(errors) == 1, [e.message for e in errors]
-        assert "pld.tensor.get_async" in errors[0].message
+        assert op_name in errors[0].message
         assert "non-InCore" in errors[0].message
+
+    @pytest.mark.parametrize("op_name", ["pld.tensor.put_async", "pld.tensor.get_async"])
+    def test_async_transfer_in_incore_body_passes(self, op_name):
+        """The placement guard must continue to allow the owning InCore body."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
+        call = ir.Call(ir.GlobalVar(op_name), [x], ir.TupleType([]), span)
+        body = ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([], span)], span)
+        kernel = ir.Function("kernel", [x], [], body, span, type=ir.FunctionType.InCore)
+        prog = ir.Program([kernel], "test_async_incore_placement", span)
+
+        diagnostics = passes.PropertyVerifierRegistry.verify(_orch_refs_props(), prog)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert errors == []
+
+    @pytest.mark.parametrize("op_name", ["pld.tensor.put_async", "pld.tensor.get_async"])
+    def test_async_transfer_submit_requires_defined_callee(self, op_name):
+        """Exempting a direct op Call must not exempt an undefined Submit target."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.TensorType([64], ir.DataType.FP32), span)
+        submit = ir.Submit(ir.GlobalVar(op_name), [x], [], ir.ScalarType(ir.DataType.TASK_ID), span)
+        body = ir.SeqStmts([ir.EvalStmt(submit, span), ir.ReturnStmt([], span)], span)
+        graph = ir.Function("graph_main", [x], [], body, span, type=ir.FunctionType.Graph)
+        prog = ir.Program([graph], "test_async_submit_callee", span)
+
+        diagnostics = passes.PropertyVerifierRegistry.verify(_orch_refs_props(), prog)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert len(errors) == 1, [e.message for e in errors]
+        assert op_name in errors[0].message
+        assert "undefined function" in errors[0].message
 
     def test_non_orchestration_functions_are_skipped(self):
         """Non-Orchestration (e.g. Opaque) functions are not checked for undefined callees."""

@@ -42,7 +42,9 @@ Adapter symbols and C++ element types reuse the shared dtype conversions.
 
 **Usage pattern.** The transfer runs in the InCore body that owns the
 destination; a call in a host orchestration body is rejected by
-`OrchestrationReferencesResolved`. The destination is the producer's `InOut`
+`OrchestrationReferencesResolved`. Direct calls outside InCore receive one
+placement diagnostic, without an additional undefined-function diagnostic.
+The destination is the producer's `InOut`
 output, and a later task consumes it as `In`:
 
 ```python

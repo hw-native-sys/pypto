@@ -36,7 +36,8 @@ adapter 符号与 C++ 元素类型复用公共 dtype 转换。
 | 远端可见性 | 接收方仍需现有的跨 rank notify/wait 协议 | 完成序的远端消费 |
 
 **使用模式。** 传输必须在拥有目的地的 InCore body 中执行；在 host orchestration
-body 中调用会被 `OrchestrationReferencesResolved` 拒绝。目的地是 producer 的
+body 中调用会被 `OrchestrationReferencesResolved` 拒绝。在 InCore 之外直接调用时，
+只报告一条调用位置诊断，不再附加未定义函数诊断。目的地是 producer 的
 `InOut` 输出，后续 task 以 `In` 消费：
 
 ```python

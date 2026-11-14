@@ -18,6 +18,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -31,6 +32,10 @@ namespace {
 using op_predicates::IsBuiltinOp;
 using op_predicates::IsManagedTensorCollective;
 
+bool IsAsyncTransferCall(const CallPtr& call) {
+  return IsOp(call, "pld.tensor.put_async") || IsOp(call, "pld.tensor.get_async");
+}
+
 class OrchestrationCallTargetChecker : public IRVisitor {
  public:
   OrchestrationCallTargetChecker(ProgramPtr program, std::vector<Diagnostic>& diagnostics,
@@ -41,6 +46,10 @@ class OrchestrationCallTargetChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& call) override {
     IRVisitor::VisitExpr_(call);
     if (!call) return;
+    // The placement checker already rejects direct async ops outside InCore.
+    // They are not missing program functions; keep this exemption Call-only
+    // so Submit targets still require a defined callee.
+    if (IsAsyncTransferCall(call)) return;
     CheckCallee(call->op_, call->span_);
   }
 
@@ -104,9 +113,8 @@ class AsyncTransferPlacementChecker : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& call) override {
     IRVisitor::VisitExpr_(call);
-    if (!call || !call->op_) return;
+    if (!IsAsyncTransferCall(call)) return;
     const std::string& name = call->op_->name_;
-    if (name != "pld.tensor.put_async" && name != "pld.tensor.get_async") return;
     diagnostics_.emplace_back(
         DiagnosticSeverity::Error, "OrchestrationReferencesResolved", 0,
         "Function '" + func_name_ + "' calls " + name +
