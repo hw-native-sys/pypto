@@ -79,6 +79,61 @@ def _dn_tensor(shape: Sequence[int], stride: Sequence[int]) -> ir.TensorType:
     return ir.TensorType(_dims(shape), DataType.FP32, None, view)
 
 
+def _mx_load_program(layout, block_offset, group_offset, explicit_stride):
+    is_a = layout == pl.MX_A_ZZ
+    shape = [32, 4] if is_a else [4, 32]
+    tile_shape = [16, 2] if is_a else [2, 16]
+    offsets = [block_offset, group_offset] if is_a else [group_offset, block_offset]
+    view = pl.TensorView(stride=[shape[1], 1] if explicit_stride else [], layout=layout)
+
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, scale: pl.Tensor[shape, pl.FP8E8M0, view]):
+            _ = pl.load(scale, offsets, tile_shape, target_memory=pl.Mem.Mat)
+
+    return Input
+
+
+@pytest.mark.parametrize("layout", [pl.MX_A_ZZ, pl.MX_B_NN])
+@pytest.mark.parametrize("explicit_stride", [False, True])
+@pytest.mark.parametrize("offsets", [(1, 0), (0, 1), (16, 2)])
+def test_logical_mx_requires_legalization(layout, explicit_stride, offsets):
+    # A custom pipeline must not replace offset validation with shape-only
+    # validation, even for an already explicit view or with verification off.
+    program = _mx_load_program(layout, *offsets, explicit_stride)
+    with _passes.PassContext([], _passes.VerificationLevel.NONE):
+        with pytest.raises(InternalError, match="requires LegalizeMxScaleTensorViews"):
+            _materialize(program)
+
+
+@pytest.mark.parametrize("layout", [pl.MX_A_ZZ, pl.MX_B_NN])
+@pytest.mark.parametrize("explicit_stride", [False, True])
+@pytest.mark.parametrize("logical_views", [False, True])
+def test_valid_mx_legalization_and_legacy_blocking_materialize(layout, explicit_stride, logical_views):
+    program = _mx_load_program(layout, 16, 2, explicit_stride)
+    factory = _passes.legalize_mx_scale_tensor_views if logical_views else _passes.block_mx_scale_tensor_views
+    with _passes.PassContext([], _passes.VerificationLevel.NONE):
+        result = _materialize(factory()(program))
+        assert _materialize(result) is result
+    assert _verify_strict(result) == []
+    param = next(iter(result.functions.values())).params[0]
+    assert isinstance(param.type, ir.TensorType)
+    assert len(param.type.shape) == (2 if logical_views else 5)
+
+
+def test_submit_logical_mx_return_requires_legalization():
+    # The only MX type is nested in a Submit return; no parameter carries it.
+    mx = ir.TensorType(_dims([32, 4]), pl.FP8E8M0, None, ir.TensorView([], pl.MX_A_ZZ))
+    result_type = ir.TupleType([mx, ir.ScalarType(pl.TASK_ID)])
+    submit = ir.Submit(ir.GlobalVar("kernel"), [], [], {}, {}, result_type, _SPAN)
+    result = ir.Var("result", result_type, _SPAN)
+    function = ir.Function("caller", [], [], ir.AssignStmt(result, submit, _SPAN), _SPAN)
+    with _passes.PassContext([], _passes.VerificationLevel.NONE):
+        with pytest.raises(InternalError, match="requires LegalizeMxScaleTensorViews"):
+            _materialize(ir.Program([function], "mx_submit", _SPAN))
+
+
 # ============================================================================
 # Bare tensor stays bare; strict verifier still passes (treated as implicit ND).
 # ============================================================================

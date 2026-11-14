@@ -1507,11 +1507,11 @@ class TestRemainderFamilyCodegen:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                 rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                tmp2: pl.Tile[[2, 16], pl.FP32] = pl.tile.create(
-                    [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp2: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                    [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                tmp1: pl.Tile[[1, 16], pl.FP32] = pl.tile.create(
-                    [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp1: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                    [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 out = pl.store(pl.tile.rem(lhs_tile, rhs_tile, tmp2), [0, 0], out)
                 out = pl.store(pl.tile.rems(lhs_tile, -3.0, tmp1), [0, 0], out)
@@ -1551,8 +1551,8 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 16], pl.FP32] = pl.tile.create(
-                        [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                        [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                     return pl.store(result, [0, 0], out)
@@ -1608,8 +1608,8 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], dtype]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 16], dtype] = pl.tile.create(
-                        [2, 16], dtype=dtype, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], dtype] = pl.tile.create(
+                        [2, 272], dtype=dtype, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1628,8 +1628,8 @@ class TestRemainderFamilyCodegen:
                     out: pl.Tensor[[16, 16], dtype],
                 ) -> pl.Tensor[[16, 16], dtype]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[1, 16], dtype] = pl.tile.create(
-                        [1, 16], dtype=dtype, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], dtype] = pl.tile.create(
+                        [2, 272], dtype=dtype, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rems(lhs_tile, 3, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1674,8 +1674,9 @@ class TestRemainderFamilyCodegen:
         with pytest.raises(ValueError, match=r"not supported on A2/A3"):
             self._generate_mlir(program_cls)
 
+    @pytest.mark.ptoas_compile
     @pytest.mark.parametrize("op_name", ["rem", "rems"])
-    def test_a2a3_accepts_int32_floor_remainder(self, op_name):
+    def test_a2a3_accepts_int32_floor_remainder(self, tmp_path, op_name):
         if op_name == "rem":
 
             @pl.program
@@ -1689,8 +1690,8 @@ class TestRemainderFamilyCodegen:
                 ) -> pl.Tensor[[16, 16], pl.INT32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[2, 16], pl.INT32] = pl.tile.create(
-                        [2, 16], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], pl.INT32] = pl.tile.create(
+                        [2, 272], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1709,8 +1710,8 @@ class TestRemainderFamilyCodegen:
                     out: pl.Tensor[[16, 16], pl.INT32],
                 ) -> pl.Tensor[[16, 16], pl.INT32]:
                     lhs_tile = pl.load(lhs, [0, 0], [16, 16])
-                    tmp: pl.Tile[[1, 16], pl.INT32] = pl.tile.create(
-                        [1, 16], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], pl.INT32] = pl.tile.create(
+                        [2, 272], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rems(lhs_tile, 3, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1720,19 +1721,17 @@ class TestRemainderFamilyCodegen:
         pto_name = "pto.trem" if op_name == "rem" else "pto.trems"
         mlir = self._generate_mlir(program_cls)
         assert pto_name in mlir
-        if op_name == "rem":
-            assert mlir.count("pto.tcvt") == 1
-            assert mlir.index("pto.trem") < mlir.index("pto.tcvt")
-            tcvt_line = self._op_line(mlir, "pto.tcvt")
-            assert "%trem_rhs_fp32_view" in tcvt_line
-            assert "f32" in tcvt_line and "i32" in tcvt_line
-            assert "#pto<round_mode ROUND>" in tcvt_line
-            # Stamped, not left to the assembler's default for an omitted satmode --
-            # PTOAS v0.63 flipped that default from OFF to ON. INT32 is an integer
-            # destination, so the policy default (and what this restore wants) is ON.
-            assert "satmode = #pto<saturation_mode ON>" in tcvt_line, tcvt_line
-        else:
-            assert "pto.tcvt" not in mlir
+        # Both TREM sources and the TREMS dividend remain FP32 in the ISA.
+        restores = [line for line in mlir.splitlines() if "pto.tcvt " in line]
+        assert len(restores) == (2 if op_name == "rem" else 1)
+        assert mlir.index(pto_name) < mlir.index("pto.tcvt")
+        for line in restores:
+            assert "#pto<round_mode ROUND>" in line
+            assert "#pto<saturation_mode ON>" in line
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+        assert cpp.count("TCVT(") == len(restores)
 
     @pytest.mark.parametrize("scalar", [-(2**24) - 1, 2**24 + 1])
     def test_a2a3_rejects_out_of_domain_int32_rems_constant(self, scalar):
@@ -1745,8 +1744,8 @@ class TestRemainderFamilyCodegen:
                 out: pl.Tensor[[16, 16], pl.INT32],
             ) -> pl.Tensor[[16, 16], pl.INT32]:
                 src_tile = pl.load(src, [0, 0], [16, 16])
-                tmp: pl.Tile[[1, 16], pl.INT32] = pl.tile.create(
-                    [1, 16], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[2, 272], pl.INT32] = pl.tile.create(
+                    [2, 272], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 result = pl.tile.rems(src_tile, scalar, tmp)
                 return pl.store(result, [0, 0], out)
@@ -1773,8 +1772,8 @@ class TestRemainderFamilyCodegen:
                     out: pl.Tensor[[16, 16], pl.FP32],
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     src_tile = pl.load(src, [0, 0], [16, 16], valid_shape=valid_shape)
-                    tmp: pl.Tile[[1, 16], pl.FP32] = pl.tile.create(
-                        [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                        [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rems(src_tile, 3.0, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1816,8 +1815,8 @@ class TestRemainderFamilyCodegen:
                     rows: pl.Scalar[pl.INDEX],
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     src_tile = pl.load(src, [0, 0], [16, 16], valid_shape=[rows, 16])
-                    tmp: pl.Tile[[1, 16], pl.FP32] = pl.tile.create(
-                        [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                        [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rems(src_tile, 3.0, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1836,8 +1835,8 @@ class TestRemainderFamilyCodegen:
                     columns: pl.Scalar[pl.INDEX],
                 ) -> pl.Tensor[[16, 16], pl.FP32]:
                     src_tile = pl.load(src, [0, 0], [16, 16], valid_shape=[16, columns])
-                    tmp: pl.Tile[[1, 16], pl.FP32] = pl.tile.create(
-                        [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    tmp: pl.Tile[[2, 272], pl.FP32] = pl.tile.create(
+                        [2, 272], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                     )
                     result = pl.tile.rems(src_tile, 3.0, tmp)
                     return pl.store(result, [0, 0], out)
@@ -1913,13 +1912,13 @@ class TestRemainderFamilyCodegen:
                     self,
                     lhs: pl.Tensor[[8, 16], pl.FP32],
                     rhs: pl.Tensor[[8, 16], pl.FP32],
-                    tmp_in: pl.Tensor[[2, 16], pl.FP32],
+                    tmp_in: pl.Tensor[[2, 32], pl.FP32],
                     out: pl.Tensor[[8, 16], pl.FP32],
                     tmp_rows: pl.Scalar[pl.INDEX],
                 ) -> pl.Tensor[[8, 16], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [8, 16])
                     rhs_tile = pl.load(rhs, [0, 0], [8, 16])
-                    tmp = pl.load(tmp_in, [0, 0], [2, 16], valid_shape=[tmp_rows, 16])
+                    tmp = pl.load(tmp_in, [0, 0], [2, 32], valid_shape=[tmp_rows, 32])
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
                     return pl.store(result, [0, 0], out)
 
@@ -1934,14 +1933,14 @@ class TestRemainderFamilyCodegen:
                     self,
                     lhs: pl.Tensor[[8, 64], pl.FP32],
                     rhs: pl.Tensor[[8, 64], pl.FP32],
-                    tmp_in: pl.Tensor[[2, 64], pl.FP32],
+                    tmp_in: pl.Tensor[[2, 80], pl.FP32],
                     out: pl.Tensor[[8, 64], pl.FP32],
                     src_cols: pl.Scalar[pl.INDEX],
                     tmp_cols: pl.Scalar[pl.INDEX],
                 ) -> pl.Tensor[[8, 64], pl.FP32]:
                     lhs_tile = pl.load(lhs, [0, 0], [8, 64], valid_shape=[8, src_cols])
                     rhs_tile = pl.load(rhs, [0, 0], [8, 64], valid_shape=[8, src_cols])
-                    tmp = pl.load(tmp_in, [0, 0], [2, 64], valid_shape=[2, tmp_cols])
+                    tmp = pl.load(tmp_in, [0, 0], [2, 80], valid_shape=[2, tmp_cols])
                     result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
                     return pl.store(result, [0, 0], out)
 
@@ -2012,6 +2011,36 @@ class TestRemainderFamilyCodegen:
         with pytest.raises(ValueError, match="tmp not to overlap source operand 0"):
             self._generate_mlir(Program, BackendType.Ascend910)
 
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    @pytest.mark.parametrize("dtype", [pl.INT32, pl.FP32])
+    @pytest.mark.parametrize("rhs_offset", [0, 8], ids=["same-view", "partial-overlap"])
+    def test_remainder_source_alias_contract(self, backend_type, dtype, rhs_offset):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                source: pl.Tensor[[2, 24], dtype],
+                out: pl.Tensor[[2, 16], dtype],
+                source_after: pl.Tensor[[2, 16], dtype],
+            ) -> tuple[pl.Tensor[[2, 16], dtype], pl.Tensor[[2, 16], dtype]]:
+                base = pl.load(source, [0, 0], [2, 24])
+                a = pl.tile.slice(base, [2, 16], [0, 0])
+                b = pl.tile.slice(base, [2, 16], [0, rhs_offset])
+                tmp = pl.tile.create([2, 32], dtype=dtype, target_memory=pl.MemorySpace.Vec)
+                value = pl.tile.rem(a, b, tmp)
+                out = pl.store(value, [0, 0], out)
+                source_after = pl.store(a, [0, 0], source_after)
+                return out, source_after
+
+        if backend_type == BackendType.Ascend910 and dtype == pl.INT32:
+            with pytest.raises(ValueError, match="INT32 sources not to overlap"):
+                self._generate_mlir(Program, backend_type)
+        else:
+            mlir = self._generate_mlir(Program, backend_type)
+            assert "pto.trem " in mlir
+            assert "pto.tcvt " not in mlir
+
     def test_a2a3_rem_rejects_tmp_aliasing_rhs(self):
         @pl.program
         class Program:
@@ -2029,6 +2058,81 @@ class TestRemainderFamilyCodegen:
 
         with pytest.raises(ValueError, match="tmp not to overlap source operand 1"):
             self._generate_mlir(Program, BackendType.Ascend910)
+
+    @pytest.mark.ptoas_compile
+    @pytest.mark.parametrize(
+        "op_name,width,high_precision,required_cols",
+        [
+            ("rem", 64, False, 80),
+            ("rems", 64, False, 80),
+            ("rem", 64, True, 272),
+            ("rem", 128, True, 400),
+            ("rem", 256, True, 784),
+        ],
+    )
+    @pytest.mark.parametrize("shortfall", [0, 1])
+    def test_a2a3_remainder_scratch_workspace(
+        self, tmp_path, capfd, op_name, width, high_precision, required_cols, shortfall
+    ):
+        # A one-column shortfall must fail even when physical UB padding would
+        # supply those bytes: PTO-ISA also checks tmp's valid column extent.
+        scratch_cols = required_cols - shortfall
+        is_rem = op_name == "rem"
+        scratch_rows = 2 if is_rem else 1
+
+        if is_rem:
+
+            @pl.program
+            class RemProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[4, width], pl.FP32],
+                    rhs: pl.Tensor[[4, width], pl.FP32],
+                    out: pl.Tensor[[4, width], pl.FP32],
+                ) -> pl.Tensor[[4, width], pl.FP32]:
+                    a = pl.load(lhs, [0, 0], [4, width])
+                    b = pl.load(rhs, [0, 0], [4, width])
+                    tmp = pl.tile.create(
+                        [scratch_rows, scratch_cols], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    value = pl.tile.rem(a, b, tmp, high_precision=high_precision)
+                    return pl.store(value, [0, 0], out)
+
+            program_cls = RemProgram
+
+        else:
+
+            @pl.program
+            class RemsProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[4, width], pl.FP32],
+                    out: pl.Tensor[[4, width], pl.FP32],
+                ) -> pl.Tensor[[4, width], pl.FP32]:
+                    a = pl.load(lhs, [0, 0], [4, width])
+                    tmp = pl.tile.create(
+                        [scratch_rows, scratch_cols], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    value = pl.tile.rems(a, 3.0, tmp)
+                    return pl.store(value, [0, 0], out)
+
+            program_cls = RemsProgram
+
+        if shortfall:
+            with pytest.raises(ValueError, match=r"tmp (physical|valid) columns"):
+                self._generate_mlir(program_cls)
+        else:
+            mlir = self._generate_mlir(program_cls)
+            assert ("pto.trem " if op_name == "rem" else "pto.trems ") in mlir
+            if high_precision:
+                assert "#pto<rem_precision high_precision>" in mlir
+                assert "[HighPrecisionIgnored]" not in capfd.readouterr().err
+            if find_ptoas_binary() is None:
+                pytest.skip("PTOAS is not available")
+            cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            assert ("  TREM" if is_rem else "  TREMS") in cpp
 
 
 class TestTileReadWriteOffsetCodegen:

@@ -15,6 +15,7 @@ from pypto import ir
 from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_fp4 import uses_native_fp4_mx
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -45,6 +46,22 @@ def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
         result = codegen.PTOCodegen().generate(single, emit_tile_addr=True)
         parts.append(result if isinstance(result, str) else "".join(result.values()))
     return "\n".join(parts)
+
+
+def _assemble_mx(mlir, tmp_path):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "mx.pto"
+    output = tmp_path / "mx.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a5", "--pto-level=level3"])
+    cpp = output.read_text()
+    # Acceptance alone is insufficient: MX must retain its packed ISA layout,
+    # rather than silently falling back to an ordinary ND GlobalTensor.
+    for layout in ("mx_a_zz", "mx_b_nn"):
+        if f"#pto.layout<{layout}>" in mlir:
+            assert f"pto::Layout::{layout.upper()}" in cpp
+    return cpp
 
 
 class TestMxMatmulCodegen:
@@ -235,8 +252,9 @@ class TestMxMatmulCodegen:
         with pytest.raises(ValueError, match=r"matmul_mx.*only supported.*Ascend950.*a5.*a2a3"):
             _run_default_pipeline(Program, BackendType.Ascend910)
 
-    def test_mx_scale_load_accepts_provable_dynamic_offset(self):
-        """Provable MX offsets become FloorDiv in IR; codegen sees floordivsi + maxsi."""
+    @pytest.mark.ptoas_compile
+    def test_mx_scale_load_accepts_provable_dynamic_offset(self, tmp_path):
+        """Provable MX offsets remain logical; PTOAS performs the physical addressing."""
 
         @pl.program
         class Program:
@@ -251,15 +269,14 @@ class TestMxMatmulCodegen:
                         _ = pl.load(a_s, [row_off, kg], [16, 2], target_memory=pl.Mem.Mat)
 
         mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path)
         assert "cf.assert" not in mlir
         assert "arith.remui" not in mlir
-        assert "arith.floordivsi" in mlir
+        assert "arith.floordivsi" not in mlir
         assert "pto.tload" in mlir
         assert "{layout = #pto.layout<mx_a_zz>}" in mlir
         partitions = [line for line in mlir.splitlines() if "partition_view" in line]
-        assert any(
-            "sizes = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in line for line in partitions
-        )
+        assert any("sizes = [%c16_index, %c2_index]" in line for line in partitions)
 
     def test_mx_scale_load_preserves_layout_with_a5_bypass(self):
         """A5 NOT_ALLOC_KEEP keeps the MX layout and selects an ISA hint without an offset."""
@@ -283,7 +300,7 @@ class TestMxMatmulCodegen:
         assert "l2_hint = #pto.load_l2_hint<not_alloc_keep>" in tloads[0]
 
     def test_mx_scale_load_rejects_unprovable_dynamic_offset(self):
-        """Unaligned / unprovable dynamic MX offsets fail at BlockMxScaleTensorViews."""
+        """Unaligned / unprovable dynamic MX offsets fail at LegalizeMxScaleTensorViews."""
 
         @pl.program
         class Program:
@@ -299,7 +316,8 @@ class TestMxMatmulCodegen:
         with pytest.raises(ValueError, match=r"MX_A_ZZ.*cannot be proven|multiple of"):
             _emit_incore_mlir(Program)
 
-    def test_mx_scale_load_accepts_narrowed_valid_shape(self):
+    @pytest.mark.ptoas_compile
+    def test_mx_scale_load_accepts_narrowed_valid_shape(self, tmp_path):
         """Physical shapes stay fractal-aligned; valid_shape may narrow M."""
 
         @pl.program
@@ -318,12 +336,11 @@ class TestMxMatmulCodegen:
                 )
 
         mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path)
         assert "pto.tload" in mlir
         partitions = [line for line in mlir.splitlines() if "partition_view" in line]
         # Physical TLoad box remains shapes=[16,2] -> one SFractal block row.
-        assert any(
-            "sizes = [%c1_index, %c1_index, %c1_index, %c16_index, %c2_index]" in line for line in partitions
-        )
+        assert any("sizes = [%c16_index, %c2_index]" in line for line in partitions)
 
     def test_mx_scale_load_rejects_static_misaligned_offset(self):
         with pytest.raises(ValueError, match=r"MX_A_ZZ.*multiple of 16"):
@@ -369,7 +386,8 @@ class TestMxMatmulCodegen:
         assert "{layout = #pto.layout<mx_a_zz>}" in mlir
         assert "{layout = #pto.layout<mx_b_nn>}" in mlir
 
-    def test_emits_tmatmul_mx_and_tget(self):
+    @pytest.mark.ptoas_compile
+    def test_emits_tmatmul_mx_and_tget(self, tmp_path):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -389,6 +407,7 @@ class TestMxMatmulCodegen:
                 pl.store(c, [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path)
         assert "pto.tmatmul.mx" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2
         assert "loc=scaling" in mlir
@@ -403,16 +422,17 @@ class TestMxMatmulCodegen:
         assert len(mx_views) >= 2
         mx_a_view = next(line for line in mx_views if "mx_a_zz" in line)
         mx_b_view = next(line for line in mx_views if "mx_b_nn" in line)
-        assert "shape = [%c1_index, %c8_index, %c1_index, %c16_index, %c2_index]" in mx_a_view
-        assert "strides = [%c256_index, %c32_index, %c32_index, %c2_index, %c1_index]" in mx_a_view
-        assert "shape = [%c1_index, %c4_index, %c1_index, %c16_index, %c2_index]" in mx_b_view
-        assert "strides = [%c128_index, %c32_index, %c32_index, %c2_index, %c1_index]" in mx_b_view
+        assert "shape = [%c128_index, %c2_index]" in mx_a_view
+        assert "strides = [%c2_index, %c1_index]" in mx_a_view
+        assert "shape = [%c2_index, %c64_index]" in mx_b_view
+        assert "strides = [%c64_index, %c1_index]" in mx_b_view
         # Mat→scale fill stays source-order; PTOAS later reorders bind-before-fill.
         lines = mlir.splitlines()
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
 
-    def test_nd_backing_alias_only_emits_physical_rank5_mx_views(self):
+    @pytest.mark.ptoas_compile
+    def test_nd_backing_alias_emits_logical_mx_views(self, tmp_path):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -443,13 +463,32 @@ class TestMxMatmulCodegen:
                 pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path)
         mx_views = [
             line for line in mlir.splitlines() if "pto.make_tensor_view" in line and "#pto.layout<mx_" in line
         ]
         assert len(mx_views) == 2
-        assert all(line.count("?") == 5 for line in mx_views)
+        assert all(line.count("?") == 2 for line in mx_views)
         assert any("#pto.layout<mx_a_zz>" in line for line in mx_views)
         assert any("#pto.layout<mx_b_nn>" in line for line in mx_views)
+
+    @pytest.mark.ptoas_compile
+    def test_quant_mx_scale_store_preserves_native_layout_diagnostic(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[16, 64], pl.FP16]) -> pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ]:
+                _data, scale = pl.quant_mx(src, group_axis=1)
+                return scale
+
+        mlir = _emit_incore_mlir(Program)
+        # Direct Vec fractal-32 stores are rejected by both PTOAS v0.67 and v0.74.
+        # Changing the destination view must not hide the unsupported source layout.
+        with pytest.raises(RuntimeError, match="expects A5 vec tstore src layout"):
+            _assemble_mx(mlir, tmp_path)
+        stores = [line for line in mlir.splitlines() if "pto.tstore" in line and "!pto.f8E8M0" in line]
+        assert len(stores) == 1
+        assert "!pto.partition_tensor_view<16x2x!pto.f8E8M0>" in stores[0]
 
     def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self):
         @pl.program
@@ -558,7 +597,8 @@ class TestMxMatmulCodegen:
             # Base and accumulating forms use two overloads of TMATMUL_MX.
             assert cpp.count("TMATMUL_MX(") == 2
 
-    def test_mx_rank5_view_maps_aligned_logical_offsets(self):
+    @pytest.mark.ptoas_compile
+    def test_mx_view_preserves_aligned_logical_offsets(self, tmp_path):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -587,17 +627,12 @@ class TestMxMatmulCodegen:
                 pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
+        _assemble_mx(mlir, tmp_path)
         partitions = [
-            line
-            for line in mlir.splitlines()
-            if "partition_view" in line and "offsets = [%c0_index" in line and "%c16_index" in line
+            line for line in mlir.splitlines() if "partition_view" in line and "!pto.f8E8M0" in line
         ]
-        assert any(
-            "offsets = [%c0_index, %c1_index, %c1_index, %c0_index, %c0_index]" in line for line in partitions
-        )
-        assert any(
-            "offsets = [%c0_index, %c0_index, %c1_index, %c0_index, %c0_index]" in line for line in partitions
-        )
+        assert any("offsets = [%c16_index, %c2_index]" in line for line in partitions)
+        assert any("offsets = [%c2_index, %c0_index]" in line for line in partitions)
 
     def test_matmul_mx_bias_emits_pto_op(self):
         @pl.program

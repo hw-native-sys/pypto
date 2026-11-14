@@ -580,6 +580,9 @@ def block_nz_tensor_views() -> Pass:
     argument ranks cannot both be printed.
     """
 
+def legalize_mx_scale_tensor_views() -> Pass:
+    """Validate MX alignment and load windows, preserving logical rank-2 views for PTOAS."""
+
 def block_mx_scale_tensor_views() -> Pass:
     """Create a pass that physicalizes logical MX scale tensor views.
 
@@ -1148,6 +1151,7 @@ __all__ = [
     "optimize_orch_tensors",
     "block_nz_tensor_views",
     "block_mx_scale_tensor_views",
+    "legalize_mx_scale_tensor_views",
     "flatten_tile_nd_to_2d",
     "legalize_tile_cast",
     "legalize_spmd_launches",

@@ -8,7 +8,7 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Toolchain:** use PTOAS v0.72 or newer. The version and wheel checksums in
+> **Toolchain:** use PTOAS v0.74 or newer. The version and wheel checksums in
 > `toolchain/versions.env` pin the released compiler with native A5 `l2_hint`
 > attributes; PyPTO emits these attributes directly on each transfer.
 > **On A2/A3**, a `BYPASS` declaration becomes a

@@ -7,7 +7,7 @@
 该策略是*作者声明的契约（contract）*，绝不是编译器推断出来的提示（hint）。因此它必须
 显式书写，粒度二选一，并且从 DSL 一路原样传递到代码生成（codegen）。
 
-> **工具链：**使用 PTOAS v0.72 或更新版本。`toolchain/versions.env` 中的版本及 wheel
+> **工具链：**使用 PTOAS v0.74 或更新版本。`toolchain/versions.env` 中的版本及 wheel
 > 校验和固定了已发布、支持 A5 原生 `l2_hint` 属性的编译器；PyPTO 直接在每条搬运操作上发射这些属性。
 > **在 A2/A3 上**，`BYPASS` 声明会变成 `pto.tload` 上的一个 `cache_policy`
 > 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条

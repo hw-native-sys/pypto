@@ -32,7 +32,7 @@ PyPTO SIMT IR 已能 lowering 为可执行代码。
 
 ## 聚焦验收
 
-在当前 checkout 构建 PyPTO 及固定版本的 runtime。配置固定的 PTOAS v0.72 和
+在当前 checkout 构建 PyPTO 及固定版本的 runtime。配置固定的 PTOAS v0.74 和
 A5 CANN/毕昇工具链，并保持 runtime pin 检查开启。
 本测试复用 [VF 测试](03-vpto-vf-integration.md) 的显式启用开关。
 

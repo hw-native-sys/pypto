@@ -68,6 +68,8 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 
 `tile.rsqrt(high_precision=True)` 不适用此告警钩子：它要求 scratch tile，并为 A5 生成 `precisionType`；A2/A3 虽然忽略选择器，但会通过 scratch 重载兑现高精度请求。精度由显式属性选择，不再仅由 scratch 是否存在决定。
 
+`tile.rem(high_precision=True)` 同样不触发该告警：PTO-ISA `90a37965` 已在 A2/A3 上实现 FP32 高精度 TREM 算法，代码生成会先验证它所需的更大 scratch 容量。
+
 `SupportsRuntimeBoundLocalSoftwarePipeline()` 默认返回 `false`，在后端启用这条降低
 路径前保留既有循环回退行为。该查询独立于跨核传输，不表示硬件是否支持相关事件。
 

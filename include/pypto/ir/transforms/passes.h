@@ -578,6 +578,10 @@ Pass BlockNzTensorViews();
  */
 Pass BlockMxScaleTensorViews();
 
+/// Validate MX alignment and canonicalize load windows while retaining logical rank-2 views.
+/// PTOAS v0.74 performs the physical packing. Run before MaterializeTensorStrides.
+Pass LegalizeMxScaleTensorViews();
+
 /**
  * @brief Flatten ND tile ops to 2D in InCore functions
  *
