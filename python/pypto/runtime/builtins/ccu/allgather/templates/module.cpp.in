@@ -28,6 +28,8 @@ namespace {
 namespace ccu = AscendC::ccu;
 constexpr uint32_t kRanks = {{nranks_cpp}};
 constexpr uint32_t kWords = 9 + 3 * kRanks;
+// Requests sharing a channel are serialized; callable-local IDs may differ across peers.
+constexpr uint32_t kNotifyIndex = 0;
 static_assert(kRanks >= 2 && kRanks <= SIMPLER_CCU_MAX_RANKS);
 // The exported C entry never throws, including when instruction construction fails.
 struct InstructionError {};
@@ -172,8 +174,8 @@ int32_t AllGather(const SimplerCcuRegistrationBinding *binding) noexcept {
           for (uint32_t peer = 0; peer < binding->rank_count; ++peer) {
             if (peer == binding->rank_id) continue;
             CCU_IF(words[11 + 3 * slot] == peer) {
-              if (record) Check(ccu::NotifyRecord(binding->channels[peer], binding->ccu_id, mask));
-              else Check(ccu::NotifyWait(binding->channels[peer], binding->ccu_id, mask));
+              if (record) Check(ccu::NotifyRecord(binding->channels[peer], kNotifyIndex, mask));
+              else Check(ccu::NotifyWait(binding->channels[peer], kNotifyIndex, mask));
             }
           }
         }

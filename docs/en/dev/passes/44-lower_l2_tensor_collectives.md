@@ -385,6 +385,11 @@ trigger loop. After requests complete and become visible, simpler must stop and
 confirm quiescence before releasing per-run state. No static request count or
 user EXIT request is introduced.
 
+Peer handshakes use notify index `0`, with mask `1` for readiness and mask `2`
+for completion. All requests sharing a domain channel must be serialized to
+reuse this index safely. The callable-local `ccu_id` selects a mission only;
+it does not select the peer notify index and may differ across ranks.
+
 CPU tests cover the full lowering/codegen pipeline, overlapping domains,
 registration reuse, definition-ID consistency, ordinary ctx forwarding, source packaging,
 and generated wrapper/native code with mocked primitives. They do not validate

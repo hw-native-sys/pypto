@@ -235,7 +235,7 @@ inline CcuResult EventRecord(const Event& event, uint16_t mask) {
   return CCU_SUCCESS;
 }
 inline CcuResult NotifyRecord(uint64_t channel, uint32_t index, uint16_t mask) {
-  assert(index == 7);
+  assert(index == 0);
   if (mask == 1) {
     assert(model::phase == 1);
   } else {
@@ -252,7 +252,7 @@ inline CcuResult NotifyRecord(uint64_t channel, uint32_t index, uint16_t mask) {
   return CCU_SUCCESS;
 }
 inline CcuResult NotifyWait(uint64_t channel, uint32_t index, uint16_t mask) {
-  assert(index == 7 && model::records == model::peers);
+  assert(index == 0 && model::records == model::peers);
   assert((mask == 1 && (model::phase == 1 || model::phase == 2)) ||
          (mask == 2 && (model::phase == 4 || model::phase == 5)));
   const auto bit = model::ChannelBit(channel);
@@ -349,7 +349,7 @@ void RunCase(uint32_t rank, uint64_t count, bool failure, bool dry_run, int trig
   model::dry_run = dry_run;
   SimplerCcuRegistrationBinding binding{};
   binding.rank_count = TEST_RANKS;
-  binding.ccu_id = 7;
+  binding.ccu_id = 7;  // Mission routing must not determine the peer notify index.
   binding.trigger_event_handle = 11;
   binding.done_event_handle = 12;
   for (uint32_t slot = 0; slot < TEST_RANKS; ++slot) {

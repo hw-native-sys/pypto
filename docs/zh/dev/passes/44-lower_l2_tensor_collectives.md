@@ -319,6 +319,11 @@ HBM 算法保留 32 KiB chunk、16 lane、4 GiB 分段、独立 main/remainder L
 ready/completion 握手和常驻 trigger 循环。所有请求完成且结果可见后，simpler 必须
 停止并确认无剩余访存，再释放本轮资源。不增加静态请求次数或用户 EXIT 请求。
 
+peer 握手统一使用 notify index `0`，ready 使用 mask `1`，completion 使用 mask `2`。
+共享同一域 channel 的所有请求必须串行执行，才能安全复用该 index。
+callable 局部的 `ccu_id` 仅用于选择 mission，不用于选择 peer notify index，
+不同 rank 上的值可以不同。
+
 CPU 测试覆盖完整 lowering/codegen、重叠域、注册复用、定义编号一致性、普通 ctx 转发、
 源码打包，以及通过模拟 primitive 执行生成的 wrapper/native 源码。
 这些测试不验证硬件调度、资源生命周期或 HCOMM 指令生成。
