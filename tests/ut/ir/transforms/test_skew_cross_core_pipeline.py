@@ -55,7 +55,9 @@ class TestSkewCrossCorePipeline:
     loops DEMOTE to Sequential; non-cross-core loops are left for the unroll pass."""
 
     @pytest.mark.parametrize("vector", [False, True])
-    def test_quant_configuration_preserves_sequential_order(self, vector):
+    @pytest.mark.parametrize("round_trip", [False, True])
+    @pytest.mark.parametrize("stages", [1, 2, 3])
+    def test_quant_configuration_preserves_sequential_order(self, vector, round_trip, stages):
         """Quant registers are side effects outside TPUSH's SSA backward slice."""
 
         @pl.program
@@ -66,15 +68,16 @@ class TestSkewCrossCorePipeline:
                 q: pl.Tensor[[64, 64], pl.FP32],
                 controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
             ):
-                for i in pl.pipeline(0, 4, 1, stage=2):
+                for i in pl.pipeline(0, 4, 1, stage=stages):
                     tile = pl.tile.load(q, [i * 16, 0], [16, 64])
                     if vector:
                         pl.system.set_quant_vector(controls)
                     else:
-                        pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                        pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
                     pl.tile.tpush_to_aiv(tile, split=0)
-                    reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
-                    pl.tfree_to_aiv(reply, id=1)
+                    if round_trip:
+                        reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
+                        pl.tfree_to_aiv(reply, id=1)
 
         @pl.program
         class Expected:
@@ -89,10 +92,11 @@ class TestSkewCrossCorePipeline:
                     if vector:
                         pl.system.set_quant_vector(controls)
                     else:
-                        pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                        pl.system.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
                     pl.tile.tpush_to_aiv(tile, split=0)
-                    reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
-                    pl.tfree_to_aiv(reply, id=1)
+                    if round_trip:
+                        reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
+                        pl.tfree_to_aiv(reply, id=1)
 
         # The default pipeline folds compile-time mode branches before skewing.
         ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))

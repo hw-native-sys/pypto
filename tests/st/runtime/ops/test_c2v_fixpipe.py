@@ -101,7 +101,14 @@ def test_non_square_c2v(case_run):
     case_run.assert_passed()
 
 
-def _explicit_case(quant_mode, use_relu, negative_scale=False, layout_mode="nz2nd", integer_no_convert=False):
+def _explicit_case(
+    quant_mode,
+    use_relu,
+    negative_scale=False,
+    layout_mode="nz2nd",
+    integer_no_convert=False,
+    pipeline_stages=1,
+):
     relu_mode = "normal_relu" if use_relu else "no_relu"
     scalar_scale = -0.5 if negative_scale else 0.5
     quant_scale = ir.ConstFloat(scalar_scale, pl.FP32, ir.Span.unknown())
@@ -124,6 +131,8 @@ def _explicit_case(quant_mode, use_relu, negative_scale=False, layout_mode="nz2n
     expected = expected.to(torch.float32)
     if quant_mode.endswith("scalar"):
         expected *= scalar_scale
+        if pipeline_stages > 1:
+            expected *= torch.arange(1, 6).repeat_interleave(32).reshape(-1, 1)
     if quant_mode.endswith("vec"):
         expected *= channel_scales[:16]
     expected = expected.to(output_dtype)
@@ -163,12 +172,15 @@ def _explicit_case(quant_mode, use_relu, negative_scale=False, layout_mode="nz2n
                 pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
             ] = pl.load(words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
             controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
-            for iteration in pl.range(5):
+            for iteration in pl.pipeline(5, stage=pipeline_stages):
                 lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
                 rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
                 acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
                 if scalar_quant:
-                    pl.set_quant_scalar(quant_scale)
+                    if pipeline_stages > 1:
+                        pl.set_quant_scalar(pl.cast(pl.cast(iteration + 1, pl.INT32), pl.FP32) * quant_scale)
+                    else:
+                        pl.set_quant_scalar(quant_scale)
                 if vector_quant:
                     pl.set_quant_vector(controls)
                 pl.tpush_to_aiv(acc, split=0)
@@ -236,7 +248,10 @@ def _explicit_case(quant_mode, use_relu, negative_scale=False, layout_mode="nz2n
             TensorSpec("out", [out_rows, out_cols], datatype_from_torch(output_dtype), is_output=True),
             TensorSpec("words", [1, 32], datatype_from_torch(torch.int64), init_value=control_words),
         ],
-        name=f"fixpipe_{layout_mode}_{quant_mode}_relu={use_relu}_negative={negative_scale}_i32={integer_no_convert}",
+        name=(
+            f"fixpipe_{layout_mode}_{quant_mode}_relu={use_relu}_negative={negative_scale}"
+            f"_i32={integer_no_convert}_stages={pipeline_stages}"
+        ),
         golden=lambda _tensors: expected,
         platform="a5",
         rtol=0,
@@ -266,6 +281,17 @@ def _explicit_case(quant_mode, use_relu, negative_scale=False, layout_mode="nz2n
     ]
 )
 def test_explicit_quant_relu_ring_reuse(case_run):
+    case_run.assert_passed()
+
+
+@st.cases(
+    *[
+        _explicit_case(quant, False, layout_mode=layout, pipeline_stages=2)
+        for quant in ("deqf16_scalar", "qf322f16_pre_scalar")
+        for layout in ("nz2nd", "nz2dn")
+    ]
+)
+def test_one_way_pipeline_varying_quant_scale(case_run):
     case_run.assert_passed()
 
 
