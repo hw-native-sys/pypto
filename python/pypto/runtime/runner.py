@@ -927,7 +927,8 @@ class CompileOptions:
     # rejected while a ``PassContext`` is active, so unset values defer to it.
     output_dir: str | None = None
     memory_planner: MemoryPlanner | None = None
-    sync_strategy: AutoSyncStrategy | None = None
+    # Preserve the legacy positional slots for distributed and pipeline options.
+    sync_strategy: AutoSyncStrategy | None = field(default=None, kw_only=True)
     distributed_config: "DistributedConfig | None" = None
     enable_software_pipeline: bool | None = None
 

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto.backend import BackendType
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import AutoSyncStrategy, MemoryPlanner
 from pypto.runtime.runner import (
     CompileOptions,
     DfxOptions,
@@ -1247,6 +1247,44 @@ def test_positional_compile_options_platform_is_deprecated():
     assert caught[0].filename == __file__
     assert options.backend_type == BackendType.Ascend950
     assert options.execution_mode is ExecutionMode.ONBOARD
+
+
+@pytest.mark.parametrize("sync_strategy", [None, AutoSyncStrategy.BUFID])
+def test_compile_options_preserves_legacy_positional_fields(sync_strategy):
+    from pypto.ir import DistributedConfig  # noqa: PLC0415
+
+    distributed = DistributedConfig(device_ids=[0, 1])
+    # Legacy callers may supply every compile option after platform by position.
+    # Adding sync selection must not shift distributed_config or the next field.
+    legacy_args = (
+        "a5",
+        CompileOptions().strategy,
+        False,
+        False,
+        False,
+        None,
+        None,
+        False,
+        "build-options",
+        MemoryPlanner.PYPTO,
+        distributed,
+        True,
+    )
+    extra = {} if sync_strategy is None else {"sync_strategy": sync_strategy}
+    with pytest.warns(DeprecationWarning, match=r"CompileOptions\(platform="):
+        options = cast(Any, CompileOptions)(*legacy_args, **extra)
+
+    assert options.output_dir == "build-options"
+    assert options.memory_planner is MemoryPlanner.PYPTO
+    assert options.distributed_config is distributed
+    assert options.enable_software_pipeline is True
+    assert options.sync_strategy is sync_strategy
+    kwargs = options.as_compile_kwargs()
+    assert kwargs["distributed_config"] is distributed
+    if sync_strategy is None:
+        assert "sync_strategy" not in kwargs
+    else:
+        assert kwargs["sync_strategy"] is sync_strategy
 
 
 if __name__ == "__main__":
