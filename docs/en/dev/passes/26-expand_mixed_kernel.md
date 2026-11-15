@@ -879,9 +879,10 @@ accumulator; this API is separate from `tile.store` / `tile.assemble`
 Scaling allocations conservatively remain live for the whole function: the
 setter installs a hardware address and TPUSH reads it without an SSA operand.
 This prevents allocation reuse after the setter, at the cost of consuming more
-of the 4 KiB planning budget. Bidirectional `pl.pipeline` loops containing quant
-configuration are lowered to sequential loops to preserve configuration/push
-ordering until skewing models these register dependencies explicitly.
+of the 4 KiB planning budget. One-way and bidirectional `pl.pipeline` loops
+containing quant configuration are lowered to sequential loops, including
+stage=1. This preserves configuration/push ordering until both skewing and the
+one-way unroll/IO scheduler model these register dependencies explicitly.
 
 ### Regression and evidence
 
@@ -900,6 +901,10 @@ iterations, vary input tags and per-channel packed controls, and include negativ
 scalar scales to distinguish pre-ReLU ordering. NZ2NZ is checked by returning the
 physical NZ tile through an ordinary separate V2C pipe and multiplying by an
 identity matrix on Cube. This does not introduce a GlobalTensor FIFO.
+
+The one-way pipeline regression changes the scalar scale on every iteration;
+ND/DN and both scalar quant modes use independent zero-tolerance goldens. This
+detects setters hoisted across a stage's TPUSH even when lexical state checks pass.
 
 `tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` removes only the emitted DN
 epilogue attributes for a diagnostic replay. It keeps the correct independent

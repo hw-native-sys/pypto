@@ -401,7 +401,8 @@ def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp
 
 @pytest.mark.parametrize("quant", ["deqf16_scalar", "deqf16_vec"])
 @pytest.mark.parametrize("buffer_ir", [False, True])
-def test_quantized_bidirectional_pipeline_compiles(quant, buffer_ir, tmp_path):
+@pytest.mark.parametrize("round_trip", [False, True])
+def test_quantized_pipeline_compiles(quant, buffer_ir, round_trip, tmp_path):
     epilogue = _epilogue(quant=quant)
     vector = quant == "deqf16_vec"
 
@@ -416,11 +417,12 @@ def test_quantized_bidirectional_pipeline_compiles(quant, buffer_ir, tmp_path):
             words: pl.Tensor[[1, 32], pl.UINT64],
         ):
             forward = pl.import_peer_buffer(name="forward", peer_func="consumer")
-            reply = pl.reserve_buffer(name="reply", size=2048)
+            if round_trip:
+                reply = pl.reserve_buffer(name="reply", size=2048)
+                pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
             pl.aic_initialize_pipe(
                 forward, dir_mask=1, slot_size=1024, slot_num=2, acc_push_epilogue=epilogue
             )
-            pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
             packed: pl.Tile[
                 [1, 32],
                 pl.UINT64,
@@ -435,10 +437,11 @@ def test_quantized_bidirectional_pipeline_compiles(quant, buffer_ir, tmp_path):
                 if vector:
                     pl.set_quant_vector(controls)
                 else:
-                    pl.set_quant_scalar(pl.const(0.5, pl.FP32))
+                    pl.set_quant_scalar(pl.cast(pl.cast(i + 1, pl.INT32), pl.FP32) * 0.5)
                 pl.tpush_to_aiv(acc, split=0)
-                returned = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)
-                pl.tfree_to_aiv(returned, id=1)
+                if round_trip:
+                    returned = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)
+                    pl.tfree_to_aiv(returned, id=1)
 
         @pl.function(type=pl.FunctionType.AIV)
         def consumer(
@@ -449,15 +452,17 @@ def test_quantized_bidirectional_pipeline_compiles(quant, buffer_ir, tmp_path):
             words: pl.Tensor[[1, 32], pl.UINT64],
         ):
             forward = pl.reserve_buffer(name="forward", size=2048)
-            reply = pl.import_peer_buffer(name="reply", peer_func="producer")
+            if round_trip:
+                reply = pl.import_peer_buffer(name="reply", peer_func="producer")
+                pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
             pl.aiv_initialize_pipe(
                 forward, dir_mask=1, slot_size=1024, slot_num=2, acc_push_epilogue=epilogue
             )
-            pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
             for i in pl.pipeline(4, stage=2):
                 tile = pl.tpop_from_aic(shape=[32, 16], dtype=pl.FP16, split=0)
                 pl.store(tile, [i * 32, 0], out)
-                pl.tpush_to_aic(tile, split=0, id=1)
+                if round_trip:
+                    pl.tpush_to_aic(tile, split=0, id=1)
                 pl.tfree_to_aic(tile)
 
     _, mlir = _generate(QuantizedPipeline, buffer_ir)

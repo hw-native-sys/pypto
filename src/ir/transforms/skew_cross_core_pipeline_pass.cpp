@@ -233,7 +233,8 @@ StmtPtr TagPipelineStage(const StmtPtr& body, int32_t group, int32_t stage) {
  *
  * NON-cross-core pipeline loops (same-core GM->L1 / L1->L0 / nested matmul stage
  * loops) are left intact as `ForKind::Pipeline` for `LowerPipelineLoops` to
- * replicate.
+ * replicate, except loops with explicit quant configuration: their implicit
+ * register dependencies require sequential ordering even without a push/pop pair.
  *
  * Idempotency: the steady loop and the demoted loop are both `Sequential` with no
  * `pipeline_stages` attr, so re-running this pass finds no trigger.
@@ -258,6 +259,13 @@ class SkewCrossCoreMutator : public IRMutator {
     auto inner_step = VisitExpr(op->step_);
     auto inner_body = VisitStmt(op->body_);
 
+    // Quant registers are implicit TPUSH inputs. Neither skewing nor the
+    // one-way pipeline unroll/IO scheduler models these dependencies. Preserve
+    // configure/push order before either the stage-1 or no-pair early return.
+    if (BodyHasQuantConfiguration(inner_body)) {
+      return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
+    }
+
     // factor == 1 (user `pl.pipeline(stage=1)` or a prior run's marker): nothing to
     // skew. A cross-core body must STILL be demoted to Sequential here so it never
     // reaches LowerPipelineLoops / CanonicalizeIOOrder as a Pipeline body; a
@@ -273,13 +281,6 @@ class SkewCrossCoreMutator : public IRMutator {
     // LowerPipelineLoops to replicate (same-core GM->L1 / L1->L0 / matmul stages).
     if (!BodyHasCrossCorePair(inner_body)) {
       return RebuildIfChanged(op, inner_start, inner_stop, inner_step, inner_body);
-    }
-
-    // Quant registers are implicit TPUSH inputs, absent from the SSA backward
-    // slice used by LowerSkewed. Preserve configure/push order until skewing can
-    // model these register dependencies and their clobbers explicitly.
-    if (BodyHasQuantConfiguration(inner_body)) {
-      return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
     }
 
     // Cross-core: skew if statically skewable, otherwise demote to Sequential. A

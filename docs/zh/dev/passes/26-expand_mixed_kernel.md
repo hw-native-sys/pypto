@@ -755,8 +755,9 @@ packed 控制字在对应 TPUSH 完成前必须保持不变，应在 ring 复用
 
 Scaling 分配保守地保持存活至整个函数结束：setter 将地址写入硬件寄存器，
 而 TPUSH 读取该地址时没有对应的 SSA 操作数。这阻止 setter 后的分配复用，
-代价是占用更多 4 KiB 规划预算。包含量化配置的双向 `pl.pipeline` 循环会降为顺序循环，
-保持配置与 push 的顺序，直至 skew 能显式建模这些寄存器依赖。
+代价是占用更多 4 KiB 规划预算。包含量化配置的单向和双向 `pl.pipeline` 循环
+都会降为顺序循环，包括 stage=1。这保持配置与 push 的顺序，直至 skew 与单向
+unroll/IO 调度器都能显式建模这些寄存器依赖。
 
 ### 回归与证据
 
@@ -772,6 +773,9 @@ CPU 模拟器按用户要求跳过。
 量化用例在两个 slot 上循环五轮，输入标签和 packed 控制字按列变化，
 负 scalar scale 区分前置 ReLU 顺序。NZ2NZ 用另一条普通 V2C pipe 将实际 NZ
 字节送回 Cube，再乘 identity 验证布局；不引入 GlobalTensor FIFO。
+
+单向流水回归逐次改变 scalar scale，ND/DN 和两种 scalar quant 模式都使用独立的
+零容差 golden。即使词法状态检查通过，该用例也能发现 setter 被提升越过 TPUSH 的错误。
 
 `tests/st/runtime/ops/test_c2v_fixpipe_legacy.py` 只移除发射的 DN epilogue 属性，
 保留正确的独立转置 golden；诊断回放必须观测到精确的旧 row-major 字节模式，
