@@ -929,8 +929,13 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
   const bool window_view = IsOp(op, "tensor.view") && (op->args_.size() == 4 || op->args_.size() == 5);
 
+  // The lane remains a dataflow operand; the DSL exposes it as a keyword.
+  const bool aiv_lane = (IsOp(op, "tile.tpush_to_aic") && op->args_.size() == 2) ||
+                        (IsOp(op, "tile.tpop_from_aic") && op->args_.size() == 1);
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (aiv_lane && i == op->args_.size() - 1) continue;
     if (gather_row_kw_valid && i == 5) continue;
     if (acc_kw_init_cond && i == 3) continue;
     if (ci_kw_tmp && i == 2) continue;
@@ -961,7 +966,12 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   }
 
   // Print kwargs as keyword arguments
-  bool need_comma = !op->args_.empty();
+  bool need_comma = op->args_.size() > (aiv_lane ? 1U : 0U);
+  if (aiv_lane) {
+    stream_ << (need_comma ? ", " : "") << "aiv_subblockid=";
+    VisitExpr(op->args_.back());
+    need_comma = true;
+  }
   if (gather_row_kw_valid) {
     stream_ << ", valid_shape=";
     VisitExpr(op->args_[5]);

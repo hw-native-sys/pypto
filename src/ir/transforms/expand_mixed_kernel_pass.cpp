@@ -974,7 +974,7 @@ MxV2CContracts BuildMxV2CContracts(const std::vector<FunctionPtr>& functions) {
     const auto& producer_pipe_index = all_indexes[producer_index];
     if (producer.function->func_type_ != FunctionType::AIV) continue;
     for (const auto& push : producer.v2c_pushes) {
-      if (push->args_.size() != 1) continue;
+      if (push->args_.empty()) continue;
       auto source_type = As<TileType>(push->args_[0]->GetType());
       if (!source_type || !IsMxScaleView(*source_type)) continue;
 
@@ -1236,8 +1236,10 @@ StmtPtr AdaptMxV2CPush(const EvalStmtPtr& stmt, const CallPtr& push, const MxV2C
 
   ValidateMxCarrierSize(*current_type, contract, stmt->span_);
 
-  auto adapted_push = std::make_shared<Call>(push->op_, std::vector<ExprPtr>{carrier}, push->kwargs_,
-                                             push->attrs_, push->GetType(), push->span_);
+  auto adapted_args = push->args_;
+  adapted_args[0] = carrier;
+  auto adapted_push = std::make_shared<Call>(push->op_, adapted_args, push->kwargs_, push->attrs_,
+                                             push->GetType(), push->span_);
   output.push_back(std::make_shared<EvalStmt>(adapted_push, stmt->span_));
   return SeqStmts::Flatten(std::move(output), stmt->span_);
 }
@@ -1266,7 +1268,7 @@ class AdaptManualVtoCPush : public IRMutator {
  protected:
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     auto call = As<Call>(op->expr_);
-    if (!call || !IsOp(call, "tile.tpush_to_aic") || call->args_.size() != 1) {
+    if (!call || !IsOp(call, "tile.tpush_to_aic") || call->args_.empty()) {
       return IRMutator::VisitStmt_(op);
     }
     const ExprPtr& source = call->args_[0];
@@ -1314,8 +1316,10 @@ class AdaptManualVtoCPush : public IRMutator {
     // rides along for the same reason -- this rewrite replaces the pushed tile
     // and nothing else, so it must not quietly drop compiler metadata a caller
     // or an earlier pass attached to the op.
-    auto adapted_push = std::make_shared<Call>(call->op_, std::vector<ExprPtr>{adapted_var}, call->kwargs_,
-                                               call->attrs_, call->GetType(), call->span_);
+    auto adapted_args = call->args_;
+    adapted_args[0] = adapted_var;
+    auto adapted_push = std::make_shared<Call>(call->op_, adapted_args, call->kwargs_, call->attrs_,
+                                               call->GetType(), call->span_);
     std::vector<StmtPtr> out{std::make_shared<AssignStmt>(adapted_var, adapt_call, op->span_),
                              std::make_shared<EvalStmt>(adapted_push, op->span_)};
     return SeqStmts::Flatten(std::move(out), op->span_);

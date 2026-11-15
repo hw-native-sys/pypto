@@ -12,7 +12,7 @@
 import pytest
 from pypto import DataType, ir, passes
 from pypto import language as pl
-from pypto.ir.op import system_ops
+from pypto.ir.op import system_ops, tile_ops
 from pypto.pypto_core.ir import ConstInt
 
 
@@ -767,6 +767,87 @@ def test_mixed_kernel_expanded_property():
 
     prop_set.remove(passes.IRProperty.MixedKernelExpanded)
     assert not prop_set.contains(passes.IRProperty.MixedKernelExpanded)
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 4])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_aiv_lane_operands(split, dynamic):
+    """The lane stays an i64 operand for both AIV-side transfers."""
+    span = ir.Span.unknown()
+    tile = ir.Var("tile", ir.TileType([16, 16], DataType.FP32, memory_space=ir.MemorySpace.Vec), span)
+    lane = ir.Var("lane", ir.ScalarType(DataType.INT64), span) if dynamic else 1
+    push = tile_ops.tpush_to_aic(tile, split=split, id=2, aiv_subblockid=lane)
+    pop = tile_ops.tpop_from_aic(shape=[16, 16], dtype=DataType.FP32, split=split, aiv_subblockid=lane)
+    assert len(push.args) == 2
+    assert len(pop.args) == 1
+    assert isinstance(push.args[-1].type, ir.ScalarType)
+    assert isinstance(pop.args[-1].type, ir.ScalarType)
+    assert push.args[-1].type.dtype == DataType.INT64
+    assert pop.args[-1].type.dtype == DataType.INT64
+    assert "aiv_subblockid" not in push.kwargs
+    assert "aiv_subblockid" not in pop.kwargs
+    if isinstance(lane, ir.Var):
+        assert push.args[-1].same_as(lane)
+        assert pop.args[-1].same_as(lane)
+    else:
+        assert isinstance(push.args[-1], ir.ConstInt)
+        assert isinstance(pop.args[-1], ir.ConstInt)
+        assert push.args[-1].value == 1
+        assert pop.args[-1].value == 1
+
+
+@pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.INT32, DataType.UINT64, DataType.FP32])
+def test_aiv_lane_rejects_other_scalar_dtypes(dtype):
+    """INDEX and same-width unsigned values require an explicit INT64 cast."""
+    span = ir.Span.unknown()
+    tile = ir.Var("tile", ir.TileType([16, 16], DataType.FP32), span)
+    lane = ir.Var("lane", ir.ScalarType(dtype), span)
+    for transfer in (
+        lambda: tile_ops.tpush_to_aic(tile, split=1, aiv_subblockid=lane),
+        lambda: tile_ops.tpop_from_aic(split=1, aiv_subblockid=lane),
+        lambda: ir.create_op_call("tile.tpush_to_aic", [tile, lane], {"split": 1}, span),
+        lambda: ir.create_op_call("tile.tpop_from_aic", [lane], {"split": 1}, span),
+    ):
+        with pytest.raises((TypeError, ValueError), match="INT64"):
+            transfer()
+
+
+@pytest.mark.parametrize("lane", [True, 0.5, -1, 2, 1 << 64])
+def test_aiv_lane_rejects_invalid_literals(lane):
+    """Reject invalid literals before constructing an i64 constant."""
+    with pytest.raises((TypeError, ValueError), match="aiv_subblockid"):
+        tile_ops.tpop_from_aic(split=1, aiv_subblockid=lane)
+
+
+@pytest.mark.parametrize("split", [0, -1, 5])
+def test_aiv_lane_rejects_invalid_split(split):
+    with pytest.raises(ValueError, match="requires split"):
+        tile_ops.tpop_from_aic(split=split, aiv_subblockid=0)
+
+
+@pytest.mark.parametrize("entry", ["global", "mat", "acc"])
+def test_aiv_lane_rejects_non_vec_entry(entry):
+    span = ir.Span.unknown()
+    entry_type = (
+        ir.TensorType([16, 16], DataType.FP32)
+        if entry == "global"
+        else ir.TileType([16, 16], DataType.FP32, memory_space=getattr(ir.MemorySpace, entry.title()))
+    )
+    tile = ir.Var("tile", entry_type, span)
+    with pytest.raises((TypeError, ValueError), match="Vec Tile"):
+        tile_ops.tpush_to_aic(tile, split=1, aiv_subblockid=0)
+    with pytest.raises((TypeError, ValueError), match="Vec Tile"):
+        tile_ops.tpop_from_aic(result_type=entry_type, split=1, aiv_subblockid=0)
+
+
+def test_aiv_lane_omission_and_wrong_direction():
+    tile = ir.Var("tile", ir.TileType([16, 16], DataType.FP32), ir.Span.unknown())
+    assert len(tile_ops.tpush_to_aic(tile, split=0).args) == 1
+    assert not tile_ops.tpop_from_aic(split=0).args
+    with pytest.raises(TypeError, match="aiv_subblockid"):
+        getattr(tile_ops, "tpush_to_aiv")(tile, split=1, aiv_subblockid=0)
+    with pytest.raises(TypeError, match="aiv_subblockid"):
+        getattr(tile_ops, "tpop_from_aiv")(split=1, aiv_subblockid=0)
 
 
 if __name__ == "__main__":

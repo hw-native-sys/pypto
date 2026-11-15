@@ -15,8 +15,10 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     Call,
+    ConstInt,
     Expr,
     MemorySpace,
+    ScalarType,
     Span,
 )
 
@@ -130,20 +132,58 @@ def tpush_to_aiv(
     return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], kwargs, actual_span)
 
 
-def tpush_to_aic(tile: Expr, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def _aiv_lane_args(lane: object, split: int, entry_type: _ir_core.Type | None, span: Span) -> list[Expr]:
+    """Normalize the optional AIV-side i64 operand without an implicit index cast."""
+    if lane is None:
+        return []
+    if split not in (1, 2, 3, 4):
+        raise ValueError("aiv_subblockid requires split=1, 2, 3, or 4")
+    if isinstance(lane, bool):
+        raise TypeError("aiv_subblockid must be a Python int or an INT64 scalar, got bool")
+    if isinstance(lane, int):
+        if lane not in (0, 1):
+            raise ValueError(f"aiv_subblockid must be 0 or 1, got {lane}")
+        lane = ConstInt(lane, DataType.INT64, span)
+    if not isinstance(lane, Expr) or not isinstance(lane.type, ScalarType):
+        raise TypeError("aiv_subblockid must be a Python int or an INT64 scalar")
+    if lane.type.dtype != DataType.INT64:
+        raise TypeError("aiv_subblockid requires INT64; explicitly cast other scalar dtypes to pl.INT64")
+    if isinstance(lane, ConstInt) and lane.value not in (0, 1):
+        raise ValueError(f"aiv_subblockid must be 0 or 1, got {lane.value}")
+    if entry_type is not None and not isinstance(entry_type, _ir_core.UnknownType):
+        if not isinstance(entry_type, _ir_core.TileType):
+            raise TypeError("aiv_subblockid requires an AIV-side Vec Tile entry; GlobalTensor is unsupported")
+        if entry_type.memory_space not in (None, MemorySpace.Vec):
+            raise ValueError("aiv_subblockid requires an AIV-side Vec Tile entry")
+    return [lane]
+
+
+def tpush_to_aic(
+    tile: Expr,
+    *,
+    split: int,
+    id: int | None = None,
+    aiv_subblockid: int | Expr | None = None,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe.
 
     Args:
         tile: Tile data to push
         split: Split mode (0=none, 1=up-down, 2=left-right)
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2/3/4 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {"split": split}
     if id is not None:
         kwargs["id"] = id
-    return _ir_core.create_op_call("tile.tpush_to_aic", [tile], kwargs, actual_span)
+    args = [tile, *_aiv_lane_args(aiv_subblockid, split, tile.type, actual_span)]
+    return _ir_core.create_op_call("tile.tpush_to_aic", args, kwargs, actual_span)
 
 
 def aiv_shard(tile: Expr, *, split: int, lane_stride: int | None = None, span: Span | None = None) -> Call:
@@ -192,6 +232,7 @@ def tpop_from_aic(
     split: int = 0,
     lane_stride: int | None = None,
     id: int | None = None,
+    aiv_subblockid: int | Expr | None = None,
     span: Span | None = None,
 ) -> Call:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -205,10 +246,15 @@ def tpop_from_aic(
         lane_stride: Partition stride carried when a ragged boundary was
             balanced across the two AIV lanes; omit for the box partition
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
+        aiv_subblockid: Optional Python int (0 or 1) or INT64 scalar selecting
+            the logical AIV lane. Requires split=1/2/3/4 and a Vec Tile entry.
+            Dynamic values must be 0 or 1 at runtime; the author must pair both
+            lanes consistently. Omit to use the backend's physical lane id.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Vec)
+    args = _aiv_lane_args(aiv_subblockid, split, resolved_type, actual_span)
     kwargs: dict[str, Any] = {"split": split}
     if lane_stride is not None:
         kwargs["lane_stride"] = lane_stride
@@ -216,8 +262,8 @@ def tpop_from_aic(
         kwargs["id"] = id
     if resolved_type is not None:
         op = _ir_core.get_op("tile.tpop_from_aic")
-        return _ir_core.Call(op, [], kwargs, resolved_type, actual_span)
-    return _ir_core.create_op_call("tile.tpop_from_aic", [], kwargs, actual_span)
+        return _ir_core.Call(op, args, kwargs, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aic", args, kwargs, actual_span)
 
 
 def tpop_from_aiv(
