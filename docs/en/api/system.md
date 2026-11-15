@@ -52,6 +52,33 @@ counts and pipe IDs. No runtime range guard is inserted. A constant outside
 that range is rejected. Selecting a logical lane does not move the operation
 to another physical core or change the executing kernel.
 
+## L1 to UB boundary
+
+Explicit lane selection does not establish a Mat (L1) to Vec (UB) transfer.
+The current PTOAS `verifyTMovGenericPairing` has no Mat→Vec pair, and the 950
+memory graph in `src/backend/common/soc.cpp` has no such edge. Keep this
+restriction until a legal backend mechanism is demonstrated.
+
+The alternatives require separate contracts:
+
+- Direct TMOV needs a legal Mat→Vec instruction, layouts, dtypes, valid extents
+  and producer/consumer ordering. The minimal assembler rejection is covered
+  by `tests/ut/codegen/test_pto_codegen_aiv_lane.py`.
+- A tile TPipe needs evidence that its C2V producer accepts Mat storage and
+  that its AIV consumer receives Vec storage; the existing Acc→Vec pipe is
+  not that evidence. A Mat producer probe currently fails on both A3 and A5
+  with `tile type must map to a supported producer pipe`.
+- A GM route needs a legal L1→GM store, AIV GM→UB load, lifetime, cache
+  visibility and synchronization. A3's store verifier permits Mat, but A5's
+  permits only Vec or Acc. Reloading the original GM input on AIV can be a
+  separately authored algorithm when that input is still available; it does
+  not copy an arbitrary existing L1 tile.
+
+No new memory-graph edge or implicit staging is introduced. These compiler
+limits do not establish a hardware capability limit. Backend instruction and
+protocol evidence, including the intended meaning of the external L1→UB
+request, remains necessary before extending this path.
+
 ::: pypto.language.system
     options:
       show_root_heading: false

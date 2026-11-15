@@ -185,6 +185,33 @@ def test_default_pipeline_keeps_lane_and_compiles(target, arch, lane_kind, plann
 
 
 @pytest.mark.parametrize("arch", ["a3", "a5"])
+def test_l1_to_ub_tmov_stays_rejected(ptoas_binary, arch, tmp_path):
+    """A Mat-to-Vec memory-graph edge alone cannot establish a legal TMOV."""
+    source = """
+module {
+  func.func @l1_to_ub() {
+    %src = pto.alloc_tile : !pto.tile_buf<mat, 16x16xf32, blayout=col_major, slayout=row_major>
+    %dst = pto.alloc_tile : !pto.tile_buf<vec, 16x16xf32>
+    pto.tmov ins(%src : !pto.tile_buf<mat, 16x16xf32, blayout=col_major, slayout=row_major>)
+             outs(%dst : !pto.tile_buf<vec, 16x16xf32>)
+    return
+  }
+}
+"""
+    diagnostics = _assemble(ptoas_binary, source, arch, tmp_path, succeeds=False)
+    assert "supported tmov address-space pair" in diagnostics
+
+
+@pytest.mark.parametrize("arch", ["a3", "a5"])
+def test_l1_to_ub_pipe_stays_rejected(ptoas_binary, arch, tmp_path):
+    """An Acc-to-Vec FIFO cannot be reused as a Mat-to-Vec producer pipe."""
+    source = (Path(__file__).parent / "fixtures/aiv_lane.pto").read_text()
+    source = source.replace("loc=acc,", "loc=mat,").replace("fractal=1024", "fractal=512")
+    diagnostics = _assemble(ptoas_binary, source, arch, tmp_path, succeeds=False)
+    assert "tile type must map to a supported producer pipe" in diagnostics
+
+
+@pytest.mark.parametrize("arch", ["a3", "a5"])
 @pytest.mark.parametrize("split", [3, 4])
 def test_odd_c2v_pop_with_lane_and_valid_operands(ptoas_binary, arch, split, tmp_path):
     """The i64 lane coexists with both index valid-shape operands."""
@@ -287,6 +314,26 @@ def test_outlining_and_auto_core_placement_keep_lane(target):
     for function in after.functions.values():
         if function.func_type == ir.FunctionType.AIC:
             assert "aiv_subblockid=" not in function.as_python()
+
+
+@pytest.mark.parametrize("arch", ["a3", "a5"])
+def test_l1_gm_store_architecture_boundary(ptoas_binary, arch, tmp_path):
+    """A3's Mat store primitive is not proof of an A5 L1-to-GM route."""
+    source = """
+module {
+  func.func @l1_to_gm(%dst: !pto.partition_tensor_view<16x16xf32>) {
+    %src = pto.alloc_tile : !pto.tile_buf<mat, 16x16xf32>
+    pto.tstore ins(%src : !pto.tile_buf<mat, 16x16xf32>)
+               outs(%dst : !pto.partition_tensor_view<16x16xf32>)
+    return
+  }
+}
+"""
+    output = _assemble(ptoas_binary, source, arch, tmp_path, succeeds=arch == "a3")
+    if arch == "a3":
+        assert "TSTORE(" in output
+    else:
+        assert "expects A5 tstore src to use loc=vec or loc=acc" in output
 
 
 @pytest.mark.parametrize("push", [False, True])

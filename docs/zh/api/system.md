@@ -49,6 +49,29 @@ no-split（`split=0`）、GlobalTensor entry 以及 AIC 侧的
 越界常量会被拒绝。逻辑 lane 的选择不会把操作迁移到其他物理核，
 也不会改变执行它的 kernel。
 
+## L1 到 UB 的支持边界
+
+显式 lane 不建立 Mat（L1）到 Vec（UB）的传输能力。当前 PTOAS 的
+`verifyTMovGenericPairing` 不包含 Mat→Vec，950 的内存图
+`src/backend/common/soc.cpp` 也没有该边。在出现合法后端机制的证据前
+继续维持限制。
+
+各候选机制需要独立契约：
+
+- 直接 TMOV 需要合法的 Mat→Vec 指令、布局、dtype、有效范围及
+  生产者/消费者次序。最小汇编拒绝用例位于
+  `tests/ut/codegen/test_pto_codegen_aiv_lane.py`。
+- Tile TPipe 需要证明 C2V 生产端接受 Mat、AIV 消费端得到 Vec；
+  已有 Acc→Vec 管道不能证明这一点。当前 Mat 生产端的最小用例在
+  A3、A5 均报错 `tile type must map to a supported producer pipe`。
+- 经 GM 路径需要合法的 L1→GM store、AIV GM→UB load、生命周期、cache
+  可见性和同步。A3 store verifier 允许 Mat，A5 仅允许 Vec 或 Acc。
+  当原始 GM 输入仍可用时，可以单独编写在 AIV 重新读取的算法，
+  但这不等于复制已有的任意 L1 tile。
+
+本次不添加内存图边或隐式 staging。这些编译器限制不能证明硬件没有相关
+能力。扩展该路径仍需后端指令和协议证据，并明确外部 L1→UB 需求所指机制。
+
 ::: pypto.language.system
     options:
       show_root_heading: false
