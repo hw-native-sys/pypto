@@ -52,6 +52,18 @@ counts and pipe IDs. No runtime range guard is inserted. A constant outside
 that range is rejected. Selecting a logical lane does not move the operation
 to another physical core or change the executing kernel.
 
+The effect follows the backend transport. A5's direct Acc→UB C2V pipe returns
+the executing AIV's local UB slot; an explicit pop lane does not remap that
+slot to the other physical AIV. Use the matching physical lane on this path.
+The pinned GM-backed C2V implementation uses the lane for its GM band offset;
+that route needs separate device validation.
+
+`tests/st/runtime/cross_core/test_explicit_aiv_lane.py` checks omitted,
+static and dynamic lanes with exact goldens and twelve transfers through a
+four-slot ring. Its A5 V2C cases swap the logical lanes to distinguish explicit
+selection from an ignored operand. Local C2V cases use matching physical
+lanes. A3 and A5 execution results must be recorded separately.
+
 ## L1 to UB boundary
 
 Explicit lane selection does not establish a Mat (L1) to Vec (UB) transfer.
