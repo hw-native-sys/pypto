@@ -591,6 +591,24 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 The orchestration file is named `orchestration/<func_name>.cpp` in the generated file map.
 
+`OrchestrationResult.ccu_modules` contains ordered `CcuModule` descriptors for
+native CCU implementations used by this callable. Codegen derives them from
+emitted kernel registrations, so unrelated functions cannot create missions.
+Each descriptor carries the callable-local ID, template variables, AIV wrapper
+names, native source path and entry symbol, plus parameter size/alignment in
+bytes. C++ derives the rendering specifications from these descriptors; Python
+serializes their runtime configuration without rediscovering entries or assigning
+IDs. See
+[CCU allgather source generation](../passes/44-lower_l2_tensor_collectives.md)
+for the ABI and runtime integration boundary.
+
+`OrchestrationResult.builtin_sources` is the complete rendering contract for
+ordinary AIV builtins, CCU submission wrappers, native modules and shared headers.
+Each `BuiltinSourceSpec` supplies `template_dir`, `template_file`, `output_path`
+and all substitution `variables`. C++ selects only registered kernels, injects
+CCU IDs and emits shared headers once. Python renders this list without IR
+traversal or operator-specific paths, filenames or template checks.
+
 ## Manual Scope and TaskId Lowering
 
 `with pl.manual_scope():` regions lower to a `SIMPLER_SCOPE(ScopeMode::MANUAL)`

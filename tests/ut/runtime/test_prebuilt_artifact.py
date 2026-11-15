@@ -1689,3 +1689,36 @@ def test_private_output_base_inside_cache_keeps_runtime_outside(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_ccu_sources_and_binary_package_preserve_order(tmp_path, fake_runtime):
+    _chip(tmp_path)
+    modules = [{"ccu_id": i, "source": f"ccu/module_{i}.cpp"} for i in range(2)]
+    for module in modules:
+        _write(tmp_path / module["source"], "// native module")
+    with (tmp_path / "kernel_config.py").open("a") as stream:
+        stream.write(f"\nCCU_MODULES = {modules!r}\n")
+        stream.write("CCU_DOMAIN_ABI_VERSION = 2\nCCU_RUNTIME_SUPPORTED = False\n")
+        stream.write("CCU_BUILD_IDENTITY = {'pypto_ccu_module_abi': 1}\n")
+    package_generated_sources(tmp_path, BuildKind.SINGLE_CHIP)
+    validate_generated_sources(tmp_path, BuildKind.SINGLE_CHIP)
+    config = read_kernel_config(tmp_path / "kernel_config.py")
+    assert config.CCU_MODULES == modules
+    assert config.CCU_DOMAIN_ABI_VERSION == 2
+    assert config.CCU_RUNTIME_SUPPORTED is False
+    assert config.CCU_BUILD_IDENTITY == {"pypto_ccu_module_abi": 1}
+    _prebuilt.write_chip_binaries(
+        tmp_path,
+        "a5",
+        config.ORCHESTRATION,
+        [(kernel, b"aiv") for kernel in config.KERNELS],
+        b"orchestration",
+        "test_runtime",
+        config.RUNTIME_CONFIG,
+        ccu_modules=[b"first native ELF", b"second native ELF"],
+    )
+    loaded = _prebuilt.load_prebuilt(tmp_path, "a5", BuildKind.SINGLE_CHIP)
+    assert loaded["."][0]["ccu_modules"] == [b"first native ELF", b"second native ELF"]
+    (tmp_path / "prebuilt/ccu_0.so").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="size mismatch"):
+        _prebuilt.load_prebuilt(tmp_path, "a5", BuildKind.SINGLE_CHIP)

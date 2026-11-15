@@ -821,6 +821,10 @@ def lower_l2_tensor_collectives() -> Pass:
     joins the caller's own task DAG, so ``compute -> collective -> consume`` is
     ordered by ordinary TensorMap dependencies.
 
+    Explicit ``allgather(engine="ccu")`` lowers to a BF16 AIV wrapper and native
+    CCU module on Ascend950 (2..64 ranks, straight-line CHIP only), with a local
+    order token per CCU function. Host signatures stay unchanged.
+
     Runs before :func:`derive_call_directions` so the emitted call
     gets its argument directions and task edges derived like any kernel call.
     ``pld.tensor.indexed_all_to_all_v`` also lowers on this rail (A5 URMA only),

@@ -39,6 +39,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -923,7 +924,18 @@ Pass MaterializeCommDomainScopes() {
     // Precise domain attribution belongs here in a future refinement, not in codegen.
     class EngineCollector : public IRVisitor {
      public:
+      explicit EngineCollector(const ProgramPtr& program) : program_(program) {}
+      bool uses_ccu = false;
       bool uses_urma = false;
+      ProgramPtr program_;
+      // CHIP collectives have already been lowered by LowerL2TensorCollectives.
+      // HOST raw collectives are handled separately by the domain analyzer.
+      void RecordCcu(const OpPtr& op) {
+        if (auto gv = As<GlobalVar>(op)) {
+          auto func = program_->GetFunction(gv->name_);
+          uses_ccu |= IsCcuAllGatherBuiltin(func);
+        }
+      }
       void Record(const OpPtr& op) {
         // LowerL2TensorCollectives may already have replaced the registered op
         // with a synthesized builtin function (not a registry operator).
@@ -935,18 +947,21 @@ Pass MaterializeCommDomainScopes() {
       }
       void VisitExpr_(const CallPtr& op) override {
         Record(op->op_);
+        RecordCcu(op->op_);
         IRVisitor::VisitExpr_(op);
       }
       void VisitExpr_(const SubmitPtr& op) override {
         Record(op->op_);
+        RecordCcu(op->op_);
         IRVisitor::VisitExpr_(op);
       }
-    } collector;
+    } collector(program);
     for (const auto& [gv, func] : program->functions_) {
       if (func && func->body_) collector.VisitStmt(func->body_);
     }
-    const std::vector<std::string> engines =
+    std::vector<std::string> engines =
         collector.uses_urma ? std::vector<std::string>{"urma"} : std::vector<std::string>{};
+    if (collector.uses_ccu) engines.push_back("ccu");
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
     std::map<std::string, FunctionPtr> chip_orchs;
@@ -967,8 +982,10 @@ Pass MaterializeCommDomainScopes() {
       if (new_func.get() != func.get()) modified = true;
     }
 
-    if (!modified) return program;
-    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+    auto domains = modified
+                       ? std::make_shared<Program>(std::move(new_functions), program->name_, program->span_)
+                       : program;
+    return MaterializeCcuBindings(domains);
   };
 
   return CreateProgramPass(pass_func, "MaterializeCommDomainScopes", kMaterializeCommDomainScopesProperties);
@@ -1060,6 +1077,12 @@ class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    try {
+      VerifyCcuBindings(program);
+    } catch (const pypto::Error& error) {
+      diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0, error.what(),
+                               program->span_);
+    }
     CommDomainScopeCollector collector;
     for (const auto& [gvar, func] : program->functions_) {
       if (func && func->body_) collector.VisitStmt(func->body_);

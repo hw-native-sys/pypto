@@ -1,0 +1,66 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// Generated from {{template_package}}. Four tensors and three CommContexts.
+#include <cstdint>
+#include <pto/pto-inst.hpp>
+#include "async_kernel_api.h"
+#include "tensor.h"
+// Draft domain-binding ABI: intentionally reject the legacy runtime headers.
+#if !defined(SIMPLER_CCU_DOMAIN_ABI_VERSION) || SIMPLER_CCU_DOMAIN_ABI_VERSION != 2
+#error "CCU domain binding requires simpler device ABI v2 (not implemented by the pinned runtime)"
+#endif
+#define PYPTO_CCU_INLINE __aicore__ inline
+#include "../../ccu/allgather_schedule.hpp"
+
+extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
+  auto *input = reinterpret_cast<__gm__ Tensor *>(args[0]);
+  auto *target = reinterpret_cast<__gm__ Tensor *>(args[1]);
+  const auto *comm = reinterpret_cast<const __gm__ CommContext *>(args[{{ctx_index}}]);
+  AsyncCtx ctx = get_async_ctx(args);
+  constexpr uint32_t ccu_id = {{ccu_id}};
+  constexpr uint32_t nranks = {{nranks_cpp}};
+  if (comm == nullptr || comm->rankNum != nranks || comm->rankId >= nranks) {
+    pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+    return;
+  }
+  const uint64_t count = input->shapes[1];
+  const uint64_t bytes = count * sizeof(uint16_t);
+  const uint32_t rank = comm->rankId;
+  auto *src = reinterpret_cast<__gm__ uint16_t *>(input->buffer.addr) + input->start_offset;
+  auto *dst = reinterpret_cast<__gm__ uint16_t *>(target->buffer.addr) + target->start_offset;
+  const uint64_t base = comm->windowsIn[rank];
+  const uint64_t input_offset = reinterpret_cast<uint64_t>(src) - base;
+  const uint64_t target_offset = reinterpret_cast<uint64_t>(dst) - base;
+  // Match CcuAllGatherOp: pass output bases and apply the slot exactly once
+  // inside CCU. Compute the multiplication here; the A5 CCU translator lacks it.
+  const uint64_t slot_offset = rank * bytes;
+  using Arg = simpler::ccu::CcuCallArg;
+  // Window expands to address/token. Peers are ordinary domain-logical scalars.
+  const auto go = pypto_ccu::CalcGoSize(bytes % pypto_ccu::kSegmentBytes);
+  Arg call_args[8 + 2 * nranks]{};
+  call_args[0] = {Arg::Kind::Window, rank, input_offset, bytes};
+  call_args[1] = {Arg::Kind::Scalar, 0, bytes, 0};
+  call_args[2] = {Arg::Kind::Scalar, 0, slot_offset, 0};
+  call_args[3] = {Arg::Kind::Scalar, 0, bytes / pypto_ccu::kSegmentBytes, 0};
+  call_args[4] = {Arg::Kind::Scalar, 0, go.addr_offset, 0};
+  call_args[5] = {Arg::Kind::Scalar, 0, go.iterations, 0};
+  call_args[6] = {Arg::Kind::Scalar, 0, go.parallel, 0};
+  call_args[7] = {Arg::Kind::Scalar, 0, go.residual, 0};
+  for (uint32_t peer = 0; peer < nranks; ++peer) {
+    call_args[8 + 2 * peer] = {Arg::Kind::Window, peer, target_offset, nranks * bytes};
+    call_args[9 + 2 * peer] = {Arg::Kind::Scalar, 0, peer, 0};
+  }
+  // Both local and peer payload copies belong to CCU. AIV only submits metadata.
+  // The runtime registers done before publishing parameters and trigger.
+  // Signal and order retain task dependencies but are not CCU parameters.
+  (void)submit_ccu_mission(ctx, comm, ccu_id, call_args);
+}

@@ -572,6 +572,11 @@ def _compile_and_assemble_locked(
         kernel_config = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(kernel_config)
 
+    if getattr(kernel_config, "CCU_DOMAIN_ABI_VERSION", None) == 2:
+        raise NotImplementedError(
+            "CCU domain binding ABI v2 is codegen-only; simpler runtime integration is pending"
+        )
+
     kernels = kernel_config.KERNELS
     orchestration = kernel_config.ORCHESTRATION
     runtime_config = getattr(kernel_config, "RUNTIME_CONFIG", {})
@@ -692,6 +697,13 @@ def _compile_and_assemble_locked(
         for kernel, key in zip(kernels, registration_keys, strict=True)
     ]
 
+    # Native modules use callable-local IDs in the emitted package order.
+    ccu_modules: list[bytes] = []
+    for index, module in enumerate(getattr(kernel_config, "CCU_MODULES", [])):
+        if module["ccu_id"] != index:
+            raise ValueError("CCU_MODULES must be ordered by contiguous callable-local ccu_id")
+        ccu_modules.append(compiler.compile_ccu(str(work_dir / module["source"])))
+
     # Assemble ChipCallable
     orch_sig = orchestration.get("signature", [])
     func_name = orchestration["function_name"]
@@ -700,6 +712,7 @@ def _compile_and_assemble_locked(
         func_name=func_name,
         binary=orch_so_binary,
         children=[(fid, callable_) for fid, callable_, _ in kernel_binaries],
+        ccu_modules=ccu_modules,
     )
     # ``orch_so_binary`` is the buffer the runtime hashes into the ``hid=`` of this
     # callable's [STRACE] markers; pair it with the per-program display name (NOT
@@ -723,6 +736,7 @@ def _compile_and_assemble_locked(
             orch_so_binary,
             runtime_name,
             runtime_config,
+            ccu_modules=ccu_modules,
         )
 
     return chip_callable, runtime_name, runtime_config

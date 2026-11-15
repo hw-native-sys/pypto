@@ -260,6 +260,51 @@ class KernelCompiler:
                 _vpto.validate_device_image(binary)
             return binary
 
+    def compile_ccu(self, source_path: str) -> bytes:
+        """Build a native CCU Host module using simpler's SDK identities.
+
+        Follow simpler's native-domain example until its CCU toolchain query
+        is available (simpler #3054). The module remains a complete Host ELF.
+        """
+        if self.platform != "a5":
+            raise ValueError(f"Native CCU modules require a5, got {self.platform!r}")
+        from simpler.ccu import ccu_sdk_root, runtime_build_identity  # noqa: PLC0415
+
+        source = self._source_path(source_path)
+        sdk = ccu_sdk_root()
+        sdk_identity, isa_identity = runtime_build_identity()
+        with tempfile.TemporaryDirectory(prefix="pypto-ccu-") as directory:
+            root = Path(directory)
+            identities = root / "build_identity.cpp"
+            identities.write_text(
+                "#include <cstdint>\n"
+                f"extern const uint8_t pypto_ccu_sdk_identity[32] = {{{','.join(map(str, sdk_identity))}}};\n"
+                f"extern const uint8_t pypto_ccu_isa_identity[32] = {{{','.join(map(str, isa_identity))}}};\n"
+            )
+            output = root / "module.so"
+            cmd = [
+                self.sdk.host_gxx.cxx_path,
+                *self.sdk.host_gxx.get_compile_flags(),
+                *self._sanitizer_flags(self.sdk.host_gxx),
+                str(compiler_visible_path(source)),
+                str(identities),
+                *self._include_flags(
+                    [
+                        str(self.project_root / "src/common"),
+                        str(sdk / "include"),
+                        str(sdk / "include/hccl"),
+                        str(sdk / "pkg_inc/hcomm/ccu"),
+                        str(sdk / "include/hcomm/ccu"),
+                    ]
+                ),
+                f"-L{sdk / 'lib64'}",
+                "-lasccomm_ccu",
+                "-lhcomm",
+                "-o",
+                str(output),
+            ]
+            return self._run(cmd, output, "CCU")
+
     def _vpto_toolchain(self) -> tuple[str, str]:
         """Use the assembler selected by PyPTO and the SDK's matching Bisheng."""
         ptoas = find_ptoas_binary()

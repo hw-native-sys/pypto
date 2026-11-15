@@ -103,6 +103,38 @@ class KernelRegistration:
     @property
     def signature(self) -> list[str]: ...
 
+class BuiltinSourceSpec:
+    """Template artifact selected by codegen, with complete rendering variables."""
+
+    @property
+    def template_dir(self) -> str: ...
+    @property
+    def template_file(self) -> str: ...
+    @property
+    def output_path(self) -> str: ...
+    @property
+    def variables(self) -> dict[str, str]: ...
+
+class CcuModule:
+    """Native CCU source and ABI descriptor; sizes and alignment are in bytes."""
+
+    @property
+    def ccu_id(self) -> int: ...
+    @property
+    def template_dir(self) -> str: ...
+    @property
+    def variables(self) -> dict[str, str]: ...
+    @property
+    def wrappers(self) -> list[str]: ...
+    @property
+    def source(self) -> str: ...
+    @property
+    def entry_symbol(self) -> str: ...
+    @property
+    def parameter_size(self) -> int: ...
+    @property
+    def parameter_alignment(self) -> int: ...
+
 class OrchestrationResult:
     """Result of orchestration code generation."""
 
@@ -114,6 +146,16 @@ class OrchestrationResult:
     @property
     def kernel_registrations(self) -> list[KernelRegistration]:
         """Distinct runtime registrations, in func_id order; code may be shared."""
+        ...
+
+    @property
+    def builtin_sources(self) -> list[BuiltinSourceSpec]:
+        """Template artifacts used by this callable, including shared headers."""
+        ...
+
+    @property
+    def ccu_modules(self) -> list[CcuModule]:
+        """Native modules in callable-local ID order; also supplies AIV wrapper IDs."""
         ...
 
     @property
@@ -150,19 +192,20 @@ class BuiltinNextLevelSpec:
         ...
 
 class DistributedCodegen:
-    """Distributed codegen for Linqu hierarchy runtime C++ code."""
+    """Distributed codegen for Linqu hierarchy runtime Python code."""
 
     def __init__(self) -> None:
         """Create a distributed code generator."""
 
-    def generate(self, program: Program) -> str:
-        """Generate distributed C++ code from IR Program.
+    def generate(self, program: Program, chip_results: dict[str, OrchestrationResult] = {}) -> str:
+        """Generate distributed Python code from IR Program.
 
         Args:
             program: The IR Program (after OutlineHierarchyScopes)
+            chip_results: Generated CHIP artifacts; required for CCU registrations
 
         Returns:
-            Complete C++ source code as a string
+            Complete Python source code as a string
         """
 
     def get_builtin_next_level_specs(self) -> list[BuiltinNextLevelSpec]:
@@ -218,6 +261,8 @@ __all__ = [
     "DistributedCodegen",
     "OrchestrationResult",
     "KernelRegistration",
+    "CcuModule",
+    "BuiltinSourceSpec",
     "collect_vars_from_shape_expr",
     "collect_tensor_shape_dyn_vars",
     "generate_orchestration",

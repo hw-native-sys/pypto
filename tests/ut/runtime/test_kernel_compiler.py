@@ -476,3 +476,36 @@ def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypa
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_ccu_host_module_uses_sdk_identity_and_preserves_elf(compiler_module, monkeypatch, tmp_path):
+    """A native CCU module needs Host ELF metadata, not AIV text extraction."""
+    monkeypatch.setitem(
+        sys.modules,
+        "simpler.ccu",
+        SimpleNamespace(
+            ccu_sdk_root=lambda: tmp_path / "sdk",
+            runtime_build_identity=lambda: (bytes(range(32)), bytes(reversed(range(32)))),
+        ),
+    )
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        identity = next(Path(arg) for arg in command if arg.endswith("build_identity.cpp"))
+        text = identity.read_text()
+        assert "pypto_ccu_sdk_identity[32]" in text
+        assert "pypto_ccu_isa_identity[32]" in text
+        assert ",".join(map(str, range(32))) in text
+        Path(command[command.index("-o") + 1]).write_bytes(b"complete host ELF")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    result = compiler_module.KernelCompiler("a5").compile_ccu(_source(tmp_path))
+    assert result == b"complete host ELF"
+    assert len(commands) == 1
+    assert commands[0][0] == "host-compiler"
+    assert "-lasccomm_ccu" in commands[0] and "-lhcomm" in commands[0]
+    assert not Path(commands[0][commands[0].index("-o") + 1]).parent.exists()
+    with pytest.raises(ValueError, match="require a5"):
+        compiler_module.KernelCompiler("a5sim").compile_ccu(_source(tmp_path))

@@ -46,7 +46,6 @@ from typing import Any
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, decode_external_include_dirs
 from pypto._function_attrs import (
     BUILTIN_TEMPLATE_DIR_ATTR,
-    BUILTIN_TEMPLATE_VARS_ATTR,
     DUAL_AIV_DISPATCH_ATTR,
     EXTERNAL_PREFLIGHT_SOURCE_ATTR,
     EXTERNAL_SOURCE_ATTR,
@@ -1595,6 +1594,8 @@ class _CallCollector(_ir_core.IRVisitor):
         self.callee_names: list[str] = []
 
     def visit_call(self, op: _ir_core.Call) -> None:
+        if op.op.name == _ir_core.get_op("pld.system.register_ccu").name:
+            self.callee_names.append(op.kwargs["callee"])
         if isinstance(op.op, _ir_core.GlobalVar):
             self.callee_names.append(op.op.name)
         super().visit_call(op)
@@ -1738,53 +1739,44 @@ def _external_include_dirs_of(func: _ir_core.Function) -> tuple[str, ...]:
         raise RuntimeError(f"Invalid external include metadata on function '{func.name}': {e}") from e
 
 
-def _builtin_template_of(func: _ir_core.Function) -> tuple[str, dict[str, str]] | None:
-    """Return ``(template_dir, variables)`` for a builtin-template kernel, else None.
+def _ccu_config(entries: list[_codegen_core.CcuModule]) -> str:
+    """Native module handoff; module order is the runtime's callable-local ID order."""
+    if not entries:
+        return ""
+    modules = [
+        {
+            "ccu_id": entry.ccu_id,
+            "source": entry.source,
+            "entry_symbol": entry.entry_symbol,
+            "parameter_size": entry.parameter_size,
+            "parameter_alignment": entry.parameter_alignment,
+        }
+        for entry in entries
+    ]
+    return (
+        "\n# Native CCU sources compiled and packaged by the runtime builder.\n"
+        f"CCU_MODULES = {modules!r}\n"
+        "CCU_BUILD_IDENTITY = {\n"
+        "    'algorithm': 'sha256',\n"
+        "    'pypto_ccu_sdk_identity': 'hcomm/ccu/ccu_res.h',\n"
+        "    'pypto_ccu_isa_identity': 'pto/pto-inst.hpp',\n"
+        "}\n"
+        "CCU_DOMAIN_ABI_VERSION = 2\n"
+        "CCU_RUNTIME_SUPPORTED = False  # Pending simpler domain binding/device ABI.\n"
+    )
 
-    ``LowerL2TensorCollectives`` synthesizes an AIV function per managed CHIP/L2
-    collective whose implementation is the hand-written builtin kernel the HOST
-    rail also renders — named indirectly by ``builtin_template_dir`` (a
-    package-resource handle) plus a ``key=value`` substitution list. Like an
-    external kernel it gets no PyPTO codegen; unlike one it is *generated*, so
-    the rendered source is written to ``kernels/<ct>/<name>.cpp`` under the
-    artifact dir, which is exactly where the manifest already points.
-    """
-    attrs = dict(func.attrs)
-    template_dir = attrs.get(BUILTIN_TEMPLATE_DIR_ATTR)
-    if template_dir is None:
-        return None
-    variables: dict[str, str] = {}
-    raw = attrs.get(BUILTIN_TEMPLATE_VARS_ATTR, "")
-    for item in filter(None, (part.strip() for part in raw.split(","))):
-        key, sep, value = item.partition("=")
-        if not sep:
-            raise RuntimeError(
-                f"Invalid {BUILTIN_TEMPLATE_VARS_ATTR} entry {item!r} on function '{func.name}': "
-                "expected 'key=value'"
-            )
-        variables[key.strip()] = value.strip()
-    return template_dir, variables
 
-
-def _render_builtin_kernel_sources(program: _ir_core.Program) -> dict[str, str]:
-    """Render every builtin-template kernel in *program* into artifact sources."""
+def _render_builtin_kernel_sources(sources: list[_codegen_core.BuiltinSourceSpec]) -> dict[str, str]:
+    """Render the complete artifact list selected by C++ codegen."""
     rendered: dict[str, str] = {}
-    for func in program.functions.values():
-        spec = _builtin_template_of(func)
-        if spec is None:
-            continue
-        template_dir, variables = spec
-        templates_dir = _resolve_builtin_template_dir(template_dir) / "templates"
-        kernel_template = templates_dir / "kernel.cpp.in"
-        if not kernel_template.is_file():
+    for source in sources:
+        template = _resolve_builtin_template_dir(source.template_dir) / source.template_file
+        if not template.is_file():
             raise FileNotFoundError(
-                f"builtin template_dir {template_dir!r} has no templates/kernel.cpp.in for "
-                f"function '{func.name}'"
+                f"builtin template_dir {source.template_dir!r} has no {source.template_file!r} "
+                f"for artifact {source.output_path!r}"
             )
-        core_type = "aic" if func.func_type == _ir_core.FunctionType.AIC else "aiv"
-        rendered[f"kernels/{core_type}/{func.name}.cpp"] = _render_builtin_template(
-            kernel_template, {"template_package": template_dir.lstrip(":"), **variables}
-        )
+        rendered[source.output_path] = _render_builtin_template(template, source.variables)
     return rendered
 
 
@@ -2261,13 +2253,9 @@ def _generate_with_distributed(
     """
     result_files: dict[str, str] = {}
 
-    # 1. L3 HOST orchestrator → orchestration/host_orch.py
-    cg = _codegen_core.DistributedCodegen()
-    orch_code = cg.generate(transformed_program)
-    result_files["orchestration/host_orch.py"] = orch_code
-    result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs(), runtime))
-
-    # 2. Each chip-level Orchestration → next_levels/{name}/...
+    # CHIP codegen owns callable-local IDs, just as it owns AIV func_ids.
+    # Keep its results so HOST generation consumes the exact packaged CCU table.
+    chip_results: dict[str, _codegen_core.OrchestrationResult] = {}
     for func in transformed_program.functions.values():
         if func.func_type == _ir_core.FunctionType.Orchestration:
             chip_funcs = _collect_chip_task_functions(func, transformed_program)
@@ -2281,9 +2269,14 @@ def _generate_with_distributed(
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
                 runtime=runtime,
+                orchestration_results=chip_results,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
+
+    cg = _codegen_core.DistributedCodegen()
+    result_files["orchestration/host_orch.py"] = cg.generate(transformed_program, chip_results)
+    result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs(), runtime))
 
     # 3. HOST SubWorker functions → sub_workers/{name}.py
     # Only HOST-level (Linqu level >= 3) SubWorkers carry an InlineStmt body
@@ -2463,6 +2456,7 @@ def _collect_chip_task_functions(
         _ir_core.FunctionType.Spmd,
         _ir_core.FunctionType.Graph,
         _ir_core.FunctionType.SIMT,
+        _ir_core.FunctionType.CCU,
     )
 
     result: list[_ir_core.Function] = [orch_func]
@@ -2593,6 +2587,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    orchestration_results: dict[str, _codegen_core.OrchestrationResult] | None = None,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2601,6 +2596,9 @@ def _generate_single_chip(
     (called from the top-level :func:`generate` dispatcher), so each
     sub-program reaching this function has exactly one orch.
     """
+    # Distributed builds retain the results for HOST codegen; single-chip
+    # callers need only the rendered files and use a local result sink.
+    orchestration_results = orchestration_results if orchestration_results is not None else {}
     result_files: dict[str, str] = {}
     errors: list[tuple[str, Exception]] = []
     prof = CompileProfiler.current()
@@ -2622,9 +2620,7 @@ def _generate_single_chip(
     # PyPTO codegen, so they are skipped in the same places external kernels are
     # — but their source is written into this artifact, not referenced in place.
     def _skips_pto_codegen(func: _ir_core.Function) -> bool:
-        return _external_source_of(func) is not None or _builtin_template_of(func) is not None
-
-    result_files.update(_render_builtin_kernel_sources(transformed_program))
+        return _external_source_of(func) is not None or BUILTIN_TEMPLATE_DIR_ATTR in func.attrs
 
     emitted_incore_funcs = [
         func for members in groups.values() for func in members if not _skips_pto_codegen(func)
@@ -2741,6 +2737,7 @@ def _generate_single_chip(
     )
 
     # Orchestration + config
+    builtin_sources: list[_codegen_core.BuiltinSourceSpec] = []
     if orch_func is not None:
         try:
             if not skip_ptoas and any(
@@ -2753,6 +2750,8 @@ def _generate_single_chip(
                 )
             with _profiling_stage(prof, "orchestration_codegen"):
                 orch_result = _codegen_core.generate_orchestration(transformed_program, orch_func)
+            orchestration_results[orch_func.name] = orch_result
+            builtin_sources = orch_result.builtin_sources
             result_files[f"orchestration/{orch_func.name}.cpp"] = (
                 f"// Orchestration Function: {orch_func.name}\n"
                 f"// Generated by PyPTO IR Compiler\n\n"
@@ -2787,9 +2786,13 @@ def _generate_single_chip(
                         if unit.helpers
                     },
                 )
+                result_files["kernel_config.py"] += _ccu_config(orch_result.ccu_modules)
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)
             errors.append((orch_func.name, e))
+    # Rendering consumes codegen metadata without changing its identities.
+    # Keep template diagnostics outside the orchestration error wrapper.
+    result_files.update(_render_builtin_kernel_sources(builtin_sources))
 
     if errors:
         report = _format_error_report(errors, output_dir)

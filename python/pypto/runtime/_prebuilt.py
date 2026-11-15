@@ -80,6 +80,8 @@ def write_chip_binaries(
     orchestration_binary: bytes,
     runtime_name: str,
     runtime_config: dict[str, Any],
+    *,
+    ccu_modules: list[bytes] | None = None,
 ) -> None:
     """Record final device bytes in a private build, after successful compilation."""
     # Keep every registration while storing identical immutable bytes once.
@@ -111,6 +113,11 @@ def write_chip_binaries(
         },
         "kernels": kernel_records,
     }
+    if ccu_modules:
+        record["ccu_modules"] = [
+            _save_bytes(directory, f"prebuilt/ccu_{index}.so", binary)
+            for index, binary in enumerate(ccu_modules)
+        ]
     (directory / BINARY_MANIFEST).write_bytes(encode_manifest(record))
 
 
@@ -280,12 +287,35 @@ def _binary(
     return data
 
 
+def _read_ccu_modules(
+    root: Path,
+    record: dict[str, Any],
+    validated_files: dict[Path, dict[str, Any]] | None,
+    binary_cache: dict[Path, tuple[bytes, str]],
+) -> None:
+    """Validate each native module before assembling any callable."""
+    modules = record.get("ccu_modules", [])
+    if not isinstance(modules, list):
+        raise ValueError(f"Invalid prebuilt CCU module list: {root}")
+    if modules:
+        record["ccu_modules"] = [
+            _binary(root, module, validated_files, binary_cache) for module in cast("list[Any]", modules)
+        ]
+
+
 def _read_chip(
     root: Path, platform: str, validated_files: dict[Path, dict[str, Any]] | None
 ) -> dict[str, Any]:
     record = _read_json(root)
     binary_cache: dict[Path, tuple[bytes, str]] = {}
-    if set(record) != {"schema", "platform", "runtime_name", "runtime_config", "orchestration", "kernels"}:
+    if set(record) - {"ccu_modules"} != {
+        "schema",
+        "platform",
+        "runtime_name",
+        "runtime_config",
+        "orchestration",
+        "kernels",
+    }:
         raise ValueError(f"Invalid prebuilt chip fields: {root}")
     if record["platform"] != platform:
         raise ValueError(f"Prebuilt platform {record['platform']!r} does not match {platform!r}")
@@ -326,6 +356,7 @@ def _read_chip(
             raise ValueError(f"Invalid prebuilt kernel name: {root}")
         _signature(kernel["signature"])
         kernel["binary"] = _binary(root, kernel["binary"], validated_files, binary_cache)
+    _read_ccu_modules(root, record, validated_files, binary_cache)
     return record
 
 
@@ -404,6 +435,7 @@ def load_prebuilt(
             func_name=orch["function_name"],
             binary=orch["binary"],
             children=kernels,
+            **({"ccu_modules": record["ccu_modules"]} if record.get("ccu_modules") else {}),
         )
         register_callable_identity(orch["binary"], orch["display_name"])
         result[name] = (callable_, record["runtime_name"], record["runtime_config"])

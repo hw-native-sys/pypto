@@ -3,6 +3,11 @@
 本 pass 为每个 `DistributedTensorType` 函数参数显式物化一个对应的
 `CommCtxType` 参数和实参，SIMT helper 除外。
 
+CCU CHIP callable、wrapper 和 builtin 声明均遵循同一规则。
+一个 CHIP 可以使用多个通信域，重复 ctx 也合法。
+HOST 注册 handle 只出现在 dispatch 的 `ccu_bindings` 配置中。
+编译器追加的 ctx 不打包为 native 算法参数。定义编号是 codegen 常量，不是 wrapper 形参。
+
 ## 概览
 
 DistributedTensor 的通信上下文需要沿完整调用链传递：host orchestration

@@ -67,6 +67,7 @@ struct FunctionCtxPlan {
 
 class LocalNameCollector : public IRVisitor {
  public:
+  LocalNameCollector() = default;
   std::unordered_set<std::string> names;
 
  protected:
@@ -702,9 +703,10 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
     params.push_back(it->second);
     dirs.push_back(ParamDirection::In);
   }
+  auto attrs = func->attrs_;
   return std::make_shared<Function>(func->name_, std::move(params), std::move(dirs), func->return_types_,
                                     func->body_, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+                                    attrs, func->requires_runtime_binding_, func->ir_stage_);
 }
 
 // Trace Host provenance along context forwarding edges. Each node/edge is

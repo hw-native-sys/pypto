@@ -343,7 +343,9 @@ void CheckDimAgreesIfStatic(const ExprPtr& lhs, const ExprPtr& rhs, const std::s
 
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)kwargs;
+  auto engine = GetKwargOr<std::string>(kwargs, "engine", "default");
+  CHECK(engine == "default" || engine == "ccu")
+      << "pld.tensor.allgather engine must be 'default' or 'ccu', got '" << engine << "'";
   CHECK(args.size() == 3) << "pld.tensor.allgather requires exactly 3 args (input, target, signal), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
@@ -435,6 +437,7 @@ REGISTER_OP("pld.tensor.allgather")
                   "window (HOST) (Input)")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] — gathered result in-place (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .set_attr<std::string>("engine")
     .no_memory_spec()
     // notify+wait.
     // Composite collective — the data destination is overwritten, not updated:

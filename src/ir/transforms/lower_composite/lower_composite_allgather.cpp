@@ -66,6 +66,8 @@ namespace lower_composite {
 
 ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
+  CHECK_SPAN(call->GetKwarg<std::string>("engine", "default") != "ccu", span)
+      << "pld.tensor.allgather engine='ccu' is supported only in CHIP orchestration";
   INTERNAL_CHECK_SPAN(args.size() == 3, span)
       << "pld.tensor.allgather rule expects 3 args (local_data, target, signal), got " << args.size();
   const auto& local_data = args[0];

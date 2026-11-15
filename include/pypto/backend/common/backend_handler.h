@@ -148,6 +148,10 @@ class BackendHandler {
  public:
   virtual ~BackendHandler() = default;
 
+  /// Compiler-side CCU capability; source generation/runtime support
+  /// are separate milestones. Unsupported targets reject before synthesizing IR.
+  [[nodiscard]] virtual bool SupportCcu() const { return false; }
+
   /// Unsupported by default: narrowing or MLIR loop syntax is not final evidence.
   [[nodiscard]] virtual ir::HardwareLoopProfile GetHardwareLoopProfile() const { return {}; }
 

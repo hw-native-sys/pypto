@@ -1,0 +1,75 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// HBM LoopGroup scheduling adapted from PTO-ISA ccu_test, commit
+// 6a60d0d3525aeecd76b0138018cc39fabf708794: ccu_loopgroup_utils.hpp,
+// ccu_loopgroup_executor.hpp and CcuAllGatherOp in ccu_collective_ops.hpp.
+// Original portions Copyright (c) 2025 Huawei Technologies Co., Ltd.
+// Distributed under CANN Open Software License Agreement Version 2.0.
+
+#ifndef PYPTO_CCU_ALLGATHER_SCHEDULE_HPP_
+#define PYPTO_CCU_ALLGATHER_SCHEDULE_HPP_
+
+#include <cstdint>
+
+// The AIV includes this with __aicore__; native registration uses host inline.
+#ifndef PYPTO_CCU_INLINE
+#define PYPTO_CCU_INLINE inline
+#endif
+namespace pypto_ccu {
+constexpr uint32_t kChunkBytes = 32768;
+constexpr uint32_t kLanes = 16;
+constexpr uint64_t kMaxIterations = 8191;
+constexpr uint64_t kSegmentBytes = uint64_t{kChunkBytes} * kLanes * (kMaxIterations + 1);
+
+PYPTO_CCU_INLINE constexpr uint64_t EncodeLoopParam(uint64_t stride, uint64_t iterations) {
+  // Context ID is zero; the low 13 bits hold the bounded iteration count.
+  return (stride << 13) | iterations;
+}
+PYPTO_CCU_INLINE constexpr uint64_t EncodeParallelParam(uint64_t repeat, uint64_t index, uint64_t total) {
+  return (repeat << 55) | (index << 48) | (total << 41);
+}
+PYPTO_CCU_INLINE constexpr uint64_t EncodeOffsetParam() {
+  // HBM uses no MS banks: only address and per-lane completion-event strides.
+  return (uint64_t{kChunkBytes} << 21) | 1;
+}
+struct GoSize {
+  uint64_t addr_offset, iterations, parallel, residual;
+};
+PYPTO_CCU_INLINE constexpr GoSize CalcGoSize(uint64_t bytes) {
+  // Callers segment at kSegmentBytes before encoding, avoiding silent overflow
+  // of the CCU loop-count field. Match the reference's exact-limit remapping.
+  const uint64_t stripe = uint64_t{kChunkBytes} * kLanes;
+  uint64_t m = bytes / stripe;
+  uint64_t n = (bytes % stripe) / kChunkBytes;
+  uint64_t p = bytes % kChunkBytes;
+  if (bytes == kSegmentBytes) {
+    m = kMaxIterations;
+    n = kLanes - 1;
+    p = kChunkBytes;
+  }
+  GoSize result{stripe * m, m, 0, 0};
+  if (n == 0 && p == 0) return result;
+  if (p == 0) {
+    result.parallel = EncodeParallelParam(n - 1, 0, 1);
+    result.residual = kChunkBytes;
+  } else if (n == 0) {
+    result.parallel = EncodeParallelParam(0, 0, 1);
+    result.residual = p;
+  } else {
+    result.parallel = EncodeParallelParam(n - 1, 1, 2);
+    result.residual = p;
+  }
+  return result;
+}
+}  // namespace pypto_ccu
+#undef PYPTO_CCU_INLINE
+#endif  // PYPTO_CCU_ALLGATHER_SCHEDULE_HPP_

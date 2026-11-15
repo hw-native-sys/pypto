@@ -25,6 +25,7 @@
 
 #include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -65,9 +66,11 @@ class DistributedCodegen : public CodegenBase {
    * @brief Generate distributed Python code from a Program
    *
    * @param program IR Program (after OutlineHierarchyScopes)
+   * @param chip_results Actual CHIP codegen results, required for CCU registrations
    * @return Complete Python source code as a string
    */
-  [[nodiscard]] std::string Generate(const ir::ProgramPtr& program);
+  [[nodiscard]] std::string Generate(const ir::ProgramPtr& program,
+                                     const std::map<std::string, OrchestrationResult>& chip_results = {});
 
   // CodegenBase interface
   [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_target_var_; }
@@ -275,6 +278,8 @@ class DistributedCodegen : public CodegenBase {
   /// dispatch outside its enclosing comm-domain scope.
   [[nodiscard]] ir::CommDomainScopeStmtPtr ScopeForWindowBuffer(const ir::WindowBufferPtr& wb) const;
 
+  std::map<std::pair<std::string, std::string>, int> ccu_definitions_;
+  std::unordered_map<const ir::Var*, ir::CommDomainScopeStmtPtr> allocation_domains_;
   ir::ProgramPtr program_;
   CodeEmitter emitter_;
 

@@ -513,6 +513,7 @@ def allgather(
     target: Expr,
     signal: Expr,
     *,
+    engine: str = "default",
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allgather(input, target, signal)`` Call.
@@ -531,7 +532,10 @@ def allgather(
     **HOST builtin:** distinct input/target windows; lowered to
     ``builtin.tensor.allgather`` per chip (in-kernel TPUT push + barrier).
 
+    ``engine="ccu"`` selects the Ascend950 CHIP BF16 source path for 2..64 ranks.
+
     Args:
+        engine: "default" or "ccu".
         local_data: This rank's single chunk — Tensor [1, SIZE] (InCore) or
             [1, SIZE] DistributedTensor staging window (HOST).
         target: DistributedTensor [NR, SIZE] result window (window-as-result).
@@ -539,7 +543,9 @@ def allgather(
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [local_data, target, signal]
-    return _ir_core.create_op_call("pld.tensor.allgather", _args, {}, actual_span)
+    return _ir_core.create_op_call(
+        "pld.tensor.allgather", _args, {"engine": engine} if engine != "default" else {}, actual_span
+    )
 
 
 def reduce_scatter(

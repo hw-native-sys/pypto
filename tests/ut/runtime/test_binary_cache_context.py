@@ -22,6 +22,7 @@ from unittest.mock import Mock
 import pypto.runtime._binary_cache as binary_cache
 import pytest
 from pypto.jit._artifact_manifest import BuildKind
+from pypto.runtime._artifact_sources import package_generated_sources
 from pypto.runtime._binary_cache import (
     BinaryCacheContext,
     binary_context_path,
@@ -314,6 +315,23 @@ def _stub_assembly(device_runner, monkeypatch, tmp_path: Path, chip_build: Mock)
     monkeypatch.setattr(device_runner, "ChipCallable", SimpleNamespace(build=chip_build))
     monkeypatch.setattr(device_runner, "register_callable_identity", Mock())
     return context
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+def test_ccu_domain_abi_rejects_runtime_before_compilation(device_runner, monkeypatch, tmp_path, packaged):
+    _write_minimal_artifact(tmp_path)
+    config = tmp_path / "kernel_config.py"
+    config.write_text(config.read_text() + "CCU_DOMAIN_ABI_VERSION = 2\n", encoding="utf-8")
+    if packaged:
+        task_interface = SimpleNamespace(ArgDirection=SimpleNamespace())
+        monkeypatch.setitem(sys.modules, "simpler", SimpleNamespace(task_interface=task_interface))
+        monkeypatch.setitem(sys.modules, "simpler.task_interface", task_interface)
+        package_generated_sources(tmp_path, BuildKind.SINGLE_CHIP)
+    compiler = Mock()
+    monkeypatch.setattr(device_runner, "KernelCompiler", compiler)
+    with pytest.raises(NotImplementedError, match="codegen-only"):
+        device_runner._compile_and_assemble(tmp_path, "a2a3sim")
+    compiler.assert_not_called()
 
 
 def test_compile_and_assemble_records_context_after_success(

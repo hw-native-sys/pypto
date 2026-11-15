@@ -23,7 +23,8 @@
 `CommDomainScopeStmt.engines` 记录通信域需要的异步工作区引擎 (async workspace engines)。
 物化通信域之前，此 Pass 扫描整个 Program 中每个函数的 Call 和 Submit。
 只要发现 `pld.tensor.indexed_all_to_all_v` 或其降低后的 builtin，所有物化通信域都设置
-`engines=["urma"]`；否则为空列表。
+`urma`；降低后的 CCU allgather builtin 模板身份增加 `ccu`。
+没有引擎需求时列表为空。
 
 当前采用保守策略，包括未调用函数和无关通信域。精确匹配留待后续实现。
 分布式代码生成仅根据该 IR 字段输出 `workspace_engines`，不再分析通信需求。
@@ -251,3 +252,21 @@ worker 创建时固定来源映射与文件列表，修改原来的字典或列�
 `persistent=True` 保留分配，`reset_persistent_windows` 控制复用前是否清零（默认开启）。
 清零后不会重新执行初始化。若要保留已加载的 Engram 表，设置 `reset_persistent_windows=False`；
 这也会关闭 Device scratch/signal buffer 的重置，其状态须由调用者管理。通信域仍由 Simpler 负责释放。
+
+### CCU 引擎需求
+
+`LowerL2TensorCollectives` 先于本 pass 执行，因此 CHIP CCU 需求仅通过
+Call/Submit 引用的 allgather builtin 模板身份收集，为所有域贡献
+`ccu`，包括未调用函数中的使用。原始 HOST collective 的分析仍需保留，
+因为 `LowerHostTensorCollectives` 位于本 pass 之后。
+重复执行合并已有 `urma` 等引擎并保留窗口绑定。
+详见 [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather)。
+
+### 显式 CCU 绑定
+
+建域后，CCU 使用通过现有 allocation slot 解析。pass 插入
+`pld.system.register_ccu(allocation, callee=..., chip_callee=...)`，并在 HOST dispatch 上附加
+`ccu_bindings` SSA 引用。每个 CHIP 调用独立注册，并通过 `chip_callee` 指定该 callable。
+注册携带 dispatch 的 device，返回本地 handle；依赖 rank 的
+注册先于首次任务提交，保留 rank 循环并在提交处按 rank 选择 handle，绑定必须与消费者 device 一致。不会合并成员相交的域。来源分析、参与校验和只支持
+codegen 的运行时边界见 [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather)。

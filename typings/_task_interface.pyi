@@ -384,6 +384,7 @@ class ChipCallable:
         binary: bytes,
         children: Sequence[tuple[int, CoreCallable]],
         config_name: str = "",
+        ccu_modules: Sequence[bytes] = (),
     ) -> ChipCallable:
         """
         Build a ChipCallable from signature, func_name, binary, and list of (func_id, CoreCallable) children.
