@@ -42,6 +42,34 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+// Lane is a scalar SSA operand, not a compile-time pipe attribute. The pop's
+// entry type may still be supplied by an annotation; codegen validates it once
+// memory inference has resolved the final Vec Tile entry.
+TypePtr DeduceAivTransferType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs, bool push) {
+  const size_t base_args = push ? 1 : 0;
+  CHECK(args.size() == base_args || args.size() == base_args + 1)
+      << "AIV transfer expects " << base_args << " operands plus optional aiv_subblockid";
+  if (args.size() == base_args) return GetUnknownType();
+  const auto& lane = args.back();
+  auto scalar = As<ScalarType>(lane->GetType());
+  CHECK_SPAN(scalar && scalar->dtype_ == DataType::INT64, lane->span_)
+      << "aiv_subblockid requires an INT64 scalar; explicitly cast other scalar dtypes";
+  if (auto value = As<ConstInt>(lane)) {
+    CHECK_SPAN(value->value_ == 0 || value->value_ == 1, lane->span_)
+        << "aiv_subblockid must be 0 or 1, got " << value->value_;
+  }
+  const int split = GetKwargOr<int>(kwargs, "split", 0);
+  CHECK_SPAN(split >= 1 && split <= 4, lane->span_) << "aiv_subblockid requires split=1, 2, 3, or 4";
+  if (push) {
+    auto tile = As<TileType>(args.front()->GetType());
+    CHECK_SPAN(tile && (!tile->memory_space_ || tile->GetMemorySpace() == MemorySpace::Vec),
+               args.front()->span_)
+        << "aiv_subblockid requires an AIV-side Vec Tile entry; GlobalTensor is unsupported";
+  }
+  return GetUnknownType();
+}
+
 // Read the required "split" int attr shared by the split-axis reshape ops
 // (0 = NONE/no split axis, 1 = UP_DOWN/axis0, 2 = LEFT_RIGHT/axis1).
 //
@@ -459,10 +487,13 @@ REGISTER_OP("tile.tpush_to_aic")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
+    .add_argument("aiv_subblockid", "Optional INT64 logical AIV lane operand (0 or 1)")
     .set_attr<int>("split")
     .set_attr<int>("id")
     .no_memory_spec()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceAivTransferType(args, kwargs, true);
+    });
 
 // Pop tile data from AIC (into AIV)
 REGISTER_OP("tile.tpop_from_aic")
@@ -470,14 +501,16 @@ REGISTER_OP("tile.tpop_from_aic")
     .set_op_category("CrossCoreOp")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
-    .no_argument()
+    .add_argument("aiv_subblockid", "Optional INT64 logical AIV lane operand (0 or 1)")
     .set_attr<int>("split")
     // Optional partition stride (see tile.aiv_shard); consumed by the torch
     // reference runtime, ignored by PTO codegen.
     .set_attr<int>("lane_stride")
     .set_attr<int>("id")
     .no_memory_spec()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceAivTransferType(args, kwargs, false);
+    });
 
 // Pop tile data from AIV (into AIC)
 REGISTER_OP("tile.tpop_from_aiv")
