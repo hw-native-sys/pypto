@@ -4,7 +4,9 @@
 
 包含手写 `system.get_buf` / `system.rls_buf` 的区域（含嵌套控制流）保留
 原有顺序。本 pass 仍消费 pipeline 标记，但不会将访问调度到这些同步
-边界之外；同步摘要在现有遍历中收集。
+边界之外。启用 `pipeline_double_buffer_c=True` 时，cube 产生的 Acc membership
+仍归一化为 `stage % 2`，操作数 membership 保留完整流水线深度；此元数据
+归一化不改变语句顺序。同步摘要在现有遍历中收集。
 
 ## 概述
 

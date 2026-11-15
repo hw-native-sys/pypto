@@ -21,14 +21,17 @@ forwards the case execution mode explicitly through the shared compile harness.
 """
 
 import json
+from concurrent.futures import wait
 from pathlib import Path
 from typing import Any
 
 import pypto.language as pl
 import pytest
 import torch
+from harness.core import test_runner as harness_runner
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto import ir
+from pypto._target import _parse_platform
 from pypto.backend import pto_backend
 from pypto.runtime import ExecutionMode
 
@@ -121,16 +124,21 @@ class BufferSyncCase(PTOTestCase):
 
 
 @pytest.fixture
-def manual_sync_only(monkeypatch, test_config):
+def manual_sync_only(monkeypatch, _st_platform):
     """Exercise manual ordering without adding a public auto-sync policy API."""
-    assert test_config.execution_mode is ExecutionMode.ONBOARD
+    _, execution_mode = _parse_platform(_st_platform)
+    assert execution_mode is ExecutionMode.ONBOARD
+    # Collection has already submitted all background compiles. Drain them
+    # before installing process-wide patches, so unrelated cases retain their
+    # requested execution mode and automatic synchronization flags.
+    wait(tuple(harness_runner._compile_futures.values()))
     original = pto_backend._get_ptoas_flags
     original_compile = ir.compile
 
     def compile_onboard(*args, **kwargs):
         # The shared harness currently drops RunConfig.execution_mode.
         # Pin this hardware-only acceptance case to its requested mode.
-        kwargs["execution_mode"] = test_config.execution_mode
+        kwargs["execution_mode"] = execution_mode
         return original_compile(*args, **kwargs)
 
     monkeypatch.setattr(ir, "compile", compile_onboard)
@@ -150,8 +158,8 @@ def manual_sync_only(monkeypatch, test_config):
 @pytest.mark.platforms("a5")
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static", "pingpong"])
 @pytest.mark.parametrize("launch", [0, 1, 2])
-def test_manual_buffer_sync(test_runner, test_config, dynamic, launch, manual_sync_only):
-    case = BufferSyncCase(dynamic, launch, config=test_config)
+def test_manual_buffer_sync(test_runner, test_config, _st_platform, dynamic, launch, manual_sync_only):
+    case = BufferSyncCase(dynamic, launch, config=test_config, platform=_st_platform)
     result = test_runner.run(case)
     assert result.passed, f"Manual Buffer-ID failed: {result.error}"
     assert manual_sync_only, "Manual acceptance must compile with the test's native compiler flags"

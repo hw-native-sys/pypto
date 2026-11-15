@@ -65,6 +65,32 @@ std::string RotateInnermostPipelineStage(const std::string& packed, int32_t dept
   return result;
 }
 
+// Physical dbC rotation also applies to manually ordered regions. Operand
+// memberships keep the full pipeline depth; only cube-produced Acc uses two slots.
+bool RotateDbCAccMemberships(std::vector<StmtPtr>& stmts) {
+  bool changed = false;
+  for (StmtPtr& stmt : stmts) {
+    auto assign = As<AssignStmt>(stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    auto tile = assign ? As<TileType>(assign->var_->GetType()) : nullptr;
+    if (!call || !call->op_ || !tile || tile->GetMemorySpace() != MemorySpace::Acc ||
+        call->op_->name_.rfind("tile.matmul", 0) != 0) {
+      continue;
+    }
+    const std::string packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
+    const std::string rotated = RotateInnermostPipelineStage(packed, /*depth=*/2);
+    if (rotated == packed) continue;
+    auto attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    attrs.emplace_back(kPipelineMembershipAttr, rotated);
+    auto rewritten = MutableCopy(assign);
+    rewritten->value_ = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
+                                               call->GetType(), call->span_);
+    stmt = rewritten;
+    changed = true;
+  }
+  return changed;
+}
+
 /// IO category used for priority during the topological sort. Lower is emitted first.
 ///
 /// This is a **hardware-unit stage ladder** for SAME-CORE pipelines: statements
@@ -227,10 +253,20 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     auto visited = IRMutator::VisitStmt_(op);
     const bool region_buffer_sync = has_buffer_sync_;
     has_buffer_sync_ |= enclosing_buffer_sync;
-    if (inside_pipeline_depth_ == 0 || region_buffer_sync) {
-      return visited;  // Non-pipeline code and manual synchronization retain their order.
-    }
+    if (inside_pipeline_depth_ == 0) return visited;
     auto seq = std::dynamic_pointer_cast<const SeqStmts>(visited);
+    if (region_buffer_sync) {
+      // Keep authored order while retaining the physical two-slot Acc policy.
+      if (seq && double_buffer_c_) {
+        auto stmts = seq->stmts_;
+        if (RotateDbCAccMemberships(stmts)) {
+          auto rewritten = MutableCopy(seq);
+          rewritten->stmts_ = std::move(stmts);
+          return rewritten;
+        }
+      }
+      return visited;
+    }
     if (!seq || seq->stmts_.size() < 2) {
       return visited;  // single stmt — nothing to reorder
     }
@@ -418,23 +454,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     // before MemoryReuse consumes them. Operand memberships retain the user's
     // full pipeline depth.
     if (double_buffer_c_) {
-      for (StmtPtr& stmt : out) {
-        auto assign = As<AssignStmt>(stmt);
-        auto call = assign ? As<Call>(assign->value_) : nullptr;
-        auto tile = assign ? As<TileType>(assign->var_->GetType()) : nullptr;
-        if (!call || !call->op_ || !tile || tile->GetMemorySpace() != MemorySpace::Acc ||
-            call->op_->name_.rfind("tile.matmul", 0) != 0) {
-          continue;
-        }
-        const std::string packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
-        const std::string rotated = RotateInnermostPipelineStage(packed, /*depth=*/2);
-        if (rotated == packed) continue;
-        auto attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
-        attrs.emplace_back(kPipelineMembershipAttr, rotated);
-        auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
-                                               call->GetType(), call->span_);
-        stmt = std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
-      }
+      RotateDbCAccMemberships(out);
     }
 
     // No-op detection.

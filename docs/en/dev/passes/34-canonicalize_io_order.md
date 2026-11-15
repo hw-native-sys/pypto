@@ -5,7 +5,10 @@ Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements 
 Regions containing manual `system.get_buf` / `system.rls_buf` calls, including
 nested control flow, keep their authored order. The pass still consumes the
 pipeline marker, but does not schedule accesses across these synchronization
-boundaries. The summary is collected during the existing traversal.
+boundaries. With `pipeline_double_buffer_c=True`, cube-produced Acc memberships
+still rotate to `stage % 2`; operand memberships retain the full pipeline depth.
+This metadata normalization does not change statement order. The summary is
+collected during the existing traversal.
 
 ## Overview
 
