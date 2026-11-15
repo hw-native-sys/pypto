@@ -12,6 +12,7 @@
 #ifndef SRC_IR_TRANSFORMS_LOWER_L2_CCU_COLLECTIVES_H_
 #define SRC_IR_TRANSFORMS_LOWER_L2_CCU_COLLECTIVES_H_
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
 
 namespace pypto::ir {

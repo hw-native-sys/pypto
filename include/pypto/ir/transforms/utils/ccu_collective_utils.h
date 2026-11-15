@@ -16,7 +16,10 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
@@ -50,7 +53,7 @@ inline std::map<std::string, std::string> GetBuiltinTemplateVariables(const Func
 inline CallPtr CcuWrapperCall(const FunctionPtr& func, const ProgramPtr& program) {
   class Finder : public IRVisitor {
    public:
-    explicit Finder(const ProgramPtr& program) : program_(program) {}
+    explicit Finder(ProgramPtr program) : program_(std::move(program)) {}
     CallPtr call;
     void VisitExpr_(const CallPtr& op) override {
       auto callee = As<GlobalVar>(op->op_) ? program_->GetFunction(op->op_->name_) : nullptr;

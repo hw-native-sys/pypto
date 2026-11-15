@@ -10,6 +10,8 @@
  */
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -21,13 +23,21 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 namespace {
@@ -50,8 +60,9 @@ class Origins : public IRVisitor {
       auto it = defs.find(var.get());
       auto root = it == defs.end() ? expr : Root(it->second);
       if (auto call = it == defs.end() ? nullptr : As<Call>(it->second);
-          IsOp(call, "pld.tensor.alloc_window_buffer"))
+          IsOp(call, "pld.tensor.alloc_window_buffer")) {
         root = expr;
+      }
       roots_[var.get()] = root;
       return root;
     }
@@ -64,8 +75,9 @@ class Origins : public IRVisitor {
       return CallResult(tuple, item->index_);
     }
     if (auto call = As<Call>(expr)) {
-      if (IsOp(call, "pld.tensor.window") || IsOp(call, "tensor.slice") || IsOp(call, "tensor.reshape"))
+      if (IsOp(call, "pld.tensor.window") || IsOp(call, "tensor.slice") || IsOp(call, "tensor.reshape")) {
         return Root(call->args_[0]);
+      }
     }
     if (As<Call>(expr) || As<Submit>(expr)) return CallResult(expr, 0);
     return expr;
@@ -87,8 +99,11 @@ class Origins : public IRVisitor {
     if (!callee) return nullptr;
     auto [it, inserted] = returns_.try_emplace(callee.get());
     if (inserted) it->second = return_lineage::ReturnedParamIndices(callee, program_);
-    if (index >= it->second.size() || !it->second[index]) return nullptr;
-    auto param = *it->second[index];
+    if (index >= it->second.size()) return nullptr;
+    // Keep the presence check and dereference on the same optional value.
+    const auto& returned_param = it->second[index];
+    if (!returned_param.has_value()) return nullptr;
+    auto param = *returned_param;
     return param < args.size() ? Root(args[param]) : nullptr;
   }
   ProgramPtr program_;
@@ -108,9 +123,9 @@ using Uses = std::map<std::string, std::vector<Use>>;
 
 class Scan : public IRVisitor {
  public:
-  Scan(const ProgramPtr& program, const std::map<std::string, CallPtr>& wrappers, Origins& origins,
+  Scan(ProgramPtr program, const std::map<std::string, CallPtr>& wrappers, Origins& origins,
        const std::unordered_map<const Var*, size_t>& params, std::vector<Use>& uses)
-      : program_(program), wrappers_(wrappers), origins_(origins), params_(params), uses_(uses) {}
+      : program_(std::move(program)), wrappers_(wrappers), origins_(origins), params_(params), uses_(uses) {}
   void VisitExpr_(const CallPtr& call) override {
     Record(call);
     IRVisitor::VisitExpr_(call);
@@ -231,8 +246,9 @@ class HostBindings : public IRVisitor {
       for (const auto& edge : edges) ++indegree[edge];
     }
     std::vector<Request> ready;
-    for (const auto& [node, count] : indegree)
+    for (const auto& [node, count] : indegree) {
       if (!count) ready.push_back(node);
+    }
     size_t visited = 0;
     while (!ready.empty()) {
       auto node = ready.back();
@@ -240,8 +256,9 @@ class HostBindings : public IRVisitor {
       ++visited;
       auto it = successors.find(node);
       if (it == successors.end()) continue;
-      for (const auto& edge : it->second)
+      for (const auto& edge : it->second) {
         if (--indegree[edge] == 0) ready.push_back(edge);
+      }
     }
     CHECK_SPAN(visited == indegree.size(), span) << "CCU collective order creates a cross-domain wait cycle";
   }
@@ -448,8 +465,9 @@ class HostBindings : public IRVisitor {
         auto& sequence = sequences[domain.get()][rank];
         Request request{domain.get(), sequence.size()};
         successors.try_emplace(request);
-        if (auto prior = previous.find(rank); prior != previous.end())
+        if (auto prior = previous.find(rank); prior != previous.end()) {
           successors[prior->second].insert(request);
+        }
         previous[rank] = request;
         sequence.push_back(use.protocol);
       }
@@ -543,6 +561,7 @@ class Rewrite : public IRMutator {
           std::make_shared<YieldStmt>(std::vector<ExprPtr>(next->second.begin(), next->second.end()), span);
     } else {
       std::vector<VarPtr> nested;
+      nested.reserve(results.size());
       for (size_t i = 0; i < results.size(); ++i) nested.push_back(Fresh(span));
       else_body = SeqStmts::Flatten(
           {Select(device, next, end, nested, span),

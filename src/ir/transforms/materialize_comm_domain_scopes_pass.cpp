@@ -924,7 +924,7 @@ Pass MaterializeCommDomainScopes() {
     // Precise domain attribution belongs here in a future refinement, not in codegen.
     class EngineCollector : public IRVisitor {
      public:
-      explicit EngineCollector(const ProgramPtr& program) : program_(program) {}
+      explicit EngineCollector(ProgramPtr program) : program_(std::move(program)) {}
       bool uses_ccu = false;
       bool uses_urma = false;
       ProgramPtr program_;
@@ -961,7 +961,7 @@ Pass MaterializeCommDomainScopes() {
     }
     std::vector<std::string> engines =
         collector.uses_urma ? std::vector<std::string>{"urma"} : std::vector<std::string>{};
-    if (collector.uses_ccu) engines.push_back("ccu");
+    if (collector.uses_ccu) engines.emplace_back("ccu");
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
     std::map<std::string, FunctionPtr> chip_orchs;
