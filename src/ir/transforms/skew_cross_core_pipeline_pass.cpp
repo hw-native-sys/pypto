@@ -136,6 +136,14 @@ bool BodyHasCrossCorePair(const StmtPtr& body) {
   return has_push && has_pop;
 }
 
+bool BodyHasQuantConfiguration(const StmtPtr& body) {
+  for (const auto& stmt : FlattenToStmts(SplitBodyYield(body).first)) {
+    auto call = GetCallFromStmt(stmt);
+    if (IsOp(call, "system.set_quant_scalar") || IsOp(call, "system.set_quant_vector")) return true;
+  }
+  return false;
+}
+
 /// Tag every tile-producing `Call` in @p body with one `(group, stage)`
 /// pipeline-membership pair.
 ///
@@ -265,6 +273,13 @@ class SkewCrossCoreMutator : public IRMutator {
     // LowerPipelineLoops to replicate (same-core GM->L1 / L1->L0 / matmul stages).
     if (!BodyHasCrossCorePair(inner_body)) {
       return RebuildIfChanged(op, inner_start, inner_stop, inner_step, inner_body);
+    }
+
+    // Quant registers are implicit TPUSH inputs, absent from the SSA backward
+    // slice used by LowerSkewed. Preserve configure/push order until skewing can
+    // model these register dependencies and their clobbers explicitly.
+    if (BodyHasQuantConfiguration(inner_body)) {
+      return DemoteToSequential(op, inner_start, inner_stop, inner_step, inner_body);
     }
 
     // Cross-core: skew if statically skewable, otherwise demote to Sequential. A

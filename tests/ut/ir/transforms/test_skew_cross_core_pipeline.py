@@ -54,6 +54,49 @@ class TestSkewCrossCorePipeline:
     """Producer-role single-round-trip loops SKEW; consumer-role / multi-round-trip
     loops DEMOTE to Sequential; non-cross-core loops are left for the unroll pass."""
 
+    @pytest.mark.parametrize("vector", [False, True])
+    def test_quant_configuration_preserves_sequential_order(self, vector):
+        """Quant registers are side effects outside TPUSH's SSA backward slice."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                q: pl.Tensor[[64, 64], pl.FP32],
+                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
+            ):
+                for i in pl.pipeline(0, 4, 1, stage=2):
+                    tile = pl.tile.load(q, [i * 16, 0], [16, 64])
+                    if vector:
+                        pl.system.set_quant_vector(controls)
+                    else:
+                        pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                    pl.tile.tpush_to_aiv(tile, split=0)
+                    reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
+                    pl.tfree_to_aiv(reply, id=1)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                q: pl.Tensor[[64, 64], pl.FP32],
+                controls: pl.Tile[[1, 64], pl.UINT64, pl.Mem.Scaling],
+            ):
+                for i in pl.range(0, 4, 1):
+                    tile = pl.tile.load(q, [i * 16, 0], [16, 64])
+                    if vector:
+                        pl.system.set_quant_vector(controls)
+                    else:
+                        pl.system.set_quant_scalar(pl.const(0.5, pl.FP32))
+                    pl.tile.tpush_to_aiv(tile, split=0)
+                    reply: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0, id=1)
+                    pl.tfree_to_aiv(reply, id=1)
+
+        # The default pipeline folds compile-time mode branches before skewing.
+        ir.assert_structural_equal(_skew(passes.simplify()(Before)), passes.simplify()(Expected))
+
     def test_single_roundtrip_producer_skews(self):
         """AIC-style (cube) produce-first body — one ``tpush_to_aiv`` then one
         ``tpop_from_aiv`` — skews at the cross-core default depth-2: a 2-produce

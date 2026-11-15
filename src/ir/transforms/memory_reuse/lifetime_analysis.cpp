@@ -103,6 +103,14 @@ class LifetimeAnalyzer : public IRVisitor {
       VisitStmt(func_body);
     }
 
+    // SET_QUANT_VECTOR installs an address consumed implicitly by asynchronous
+    // TPUSH reads. Keep Scaling storage live through function completion until
+    // those reads have explicit completion dependencies in allocation analysis.
+    for (const auto& var : ordered_defs_) {
+      auto tile = As<TileType>(var->GetType());
+      if (tile && tile->memory_space_ == MemorySpace::Scaling) RecordRawUse(var, current_order_);
+    }
+
     // Phase 2: Apply loop-aware lifetime extension
     auto effective_last_use = ComputeEffectiveLastUse();
 

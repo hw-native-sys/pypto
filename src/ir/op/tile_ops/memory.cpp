@@ -725,6 +725,12 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     auto cols = As<ConstInt>(input_shape[1]);
     CHECK(rows && rows->value_ == 1 && cols && cols->value_ > 0 && cols->value_ % 16 == 0)
         << "Fixpipe Scaling controls require shape [1, N] with N a positive multiple of 16 (128 bytes)";
+    const auto valid_rows =
+        tile_view.valid_shape.size() == 2 ? As<ConstInt>(tile_view.valid_shape[0]) : nullptr;
+    const auto valid_cols =
+        tile_view.valid_shape.size() == 2 ? As<ConstInt>(tile_view.valid_shape[1]) : nullptr;
+    CHECK(valid_rows && valid_rows->value_ == 1 && valid_cols && valid_cols->value_ == cols->value_)
+        << "Fixpipe Scaling controls require valid_shape to cover the full [1, N] shape";
     CHECK(source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box)
         << "Fixpipe Scaling controls require a row-major unboxed Mat source";
   }

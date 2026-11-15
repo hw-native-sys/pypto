@@ -15,7 +15,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, Error, backend, codegen, ir, passes
 from pypto.backend._ptoas_locate import find_ptoas_binary
-from pypto.ir.op import system_ops
+from pypto.ir.op import system_ops, tile_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -102,8 +102,8 @@ def _program(
     return Program
 
 
-def _generate(program, buffer_ir=False):
-    with passes.PassContext([], enable_buffer_ir=buffer_ir):
+def _generate(program, buffer_ir=False, verification_level=passes.VerificationLevel.BASIC):
+    with passes.PassContext([], enable_buffer_ir=buffer_ir, verification_level=verification_level):
         lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
         core_functions = [
             func
@@ -114,7 +114,7 @@ def _generate(program, buffer_ir=False):
     return lowered, modules if isinstance(modules, str) else "".join(modules.values())
 
 
-def _assemble(mlir, tmp_path):
+def _assemble(mlir, tmp_path, expected_error=None):
     compiler = find_ptoas_binary()
     if not compiler:
         pytest.skip("real PTOAS compiler is not installed")
@@ -128,6 +128,10 @@ def _assemble(mlir, tmp_path):
         text=True,
         timeout=60,
     )
+    if expected_error is not None:
+        assert result.returncode != 0, "PTOAS unexpectedly accepted an unsupported contract"
+        assert expected_error in result.stderr, result.stderr
+        return result.stderr
     assert result.returncode == 0, result.stderr
     assert output.stat().st_size > 0
     return output.read_text()
@@ -229,6 +233,86 @@ def test_vector_quant_packed_controls():
     assert call.kwargs["id"] == 3
 
 
+@pytest.mark.parametrize("valid_shape", [[1, 16], [0, 32]])
+@pytest.mark.parametrize("setter", [False, True])
+def test_packed_controls_require_full_valid_extent(valid_shape, setter):
+    controls = ir.Var(
+        "controls",
+        ir.TileType(
+            [1, 32],
+            DataType.UINT64,
+            memory_space=ir.MemorySpace.Scaling if setter else ir.MemorySpace.Mat,
+            tile_view=ir.TileView(valid_shape=valid_shape),
+        ),
+        ir.Span.unknown(),
+    )
+    with pytest.raises(ValueError, match="valid_shape to cover the full"):
+        if setter:
+            system_ops.set_quant_vector(controls)
+        else:
+            tile_ops.move(controls, target_memory=ir.MemorySpace.Scaling)
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_legacy_init_cannot_hide_duplicate_fixpipe_init(legacy_first):
+    class DuplicateInit(ir.IRMutator):
+        def visit_eval_stmt(self, op: ir.EvalStmt) -> ir.Stmt:
+            call = op.expr
+            if isinstance(call, ir.Call) and "acc_push_epilogue" in call.kwargs:
+                kwargs = dict(call.kwargs)
+                del kwargs["acc_push_epilogue"]
+                legacy = ir.Call(call.op, call.args, kwargs, call.type, call.span)
+                statements: list[ir.Stmt] = [op, ir.EvalStmt(legacy, op.span)]
+                return ir.SeqStmts(statements[::-1] if legacy_first else statements, op.span)
+            return super().visit_eval_stmt(op)
+
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.MixedKernelExpanded)
+    with pytest.raises(Error, match="exactly one initialize_pipe"):
+        passes.verify_properties(properties, DuplicateInit().visit_program(_program()), "test")
+
+
+@pytest.mark.parametrize("buffer_ir", [False, True])
+def test_scaling_allocations_remain_distinct_after_setter(buffer_ir):
+    @pl.program
+    class Controls:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel(self, packed: pl.Tensor[[1, 32], pl.UINT64]):
+            source0: pl.Tile[
+                [1, 32],
+                pl.UINT64,
+                pl.Mem.Mat,
+                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
+            ] = pl.load(packed, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            controls0 = pl.tile.move(source0, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(controls0)
+            source1: pl.Tile[
+                [1, 32],
+                pl.UINT64,
+                pl.Mem.Mat,
+                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
+            ] = pl.load(packed, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            controls1 = pl.tile.move(source1, target_memory=pl.Mem.Scaling)
+            pl.system.set_quant_vector(controls1)
+
+    with passes.PassContext([], enable_buffer_ir=buffer_ir):
+        lowered = passes.memory_reuse()(
+            passes.materialize_semantic_aliases()(passes.init_mem_ref()(Controls))
+        )
+    allocations: list[ir.MemRef] = []
+
+    class Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            if isinstance(op.var.type, ir.TileType) and op.var.type.memory_space == ir.MemorySpace.Scaling:
+                assert op.var.type.memref is not None
+                allocations.append(op.var.type.memref)
+            super().visit_assign_stmt(op)
+
+    Collector().visit_stmt(next(iter(lowered.functions.values())).body)
+    assert len(allocations) == 2
+    assert not ir.MemRef.same_allocation(allocations[0], allocations[1])
+
+
 @pl.program
 class ColumnMajorMove:
     @pl.function(type=pl.FunctionType.InCore)
@@ -277,6 +361,106 @@ class ColumnMajorLoopTranspose:
 
 def test_transpose_over_popped_view_in_loop_compiles(tmp_path):
     _, mlir = _generate(ColumnMajorLoopTranspose)
+    _assemble(mlir, tmp_path)
+
+
+@pl.program
+class VaryingColumnMajorMoves:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 32], pl.BF16],
+        b: pl.Tensor[[32, 16], pl.BF16],
+        out: pl.Out[pl.Tensor[[16, 96], pl.FP32]],
+    ):
+        lhs0 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs0 = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        acc0 = pl.matmul(lhs0, rhs0)
+        dn0 = pl.tile.move(
+            acc0, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
+        )
+        pl.store(pl.tile.transpose_view(dn0), [0, 0], out)
+        lhs1 = pl.load(a, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+        rhs1 = pl.load(b, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        acc1 = pl.matmul(lhs1, rhs1)
+        dn1 = pl.tile.move(
+            acc1, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box
+        )
+        pl.store(pl.tile.transpose_view(dn1), [0, 32], out)
+
+
+@pytest.mark.parametrize("buffer_ir", [False, True])
+def test_varying_column_major_payload_shapes_require_separate_ids(buffer_ir, tmp_path):
+    with pytest.raises(Error, match="one physical payload shape/converted dtype"):
+        _generate(VaryingColumnMajorMoves, buffer_ir)
+    # Intentionally bypass PyPTO verification only to construct a negative PTOAS
+    # fixture. The real compiler must independently reject the same boundary.
+    _, mlir = _generate(VaryingColumnMajorMoves, buffer_ir, passes.VerificationLevel.NONE)
+    _assemble(mlir, tmp_path, expected_error="to use the same tile type")
+
+
+@pytest.mark.parametrize("quant", ["deqf16_scalar", "deqf16_vec"])
+@pytest.mark.parametrize("buffer_ir", [False, True])
+def test_quantized_bidirectional_pipeline_compiles(quant, buffer_ir, tmp_path):
+    epilogue = _epilogue(quant=quant)
+    vector = quant == "deqf16_vec"
+
+    @pl.program
+    class QuantizedPipeline:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(
+            self,
+            a: pl.Tensor[[128, 32], pl.INT8],
+            b: pl.Tensor[[16, 32], pl.INT8],
+            out: pl.Out[pl.Tensor[[128, 16], pl.FP16]],
+            words: pl.Tensor[[1, 32], pl.UINT64],
+        ):
+            forward = pl.import_peer_buffer(name="forward", peer_func="consumer")
+            reply = pl.reserve_buffer(name="reply", size=2048)
+            pl.aic_initialize_pipe(
+                forward, dir_mask=1, slot_size=1024, slot_num=2, acc_push_epilogue=epilogue
+            )
+            pl.aic_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
+            packed: pl.Tile[
+                [1, 32],
+                pl.UINT64,
+                pl.Mem.Mat,
+                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
+            ] = pl.load(words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
+            for i in pl.pipeline(4, stage=2):
+                lhs = pl.load(a, [i * 32, 0], [32, 32], target_memory=pl.Mem.Mat)
+                rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
+                if vector:
+                    pl.set_quant_vector(controls)
+                else:
+                    pl.set_quant_scalar(pl.const(0.5, pl.FP32))
+                pl.tpush_to_aiv(acc, split=0)
+                returned = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP16, split=0, id=1)
+                pl.tfree_to_aiv(returned, id=1)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            a: pl.Tensor[[128, 32], pl.INT8],
+            b: pl.Tensor[[16, 32], pl.INT8],
+            out: pl.Out[pl.Tensor[[128, 16], pl.FP16]],
+            words: pl.Tensor[[1, 32], pl.UINT64],
+        ):
+            forward = pl.reserve_buffer(name="forward", size=2048)
+            reply = pl.import_peer_buffer(name="reply", peer_func="producer")
+            pl.aiv_initialize_pipe(
+                forward, dir_mask=1, slot_size=1024, slot_num=2, acc_push_epilogue=epilogue
+            )
+            pl.aiv_initialize_pipe(0, reply, dir_mask=2, slot_size=1024, slot_num=2, id=1)
+            for i in pl.pipeline(4, stage=2):
+                tile = pl.tpop_from_aic(shape=[32, 16], dtype=pl.FP16, split=0)
+                pl.store(tile, [i * 32, 0], out)
+                pl.tpush_to_aic(tile, split=0, id=1)
+                pl.tfree_to_aic(tile)
+
+    _, mlir = _generate(QuantizedPipeline, buffer_ir)
     _assemble(mlir, tmp_path)
 
 

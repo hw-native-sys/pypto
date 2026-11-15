@@ -701,10 +701,19 @@ Python API 将省略值设为 true。显式 false 会被拒绝，原始 IR 必�
 Fixpipe 要求 `dir_mask=1`（仅 C2V）、Acc 输入，且 push/pop/free 的 `split=0`。
 这不放宽普通 V2C 或 AIV lane 契约。
 
+验证器通过 `PassContext` 获取 `BackendHandler` 的 epilogue 能力与消费者环槽数策略，
+这些策略由后端负责。
+
 两端必须具有相同 epilogue、pipe id、slot_size 和 nosplit 策略。
 生产者导入消费者具名 reserve buffer。`MixedKernelExpanded` 验证两端契约、
 转换后的 dtype、物理形状、消费者布局，以及**转换后字节数**是否适合 slot。
 随后 PTOAS 还会独立验证。
+
+当前 PTOAS 要求同一个 pipe id 的全部 Fixpipe pop 使用相同 tile 类型。
+因此不同物理 payload 形状必须使用独立的显式 pipe id，即使各自都能放入最大的 slot。
+PyPTO 会提前拒绝此组合；真实 PTOAS 负例独立验证该边界。
+只要某个 id 的任一 init 包含 epilogue，
+重复 init id 就会被拒绝；后续 legacy init 不能隐藏先前的 Fixpipe 契约。
 
 | Layout | Vec byte layout |
 | ------ | --------------- |
@@ -736,11 +745,18 @@ Fixpipe 要求 `dir_mask=1`（仅 C2V）、Acc 输入，且 push/pop/free 的 `s
 `[1, N]`、`N > 0` 且 `N % 16 == 0`，满足 128 字节对齐。
 A5 PyPTO planner 为 Scaling 使用保守的 4 KiB 分配预算，这是分配策略，
 不是硬件容量声明。目前公开的向量模式为 `deqf16_vec`（INT32→FP16）。
+move 和向量 setter 都要求有效范围 (valid extent) 覆盖完整的物理 `[1, N]` 控制字，
+包括唯一的一行。
 
 packed 控制字在对应 TPUSH 完成前必须保持不变，应在 ring 复用循环之外加载。
 量化状态按 pipe id 验证，不能仅在兄弟分支或前一个块配置；中间经过控制流块或
 带 `pre_quant` 的写回后，必须在下次 push 前重新配置。重新配置会使其他 id 的旧配置失效。`normal_relu` 是对 accumulator 应用 Fixpipe 前置 ReLU。
 此 API 与 `tile.store` / `tile.assemble` 的 `pre_quant`、`pre_relu` 写回参数独立。
+
+Scaling 分配保守地保持存活至整个函数结束：setter 将地址写入硬件寄存器，
+而 TPUSH 读取该地址时没有对应的 SSA 操作数。这阻止 setter 后的分配复用，
+代价是占用更多 4 KiB 规划预算。包含量化配置的双向 `pl.pipeline` 循环会降为顺序循环，
+保持配置与 push 的顺序，直至 skew 能显式建模这些寄存器依赖。
 
 ### 回归与证据
 
