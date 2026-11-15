@@ -10,12 +10,11 @@
 
 import os
 import re
-import subprocess
 
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir, passes
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
 from pypto.ir.op import system_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -173,7 +172,7 @@ def test_incore_placement_rejected():
         passes.expand_mixed_kernel()(Untyped)
 
 
-def test_ptoas_compilation(tmp_path):
+def test_ptoas_compilation(tmp_path, monkeypatch):
     """Use an explicitly selected PTOAS built from the sibling worktree."""
     ptoas = os.environ.get("T1_PTOAS")
     if not ptoas:
@@ -181,22 +180,16 @@ def test_ptoas_compilation(tmp_path):
     source = tmp_path / "buffer_sync.pto"
     source.write_text(_generate())
     output = tmp_path / "buffer_sync.cpp"
-    result = subprocess.run(
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: ptoas)
+    pto_backend._run_ptoas(
+        str(source),
+        str(output),
         [
-            ptoas,
             "--pto-arch=a5",
             "--pto-level=level3",
             "--enable-insert-sync",
-            str(source),
-            "-o",
-            str(output),
         ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=60,
     )
-    assert result.returncode == 0, result.stderr
     cpp = output.read_text()
     assert "get_buf(PIPE_MTE2, 0, 0)" in cpp
     assert "rls_buf(PIPE_MTE3," in cpp
@@ -383,6 +376,90 @@ def test_aic_nested_loop_keeps_protected_mat_load():
     ]
     assert positions == sorted(positions), pto
     assert pto.count('pto.get_buf "PIPE_MTE2"') == 1
+
+
+@pytest.mark.parametrize("acquire", [False, True], ids=["release", "acquire"])
+@pytest.mark.parametrize("keyword", [False, True], ids=["positional", "keyword"])
+def test_inline_buffer_id_is_evaluated_once(acquire, keyword):
+    """An inline ID expression must expand its synchronization exactly once."""
+
+    @pl.inline
+    def choose_id(identifier: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+        pl.system.get_buf(7, pipe=pl.PipeType.S)
+        pl.system.rls_buf(7, pipe=pl.PipeType.S)
+        return identifier
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self, identifier: pl.Scalar[pl.INDEX]):
+            if acquire:
+                if keyword:
+                    pl.system.get_buf(buf_id=choose_id(identifier), pipe=pl.PipeType.V)
+                else:
+                    pl.system.get_buf(choose_id(identifier), pipe=pl.PipeType.V)
+            elif keyword:
+                pl.system.rls_buf(buf_id=choose_id(identifier), pipe=pl.PipeType.V)
+            else:
+                pl.system.rls_buf(choose_id(identifier), pipe=pl.PipeType.V)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self, identifier: pl.Scalar[pl.INDEX]):
+            pl.system.get_buf(7, pipe=pl.PipeType.S)
+            pl.system.rls_buf(7, pipe=pl.PipeType.S)
+            if acquire:
+                pl.system.get_buf(identifier, pipe=pl.PipeType.V)
+            else:
+                pl.system.rls_buf(identifier, pipe=pl.PipeType.V)
+
+    ir.assert_structural_equal(passes.simplify()(Before), passes.simplify()(Expected))
+
+
+@pytest.mark.parametrize(
+    "extent,nested_release,protected",
+    [(64, False, True), (64, True, True), (512, False, True), (512, True, True), (512, False, False)],
+    ids=["small-direct", "small-nested", "large-direct", "large-nested", "large-control"],
+)
+def test_matmul_store_fold_respects_buffer_sync(extent, nested_release, protected):
+    """M/N folding must not delay protected Mat reads past a Buffer-ID release."""
+
+    @pl.program
+    class MatmulBoundary:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            a: pl.Tensor[[extent, 64], pl.FP16],
+            b: pl.Tensor[[64, extent], pl.FP16],
+            out: pl.Out[pl.Tensor[[extent, extent], pl.FP32]],
+        ) -> pl.Tensor[[extent, extent], pl.FP32]:
+            lhs = pl.tile.load(a, [0, 0], [extent, 64], target_memory=pl.Mem.Mat)
+            rhs = pl.tile.load(b, [0, 0], [64, extent], target_memory=pl.Mem.Mat)
+            if protected:
+                pl.system.get_buf(0, pipe=pl.PipeType.M)
+            product = pl.tile.matmul(lhs, rhs)
+            if protected:
+                if nested_release:
+                    for _ in pl.range(1):
+                        pl.system.rls_buf(0, pipe=pl.PipeType.M)
+                else:
+                    pl.system.rls_buf(0, pipe=pl.PipeType.M)
+            out = pl.tile.store(product, [0, 0], out)
+            return out
+
+    if protected and extent == 512:
+        with pytest.raises(ValueError, match="input snapshot.*no full-output K-only plan fits"):
+            _generate(MatmulBoundary)
+        return
+
+    pto = _generate(MatmulBoundary)
+    assert "pto.tmatmul" in pto and "pto.tstore" in pto
+    if protected:
+        acquire = pto.index('pto.get_buf "PIPE_M", 0, 0')
+        release = pto.index('pto.rls_buf "PIPE_M", 0, 0')
+        assert acquire < pto.index("pto.tmatmul") <= pto.rfind("pto.tmatmul") < release
+        assert release < pto.index("pto.tstore")
 
 
 if __name__ == "__main__":

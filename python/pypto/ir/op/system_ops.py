@@ -306,7 +306,7 @@ _BUFFER_SYNC_PIPES = (
 
 
 def _create_buffer_sync_op(
-    op_name: str, buf_id: int | Expr, *, pipe: PipeType, mode: int, span: Span | None
+    op_name: str, buf_id: int | Expr, *, pipe: object, mode: int, span: Span | None
 ) -> Call:
     if not isinstance(pipe, PipeType):
         raise TypeError(f"{op_name} pipe must be a PipeType member, got {pipe!r}")

@@ -752,26 +752,25 @@ class OpParser:
                 span=self.services.span_tracker.get_span(call),
                 hint=f"Check if '{op_name}' is a valid {module_name} operation",
             )
+        op_func = getattr(module, op_name)
         # SIMT math requires typed scalar operands. Generic wrappers retain
         # Python numeric values for slots such as full/padding and choose their
         # own literal dtype, so keep the two argument contracts explicit.
         # Mixed signatures such as ftof(value, dtype) need typed value operands
         # while retaining dtype/enum resolution in their other positional slots.
-        args = [
-            self.callbacks.expression(arg)
-            if expression_args or index in expression_arg_indices
-            else self.parse_op_positional_arg(arg)
-            for index, arg in enumerate(call.args)
-        ]
+        args: list[Any] = []
+        for index, arg in enumerate(call.args):
+            if index == 0 and op_func in (_dsl_system.get_buf, _dsl_system.rls_buf):
+                # Choose the ID representation before expanding an inline helper:
+                # a second parse would duplicate its side effects in the caller.
+                id_call = ast.Call(func=call.func, args=[], keywords=[ast.keyword(arg="buf_id", value=arg)])
+                args.append(self.parse_op_kwargs(id_call)["buf_id"])
+            elif expression_args or index in expression_arg_indices:
+                args.append(self.callbacks.expression(arg))
+            else:
+                args.append(self.parse_op_positional_arg(arg))
         kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
-        op_func = getattr(module, op_name)
-        if op_func in (_dsl_system.get_buf, _dsl_system.rls_buf) and call.args:
-            # Preserve the static integer versus explicit INDEX expression layout.
-            id_call = ast.Call(
-                func=call.func, args=[], keywords=[ast.keyword(arg="buf_id", value=call.args[0])]
-            )
-            args[0] = self.parse_op_kwargs(id_call)["buf_id"]
         span = self.services.span_tracker.get_span(call)
         try:
             result = invoke_dsl(op_func, args, kwargs, span)

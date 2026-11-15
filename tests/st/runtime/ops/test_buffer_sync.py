@@ -16,10 +16,11 @@ Automatic event insertion is disabled only by this test fixture so the numeric
 result depends on the manual protocol. Default-pipeline compilation is covered
 by the unit integration test.
 
-This placement test uses @pl.program because the current @pl.jit.incore surface
-produces InCore functions, while manual Buffer-ID requires an explicit AIV owner.
+The entry uses @pl.jit with an explicit @pl.jit.aiv kernel. The fixture also
+forwards the case execution mode explicitly through the shared compile harness.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,9 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto import ir
 from pypto.backend import pto_backend
+from pypto.runtime import ExecutionMode
 
 ITERATIONS = 8
 ROWS = 16
@@ -37,60 +40,56 @@ COLS = 32
 def make_buffer_sync_program(dynamic: bool):
     """Create an explicit AIV kernel with separate input/output allocations."""
     slot_count = 2 if dynamic else 1
-    input_mem = pl.MemRef(slots=2)
-    output_mem = pl.MemRef(slots=2)
 
-    @pl.program
-    class ManualBufferSync:
-        @pl.function(type=pl.FunctionType.AIV)
-        def kernel(
-            self,
-            x: pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32],
-            out: pl.Out[pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]],
-        ) -> pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]:
-            for i in pl.range(ITERATIONS):
-                slot: pl.Scalar[pl.INDEX] = i % slot_count
-                if dynamic:
-                    pl.system.get_buf(slot, pipe=pl.PipeType.MTE2)
-                else:
-                    pl.system.get_buf(0, pipe=pl.PipeType.MTE2)
-                tile: pl.Tile[[ROWS, COLS], pl.FP32, input_mem[slot], pl.Mem.Vec] = pl.tile.load(
-                    x, [i * ROWS, 0], [ROWS, COLS]
-                )
-                if dynamic:
-                    pl.system.rls_buf(slot, pipe=pl.PipeType.MTE2)
-                    pl.system.get_buf(slot, pipe=pl.PipeType.V)
-                    pl.system.get_buf(slot + 2, pipe=pl.PipeType.V)
-                else:
-                    pl.system.rls_buf(0, pipe=pl.PipeType.MTE2)
-                    pl.system.get_buf(0, pipe=pl.PipeType.V)
-                    pl.system.get_buf(2, pipe=pl.PipeType.V)
-                result: pl.Tile[[ROWS, COLS], pl.FP32, output_mem[slot], pl.Mem.Vec] = pl.tile.add(tile, 1.0)
-                if dynamic:
-                    pl.system.rls_buf(slot, pipe=pl.PipeType.V)
-                    pl.system.rls_buf(slot + 2, pipe=pl.PipeType.V)
-                    pl.system.get_buf(slot + 2, pipe=pl.PipeType.MTE3)
-                else:
-                    pl.system.rls_buf(0, pipe=pl.PipeType.V)
-                    pl.system.rls_buf(2, pipe=pl.PipeType.V)
-                    pl.system.get_buf(2, pipe=pl.PipeType.MTE3)
-                pl.tile.store(result, [i * ROWS, 0], out)
-                if dynamic:
-                    pl.system.rls_buf(slot + 2, pipe=pl.PipeType.MTE3)
-                else:
-                    pl.system.rls_buf(2, pipe=pl.PipeType.MTE3)
-            return out
+    @pl.jit.aiv
+    def kernel(
+        x: pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32],
+        out: pl.Out[pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]],
+    ) -> pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]:
+        for i in pl.range(ITERATIONS):
+            slot: pl.Scalar[pl.INDEX] = i % slot_count
+            if dynamic:
+                pl.system.get_buf(slot, pipe=pl.PipeType.MTE2)
+            else:
+                pl.system.get_buf(0, pipe=pl.PipeType.MTE2)
+            tile: pl.Tile[[ROWS, COLS], pl.FP32, pl.MemRef("input_slots", slots=2)[slot], pl.Mem.Vec] = (
+                pl.tile.load(x, [i * ROWS, 0], [ROWS, COLS])
+            )
+            if dynamic:
+                pl.system.rls_buf(slot, pipe=pl.PipeType.MTE2)
+                pl.system.get_buf(slot, pipe=pl.PipeType.V)
+                pl.system.get_buf(slot + 2, pipe=pl.PipeType.V)
+            else:
+                pl.system.rls_buf(0, pipe=pl.PipeType.MTE2)
+                pl.system.get_buf(0, pipe=pl.PipeType.V)
+                pl.system.get_buf(2, pipe=pl.PipeType.V)
+            result: pl.Tile[[ROWS, COLS], pl.FP32, pl.MemRef("output_slots", slots=2)[slot], pl.Mem.Vec] = (
+                pl.tile.add(tile, 1.0)
+            )
+            if dynamic:
+                pl.system.rls_buf(slot, pipe=pl.PipeType.V)
+                pl.system.rls_buf(slot + 2, pipe=pl.PipeType.V)
+                pl.system.get_buf(slot + 2, pipe=pl.PipeType.MTE3)
+            else:
+                pl.system.rls_buf(0, pipe=pl.PipeType.V)
+                pl.system.rls_buf(2, pipe=pl.PipeType.V)
+                pl.system.get_buf(2, pipe=pl.PipeType.MTE3)
+            pl.tile.store(result, [i * ROWS, 0], out)
+            if dynamic:
+                pl.system.rls_buf(slot + 2, pipe=pl.PipeType.MTE3)
+            else:
+                pl.system.rls_buf(2, pipe=pl.PipeType.MTE3)
+        return out
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def orchestrator(
-            self,
-            x: pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32],
-            out: pl.Out[pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]],
-        ) -> pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]:
-            out = self.kernel(x, out)
-            return out
+    @pl.jit
+    def orchestrator(
+        x: pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32],
+        out: pl.Out[pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]],
+    ) -> pl.Tensor[[ITERATIONS * ROWS, COLS], pl.FP32]:
+        out = kernel(x, out)
+        return out
 
-    return ManualBufferSync
+    return orchestrator.specialize()
 
 
 class BufferSyncCase(PTOTestCase):
@@ -122,9 +121,19 @@ class BufferSyncCase(PTOTestCase):
 
 
 @pytest.fixture
-def manual_sync_only(monkeypatch):
+def manual_sync_only(monkeypatch, test_config):
     """Exercise manual ordering without adding a public auto-sync policy API."""
+    assert test_config.execution_mode is ExecutionMode.ONBOARD
     original = pto_backend._get_ptoas_flags
+    original_compile = ir.compile
+
+    def compile_onboard(*args, **kwargs):
+        # The shared harness currently drops RunConfig.execution_mode.
+        # Pin this hardware-only acceptance case to its requested mode.
+        kwargs["execution_mode"] = test_config.execution_mode
+        return original_compile(*args, **kwargs)
+
+    monkeypatch.setattr(ir, "compile", compile_onboard)
     seen: list[list[str]] = []
 
     def flags(*args, **kwargs):
@@ -137,6 +146,7 @@ def manual_sync_only(monkeypatch):
     return seen
 
 
+@pytest.mark.inline_case(reason="Manual sync and onboard-mode compiler patches require the test fixtures")
 @pytest.mark.platforms("a5")
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static", "pingpong"])
 @pytest.mark.parametrize("launch", [0, 1, 2])
@@ -146,11 +156,14 @@ def test_manual_buffer_sync(test_runner, test_config, dynamic, launch, manual_sy
     assert result.passed, f"Manual Buffer-ID failed: {result.error}"
     assert manual_sync_only, "Manual acceptance must compile with the test's native compiler flags"
     if test_config.save_kernels_dir:
-        sources = list((Path(test_config.save_kernels_dir) / case.get_name() / "kernels").rglob("*.cpp"))
+        case_dir = Path(test_config.save_kernels_dir) / case.get_name()
+        metadata = json.loads((case_dir / "compiled_meta.json").read_text())
+        assert metadata["platform"] == "a5"
+        sources = list((case_dir / "kernels").rglob("*.cpp"))
         assert sources
         for source in sources:
             text = source.read_text()
-            _, _, start, end = pto_backend._find_ptoas_function("kernel", text)
+            _, _, start, end = pto_backend._find_ptoas_function(source.stem, text)
             text = text[start:end]
             assert "get_buf(PIPE_MTE2," in text
             assert "get_buf(PIPE_V," in text

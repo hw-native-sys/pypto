@@ -2961,7 +2961,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
     }
   }
   auto call = As<ir::Call>(op->value_);
-  CHECK_SPAN(!(ir::IsOp(call, "system.get_buf") || ir::IsOp(call, "system.rls_buf")), op->span_)
+  const bool binds_buffer_sync_result = ir::IsOp(call, "system.get_buf") || ir::IsOp(call, "system.rls_buf");
+  CHECK_SPAN(!binds_buffer_sync_result, op->span_)
       << "Buffer-ID synchronization has no result; use get_buf/rls_buf as statements";
   if (TryEmitVFCall(call, op->var_)) return;
   if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
