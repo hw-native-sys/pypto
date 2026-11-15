@@ -859,6 +859,9 @@ class FunctionType(enum.Enum):
     SIMT = ...
     """Per-thread device helper launched inside an AIV task, returning void."""
 
+    CCU = ...
+    """Domain-registered native communication builtin declaration."""
+
 class SimtParamAccess:
     reads: bool
     writes: bool
@@ -1075,6 +1078,13 @@ class WindowBufferType(Type):
     def get() -> WindowBufferType:
         """Get the shared singleton WindowBufferType instance."""
         ...
+
+class CcuRegistrationType(Type):
+    """HOST-only local registration owned by one device in a live communication domain."""
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> CcuRegistrationType: ...
 
 class CommCtxType(Type):
     """Singleton marker type for ``pld.system.get_comm_ctx`` outputs.

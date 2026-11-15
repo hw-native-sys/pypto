@@ -735,6 +735,11 @@ def _deepseek_shape_case(case, name):
         assert case == "kv_touch"
         shapes = [[n * 128, 512]]
         outputs, returns = [0], [0]
+    # TensorType accepts uniformly Expr or int dimensions, not mixed lists.
+    shapes = [
+        [ir.ConstInt(dim, D.INDEX, S) if isinstance(dim, int) else dim for dim in shape] if shape else None
+        for shape in shapes
+    ]
     params = [
         var(f"buffer_{i}", ir.TensorType(shape, D.FP32)) if shape else (n if i == 1 else m)
         for i, shape in enumerate(shapes)

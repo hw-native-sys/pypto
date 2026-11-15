@@ -849,3 +849,11 @@ The IR construction API supports:
 - Hardware-aware memory management via MemRef and TileView
 - Intra-program function calls via GlobalVar
 - Loop-carried dependencies via IterArg
+
+### CcuRegistrationType
+
+`CcuRegistrationType` is an opaque HOST-only resource type returned by the
+internal `pld.system.register_ccu` operation. It belongs to the live domain
+selected by an allocation token and to the required registration `device`.
+Only aliases, SSA phi selection and same-device HOST dispatch `ccu_bindings` may consume it; it cannot be a device argument or escape its domain. The printer
+uses `pl._dump.CcuRegistration` for lossless compiler IR round trips.
