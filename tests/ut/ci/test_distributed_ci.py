@@ -65,12 +65,17 @@ def test_distributed_job_routes_and_propagates_failure(
     if step_name == "Run Host communication-domain tests":
         assert "task-submit --device auto --device-num 2" in executed
         assert "tests/st/distributed/test_l3_host_comm_domain.py" in executed
+        assert "-k 'not test_host_domain_urma_four_rank_exchange'" in executed
         assert "--platform=a5 --device=$TASK_DEVICE" in executed
         assert f"--junitxml={checkout}/ci-host-domain-junit.xml" in executed
         assert "test_l3_urma_async.py" not in executed
         assert "test_ci_placeholder.py" not in executed
     else:
         assert "task-submit --device auto --device-num 4" in executed
+        assert (
+            "tests/st/distributed/test_l3_host_comm_domain.py::test_host_domain_urma_four_rank_exchange"
+            in executed
+        )
         assert "tests/st/distributed/test_l3_urma_async.py" in executed
         assert "test_ci_placeholder.py" not in executed
     # Preserve the device placeholder for expansion inside task-submit.

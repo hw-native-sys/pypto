@@ -2550,10 +2550,12 @@ jobs:
           mkdir -p "$HOST_DOMAIN_LOGDIR"
           export ASCEND_PROCESS_LOG_PATH="$HOST_DOMAIN_LOGDIR"
           # Exercise local Host access and file/tensor initialization with all
-          # reset policies independently of the URMA async suite.
+          # reset policies independently of the URMA async suite. The four-rank
+          # Host exchange runs in the four-card step below.
           task-submit --device auto --device-num 2 --timeout 1800 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
               tests/st/distributed/test_l3_host_comm_domain.py \
+              -k 'not test_host_domain_urma_four_rank_exchange' \
               -v --platform=a5 --device=\$TASK_DEVICE --durations=0 \
               --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-host-domain-junit.xml"
 
@@ -2564,7 +2566,8 @@ jobs:
           LOGDIR="$GITHUB_WORKSPACE/a5-dist-checkout/outputs/urma_async/ascend"
           mkdir -p "$LOGDIR"
           export ASCEND_PROCESS_LOG_PATH="$LOGDIR"
-          # Four cards select the P=4 cases. No --forked: JIT compilation can
+          # Four cards cover the Host exchange and the P=4 URMA cases.
+          # No --forked: JIT compilation can
           # leave a child that pytest-forked waits on beyond its timeout.
           # The suite passes in ~5.5 min (slow path ~12 min). Bound a hung
           # case at 15 min of execution and 20 min of card-queue wait so a
@@ -2573,6 +2576,7 @@ jobs:
           # repeats its ~2.5 min failure path for every remaining case.
           task-submit --device auto --device-num 4 --timeout 2100 --max-time 900 \
             --run "cd $GITHUB_WORKSPACE/a5-dist-checkout && source activate.sh && python -m pytest \
+              tests/st/distributed/test_l3_host_comm_domain.py::test_host_domain_urma_four_rank_exchange \
               tests/st/distributed/test_l3_urma_async.py \
               -v -x --platform=a5 --device=\$TASK_DEVICE --durations=0 \
               --junitxml=$GITHUB_WORKSPACE/a5-dist-checkout/ci-distributed-junit.xml"
