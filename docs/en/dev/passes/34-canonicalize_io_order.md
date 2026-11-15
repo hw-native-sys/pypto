@@ -2,6 +2,11 @@
 
 Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **same-core hardware-unit stage ladder** (scalar → load → compute → store) — subject to the SSA dependency graph. Clustering the replicated clones' loads up front issues both stages' prefetches before the computes, so the MTE load engine runs ahead of the Vector/Cube compute engine (double-buffer overlap); the compute/store tier is then ordered by pipeline **stage** so each stage stores its output right after its compute. Note: buffer *separation* between stages is no longer a side effect of this clustering — it is an explicit [`MemoryReuse`](40-memory_reuse.md) constraint (`pipeline_membership`); this pass only shapes the **schedule**. Cross-core (cube/vector) pipelines are software-pipelined upstream by [`SkewCrossCorePipeline`](31-skew_cross_core_pipeline.md) and reach this pass as `ForKind::Sequential`, so there is no cross-core handling here. Loops that are not pipelined are left untouched.
 
+Regions containing manual `system.get_buf` / `system.rls_buf` calls, including
+nested control flow, keep their authored order. The pass still consumes the
+pipeline marker, but does not schedule accesses across these synchronization
+boundaries. The summary is collected during the existing traversal.
+
 ## Overview
 
 After `LowerPipelineLoops` produces an outer `ForStmt` (kind=Pipeline marker) whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]` (each clone's address arithmetic precedes its own load). In that layout each clone's load is issued only after the previous clone's store, so the MTE load engine cannot run ahead of the compute engine — no prefetch overlap.

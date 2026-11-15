@@ -16,10 +16,12 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -82,11 +84,92 @@ TypePtr DeducePipelineFlagType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+// Both layouts are deliberately accepted by the registry: an attribute ID or
+// one INDEX operand. Validate again here so direct IR construction cannot bypass
+// the Python contract.
+TypePtr DeduceBufferSyncType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& name) {
+  CHECK(args.size() <= 1) << name << " accepts at most one dynamic buf_id operand";
+  bool has_id = false;
+  bool has_pipe = false;
+  bool has_mode = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "buf_id") {
+      CHECK(!has_id) << name << " has duplicate buf_id attributes";
+      const int id = AnyCast<int>(value, name + " buf_id must be an integer");
+      CHECK(id >= 0 && id <= 31) << name << " buf_id must be in [0, 31], got " << id;
+      has_id = true;
+    } else if (key == "pipe") {
+      CHECK(!has_pipe) << name << " has duplicate pipe attributes";
+      const int pipe = AnyCast<int>(value, name + " pipe");
+      switch (pipe) {
+        case PipeType::MTE1:
+        case PipeType::MTE2:
+        case PipeType::MTE3:
+        case PipeType::M:
+        case PipeType::V:
+        case PipeType::S:
+        case PipeType::FIX:
+          break;
+        default:
+          CHECK(false) << name << " requires a concrete pipe (ALL is unsupported), got " << pipe;
+      }
+      has_pipe = true;
+    } else if (key == "mode") {
+      CHECK(!has_mode) << name << " has duplicate mode attributes";
+      CHECK(AnyCast<int>(value, name + " mode must be an integer") == 0) << name << " supports only mode=0";
+      has_mode = true;
+    } else {
+      CHECK(false) << name << " does not accept attribute " << key;
+    }
+  }
+  CHECK(has_pipe) << name << " requires a pipe attribute";
+  CHECK(has_id != (args.size() == 1))
+      << name << " requires exactly one static buf_id attribute or dynamic buf_id operand";
+  if (!args.empty()) {
+    CHECK(args[0]) << name << " dynamic buf_id must be a non-null INDEX expression";
+    auto type = As<ScalarType>(args[0]->GetType());
+    CHECK(type && type->dtype_ == DataType::INDEX) << name << " dynamic buf_id must have ScalarType(INDEX)";
+    arith::Analyzer analyzer;
+    if (auto id = As<ConstInt>(analyzer.Simplify(args[0]))) {
+      CHECK(id->value_ >= 0 && id->value_ <= 31) << name << " buf_id must be in [0, 31], got " << id->value_;
+    }
+  }
+  return GetUnknownType();
+}
+
 }  // namespace
 
 // ============================================================================
 // Registration Function for Sync Operations
 // ============================================================================
+
+REGISTER_OP("system.get_buf")
+    .set_description("Manual same-core A5 Buffer-ID synchronization (mode=0)")
+    .set_op_category("SyncOp")
+    .add_argument("buf_id_dyn", "Optional INDEX Buffer-ID operand")
+    .set_attr<int>("buf_id")
+    .set_attr<int>("pipe")
+    .set_attr<int>("mode")
+    .no_arg_writes()
+    .set_no_duplicate()
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBufferSyncType(args, kwargs, "system.get_buf");
+    });
+
+REGISTER_OP("system.rls_buf")
+    .set_description("Manual same-core A5 Buffer-ID synchronization (mode=0)")
+    .set_op_category("SyncOp")
+    .add_argument("buf_id_dyn", "Optional INDEX Buffer-ID operand")
+    .set_attr<int>("buf_id")
+    .set_attr<int>("pipe")
+    .set_attr<int>("mode")
+    .no_arg_writes()
+    .set_no_duplicate()
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBufferSyncType(args, kwargs, "system.rls_buf");
+    });
 
 // Register system.sync_src (Set Flag)
 // Attributes: set_pipe, wait_pipe, event_id

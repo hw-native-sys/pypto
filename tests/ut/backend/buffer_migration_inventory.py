@@ -343,6 +343,8 @@ MIGRATION_FAMILIES = (
             "system.bar_v",
             "system.fence",
             "system.cacheinvalid",
+            "system.get_buf",
+            "system.rls_buf",
             "system.sync_set",
             "system.sync_wait",
             "system.set_flag",

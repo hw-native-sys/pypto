@@ -727,6 +727,7 @@ follow — the restriction `set_flag` / `wait_flag` already carry.
 | `system.cacheinvalid` | Invalidate the cache line containing a tensor sub-region's base address. Args: `tensor`, `shapes` (N-D), `offsets` (N-D). Every region size — a single element included — lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`; `shapes` does not make it walk every cache line. The no-argument form invalidates all GM. | None |
 | `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). Attr `mode` `"hard"` (FFTS, no operands) or `"soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
+| `system.get_buf` / `system.rls_buf` | A5 same-core Buffer-ID acquire/release | static `buf_id` or one INDEX operand; `pipe`, integer `mode=0` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.set_flag` / `system.wait_flag` | Explicit intra-core pipeline event | `src_pipe`, `dst_pipe`, static `event_id` or one dynamic INDEX operand; optional `core_type` |
 | `system.task_invalid` | Sentinel `TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
@@ -758,6 +759,49 @@ The `core_type` and `mode` attributes stay strings **in the IR**, but the Python
 `system.available_cluster_count` / `system.available_aiv_count` are the SPMD **launch-shape queries**: pass one as `pl.spmd(...)`'s `core_num` so the launch sizes itself on the device the run lands on. Orchestration codegen lowers them to `rt_available_cluster_count()` / `rt_available_aiv_count()`. Use the cluster count for a mixed (AIC+AIV) or cube-only kernel — one block per core-group — and the AIV count for a vector-only kernel. This is the only launch width that stays at full occupancy across devices, which the hard `system.syncall` requires; the `HardSyncallOccupancy` verifier accepts these widths without a count comparison and rejects the query for the *other* core type. Pass the call inline (`pl.spmd(pl.system.available_cluster_count())`) rather than binding it to a name first — a name reaches the outlined `Spmd` wrapper as a variable defined in the caller, which the IR printer cannot re-parse. Source: `src/ir/op/sync_ops/launch.cpp`.
 
 `system.task_invalid` returns [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). It is the lowering target of the Python literal `None` when `None` appears in a TaskId position (a `deps=[None]` entry or a TaskId loop iter_arg seed) inside `with pl.manual_scope():` regions. There is no `system.task_id_of` op — producer task ids are obtained from the second tuple element returned by the `pl.submit(...)` parser construct, not from a builtin. Source: `src/ir/op/sync_ops/task.cpp`.
+
+### Manual Buffer-ID synchronization (A5 only)
+
+This is the manual Buffer-ID subset of [#3268](https://github.com/hw-native-sys/pypto/issues/3268).
+
+`pl.system.get_buf(buf_id, *, pipe, mode=0)` and
+`pl.system.rls_buf(buf_id, *, pipe, mode=0)` order accesses to a local buffer
+between pipes on the **same core**. Both are side-effecting statements with no
+result (`UnknownType` in PyPTO IR). Supported concrete pipes are `MTE1`, `MTE2`,
+`MTE3`, `M`, `V`, `S`, and `FIX`; `ALL` is rejected. Use only pipes available
+on the enclosing core. A2/A3 targets and every nonzero mode are rejected.
+
+A Python integer ID is a static attribute in `[0, 31]` (booleans are rejected).
+An INDEX expression, including an INDEX constant, is a dynamic SSA operand;
+other scalar dtypes are rejected. The kernel author must keep dynamic IDs in
+`[0, 31]` at runtime, pair get/rls on every path, and protect **all** accesses
+that share a buffer. No runtime ID checks or protocol verification are inserted.
+
+```python
+# Interface fragment only: surround the actual accesses with matching calls.
+pl.system.get_buf(0, pipe=pl.PipeType.MTE2)
+# Load into the protected local buffer here.
+pl.system.rls_buf(0, pipe=pl.PipeType.MTE2)
+pl.system.get_buf(buf_id, pipe=pl.PipeType.V, mode=0)  # buf_id: Scalar[INDEX]
+# Consume the buffer here, then release it on the same pipe and ID.
+pl.system.rls_buf(buf_id, pipe=pl.PipeType.V)
+```
+
+Use explicitly typed `FunctionType.AIC` / `FunctionType.AIV` kernels. InCore
+and mixed-kernel placement is rejected before expansion because a pipe such
+as MTE2 does not identify the owning core. The default pipeline retains the
+calls inside loops and keeps automatic event synchronization enabled. T1 adds
+no automatic synchronization strategy selector. PTOAS BufidSync skips a whole
+function containing any manual static **or dynamic** Buffer-ID operation;
+it does not merge manual and automatic Buffer-ID allocation. These APIs do
+not provide cross-core mode-4 synchronization or the full hardware Mutex API.
+
+The pinned PTO-ISA CPU simulator does not declare `get_buf` / `rls_buf`;
+`a5sim` native compilation is unsupported. The device acceptance cases in
+`tests/st/runtime/ops/test_buffer_sync.py` use three pipes, static reuse and
+dynamic physical ping-pong slots, with independent golden data and repeated
+launches. They disable automatic event insertion only in the test harness;
+the public default compilation policy remains unchanged.
 
 ## CrossCoreOp: AIC↔AIV Communication
 

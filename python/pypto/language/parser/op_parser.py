@@ -766,6 +766,12 @@ class OpParser:
         kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
+        if op_func in (_dsl_system.get_buf, _dsl_system.rls_buf) and call.args:
+            # Preserve the static integer versus explicit INDEX expression layout.
+            id_call = ast.Call(
+                func=call.func, args=[], keywords=[ast.keyword(arg="buf_id", value=call.args[0])]
+            )
+            args[0] = self.parse_op_kwargs(id_call)["buf_id"]
         span = self.services.span_tracker.get_span(call)
         try:
             result = invoke_dsl(op_func, args, kwargs, span)
