@@ -49,6 +49,16 @@ no-split（`split=0`）、GlobalTensor entry 以及 AIC 侧的
 越界常量会被拒绝。逻辑 lane 的选择不会把操作迁移到其他物理核，
 也不会改变执行它的 kernel。
 
+实际效果取决于后端传输路径。A5 的直接 Acc→UB C2V 管道返回当前
+AIV 的本地 UB 槽；显式 pop lane 不会把该槽重定位到另一个物理 AIV。
+该路径应使用匹配的物理 lane。当前固定版本的 GM-backed C2V 实现将
+lane 用于 GM 数据分带偏移；该路径仍需单独进行真机验证。
+
+`tests/st/runtime/cross_core/test_explicit_aiv_lane.py` 使用精确 golden
+检查省略、静态和动态 lane，并通过四槽环形缓冲完成十二次传输。
+A5 V2C 用例交换逻辑 lane，区分显式选择与忽略操作数的行为；本地
+C2V 用例使用匹配的物理 lane。A3、A5 的运行结果必须分别记录。
+
 ## L1 到 UB 的支持边界
 
 显式 lane 不建立 Mat（L1）到 Vec（UB）的传输能力。当前 PTOAS 的
