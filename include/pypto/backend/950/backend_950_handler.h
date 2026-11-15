@@ -55,6 +55,9 @@ class Ascend950Handler : public BackendHandler {
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool SupportsC2VFixpipeEpilogue() const override { return true; }
+  [[nodiscard]] int GetC2VConsumerRingSlotCount(int slot_num, int /*local_slot_num*/) const override {
+    return slot_num;
+  }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }
 
   // A5 dispatches all six compare modes generically over the element type.

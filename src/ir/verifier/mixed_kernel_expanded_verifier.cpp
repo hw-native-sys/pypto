@@ -21,7 +21,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/acc_push_epilogue.h"
 #include "pypto/ir/core_affinity_kind.h"
@@ -36,6 +38,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
@@ -535,8 +538,13 @@ struct FixpipeFunctionInfo : IRVisitor {
   void VisitExpr_(const CallPtr& call) override {
     if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
       const int id = call->GetKwarg<int>("id", 0);
-      if (inits.count(id)) duplicate_ids.insert(id);
-      inits[id] = call;
+      auto [it, inserted] = inits.emplace(id, call);
+      if (!inserted) {
+        duplicate_ids.insert(id);
+        // Keep an epilogue representative: a later legacy init must not hide
+        // the duplicate-id diagnostic or peer contract for an earlier Fixpipe.
+        if (!it->second->HasKwarg("acc_push_epilogue")) it->second = call;
+      }
     } else if (IsOp(call, "tile.tpush_to_aiv")) {
       pushes[call->GetKwarg<int>("id", 0)].push_back(call);
     } else if (IsOp(call, "tile.tpop_from_aic")) {
@@ -547,6 +555,11 @@ struct FixpipeFunctionInfo : IRVisitor {
 };
 
 void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) {
+  const auto* context = PassContext::Current();
+  const auto* handler =
+      backend::BackendConfig::IsConfigured()
+          ? (context ? context->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler())
+          : nullptr;
   std::map<std::string, FixpipeFunctionInfo> info;
   for (const auto& [gv, func] : program->functions_) {
     if (func && func->body_) info[func->name_].VisitStmt(func->body_);
@@ -573,8 +586,7 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
       const bool has_epilogue = init->HasKwarg("acc_push_epilogue");
       const auto e = init->GetKwarg<AccPushEpilogue>("acc_push_epilogue");
       if (has_epilogue) {
-        if (backend::BackendConfig::IsConfigured() &&
-            backend::GetBackendType() != backend::BackendType::Ascend950)
+        if (handler && !handler->SupportsC2VFixpipeEpilogue())
           error(init, "Cross-core Fixpipe epilogues currently require Ascend950 (A5); A2/A3 is not enabled");
         const auto schema_error = ValidateAccPushEpilogue(e);
         if (!schema_error.empty()) {
@@ -603,9 +615,9 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
         if (incoming[{func->name_, name, id}] != 1)
           error(init, "Fixpipe consumer requires exactly one peer producer importing its buffer and pipe id");
         const int slots = init->GetKwarg<int>("slot_num", cross_core_pipe::GetPtoasImplicitSlotNum(1));
-        const bool a5 = backend::BackendConfig::IsConfigured() &&
-                        backend::GetBackendType() == backend::BackendType::Ascend950;
-        const int local_slots = a5 ? slots : init->GetKwarg<int>("local_slot_num", slots);
+        const int requested_local_slots = init->GetKwarg<int>("local_slot_num", slots);
+        const int local_slots = handler ? handler->GetC2VConsumerRingSlotCount(slots, requested_local_slots)
+                                        : requested_local_slots;
         const int64_t required = static_cast<int64_t>(init->GetKwarg<int>("slot_size", 0)) * local_slots;
         if (required > def->second->GetKwarg<int>("size", 0))
           error(init, "Fixpipe reserve_buffer requires at least " + std::to_string(required) +
@@ -654,6 +666,10 @@ void VerifyFixpipeContracts(const ProgramPtr& program, std::vector<Diagnostic>& 
           auto src = push->args_.empty() ? nullptr : As<TileType>(push->args_[0]->GetType());
           if (src) source_signatures.insert(signature(src, AccPushResultDtype(e.at("quant"), src->dtype_)));
         }
+        if (source_signatures.size() > 1)
+          error(init,
+                "Current PTOAS requires one physical payload shape/converted dtype per Fixpipe pipe id; "
+                "use separate explicit pipe ids for different payloads");
         for (const auto& pop : pops->second) {
           auto dst = As<TileType>(pop->GetType());
           if (dst && (source_signatures.size() != 1 || !source_signatures.count(signature(dst, dst->dtype_))))

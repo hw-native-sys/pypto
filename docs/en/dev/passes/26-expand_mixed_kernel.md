@@ -807,6 +807,8 @@ are required; unknown fields or values are rejected:
 Cross-core Fixpipe epilogues are currently enabled only on A5. A2/A3 targets
 are rejected until their numerical contract is validated; ordinary legacy pipes
 keep their existing target support.
+The verifier obtains epilogue capability and consumer-ring slot sizing through
+`BackendHandler` via `PassContext`; these policies are owned by the backend.
 
 The enabled matrix is deliberately bounded. `nz2nd` and `nz2dn` support all
 listed quant modes and both ReLU modes; `no_convert` accepts FP32 or INT32.
@@ -825,6 +827,13 @@ policy. The producer imports the named consumer reserve buffer. The
 `MixedKernelExpanded` verifier checks matching peer contracts, converted dtypes,
 physical shapes, consumer layouts, and capacity in **post-conversion bytes**.
 PTOAS performs its own verification again before lowering.
+
+Current PTOAS requires all Fixpipe pops on one pipe id to use the same tile
+type. Different physical payload shapes therefore require separate explicit
+pipe ids even if every payload fits the maximum slot size. PyPTO rejects this
+combination early; a negative real-PTOAS test independently checks the boundary.
+Duplicate init ids are rejected whenever any init for that id has an epilogue;
+a later legacy init cannot hide an earlier Fixpipe contract.
 
 | Layout | Physical Vec bytes (`blayout`, `slayout`) |
 | ------ | ----------------------------------------- |
@@ -861,6 +870,8 @@ then move to Scaling. The move requires `[1, N]` with positive `N % 16 == 0`
 (128-byte alignment). The A5 PyPTO planner reserves a conservative 4 KiB budget
 for Scaling allocations; this is an allocation policy, not a hardware capacity
 claim. The currently exposed vector mode is `deqf16_vec` (INT32 to FP16).
+Both the move and vector setter require the valid extent to cover the full
+physical `[1, N]` controls, including the single row.
 
 Keep packed controls immutable until their TPUSH completes; stage them outside
 a ring reuse loop. Quant state belongs to the pipe id and cannot be supplied
@@ -870,6 +881,13 @@ before the next push. Reconfiguring quant state invalidates the preceding
 configuration for another id. `normal_relu` applies the Fixpipe pre-ReLU to the
 accumulator; this API is separate from `tile.store` / `tile.assemble`
 `pre_quant` and `pre_relu` writeback operands.
+
+Scaling allocations conservatively remain live for the whole function: the
+setter installs a hardware address and TPUSH reads it without an SSA operand.
+This prevents allocation reuse after the setter, at the cost of consuming more
+of the 4 KiB planning budget. Bidirectional `pl.pipeline` loops containing quant
+configuration are lowered to sequential loops to preserve configuration/push
+ordering until skewing models these register dependencies explicitly.
 
 ### Regression and evidence
 
