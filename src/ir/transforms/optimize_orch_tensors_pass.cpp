@@ -36,10 +36,12 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/window_externalization.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -1482,7 +1484,8 @@ class SliceInputStridesOptimizer {
   }
 
  private:
-  // func_name -> { param_index -> parent_shape }
+  // func_name -> { param_index -> metadata }. Legacy InCore entries carry
+  // parent shapes; explicit AIV entries carry resolved physical strides.
   using InputShapeMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<ExprPtr>>>;
 
   static bool ShapesMatch(const std::vector<ExprPtr>& a, const std::vector<ExprPtr>& b) {
@@ -1498,12 +1501,38 @@ class SliceInputStridesOptimizer {
   class SliceAnalyzer : public IRVisitor {
    public:
     SliceAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names)
-        : program_(program), incore_names_(incore_names) {}
+        : incore_names_(incore_names) {
+      for (const auto& [gvar, func] : program->functions_) functions_.emplace(func->name_, func);
+    }
 
-    const InputShapeMap& result() const { return result_; }
+    InputShapeMap result() {
+      for (const auto& [name, params] : aiv_bindings_) {
+        for (const auto& [index, binding] : params) {
+          if (!binding.sliced) continue;
+          CHECK_SPAN(binding.consistent && !binding.strides.empty(), *binding.span)
+              << "AIV sliced tensor argument requires one consistent static stride per parameter across "
+                 "all call sites; pass the full parent tensor and use parent-relative indices instead";
+          for (const auto& stride : binding.strides) {
+            CHECK_SPAN(As<ConstInt>(stride), *binding.span)
+                << "AIV sliced tensor argument requires static physical strides; pass the full parent "
+                   "tensor and use parent-relative indices instead";
+          }
+          result_[name][index] = binding.strides;
+        }
+      }
+      return result_;
+    }
 
    protected:
     void VisitStmt_(const AssignStmtPtr& op) override {
+      // Snapshot operand metadata at each definition, including before SSA
+      // conversion, when an assignment may reuse a variable identity.
+      if (AsTensorTypeLike(op->var_->GetType())) {
+        storage_[op->var_.get()] = ResolveStorage(op->value_);
+      } else if (As<TupleType>(op->var_->GetType())) {
+        tuples_[op->var_.get()] = ResolveTuple(op->value_);
+      }
+      IRVisitor::VisitStmt_(op);
       auto call = As<Call>(op->value_);
       if (!call) return;
 
@@ -1524,8 +1553,10 @@ class SliceInputStridesOptimizer {
       auto fname = GetCallFuncName(call);
       if (!incore_names_.count(fname)) return;
 
-      auto incore_func = FindFunction(program_, fname);
-      if (!incore_func) return;
+      const auto found = functions_.find(fname);
+      if (found == functions_.end()) return;
+      const auto& incore_func = found->second;
+      if (incore_func->func_type_ == FunctionType::AIV) return;  // handled for Call and Submit below
 
       for (size_t i = 0; i < call->args_.size() && i < incore_func->param_directions_.size(); ++i) {
         if (incore_func->param_directions_[i] != ParamDirection::In) continue;
@@ -1549,12 +1580,103 @@ class SliceInputStridesOptimizer {
       }
     }
 
+    void VisitExpr_(const CallPtr& op) override {
+      AnalyzeAivCall(op->op_, op->args_, op->span_);
+      IRVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const SubmitPtr& op) override {
+      AnalyzeAivCall(op->op_, op->args_, op->span_);
+      IRVisitor::VisitExpr_(op);
+    }
+
    private:
-    const ProgramPtr& program_;
+    struct Storage {
+      std::vector<ExprPtr> strides;
+      bool sliced = false;
+      bool consistent = true;
+      const Span* span = nullptr;
+    };
+
+    std::vector<Storage> ResolveTuple(const ExprPtr& expr) {
+      if (auto found = tuples_.find(expr.get()); found != tuples_.end()) {
+        return found->second;
+      }
+      std::vector<Storage> values;
+      if (auto tuple = As<MakeTuple>(expr)) {
+        for (const auto& element : tuple->elements_) values.push_back(ResolveStorage(element));
+      }
+      return values;
+    }
+
+    Storage ResolveStorage(const ExprPtr& expr) {
+      if (auto found = storage_.find(expr.get()); found != storage_.end()) {
+        return found->second;
+      }
+      Storage info;
+      auto tensor = AsTensorTypeLike(expr->GetType());
+      if (!tensor) return info;
+      const auto layout = tensor->tensor_view_ ? tensor->tensor_view_->layout : TensorLayout::ND;
+      if (layout == TensorLayout::ND || layout == TensorLayout::DN) {
+        info.strides = tensor->tensor_view_ && !tensor->tensor_view_->stride.empty()
+                           ? tensor->tensor_view_->stride
+                           : tensor_view_semantics::BuildLogicalStridesFromLayout(tensor->shape_, layout);
+      }
+      if (auto iter = As<IterArg>(expr)) {
+        info = ResolveStorage(iter->initValue_);
+      } else if (auto item = As<TupleGetItemExpr>(expr)) {
+        auto tuple = ResolveTuple(item->tuple_);
+        if (item->index_ >= 0 && static_cast<size_t>(item->index_) < tuple.size()) info = tuple[item->index_];
+      } else if (auto call = As<Call>(expr); call && IsOp(call, "tensor.slice")) {
+        info = ResolveStorage(call->args_[0]);
+        info.sliced = true;
+        const auto shape = As<MakeTuple>(call->args_[1]);
+        const auto dropped = ParseSliceDropDims(call->args_.size() > 4 ? call->args_[4] : nullptr,
+                                                shape->elements_, "tensor.slice");
+        // Rank-reinterpreting windows use the parent's trailing axes, matching
+        // the existing InCore contract. Explicit drop_dims removes those axes.
+        if (shape->elements_.size() <= info.strides.size()) {
+          info.strides.erase(info.strides.begin(), info.strides.end() - shape->elements_.size());
+          info.strides = ApplyDropDims(info.strides, dropped);
+        } else {
+          info.strides.clear();
+        }
+      }
+      return info;
+    }
+
+    void AnalyzeAivCall(const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span) {
+      if (!As<GlobalVar>(op)) return;
+      auto found = functions_.find(op->name_);
+      if (found == functions_.end() || found->second->func_type_ != FunctionType::AIV) return;
+      const auto& params = found->second->params_;
+      // Submit may omit trailing Out params before its CommCtx suffix. Context
+      // operands have no TensorType and therefore do not participate here.
+      for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
+        auto tensor = AsTensorTypeLike(args[i]->GetType());
+        if (!tensor) continue;
+        // Blocked layouts have their own legalization; their logical strides
+        // are not affine physical strides at this point in the pipeline.
+        const auto layout = tensor->tensor_view_ ? tensor->tensor_view_->layout : TensorLayout::ND;
+        if (layout != TensorLayout::ND && layout != TensorLayout::DN) continue;
+        auto info = ResolveStorage(args[i]);
+        info.span = &span;
+        auto [binding, inserted] = aiv_bindings_[op->name_].emplace(i, info);
+        if (!inserted) {
+          binding->second.consistent &= ShapesMatch(binding->second.strides, info.strides);
+          binding->second.sliced |= info.sliced;
+        }
+      }
+    }
+
     const std::unordered_set<std::string>& incore_names_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> var_to_parent_shape_;
     std::unordered_set<std::string> conflicted_;
     InputShapeMap result_;
+    std::unordered_map<std::string, FunctionPtr> functions_;
+    std::unordered_map<const Expr*, Storage> storage_;
+    std::unordered_map<const Expr*, std::vector<Storage>> tuples_;
+    std::unordered_map<std::string, std::unordered_map<size_t, Storage>> aiv_bindings_;
   };
 
   InputShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
@@ -1571,10 +1693,21 @@ class SliceInputStridesOptimizer {
     void AddSubstitution(const Var* old_ptr, const VarPtr& new_var) { subs_[old_ptr] = new_var; }
 
    protected:
+    ExprPtr VisitExpr_(const CallPtr& op) override {
+      auto call = As<Call>(IRMutator::VisitExpr_(op));
+      if (call.get() != op.get() && IsOp(call, "tile.store")) {
+        return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->args_[2]->GetType(),
+                                      call->span_);
+      }
+      return call;
+    }
+
     ExprPtr VisitExpr_(const VarPtr& op) override {
       auto it = subs_.find(op.get());
       if (it != subs_.end()) return it->second;
-      return op;
+      // The base mutator also remaps SSA results defined by a SIMT launch
+      // when a rewritten storage argument changes their view type.
+      return IRMutator::VisitExpr_(op);
     }
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -1601,14 +1734,21 @@ class SliceInputStridesOptimizer {
         if (parent_shape.empty()) continue;  // conflicted or not from slice
         if (param_idx >= func->params_.size()) continue;
 
-        auto full_strides = ComputeRowMajorStrides(parent_shape);
+        auto full_strides =
+            func->func_type_ == FunctionType::AIV ? parent_shape : ComputeRowMajorStrides(parent_shape);
         if (full_strides.empty()) continue;
 
         auto tensor_type = As<TensorType>(func->params_[param_idx]->GetType());
         if (!tensor_type) continue;
 
-        // Skip params that already have explicit strides
-        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) continue;
+        // An explicit AIV declaration must agree with the caller's storage.
+        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
+          CHECK_SPAN(func->func_type_ != FunctionType::AIV ||
+                         ShapesMatch(tensor_type->tensor_view_->stride, full_strides),
+                     func->params_[param_idx]->span_)
+              << "AIV sliced tensor argument disagrees with the parameter's explicit physical strides";
+          continue;
+        }
 
         // NZ bytes are fractal-blocked, so the parent's logical row-major strides
         // do not describe them. BlockNzTensorViews derives the real strides from
@@ -1628,7 +1768,9 @@ class SliceInputStridesOptimizer {
         // argument disagreeing with it.
         const TensorLayout param_layout =
             tensor_type->tensor_view_ ? tensor_type->tensor_view_->layout : TensorLayout::ND;
-        TensorView view(std::move(strides), param_layout);
+        TensorView view =
+            tensor_type->tensor_view_.value_or(TensorView(std::vector<ExprPtr>{}, param_layout));
+        view.stride = std::move(strides);
         auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
                                                      tensor_type->memref_, std::move(view));
         auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,
@@ -1682,8 +1824,13 @@ Pass OptimizeOrchTensors() {
     // Pattern 3: Assemble-loop rewrite (sees Pattern 2 results)
     auto p3 = AssembleLoopRewriter().Run(p2, incore_names);
 
-    // Pattern 4: Slice input strides (propagate parent strides to In params)
-    auto p4 = SliceInputStridesOptimizer().Run(p3, incore_names);
+    // Explicit AIV functions bypass the InCore lowering patterns above, but
+    // still need sliced storage metadata at their call boundary.
+    auto stride_targets = incore_names;
+    for (const auto& [gvar, func] : p3->functions_) {
+      if (func->func_type_ == FunctionType::AIV) stride_targets.insert(func->name_);
+    }
+    auto p4 = SliceInputStridesOptimizer().Run(p3, stride_targets);
 
     // Optional Pattern 5 module: default off unless a kernel explicitly opts in.
     if (!window_externalization::HasWindowizeEnabledFunction(p4)) return p4;

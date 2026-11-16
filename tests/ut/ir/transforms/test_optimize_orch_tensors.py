@@ -998,6 +998,152 @@ class TestAssembleLoopRewrite:
 class TestSliceInputStrides:
     """Pattern 4: Attach parent-derived strides to In params for slice patterns."""
 
+    @pytest.mark.parametrize("submit", [False, True], ids=["call", "submit"])
+    @pytest.mark.parametrize("direction", ["InOut", "Out"])
+    @pytest.mark.parametrize("alias", [False, True], ids=["direct", "tuple_alias"])
+    def test_aiv_sliced_read_and_write_arguments(self, submit, direction, alias):
+        call = "result = self.kernel(chunk, target)"
+        if submit:
+            call = "with pl.manual_scope():\n            result, tid = pl.submit(self.kernel, chunk, target)"
+        aliases = ""
+        if alias:
+            aliases = (
+                "pair = (chunk, target)\n        other = pair\n"
+                "        chunk = other[0]\n        target = other[1]"
+            )
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32],
+               dst: pl.{direction}[pl.Tensor[[8, 256], pl.FP32]]) -> pl.Tensor[[8, 256], pl.FP32]:
+        tile = pl.tile.load(x, [0, 0], [8, 256])
+        result = pl.tile.store(tile, [0, 0], dst)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[10, 288], pl.FP32],
+             dst: pl.InOut[pl.Tensor[[12, 320], pl.FP32]]) -> pl.Tensor[[8, 256], pl.FP32]:
+        outer = pl.tensor.slice(x, [9, 280], [1, 2])
+        chunk = pl.tensor.slice(outer, [8, 256], [0, 5])
+        target = pl.tensor.slice(dst, [8, 256], [2, 11])
+        {aliases}
+        {call}
+        return result
+"""
+        before = pl.parse_program(source)
+        expected = pl.parse_program(
+            source.replace(
+                "x: pl.Tensor[[8, 256], pl.FP32]",
+                "x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[288, 1])]",
+            ).replace(
+                f"dst: pl.{direction}[pl.Tensor[[8, 256], pl.FP32]]",
+                f"dst: pl.{direction}[pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[320, 1])]]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(before), expected)
+
+    @pytest.mark.parametrize("second", ["dense", "different_slice"])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_aiv_conflicting_slice_pitches_are_rejected(self, second, reverse):
+        first_arg = "chunk"
+        second_arg = "dense" if second == "dense" else "other"
+        if reverse:
+            first_arg, second_arg = second_arg, first_arg
+        program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[8, 256], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[10, 288], pl.FP32], y: pl.Tensor[[10, 320], pl.FP32],
+             dense: pl.Tensor[[8, 256], pl.FP32]) -> pl.Tensor[[8, 256], pl.FP32]:
+        chunk = pl.tensor.slice(x, [8, 256], [1, 7])
+        other = pl.tensor.slice(y, [8, 256], [1, 7])
+        first = self.kernel({first_arg})
+        second = self.kernel({second_arg})
+        return second
+""")
+        with pytest.raises(ValueError, match="consistent static stride"):
+            passes.optimize_orch_tensors()(program)
+
+    @pytest.mark.parametrize("layout, strides", [("ND", [96, 32, 1]), ("DN", [96, 1, 3])])
+    def test_aiv_slice_dropped_axis_preserves_parent_layout(self, layout, strides):
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, x: pl.Tensor[[2, 3, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.{layout})]):
+        return
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, parent: pl.Tensor[[2, 1, 3, 32], pl.FP32, pl.TensorView(layout=pl.TensorLayout.{layout})]):
+        chunk = pl.tensor.slice(parent, [2, 1, 3, 16], [0, 0, 0, 7], drop_dims=[1])
+        self.kernel(chunk)
+        return
+"""
+        expected = pl.parse_program(
+            source.replace(
+                f"x: pl.Tensor[[2, 3, 16], pl.FP32, pl.TensorView(layout=pl.TensorLayout.{layout})]",
+                f"x: pl.Tensor[[2, 3, 16], pl.FP32, "
+                f"pl.TensorView(stride={strides}, layout=pl.TensorLayout.{layout})]",
+            )
+        )
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(pl.parse_program(source)), expected)
+
+    def test_aiv_dynamic_slice_pitch_is_rejected(self):
+        N = pl.dynamic("N")
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, x: pl.Tensor[[8, 256], pl.FP32]):
+                return
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, parent: pl.Tensor[[10, N], pl.FP32]):
+                chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+                self.kernel(chunk)
+
+        with pytest.raises(ValueError, match="static physical strides"):
+            passes.optimize_orch_tensors()(Program)
+
+    def test_aiv_blocked_slice_keeps_layout_legalization(self):
+        """NZ slices must keep the existing blocked-layout lowering path."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, x: pl.Tensor[[32, 32], pl.FP32, pl.NZ]):
+                return
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, parent: pl.Tensor[[64, 64], pl.FP32, pl.NZ]):
+                chunk = pl.tensor.slice(parent, [32, 32], [0, 0])
+                self.kernel(chunk)
+
+        ir.assert_structural_equal(passes.optimize_orch_tensors()(Program), Program)
+
+    def test_aiv_conflicting_explicit_stride_is_rejected(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                x: pl.Tensor[[8, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)],
+            ):
+                return
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, parent: pl.Tensor[[10, 288], pl.FP32]):
+                chunk = pl.tensor.slice(parent, [8, 256], [1, 7])
+                self.kernel(chunk)
+
+        with pytest.raises(ValueError, match="explicit physical strides"):
+            passes.optimize_orch_tensors()(Program)
+
     @pytest.mark.parametrize(
         "access",
         [

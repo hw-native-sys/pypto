@@ -267,3 +267,46 @@ matching PTOAS object emission, before invoking CANN Bisheng. It preserves
 instructions, synchronization and other attributes.
 Groups left empty by this cleanup and their references are removed together,
 since LLVM rejects empty attribute groups.
+
+## Pitched GM windows and launch-boundary acceptance
+
+The public [strided-copy example](../../../../examples/advanced/07_simt_strided_copy.py)
+passes three `[8, 256]` windows to an AIV helper: FP32 input with row pitch 288,
+FP32 output with pitch 320, and INT32 thread tags with pitch 352. All have
+nonzero row and column origins. `OptimizeOrchTensors` propagates these physical
+strides to read and writable AIV parameters; SIMT specialization then retains
+that metadata. Previously, the helper used logical pitch 256 for all three,
+which addressed the wrong rows after the first row.
+
+The acceptance case uses `thread_idx` and `block_dim` on all three axes, lane ID,
+and a thread-strided loop. It covers `(n, 1, 1)` for
+`n = 1, 256, 257, 512, 513, 1024, 1025, 2048`, plus `(8, 4, 8)`. Each variant
+checks `valid = 0, 1, 255, 256, 257, 2047, 2048` with two input changes:
+**126 exact device comparisons**. Checks include both complete output parents,
+all inactive elements and surrounding guards, and an unchanged source.
+Compilation also verifies each linked SIMT launch length.
+
+The 2026-11-16 A5 run passed all 126 checks with PTOAS v0.74, CANN 9.3.0,
+and pinned runtime `c1c234667d54f4aea1582249448b24f9a08753f6`. Prepare artifacts
+without reserving a device, then execute them on a queued device:
+
+```bash
+python tests/st/runtime/vpto/test_simt_ir_onboard.py \
+  --strided-worker build/simt-strided
+
+task-submit --device auto --max-time 600 --run \
+  'python tests/st/runtime/vpto/test_simt_ir_onboard.py --strided-worker build/simt-strided "$TASK_DEVICE"'
+```
+
+`strided-artifacts.json` records the prepared artifact directories;
+`strided-result.json` records the per-variant counts, device, and runtime pin.
+The opt-in pytest case is `test_simt_strided`, with the same build/persistent
+gates as the earlier acceptance cases.
+
+Sliced arguments crossing an AIV call boundary currently require static,
+consistent physical strides for each parameter across all calls. Different
+pitches or conflicting explicit parameter strides produce a compile diagnostic;
+pass the full parent and use parent-relative indices when pitches vary.
+Nested slices, aliases, tuple projections, dropped axes, and manual `Submit`
+calls have pass-level regression coverage. Packed short vectors remain outside
+this executable subset; this acceptance does not add packed storage or APIs.

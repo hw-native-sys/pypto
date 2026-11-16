@@ -78,6 +78,19 @@ Refined output view types propagate through store results, local aliases, tuple 
 
 Refined input view types also propagate through local aliases, tuple construction, and tuple projections, so subsequent uses retain the parent strides and assignments remain type-symmetric.
 
+Explicit AIV callees also receive physical strides for sliced `In`, `InOut`, and
+caller-supplied `Out` arguments, including `Submit` calls. Analysis follows nested
+slices, aliases, tuple projections, and explicit dropped axes. It preserves the
+parent's ND/DN strides rather than recomputing them from the window's logical
+shape. Refined types propagate through SIMT launch arguments and their SSA results.
+For example, an `[8, 256]` window of a `[10, 288]` parent retains `[288, 1]`.
+
+This AIV refinement requires static physical strides consistent across every
+call to the same parameter. Mixed dense/sliced calls with different pitches,
+dynamic pitches, and conflicting explicit parameter strides are diagnosed.
+Pass the full parent and use parent-relative indices when different calls need
+different physical layouts; this pass does not add a runtime stride ABI.
+
 An `In` param declared `pl.NZ` is skipped: its bytes are fractal-blocked, so row-major parent strides do not describe them. `BlockNzTensorViews` derives its strides from the blocked shape and rejects an explicit one.
 
 ### Pattern 5: Static Window Externalization

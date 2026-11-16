@@ -227,3 +227,38 @@ JIT 单元测试 `test_public_math_native_compile` 覆盖原生 LLVM 导出。
 LLVM 文本设备编译在调用 CANN Bisheng 前移除其不支持的 LLVM 内存效果属性，
 与 PTOAS 对象文件生成路径一致；保留指令、同步和其他属性。
 若清理后属性组为空，则同时移除该组及其引用，因为 LLVM 不接受空属性组。
+
+## 带跨度 GM 窗口与启动边界验收
+
+公开的[带步长拷贝示例](../../../../examples/advanced/07_simt_strided_copy.py)
+向 AIV helper 传入三个 `[8, 256]` 窗口：行跨度为 288 的 FP32 输入、跨度为 320 的
+FP32 输出，以及跨度为 352 的 INT32 线程标签。三个窗口的行、列原点均非零。
+`OptimizeOrchTensors` 将这些物理步长传播到 AIV 的只读及可写参数，SIMT 特化随后
+保留该元数据。修复前，helper 对三个窗口均使用逻辑跨度 256，导致第一行之后的寻址错误。
+
+验收用例使用三个轴的 `thread_idx`、`block_dim`、lane ID 和按线程跨步的循环。
+覆盖 `(n, 1, 1)`，其中 `n = 1, 256, 257, 512, 513, 1024, 1025, 2048`，另加 `(8, 4, 8)`。
+每种配置检查 `valid = 0, 1, 255, 256, 257, 2047, 2048` 和两组变化输入，合计
+**126 次精确设备比对**。检查包含两个完整输出父张量、全部未激活元素与外围保护区，
+并确认输入不变。编译阶段还验证每个链接后 SIMT launch 的长度。
+
+2026-11-16 的 A5 验证在 PTOAS v0.74、CANN 9.3.0 和固定 runtime
+`c1c234667d54f4aea1582249448b24f9a08753f6` 下通过全部 126 项检查。
+先在不占卡的情况下准备产物，再经队列分配设备执行：
+
+```bash
+python tests/st/runtime/vpto/test_simt_ir_onboard.py \
+  --strided-worker build/simt-strided
+
+task-submit --device auto --max-time 600 --run \
+  'python tests/st/runtime/vpto/test_simt_ir_onboard.py --strided-worker build/simt-strided "$TASK_DEVICE"'
+```
+
+`strided-artifacts.json` 记录已准备的产物目录；`strided-result.json` 记录每种配置的
+检查数、设备和 runtime pin。显式启用的 pytest 用例为 `test_simt_strided`，沿用前述
+验收用例的 build/persistent 开关。
+
+跨 AIV 调用边界的切片参数目前要求物理步长为静态值，且同一参数在所有调用处一致。
+不同跨度或与参数显式步长冲突时编译报错；跨度需要变化时，请传入完整父张量并使用
+相对父张量的索引。嵌套切片、别名、元组投影、删除轴及手动 `Submit` 调用具有 pass
+回归覆盖。打包短向量仍在当前可执行子集之外；本次验收不新增打包存储或 API。
