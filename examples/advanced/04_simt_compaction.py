@@ -9,6 +9,7 @@
 
 """Stable routing-index compaction within each of two A5 warps.
 
+Run without arguments to compile only (no device required).
 Run on an allocated A5 device:
     python examples/advanced/04_simt_compaction.py --device 0 --method ballot
     python examples/advanced/04_simt_compaction.py --device 0 --method scan --rounds 20
@@ -96,7 +97,7 @@ def compact(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--device", type=int, help="Run on this allocated A5 device; omit to compile only")
     parser.add_argument("--method", choices=("ballot", "scan"), default="ballot")
     parser.add_argument("--valid", type=int, default=47)
     parser.add_argument("--rounds", type=int, default=0, help="Optional measured launches after 3 warmups")
@@ -106,13 +107,18 @@ def main():
     config = RunConfig(
         backend_type=BackendType.Ascend950,
         execution_mode=ExecutionMode.ONBOARD,
-        device_id=args.device,
+        device_id=args.device if args.device is not None else 0,
     )
+    compiled = compact.compile(USE_BALLOT=args.method == "ballot", config=config)
+    # The simulator example sweep invokes this script bare on a CPU checkout.
+    # Compile the A5 helper there, but never load or run it without an opt-in.
+    if args.device is None:
+        print(f"{args.method}: compiled; pass --device to execute on an allocated A5 device")
+        return
     flags = (torch.arange(64) % 3 == 1).to(torch.int32)
     indices = torch.full((2, 32), -1, dtype=torch.int32)
     counts = torch.full((2,), -1, dtype=torch.int32)
     ranks = torch.full((64,), -1, dtype=torch.int32)
-    compiled = compact.compile(USE_BALLOT=args.method == "ballot", config=config)
     compiled(flags, indices, counts, ranks, args.valid, config=config)
     for warp in range(2):
         ids = torch.arange(warp * 32, (warp + 1) * 32)

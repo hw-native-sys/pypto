@@ -169,6 +169,11 @@ stable indices, counts and exclusive ranks. Seven flag patterns and nine valid
 lengths (0/1/17/31/32/33/47/63/64) give 126 A5 checks. Cases include empty/full
 selection, bit 31, independent warps, negative flags and untouched output tails.
 
+The compaction and row-update examples compile only when invoked without
+`--device`, so the CPU example sweep can validate them without hardware.
+Pass `--device` with an allocated A5 device to execute and check the outputs;
+the dedicated onboard acceptance below provides numerical coverage.
+
 Prepare without a card, then replay under the local device queue:
 
 ```bash

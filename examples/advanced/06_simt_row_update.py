@@ -13,6 +13,7 @@ For columns below valid, update a seed Tile with (src + 1) * row_scale;
 then add 2 to every element and store the result. A second output reads the
 original seed Tile after the update. The caller supplies 0 <= valid <= 64.
 
+Run without arguments to compile only (no device required).
 Run: python examples/advanced/06_simt_row_update.py --device 0 --method simt
      python examples/advanced/06_simt_row_update.py --device 0 --method simd
 """
@@ -86,29 +87,35 @@ def row_update(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--device", type=int, help="Run on this allocated A5 device; omit to compile only")
     parser.add_argument("--method", choices=("simt", "simd"), default="simt")
     parser.add_argument("--valid", type=int, default=33)
     args = parser.parse_args()
     if not 0 <= args.valid <= 64:
         parser.error("--valid must be in [0, 64]")
+    config = RunConfig(
+        backend_type=BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        device_id=args.device if args.device is not None else 0,
+    )
+    compiled = row_update.compile(USE_SIMT=args.method == "simt", config=config)
+    # Keep the bare CLI usable in the CPU-only example sweep. Device execution
+    # and golden checks require an explicitly allocated A5 device.
+    if args.device is None:
+        print(f"{args.method}: compiled; pass --device to execute on an allocated A5 device")
+        return
     src = torch.arange(512, dtype=torch.float32).reshape(8, 64) * 0.25
     scales = torch.tensor([[0.0, -2.0, 0.5, 4.0, -0.25, 1.0, 2.0, -4.0]])
     seed = -src - 100.0
     dst, snapshot = torch.zeros_like(src), torch.zeros_like(src)
-    row_update(
+    compiled(
         src,
         scales,
         seed,
         dst,
         snapshot,
         args.valid,
-        USE_SIMT=args.method == "simt",
-        config=RunConfig(
-            backend_type=BackendType.Ascend950,
-            execution_mode=ExecutionMode.ONBOARD,
-            device_id=args.device,
-        ),
+        config=config,
     )
     expected = seed.clone()
     expected[:, : args.valid] = ((src + 1) * scales.reshape(8, 1))[:, : args.valid]

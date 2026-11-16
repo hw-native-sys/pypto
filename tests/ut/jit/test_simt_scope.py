@@ -14,6 +14,7 @@ import json
 import re
 import runpy
 import subprocess
+import sys
 from pathlib import Path
 
 import pypto.language as pl
@@ -808,6 +809,30 @@ def test_public_row_update_native_compile(tmp_path, use_simt):
         source = "\n".join(p.read_text() for p in (tmp_path / "vpto").rglob("*.pto"))
         assert ("pto.simt_launch" in source) == use_simt
         assert ("pto.vmi." in source) != use_simt
+    finally:
+        backend.reset_for_testing()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("script", ["04_simt_compaction.py", "06_simt_row_update.py"])
+def test_public_simt_examples_compile_without_device(script, monkeypatch, capsys):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is unavailable; use --require-ptoas to make this an error")
+    example = Path(__file__).resolve().parents[3] / "examples/advanced" / script
+
+    def reject_execution(*args, **kwargs):
+        raise AssertionError("Bare example invocation must compile without loading or executing on a device")
+
+    # Reproduce the CPU example sweep's bare invocation with real compilation.
+    # Forbid runtime loading/execution so this fails before any device access
+    # if a future CLI change restores the old ONBOARD default behavior.
+    monkeypatch.setattr(sys, "argv", [str(example)])
+    monkeypatch.setattr(CompiledProgram, "load", reject_execution)
+    monkeypatch.setattr(CompiledProgram, "__call__", reject_execution)
+    backend.reset_for_testing()
+    try:
+        runpy.run_path(str(example), run_name="__main__")
+        assert "compiled; pass --device" in capsys.readouterr().out
     finally:
         backend.reset_for_testing()
 
