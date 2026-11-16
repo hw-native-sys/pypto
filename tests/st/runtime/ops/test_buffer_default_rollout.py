@@ -832,10 +832,6 @@ def test_default_compare_gather(case_run, request):
     _assert_buffer_result(case_run, request)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def _row_compute_entry(valid):
     rows, cols = valid
 
@@ -936,3 +932,79 @@ def _transpose_compute_entry(shape):
 )
 def test_default_transpose_compute(case_run, request):
     _assert_buffer_result(case_run, request)
+
+
+def _column_compute_entry(valid):
+    rows, cols = valid
+
+    @pl.jit
+    def entry(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            source = pl.load(a, [0, 0], [16, 64], valid_shape=[rows, cols])
+            total = pl.tile.col_sum(source)
+            minimum = pl.tile.col_min(source)
+            maximum = pl.tile.col_max(source)
+            product = pl.tile.col_prod(source)
+            added = pl.tile.col_expand_add(source, total)
+            subtracted = pl.tile.col_expand_sub(source, maximum)
+            multiplied = pl.tile.col_expand_mul(source, product)
+            divided = pl.tile.col_expand_div(source, total)
+            upper = pl.tile.col_expand_max(source, maximum)
+            lower = pl.tile.col_expand_min(source, minimum)
+            out = pl.store(added, [0, 0], out)
+            out = pl.store(subtracted, [16, 0], out)
+            out = pl.store(multiplied, [32, 0], out)
+            out = pl.store(divided, [48, 0], out)
+            out = pl.store(upper, [64, 0], out)
+            out = pl.store(lower, [80, 0], out)
+            out = pl.store(source, [96, 0], out)
+        return out
+
+    return entry
+
+
+def _column_compute_golden(tensors, valid):
+    rows, cols = valid
+    active = tensors["a"][:rows, :cols]
+    total, product = active.sum(dim=0, keepdim=True), active.prod(dim=0, keepdim=True)
+    minimum, maximum = active.amin(dim=0, keepdim=True), active.amax(dim=0, keepdim=True)
+    output = tensors["out"].clone()
+    for index, value in enumerate(
+        (
+            active + total,
+            active - maximum,
+            active * product,
+            active / total,
+            torch.maximum(active, maximum),
+            torch.minimum(active, minimum),
+            active,
+        )
+    ):
+        output[index * 16 : index * 16 + rows, :cols] = value
+    return output
+
+
+@st.cases(
+    *[
+        st.case(
+            _column_compute_entry(valid),
+            torch.rand((16, 64), generator=torch.Generator().manual_seed(29)) * 0.02 + 0.99,
+            torch.full((112, 64), -777.0),
+            name=f"buffer_column_compute_{valid[0]}_{valid[1]}_{planner.name.lower()}_{enabled}",
+            golden=lambda tensors, valid=valid: _column_compute_golden(tensors, valid),
+            memory_planner=planner,
+            enable_buffer_ir=enabled,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for valid in ((16, 64), (13, 57))
+        for planner in _PLANNERS
+        for enabled in (False, True)
+    ]
+)
+def test_default_column_compute(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -20,10 +20,10 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_axis_recipes.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
-#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -211,24 +211,23 @@ class BufferIRVisitor : public IRVisitor {
             CheckWindowPair(op, op->args_[pair.first], op->args_[pair.second], pair.exact_allowed);
           }
         }
-        if (const auto* row_recipe = backend::FindBufferRowRecipe(name)) {
-          // Scratch writes must not clobber the reduction input or destination.
-          // Broadcast permits exact reuse of its matrix, never its column vector.
-          CheckWindowPair(op, op->args_[0], op->args_[2], !row_recipe->reduction);
-          CheckWindowPair(op, op->args_[1], op->args_[2], false);
-          if (row_recipe->reduction) CheckWindowPair(op, op->args_[0], op->args_[1], false);
+        if (const auto* axis_recipe = backend::FindBufferAxisRecipe(name)) {
+          // Reduction destinations are disjoint from their inputs. Broadcasts
+          // may reuse their matrix exactly, never their repeated vector.
+          if (axis_recipe->axis == 0) {
+            // A subview descriptor can hide its parent's wider row pitch.
+            // Native column recipes here consume dense allocation geometry.
+            CheckDensePhysicalPitch(op);
+          }
+          const auto& destination = op->args_[axis_recipe->InputCount()];
+          CheckWindowPair(op, op->args_[0], destination, !axis_recipe->reduction);
+          if (axis_recipe->InputCount() == 2) CheckWindowPair(op, op->args_[1], destination, false);
+          if (axis_recipe->HasScratch()) CheckWindowPair(op, op->args_[0], op->args_[1], false);
         }
         if (IsOp(op, "buffer.transpose")) {
           // Equal shapes do not prove equal pitch: reject strided windows as
           // well as every overlapping pair, including scratch versus source.
-          for (const auto& arg : op->args_) {
-            const auto window = windows_.find(AsVarLike(arg).get());
-            const auto type = As<BufferType>(arg->GetType());
-            const auto pitch = static_cast<uint64_t>(type->shape_[1]) * type->dtype_.GetByte();
-            if (window == windows_.end() || window->second.row_pitch != pitch) {
-              Error("Buffer transpose requires dense physical row pitch", op->span_);
-            }
-          }
+          CheckDensePhysicalPitch(op);
           CheckWindowPair(op, op->args_[0], op->args_[1], false);
           CheckWindowPair(op, op->args_[0], op->args_[2], false);
           CheckWindowPair(op, op->args_[1], op->args_[2], false);
@@ -407,6 +406,17 @@ class BufferIRVisitor : public IRVisitor {
       const bool known_offset = !source_window || source_window->known_offset;
       const auto extent = known_offset ? *bytes : source_window->bytes;
       windows_[variable.get()] = Window{root, offset, extent, pitch, known_offset};
+    }
+  }
+
+  void CheckDensePhysicalPitch(const CallPtr& call) {
+    for (const auto& arg : call->args_) {
+      const auto window = windows_.find(AsVarLike(arg).get());
+      const auto type = As<BufferType>(arg->GetType());
+      const auto pitch = static_cast<uint64_t>(type->shape_[1]) * type->dtype_.GetByte();
+      if (window == windows_.end() || window->second.row_pitch != pitch) {
+        Error(call->op_->name_ + " requires dense physical row pitch", call->span_);
+      }
     }
   }
 

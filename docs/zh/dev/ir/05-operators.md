@@ -37,6 +37,8 @@
 | `buffer.scatter` | 源、INT32 索引、完整有效的目的地（索引写入前清零） | Void |
 | `buffer.row_max`、`buffer.row_sum` | FP32 矩阵、显式 scratch、列向量目的地 | Void |
 | `buffer.row_expand_sub`、`buffer.row_expand_div` | FP32 矩阵、列向量、矩阵目的地 | Void |
+| `buffer.col_sum/max/min/prod` | FP32 矩阵、单行目的地 | Void |
+| `buffer.col_expand_add/sub/mul/div/max/min` | FP32 矩阵、单行载体、矩阵目的地 | Void |
 
 这些算子分别声明数据/元数据效应。形状、dtype、valid 状态和别名要求见
 [Buffer 契约](02-types.md#buffer-算子契约)。

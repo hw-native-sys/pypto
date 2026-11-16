@@ -85,6 +85,16 @@ const PtoNativeOpSpec& GetPtoNativeOpSpec(std::string_view logical_op) {
       {"tile.row_expand_div", {"pto.trowexpanddiv"}},
       {"tile.row_expand_max", {"pto.trowexpandmax"}},
       {"tile.row_expand_min", {"pto.trowexpandmin"}},
+      {"tile.col_sum", {"pto.tcolsum"}},
+      {"tile.col_max", {"pto.tcolmax"}},
+      {"tile.col_min", {"pto.tcolmin"}},
+      {"tile.col_prod", {"pto.tcolprod"}},
+      {"tile.col_expand_add", {"pto.tcolexpandadd"}},
+      {"tile.col_expand_sub", {"pto.tcolexpandsub"}},
+      {"tile.col_expand_mul", {"pto.tcolexpandmul"}},
+      {"tile.col_expand_div", {"pto.tcolexpanddiv"}},
+      {"tile.col_expand_max", {"pto.tcolexpandmax"}},
+      {"tile.col_expand_min", {"pto.tcolexpandmin"}},
       {"tile.transpose", {"pto.ttrans"}},
   };
   const auto found = specs.find(logical_op);

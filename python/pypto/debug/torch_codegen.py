@@ -1320,6 +1320,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.row_expand_sub"] = _binop("-")
         m[f"{prefix}.row_expand_mul"] = _binop("*")
         m[f"{prefix}.row_expand_div"] = _binop("/")
+        m[f"{prefix}.col_expand_add"] = _binop("+")
         m[f"{prefix}.col_expand_mul"] = _binop("*")
         m[f"{prefix}.col_expand_sub"] = _binop("-")
         m[f"{prefix}.col_expand_div"] = _binop("/")
@@ -1446,7 +1447,20 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"buffer.{suffix}"] = lambda a, _kw, fn=reduction: (
             f"_buffer_write({a[2]}, torch.{fn}(_buffer_active({a[0]}), dim=-1, keepdim=True))"
         )
+    for suffix, reduction in (
+        ("col_max", "amax"),
+        ("col_sum", "sum"),
+        ("col_min", "amin"),
+        ("col_prod", "prod"),
+    ):
+        m[f"buffer.{suffix}"] = lambda a, _kw, fn=reduction: (
+            f"_buffer_write({a[1]}, torch.{fn}(_buffer_active({a[0]}), dim=0, keepdim=True))"
+        )
     for suffix, operation in (
+        ("col_expand_add", "+"),
+        ("col_expand_sub", "-"),
+        ("col_expand_mul", "*"),
+        ("col_expand_div", "/"),
         ("row_expand_add", "+"),
         ("row_expand_sub", "-"),
         ("row_expand_mul", "*"),
@@ -1456,7 +1470,12 @@ def _register_ops() -> None:  # noqa: PLR0915
             f"_buffer_write({a[2]}, _buffer_active({a[0]}) {op} _buffer_active({a[1]}))"
         )
 
-    for suffix, operation in (("row_expand_max", "maximum"), ("row_expand_min", "minimum")):
+    for suffix, operation in (
+        ("row_expand_max", "maximum"),
+        ("row_expand_min", "minimum"),
+        ("col_expand_max", "maximum"),
+        ("col_expand_min", "minimum"),
+    ):
         m[f"buffer.{suffix}"] = lambda a, _kw, op=operation: (
             f"_buffer_write({a[2]}, torch.{op}(_buffer_active({a[0]}), _buffer_active({a[1]})))"
         )

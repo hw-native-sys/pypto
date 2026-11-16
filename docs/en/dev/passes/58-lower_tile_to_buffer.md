@@ -35,6 +35,8 @@ partition form before storage planning rather than failing during final lowering
 | adds, subs, muls, divs, maximums, minimums, lrelu, full | FP32 |
 | row_max, row_sum, row_min, row_prod | FP32, positive static valid |
 | row_expand_add/sub/mul/div/max/min | FP32, positive static valid, contiguous column carrier |
+| col_sum/max/min/prod | FP32, positive static valid, sequential reduction |
+| col_expand_add/sub/mul/div/max/min | FP32, positive static valid, single-row carrier |
 | transpose | FP32, full-valid dense rank-2 matrices |
 
 Scalar parameters use the existing scalar ABI; element operands receive explicit
@@ -69,6 +71,16 @@ state, window operands, other dtypes or other reduction operations retain Tile
 IR. Empty reduction axes do not inherit the elementwise no-data behavior.
 `row_expand_add` uses its two-input contiguous-column form; the optional scratch
 and packed row-major carrier forms remain on Tile IR.
+
+Column recipes reduce the first axis into a row-major `[1,C]` destination, then
+broadcast that single row over a matrix. For example, `col_sum(source)` followed
+by `col_expand_add(source, row)` lowers to `buffer.col_sum(source, row)` and
+`buffer.col_expand_add(source, row, destination)`. Physical columns are aligned
+to 32 bytes; the carrier preserves the source's physical and valid column counts.
+Reduction output is disjoint from its source, while broadcasts may reuse their
+matrix exactly but never overwrite the carrier. These forms require dense FP32
+allocations and positive static valid extents. The optional-scratch binary-tree
+`col_sum`, window operands, dynamic/empty domains, and other dtypes remain Tile.
 
 Dense FP32 `transpose` reuses the scratch created by `FlattenTileNdTo2D`.
 Lowering removes the logical axis operands and emits
@@ -190,7 +202,7 @@ places precision selectors after `outs`. Neither formatter discovers storage,
 constructs views, allocates scratch or changes operand types. Tile callbacks
 still resolve those decisions first; Buffer operands arrive already explicit.
 
-`GetPtoNativeOpSpec` supplies common elementwise, row-compute and transpose
+`GetPtoNativeOpSpec` supplies common elementwise, axis-compute and transpose
 instruction names plus precision attributes to both paths. It is emission metadata, not a support registry:
 target, dtype, layout, aliasing and default-selection checks remain separate.
 Adding a native spelling does not enable a new Buffer form. Other operator

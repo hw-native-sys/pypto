@@ -26,10 +26,10 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/buffer_axis_recipes.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
-#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_transpose_recipe.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
@@ -1176,11 +1176,13 @@ class TileToBufferMutator : public IRMutator {
       return Operation("buffer.transpose", {Handle(call->args_[0]), Handle(call->args_[3]), Handle(result)},
                        call->span_);
     }
-    if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
-      CHECK_SPAN(result && backend::SupportsLogicalBufferRow(*row_recipe, call), call->span_)
-          << "LowerTileToBuffer: row recipes require supported static FP32 operands";
-      return Operation(row_recipe->buffer_op,
-                       {Handle(call->args_[0]), Handle(call->args_[1]), Handle(result)}, call->span_);
+    if (const auto* axis_recipe = backend::FindLogicalBufferAxisRecipe(call->op_->name_)) {
+      CHECK_SPAN(result && backend::SupportsLogicalBufferAxis(*axis_recipe, call), call->span_)
+          << "LowerTileToBuffer: axis recipes require supported static FP32 operands";
+      std::vector<ExprPtr> arguments;
+      for (const auto& arg : call->args_) arguments.push_back(Handle(arg));
+      arguments.push_back(Handle(result));
+      return Operation(axis_recipe->buffer_op, arguments, call->span_);
     }
     for (const auto& [logical, physical] : {std::pair{"tile.get_block_idx", "buffer.get_block_idx"},
                                             std::pair{"tile.get_block_num", "buffer.get_block_num"},

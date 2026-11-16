@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/buffer_row_recipes.h"
+#include "pypto/backend/common/buffer_axis_recipes.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 
@@ -23,28 +23,30 @@ namespace pypto::ir {
 // Explicit Buffer effects describe scratch and destination writes. The legacy
 // Functional execution-access classification models Tile SSA results instead,
 // so it intentionally remains Unknown for these destination-passing operations.
-[[maybe_unused]] const bool kRowRecipesRegistered = [] {
-  for (const auto& recipe : backend::GetBufferRowRecipes()) {
+[[maybe_unused]] const bool kAxisRecipesRegistered = [] {
+  for (const auto& recipe : backend::GetBufferAxisRecipes()) {
     auto& entry = OpRegistry::GetInstance().Register(recipe.buffer_op);
-    entry.set_description(std::string("Explicit FP32 row operation for ") + recipe.logical_op)
+    entry.set_description(std::string("Explicit FP32 axis operation for ") + recipe.logical_op)
         .set_op_category("BufferOp")
         .set_ir_stage(OpIRStage::Buffer)
         .set_internal_only()
         .add_argument("source", "Source matrix with nonempty static valid extents")
-        .add_argument("auxiliary", recipe.reduction ? "Full-valid workspace" : "Column vector")
-        .add_argument("destination", "Explicit destination")
         .set_output_arity(0)
         .set_buffer_arg_effect(0, BufferAccess::Read, BufferAccess::Read)
-        .set_buffer_arg_effect(1, recipe.reduction ? BufferAccess::Write : BufferAccess::Read,
-                               BufferAccess::Read)
-        .set_buffer_arg_effect(2, BufferAccess::Write, BufferAccess::Read)
         .set_buffer_result_behavior(BufferResultBehavior::None)
         .f_deduce_type(
             [recipe](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>&) {
-              backend::ValidateBufferRowOperands(recipe, args);
+              backend::ValidateBufferAxisOperands(recipe, args);
               return GetVoidType();
             });
-    if (recipe.reduction) entry.set_workspace_arg(1);
+    if (recipe.InputCount() == 2) {
+      entry.add_argument("auxiliary", recipe.HasScratch() ? "Full-valid workspace" : "Broadcast vector")
+          .set_buffer_arg_effect(1, recipe.HasScratch() ? BufferAccess::Write : BufferAccess::Read,
+                                 BufferAccess::Read);
+    }
+    entry.add_argument("destination", "Explicit destination")
+        .set_buffer_arg_effect(recipe.InputCount(), BufferAccess::Write, BufferAccess::Read);
+    if (recipe.HasScratch()) entry.set_workspace_arg(1);
   }
   return true;
 }();

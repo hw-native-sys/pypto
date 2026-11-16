@@ -956,20 +956,20 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_max",        nullptr,                2},
     {"tile.row_min",        nullptr,                2},
     {"tile.row_prod",       nullptr,                2},
-    {"tile.col_max",         "pto.tcolmax",          1},
-    {"tile.col_min",         "pto.tcolmin",          1},
-    {"tile.col_prod",        "pto.tcolprod",         1},
+    {"tile.col_max",         nullptr,                1},
+    {"tile.col_min",         nullptr,                1},
+    {"tile.col_prod",        nullptr,                1},
     // Argmax/argmin reductions — int32 index output, require a tmp scratch tile.
     {"tile.row_argmax",      "pto.trowargmax",       2},
     {"tile.row_argmin",      "pto.trowargmin",       2},
     {"tile.col_argmax",      "pto.tcolargmax",       2},
     {"tile.col_argmin",      "pto.tcolargmin",       2},
-    {"tile.col_expand_mul",  "pto.tcolexpandmul",    2},
-    {"tile.col_expand_add",  "pto.tcolexpandadd",    2},
-    {"tile.col_expand_div",  "pto.tcolexpanddiv",    2},
-    {"tile.col_expand_sub",  "pto.tcolexpandsub",    2},
-    {"tile.col_expand_max",  "pto.tcolexpandmax",    2},
-    {"tile.col_expand_min",  "pto.tcolexpandmin",    2},
+    {"tile.col_expand_mul",  nullptr,                2},
+    {"tile.col_expand_add",  nullptr,                2},
+    {"tile.col_expand_div",  nullptr,                2},
+    {"tile.col_expand_sub",  nullptr,                2},
+    {"tile.col_expand_max",  nullptr,                2},
+    {"tile.col_expand_min",  nullptr,                2},
     {"tile.col_expand_expdif", "pto.tcolexpandexpdif", 2},
     {"tile.row_expand_div", nullptr,                2},
     {"tile.row_expand_mul", nullptr,                2},
@@ -1253,12 +1253,13 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
             const std::string src_ssa = EnsureStaticViewTileSsa(op->args_[0], codegen, "colsum_src_view");
             const std::string tmp_ssa = EnsureStaticViewTileSsa(op->args_[1], codegen, "colsum_tmp_view");
             const std::string dst_ssa = EnsureStaticViewTileSsa(dst_var, codegen, "colsum_dst_view");
-            EmitInsOutsWithViewTypes(codegen, "pto.tcolsum",
+            EmitInsOutsWithViewTypes(codegen, GetPtoNativeOpSpec("tile.col_sum").native_op,
                                      {{src_ssa, GetTileViewTypeAnnotation(op->args_[0], codegen)},
                                       {tmp_ssa, GetTileViewTypeAnnotation(op->args_[1], codegen)}},
                                      dst_ssa, dst_type, config_attr);
           } else {
-            codegen.Emit("pto.tcolsum " + GenerateInsOutsClause(op, codegen, config_attr));
+            codegen.Emit(std::string(GetPtoNativeOpSpec("tile.col_sum").native_op) + " " +
+                         GenerateInsOutsClause(op, codegen, config_attr));
           }
           return std::string("");
         });

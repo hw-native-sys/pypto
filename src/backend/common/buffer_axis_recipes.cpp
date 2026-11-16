@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/backend/common/buffer_row_recipes.h"
+#include "pypto/backend/common/buffer_axis_recipes.h"
 
 #include <cstddef>
 #include <string>
@@ -27,8 +27,8 @@
 
 namespace pypto::backend {
 
-const std::vector<BufferRowRecipe>& GetBufferRowRecipes() {
-  static const std::vector<BufferRowRecipe> recipes = {
+const std::vector<BufferAxisRecipe>& GetBufferAxisRecipes() {
+  static const std::vector<BufferAxisRecipe> recipes = {
       {"tile.row_max", "buffer.row_max", GetPtoNativeOpSpec("tile.row_max").native_op, true},
       {"tile.row_sum", "buffer.row_sum", GetPtoNativeOpSpec("tile.row_sum").native_op, true},
       {"tile.row_min", "buffer.row_min", GetPtoNativeOpSpec("tile.row_min").native_op, true},
@@ -45,24 +45,40 @@ const std::vector<BufferRowRecipe>& GetBufferRowRecipes() {
        false},
       {"tile.row_expand_min", "buffer.row_expand_min", GetPtoNativeOpSpec("tile.row_expand_min").native_op,
        false},
+      {"tile.col_sum", "buffer.col_sum", GetPtoNativeOpSpec("tile.col_sum").native_op, true, 0},
+      {"tile.col_max", "buffer.col_max", GetPtoNativeOpSpec("tile.col_max").native_op, true, 0},
+      {"tile.col_min", "buffer.col_min", GetPtoNativeOpSpec("tile.col_min").native_op, true, 0},
+      {"tile.col_prod", "buffer.col_prod", GetPtoNativeOpSpec("tile.col_prod").native_op, true, 0},
+      {"tile.col_expand_add", "buffer.col_expand_add", GetPtoNativeOpSpec("tile.col_expand_add").native_op,
+       false, 0},
+      {"tile.col_expand_sub", "buffer.col_expand_sub", GetPtoNativeOpSpec("tile.col_expand_sub").native_op,
+       false, 0},
+      {"tile.col_expand_mul", "buffer.col_expand_mul", GetPtoNativeOpSpec("tile.col_expand_mul").native_op,
+       false, 0},
+      {"tile.col_expand_div", "buffer.col_expand_div", GetPtoNativeOpSpec("tile.col_expand_div").native_op,
+       false, 0},
+      {"tile.col_expand_max", "buffer.col_expand_max", GetPtoNativeOpSpec("tile.col_expand_max").native_op,
+       false, 0},
+      {"tile.col_expand_min", "buffer.col_expand_min", GetPtoNativeOpSpec("tile.col_expand_min").native_op,
+       false, 0},
   };
   return recipes;
 }
 
-const BufferRowRecipe* FindLogicalBufferRowRecipe(const std::string& name) {
+const BufferAxisRecipe* FindLogicalBufferAxisRecipe(const std::string& name) {
   static const auto index = [] {
-    std::unordered_map<std::string, const BufferRowRecipe*> result;
-    for (const auto& recipe : GetBufferRowRecipes()) result.emplace(recipe.logical_op, &recipe);
+    std::unordered_map<std::string, const BufferAxisRecipe*> result;
+    for (const auto& recipe : GetBufferAxisRecipes()) result.emplace(recipe.logical_op, &recipe);
     return result;
   }();
   const auto found = index.find(name);
   return found == index.end() ? nullptr : found->second;
 }
 
-const BufferRowRecipe* FindBufferRowRecipe(const std::string& name) {
+const BufferAxisRecipe* FindBufferAxisRecipe(const std::string& name) {
   static const auto index = [] {
-    std::unordered_map<std::string, const BufferRowRecipe*> result;
-    for (const auto& recipe : GetBufferRowRecipes()) result.emplace(recipe.buffer_op, &recipe);
+    std::unordered_map<std::string, const BufferAxisRecipe*> result;
+    for (const auto& recipe : GetBufferAxisRecipes()) result.emplace(recipe.buffer_op, &recipe);
     return result;
   }();
   const auto found = index.find(name);
@@ -73,10 +89,10 @@ namespace {
 
 // Return a contract diagnostic without throwing: the same predicate must serve
 // whole-kernel selection before planning and validation of explicit Buffer IR.
-const char* OperandError(const BufferRowRecipe& recipe, const std::vector<ir::BufferTypePtr>& types) {
+const char* OperandError(const BufferAxisRecipe& recipe, const std::vector<ir::BufferTypePtr>& types) {
   for (size_t i = 0; i < types.size(); ++i) {
     const auto& type = types[i];
-    const bool column = i == (recipe.reduction ? 2 : 1);
+    const bool column = recipe.axis == 1 && i == (recipe.reduction ? 2 : 1);
     if (column) {
       if (!IsColumnVectorBuffer(type)) return "requires a static aligned FP32 column vector";
     } else if (!type || type->shape_.size() != 2 || type->dtype_ != DataType::FP32 ||
@@ -91,6 +107,18 @@ const char* OperandError(const BufferRowRecipe& recipe, const std::vector<ir::Bu
     }
   }
   const auto& source = types[0];
+  if (recipe.axis == 0) {
+    const auto& row = types[1];
+    if (row->shape_[0] != 1 || row->valid_shape_[0] != 1 || row->shape_[1] != source->shape_[1] ||
+        row->valid_shape_[1] != source->valid_shape_[1]) {
+      return "requires a single row preserving physical and valid columns";
+    }
+    if (!recipe.reduction &&
+        (types[2]->shape_ != source->shape_ || types[2]->valid_shape_ != source->valid_shape_)) {
+      return "requires the broadcast destination to preserve source physical and valid shape";
+    }
+    return nullptr;
+  }
   const auto& column = types[recipe.reduction ? 2 : 1];
   if (column->shape_[0] != source->shape_[0] || column->valid_shape_[0] != source->valid_shape_[0]) {
     return "requires the column vector to preserve physical and valid rows";
@@ -109,18 +137,21 @@ const char* OperandError(const BufferRowRecipe& recipe, const std::vector<ir::Bu
 
 }  // namespace
 
-bool SupportsLogicalBufferRow(const BufferRowRecipe& recipe, const ir::CallPtr& call) {
-  // The optional-scratch and packed-carrier row_expand_add overloads remain
-  // Tile; this recipe is the existing two-input contiguous-column form.
-  if (call->args_.size() != 2 || !call->kwargs_.empty()) return false;
+bool SupportsLogicalBufferAxis(const BufferAxisRecipe& recipe, const ir::CallPtr& call) {
+  // Binary-tree col_sum and optional-scratch/packed row_expand_add have
+  // separate storage contracts and remain on Tile.
+  if (call->args_.size() != recipe.InputCount() || !call->kwargs_.empty()) return false;
   std::vector<ir::BufferTypePtr> types;
   for (const auto& arg : call->args_) types.push_back(StaticLogicalBufferDescriptor(arg->GetType()));
   types.push_back(StaticLogicalBufferDescriptor(call->GetType()));
   return OperandError(recipe, types) == nullptr;
 }
 
-void ValidateBufferRowOperands(const BufferRowRecipe& recipe, const std::vector<ir::ExprPtr>& args) {
-  CHECK(args.size() == 3) << recipe.buffer_op << " requires two inputs and an explicit destination";
+void ValidateBufferAxisOperands(const BufferAxisRecipe& recipe, const std::vector<ir::ExprPtr>& args) {
+  CHECK(args.size() == recipe.InputCount() + 1)
+      << recipe.buffer_op
+      << (recipe.InputCount() == 2 ? " requires two inputs and an explicit destination"
+                                   : " requires one input and an explicit destination");
   std::vector<ir::BufferTypePtr> types;
   for (const auto& arg : args) {
     CHECK(arg) << recipe.buffer_op << " operands must not be null";

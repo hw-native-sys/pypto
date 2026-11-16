@@ -40,6 +40,9 @@ def _buffer(name, column=False, **changes):
 
 
 def _args(suffix):
+    if suffix.startswith("col_"):
+        row = _buffer("row", shape=[1, 64])
+        return [_buffer("src"), row, _buffer("dst")] if "expand" in suffix else [_buffer("src"), row]
     reduction = suffix in _REDUCTIONS
     return [_buffer("src"), _buffer("aux", column=not reduction), _buffer("dst", column=reduction)]
 
@@ -102,7 +105,7 @@ def test_row_recipe_requires_matching_row_geometry(suffix):
         _call(suffix, arguments)
 
 
-def _verify_storage(suffix, addresses):
+def _verify_storage(suffix, addresses, source_window=False):
     arguments = _args(suffix)
     allocations = [
         ir.AssignStmt(
@@ -119,6 +122,30 @@ def _verify_storage(suffix, addresses):
         )
         for value, address in zip(arguments, addresses)
     ]
+    if source_window:
+        # The source still advertises [16,64], but its parent has a 128-column
+        # row pitch. Descriptor-only validation cannot detect this distinction.
+        parent = _buffer("parent", shape=[16, 128])
+        allocations[0] = ir.AssignStmt(
+            parent,
+            ir.Call(
+                ir.get_op("buffer.alloc"),
+                [ir.MakeTuple([], _SPAN), ir.ConstInt(0, DataType.INDEX, _SPAN)],
+                {},
+                None,
+                parent.type,
+                _SPAN,
+            ),
+            _SPAN,
+        )
+        offsets = ir.MakeTuple([ir.ConstInt(0, DataType.INDEX, _SPAN)] * 2, _SPAN)
+        allocations.append(
+            ir.AssignStmt(
+                arguments[0],
+                ir.Call(ir.get_op("buffer.subview"), [parent, offsets], {}, None, arguments[0].type, _SPAN),
+                _SPAN,
+            )
+        )
     body = ir.SeqStmts([*allocations, ir.EvalStmt(_call(suffix, arguments), _SPAN)], _SPAN)
     program = ir.Program(
         [
@@ -146,6 +173,75 @@ def test_broadcast_can_reuse_matrix_but_not_its_repeated_column(suffix):
     assert _verify_storage(suffix, (0, 4096, 0)) == []
     diagnostics = _verify_storage(suffix, (0, 4096, 4096))
     assert diagnostics and any("disjoint" in diagnostic.message for diagnostic in diagnostics)
+
+
+_COLUMN_REDUCTIONS = ("col_sum", "col_max", "col_min", "col_prod")
+_COLUMN_BROADCASTS = tuple(f"col_expand_{op}" for op in ("add", "sub", "mul", "div", "max", "min"))
+_COLUMN_RECIPES = (*_COLUMN_REDUCTIONS, *_COLUMN_BROADCASTS)
+
+
+@pytest.mark.parametrize("suffix", _COLUMN_RECIPES)
+def test_column_effects_and_roundtrip(suffix):
+    arguments = _args(suffix)
+    call = _call(suffix, arguments)
+    assert isinstance(call.type, ir.VoidType)
+    for index in range(len(arguments)):
+        effect = ir.get_op_buffer_arg_effect(call.op.name, index)
+        assert effect.data == (ir.BufferAccess.Write if index == len(arguments) - 1 else ir.BufferAccess.Read)
+        assert effect.metadata == ir.BufferAccess.Read
+        assert not ir.op_arg_is_workspace(call.op.name, index)
+    statement = ir.EvalStmt(call, _SPAN)
+    ir.assert_structural_equal(statement, ir.deserialize(ir.serialize(statement)), enable_auto_mapping=True)
+    with pytest.raises(ValueError, match="explicit destination"):
+        _call(suffix, arguments[:-1])
+
+
+@pytest.mark.parametrize("suffix", _COLUMN_RECIPES)
+@pytest.mark.parametrize(
+    "changes,diagnostic",
+    [
+        ({"dtype": DataType.FP16}, "FP32"),
+        ({"blayout": ir.TileLayout.col_major}, "row-major"),
+        ({"valid_shape": [0, 64]}, "nonempty static valid"),
+        ({"valid_shape": [-1, -1]}, "nonempty static valid"),
+    ],
+)
+def test_column_contract_rejects_unverified_matrix(suffix, changes, diagnostic):
+    arguments = _args(suffix)
+    arguments[0] = _buffer("src", **changes)
+    with pytest.raises(ValueError, match=diagnostic):
+        _call(suffix, arguments)
+
+
+@pytest.mark.parametrize("suffix", _COLUMN_RECIPES)
+@pytest.mark.parametrize("changes", [{"shape": [2, 64]}, {"shape": [1, 32]}, {"valid_shape": [1, 57]}])
+def test_column_carrier_preserves_valid_and_physical_columns(suffix, changes):
+    arguments = _args(suffix)
+    options: dict[str, Any] = {"shape": [1, 64], **changes}
+    arguments[1] = _buffer("row", **options)
+    with pytest.raises(ValueError, match="single row preserving physical and valid columns"):
+        _call(suffix, arguments)
+
+
+@pytest.mark.parametrize("suffix", _COLUMN_REDUCTIONS)
+def test_column_reduction_rejects_source_overlap(suffix):
+    assert _verify_storage(suffix, (0, 4096)) == []
+    diagnostics = _verify_storage(suffix, (0, 0))
+    assert diagnostics and any("disjoint" in diagnostic.message for diagnostic in diagnostics)
+
+
+@pytest.mark.parametrize("suffix", _COLUMN_BROADCASTS)
+def test_column_broadcast_can_reuse_matrix_not_row(suffix):
+    assert _verify_storage(suffix, (0, 4096, 0)) == []
+    diagnostics = _verify_storage(suffix, (0, 4096, 4096))
+    assert diagnostics and any("disjoint" in diagnostic.message for diagnostic in diagnostics)
+
+
+@pytest.mark.parametrize("suffix", _COLUMN_RECIPES)
+def test_column_recipes_reject_inherited_wide_pitch(suffix):
+    addresses = (0, 16384) if suffix in _COLUMN_REDUCTIONS else (0, 16384, 32768)
+    diagnostics = _verify_storage(suffix, addresses, source_window=True)
+    assert diagnostics and any("dense physical row pitch" in item.message for item in diagnostics)
 
 
 if __name__ == "__main__":

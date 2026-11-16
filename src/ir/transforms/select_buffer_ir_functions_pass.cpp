@@ -24,10 +24,10 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/backend/common/buffer_axis_recipes.h"
 #include "pypto/backend/common/buffer_conversion_recipes.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
-#include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_transpose_recipe.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
@@ -410,9 +410,9 @@ class BufferKernelSupport : public IRVisitor {
       supported &= backend::SupportsLogicalBufferTranspose(call);
       // A logical window can retain a wider physical pitch than its descriptor.
       for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
-    } else if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
-      supported &= backend::SupportsLogicalBufferRow(*row_recipe, call);
-      // Native row recipes below are dense allocations. A slice retains a
+    } else if (const auto* axis_recipe = backend::FindLogicalBufferAxisRecipe(call->op_->name_)) {
+      supported &= backend::SupportsLogicalBufferAxis(*axis_recipe, call);
+      // Native axis recipes below are dense allocations. A slice retains a
       // different physical pitch and needs its own reduction/broadcast recipe.
       for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
     } else if (!IsOp(call, "tile.alloc")) {
