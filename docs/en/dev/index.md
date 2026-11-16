@@ -74,12 +74,12 @@ verifies both GitHub's current test-merge SHA and its parents before any tests s
 The full-test base is read from the actual test merge's first parent, not the
 PR's cached `base.sha` or an assumed current main. Its second parent must match
 the current PR head. An existing GitHub merge snapshot may be used when its base
-is an ancestor of live `refs/heads/main` and is **0–4 commits behind**; a snapshot
-5 or more commits behind, rewritten history, or an unknown distance is rejected.
+is an ancestor of live `refs/heads/main` and is **0–10 commits behind**; a snapshot
+11 or more commits behind, rewritten history, or an unknown distance is rejected.
 The dispatch inputs and run title record this actual tested base. Lint selection
 uses the newest automatic run for the same PR head whose base remains in main history.
 Before allowing full CI, the command compares the pinned PR head with live main:
-**0–4 commits behind is allowed; 5 or more is rejected**. Only commits present on
+**0–10 commits behind is allowed; 11 or more is rejected**. Only commits present on
 main but missing from the PR count; the PR's own commits do not. A rejected
 comment receives a reply with the count and instructions to rebase onto latest
 main, wait for lint, and post `/ci full` again. The check runs before dispatch or
@@ -246,7 +246,7 @@ A rerun of an old request cannot cancel a
 newer request. A new commit needs a new `/ci full` comment. If main advances during
 the run, per-job results keep syncing and `ci/full` remains pending until completion.
 A successful result applies the same limit to both the PR head and the actual
-tested base: 0–4 missing main commits is allowed; 5 or more for either fails with
+tested base: 0–10 missing main commits is allowed; 11 or more for either fails with
 a rebase explanation in the status description.
 Rewritten main history that no longer contains the tested base also fails.
 Repeated comments preserve an ongoing run for the same head, or a successful result

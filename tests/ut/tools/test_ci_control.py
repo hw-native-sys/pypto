@@ -200,7 +200,7 @@ def test_current_base_requires_live_main_commit(controller, monkeypatch, invalid
         assert controller.current_base(REPO) == BASE
 
 
-@pytest.mark.parametrize("behind", [0, 4, 5, 6, 1000])
+@pytest.mark.parametrize("behind", [0, 4, 5, 9, 10, 11, 12, 1000])
 def test_branch_freshness_counts_only_missing_main_commits(controller, monkeypatch, behind):
     def api(path):
         assert path == f"repos/{REPO}/compare/{BASE}...{HEAD}?per_page=1"
@@ -209,7 +209,7 @@ def test_branch_freshness_counts_only_missing_main_commits(controller, monkeypat
         return {"behind_by": behind, "ahead_by": 200, "commits": [{}]}
 
     monkeypatch.setattr(controller, "api", api)
-    if behind < 5:
+    if behind <= 10:
         controller.verify_branch_freshness(REPO, HEAD, BASE)
     else:
         with pytest.raises(ValueError, match=f"{behind} commits behind main.*rebase"):
@@ -224,7 +224,7 @@ def test_unknown_branch_distance_cannot_authorize_full(controller, monkeypatch, 
 
 
 @pytest.mark.parametrize("command", ["command-route", "dispatch"])
-@pytest.mark.parametrize("behind", [5, 6])
+@pytest.mark.parametrize("behind", [11, 12])
 def test_outdated_branch_blocks_full_and_reports_rebase(
     controller, monkeypatch, event, pr, tmp_path, command, behind
 ):
@@ -265,7 +265,7 @@ def test_outdated_branch_blocks_full_and_reports_rebase(
     assert "rebase onto the latest main, wait for lint to pass" in replies[0][1]["body"]
 
 
-@pytest.mark.parametrize("behind", [0, 4, 5, 6])
+@pytest.mark.parametrize("behind", [0, 4, 5, 9, 10, 11, 12])
 def test_manual_pr_full_cannot_bypass_branch_distance(controller, monkeypatch, pr, tmp_path, behind):
     output_file = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
@@ -284,7 +284,7 @@ def test_manual_pr_full_cannot_bypass_branch_distance(controller, monkeypatch, p
 
     monkeypatch.setattr(controller, "api", api)
     event = {"inputs": {"pr_number": "123", "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE}}
-    if behind < 5:
+    if behind <= 10:
         controller.prepare(REPO, event)
         assert f"checkout_sha={MERGE}\nreuse_lint=true\n" in output_file.read_text()
         assert lint_checks == [True]
@@ -294,7 +294,7 @@ def test_manual_pr_full_cannot_bypass_branch_distance(controller, monkeypatch, p
         assert not output_file.exists() and not lint_checks
 
 
-@pytest.mark.parametrize("snapshot_behind", [0, 1, 4])
+@pytest.mark.parametrize("snapshot_behind", [0, 1, 4, 5, 9, 10])
 def test_stale_pr_base_allows_pinned_full_lifecycle(
     controller, monkeypatch, event, pr, tmp_path, snapshot_behind
 ):
@@ -406,7 +406,7 @@ def test_changed_pr_rejected_before_checkout(control, pr):
         control.verify_merge(REPO, pr, HEAD, BASE, MERGE)
 
 
-@pytest.mark.parametrize("behind", [None, -1, True, "4", 4.5, 5, 8])
+@pytest.mark.parametrize("behind", [None, -1, True, "4", 4.5, 11, 15])
 @pytest.mark.parametrize("stage", ["admission", "prepare", "result"])
 def test_old_or_unknown_snapshot_cannot_pass_with_a_fresh_head(
     controller, monkeypatch, pr, event, tmp_path, behind, stage
@@ -1036,7 +1036,7 @@ def test_forged_merge_with_correct_parents_is_rejected(control, pr):
         control.verify_merge(REPO, pr, HEAD, BASE, "d" * 40)
 
 
-@pytest.mark.parametrize("behind", [0, 1, 4, 5, 6])
+@pytest.mark.parametrize("behind", [0, 1, 4, 5, 9, 10, 11, 12])
 @pytest.mark.parametrize("ancestor", [True, False])
 def test_result_freshness_allows_bounded_main_advance(controller, monkeypatch, behind, ancestor):
     current = "d" * 40
@@ -1049,29 +1049,29 @@ def test_result_freshness_allows_bounded_main_advance(controller, monkeypatch, b
         return {"merge_base_commit": {"sha": BASE if ancestor else "e" * 40}, "ahead_by": behind}
 
     monkeypatch.setattr(controller, "api", api)
-    if behind >= 5 or not ancestor:
+    if behind > 10 or not ancestor:
         with pytest.raises(ValueError, match="rebase"):
             controller.verify_result_freshness(REPO, HEAD, BASE)
     else:
         controller.verify_result_freshness(REPO, HEAD, BASE)
 
 
-@pytest.mark.parametrize("behind", [1, 4, 5])
+@pytest.mark.parametrize("behind", [1, 4, 5, 9, 10, 11])
 def test_publication_checks_freshness_and_explains_rejection(control, monkeypatch, publication, behind):
     calls = []
 
     def freshness(repo, head, base):
         calls.append((repo, head, base))
-        if behind >= 5:
+        if behind > 10:
             raise ValueError(f"PR is {behind} commits behind main; rebase and post /ci full again")
 
     monkeypatch.setattr(control, "verify_result_freshness", freshness)
     control.publish(REPO, {"workflow_run": {"id": 50}})
     status = publication[3][0][1]
     assert calls == [(REPO, HEAD, BASE)]
-    assert status["state"] == ("success" if behind < 5 else "failure")
-    if behind >= 5:
-        assert "5 commits behind main; rebase" in status["description"]
+    assert status["state"] == ("success" if behind <= 10 else "failure")
+    if behind > 10:
+        assert "11 commits behind main; rebase" in status["description"]
 
 
 def test_running_full_stays_pending_when_main_advances(control, monkeypatch, publication):
@@ -2247,7 +2247,7 @@ def test_already_green_requires_verified_full_revision(control, monkeypatch, pr,
     if case == "changed-base":
 
         def stale(*args):
-            raise ValueError("PR is 5 commits behind main; rebase")
+            raise ValueError("PR is 11 commits behind main; rebase")
 
         monkeypatch.setattr(control, "verify_result_freshness", stale)
     elif case == "failed":
