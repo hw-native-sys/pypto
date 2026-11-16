@@ -379,6 +379,34 @@ def test_device_image_requires_null_section_zero(offset, fmt):
         validate_device_image(bytes(image), entry_symbol="kernel_entry")
 
 
+@pytest.mark.parametrize("entry_symbol", [None, "kernel_entry"])
+@pytest.mark.parametrize("name", [b".te\xffxt", b"\x80.text", b".text\xfe"])
+def test_device_image_rejects_section_names_decoded_as_text(entry_symbol, name):
+    image = _text_only_elf()
+    names_size = struct.unpack_from("<Q", image, 576 + 32)[0]
+    image[64 + names_size : 64 + names_size + len(name) + 1] = name + b"\0"
+    # Rename the earlier, nonallocated string table. The loader drops the
+    # non-ASCII byte and selects its payload instead of the validated .text.
+    struct.pack_into("<I", image, 576, names_size)
+    struct.pack_into("<Q", image, 576 + 32, names_size + len(name) + 1)
+    loaded = extract_text_section(bytes(image))
+    assert loaded == bytes(image[64 : 64 + names_size + len(name) + 1])
+    assert loaded != bytes(image[128:144])
+    with pytest.raises(ValueError, match="non-ASCII section name"):
+        validate_device_image(bytes(image), entry_symbol=entry_symbol)
+
+
+@pytest.mark.parametrize("entry_symbol", [None, "kernel_entry"])
+def test_device_image_rejects_non_ascii_section_names_outside_text(entry_symbol):
+    image = _text_only_elf()
+    # The .strtab name is not selected by the loader, but admission still
+    # requires every section name to have an unambiguous ASCII spelling.
+    image[64 + 18] = 0xFF
+    assert extract_text_section(bytes(image)) == bytes(image[128:144])
+    with pytest.raises(ValueError, match="non-ASCII section name"):
+        validate_device_image(bytes(image), entry_symbol=entry_symbol)
+
+
 @pytest.mark.parametrize("definition", ["kernel_entry", "helper"])
 def test_text_only_accepts_stack_report_for_either_function_alias(tmp_path, definition):
     image = _text_only_elf()

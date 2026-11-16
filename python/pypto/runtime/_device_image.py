@@ -66,6 +66,10 @@ def _text_section(entry: int, sections: list[_Section], strings: bytes, *, plain
     text_index = 0
     for index, section in enumerate(sections):
         name = _string(strings, section.name)
+        # The loader ignores non-ASCII bytes when decoding names. Reject them
+        # so it cannot select a different section after dropping those bytes.
+        if not name.isascii():
+            raise ValueError(f"Device image has a non-ASCII section name {name!r}")
         # Host-launched kernels can carry SU/SIMT stack and UB provisioning
         # metadata. A .su report does not replace that launch contract, and the
         # persistent text loader cannot consume it. Accept only plain callees.

@@ -166,7 +166,9 @@ SDK data such as `g_tilingKey`; referenced data must still pass the final check.
 Before returning the linked ELF, the compiler requires one nonempty executable
 `.text` section, a global `kernel_entry` at its first byte, no other nonempty
 allocated sections, no remaining relocations or unresolved symbols, and valid
-section and symbol tables, including a null section at index 0. Nonempty
+section and symbol tables, including a null section at index 0. All section names
+must be ASCII so the loader cannot select different bytes by discarding invalid
+characters during name decoding. Nonempty
 `.ascend.meta*` sections are rejected because kernel launch metadata can require
 additional SU/SIMT stack or UB provisioning.
 Every retained function must have a compiler report
