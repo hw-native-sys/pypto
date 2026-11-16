@@ -26,7 +26,9 @@ PTO codegen 直接接收分配句柄和目标操作数。
 | add、mul | FP16、FP32、INT32 |
 | sub、div、maximum、minimum、abs、exp、sqrt、neg、relu、log、recip | FP32 |
 | adds、subs、muls、divs、maximums、minimums、lrelu、full | FP32 |
-| row_max、row_sum、row_expand_sub、row_expand_div | FP32，正静态 valid |
+| row_max、row_sum、row_min、row_prod | FP32，正静态 valid |
+| row_expand_add/sub/mul/div/max/min | FP32，正静态 valid，连续列向量 |
+| transpose | FP32，full-valid 稠密二维矩阵 |
 
 标量参数遵循已有 scalar ABI，元素标量在 lowering 中显式转换。
 `full` 后接 store 的无 load kernel 也可入选。BF16 传输不包含 BF16 算术或填充。
@@ -49,6 +51,14 @@ FP32 行配方支持 allocation-backed 的稠密矩阵和正静态 valid。归�
 支持完整的 `row_max -> row_expand_sub -> exp -> row_sum -> row_expand_div` softmax
 链。包含运行时/空 valid 状态、窗口操作数、其他 dtype 或其他归约操作的行配方 kernel
 继续 Tile。空归约轴不沿用逐元素操作的无数据路径语义。
+`row_expand_add` 使用双输入的连续列向量形式；带可选 scratch 或行优先打包载体的形式仍走 Tile。
+
+稠密 FP32 `transpose` 复用 `FlattenTileNdTo2D` 已创建的 scratch。
+Lowering 去除逻辑轴参数，生成 `buffer.transpose(source, scratch, destination)`。
+各描述符均为 full-valid 行优先形式，物理行按 32 字节对齐；目的地交换源的两个维度，
+scratch 的形状必须与源完全一致。scratch 为只写，三个操作数的存储均须互不重叠。
+跨步窗口、部分或动态 valid 及其他 dtype 继续 Tile。两条路径共用 `pto.ttrans` 指令名和
+操作数格式化器，Buffer codegen 不再分配或推导 scratch 容量。
 
 cast/compare/select 链也支持正静态 valid 和 allocation-backed 稠密操作数。
 `cast` 支持 FP16→FP32 和 FP32→FP16，舍入模式为 `none`/`rint`，饱和模式为 off；

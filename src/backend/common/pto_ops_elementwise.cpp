@@ -342,7 +342,8 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
 
   // Both operands carry src's annotation (pto.ttrans requires a matched type
   // pair); when src_type is empty, EmitInsOuts omits the whole `: types` clause.
-  EmitInsOuts(codegen, "pto.ttrans", {{src_ssa, src_type}, {tmp_ssa, src_type}});
+  EmitInsOuts(codegen, GetPtoNativeOpSpec("tile.transpose").native_op,
+              {{src_ssa, src_type}, {tmp_ssa, src_type}});
   return std::string("");
 }
 
@@ -897,7 +898,7 @@ static std::string MakePreluCodegenPTO(const CallPtr& op, codegen::CodegenBase& 
 
 struct SimpleOpEntry {
   const char* op_name;
-  const char* pto_op_name;  ///< nullptr uses the shared elementwise native specification.
+  const char* pto_op_name;  ///< nullptr uses the shared native specification.
   size_t arity;
   std::optional<size_t> i32_operand_idx = std::nullopt;
 };
@@ -951,10 +952,10 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.subsc",           "pto.tsubsc",           3},
     {"tile.selc",            "pto.tselc",            3},
     // Axis reduction/expansion operations
-    {"tile.row_sum",         "pto.trowsum",          2},
-    {"tile.row_max",         "pto.trowmax",          2},
-    {"tile.row_min",         "pto.trowmin",          2},
-    {"tile.row_prod",        "pto.trowprod",         2},
+    {"tile.row_sum",        nullptr,                2},
+    {"tile.row_max",        nullptr,                2},
+    {"tile.row_min",        nullptr,                2},
+    {"tile.row_prod",       nullptr,                2},
     {"tile.col_max",         "pto.tcolmax",          1},
     {"tile.col_min",         "pto.tcolmin",          1},
     {"tile.col_prod",        "pto.tcolprod",         1},
@@ -970,11 +971,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.col_expand_max",  "pto.tcolexpandmax",    2},
     {"tile.col_expand_min",  "pto.tcolexpandmin",    2},
     {"tile.col_expand_expdif", "pto.tcolexpandexpdif", 2},
-    {"tile.row_expand_div",  "pto.trowexpanddiv",    2},
-    {"tile.row_expand_mul",  "pto.trowexpandmul",    2},
-    {"tile.row_expand_sub",  "pto.trowexpandsub",    2},
-    {"tile.row_expand_max",  "pto.trowexpandmax",    2},
-    {"tile.row_expand_min",  "pto.trowexpandmin",    2},
+    {"tile.row_expand_div", nullptr,                2},
+    {"tile.row_expand_mul", nullptr,                2},
+    {"tile.row_expand_sub", nullptr,                2},
+    {"tile.row_expand_max", nullptr,                2},
+    {"tile.row_expand_min", nullptr,                2},
     {"tile.row_expand_expdif", "pto.trowexpandexpdif", 2},
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
@@ -1012,8 +1013,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // Register simple N-ary ops
   for (const auto& entry : kSimpleOps) {
     if (!ShouldRegister(exclude_ops, entry.op_name)) continue;
-    std::string pto_op =
-        entry.pto_op_name ? entry.pto_op_name : GetPtoElementwiseSpec(entry.op_name).native_op;
+    std::string pto_op = entry.pto_op_name ? entry.pto_op_name : GetPtoNativeOpSpec(entry.op_name).native_op;
     size_t arity = entry.arity;
     std::optional<size_t> i32_operand_idx = entry.i32_operand_idx;
     auto reg_entry = backend.RegisterOp(entry.op_name);
@@ -1030,7 +1030,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   struct RemainderOpEntry {
     const char* op_name;
-    const char* pto_op_name;  ///< nullptr uses the shared elementwise native specification.
+    const char* pto_op_name;
     size_t arity;
     const char* precision_attr_kind;
   };
@@ -1098,7 +1098,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   for (const char* op_name : {"tile.div", "tile.log", "tile.recip"}) {
     if (!ShouldRegister(exclude_ops, op_name)) continue;
-    const auto spec = GetPtoElementwiseSpec(op_name);
+    const auto spec = GetPtoNativeOpSpec(op_name);
     const size_t arity = std::string_view(op_name) == "tile.div" ? 2 : 1;
     auto reg_entry = backend.RegisterOp(op_name);
     reg_entry.f_codegen([spec, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
@@ -1119,7 +1119,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       const size_t arity = op->args_.size();
       INTERNAL_CHECK_SPAN(arity == 2 || arity == 3, op->span_)
           << "tile.row_expand_add requires 2 or 3 arguments, but got " << arity;
-      return MakeNaryCodegenPTO("pto.trowexpandadd", arity, op, codegen);
+      return MakeNaryCodegenPTO(GetPtoNativeOpSpec("tile.row_expand_add").native_op, arity, op, codegen);
     });
   }
 
@@ -1268,7 +1268,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   if (ShouldRegister(exclude_ops, "tile.full")) {
     backend.RegisterOp("tile.full")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeFullCodegenPTO(GetPtoElementwiseSpec("tile.full").native_op, op, codegen);
+          return MakeFullCodegenPTO(GetPtoNativeOpSpec("tile.full").native_op, op, codegen);
         })
         .set_output_layout(ir::TileLayout::row_major);
   }

@@ -28,6 +28,7 @@
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
+#include "pypto/backend/common/buffer_transpose_recipe.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/ir/expr.h"
@@ -404,6 +405,10 @@ class BufferKernelSupport : public IRVisitor {
       for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
     } else if (const auto* conversion = backend::FindLogicalBufferConversionRecipe(call->op_->name_)) {
       supported &= backend::SupportsLogicalBufferConversion(*conversion, call);
+      for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
+    } else if (IsOp(call, "tile.transpose")) {
+      supported &= backend::SupportsLogicalBufferTranspose(call);
+      // A logical window can retain a wider physical pitch than its descriptor.
       for (const auto& arg : call->args_) supported &= !views_.IsWindow(arg);
     } else if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
       supported &= backend::SupportsLogicalBufferRow(*row_recipe, call);

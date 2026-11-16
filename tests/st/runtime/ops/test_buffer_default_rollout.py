@@ -233,7 +233,12 @@ def _assert_buffer_result(case_run, request):
     case_run.assert_passed()
     if request.config.getoption("--precompile-workers") is not None:
         assert case_run.work_dir is not None
-        program = ir.deserialize((case_run.work_dir / "buffer_ir.msgpack").read_bytes())
+        receipt = case_run.work_dir / "buffer_ir.msgpack"
+        if not case_run.case.get_enable_buffer_ir():
+            # The harness emits a stage receipt only when Buffer is enabled.
+            assert not receipt.exists()
+            return
+        program = ir.deserialize(receipt.read_bytes())
         kernels = [f for f in program.functions.values() if ir.is_incore_type(f.func_type)]
         expected = (
             ir.FunctionIRStage.Buffer
@@ -829,3 +834,105 @@ def test_default_compare_gather(case_run, request):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _row_compute_entry(valid):
+    rows, cols = valid
+
+    @pl.jit
+    def entry(a: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            source = pl.load(a, [0, 0], [16, 64], valid_shape=[rows, cols])
+            scratch = pl.create_tile([16, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            minimum = pl.tile.row_min(source, scratch)
+            product = pl.tile.row_prod(source, scratch)
+            added = pl.tile.row_expand_add(source, minimum)
+            multiplied = pl.tile.row_expand_mul(source, product)
+            maximum = pl.tile.row_expand_max(source, product)
+            bounded = pl.tile.row_expand_min(source, minimum)
+            out = pl.store(added, [0, 0], out)
+            out = pl.store(multiplied, [16, 0], out)
+            out = pl.store(maximum, [32, 0], out)
+            out = pl.store(bounded, [48, 0], out)
+            out = pl.store(source, [64, 0], out)
+        return out
+
+    return entry
+
+
+def _row_compute_golden(tensors, valid):
+    rows, cols = valid
+    active = tensors["a"][:rows, :cols]
+    minimum, product = active.amin(dim=-1, keepdim=True), active.prod(dim=-1, keepdim=True)
+    output = tensors["out"].clone()
+    for index, value in enumerate(
+        (
+            active + minimum,
+            active * product,
+            torch.maximum(active, product),
+            torch.minimum(active, minimum),
+            active,
+        )
+    ):
+        output[index * 16 : index * 16 + rows, :cols] = value
+    return output
+
+
+@st.cases(
+    *[
+        st.case(
+            _row_compute_entry(valid),
+            torch.rand((16, 64), generator=torch.Generator().manual_seed(28)) * 0.02 + 0.99,
+            torch.full((80, 64), -777.0),
+            name=f"buffer_row_compute_{valid[0]}_{valid[1]}_{planner.name.lower()}_{enabled}",
+            golden=lambda tensors, valid=valid: _row_compute_golden(tensors, valid),
+            memory_planner=planner,
+            enable_buffer_ir=enabled,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for valid in ((16, 64), (13, 57))
+        for planner in _PLANNERS
+        for enabled in (False, True)
+    ]
+)
+def test_default_extended_row_compute(case_run, request):
+    _assert_buffer_result(case_run, request)
+
+
+def _transpose_compute_entry(shape):
+    rows, cols = shape
+
+    @pl.jit
+    def entry(a: pl.Tensor, out: pl.Out[pl.Tensor], old: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            source = pl.load(a, [0, 0], [rows, cols])
+            transposed = pl.tile.transpose(source, -2, -1)
+            out = pl.store(transposed, [0, 0], out)
+            old = pl.store(source, [0, 0], old)
+        return out, old
+
+    return entry
+
+
+@st.cases(
+    *[
+        st.case(
+            _transpose_compute_entry(shape),
+            torch.arange(shape[0] * shape[1], dtype=torch.float32).reshape(shape),
+            torch.zeros((shape[1], shape[0])),
+            torch.zeros(shape),
+            name=f"buffer_transpose_compute_{shape[0]}_{shape[1]}_{planner.name.lower()}_{enabled}",
+            golden=lambda tensors: {"out": tensors["a"].T.contiguous(), "old": tensors["a"]},
+            memory_planner=planner,
+            enable_buffer_ir=enabled,
+            rtol=0,
+            atol=0,
+        )
+        for shape in ((16, 32), (32, 64), (24, 40))
+        for planner in _PLANNERS
+        for enabled in (False, True)
+    ]
+)
+def test_default_transpose_compute(case_run, request):
+    _assert_buffer_result(case_run, request)

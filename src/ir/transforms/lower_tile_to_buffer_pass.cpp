@@ -30,6 +30,7 @@
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
+#include "pypto/backend/common/buffer_transpose_recipe.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/backend/common/gather_compare_scratch.h"
@@ -1168,6 +1169,12 @@ class TileToBufferMutator : public IRMutator {
         kwargs = {{"mode", call->GetKwarg<int>("mode", 0)}, {"saturation_mode", 0}};
       }
       return Operation(conversion->buffer_op, args, call->span_, kwargs);
+    }
+    if (IsOp(call, "tile.transpose")) {
+      CHECK_SPAN(result && backend::SupportsLogicalBufferTranspose(call), call->span_)
+          << "LowerTileToBuffer: transpose requires full-valid dense FP32 operands and matching scratch";
+      return Operation("buffer.transpose", {Handle(call->args_[0]), Handle(call->args_[3]), Handle(result)},
+                       call->span_);
     }
     if (const auto* row_recipe = backend::FindLogicalBufferRowRecipe(call->op_->name_)) {
       CHECK_SPAN(result && backend::SupportsLogicalBufferRow(*row_recipe, call), call->span_)

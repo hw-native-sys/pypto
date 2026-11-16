@@ -33,7 +33,9 @@ partition form before storage planning rather than failing during final lowering
 | add, mul | FP16, FP32, INT32 |
 | sub, div, maximum, minimum, abs, exp, sqrt, neg, relu, log, recip | FP32 |
 | adds, subs, muls, divs, maximums, minimums, lrelu, full | FP32 |
-| row_max, row_sum, row_expand_sub, row_expand_div | FP32, positive static valid |
+| row_max, row_sum, row_min, row_prod | FP32, positive static valid |
+| row_expand_add/sub/mul/div/max/min | FP32, positive static valid, contiguous column carrier |
+| transpose | FP32, full-valid dense rank-2 matrices |
 
 Scalar parameters use the existing scalar ABI; element operands receive explicit
 conversion during lowering. `full` followed by store also qualifies without a
@@ -65,6 +67,18 @@ This supports the complete `row_max -> row_expand_sub -> exp -> row_sum ->
 row_expand_div` softmax chain. Row recipes in kernels with runtime/empty valid
 state, window operands, other dtypes or other reduction operations retain Tile
 IR. Empty reduction axes do not inherit the elementwise no-data behavior.
+`row_expand_add` uses its two-input contiguous-column form; the optional scratch
+and packed row-major carrier forms remain on Tile IR.
+
+Dense FP32 `transpose` reuses the scratch created by `FlattenTileNdTo2D`.
+Lowering removes the logical axis operands and emits
+`buffer.transpose(source, scratch, destination)`. Every descriptor is full-valid
+and row-major, with 32-byte-aligned physical rows; destination dimensions swap
+the source dimensions, while scratch must match the source shape exactly.
+Scratch is write-only, and all three operands must occupy disjoint storage.
+Strided windows, partial/dynamic valid extents and other dtypes remain Tile.
+Both IR paths use the shared native `pto.ttrans` spelling and operand formatter;
+Buffer codegen performs no allocation or scratch sizing.
 
 Cast/compare/select chains also qualify with positive static valid extents and
 allocation-backed dense operands. `cast` supports FP16 to FP32 and FP32 to FP16

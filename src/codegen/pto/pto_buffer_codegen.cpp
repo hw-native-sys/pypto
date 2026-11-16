@@ -26,6 +26,7 @@
 #include "pypto/backend/common/buffer_indexed_recipes.h"
 #include "pypto/backend/common/buffer_row_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/backend/common/pto_native_ops.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/error.h"
@@ -384,7 +385,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
                    ir::IsOp(call, "buffer.store") || ir::IsOp(call, "buffer.set_validshape") ||
                    ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num") ||
                    ir::IsOp(call, "buffer.get_subblock_idx") || ir::IsOp(call, "buffer.matmul") ||
-                   ir::IsOp(call, "buffer.matmul_acc") || ir::IsOp(call, "buffer.extract"),
+                   ir::IsOp(call, "buffer.matmul_acc") || ir::IsOp(call, "buffer.extract") ||
+                   ir::IsOp(call, "buffer.transpose"),
                call->span_)
         << "Operation '" << call->op_->name_ << "' is not supported by direct Buffer IR codegen";
     if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
@@ -736,6 +738,9 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     Emit("pto.textract ins(" + GetExprAsCode(call->args_[0]) + ", " + row + ", " + col + " : " +
          GetExprTypeAnnotation(call->args_[0]) + ", index, index) outs(" + GetExprAsCode(call->args_[3]) +
          " : " + GetExprTypeAnnotation(call->args_[3]) + ")");
+  } else if (ir::IsOp(call, "buffer.transpose")) {
+    Emit(std::string(backend::GetPtoNativeOpSpec("tile.transpose").native_op) + " " +
+         BufferInsOutsClause({call->args_[0], call->args_[1]}, call->args_[2]));
   } else {
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
     const auto* row_recipe = backend::FindBufferRowRecipe(call->op_->name_);

@@ -16,17 +16,17 @@
 
 namespace pypto::backend {
 
-/// Native spelling shared by Tile callbacks and Buffer elementwise recipes.
+/// Native spelling shared by Tile callbacks and Buffer compute recipes.
 /// This is emission metadata, not a capability table: each IR path retains its
 /// own operand, storage and target validation before reaching native emission.
-struct PtoElementwiseSpec {
+struct PtoNativeOpSpec {
   const char* native_op;
   const char* precision_attribute = nullptr;
 };
 
-/// Only the existing common elementwise family is listed. Missing names are an
+/// Only explicitly migrated compute families are listed. Missing names are an
 /// internal registration error, never a reason to enable an unsupported recipe.
-const PtoElementwiseSpec& GetPtoElementwiseSpec(std::string_view logical_op);
+const PtoNativeOpSpec& GetPtoNativeOpSpec(std::string_view logical_op);
 
 }  // namespace pypto::backend
 

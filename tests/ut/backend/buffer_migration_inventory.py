@@ -186,7 +186,7 @@ MIGRATION_FAMILIES = (
             "tile.col_argmax",
             "tile.col_argmin",
         ),
-        restricted=frozenset({"tile.row_max", "tile.row_sum"}),
+        restricted=frozenset({"tile.row_max", "tile.row_sum", "tile.row_min", "tile.row_prod"}),
     ),
     MigrationFamily(
         "G10: Axis expansion and broadcast",
@@ -208,7 +208,16 @@ MIGRATION_FAMILIES = (
             "tile.row_expand_mul",
             "tile.row_expand_sub",
         ),
-        restricted=frozenset({"tile.row_expand_sub", "tile.row_expand_div"}),
+        restricted=frozenset(
+            {
+                "tile.row_expand_add",
+                "tile.row_expand_sub",
+                "tile.row_expand_mul",
+                "tile.row_expand_div",
+                "tile.row_expand_max",
+                "tile.row_expand_min",
+            }
+        ),
     ),
     MigrationFamily(
         "G11: Padding",
@@ -228,7 +237,7 @@ MIGRATION_FAMILIES = (
             "tile.extract",
             "tile.assemble",
         ),
-        restricted=frozenset({"tile.move", "tile.cast"}),
+        restricted=frozenset({"tile.move", "tile.cast", "tile.transpose"}),
     ),
     MigrationFamily(
         "G13: Views and valid metadata",

@@ -152,8 +152,8 @@ places precision selectors after `outs`. Neither formatter discovers storage,
 constructs views, allocates scratch or changes operand types. Tile callbacks
 still resolve those decisions first; Buffer operands arrive already explicit.
 
-`GetPtoElementwiseSpec` supplies common elementwise instruction and precision
-attribute names to both paths. It is emission metadata, not a support registry:
+`GetPtoNativeOpSpec` supplies common elementwise, row-compute and transpose
+instruction names plus precision attributes to both paths. It is emission metadata, not a support registry:
 target, dtype, layout, aliasing and default-selection checks remain separate.
 Adding a native spelling does not enable a new Buffer form. Other operator
 families retain their specialized emitters.

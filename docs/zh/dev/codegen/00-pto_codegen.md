@@ -131,8 +131,8 @@ Tile 与 Buffer 适配层分别解析操作数，再使用
 scratch，也不改变操作数类型。仍需这些决策的 Tile callback 在调用格式化器
 之前完成处理；Buffer 路径接收的操作数已经显式化。
 
-`GetPtoElementwiseSpec` 向 Tile 注册和 Buffer 配方提供共用的逐元素指令名
-及精度属性名。这是发射元数据，不是支持能力注册表：目标、dtype、布局、
+`GetPtoNativeOpSpec` 向 Tile 注册和 Buffer 配方提供共用的逐元素、行计算和转置
+指令名，以及精度属性名。这是发射元数据，不是支持能力注册表：目标、dtype、布局、
 别名和默认选择条件仍由各路径检查。增加原生名称不会开放新的 Buffer 形态。
 其他算子族继续使用现有专用发射器。
 

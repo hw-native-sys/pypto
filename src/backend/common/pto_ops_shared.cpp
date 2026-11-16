@@ -52,8 +52,8 @@ using ir::ScalarType;
 using ir::TensorType;
 using ir::Var;
 
-const PtoElementwiseSpec& GetPtoElementwiseSpec(std::string_view logical_op) {
-  static const std::unordered_map<std::string_view, PtoElementwiseSpec> specs = {
+const PtoNativeOpSpec& GetPtoNativeOpSpec(std::string_view logical_op) {
+  static const std::unordered_map<std::string_view, PtoNativeOpSpec> specs = {
       {"tile.add", {"pto.tadd"}},
       {"tile.mul", {"pto.tmul"}},
       {"tile.sub", {"pto.tsub"}},
@@ -75,10 +75,21 @@ const PtoElementwiseSpec& GetPtoElementwiseSpec(std::string_view logical_op) {
       {"tile.minimums", {"pto.tmins"}},
       {"tile.lrelu", {"pto.tlrelu"}},
       {"tile.full", {"pto.texpands"}},
+      {"tile.row_max", {"pto.trowmax"}},
+      {"tile.row_sum", {"pto.trowsum"}},
+      {"tile.row_min", {"pto.trowmin"}},
+      {"tile.row_prod", {"pto.trowprod"}},
+      {"tile.row_expand_add", {"pto.trowexpandadd"}},
+      {"tile.row_expand_sub", {"pto.trowexpandsub"}},
+      {"tile.row_expand_mul", {"pto.trowexpandmul"}},
+      {"tile.row_expand_div", {"pto.trowexpanddiv"}},
+      {"tile.row_expand_max", {"pto.trowexpandmax"}},
+      {"tile.row_expand_min", {"pto.trowexpandmin"}},
+      {"tile.transpose", {"pto.ttrans"}},
   };
   const auto found = specs.find(logical_op);
   INTERNAL_CHECK(found != specs.end())
-      << "Internal error: missing shared PTO elementwise emission metadata for " << logical_op;
+      << "Internal error: missing shared PTO emission metadata for " << logical_op;
   return found->second;
 }
 
