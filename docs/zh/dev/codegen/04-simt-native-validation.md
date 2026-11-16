@@ -67,3 +67,57 @@ ELF 和反汇编。`result.json` 区分仅编译验证与硬件执行；`build-r
 
 本里程碑仅覆盖 FP32 连续 GM copy。带跨度或动态布局、UB gather、混合流水线
 依赖、多维 launch、lane 操作、原子和通用 IR lowering 需要各自的验收测试。
+
+## 短向量值的编译器能力门禁
+
+`tests/ut/backend/vpto_vf_validation/test_simt_packed.py` 在公开 packed-value API
+之前，为任务 11.6 建立原生编译器能力边界。这些夹具仅用于编译：所有线程访问相同地址，
+UB 入口参数也不是可运行的主机 ABI。不要在设备上执行这些内核。
+
+矩阵针对 PTOAS v0.74、A5（`dav-c310-vec`）及 CANN 9.3.0 Bisheng
+（Clang 15.0.5）。依次执行 PTOAS LLVM 导出、PyPTO 生产路径的
+`prepare_llvm_for_bisheng` 兼容处理，以及使用生产 `DEVICE_FLAGS` 的编译。
+原始与处理后的 LLVM 均保留；LLVM 19 的 `memory(...)` 注解需要已有的兼容处理。
+
+| 操作 | FP16×2 | BF16×2 | FP32×2 |
+| --- | --- | --- | --- |
+| GM、UB 读写及加法、乘法 | 可编译 | 可编译 | 可编译 |
+| `pto.absf` | 可编译 | 可编译 | 可编译 |
+| `pto.sqrt` | 可编译 | PTOAS 拒绝类型 | PTOAS 拒绝类型 |
+| `shuffle_idx/up/down/bfly` | 可编译 | PTOAS 拒绝类型 | PTOAS 拒绝类型 |
+| GM/UB 原子 add/min/max/exch/cas，丢弃旧值 | 可编译 | 可编译 | 未探测 |
+| 同上，但使用旧值 | PTOAS 拒绝使用 | PTOAS 拒绝使用 | 未探测 |
+| `vector.extract` + `vector.from_elements` | 方言不可用 | 方言不可用 | 方言不可用 |
+
+FP16×2 ↔ FP32×2、BF16×2 ↔ FP32×2 转换的原生舍入选择器 `r`、`z`、`a`、`f`
+均可编译。这只证明编译成功，数值舍入行为仍需设备验收。四元素 FP16/BF16/FP32
+拷贝被 GM `pto.ldg` 拒绝，但 UB `pto.load/store` 可编译；这不证明四元素算术
+受支持，也不证明会生成单条 packed 硬件指令。
+
+104 个用例要求生成 65 个包含 SIMT 入口及非空机器码的设备对象，并得到 39 个特定的
+PTOAS 拒绝诊断。崩溃、超时、诊断不符或负向用例变为接受，都会使门禁失败。
+正向用例还检查 LLVM 的 packed 元素寻址：偏移 1 跨过整个向量。UB 加载带有自然
+对齐属性（半精度双元素为 4 字节，FP32 双元素为 8 字节；四元素为 8/16 字节）。
+这些是编译器生成的假设，并非运行时对齐检查。
+
+将完整矩阵及工具链版本保存在新的证据目录中：
+
+```bash
+source .claude/skills/testing/load-env.sh
+python tests/ut/backend/vpto_vf_validation/test_simt_packed.py \
+  --probe build/simt-packed --jobs "$PYPTO_TEST_JOBS"
+```
+
+也可通过 pytest 运行参数化门禁：
+
+```bash
+PYPTO_RUN_VPTO_VF_VALIDATION=1 python -m pytest \
+  tests/ut/backend/vpto_vf_validation/test_simt_packed.py \
+  -n "$PYPTO_TEST_JOBS" -v
+```
+
+先配置 `PTOAS_ROOT` 和 `ASCEND_HOME_PATH`。普通单元测试会跳过这些原生用例。
+本阶段不增加 PyPTO packed 类型或操作，不验证链接和启动大小，也不证明硬件正确性或
+性能。公开 API 前仍需找到受支持的构造与拆分 lowering。对齐检查、奇数尾部、子视图
+偏移、转换数值、原子竞争及标量版本对比仍需独立验收。packed 值应保持为线程私有值，
+与 Tile 存储及 VMI `RegType` 区分。
