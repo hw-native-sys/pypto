@@ -730,8 +730,9 @@ pl.system.wait_intra_block(17, pipe=pl.PipeType.V, core_type=pl.KernelType.AIV)
 0–15 的本地事件 `e`，Cube 用 `e` 寻址 AIV0，用 `e + 16` 寻址 AIV1；
 各 AIV 使用本地 `e`。Cube 必须分别向参与的 AIV 发信号/等待，因此 Cube
 上的原始事件 17 对应 AIV1 的本地事件 1，而不是两个 AIV 的本地事件 17。
-仅在一个 AIV 执行还需要核函数中的 lane 控制。这些头文件证据不等于完整
-协议已通过真机验证。
+仅在一个 AIV 执行还需要核函数中的 lane 控制。配套单 AIV 真机协议在
+Cube 端通过 MTE1 等待和 `PIPE_ALL` 栅栏约束事件复用，防止标量发射越过
+回执。具名 `PIPE_S` 的编译器支持仍单独检查。
 
 **资源归属：**这些调用不预留事件。TPipe 使用同一个 intra-block 命名空间：
 单向 pipe 消耗 `flag_base` 和 `flag_base + 1`，双向 pipe 还消耗 `+2` 和

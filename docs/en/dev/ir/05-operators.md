@@ -805,7 +805,9 @@ There is no Python lane parameter. The installed A5 PTO-ISA `TPush.hpp` uses
 Cube must signal/wait separately for each participating AIV. A raw event 17
 on Cube therefore addresses AIV1's local event 1, not local event 17 on both
 AIVs. Executing on only one AIV also requires lane control in the kernel.
-This header evidence is not an on-device validation of a complete protocol.
+The single-AIV runtime protocol uses a Cube MTE1 wait followed by a
+`PIPE_ALL` barrier before reusing the event, so scalar dispatch cannot outrun
+the acknowledgement. Named `PIPE_S` assembler support is checked separately.
 
 **Resource ownership:** these calls do not reserve IDs. TPipe uses the same
 intra-block namespace: a unidirectional pipe consumes `flag_base` and

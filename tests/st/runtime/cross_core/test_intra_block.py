@@ -12,6 +12,9 @@
 Run each lane case with the hardware harness and an external timeout. There is
 no TPipe or SYNCALL, so local IDs 4/5 are owned exclusively by this protocol.
 Cube uses 4/5 for AIV0 and 20/21 for AIV1; either AIV uses local 4/5.
+The Cube waits on MTE1 and then drains PIPE_ALL before the next iteration,
+so scalar dispatch cannot outrun acknowledgements. This legal-pipe protocol
+runs independently of the named PIPE_S verifier support checked by the UT.
 """
 
 import pypto.language as pl
@@ -41,7 +44,8 @@ def _handshake_kernel(lane: int):
                         tagged = pl.add(tile, 1000.0)
                         pl.store(tagged, [iteration, lane * LANE_WIDTH], output)
                         pl.system.set_intra_block(5, pipe=pl.PipeType.MTE3, core_type=pl.KernelType.AIV)
-                pl.system.wait_intra_block(5 + 16 * lane, pipe=pl.PipeType.S, core_type=pl.KernelType.AIC)
+                pl.system.wait_intra_block(5 + 16 * lane, pipe=pl.PipeType.MTE1, core_type=pl.KernelType.AIC)
+                pl.system.bar_all()
         return output
 
     return handshake
