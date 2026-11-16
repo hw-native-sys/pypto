@@ -633,10 +633,10 @@ grid 避免了这两个问题 —— `require_sync_start` 让所有 block 一起
 
 ### `pld.tensor.allgather`
 
-`engine="ccu"` 支持 Ascend950 CHIP BF16 allgather 的域内注册代码生成：输入窗口
+`engine="ccu"` 支持 Ascend950 CHIP BF16 allgather 的域内注册、编译和执行：输入窗口
 `[1, N]`、目标 `[NR, N]`、INT32 signal `[NR, 1]`，完整连续 ND 静态正尺寸，
 2–64 个 rank，直线调用序列。所有窗口必须属于同一通信域，输入和目标不得别名。
-单次调用的窗口必须同域，CHIP 可使用多个域；运行时执行等待 simpler 域绑定 ABI v2。
+单次调用的窗口必须同域，CHIP 可使用多个域；native module 在 `a5` 上使用固定版本 simpler 的域绑定 ABI v2。
 默认参数保留 HOST/InCore 实现。详见 [CCU lowering 与源码 ABI](passes/44-lower_l2_tensor_collectives.md#ccu-allgather)。
 
 ```text

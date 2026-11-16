@@ -299,22 +299,28 @@ register 通过 `chip_callee` 显式指定消费它的 callable。CCU 编号与 
 
 ### Native 源码契约与验证边界
 
-此次迁移只支持 codegen。产物标记 `CCU_DOMAIN_ABI_VERSION = 2` 和
-`CCU_RUNTIME_SUPPORTED = False`。runtime builder 在编译/注册 native module 前
-拒绝执行；`_submit_chip` 也拒绝带绑定的提交，等待 PyPTO 集成与端到端验证。
-当前 pin 的 simpler runtime 已包含 PR #3093 的域注册与协调 prepare/激活接口，
-包括 `ChipCallable.build(..., ccu_modules=...)`。
+生成产物标记 `CCU_DOMAIN_ABI_VERSION = 2` 和 `CCU_RUNTIME_SUPPORTED = True`。
+PyPTO 固定到 simpler PR #3093 的域绑定运行时，仅在 `a5` 上编译 native module。
+编译直接使用 `simpler_setup.KernelCompiler.ccu_compile_cache_token()`：由 simpler
+提供 Host 编译器、选项、头文件目录、经过校验的库路径及 `ccu_manifest_identity.h`。
+PyPTO 负责带超时的编译调用并保留完整 Host ELF，不另行定义 CCU 工具链。
 
-设备调用采用已核对的 simpler PR #3093 接口：
-`submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`。ctx 选择域，定义编号选择该域
-唯一的本地 mission；相同组合的重复请求复用 mission，并通过任务完成依赖串行化。
-不再使用独立的 CHIP execution accessor。当前 runtime pin 尚待联调验证，保留 wrapper/native
-ABI guard 和运行时执行保护。
+Native manifest 使用 `SIMPLER_CCU_ABI_VERSION`，声明所需域 rank 数量，并嵌入
+simpler 提供的 SDK/PTO-ISA 标识。模块按 callable 内连续 ID 排列，源码产物与
+预编译产物均保留这一顺序；加载预编译模块不调用编译器。HOST 注册先于提交，
+`_submit_chip` 原样转发 `ccu_bindings`，启用 DFX 时也保持该行为。
+
+设备调用为 `submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`。
+ctx 选择域，定义编号选择域内唯一的本地 mission；相同组合的重复请求复用 mission，
+通过任务完成依赖串行化。simpler 负责准备、激活及确认 mission 停止；PyPTO 不引入
+独立的 CHIP execution accessor 或关闭协议。
 
 请求保留 `9 + 3 * NR` 个 uint64 word，64 字节对齐：input 地址/token、字节数、
 来源行字节偏移、segment 数、四个 GoSize 值，再为每个目标保存地址/token 和
 域逻辑 rank。peer 使用普通 scalar，删除 `PeerRank` 转换；注册 channel 按域逻辑
 rank 索引，包括自 rank 的 LocalCopy 选择。
+目标 slot 在构造 LoopGroup 前映射到域内 peer；循环体只保留传输和等待，
+因为 HCOMM 不允许在循环体内使用 `CCU_IF`。
 
 HBM 算法保留 32 KiB chunk、16 lane、4 GiB 分段、独立 main/remainder LoopGroup、
 ready/completion 握手和常驻 trigger 循环。所有请求完成且结果可见后，simpler 必须
@@ -326,5 +332,6 @@ callable 局部的 `ccu_id` 仅用于选择 mission，不用于选择 peer notif
 不同 rank 上的值可以不同。
 
 CPU 测试覆盖完整 lowering/codegen、重叠域、注册复用、定义编号一致性、普通 ctx 转发、
-源码打包，以及通过模拟 primitive 执行生成的 wrapper/native 源码。
+源码打包、编译命令构造、绑定转发、预编译产物往返，以及使用固定版本 ABI 头文件、
+通过模拟 primitive 执行生成的 wrapper/native 源码。
 这些测试不验证硬件调度、资源生命周期或 HCOMM 指令生成。

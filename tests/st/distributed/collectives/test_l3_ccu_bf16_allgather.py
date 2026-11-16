@@ -15,6 +15,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
+from pypto import passes
 from pypto.ir import DistributedConfig
 from pypto.runtime import RunConfig
 
@@ -72,7 +73,10 @@ def _program(size):
 @pytest.mark.platforms("a5")
 @pytest.mark.parametrize("size", [64, 1024])
 @pytest.mark.parametrize("prepared", [False, True], ids=["one-shot", "prepared"])
-def test_ccu_bf16_allgather(test_config, device_ids, size, prepared):
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH]
+)
+def test_ccu_bf16_allgather(test_config, device_ids, size, prepared, runtime):
     if len(device_ids) < 2:
         pytest.skip("CCU allgather requires two devices")
     inputs = (torch.arange(2 * size, dtype=torch.float32).reshape(2, 1, size) / 8 - size / 8).bfloat16()
@@ -80,14 +84,15 @@ def test_ccu_bf16_allgather(test_config, device_ids, size, prepared):
     if prepared:
         inputs.share_memory_()
         outputs.share_memory_()
-    compiled = _program(size).compile(
-        inputs,
-        outputs,
-        config=RunConfig(
-            platform="a5",
-            distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
-        ),
-    )
+    with passes.PassContext([], runtime=runtime):
+        compiled = _program(size).compile(
+            inputs,
+            outputs,
+            config=RunConfig(
+                platform="a5",
+                distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
+            ),
+        )
     config = RunConfig(platform="a5")
     context = compiled.prepare(config=config, persistent=True) if prepared else nullcontext()
     with context as worker:
@@ -100,3 +105,7 @@ def test_ccu_bf16_allgather(test_config, device_ids, size, prepared):
                 worker.run(compiled, inputs, outputs, config=config)
             expected = inputs[:, 0].unsqueeze(0).expand(2, -1, -1)
             assert torch.equal(outputs, expected)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -2505,7 +2505,7 @@ jobs:
       needs.changes.outputs.full == 'true'
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, npu-a5]
+    runs-on: [self-hosted, Linux, ARM64, npu-a5]
     defaults:
       run:
         working-directory: a5-dist-checkout

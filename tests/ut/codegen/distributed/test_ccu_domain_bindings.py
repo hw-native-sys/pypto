@@ -180,7 +180,7 @@ def test_overlapping_domains_codegen(tmp_path, submit):
         assert len(modules) == 2
         config = (root / "kernel_config.py").read_text()
         assert "CCU_DOMAIN_ABI_VERSION = 2" in config
-        assert "CCU_RUNTIME_SUPPORTED = False" in config
+        assert "CCU_RUNTIME_SUPPORTED = True" in config
         for wrapper in (root / "kernels/aiv").glob("*.cpp"):
             source = wrapper.read_text()
             assert "CommContext *>(args[4])" in source

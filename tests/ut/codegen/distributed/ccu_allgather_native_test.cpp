@@ -21,36 +21,18 @@
 #include <memory>
 #include <vector>
 
-constexpr uint32_t SIMPLER_CCU_MAX_RANKS = 64;
-constexpr uint32_t SIMPLER_CCU_TASK_ARGUMENT_COUNT = 2;
-constexpr uint32_t SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT = 1;
-constexpr uint32_t SIMPLER_CCU_KERNEL_CAP_THREE_EVENTS = 1;
-// The source-only manifest contract from simpler #2986.
-struct SimplerCcuModuleManifest {
-  uint32_t struct_size, manifest_size, kernel_record_size, kernel_count;
-  uint32_t kernel_records_offset, string_table_offset, string_table_size, capability_flags;
-  uint8_t sdk_build_id[32], pto_isa_build_id[32];
-};
-struct SimplerCcuKernelRecord {
-  uint32_t struct_size, kernel_id;
-  uint64_t parameter_size;
-  uint32_t parameter_alignment, capability_flags, entry_symbol_offset, entry_symbol_size;
-  uint32_t registration_binding_size, registration_argument_count, task_argument_count;
-};
-struct SimplerCcuRegistrationBinding {
-  uint32_t struct_size, ccu_id, rank_id, rank_count;
-  uint64_t channels[64], ready_event_handle, trigger_event_handle, done_event_handle;
-};
-static_assert(sizeof(SimplerCcuModuleManifest) == 96);
-static_assert(sizeof(SimplerCcuKernelRecord) == 48);
-static_assert(sizeof(SimplerCcuRegistrationBinding) == 552);
-extern const uint8_t pypto_ccu_sdk_identity[32] = {0x12};
-extern const uint8_t pypto_ccu_isa_identity[32] = {0x34};
+#include "platform_comm/ccu/ccu_native_abi.h"
+
+namespace simpler::ccu {
+inline constexpr uint8_t sdk_build_id[32] = {0x12};
+inline constexpr uint8_t pto_isa_build_id[32] = {0x34};
+}  // namespace simpler::ccu
 
 enum CcuResult { CCU_SUCCESS, CCU_E_INTERNAL };
 namespace model {
 std::array<uint64_t, 9 + 3 * TEST_RANKS> words;
 std::array<uint32_t, TEST_RANKS> physical_ranks;
+std::array<uint32_t, TEST_RANKS> peer_slots;
 std::array<bool, TEST_RANKS> written;
 std::array<uint16_t, 16> transfer_bits;
 std::array<uint64_t, TEST_RANKS> copied_bytes, output_bases;
@@ -78,8 +60,8 @@ struct Variable {
   void operator=(uint64_t v) { value = v; }
   Variable operator+(const Variable& rhs) const { return {value + rhs.value}; }
   bool operator!=(uint64_t rhs) const { return value != rhs; }
-  bool operator!=(const Variable& rhs) const { return value != rhs.value; }
-  bool operator==(uint64_t rhs) const { return value == rhs; }
+  // CANN comparison operators construct expressions from mutable Variables.
+  bool operator==(uint64_t rhs) { return value == rhs; }
 };
 struct Address {
   std::shared_ptr<uint64_t> cell = std::make_shared<uint64_t>(0);
@@ -268,16 +250,17 @@ inline void Copy(const Address& dst, const LocalAddr& src, const Variable& bytes
   const auto lane = event.handle - 100 + model::event_offset;
   assert(lane < 16 && mask == (1u << (model::next_slot % 16)));
   assert(!(model::transfer_bits[lane] & mask));
+  const auto slot = model::peer_slots[model::next_slot];
   const auto offset = *src.addr.cell - model::input_base;
-  assert(offset == model::copied_bytes[model::next_slot]);
+  assert(offset == model::copied_bytes[slot]);
   assert(offset + bytes.value <= model::block_bytes);
-  assert(*dst.cell ==
-         model::output_bases[model::next_slot] + model::source_rank * model::block_bytes + offset);
+  assert(*dst.cell == model::output_bases[slot] + model::source_rank * model::block_bytes + offset);
   if (!model::dry_run)
     std::memcpy(reinterpret_cast<void*>(*dst.cell), reinterpret_cast<const void*>(*src.addr.cell),
                 bytes.value);
-  model::copied_bytes[model::next_slot] += bytes.value;
-  model::written[model::next_slot++] = true;
+  model::copied_bytes[slot] += bytes.value;
+  model::written[slot] = true;
+  ++model::next_slot;
   model::transfer_bits[lane] |= mask;
   model::phase = 3;
 }
@@ -290,9 +273,10 @@ inline CcuResult Write(uint64_t channel, const RemoteAddr& dst, const LocalAddr&
         [channel, dst, src, bytes, event, mask]() { Write(channel, dst, src, bytes, event, mask); });
     return CCU_SUCCESS;
   }
-  assert(model::next_slot != model::source_rank);
-  assert(channel == 1000 + model::physical_ranks[model::next_slot]);
-  assert(dst.token.value == 200 + model::next_slot);
+  const auto slot = model::peer_slots[model::next_slot];
+  assert(slot != model::source_rank);
+  assert(channel == 1000 + model::physical_ranks[slot]);
+  assert(dst.token.value == 200 + slot);
   Copy(dst.addr, src, bytes, event, mask);
   return CCU_SUCCESS;
 }
@@ -304,17 +288,19 @@ inline CcuResult LocalCopy(const LocalAddr& dst, const LocalAddr& src, const Var
     capturing->ops.push_back([dst, src, bytes, event, mask]() { LocalCopy(dst, src, bytes, event, mask); });
     return CCU_SUCCESS;
   }
-  assert(model::next_slot == model::source_rank && dst.token.value == 200 + model::source_rank);
+  assert(model::peer_slots[model::next_slot] == model::source_rank &&
+         dst.token.value == 200 + model::source_rank);
   if (model::fail_local_copy) throw CCU_E_INTERNAL;
   Copy(dst.addr, src, bytes, event, mask);
   return CCU_SUCCESS;
 }
 }  // namespace AscendC::ccu
 #define CCU_WHILE(condition) while (condition)
-#define CCU_IF(condition) if (condition)
+#define CCU_IF(condition) if ((assert(AscendC::ccu::capturing == nullptr), (condition)))
 #include "generated_module.inc"
 
-void RunCase(uint32_t rank, uint64_t count, bool failure, bool dry_run, int triggers = 3) {
+void RunCase(uint32_t rank, uint64_t count, bool failure, bool dry_run, int triggers = 3,
+             bool permuted = false) {
   std::vector<uint16_t> input((dry_run ? 0 : count) + 2);
   // Large cases store only the touched row and its canaries. Copy checks
   // virtual target offsets before accessing memory, so this still catches
@@ -355,15 +341,17 @@ void RunCase(uint32_t rank, uint64_t count, bool failure, bool dry_run, int trig
   for (uint32_t slot = 0; slot < TEST_RANKS; ++slot) {
     // Permuted, noncontiguous subsets catch domain/physical rank confusion.
     const uint32_t physical = (63 - 5 * slot) % 64;
+    const uint32_t peer = permuted ? TEST_RANKS - 1 - slot : slot;
     model::physical_ranks[slot] = physical;
+    model::peer_slots[peer] = slot;
     model::words[9 + 3 * slot] =
         reinterpret_cast<uint64_t>(outputs[slot].data() + 3) - (count > 64 ? rank * count * 2 : 0);
     model::words[10 + 3 * slot] = 200 + slot;
-    model::words[11 + 3 * slot] = slot;
+    model::words[11 + 3 * slot] = peer;
     model::output_bases[slot] = model::words[9 + 3 * slot];
-    binding.channels[slot] = 1000 + physical;
+    binding.channels[peer] = 1000 + physical;
     if (slot == rank)
-      binding.rank_id = slot;
+      binding.rank_id = peer;
     else
       model::peers |= uint64_t{1} << physical;
   }
@@ -381,7 +369,8 @@ void RunCase(uint32_t rank, uint64_t count, bool failure, bool dry_run, int trig
   // Every destination gets exactly this source rank's row. Nonzero base
   // offsets and sentinels catch double slot offsets and neighbor corruption.
   for (uint32_t slot = 0; slot < TEST_RANKS; ++slot) {
-    assert(model::written[slot] == ((!failure && triggers > 0) || (failure && slot < rank)));
+    const auto peer = model::words[11 + 3 * slot];
+    assert(model::written[slot] == ((!failure && triggers > 0) || (failure && peer < binding.rank_id)));
     for (uint64_t i = 0; !dry_run && i < outputs[slot].size(); ++i) {
       const uint64_t row_start = 3 + (count > 64 ? 0 : rank * count);
       const bool copied = model::written[slot] && i >= row_start && i < row_start + count;
@@ -396,7 +385,10 @@ int main() {
   const auto* base = reinterpret_cast<const uint8_t*>(manifest);
   const auto* kernel =
       reinterpret_cast<const SimplerCcuKernelRecord*>(base + manifest->kernel_records_offset);
-  assert(manifest->struct_size == 96 && manifest->kernel_count == 1 && manifest->kernel_record_size == 48);
+  assert(manifest->struct_size == sizeof(SimplerCcuModuleManifest) && manifest->kernel_count == 1);
+  assert(manifest->kernel_record_size == sizeof(SimplerCcuKernelRecord));
+  assert(manifest->abi_version == SIMPLER_CCU_ABI_VERSION && manifest->reserved == 0);
+  assert(kernel->required_rank_count == TEST_RANKS && kernel->reserved == 0);
   assert(manifest->sdk_build_id[0] == 0x12 && manifest->pto_isa_build_id[0] == 0x34);
   assert(kernel->parameter_size == (9 + 3 * TEST_RANKS) * 8 && kernel->parameter_alignment == 64);
   assert(kernel->registration_argument_count == 1 && kernel->task_argument_count == 2);
@@ -404,6 +396,7 @@ int main() {
   assert(std::memcmp(base + kernel->entry_symbol_offset, "pypto_ccu_allgather_test",
                      kernel->entry_symbol_size) == 0);
   for (uint32_t rank = 0; rank < TEST_RANKS; ++rank) {
+    for (bool failure : {false, true}) RunCase(rank, 7, failure, false, 3, true);
     for (uint64_t count : {7U, 64U, 16384U, 16391U, 32767U, 262144U, 262151U, 278528U, 278535U, 524288U}) {
       // Large rows cover main/remainder combinations at both domain endpoints;
       // small rows still exercise every possible source rank and failure slot.

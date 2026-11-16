@@ -318,20 +318,77 @@ def _stub_assembly(device_runner, monkeypatch, tmp_path: Path, chip_build: Mock)
 
 
 @pytest.mark.parametrize("packaged", [False, True])
-def test_ccu_domain_abi_rejects_runtime_before_compilation(device_runner, monkeypatch, tmp_path, packaged):
-    _write_minimal_artifact(tmp_path)
+def test_ccu_modules_compile_in_id_order_and_round_trip(device_runner, monkeypatch, tmp_path, packaged):
+    chip = object()
+    build = Mock(return_value=chip)
+    _stub_assembly(device_runner, monkeypatch, tmp_path, build)
+    modules = [{"ccu_id": i, "source": f"ccu/module_{i}.cpp"} for i in range(2)]
+    for module in modules:
+        _touch(tmp_path / module["source"], b"// native CCU source")
     config = tmp_path / "kernel_config.py"
-    config.write_text(config.read_text() + "CCU_DOMAIN_ABI_VERSION = 2\n", encoding="utf-8")
+    config.write_text(config.read_text() + f"CCU_DOMAIN_ABI_VERSION = 2\nCCU_MODULES = {modules!r}\n")
     if packaged:
         task_interface = SimpleNamespace(ArgDirection=SimpleNamespace())
         monkeypatch.setitem(sys.modules, "simpler", SimpleNamespace(task_interface=task_interface))
         monkeypatch.setitem(sys.modules, "simpler.task_interface", task_interface)
         package_generated_sources(tmp_path, BuildKind.SINGLE_CHIP)
     compiler = Mock()
+    binaries = [b"native ELF zero", b"native ELF one"]
+    compiler.compile_ccu.side_effect = binaries
+    monkeypatch.setattr(device_runner, "KernelCompiler", Mock(return_value=compiler))
+    assembled, _, _ = device_runner._compile_and_assemble(tmp_path, "a5", save_prebuilt=True)
+    assert assembled is chip
+    assert [call.args[0] for call in compiler.compile_ccu.call_args_list] == [
+        str(tmp_path / module["source"]) for module in modules
+    ]
+    assert build.call_args.kwargs["ccu_modules"] == binaries
+    record = read_prebuilt(tmp_path, "a5", BuildKind.SINGLE_CHIP)
+    assert record["."]["ccu_modules"] == binaries
+
+
+@pytest.mark.parametrize(
+    "platform,abi,ids",
+    [
+        ("a5sim", 2, [0]),
+        ("a5", None, [0]),
+        ("a5", 1, [0]),
+        ("a5", 2, [1]),
+        ("a5", 2, [0, 0]),
+        ("a5", 2, [False]),
+    ],
+)
+def test_invalid_ccu_config_fails_before_compilation(
+    device_runner, monkeypatch, tmp_path, platform, abi, ids
+):
+    _write_minimal_artifact(tmp_path)
+    modules = [{"ccu_id": i, "source": "ccu/module.cpp"} for i in ids]
+    config = tmp_path / "kernel_config.py"
+    config.write_text(config.read_text() + f"CCU_DOMAIN_ABI_VERSION = {abi!r}\nCCU_MODULES = {modules!r}\n")
+    compiler = Mock()
     monkeypatch.setattr(device_runner, "KernelCompiler", compiler)
-    with pytest.raises(NotImplementedError, match="codegen-only"):
-        device_runner._compile_and_assemble(tmp_path, "a2a3sim")
+    with pytest.raises(ValueError, match="CCU"):
+        device_runner._compile_and_assemble(tmp_path, platform)
     compiler.assert_not_called()
+
+
+def test_ccu_compile_failure_does_not_publish_or_assemble(device_runner, monkeypatch, tmp_path):
+    build = Mock()
+    _stub_assembly(device_runner, monkeypatch, tmp_path, build)
+    config = tmp_path / "kernel_config.py"
+    config.write_text(
+        config.read_text() + "CCU_DOMAIN_ABI_VERSION = 2\n"
+        "CCU_MODULES = [{'ccu_id': 0, 'source': 'ccu/module.cpp'}]\n"
+    )
+    compiler = Mock()
+    compiler.compile_ccu.side_effect = RuntimeError("CCU compilation failed")
+    monkeypatch.setattr(device_runner, "KernelCompiler", Mock(return_value=compiler))
+    record = Mock()
+    monkeypatch.setattr(device_runner, "record_binary_context", record)
+    with pytest.raises(RuntimeError, match="CCU compilation failed"):
+        device_runner._compile_and_assemble(tmp_path, "a5", save_prebuilt=True)
+    build.assert_not_called()
+    record.assert_not_called()
+    assert not (tmp_path / BINARY_MANIFEST).exists()
 
 
 def test_compile_and_assemble_records_context_after_success(

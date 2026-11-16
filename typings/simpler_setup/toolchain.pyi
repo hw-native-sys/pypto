@@ -8,6 +8,19 @@
 # -----------------------------------------------------------------------------------------------------------
 """Consumed surface of ``simpler_setup.toolchain``."""
 
+from typing import TypedDict
+
+class _CcuCacheInputs(TypedDict):
+    cxx_path: str
+    compile_flags: tuple[str, ...]
+    include_dirs: tuple[str, ...]
+    link_flags: tuple[str, ...]
+    library_paths: tuple[str, ...]
+    host_target: str
+    pto_isa_commit: str
+    manifest_identity_header: str
+    dependency_digests: tuple[tuple[str, str], ...]
+
 class Toolchain:
     is_host: bool
     cxx_path: str
@@ -18,5 +31,8 @@ class Toolchain:
 
 class GxxToolchain(Toolchain):
     def __init__(self, prefer_g15: bool = ...) -> None: ...
+
+class CCUToolchain(Toolchain):
+    host_toolchain: GxxToolchain
 
 __all__ = ["GxxToolchain", "Toolchain"]

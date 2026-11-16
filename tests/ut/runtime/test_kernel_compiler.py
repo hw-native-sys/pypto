@@ -40,6 +40,7 @@ def compiler_module(monkeypatch, tmp_path):
         ccec=tool,
         gxx15=host,
         host_gxx=host,
+        ccu=SimpleNamespace(host_toolchain=host),
         get_incore_include_dirs=lambda: [str(tmp_path / "sdk include")],
         get_orchestration_cache_inputs=lambda runtime: ([], []),
         _orchestration_toolchain=lambda runtime: host if runtime == "host_build_graph" else tool,
@@ -474,38 +475,84 @@ def test_actual_compilation_inherits_runtime_injection(compiler_module, monkeypa
     assert compiler.compile_incore(_source(tmp_path), pto_isa_root=str(tmp_path)) == b"binary"
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def test_ccu_host_module_uses_sdk_identity_and_preserves_elf(compiler_module, monkeypatch, tmp_path):
-    """A native CCU module needs Host ELF metadata, not AIV text extraction."""
-    monkeypatch.setitem(
-        sys.modules,
-        "simpler.ccu",
-        SimpleNamespace(
-            ccu_sdk_root=lambda: tmp_path / "sdk",
-            runtime_build_identity=lambda: (bytes(range(32)), bytes(reversed(range(32)))),
-        ),
-    )
+    """The SDK owns discovery; PyPTO invokes its command and retains Host ELF bytes."""
+    compiler = compiler_module.KernelCompiler("a5")
+    header = "// manifest identities supplied by Simpler\n"
+    inputs = {
+        "cxx_path": "sdk-ccu-compiler",
+        "compile_flags": ["-fPIC", "-DSDK_CCU_FLAG"],
+        "include_dirs": [str(tmp_path / "sdk include")],
+        "link_flags": ["-shared", "-Wl,--build-id=sha1"],
+        "library_paths": [str(tmp_path / "sdk lib/libccu.so"), str(tmp_path / "sdk lib/libhcomm.so")],
+        "manifest_identity_header": header,
+    }
+    compiler.sdk.ccu_compile_cache_token = Mock(return_value=inputs)
     commands = []
 
     def run(command, **kwargs):
         commands.append(command)
-        identity = next(Path(arg) for arg in command if arg.endswith("build_identity.cpp"))
-        text = identity.read_text()
-        assert "pypto_ccu_sdk_identity[32]" in text
-        assert "pypto_ccu_isa_identity[32]" in text
-        assert ",".join(map(str, range(32))) in text
-        Path(command[command.index("-o") + 1]).write_bytes(b"complete host ELF")
+        output = Path(command[command.index("-o") + 1])
+        assert (output.parent / "ccu_manifest_identity.h").read_text() == header
+        assert kwargs["timeout"] == 900
+        output.write_bytes(b"complete host ELF")
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(compiler_module.subprocess, "run", run)
-    result = compiler_module.KernelCompiler("a5").compile_ccu(_source(tmp_path))
-    assert result == b"complete host ELF"
+    source = _source(tmp_path)
+    assert compiler.compile_ccu(source) == b"complete host ELF"
+    compiler.sdk.ccu_compile_cache_token.assert_called_once_with()
     assert len(commands) == 1
-    assert commands[0][0] == "host-compiler"
-    assert "-lasccomm_ccu" in commands[0] and "-lhcomm" in commands[0]
-    assert not Path(commands[0][commands[0].index("-o") + 1]).parent.exists()
+    command = commands[0]
+    assert command[0:3] == ["sdk-ccu-compiler", "-fPIC", "-DSDK_CCU_FLAG"]
+    assert f"-I{tmp_path / 'sdk include'}" in command
+    assert command[command.index(source) + 1 : -2] == [*inputs["link_flags"], *inputs["library_paths"]]
+    assert not Path(command[-1]).parent.exists()
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a2a3sim", "a5sim"])
+def test_ccu_rejects_unsupported_platform_before_discovery(compiler_module, tmp_path, platform):
+    compiler = compiler_module.KernelCompiler(platform)
+    compiler.sdk.ccu_compile_cache_token = Mock()
     with pytest.raises(ValueError, match="require a5"):
-        compiler_module.KernelCompiler("a5sim").compile_ccu(_source(tmp_path))
+        compiler.compile_ccu(_source(tmp_path))
+    compiler.sdk.ccu_compile_cache_token.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["compiler", "timeout", "empty"])
+def test_ccu_failed_build_cleans_private_directory(compiler_module, monkeypatch, tmp_path, failure):
+    compiler = compiler_module.KernelCompiler("a5")
+    compiler.sdk.ccu_compile_cache_token = Mock(
+        return_value={
+            "cxx_path": "ccu-compiler",
+            "compile_flags": [],
+            "include_dirs": [],
+            "link_flags": [],
+            "library_paths": [],
+            "manifest_identity_header": "// identities",
+        }
+    )
+    outputs = []
+
+    def run(command, **kwargs):
+        outputs.append(Path(command[-1]))
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return SimpleNamespace(returncode=1 if failure == "compiler" else 0, stderr="CCU compile error")
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="CCU"):
+        compiler.compile_ccu(_source(tmp_path))
+    assert len(outputs) == 1
+    assert not outputs[0].parent.exists()
+
+
+def test_ccu_sanitizer_selection_is_shared_with_sdk(compiler_module, monkeypatch):
+    monkeypatch.setattr(compiler_module.KernelCompiler, "_sanitizers", "address")
+    compiler = compiler_module.KernelCompiler("a5")
+    assert compiler.sdk._sanitizers == "address"
+    assert compiler.sdk.ccu.host_toolchain is compiler.sdk.host_gxx
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

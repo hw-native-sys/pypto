@@ -268,5 +268,4 @@ Call/Submit 引用的 allgather builtin 模板身份收集，为所有域贡献
 `pld.system.register_ccu(allocation, callee=..., chip_callee=...)`，并在 HOST dispatch 上附加
 `ccu_bindings` SSA 引用。每个 CHIP 调用独立注册，并通过 `chip_callee` 指定该 callable。
 注册携带 dispatch 的 device，返回本地 handle；依赖 rank 的
-注册先于首次任务提交，保留 rank 循环并在提交处按 rank 选择 handle，绑定必须与消费者 device 一致。不会合并成员相交的域。来源分析、参与校验和只支持
-codegen 的运行时边界见 [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather)。
+注册先于首次任务提交，保留 rank 循环并在提交处按 rank 选择 handle，绑定必须与消费者 device 一致。不会合并成员相交的域。来源分析、参与校验和运行时集成契约见 [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather)。

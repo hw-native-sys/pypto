@@ -360,25 +360,33 @@ registrations there. No cross-call registration sharing is performed.
 
 ### Native source contract and validation boundary
 
-This migration is **codegen-only**. `CCU_DOMAIN_ABI_VERSION = 2` and
-`CCU_RUNTIME_SUPPORTED = False` mark generated artifacts. The runtime builder
-rejects execution before compiling/registering native modules; `_submit_chip`
-also refuses bound submissions pending PyPTO integration and end-to-end validation.
-The pinned simpler runtime includes PR #3093's domain registration and coordinated
-prepare/activation interfaces, including `ChipCallable.build(..., ccu_modules=...)`.
+Generated artifacts carry `CCU_DOMAIN_ABI_VERSION = 2` and
+`CCU_RUNTIME_SUPPORTED = True`. PyPTO pins simpler PR #3093's domain-binding
+runtime and builds native modules only on `a5`. Compilation consumes
+`simpler_setup.KernelCompiler.ccu_compile_cache_token()`: simpler supplies the
+Host compiler, flags, include paths, validated library paths and
+`ccu_manifest_identity.h`. PyPTO owns the bounded compiler invocation and keeps
+the complete Host ELF. It does not discover a separate CCU toolchain.
 
-The device call follows simpler PR #3093's checked interface:
-`submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`. The context chooses
-the domain and the definition ID chooses its unique local mission. Repeated
-requests for that pair share the mission and are serialized by task dependencies.
-There is no separate CHIP execution accessor. Wrapper/native ABI guards and the
-runtime execution guard remain until the pinned runtime is integrated and verified.
+Native manifests use `SIMPLER_CCU_ABI_VERSION`, include the required domain rank
+count, and embed simpler's SDK/PTO-ISA identities. Module order follows contiguous
+callable-local IDs. Generated and prebuilt artifacts retain that order; loading
+prebuilt modules does not invoke a compiler. HOST registrations precede submissions,
+and `_submit_chip` forwards their `ccu_bindings` unchanged, including with DFX enabled.
+
+The device call is `submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)`.
+The context chooses the domain and the definition ID chooses its unique local
+mission. Repeated requests for that pair share the mission and are serialized by
+task dependencies. Simpler owns preparation, activation and confirmed mission stop;
+PyPTO does not introduce a separate CHIP execution accessor or shutdown protocol.
 
 Requests retain `9 + 3 * NR` uint64 words, aligned to 64 bytes: input address/token,
 byte count, source row byte offset, segment count, four GoSize values, then each
 destination's address/token and **domain-logical rank**. Peers use ordinary scalar
 arguments; `PeerRank` conversion is removed. Registration channels are indexed
 in domain-logical order, including local-copy selection.
+Destination slots are mapped to domain peers before LoopGroup construction;
+loop bodies contain only transfers and waits because HCOMM forbids `CCU_IF` there.
 
 The HBM algorithm retains 32 KiB chunks, 16 lanes, 4 GiB segmentation, separate
 main/remainder LoopGroups, readiness/completion handshakes and the resident
@@ -393,5 +401,7 @@ it does not select the peer notify index and may differ across ranks.
 
 CPU tests cover the full lowering/codegen pipeline, overlapping domains,
 registration reuse, definition-ID consistency, ordinary ctx forwarding, source packaging,
-and generated wrapper/native code with mocked primitives. They do not validate
-hardware scheduling, resource lifetime, or HCOMM instruction synthesis.
+compiler command construction, binding forwarding, prebuilt round trips,
+and generated wrapper/native code with mocked primitives against the pinned ABI
+header. They do not validate hardware scheduling, resource lifetime, or HCOMM
+instruction synthesis.

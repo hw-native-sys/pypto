@@ -9,20 +9,18 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// Generated native module. Link with build_identity.cpp from the build toolchain.
+// Generated native module. Simpler supplies the manifest identity header.
 #include <array>
 #include <cstring>
 #include <vector>
+#include "ccu_manifest_identity.h"
 #include "allgather_schedule.hpp"
 #include "hcomm/ccu/ccu_primitives.hpp"
 #include "hcomm/ccu/ccu_res.h"
 #include "platform_comm/ccu/ccu_native_abi.h"
-#if !defined(SIMPLER_CCU_DOMAIN_ABI_VERSION) || SIMPLER_CCU_DOMAIN_ABI_VERSION != 2
+#if !defined(SIMPLER_CCU_ABI_VERSION) || SIMPLER_CCU_ABI_VERSION != 2
 #error "Native CCU module requires domain-logical registration ABI v2"
 #endif
-
-extern const uint8_t pypto_ccu_sdk_identity[32];
-extern const uint8_t pypto_ccu_isa_identity[32];
 
 namespace {
 namespace ccu = AscendC::ccu;
@@ -50,7 +48,7 @@ class HbmAllGather {
   explicit HbmAllGather(const SimplerCcuRegistrationBinding* binding)
       : binding_(binding), events_(pypto_ccu::kLanes) {}
 
-  void Emit(const std::array<ccu::Variable, kWords>& words, ccu::Variable segment_offset,
+  void Emit(std::array<ccu::Variable, kWords>& words, ccu::Variable segment_offset,
             ccu::Variable addr_offset, ccu::Variable iterations,
             ccu::Variable parallel, ccu::Variable residual) {
     ccu::LocalAddr stable_input;
@@ -68,14 +66,20 @@ class HbmAllGather {
       source_[slot].addr = stable_input.addr + offset;
       source_[slot].token = stable_input.token;
       for (uint32_t rank = 0; rank < kRanks; ++rank) {
-        local_[slot][rank].addr = stable_output[rank].addr + offset;
-        local_[slot][rank].token = stable_output[rank].token;
-        remote_[slot][rank].addr = stable_output[rank].addr + offset;
-        remote_[slot][rank].token = stable_output[rank].token;
+        // Resolve window slots to domain peers before constructing the Func:
+        // HCOMM does not permit CCU_IF inside a Loop body.
+        for (uint32_t peer = 0; peer < kRanks; ++peer) {
+          CCU_IF(words[11 + 3 * rank] == peer) {
+            local_[slot][peer].addr = stable_output[rank].addr + offset;
+            local_[slot][peer].token = stable_output[rank].token;
+            remote_[slot][peer].addr = stable_output[rank].addr + offset;
+            remote_[slot][peer].token = stable_output[rank].token;
+          }
+        }
       }
       length_[slot] = length;
     };
-    auto emit_chunk = [&](uint32_t slot) { EmitChunk(slot, words); };
+    auto emit_chunk = [&](uint32_t slot) { EmitChunk(slot); };
 
     // Main: 16 lanes, 32 KiB between lanes, 512 KiB between loop iterations.
     CCU_IF(iterations != 0) {
@@ -114,23 +118,19 @@ class HbmAllGather {
   }
 
  private:
-  void EmitChunk(uint32_t slot, const std::array<ccu::Variable, kWords>& words) {
+  void EmitChunk(uint32_t slot) {
     const auto event = events_[slot];
     // Transfer masks describe destinations, independently of LoopGroup lanes.
     // Drain each group of 16 destinations before reusing that lane's event.
     for (uint32_t begin = 0; begin < kRanks; begin += 16) {
       const uint32_t end = (begin + 16 < kRanks) ? begin + 16 : kRanks;
-      for (uint32_t rank = begin; rank < end; ++rank) {
-        const auto bit = static_cast<uint16_t>(1u << (rank - begin));
-        for (uint32_t peer = 0; peer < binding_->rank_count; ++peer) {
-          CCU_IF(words[11 + 3 * rank] == peer) {
-            if (peer == binding_->rank_id) {
-              Check(ccu::LocalCopy(local_[slot][rank], source_[slot], length_[slot], event, bit));
-            } else {
-              Check(ccu::Write(binding_->channels[peer], remote_[slot][rank], source_[slot],
-                               length_[slot], event, bit));
-            }
-          }
+      for (uint32_t peer = begin; peer < end; ++peer) {
+        const auto bit = static_cast<uint16_t>(1u << (peer - begin));
+        if (peer == binding_->rank_id) {
+          Check(ccu::LocalCopy(local_[slot][peer], source_[slot], length_[slot], event, bit));
+        } else {
+          Check(ccu::Write(binding_->channels[peer], remote_[slot][peer], source_[slot],
+                           length_[slot], event, bit));
         }
       }
       Check(ccu::EventWait(event, static_cast<uint16_t>((1u << (end - begin)) - 1)));
@@ -151,9 +151,9 @@ int32_t AllGather(const SimplerCcuRegistrationBinding *binding) noexcept {
     for (uint32_t i = 0; i < launch.size(); ++i) Check(ccu::LoadArg(launch[i], i));
     ccu::Event trigger(binding->trigger_event_handle), done(binding->done_event_handle);
     HbmAllGather hbm(binding);
-    ccu::Variable service, one;
+    ccu::Variable service, decrement;
     service = 1;
-    one = 1;
+    decrement = UINT64_MAX;
     // This condition is never changed by a request. Each done retires only that
     // request, then the mission waits for another trigger. After the entire L2
     // task returns to Host, simpler stops the mission stream before teardown;
@@ -185,10 +185,11 @@ int32_t AllGather(const SimplerCcuRegistrationBinding *binding) noexcept {
       // A row can exceed the 13-bit LoopGroup iteration field. Process complete
       // 4 GiB segments, then the precomputed final GoSize, in this one mission.
       ccu::Variable segment, segment_offset, segment_bytes;
-      segment = 0;
+      segment = words[4];
       segment_offset = 0;
       segment_bytes = pypto_ccu::kSegmentBytes;
-      CCU_WHILE(segment != words[4]) {
+      // A5 supports the immediate-zero test; avoid variable-to-variable branches.
+      CCU_WHILE(segment != 0) {
         constexpr auto full = pypto_ccu::CalcGoSize(pypto_ccu::kSegmentBytes);
         ccu::Variable offset, iterations, parallel, residual;
         offset = full.addr_offset;
@@ -197,7 +198,7 @@ int32_t AllGather(const SimplerCcuRegistrationBinding *binding) noexcept {
         residual = full.residual;
         hbm.Emit(words, segment_offset, offset, iterations, parallel, residual);
         segment_offset = segment_offset + segment_bytes;
-        segment = segment + one;
+        segment = segment + decrement;
       }
       hbm.Emit(words, segment_offset, words[5], words[6], words[7], words[8]);
       notify(2, true);
@@ -218,18 +219,19 @@ Manifest MakeManifest() {
   Manifest result{};
   result.header.struct_size = sizeof(result.header);
   result.header.manifest_size = sizeof(result);
+  result.header.abi_version = SIMPLER_CCU_ABI_VERSION;
   result.header.kernel_record_size = sizeof(result.kernel);
   result.header.kernel_count = 1;
   result.header.kernel_records_offset = offsetof(Manifest, kernel);
   result.header.string_table_offset = offsetof(Manifest, symbol);
   result.header.string_table_size = sizeof(result.symbol);
-  std::memcpy(result.header.sdk_build_id, pypto_ccu_sdk_identity, 32);
-  std::memcpy(result.header.pto_isa_build_id, pypto_ccu_isa_identity, 32);
+  std::memcpy(result.header.sdk_build_id, simpler::ccu::sdk_build_id, 32);
+  std::memcpy(result.header.pto_isa_build_id, simpler::ccu::pto_isa_build_id, 32);
   std::memcpy(result.symbol, "{{entry_symbol}}", sizeof(result.symbol));
   result.kernel = {sizeof(SimplerCcuKernelRecord), 0, kWords * sizeof(uint64_t), 64,
       SIMPLER_CCU_KERNEL_CAP_THREE_EVENTS, offsetof(Manifest, symbol), sizeof(result.symbol),
       sizeof(SimplerCcuRegistrationBinding), SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT,
-      SIMPLER_CCU_TASK_ARGUMENT_COUNT};
+      SIMPLER_CCU_TASK_ARGUMENT_COUNT, kRanks, 0};
   return result;
 }
 }  // namespace
