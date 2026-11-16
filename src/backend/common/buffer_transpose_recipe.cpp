@@ -19,6 +19,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::backend {
@@ -60,7 +61,10 @@ bool SupportsLogicalBufferTranspose(const ir::CallPtr& call) {
 }
 
 void ValidateBufferTransposeOperands(const std::vector<ir::ExprPtr>& args) {
-  CHECK(args.size() == 3) << "buffer.transpose requires source, scratch and destination";
+  // Operand count is a compiler invariant; malformed calls may have no source.
+  INTERNAL_CHECK_SPAN(args.size() == 3,
+                      !args.empty() && args.front() ? args.front()->span_ : ir::Span::unknown())
+      << "buffer.transpose requires source, scratch and destination";
   std::vector<ir::BufferTypePtr> types;
   for (const auto& arg : args) {
     CHECK(arg) << "buffer.transpose operands must not be null";

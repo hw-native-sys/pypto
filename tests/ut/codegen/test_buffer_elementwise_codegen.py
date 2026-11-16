@@ -40,7 +40,7 @@ _NATIVE = [
 ]
 
 
-def _public_program(high_precision):
+def _public_program(high_precision, preserve_added=False):
     return pl.parse_program(f"""
 @pl.program
 class VectorRecipes:
@@ -53,7 +53,7 @@ class VectorRecipes:
         subtracted = pl.tile.sub(added, rhs)
         multiplied = pl.tile.mul(subtracted, rhs)
         divided = pl.tile.div(multiplied, rhs, high_precision={high_precision})
-        maximum = pl.tile.maximum(divided, lhs)
+        maximum = pl.tile.maximum(divided, {"added" if preserve_added else "lhs"})
         minimum = pl.tile.minimum(maximum, rhs)
         negated = pl.tile.neg(minimum)
         magnitude = pl.tile.abs(negated)
@@ -290,7 +290,8 @@ def test_tile_and_buffer_share_native_operand_and_attribute_contracts(
         )
         mnemonics = ["tadd", *_SCALAR_NATIVE]
     else:
-        program = _public_program(case == "precision")
+        # Keep both subtraction inputs live so its destination cannot alias either.
+        program = _public_program(case == "precision", preserve_added=True)
         mnemonics = _NATIVE
     pattern = re.compile(r"pto\.(" + "|".join(mnemonics) + r")\s+ins\(")
     contracts = []
@@ -324,6 +325,26 @@ def test_tile_and_buffer_share_native_operand_and_attribute_contracts(
                 assert row and col
                 assert (constants[row.group(1)], constants[col.group(1)]) == (16, 32)
         assert "pto.set_validshape" not in text
+        if case in ("vector", "precision"):
+            # Check dataflow before erasing SSA names: subtraction is ordered,
+            # and its destination must be the value consumed by multiplication.
+            # Resolve identities independently in each artifact because planners
+            # may assign different storage names to Tile and Buffer operations.
+            operands = {}
+            for mnemonic in ("tadd", "tsub", "tmul"):
+                line = next(line for line in instructions if f"pto.{mnemonic} ins(" in line)
+                match = re.search(r"ins\(([^:]+) :.*\) outs\((%[\w.$]+) :", line)
+                assert match
+                operands[mnemonic] = (
+                    [value.strip() for value in match.group(1).split(",")],
+                    match.group(2),
+                )
+            add_inputs, add_output = operands["tadd"]
+            sub_inputs, sub_output = operands["tsub"]
+            mul_inputs, _ = operands["tmul"]
+            assert len({add_output, add_inputs[1], sub_output}) == 3
+            assert sub_inputs == [add_output, add_inputs[1]]
+            assert sub_output == mul_inputs[0]
         contracts.append(
             [
                 re.sub(r"%[\w.$]+", "%value", line).replace("v_row=?, v_col=?", "v_row=16, v_col=32")
