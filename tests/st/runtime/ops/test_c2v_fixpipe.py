@@ -15,7 +15,6 @@ import torch
 from harness import st
 from harness.core.harness import TensorSpec
 from harness.core.kernel_source import datatype_from_torch
-from pypto import ir
 
 
 @pl.jit.incore
@@ -112,7 +111,6 @@ def _explicit_case(
 ):
     relu_mode = "normal_relu" if use_relu else "no_relu"
     scalar_scale = -0.5 if negative_scale else 0.5
-    quant_scale = ir.ConstFloat(scalar_scale, pl.FP32, ir.Span.unknown())
     scalar_quant = quant_mode.endswith("scalar")
     vector_quant = quant_mode == "deqf16_vec"
     column_major = layout_mode == "nz2dn"
@@ -153,115 +151,106 @@ def _explicit_case(
         torch.int32: pl.INT32,
     }[output_dtype]
 
-    # These fixtures exercise explicit AIC/AIV IR; jit.incore cannot declare
-    # those function types. The automatic non-square regression above uses jit.
-    @pl.program
-    class ExplicitPipe:
-        @pl.function(type=pl.FunctionType.AIC)
-        def fixpipe_producer(
-            self,
-            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
-            b: pl.Tensor[[16, 64], ir_input_dtype],
-            out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
-            words: pl.Tensor[[1, 32], pl.INT64],
-        ):
-            peer = pl.import_peer_buffer(name="fixpipe_slots", peer_func="fixpipe_consumer")
-            pl.aic_initialize_pipe(
-                peer,
-                dir_mask=1,
-                slot_size=2048,
-                slot_num=2,
-                acc_push_epilogue={"layout": layout_mode, "quant": quant_mode, "relu": relu_mode},
-            )
-            packed: pl.Tile[
-                [1, 32],
-                pl.INT64,
-                pl.Mem.Mat,
-                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-            ] = pl.load(words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
-            controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
-            for iteration in pl.pipeline(iterations, stage=pipeline_stages):
-                if nested_quant:
-                    for repeat in pl.range(2):
-                        lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
-                        rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
-                        acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-                        pl.set_quant_scalar(quant_scale)
-                        pl.tpush_to_aiv(acc, split=0)
-                        pl.set_quant_scalar(quant_scale * 0.5)
-                        pl.tpush_to_aiv(acc, split=0)
-                else:
+    @pl.jit.incore(level=pl.Level.AIC)
+    def fixpipe_producer(
+        a: pl.Tensor[[input_rows, 64], ir_input_dtype],
+        b: pl.Tensor[[16, 64], ir_input_dtype],
+        out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
+        words: pl.Tensor[[1, 32], pl.INT64],
+    ):
+        peer = pl.import_peer_buffer(name="fixpipe_slots", peer_func="fixpipe_consumer")
+        pl.aic_initialize_pipe(
+            peer,
+            dir_mask=1,
+            slot_size=2048,
+            slot_num=2,
+            acc_push_epilogue={"layout": layout_mode, "quant": quant_mode, "relu": relu_mode},
+        )
+        packed: pl.Tile[
+            [1, 32],
+            pl.INT64,
+            pl.Mem.Mat,
+            pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
+        ] = pl.load(words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+        controls = pl.tile.move(packed, target_memory=pl.Mem.Scaling)
+        quant_scale = pl.cast(scalar_scale, pl.FP32)
+        for iteration in pl.pipeline(iterations, stage=pipeline_stages):
+            if nested_quant:
+                for repeat in pl.range(2):
                     lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
                     rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
                     acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-                    if scalar_quant:
-                        if pipeline_stages > 1:
-                            pl.set_quant_scalar(
-                                pl.cast(pl.cast(iteration + 1, pl.INT32), pl.FP32) * quant_scale
-                            )
-                        else:
-                            pl.set_quant_scalar(quant_scale)
-                    if vector_quant:
-                        pl.set_quant_vector(controls)
+                    pl.set_quant_scalar(quant_scale)
                     pl.tpush_to_aiv(acc, split=0)
+                    pl.set_quant_scalar(quant_scale * 0.5)
+                    pl.tpush_to_aiv(acc, split=0)
+            else:
+                lhs = pl.load(a, [iteration * 32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                rhs = pl.load(b, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
+                if scalar_quant:
+                    if pipeline_stages > 1:
+                        pl.set_quant_scalar(pl.cast(pl.cast(iteration + 1, pl.INT32), pl.FP32) * quant_scale)
+                    else:
+                        pl.set_quant_scalar(quant_scale)
+                if vector_quant:
+                    pl.set_quant_vector(controls)
+                pl.tpush_to_aiv(acc, split=0)
+        return out
 
-        @pl.function(type=pl.FunctionType.AIV)
-        def fixpipe_consumer(
-            self,
-            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
-            b: pl.Tensor[[16, 64], ir_input_dtype],
-            out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
-            words: pl.Tensor[[1, 32], pl.INT64],
-        ):
-            buf = pl.reserve_buffer(name="fixpipe_slots", size=4096)
-            pl.aiv_initialize_pipe(
-                buf,
-                dir_mask=1,
-                slot_size=2048,
-                slot_num=2,
-                acc_push_epilogue={"layout": layout_mode, "quant": quant_mode, "relu": relu_mode},
-            )
-            for iteration in pl.range(messages):
-                if column_major:
-                    tile_dn: pl.Tile[
-                        [32, 16],
-                        ir_output_dtype,
-                        pl.Mem.Vec,
-                        pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box),
-                    ] = pl.tpop_from_aic(shape=[32, 16], dtype=ir_output_dtype, split=0)
-                    pl.store(
-                        pl.tile.transpose(pl.tile.transpose_view(tile_dn), 0, 1), [iteration * 32, 0], out
-                    )
-                    pl.tfree_to_aic(tile_dn)
-                else:
-                    tile_nd = pl.tpop_from_aic(shape=[32, 16], dtype=ir_output_dtype, split=0)
-                    pl.store(tile_nd, [iteration * 32, 0], out)
-                    pl.tfree_to_aic(tile_nd)
+    @pl.jit.incore(level=pl.Level.AIV)
+    def fixpipe_consumer(
+        a: pl.Tensor[[input_rows, 64], ir_input_dtype],
+        b: pl.Tensor[[16, 64], ir_input_dtype],
+        out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
+        words: pl.Tensor[[1, 32], pl.INT64],
+    ):
+        buf = pl.reserve_buffer(name="fixpipe_slots", size=4096)
+        pl.aiv_initialize_pipe(
+            buf,
+            dir_mask=1,
+            slot_size=2048,
+            slot_num=2,
+            acc_push_epilogue={"layout": layout_mode, "quant": quant_mode, "relu": relu_mode},
+        )
+        for iteration in pl.range(messages):
+            if column_major:
+                tile_dn: pl.Tile[
+                    [32, 16],
+                    ir_output_dtype,
+                    pl.Mem.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.none_box),
+                ] = pl.tpop_from_aic(shape=[32, 16], dtype=ir_output_dtype, split=0)
+                pl.store(pl.tile.transpose(pl.tile.transpose_view(tile_dn), 0, 1), [iteration * 32, 0], out)
+                pl.tfree_to_aic(tile_dn)
+            else:
+                tile_nd = pl.tpop_from_aic(shape=[32, 16], dtype=ir_output_dtype, split=0)
+                pl.store(tile_nd, [iteration * 32, 0], out)
+                pl.tfree_to_aic(tile_nd)
+        return out
 
-        @pl.function(type=pl.FunctionType.Group)
-        def group(
-            self,
-            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
-            b: pl.Tensor[[16, 64], ir_input_dtype],
-            out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
-            words: pl.Tensor[[1, 32], pl.INT64],
-        ) -> pl.Tensor[[out_rows, out_cols], ir_output_dtype]:
-            self.fixpipe_producer(a, b, out, words)
-            self.fixpipe_consumer(a, b, out, words)
-            return out
+    @pl.jit.incore(level=pl.Level.CORE_GROUP)
+    def group(
+        a: pl.Tensor[[input_rows, 64], ir_input_dtype],
+        b: pl.Tensor[[16, 64], ir_input_dtype],
+        out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
+        words: pl.Tensor[[1, 32], pl.INT64],
+    ) -> pl.Tensor[[out_rows, out_cols], ir_output_dtype]:
+        fixpipe_producer(a, b, out, words)
+        fixpipe_consumer(a, b, out, words)
+        return out
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            a: pl.Tensor[[input_rows, 64], ir_input_dtype],
-            b: pl.Tensor[[16, 64], ir_input_dtype],
-            out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
-            words: pl.Tensor[[1, 32], pl.INT64],
-        ) -> pl.Tensor[[out_rows, out_cols], ir_output_dtype]:
-            return self.group(a, b, out, words)
+    @pl.jit
+    def main(
+        a: pl.Tensor[[input_rows, 64], ir_input_dtype],
+        b: pl.Tensor[[16, 64], ir_input_dtype],
+        out: pl.Out[pl.Tensor[[out_rows, out_cols], ir_output_dtype]],
+        words: pl.Tensor[[1, 32], pl.INT64],
+    ) -> pl.Tensor[[out_rows, out_cols], ir_output_dtype]:
+        return group(a, b, out, words)
 
     return st.case(
-        ExplicitPipe,
+        main,
         tensors=[
             TensorSpec("a", [input_rows, 64], datatype_from_torch(input_dtype), init_value=a),
             TensorSpec("b", [16, 64], datatype_from_torch(input_dtype), init_value=b),
@@ -334,90 +323,86 @@ def _fractal_case(use_relu):
     if use_relu:
         expected = expected.clamp_min(0)
 
-    @pl.program
-    class FractalPipe:
-        @pl.function(type=pl.FunctionType.AIC)
-        def cube(
-            self,
-            a: pl.Tensor[[32, 32], pl.BF16],
-            b: pl.Tensor[[16, 32], pl.BF16],
-            eye: pl.Tensor[[16, 16], pl.FP32],
-            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
-        ):
-            peer = pl.import_peer_buffer(name="nz_forward", peer_func="vector")
-            back = pl.reserve_buffer(name="nz_return", size=4096)
-            pl.aic_initialize_pipe(
-                peer,
-                dir_mask=1,
-                slot_size=2048,
-                slot_num=2,
-                id=0,
-                acc_push_epilogue={"layout": "nz2nz", "quant": "no_convert", "relu": relu_mode},
-            )
-            pl.aic_initialize_pipe(0, back, dir_mask=2, slot_size=2048, slot_num=2, id=1)
-            lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-            rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
-            acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
-            pl.tpush_to_aiv(acc, split=0, id=0)
-            received = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP32, split=0, id=1)
-            identity = pl.load(eye, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
-            # Reading the returned NZ bytes through MAD detects physical packing.
-            checked = pl.matmul(received, identity)
-            pl.store(checked, [0, 0], out)
-            pl.tfree_to_aiv(received, id=1)
+    @pl.jit.incore(level=pl.Level.AIC)
+    def cube(
+        a: pl.Tensor[[32, 32], pl.BF16],
+        b: pl.Tensor[[16, 32], pl.BF16],
+        eye: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+    ):
+        peer = pl.import_peer_buffer(name="nz_forward", peer_func="vector")
+        back = pl.reserve_buffer(name="nz_return", size=4096)
+        pl.aic_initialize_pipe(
+            peer,
+            dir_mask=1,
+            slot_size=2048,
+            slot_num=2,
+            id=0,
+            acc_push_epilogue={"layout": "nz2nz", "quant": "no_convert", "relu": relu_mode},
+        )
+        pl.aic_initialize_pipe(0, back, dir_mask=2, slot_size=2048, slot_num=2, id=1)
+        lhs = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        rhs = pl.load(b, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(lhs, pl.tile.transpose_view(rhs))
+        pl.tpush_to_aiv(acc, split=0, id=0)
+        received = pl.tpop_from_aiv(shape=[32, 16], dtype=pl.FP32, split=0, id=1)
+        identity = pl.load(eye, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+        # Reading the returned NZ bytes through MAD detects physical packing.
+        checked = pl.matmul(received, identity)
+        pl.store(checked, [0, 0], out)
+        pl.tfree_to_aiv(received, id=1)
+        return out
 
-        @pl.function(type=pl.FunctionType.AIV)
-        def vector(
-            self,
-            a: pl.Tensor[[32, 32], pl.BF16],
-            b: pl.Tensor[[16, 32], pl.BF16],
-            eye: pl.Tensor[[16, 16], pl.FP32],
-            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
-        ):
-            local = pl.reserve_buffer(name="nz_forward", size=4096)
-            peer = pl.import_peer_buffer(name="nz_return", peer_func="cube")
-            pl.aiv_initialize_pipe(
-                local,
-                dir_mask=1,
-                slot_size=2048,
-                slot_num=2,
-                id=0,
-                acc_push_epilogue={"layout": "nz2nz", "quant": "no_convert", "relu": relu_mode},
-            )
-            pl.aiv_initialize_pipe(0, peer, dir_mask=2, slot_size=2048, slot_num=2, id=1)
-            tile: pl.Tile[
-                [32, 16],
-                pl.FP32,
-                pl.Mem.Vec,
-                pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
-            ] = pl.tpop_from_aic(shape=[32, 16], dtype=pl.FP32, split=0, id=0)
-            pl.tpush_to_aic(tile, split=0, id=1)
-            pl.tfree_to_aic(tile, id=0)
+    @pl.jit.incore(level=pl.Level.AIV)
+    def vector(
+        a: pl.Tensor[[32, 32], pl.BF16],
+        b: pl.Tensor[[16, 32], pl.BF16],
+        eye: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+    ):
+        local = pl.reserve_buffer(name="nz_forward", size=4096)
+        peer = pl.import_peer_buffer(name="nz_return", peer_func="cube")
+        pl.aiv_initialize_pipe(
+            local,
+            dir_mask=1,
+            slot_size=2048,
+            slot_num=2,
+            id=0,
+            acc_push_epilogue={"layout": "nz2nz", "quant": "no_convert", "relu": relu_mode},
+        )
+        pl.aiv_initialize_pipe(0, peer, dir_mask=2, slot_size=2048, slot_num=2, id=1)
+        tile: pl.Tile[
+            [32, 16],
+            pl.FP32,
+            pl.Mem.Vec,
+            pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+        ] = pl.tpop_from_aic(shape=[32, 16], dtype=pl.FP32, split=0, id=0)
+        pl.tpush_to_aic(tile, split=0, id=1)
+        pl.tfree_to_aic(tile, id=0)
+        return out
 
-        @pl.function(type=pl.FunctionType.Group)
-        def group(
-            self,
-            a: pl.Tensor[[32, 32], pl.BF16],
-            b: pl.Tensor[[16, 32], pl.BF16],
-            eye: pl.Tensor[[16, 16], pl.FP32],
-            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
-        ) -> pl.Tensor[[32, 16], pl.FP32]:
-            self.cube(a, b, eye, out)
-            self.vector(a, b, eye, out)
-            return out
+    @pl.jit.incore(level=pl.Level.CORE_GROUP)
+    def group(
+        a: pl.Tensor[[32, 32], pl.BF16],
+        b: pl.Tensor[[16, 32], pl.BF16],
+        eye: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+    ) -> pl.Tensor[[32, 16], pl.FP32]:
+        cube(a, b, eye, out)
+        vector(a, b, eye, out)
+        return out
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            a: pl.Tensor[[32, 32], pl.BF16],
-            b: pl.Tensor[[16, 32], pl.BF16],
-            eye: pl.Tensor[[16, 16], pl.FP32],
-            out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
-        ) -> pl.Tensor[[32, 16], pl.FP32]:
-            return self.group(a, b, eye, out)
+    @pl.jit
+    def main(
+        a: pl.Tensor[[32, 32], pl.BF16],
+        b: pl.Tensor[[16, 32], pl.BF16],
+        eye: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+    ) -> pl.Tensor[[32, 16], pl.FP32]:
+        return group(a, b, eye, out)
 
     return st.case(
-        FractalPipe,
+        main,
         name=f"fixpipe_nz2nz_relu={use_relu}",
         tensors=[
             TensorSpec("a", [32, 32], datatype_from_torch(torch.bfloat16), init_value=a),
