@@ -13,11 +13,15 @@ import hashlib
 import importlib
 import inspect
 import json
+import shutil
+import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pypto.backend.cannbotdsl_abi import build_call_adapter
 from pypto.backend.external_bridge import RuntimeTarget
 from pypto.backend.tmr_bridge import TMRBridge
 from pypto.jit.external.contracts import (
@@ -76,6 +80,8 @@ def compiler(monkeypatch, tmp_path):
                 "name": "x",
                 "kind": "tensor",
                 "dtype": "f32",
+                "cpp_type": "NativeTensor",
+                "element_cpp_type": "float",
                 "access": "read",
                 "layout_map": 0,
                 "shape": [-1, 32],
@@ -93,6 +99,8 @@ def compiler(monkeypatch, tmp_path):
                 "name": "out",
                 "kind": "tensor",
                 "dtype": "f32",
+                "cpp_type": "NativeTensor",
+                "element_cpp_type": "float",
                 "access": "write",
                 "layout_map": 0,
                 "shape": [-1, 32],
@@ -112,6 +120,7 @@ def compiler(monkeypatch, tmp_path):
                 "size": 4,
                 "alignment": 4,
                 "scalar_kind": "float",
+                "cpp_type": "float",
                 "bits": 32,
             },
         ],
@@ -693,6 +702,299 @@ def test_real_scalar_storage_width_and_kind(dtype):
     prepared = adapter.CANNBotDSLProvider().prepare(store_value, request)
     scalar = next(p for p in prepared.native_abi.parameters if p.value == ABIValue.SCALAR)
     assert scalar.size_bytes == dtype.get_byte()
+
+
+_CALL_SOURCE = """
+struct NativeTensor { __gm__ float* ptr; int64_t shape[1]; int64_t stride[1]; };
+__aicore__ inline void kernel_scaled(NativeTensor x, NativeTensor out, float alpha) {
+    for (int64_t row = 0; row < x.shape[0]; ++row)
+        for (int64_t col = 0; col < 32; ++col)
+            out.ptr[row * out.stride[0] + col] = x.ptr[row * x.stride[0] + col];
+    out.ptr[0] = alpha;
+}
+"""
+
+
+def _prepare_call(compiler, source=_CALL_SOURCE, request=None):
+    compiler.export.source = source
+    compiler.manifest["source_sha256"] = hashlib.sha256(source.encode()).hexdigest()
+    return adapter.CANNBotDSLProvider().prepare(_kernel, _request() if request is None else request)
+
+
+def _compile_call(artifact, tmp_path, main, *, device=False):
+    compiler = shutil.which("ccec") if device else shutil.which("g++-15") or shutil.which("g++")
+    if compiler is None:
+        pytest.skip("CANN device compiler unavailable" if device else "C++ compiler unavailable")
+    for file in artifact.files:
+        path = tmp_path / file.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(file.content)
+    root = Path(__file__).resolve().parents[3]
+    includes = [root / "runtime/src/common", root / "runtime/src/common/task_interface"]
+    includes.extend(tmp_path / path for path in artifact.include_dirs)
+    source = tmp_path / "caller.cpp"
+    source.write_text(
+        ("" if device else "#define __aicore__\n#define __gm__\n") + f'#include "{artifact.entry}"\n' + main
+    )
+    flags = ["-std=c++17", "-O2"]
+    output = tmp_path / ("caller.o" if device else "caller")
+    if device:
+        # Derive SDK include roots from the selected compiler installation,
+        # rather than taking headers from another CANN version on PATH.
+        sdk = Path(compiler).resolve().parents[3]
+        headers = list(sdk.glob("*/asc/include/c_api/asc_simd.h"))
+        if not headers:
+            pytest.skip("CANN C API headers unavailable")
+        includes.extend(header.parents[1] for header in headers)
+        includes.extend(header.parents[2] for header in headers)
+        flags += ["-c", "-x", "cce", "--cce-aicore-only", "--cce-aicore-arch=dav-c310-vec"]
+    result = subprocess.run(
+        [compiler, *flags, *(f"-I{path}" for path in includes), str(source), "-o", str(output)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, output
+
+
+@pytest.mark.parametrize("bits", [0x80000000, 0x7FC12345, 0x3F800000])
+@pytest.mark.parametrize("reorder", [False, True])
+def test_call_adapter_packs_runtime_views_and_preserves_scalar_bits(compiler, tmp_path, bits, reorder):
+    source = _CALL_SOURCE
+    if reorder:
+        compiler.manifest["parameters"][:2] = reversed(compiler.manifest["parameters"][:2])
+        source = source.replace("NativeTensor x, NativeTensor out", "NativeTensor out, NativeTensor x")
+    prepared = _prepare_call(compiler, source)
+    artifact = build_call_adapter(prepared)
+    # Generated adapters are callable headers, not loadable runtime entries.
+    assert artifact.entry == "call_adapter.hpp" and artifact.symbol.endswith("::invoke")
+    assert b"kernel_entry" not in artifact.files[-1].content
+    main = f"""
+#include <cstring>
+int main() {{
+    float input[100]{{}}, output[120]{{}};
+    for (int i = 0; i < 100; ++i) input[i] = float(i + 1);
+    simpler::tmr::Tensor x{{}}, out{{}};
+    x.dtype = out.dtype = DataType::FLOAT32;
+    x.buffer = {{uint64_t(input), sizeof(input)}}; x.ndims = 2;
+    x.start_offset = 3; x.shapes[0] = 2; x.shapes[1] = 32;
+    x.strides[0] = 40; x.strides[1] = 1;
+    out.buffer = {{uint64_t(output), sizeof(output)}}; out.ndims = 2;
+    out.start_offset = 7; out.shapes[0] = 2; out.shapes[1] = 32;
+    out.strides[0] = 40; out.strides[1] = 1;
+    int64_t args[] = {{int64_t(&x), int64_t(&out), {bits}LL}};
+    {artifact.symbol}(args);
+    uint32_t actual; std::memcpy(&actual, &output[7], 4);
+    if (actual != {bits}U) return 1;
+    if (output[8] != input[4] || output[47] != input[43] || output[78] != input[74]) return 2;
+    if (output[0] != 0 || output[6] != 0 || output[39] != 0 || output[79] != 0) return 3;
+    // Reuse the same generated source with a different invocation's pointers
+    // and offsets. No call-specific address is captured in the artifact.
+    x.start_offset = 4; out.start_offset = 8;
+    {artifact.symbol}(args);
+    if (output[9] != input[5] || output[48] != input[44]) return 4;
+}}
+"""
+    result, binary = _compile_call(artifact, tmp_path, main)
+    assert result.returncode == 0, result.stderr
+    executed = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert executed.returncode == 0, executed.stderr
+
+
+@pytest.mark.parametrize(
+    "change,message",
+    [
+        ("fields", "dynamic field offset mismatch"),
+        ("pointer", "descriptor pointer type mismatch"),
+        ("dtype", "tensor element dtype mismatch"),
+        ("scalar", "native type mismatch"),
+    ],
+)
+def test_compiler_checks_manifest_against_actual_native_layout(compiler, tmp_path, change, message):
+    source = _CALL_SOURCE
+    if change == "fields":
+        source = source.replace("shape[1]; int64_t stride[1]", "stride[1]; int64_t shape[1]")
+    elif change in ("pointer", "dtype"):
+        source = source.replace("float* ptr", "int32_t* ptr")
+        if change == "dtype":
+            # Equal widths and internally consistent native metadata must not
+            # authorize an int32 descriptor for a logical FP32 request.
+            for parameter in compiler.manifest["parameters"][:2]:
+                parameter["element_cpp_type"] = "int32_t"
+    else:
+        source = source.replace("float alpha", "int32_t alpha")
+    artifact = build_call_adapter(_prepare_call(compiler, source))
+    result, _ = _compile_call(artifact, tmp_path, "int main() {}")
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize("change", ["source", "manifest", "metadata", "missing_header", "cpp_type"])
+def test_adapter_revalidates_owned_artifacts_without_the_compiler(compiler, monkeypatch, change):
+    prepared = _prepare_call(compiler)
+    shutil.rmtree(compiler.include)
+    monkeypatch.setitem(sys.modules, "cannbotdsl", None)
+    assert build_call_adapter(prepared).symbol
+    if change == "metadata":
+        prepared = replace(prepared, execution=replace(prepared.execution, cores=(Core.AIC,), aiv_lanes=0))
+    else:
+        files = list(prepared.artifact.files)
+        if change == "source":
+            files[0] = replace(
+                files[0], content=b"// changed", sha256=hashlib.sha256(b"// changed").hexdigest()
+            )
+        elif change == "missing_header":
+            files.pop()
+        else:
+            manifest = json.loads(files[1].content)
+            if change == "manifest":
+                manifest["parameters"][0]["dynamic_fields"][0]["offset"] = 16
+            else:
+                manifest["parameters"][0]["cpp_type"] = "NativeTensor; unsafe()"
+            content = json.dumps(manifest).encode()
+            files[1] = replace(files[1], content=content, sha256=hashlib.sha256(content).hexdigest())
+        prepared = replace(prepared, artifact=replace(prepared.artifact, files=tuple(files)))
+    with pytest.raises(ContractError):
+        build_call_adapter(prepared)
+
+
+@pytest.mark.parametrize(
+    "dtype,dsl_type,element,ctype,kind,bits,expected",
+    [
+        (DataType.UINT32, "uint32", "u32", "int32_t", "integer", 0xFFFFFFFF, 0xFFFFFFFF),
+        (DataType.INT64, "int64", "i64", "int64_t", "integer", 0xFEDCBA9876543210, 0xFEDCBA9876543210),
+        (DataType.BOOL, "bool", "bool", "bool", "bool", 0, 0),
+        (DataType.BOOL, "bool", "bool", "bool", "bool", 1, 1),
+        (DataType.BOOL, "bool", "bool", "bool", "bool", 2, 1),
+    ],
+)
+def test_call_adapter_integer_carriers_and_bool_normalization(
+    compiler, tmp_path, dtype, dsl_type, element, ctype, kind, bits, expected
+):
+    setattr(compiler.cb.dtypes, dsl_type, object())
+    compiler.manifest["contract"]["parameters"][0]["argument"]["element"] = element
+    compiler.manifest["parameters"][2].update(
+        cpp_type=ctype,
+        scalar_kind=kind,
+        signed=kind == "integer",
+        size=dtype.get_byte(),
+        alignment=dtype.get_byte(),
+        bits=1 if kind == "bool" else dtype.get_byte() * 8,
+    )
+    request = _request()
+    request = replace(
+        request, parameters=(ParameterSpec("alpha", ScalarSpec(dtype)), *request.parameters[1:])
+    )
+    # Unsigned logical u32 travels through the export's signed C++ carrier;
+    # the generated adapter must copy bits, not convert numerically through float.
+    conversion = "uint64_t(uint32_t(alpha))" if dtype == DataType.UINT32 else "uint64_t(alpha)"
+    source = f"""
+struct NativeTensor {{ __gm__ float* ptr; int64_t shape[1]; int64_t stride[1]; }};
+uint64_t received = 0;
+inline void kernel_scaled(NativeTensor, NativeTensor, {ctype} alpha) {{ received = {conversion}; }}
+"""
+    artifact = build_call_adapter(_prepare_call(compiler, source, request))
+    main = f"""int main() {{
+    simpler::tmr::Tensor x{{}}, out{{}};
+    x.dtype = out.dtype = DataType::FLOAT32;
+    x.ndims = out.ndims = 2; x.shapes[1] = out.shapes[1] = 32;
+    x.strides[0] = out.strides[0] = 32; x.strides[1] = out.strides[1] = 1;
+    int64_t args[] = {{int64_t(&x), int64_t(&out), int64_t({bits}ULL)}};
+    {artifact.symbol}(args);
+    return received == {expected}ULL ? 0 : 1;
+}}"""
+    result, binary = _compile_call(artifact, tmp_path, main)
+    assert result.returncode == 0, result.stderr
+    executed = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert executed.returncode == 0, executed.stderr
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_real_export_call_adapter_compiles_with_ccec(tmp_path, dynamic):
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    @cb.kernel
+    def scaled(alpha, x, out):
+        for row in cb.range(x.shape[0]):
+            for col in cb.range(32):
+                out[row, col] = x[row, col] * alpha
+
+    request = _request()
+    if not dynamic:
+        tensor = TensorSpec((2, 32), DataType.FP32, strides=(32, 1))
+        request = replace(
+            request,
+            parameters=(request.parameters[0], ParameterSpec("x", tensor), ParameterSpec("out", tensor)),
+        )
+    artifact = build_call_adapter(adapter.CANNBotDSLProvider().prepare(scaled, request))
+    # Only the test supplies a global entry. Production output intentionally
+    # stops at a device-callable function until runtime guarantees are implemented.
+    main = f'extern "C" __aicore__ void test_entry(__gm__ int64_t* args) {{ {artifact.symbol}(args); }}'
+    result, binary = _compile_call(artifact, tmp_path, main, device=True)
+    assert result.returncode == 0, result.stderr
+    assert binary.stat().st_size > 0
+
+
+def test_call_adapter_populates_multiple_dynamic_slots(compiler, tmp_path):
+    tensor = TensorSpec(("rows", "cols", 32), DataType.FP32, strides=("plane", "pitch", 1))
+    request = replace(
+        _request(),
+        parameters=(_request().parameters[0], ParameterSpec("x", tensor), ParameterSpec("out", tensor)),
+    )
+    contract = compiler.manifest["contract"]
+    contract["dimensions"] = [
+        {"name": name, "min": minimum, "max": None, "multiple_of": 1}
+        for name, minimum in (("rows", 0), ("cols", 0), ("plane", 1), ("pitch", 1))
+    ]
+    for parameter in contract["parameters"][1:]:
+        parameter["argument"]["shape"] = [
+            {"kind": "dimension", "name": "rows"},
+            {"kind": "dimension", "name": "cols"},
+            {"kind": "constant", "value": 32},
+        ]
+        parameter["argument"]["stride"] = [
+            {"kind": "dimension", "name": "plane"},
+            {"kind": "dimension", "name": "pitch"},
+            {"kind": "constant", "value": 1},
+        ]
+    for parameter in compiler.manifest["parameters"][:2]:
+        parameter.update(
+            shape=[-1, -1, 32],
+            stride=[-1, -1, 1],
+            size=40,
+            dynamic_fields=[
+                {"field": "shape", "dimension": 0, "slot": 0, "offset": 8},
+                {"field": "shape", "dimension": 1, "slot": 1, "offset": 16},
+                {"field": "stride", "dimension": 0, "slot": 0, "offset": 24},
+                {"field": "stride", "dimension": 1, "slot": 1, "offset": 32},
+            ],
+        )
+    source = """
+struct NativeTensor { __gm__ float* ptr; int64_t shape[2]; int64_t stride[2]; };
+inline void kernel_scaled(NativeTensor x, NativeTensor out, float) {
+    out.ptr[0] = float(x.shape[0] + 10*x.shape[1] + 100*x.stride[0] + 10000*x.stride[1]);
+    out.ptr[1] = x.ptr[0];
+}
+"""
+    artifact = build_call_adapter(_prepare_call(compiler, source, request))
+    main = f"""int main() {{
+    float input[300]{{}}, output[300]{{}}; input[3] = 17;
+    simpler::tmr::Tensor x{{}}, out{{}};
+    x.dtype = out.dtype = DataType::FLOAT32;
+    x.buffer = {{uint64_t(input), sizeof(input)}}; x.start_offset = 3;
+    x.ndims = 3; x.shapes[0] = 2; x.shapes[1] = 3; x.shapes[2] = 32;
+    x.strides[0] = 128; x.strides[1] = 40; x.strides[2] = 1;
+    out = x; out.buffer = {{uint64_t(output), sizeof(output)}}; out.start_offset = 7;
+    int64_t args[] = {{int64_t(&x), int64_t(&out), 0}};
+    {artifact.symbol}(args);
+    return output[7] == 412832 && output[8] == 17 && output[0] == 0 ? 0 : 1;
+}}"""
+    result, binary = _compile_call(artifact, tmp_path, main)
+    assert result.returncode == 0, result.stderr
+    executed = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert executed.returncode == 0, executed.stderr
 
 
 if __name__ == "__main__":

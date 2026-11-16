@@ -88,8 +88,8 @@ Tensor 请求必须采用 ND 布局，明确给出正步长且最内层步长为
 
 例如，行步长动态的 `(rows, 32)` tensor 可描述为
 `TensorSpec(("rows", 32), DataType.FP32, strides=("pitch", 1))`。
-运行时 view offset 仍保留在请求中；后续 bridge 在构造提供方的首个有效元素指针时，
-必须且只能应用一次 offset。
+运行时 view offset 仍保留在请求中；下述调用适配器在构造提供方的首个有效元素指针时，
+只应用一次 offset。运行时绑定校验必须证明得到的地址位于存储边界内。
 
 结果为使用 `cannbotdsl.device_callable` v1 描述符 ABI 的 `PreparedKernel`，
 保留导出的物理参数顺序。公开返回为空；每个 tensor 写入都产生内部写回，覆盖范围
@@ -123,6 +123,27 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 编译器栈需求校验；现有仅加载 text 的 ELF 检查本身不能提供这些保证。
 `test_cannbotdsl_provider.py` 使用 fake 公开导出器验证交接边界，并在安装了可选包时
 使用真实公开编译器导出验证；这些测试不代表二进制验收。
+
+### CANNBotDSL 调用适配器（仅编译）
+
+`pypto.backend.cannbotdsl_abi.build_call_adapter(prepared)` 生成拥有全部内容的
+`SourceArtifact`，包含 `call_adapter.hpp` 及原生源码、manifest 和头文件。
+它不读取 provider 目录，也不导入可选编译器。生成代码前，适配器会重新核对
+manifest 与 prepared contract、原生 ABI、执行元数据及源码/头文件摘要的一致性。
+
+生成的设备函数消费 TMR 参数存储（tensor 在前，scalar 位模式槽位在后），保留导出
+的物理参数顺序，只应用一次元素 offset，并填充动态 shape/stride 数组。C++ 断言
+将实际函数签名、POD 布局、指针和数组类型、偏移、大小及对齐与 manifest 对照检查。
+即使原生整型载体的有符号属性与逻辑类型不同，也保持其位模式。Tensor 元素类型必须
+与请求一致，不能只比较字节宽度。浮点 scalar 保留
+负零和 NaN payload。Bool 槽位的低字节被规范化为合法的 C++ bool。TMR 限制为
+最多 32 个 tensor、16 个 scalar，以及 1..5 维 tensor；不支持 FP16/BF16 scalar 槽位。
+
+这是可调用头文件，**不是 `ExternalTask` 或可加载的 runtime 入口**：它有意不定义
+`kernel_entry`，也不改变 `TMRBridge` 支持的 ABI。调用方必须在每次调用时校验实际
+绑定，并落实保留的资源、缓存行、栈、二进制加载及完成条件。Host C++ 测试实际执行
+参数组装及 offset 处理，可选 CCEC 测试编译真实公开导出；两者均不代表设备执行或
+runtime 完成正确性验收。
 
 ## 请求与编译结果
 
