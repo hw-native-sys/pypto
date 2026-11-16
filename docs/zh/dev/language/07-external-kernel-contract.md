@@ -106,8 +106,8 @@ int64 动态 shape 字段和动态 stride 字段，整体按 8 字节对齐。�
 逻辑契约 schema 6 会单独校验，因为物理 `-1` 标记无法表示维度相等关系。Tensor
 元素类型、GM 地址空间、shape/stride 表达式及维度边界必须与请求完全一致；额外或
 更强的约束会被拒绝。支持的 view 约定为首个有效元素指针、消费端应用 offset、正步长
-且元素不重叠；不支持跨参数写重叠。这些检查只验证声明，实际地址、边界和重叠关系
-仍须由 runtime bridge 在每次调用时检查。
+且元素不重叠；不支持跨参数写重叠。这些检查只验证声明，下述绑定校验器负责验证
+实际地址、边界和重叠关系；runtime bridge 必须在每次提交前调用它。
 
 产物拥有 `device_callable.hpp`、完整的 `device_manifest.json`，以及经过摘要校验的
 DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状态修改、独占资源、
@@ -119,8 +119,8 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 该描述符 ABI。34.5 的后续工作需要实现检查完整 manifest 的 bridge、正确管理产物
 生命周期的 JIT 绑定及相关兼容回归。尤其不能在接入 runtime 时丢弃资源和 64 字节 GM
 写隔离要求。设备完成可见性、数值和性能验收仍由 34.7 跟踪。
-下一阶段 runtime 工作除描述符组装和资源所有权外，还须落实缓存行冲突串行化以及
-编译器栈需求校验；现有仅加载 text 的 ELF 检查本身不能提供这些保证。
+下一阶段 runtime 工作还须落实缓存行冲突串行化、编译器栈需求校验和资源所有权，
+并将调用适配器、绑定校验器和调用对冲突校验器接入提交路径；现有仅加载 text 的 ELF 检查本身不能提供这些保证。
 `test_cannbotdsl_provider.py` 使用 fake 公开导出器验证交接边界，并在安装了可选包时
 使用真实公开编译器导出验证；这些测试不代表二进制验收。
 
@@ -140,10 +140,61 @@ manifest 与 prepared contract、原生 ABI、执行元数据及源码/头文件
 最多 32 个 tensor、16 个 scalar，以及 1..5 维 tensor；不支持 FP16/BF16 scalar 槽位。
 
 这是可调用头文件，**不是 `ExternalTask` 或可加载的 runtime 入口**：它有意不定义
-`kernel_entry`，也不改变 `TMRBridge` 支持的 ABI。调用方必须在每次调用时校验实际
-绑定，并落实保留的资源、缓存行、栈、二进制加载及完成条件。Host C++ 测试实际执行
+`kernel_entry`，也不改变 `TMRBridge` 支持的 ABI。调用方必须在每次调用时运行绑定
+校验器，并落实保留的资源、缓存行、栈、二进制加载及完成条件。Host C++ 测试实际执行
 参数组装及 offset 处理，可选 CCEC 测试编译真实公开导出；两者均不代表设备执行或
 runtime 完成正确性验收。
+
+### CANNBotDSL 逐次调用绑定校验器（binding checker）
+
+`pypto.backend.cannbotdsl_abi.build_binding_checker(prepared)` 生成包含
+`binding_check.hpp` 的自持有 `SourceArtifact`。重新核验 prepared manifest 及源码/头文件
+摘要后，它为实际 TMR `CoreTaskArgs` 生成校验函数。使用 A5 TMR 编排头文件包含它，
+并在打包或提交同一组绑定前调用其导出符号。生成过程不导入可选编译器，也不捕获
+任何实际 tensor 地址。每次调用均须重新执行校验，包括命中产物缓存时。
+
+它复用 TMR 对参数数量、已有输出存储、rank/dtype、静态和共享维度、正步长、offset
+约束、存储边界及算术溢出的检查。CANNBotDSL 对齐检查作用于首个元素地址
+（`buffer.addr + start_offset * element_bytes`），至少满足元素的自然对齐要求。
+`c_pointer` bridge 保留独立的分配基地址对齐规则。
+
+对每个非空 tensor，校验器按 stride 排序各轴、忽略长度为 1 的轴，并要求每次跨步
+越过此前各轴覆盖的跨度。这能证明带 padding 和轴置换的布局不重叠；无法通过该保守
+检查证明的交错布局会被拒绝。不同参数的字节包围区间只有在两者均不写入时才允许
+重叠。空 view 不访问字节，但仍要求 stride、offset 合法，指针可表示且满足对齐。
+这些检查在 release 构建中仍然生效。
+
+生成校验器前会检查 TMR 元数据表示范围。`INDEX` 使用 runtime 的 `INT64` tensor
+标签；E4M3FN 和 E8M0 使用各自独立的 FP8 标签。E5M2 因 TMR 缺少对应标签而被拒绝。
+不支持 FP8 runtime scalar，也不支持 FP16/BF16 runtime scalar。
+
+通过校验器**不代表已允许设备执行**：字节级不重叠无法证明任务间的 64 字节缓存行
+隔离。资源所有权、栈/加载校验、任务完成以及 JIT/runtime 提交路径接入仍须实现。
+
+### CANNBotDSL 跨调用缓存行冲突
+
+`pypto.backend.cannbotdsl_abi.build_conflict_checker(first, second)` 生成包含两侧绑定
+校验器的自持有 `conflict_check.hpp`。两个 `PreparedKernel` 可以有不同的签名、dtype
+和访问效果。两侧 manifest 必须声明 64 字节 `serialize_conflicting_cache_lines` GM
+隔离策略；缺失或未知策略会被拒绝。导出符号接受两个 `CoreTaskArgs`，返回这对调用
+是否需要串行化。
+
+无论是否已经发现冲突，返回前都会完整校验两侧调用。它根据实际分配地址、元素
+offset、shape、stride 和元素宽度计算各访问 tensor 的保守字节包围区间，再比较包含
+末端的缓存行编号，避免在地址空间顶部向上取整溢出。空 tensor 和 `Access.NONE`
+不产生访问。允许 read/read 共享；只要共享缓存行且至少一侧写入，就返回 `true`。
+带 stride 的 view 中的空隙也保守地计入范围。
+
+例如，两个单元素 FP32 输出 view 分别位于 `0x2000` 和 `0x2004`，虽然字节不重叠，
+但同属 `0x2000` 缓存行，因此返回 `true`。第二个 view 移到 `0x2040` 且其他访问独立
+时返回 `false`。一侧输出与另一侧输入共享缓存行也要求串行化。指针 offset 在计算
+缓存行之前应用。
+
+这是调度判定函数，不是锁或提交 API。调用方必须检查所有可能并发的调用对，并在
+返回 `true` 时保证前一调用完成后才开始后一调用；仅检查相邻调用不足以保证安全。
+绑定在执行完成前必须保持不变，存储必须保持有效；绑定变化后必须重新检查。
+返回 `false` 仅证明这一对调用没有 GM 冲突，不证明本地资源、栈/加载要求或完成
+可见性。协议之外的调用也需要依赖或隔离策略。接入 TMR 调度和 JIT 仍是后续工作。
 
 ## 请求与编译结果
 

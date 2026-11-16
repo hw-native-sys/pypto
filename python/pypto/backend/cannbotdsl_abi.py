@@ -18,15 +18,22 @@ cache-line isolation, stack, loading and completion guarantees before calling it
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
-from pypto.jit.external.contracts import ABIParameter, ABIValue, PreparedKernel, SourceArtifact, TensorSpec
+from pypto.jit.external.contracts import (
+    ABIParameter,
+    ABIValue,
+    Access,
+    PreparedKernel,
+    SourceArtifact,
+    TensorSpec,
+)
 from pypto.jit.external.identity import prepared_digest
 from pypto.jit.external.providers.cannbotdsl import ABI_NAME, _contracts, _validate_inputs
 from pypto.jit.external.validation import ContractError, validate_prepared
 from pypto.pypto_core import DataType
 
-from .tmr_bridge import _file, _slots
+from .tmr_bridge import _DTYPES, _file, _preflight, _slots, _validate_parameters
 
 # CANN C API spellings differ from PTO's float8_* names. Other supported
 # element types use the shared IR C++ spelling, including INDEX as int64_t.
@@ -34,6 +41,15 @@ _TENSOR_CPP_TYPES = {
     DataType.FP8E4M3FN: "fp8_e4m3fn_t",
     DataType.FP8E5M2: "fp8_e5m2_t",
     DataType.FP8E8M0: "fp8_e8m0_t",
+}
+
+# TMR has no E5M2 tag. INDEX uses INT64 storage; keep its logical identity in
+# the prepared request. Do not widen c_pointer's supported dtype set here.
+_TMR_DTYPES = {
+    **_DTYPES,
+    DataType.INDEX: "INT64",
+    DataType.FP8E4M3FN: "FP8E4M3FN",
+    DataType.FP8E8M0: "FP8E8M0",
 }
 
 
@@ -177,14 +193,7 @@ def _scalar_lines(item: dict[str, Any], typ: str, name: str, slot: int) -> list[
     return lines
 
 
-def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
-    """Own a compile-only device call adapter and its native dependencies.
-
-    The caller must supply valid TMR packed arguments (tensors first, scalars
-    second), and prove bounds, dtype, strides, alignment and aliasing on every
-    invocation. This function validates declarations and the compiled ABI only;
-    returning a SourceArtifact does not authorize runtime submission.
-    """
+def _validate_call(prepared: PreparedKernel) -> dict[str, Any]:
     manifest = _manifest(prepared)
     symbol = _identifier(prepared.artifact.symbol, "entry symbol")
     if symbol == "kernel_entry":
@@ -199,6 +208,125 @@ def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
                 raise ContractError("CANNBotDSL adapter: TMR tensor rank must be in 1..5")
         elif spec.dtype in (DataType.FP16, DataType.BF16):
             raise ContractError("CANNBotDSL adapter: half-width runtime scalars are not supported")
+    return manifest
+
+
+def build_binding_checker(prepared: PreparedKernel) -> SourceArtifact:
+    """Generate a host checker for each invocation's actual TMR arguments.
+
+    The caller must run the exported function on CoreTaskArgs before packing
+    or submitting those same bindings, including on artifact cache hits. The
+    checker proves metadata/bounds and conservative element non-overlap, not
+    concurrent cache-line isolation, resource ownership or task completion.
+    """
+    _validate_call(prepared)
+    _validate_parameters(prepared, dtypes=_TMR_DTYPES)
+    for parameter in prepared.contract.parameters:
+        if not isinstance(parameter.type, TensorSpec) and parameter.type.dtype in _TENSOR_CPP_TYPES:
+            raise ContractError("CANNBotDSL adapter: FP8 runtime scalars are not supported")
+    symbol = f"pypto_cannbotdsl_check_{prepared_digest(prepared)}"
+    # Pair checkers embed this header under a digest-based path. A named guard
+    # also permits callers to include a standalone copy in the same TU.
+    guard = f"{symbol.upper()}_HPP"
+    source = (
+        f'#pragma once\n#ifndef {guard}\n#define {guard}\n#include "types.h"\n'
+        + _preflight(prepared, symbol, dtypes=_TMR_DTYPES, view_pointer=True, non_overlapping=True)
+        + "#endif\n"
+    )
+    return SourceArtifact((_file("binding_check.hpp", source.encode()),), "binding_check.hpp", symbol)
+
+
+def build_conflict_checker(first: PreparedKernel, second: PreparedKernel) -> SourceArtifact:
+    """Generate a host predicate for cache-line conflicts between two invocations.
+
+    The exported function takes the first and second CoreTaskArgs, validates
+    both, and returns true when their conservative access ranges require
+    serialization. Binding metadata and allocation addresses must remain fixed,
+    and storage must stay alive until execution completes. A false result
+    addresses only this pair's GM conflicts; it does
+    not establish resource ownership or authorize runtime submission.
+    """
+    checkers = [build_binding_checker(p) for p in (first, second)]
+    for prepared in (first, second):
+        isolation = _manifest(prepared)["resources"].get("gm_write_isolation")
+        policy = cast(dict[str, Any], isolation)
+        if (
+            not isinstance(isolation, dict)
+            or set(policy) != {"granularity_bytes", "rule"}
+            or type(policy["granularity_bytes"]) is not int
+            or policy["granularity_bytes"] != 64
+            or policy["rule"] != "serialize_conflicting_cache_lines"
+        ):
+            raise ContractError(
+                "CANNBotDSL conflict checker: expected 64-byte GM cache-line isolation "
+                f"with serialize_conflicting_cache_lines, got {isolation!r}"
+            )
+    digests = [prepared_digest(p) for p in (first, second)]
+    digest = hashlib.sha256(json.dumps(digests).encode()).hexdigest()
+    symbol = f"pypto_cannbotdsl_conflict_{digest}"
+    # The same kernel can appear on both sides. Emit its checker only once,
+    # using digest-based paths so multiple pair artifacts can share headers.
+    files = {f"checks/{digest}.hpp": checker.files[0].content for digest, checker in zip(digests, checkers)}
+    lines = ["#pragma once", *(f'#include "{path}"' for path in files)]
+    lines += [
+        f"template<class FirstArgs, class SecondArgs> inline bool {symbol}(",
+        "        const FirstArgs& first, const SecondArgs& second) {",
+        f"    {checkers[0].symbol}(first);",
+        f"    {checkers[1].symbol}(second);",
+        # Both checkers run before any early conflict return. Recompute spans
+        # only from validated metadata; there is no cached binding/address.
+        "    struct Lines { uint64_t first, last; bool empty; };",
+        "    auto cache_lines = [](const auto& tensor, uint64_t itemsize) -> Lines {",
+        "        for (unsigned axis = 0; axis < tensor.ndims; ++axis)",
+        "            if (tensor.shapes[axis] == 0) return {0, 0, true};",
+        "        uint64_t last = tensor.start_offset;",
+        "        for (unsigned axis = 0; axis < tensor.ndims; ++axis)",
+        "            last += uint64_t(tensor.shapes[axis] - 1) * tensor.strides[axis];",
+        # Inclusive last-line indices avoid rounding end up past UINT64_MAX.
+        # Binding checks proved addr + (last + 1) * itemsize representable.
+        "        return {(tensor.buffer.addr + tensor.start_offset * itemsize) / 64,",
+        "                (tensor.buffer.addr + (last + 1) * itemsize - 1) / 64, false};",
+        "    };",
+    ]
+    accesses: list[list[tuple[str, bool]]] = []
+    for side, prepared in zip(("first", "second"), (first, second)):
+        effects = {e.parameter: e.access for e in prepared.contract.effects}
+        side_accesses: list[tuple[str, bool]] = []
+        for index, slot in _slots(prepared)[0].items():
+            if effects.get(index, Access.NONE) == Access.NONE:
+                continue
+            spec = prepared.contract.parameters[index].type
+            name = f"{side}_{index}"
+            lines.append(
+                f"    const auto {name} = cache_lines({side}.tensor({slot}).ref(), {spec.dtype.get_byte()});"
+            )
+            side_accesses.append((name, effects[index] in (Access.WRITE, Access.READ_WRITE)))
+        accesses.append(side_accesses)
+    for left, left_writes in accesses[0]:
+        for right, right_writes in accesses[1]:
+            if left_writes or right_writes:
+                lines += [
+                    f"    if (!{left}.empty && !{right}.empty &&",
+                    f"        {left}.first <= {right}.last && {right}.first <= {left}.last) return true;",
+                ]
+    lines += ["    return false;", "}", ""]
+    files["conflict_check.hpp"] = "\n".join(lines).encode()
+    return SourceArtifact(
+        tuple(_file(path, content) for path, content in files.items()), "conflict_check.hpp", symbol
+    )
+
+
+def build_call_adapter(prepared: PreparedKernel) -> SourceArtifact:
+    """Own a compile-only device call adapter and its native dependencies.
+
+    The caller must supply valid TMR packed arguments (tensors first, scalars
+    second), and run build_binding_checker's function on every invocation.
+    This function validates declarations and the compiled ABI only; returning
+    a SourceArtifact does not authorize runtime submission.
+    """
+    manifest = _validate_call(prepared)
+    symbol = prepared.artifact.symbol
+    tensors, scalars = _slots(prepared)
     namespace = f"pypto_cannbotdsl_{prepared_digest(prepared)}"
     lines = [
         "#pragma once",
