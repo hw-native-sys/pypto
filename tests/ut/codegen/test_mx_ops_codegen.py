@@ -50,6 +50,17 @@ def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
     return "\n".join(parts)
 
 
+def _adjusted_mx_source_views(mlir: str) -> list[str]:
+    # Repeated name hints fall back to numeric SSA names. Follow the adjusted
+    # pointer definitions to exclude eager parameter views without naming assumptions.
+    pointers = set(re.findall(r"^\s*(%[\w.$]+) = pto\.addptr ", mlir, re.MULTILINE))
+    return [
+        line
+        for line in mlir.splitlines()
+        if (match := re.search(r"\bpto\.make_tensor_view (%[\w.$]+),", line)) and match.group(1) in pointers
+    ]
+
+
 def _assemble_mx(mlir, tmp_path):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
@@ -668,7 +679,7 @@ class TestMxMatmulCodegen:
         with passes.PassContext([], memory_planner=planner):
             optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
         mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
-        views = [line for line in mlir.splitlines() if "pto.make_tensor_view %mx_scale_ptr" in line]
+        views = _adjusted_mx_source_views(mlir)
         assert len(views) == 4
         assert all("!pto.tensor_view<?x?x!pto.f8E8M0>" in line for line in views)
         cpp = pto_backend._compile_pto_module(mlir, "mx_narrow", str(tmp_path), planner)
@@ -717,7 +728,7 @@ class TestMxMatmulCodegen:
 
         mlir = _emit_incore_mlir(Program)
         assert mlir.count("pto.tload") == 2
-        views = [line for line in mlir.splitlines() if "pto.make_tensor_view %mx_scale_ptr" in line]
+        views = _adjusted_mx_source_views(mlir)
         assert len(views) == 2
         assert any("shape = [%c16_index, %c2_index]" in line for line in views)
         assert any("shape = [%c2_index, %c16_index]" in line for line in views)
@@ -738,7 +749,7 @@ class TestMxMatmulCodegen:
         assert "pto.tload" not in mlir
         # The eager logical parameter view is harmless; no transfer descriptor
         # or out-of-bounds pointer may be materialized for this empty window.
-        assert "pto.make_tensor_view %mx_scale_ptr" not in mlir
+        assert not _adjusted_mx_source_views(mlir)
         assert "pto.addptr" not in mlir
         if find_ptoas_binary() is not None:
             pto_backend._compile_pto_module(mlir, "mx_empty", str(tmp_path))
