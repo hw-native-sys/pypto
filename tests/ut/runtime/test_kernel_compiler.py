@@ -11,6 +11,7 @@
 
 import importlib
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from unittest.mock import Mock
 
 import pytest
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION
+from pypto.runtime._device_image import validate_device_image
+from pypto.runtime._stack_usage import validate_stack_usage
 
 
 @pytest.fixture
@@ -291,6 +294,233 @@ def test_vpto_rejects_images_that_text_loader_cannot_load(kwargs, error):
     validate_device_image(_vpto_elf())
     with pytest.raises(ValueError, match=error):
         validate_device_image(_vpto_elf(**kwargs))
+
+
+def _text_only_elf():
+    """An entry and a retained helper, each with independently required stack evidence."""
+    data = bytearray(832)
+    data[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<HHI", data, 16, 2, 0x1029, 1)
+    struct.pack_into("<Q", data, 24, 0x1000)
+    struct.pack_into("<Q", data, 40, 512)
+    struct.pack_into("<HHH", data, 58, 64, 5, 1)
+    names = b"\0.shstrtab\0.text\0.strtab\0.symtab\0"
+    symbols = b"\0kernel_entry\0helper\0"
+    data[64 : 64 + len(names)] = names
+    data[160 : 160 + len(symbols)] = symbols
+    headers = [
+        (1, 3, 0, 0, 64, len(names), 0, 0, 1, 0),
+        (11, 1, 6, 0x1000, 128, 16, 0, 0, 4, 0),
+        (17, 3, 0, 0, 160, len(symbols), 0, 0, 1, 0),
+        (25, 2, 0, 0, 224, 72, 3, 1, 8, 24),
+    ]
+    for index, header in enumerate(headers, 1):
+        struct.pack_into("<IIQQQQIIQQ", data, 512 + 64 * index, *header)
+    struct.pack_into("<IBBHQQ", data, 248, 1, 0x12, 0, 2, 0x1000, 4)
+    struct.pack_into("<IBBHQQ", data, 272, 14, 0x02, 0, 2, 0x1008, 4)
+    return data
+
+
+@pytest.mark.parametrize(
+    "offset,fmt,value,error",
+    [
+        (6, "B", 0, "ELF version"),
+        (20, "I", 0, "ELF version"),
+        (24, "Q", 0x1004, "start of .text"),
+        (40, "Q", 830, "section table"),
+        (576 + 24, "Q", 830, "truncated section"),
+        (576 + 4, "I", 1, "section-name string table"),
+        (640, "I", 500, "string-table offset"),
+        (640 + 4, "I", 8, "executable .text"),
+        (640 + 8, "Q", 3, "executable .text"),
+        (704, "I", 11, "duplicate .text"),
+        (768 + 40, "I", 5, "symbol string table"),
+        (768 + 56, "Q", 0, "symbol table"),
+        (248, "I", 100, "string-table offset"),
+        (248 + 4, "B", 0x11, "must be a function"),
+        (248 + 6, "H", 0, "unresolved symbol"),
+        (248 + 8, "Q", 0x1004, "global entry function"),
+        (248 + 16, "Q", 0, "global entry function"),
+        (272 + 8, "Q", 0x1010, "function outside .text"),
+        (272 + 16, "Q", 100, "function outside .text"),
+    ],
+)
+def test_text_only_rejects_malformed_images(offset, fmt, value, error):
+    image = _text_only_elf()
+    assert validate_device_image(bytes(image), entry_symbol="kernel_entry") == {"kernel_entry", "helper"}
+    struct.pack_into(f"<{fmt}", image, offset, value)
+    with pytest.raises(ValueError, match=error):
+        validate_device_image(bytes(image), entry_symbol="kernel_entry")
+
+
+@pytest.mark.parametrize(
+    "report,error",
+    [
+        (None, "no stack-usage report"),
+        ("", "missing stack-usage evidence"),
+        ("source:kernel_entry\t0\tstatic\n", "helper"),
+        ("source:kernel_entry\t0\tstatic\nsource:helper\t16\tstatic\n", "zero-stack"),
+        ("source:kernel_entry\t0\tstatic\nsource:helper\t0\tdynamic\n", "zero-stack"),
+        ("bad record", "malformed"),
+        ("source:helper\t-1\tstatic", "invalid or duplicate"),
+        ("source:helper\t0\tstatic\nsource:helper\t0\tstatic", "invalid or duplicate"),
+    ],
+)
+def test_text_only_requires_compiler_stack_evidence(tmp_path, report, error):
+    path = tmp_path / "kernel.su"
+    if report is not None:
+        path.write_text(report)
+    with pytest.raises(ValueError, match=error):
+        validate_stack_usage(path, frozenset({"kernel_entry", "helper"}))
+
+
+def test_text_only_ignores_stack_frames_removed_by_linker(tmp_path):
+    path = tmp_path / "kernel.su"
+    path.write_text("path:kernel_entry\t0\tstatic\npath:helper\t0\tstatic\npath:dead\t64\tstatic\n")
+    validate_stack_usage(path, validate_device_image(bytes(_text_only_elf()), entry_symbol="kernel_entry"))
+
+
+def test_text_only_requires_unambiguous_retained_symbols():
+    image = _text_only_elf()
+    # A stripped binary cannot establish that kernel_entry is the first byte,
+    # nor enumerate every function whose compiler stack evidence is required.
+    struct.pack_into("<I", image, 768 + 4, 1)
+    with pytest.raises(ValueError, match="missing entry function"):
+        validate_device_image(bytes(image), entry_symbol="kernel_entry")
+    image = _text_only_elf()
+    struct.pack_into("<I", image, 272, 1)
+    with pytest.raises(ValueError, match="duplicate function symbol"):
+        validate_device_image(bytes(image), entry_symbol="kernel_entry")
+
+
+def test_text_only_rejects_runtime_provisioning_metadata():
+    image = _text_only_elf()
+    names_size = struct.unpack_from("<Q", image, 576 + 32)[0]
+    name = b".ascend.meta.kernel_entry\0"
+    image[64 + names_size : 64 + names_size + len(name)] = name
+    struct.pack_into("<Q", image, 576 + 32, names_size + len(name))
+    struct.pack_into("<I", image, 704, names_size)
+    with pytest.raises(ValueError, match="kernel runtime metadata"):
+        validate_device_image(bytes(image), entry_symbol="kernel_entry")
+
+
+@pytest.mark.parametrize("failure", [None, "stack", "missing_report", "image"])
+def test_text_only_compile_validates_before_return_and_cleans_outputs(
+    compiler_module, monkeypatch, tmp_path, failure
+):
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        output = Path(command[command.index("-o") + 1])
+        if command[0] == "compiler":
+            output.write_bytes(b"object")
+            if failure != "missing_report":
+                size = 16 if failure == "stack" else 0
+                output.with_suffix(".su").write_text(
+                    f"source:kernel_entry\t0\tstatic\nsource:helper\t{size}\tstatic\n"
+                )
+        else:
+            output.write_bytes(b"bad image" if failure == "image" else _text_only_elf())
+            order = next(arg.split("=", 1)[1] for arg in command if arg.startswith("--symbol-ordering"))
+            assert Path(order).read_text() == "kernel_entry\n"
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    compiler = compiler_module.KernelCompiler("a5")
+    kwargs = dict(pto_isa_root=str(tmp_path), build_dir=str(tmp_path), text_only=True)
+    if failure:
+        with pytest.raises(ValueError, match="Device image"):
+            compiler.compile_incore(_source(tmp_path), **kwargs)
+    else:
+        assert compiler.compile_incore(_source(tmp_path), **kwargs) == _text_only_elf()
+    assert {"-fstack-usage", "-ffunction-sections", "-fdata-sections"} <= set(commands[0])
+    assert "--gc-sections" in commands[1]
+    assert not list(tmp_path.glob("pypto-incore-*"))
+
+
+@pytest.mark.parametrize("platform,helpers", [("a5sim", None), ("a2a3", None), ("a5", ["helper.pto"])])
+def test_text_only_rejects_unsupported_build_modes(compiler_module, monkeypatch, tmp_path, platform, helpers):
+    run = Mock(side_effect=AssertionError("compiler must not run"))
+    monkeypatch.setattr(compiler_module.subprocess, "run", run)
+    compiler = compiler_module.KernelCompiler(platform)
+    with pytest.raises(ValueError, match="text_only requires"):
+        compiler.compile_incore(_source(tmp_path), text_only=True, vpto_sources=helpers)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("live_data", [False, True])
+def test_real_cannbotdsl_text_only_compile(compiler_module, tmp_path, dynamic, live_data):
+    """The real exporter includes SDK data; the strict link must remove only dead data."""
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+    ccec = shutil.which("ccec")
+    if ccec is None:
+        pytest.skip("CANN device compiler unavailable")
+    sdk = Path(ccec).resolve().parents[3]
+    headers = list(sdk.glob("*/asc/include/c_api/asc_simd.h"))
+    if not headers:
+        pytest.skip("CANN C API headers unavailable")
+
+    from pypto import DataType  # noqa: PLC0415
+    from pypto.backend.cannbotdsl_abi import build_call_adapter  # noqa: PLC0415
+    from pypto.jit.external.contracts import (  # noqa: PLC0415
+        CompileTarget,
+        KernelRequest,
+        ParameterSpec,
+        TensorSpec,
+    )
+    from pypto.jit.external.providers.cannbotdsl import CANNBotDSLProvider  # noqa: PLC0415
+
+    @cb.kernel
+    def copy_elements(x, out):
+        for i in cb.range(x.shape[0]):
+            out[i] = x[i] + 1.0
+
+    tensor = TensorSpec(("n" if dynamic else 32,), DataType.FP32, strides=(1,))
+    request = KernelRequest(
+        (ParameterSpec("x", tensor), ParameterSpec("out", tensor)), CompileTarget("a5", "ccec", "test")
+    )
+    artifact = build_call_adapter(CANNBotDSLProvider().prepare(copy_elements, request))
+    for file in artifact.files:
+        path = tmp_path / file.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(file.content)
+    source = tmp_path / "entry.cpp"
+    # A live reference must survive GC and fail admission. Dropping every data
+    # section unconditionally would turn this into silently miscompiled code.
+    read_data = "args[0] = g_tilingKey;" if live_data else ""
+    source.write_text(
+        f'#include "{artifact.entry}"\n'
+        f'extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {{\n'
+        f"  {read_data}\n  {artifact.symbol}(args);\n}}\n"
+    )
+    compiler = compiler_module.KernelCompiler("a5")
+    compiler.sdk.ccec.cxx_path = ccec
+    compiler.sdk.ccec.linker_path = str(Path(ccec).resolve().with_name("ld.lld"))
+    compiler.sdk.ccec.get_compile_flags = lambda **kwargs: [
+        "-std=c++17",
+        "-O2",
+        "-DNDEBUG",
+        "-c",
+        "-x",
+        "cce",
+        "--cce-aicore-only",
+        "--cce-aicore-arch=dav-c310-vec",
+    ]
+    root = Path(__file__).resolve().parents[3]
+    includes = [root / "runtime/src/common", root / "runtime/src/common/task_interface"]
+    includes += [headers[0].parents[1], headers[0].parents[2]]
+    includes.extend(tmp_path / path for path in artifact.include_dirs)
+    kwargs = dict(pto_isa_root=str(tmp_path), extra_include_dirs=[str(p) for p in includes], text_only=True)
+    if live_data:
+        with pytest.raises(ValueError, match="allocated section"):
+            compiler.compile_incore(str(source), **kwargs)
+    else:
+        binary = compiler.compile_incore(str(source), **kwargs)
+        assert "kernel_entry" in validate_device_image(binary, entry_symbol="kernel_entry")
 
 
 @pytest.mark.parametrize("platform,core", [("a5sim", "aiv"), ("a2a3", "aiv"), ("a5", "aic")])

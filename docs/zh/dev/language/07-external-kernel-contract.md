@@ -125,6 +125,30 @@ DSL 扩展头文件副本。Manifest 保留描述符布局、view 约束、状�
 `test_cannbotdsl_provider.py` 使用 fake 公开导出器验证交接边界，并在安装了可选包时
 使用真实公开编译器导出验证；这些测试不代表二进制验收。
 
+### 仅加载 text 的二进制准入
+
+`KernelCompiler.compile_incore(..., text_only=True)` 为具有 `kernel_entry` wrapper
+的设备可调用源码提供显式启用的 A5 编译路径。它生成独立的函数/数据 section 和编译器
+栈用量报告，再按入口顺序链接并回收不可达 section。这样可以删除 `g_tilingKey` 等未被
+引用的 SDK 数据；被引用的数据仍须通过最终校验。
+
+返回链接后的 ELF 前，编译器要求仅有一个非空、可执行的 `.text`，全局 `kernel_entry`
+位于其首字节，不包含其他非空的已分配 section、未处理的重定位或未解析符号，且 section
+表和符号表有效。非空的 `.ascend.meta*` section 会被拒绝，因为 kernel 启动元数据可能
+要求额外预留 SU/SIMT 栈或 UB。每个保留的函数都必须具有编译器生成的**静态零栈用量**报告。缺失报告、
+动态栈帧和正栈用量均会被拒绝，因为持久化 runtime 当前没有每任务编译器栈预留契约。
+链接器删除的函数报告不占用预算。编译、报告生成和检查在同一私有构建目录内完成，成功
+或失败都会清理该目录。
+
+此模式支持 A5 AIC/AIV 编译；拒绝模拟器及独立编译的 VPTO helper，因为其栈证据不在本次
+校验范围内。普通编译保留既有行为。该检查验证编译器产物结构，不能证明任意机器码与
+位置无关。它不会启用描述符 JIT 调用、预留本地内存/同步资源、落实批次排序或证明设备
+完成可见性；bridge 仍须在提交前建立这些保证。后续接入产物缓存时，必须将该构建策略
+纳入身份并保留准入证据；此直接编译路径不查找缓存。
+
+`test_kernel_compiler.py` 覆盖无效二进制和栈报告、失败清理，并在环境可用时使用 CCEC
+编译链接真实 CANNBotDSL 静态/动态导出。这些是二进制准入检查，不代表设备执行验收。
+
 ### CANNBotDSL 调用适配器（仅编译）
 
 `pypto.backend.cannbotdsl_abi.build_call_adapter(prepared)` 生成拥有全部内容的

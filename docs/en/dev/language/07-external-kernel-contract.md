@@ -155,6 +155,40 @@ checks alone do not establish these guarantees.
 `test_cannbotdsl_provider.py` checks the handoff with a fake public exporter and,
 when installed, the real public compiler export; it does not validate a binary.
 
+### Text-only binary admission
+
+`KernelCompiler.compile_incore(..., text_only=True)` provides an opt-in A5
+compilation path for device-callable sources with a `kernel_entry` wrapper.
+It emits separate function/data sections and a compiler stack-usage report,
+then links with entry ordering and garbage collection. This removes unreferenced
+SDK data such as `g_tilingKey`; referenced data must still pass the final check.
+
+Before returning the linked ELF, the compiler requires one nonempty executable
+`.text` section, a global `kernel_entry` at its first byte, no other nonempty
+allocated sections, no remaining relocations or unresolved symbols, and valid
+section and symbol tables. Nonempty `.ascend.meta*` sections are rejected because
+kernel launch metadata can require additional SU/SIMT stack or UB provisioning.
+Every retained function must have a compiler report
+showing **static zero-stack usage**. Missing reports, dynamic frames and positive
+stack sizes fail: the persistent runtime currently exposes no per-task compiler
+stack reservation contract. Reports for functions discarded by the linker do
+not consume a budget. Compilation, report generation and checking happen in the
+same private build directory, which is removed on success or failure.
+
+This mode supports A5 AIC/AIV compilation and rejects simulation and separately
+compiled VPTO helpers, whose stack evidence is not covered. Ordinary compilation
+keeps its existing behavior. The check validates compiler-produced binary
+structure; it does not prove arbitrary machine code position-independent.
+It does not enable descriptor JIT calls, reserve local memory/synchronization
+resources, enforce batch ordering or establish device completion visibility.
+The bridge must still establish those guarantees before submission. A future
+artifact-cache integration must include this build policy in its identity and
+retain admission evidence; this direct compile path performs no cache lookup.
+
+`test_kernel_compiler.py` covers invalid images and stack reports, failure cleanup,
+and real CANNBotDSL static/dynamic exports compiled and linked with CCEC when
+available. These are binary admission checks, not device execution acceptance.
+
 ### CANNBotDSL call adapter (compile-only)
 
 `pypto.backend.cannbotdsl_abi.build_call_adapter(prepared)` produces an owned
