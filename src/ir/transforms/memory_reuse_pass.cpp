@@ -57,8 +57,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // there is nothing for memory reuse to do — skip them silently. A Graph body
   // is orchestration too.
   if (IsOrchestrationLike(func->func_type_) ||
-      (func->func_type_ == FunctionType::SIMT || func->func_type_ == FunctionType::VF))
+      (func->func_type_ == FunctionType::SIMT || func->func_type_ == FunctionType::VF)) {
     return func;
+  }
 
   // Step 0 (semantic must-alias retarget) now runs in the preceding
   // MaterializeSemanticAliases pass, so the body here is already retargeted.

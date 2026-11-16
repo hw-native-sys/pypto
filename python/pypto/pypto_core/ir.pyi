@@ -860,8 +860,10 @@ class FunctionType(enum.Enum):
     """Recordable/replayable orchestration fragment."""
 
     SIMT = ...
-    VF = ...
     """Per-thread device helper launched inside an AIV task, returning void."""
+
+    VF = ...
+    """Synchronous register helper borrowing Tile storage; may return Tile aliases."""
 
 class SimtParamAccess:
     reads: bool

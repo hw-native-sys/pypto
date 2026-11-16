@@ -21,15 +21,20 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/simplify.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 
@@ -74,7 +79,16 @@ inline RegScopeStmtPtr BindVFRegion(const FunctionPtr& function, const CallPtr& 
     }
     substitutions[function->params_[i].get()] = argument;
   }
-  auto bound = DeepClone(scope, substitutions).cloned_body;
+  auto bound_function = MutableCopy(function);
+  bound_function->body_ = DeepClone(scope, substitutions).cloned_body;
+  // Unrolling the caller makes captured offsets constant only at binding time.
+  // Fold those expressions before bounds/initialization analysis and emission,
+  // lifting proven branches and zero-/one-trip loops while retaining effects,
+  // yields and explicit hardware-loop policy. Unknown control flow and
+  // partial-write semantics remain intact.
+  auto bound = transform_utils::SimplifyFunction(bound_function, /*constants_only=*/true,
+                                                 /*fold_constant_control_flow=*/true)
+                   ->body_;
   class RetypeStores : public IRMutator {
    protected:
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -156,8 +170,13 @@ inline void CheckVFCalls(const ProgramPtr& program, bool final_placement = false
             << "VF argument count must match its declaration";
         VFReturnedArguments(helper, call);
       }
-      CHECK_SPAN(function_->func_type_ != FunctionType::VF || !As<GlobalVar>(call->op_), call->span_)
-          << "VF helpers cannot call other functions";
+      if (function_->func_type_ == FunctionType::VF && As<GlobalVar>(call->op_)) {
+        auto callee = program_->GetFunction(call->op_->name_);
+        // Outlining precedes InlineFunctions. Only that pending substitution
+        // is legal here; no ordinary calls may survive at the codegen boundary.
+        CHECK_SPAN(!final_ && callee && callee->func_type_ == FunctionType::Inline, call->span_)
+            << "VF helpers cannot call other functions (except pending Inline calls)";
+      }
       IRVisitor::VisitExpr_(call);
     }
     void VisitExpr_(const SubmitPtr& submit) override {

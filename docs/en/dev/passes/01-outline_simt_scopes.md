@@ -105,12 +105,13 @@ contribute scalar captures too. Parameters use the existing
 alias names its captured parameter in the helper's return contract. Registers
 and region-local Scalars cannot cross this boundary. No-live-out scopes still
 produce a call, preserving writes even when store results are unused. The new
-helper is locally normalized with the existing SSA converter before deriving
+helper is locally normalized with the existing unroller and SSA converter before deriving
 directions and alias returns, so source-level rebinding cannot change an
 earlier result's storage. The caller stays in the frontend phase.
 Conditional rebindings retain their incoming capture, including zero-trip loop
 values. Tile branch results and loop carries must resolve to the same captured
-storage on every path; choosing between different buffers is rejected.
+storage on every reachable path. Proven caller constants select branches before
+this contract is checked; runtime selection between different buffers is rejected.
 
 `ExpandMixedKernel` places VF calls on AIV. The caller owns all Tile allocations;
 `InitMemRef` resolves returned aliases through the function's return lineage,
@@ -119,8 +120,30 @@ storage: they do not invalidate the caller's original Tile handle. Register
 initialization checks bind the helper to the caller's actual storage, so `InOut`
 is never mistaken for proof that the entire Tile is initialized.
 
+Programs containing source register scopes complete the ordinary Inline expansion
+before capture discovery. This specializes region-owning templates and wrappers,
+but also exposes scope-free scalar producers and scalar `Out` writes before
+constant propagation. All consumed Inline declarations are removed. Programs
+without source register scopes keep their ordinary inlining stage. Caller code
+must still use the returned value after an `Out`/`InOut` call; the input verifier
+continues to enforce that contract.
+
+Proven caller constants propagate into regions before their parameters hide
+those values, and helper normalization folds constant branches before validating
+alias returns. Binding a VF to constant caller arguments also folds proven branches
+and zero-/one-trip loops, preserving effects, yields and returned aliases. Nonempty
+explicitly required hardware loops retain their policy. Runtime-dependent branches
+retain the existing backend restrictions.
+
 PTO codegen binds the explicit helper parameters to final caller operands and
 uses the existing register emitter and annotated Tile adapter. Each execution
 call receives an artifact with the appropriate physical UB offsets. This
 preserves the current execution restrictions and does not add synchronization
 in the outlining pass.
+
+Before fixing VF captures, the outliner expands Inline calls inside register scopes
+and substitutes enclosing static-unroll indices. This removes unused Tensor or
+unplaced-Tile arguments from the VF ABI and preserves caller-dependent inner
+unroll bounds, including read-only Inline parameters specialized at each call. ND borrowed Tile
+parameters, aliases and return types flatten together. Tuple aliases retain
+caller storage through copies, repeated projections and matching branch yields.

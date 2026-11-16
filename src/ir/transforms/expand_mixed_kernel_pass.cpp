@@ -3015,8 +3015,8 @@ Pass ExpandMixedKernel() {
       // affinity even though a GlobalVar call has no operator registration.
       class VFPlacement : public IRVisitor {
        public:
-        VFPlacement(const ProgramPtr& program, AivPlacement& placement)
-            : program_(program), placement_(placement) {}
+        VFPlacement(ProgramPtr program, AivPlacement& placement)
+            : program_(std::move(program)), placement_(placement) {}
 
        protected:
         void VisitExpr_(const CallPtr& call) override {

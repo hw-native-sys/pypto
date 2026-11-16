@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
@@ -19,20 +21,27 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/inline_functions.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/transforms/utils/ssa_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/unroll_loops.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/transforms/utils/vf_helpers.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/reg_scope.h"
 
 namespace pypto::ir {
@@ -76,14 +85,16 @@ class Operands : public var_collectors::VarDefUseCollector {
     // A conditional rebinding implicitly reads the incoming value on paths
     // that skip the assignment (including a zero-trip loop).
     if (conditional_depth_ && available_ && available_->count(stmt->var_.get()) &&
-        !var_defs.count(stmt->var_.get()))
+        !var_defs.count(stmt->var_.get())) {
       Use(stmt->var_);
+    }
     if (auto call = As<Call>(stmt->value_); IsOp(call, "reg.store") || IsOp(call, "reg.scatter")) {
       auto target = AsVarLike(call->args_[0]);
       CHECK_SPAN(target, call->span_) << "Register store requires a named Tile";
       if (stmt->var_ != target) {
-        if (conditional_depth_ && aliases.count(stmt->var_.get()))
+        if (conditional_depth_ && aliases.count(stmt->var_.get())) {
           branch_sources.emplace_back(aliases.at(stmt->var_.get()), target);
+        }
         aliases[stmt->var_.get()] = target;
       }
       writes.push_back(target);
@@ -170,7 +181,14 @@ class Operands : public var_collectors::VarDefUseCollector {
 // Normalize only the new helper: the caller remains in the early frontend
 // phase. This reuses SSA conversion for temporal rebinding and branch merges.
 FunctionPtr NormalizeHelper(const FunctionPtr& source) {
-  auto normalized = ConvertFunctionToSSA(source);
+  // SSA would turn accumulator rebindings into iter_args, which static
+  // unrolling deliberately rejects. Use the normal frontend order locally.
+  auto normalized = ConvertFunctionToSSA(transform_utils::UnrollFunction(source));
+  // Caller constants and unrolled indices must choose their reachable branch
+  // before its Tile aliases become a shared-storage return contract. Reuse the
+  // guarded folds so effects, yields and required hardware loops survive.
+  normalized = transform_utils::SimplifyFunction(normalized, /*constants_only=*/true,
+                                                 /*fold_constant_control_flow=*/true);
   auto sequence = As<SeqStmts>(normalized->body_);
   INTERNAL_CHECK_SPAN(sequence && sequence->stmts_.size() == 2, source->span_)
       << "Internal error: outlined helper lost its scope/return structure";
@@ -205,6 +223,7 @@ FunctionPtr NormalizeHelper(const FunctionPtr& source) {
   for (size_t i = 0; i < result->params_.size(); ++i) {
     const auto& param = result->params_[i];
     params.emplace(param.get(), param);
+    // Partial/masked stores preserve untouched contents, so writes borrow InOut storage.
     result->param_directions_[i] = written.count(param.get()) ? ParamDirection::InOut : ParamDirection::In;
   }
   std::vector<ExprPtr> returns;
@@ -328,6 +347,7 @@ class Outliner : public IRMutator {
     // Call result types belong to the caller; helper parameter types contain
     // fresh scalar symbols and must never leak back through the call's type.
     std::vector<TypePtr> caller_return_types;
+    caller_return_types.reserve(outputs.size());
     for (const auto& output : outputs) caller_return_types.push_back(output->GetType());
     TypePtr result_type = caller_return_types.size() == 1 ? caller_return_types[0]
                                                           : std::make_shared<TupleType>(caller_return_types);
@@ -336,8 +356,9 @@ class Outliner : public IRMutator {
         std::make_shared<Call>(std::make_shared<GlobalVar>(name), args,
                                std::vector<std::pair<std::string, std::any>>{}, result_type, scope->span_);
     if (outputs.empty()) return std::make_shared<EvalStmt>(call, scope->span_, scope->leading_comments_);
-    if (outputs.size() == 1)
+    if (outputs.size() == 1) {
       return std::make_shared<AssignStmt>(outputs[0], call, scope->span_, scope->leading_comments_);
+    }
     auto tuple = std::make_shared<Var>(name + "_results", result_type, scope->span_);
     std::vector<StmtPtr> stmts{
         std::make_shared<AssignStmt>(tuple, call, scope->span_, scope->leading_comments_)};
@@ -365,20 +386,28 @@ Pass OutlineRegScopes() {
       [](const ProgramPtr& program) {
         std::set<std::string> names;
         for (const auto& [_, function] : program->functions_) names.insert(function->name_);
-        auto result = MutableCopy(program);
+        auto expanded = transform_utils::InlineRegScopeCalls(program);
+        auto result = MutableCopy(expanded);
         std::vector<FunctionPtr> helpers;
         for (auto& [_, function] : result->functions_) {
           if (function->func_type_ == FunctionType::VF || !function->body_) continue;
           CheckRegScopes(function);
+          // Propagate proven caller constants before captures hide their values
+          // behind fresh parameters. Inlining has exposed scalar Out writes,
+          // so the pre-SSA guards can reject rebound values. Caller control
+          // flow remains intact until its normal pipeline passes.
+          function = transform_utils::SimplifyFunction(function, /*constants_only=*/true);
+          function = transform_utils::UnrollRegScopeAncestors(function);
           RegionIndex index;
           index.VisitStmt(function->body_);
           Outliner outliner(function, index, names, helpers);
           function = outliner.VisitFunction(function);
         }
-        for (const auto& helper : helpers)
+        for (const auto& helper : helpers) {
           result->functions_.emplace(std::make_shared<GlobalVar>(helper->name_), helper);
+        }
         CheckVFCalls(result);
-        return ProgramPtr(helpers.empty() ? program : result);
+        return ProgramPtr(helpers.empty() ? expanded : result);
       },
       "OutlineRegScopes", kOutlineRegScopesProperties);
 }

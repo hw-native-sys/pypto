@@ -68,6 +68,7 @@
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/reg_memory_analysis.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
@@ -833,9 +834,26 @@ class InitMemRefMutator : public IRMutator {
     if (auto call = As<Call>(new_value)) {
       if (auto helper = ResolveVFCall(call, program_)) {
         auto aliases = VFReturnedArguments(helper, call);
-        if (aliases.size() == 1) return BindVFResult(aliases[0], op, new_value);
-        auto var = GetNewVar(op->var_);
+        // Call result caches must use the actual borrowed views too. A formal
+        // may retain an explicit layout that caller canonicalization removed.
+        std::vector<TypePtr> types;
+        types.reserve(aliases.size());
+        for (const auto& alias : aliases) types.push_back(alias->GetType());
+        TypePtr type = types.size() == 1 ? types[0] : std::make_shared<TupleType>(types);
+        auto value =
+            std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, type, call->span_);
+        if (aliases.size() == 1) return BindVFResult(aliases[0], op, value);
+        auto var = std::make_shared<Var>(op->var_->name_hint_, type, op->var_->span_);
+        var_map_[op->var_] = var;
         vf_returns_[var.get()] = std::move(aliases);
+        return std::make_shared<AssignStmt>(var, value, op->span_, op->leading_comments_);
+      }
+    }
+    if (auto source = AsVarLike(new_value)) {
+      if (auto it = vf_returns_.find(source.get()); it != vf_returns_.end()) {
+        auto var = std::make_shared<Var>(op->var_->name_hint_, source->GetType(), op->var_->span_);
+        var_map_[op->var_] = var;
+        vf_returns_[var.get()] = it->second;
         return std::make_shared<AssignStmt>(var, new_value, op->span_, op->leading_comments_);
       }
     }
@@ -1298,19 +1316,26 @@ class HasMemRefsVerifier : public IRVisitor {
       if (auto helper = ResolveVFCall(call, program_)) {
         auto aliases = VFReturnedArguments(helper, call);
         if (aliases.size() == 1) {
-          if (auto var = AsVarLike(aliases[0]); var && buffer_less_.count(var.get()))
+          if (auto var = AsVarLike(aliases[0]); var && buffer_less_.count(var.get())) {
             buffer_less_.insert(op->var_.get());
+          }
         } else {
           vf_returns_[op->var_.get()] = std::move(aliases);
         }
+      }
+    }
+    if (auto source = AsVarLike(op->value_)) {
+      if (auto it = vf_returns_.find(source.get()); it != vf_returns_.end()) {
+        vf_returns_[op->var_.get()] = it->second;
       }
     }
     if (auto item = As<TupleGetItemExpr>(op->value_)) {
       if (auto tuple = AsVarLike(item->tuple_); tuple && vf_returns_.count(tuple.get())) {
         const auto& aliases = vf_returns_.at(tuple.get());
         if (item->index_ >= 0 && static_cast<size_t>(item->index_) < aliases.size()) {
-          if (auto var = AsVarLike(aliases[item->index_]); var && buffer_less_.count(var.get()))
+          if (auto var = AsVarLike(aliases[item->index_]); var && buffer_less_.count(var.get())) {
             buffer_less_.insert(op->var_.get());
+          }
         }
       }
     }

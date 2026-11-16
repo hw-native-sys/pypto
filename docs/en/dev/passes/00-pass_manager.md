@@ -114,6 +114,7 @@ struct PassProperties {
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
 | OutlineSimtScopes | — | — | SSAForm |
+| OutlineRegScopes | — | — | SSAForm |
 | InlineFunctions | — | InlineFunctionsEliminated | — |
 | UnrollLoops | — | UnrollResolved | — |
 | CtrlFlowTransform | — | StructuredCtrlFlow | — |

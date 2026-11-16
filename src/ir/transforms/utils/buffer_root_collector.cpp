@@ -25,6 +25,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
@@ -140,6 +141,7 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
       auto aliases = VFReturnedArguments(helper, call);
       if (As<TupleType>(call->GetType())) {
         std::vector<RootInfo> roots;
+        roots.reserve(aliases.size());
         for (const auto& alias : aliases) roots.push_back({ResolveRootCandidates(alias), IsAmbiguous(alias)});
         tuple_output_roots_[assign->var_.get()] = std::move(roots);
       } else if (!aliases.empty()) {
@@ -175,7 +177,10 @@ void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
         RecordRootCandidates(assign->var_, info.roots, info.ambiguous);
       }
     }
-  } else if (AsVarLike(assign->value_)) {
+  } else if (auto source = AsVarLike(assign->value_)) {
+    if (auto it = tuple_output_roots_.find(source.get()); it != tuple_output_roots_.end()) {
+      tuple_output_roots_[assign->var_.get()] = it->second;
+    }
     RecordRootCandidates(assign->var_, ResolveRootCandidates(assign->value_), IsAmbiguous(assign->value_));
   }
   IRVisitor::VisitStmt_(assign);

@@ -65,6 +65,7 @@
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/transforms/utils/vf_helpers.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -815,12 +816,20 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 // the tuple-returning call is nested.
 class TupleConsumerCollector : public ir::IRVisitor {
  public:
+  explicit TupleConsumerCollector(ir::ProgramPtr program) : program_(std::move(program)) {}
   [[nodiscard]] std::map<const ir::Var*, std::vector<ir::VarPtr>> Take() { return std::move(index_); }
 
  protected:
   void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    auto call = As<ir::Call>(op->value_);
+    auto source = ir::AsVarLike(op->value_);
+    if (ir::ResolveVFCall(call, program_) || (source && aliases_.count(source.get()))) {
+      aliases_.insert(op->var_.get());
+    }
     if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
       if (auto base = As<ir::Var>(tge->tuple_); base && tge->index_ >= 0) {
+        // VF tuple elements are borrowed aliases, not hardware DPS destinations.
+        if (aliases_.count(base.get())) return;
         auto& elements = index_[base.get()];
         const auto index = static_cast<size_t>(tge->index_);
         if (elements.size() <= index) elements.resize(index + 1, nullptr);
@@ -840,6 +849,8 @@ class TupleConsumerCollector : public ir::IRVisitor {
 
  private:
   std::map<const ir::Var*, std::vector<ir::VarPtr>> index_;
+  ir::ProgramPtr program_;
+  std::set<const ir::Var*> aliases_;
 };
 
 }  // namespace
@@ -1323,7 +1334,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // separate AssignStmts — so an emitter has to look them up. Resolving each
   // call by rescanning the body would be O(body) per call.
   {
-    TupleConsumerCollector collector;
+    TupleConsumerCollector collector(vf_program_);
     collector.VisitStmt(func->body_);
     fs_.tuple_element_index = collector.Take();
   }
@@ -2984,6 +2995,12 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
   auto call = As<ir::Call>(op->value_);
   if (TryEmitVFCall(call, op->var_)) return;
+  if (auto rhs = AsVarLike(op->value_); rhs && As<ir::TupleType>(op->var_->GetType())) {
+    if (auto it = vf_return_aliases_.find(rhs.get()); it != vf_return_aliases_.end()) {
+      vf_return_aliases_[op->var_.get()] = it->second;
+      return;
+    }
+  }
   if (auto item = ir::As<ir::TupleGetItemExpr>(op->value_)) {
     if (auto tuple = ir::AsVarLike(item->tuple_); tuple && vf_return_aliases_.count(tuple.get())) {
       const auto& values = vf_return_aliases_.at(tuple.get());

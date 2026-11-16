@@ -20,7 +20,11 @@ namespace pypto::ir::transform_utils {
 /// With constants_only, propagate proven constants and rebuild types while
 /// preserving symbolic algebra, control flow and yielded slots. Memory
 /// initialization needs that form before it consumes address metadata.
-FunctionPtr SimplifyFunction(const FunctionPtr& func, bool constants_only = false);
+/// fold_constant_control_flow also folds proven IfStmt branches and zero-/one-trip
+/// ForStmt loops when VF binding exposes constants. Existing effect, yield,
+/// hardware-loop-policy and bounded-cloning guards still apply.
+FunctionPtr SimplifyFunction(const FunctionPtr& func, bool constants_only = false,
+                             bool fold_constant_control_flow = false);
 
 }  // namespace pypto::ir::transform_utils
 

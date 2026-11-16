@@ -96,6 +96,12 @@ bool PTOCodegen::TryEmitVFCall(const ir::CallPtr& call, const ir::VarPtr& result
   // Logical capture discovery belongs to OutlineRegScopes. The existing VMI
   // emitter now sees declaration arguments bound to the final caller storage.
   VisitStmt_(scope);
+  // Unused Tile captures may have no owner in the retained region. Erase their
+  // raw-pointer keys before borrowed_args dies and an allocator can reuse them.
+  for (const auto& [borrowed, actual] : borrowed_args) {
+    fs_.tile_aliases.erase(borrowed.get());
+    fs_.var_to_mlir.erase(borrowed.get());
+  }
   auto aliases = ir::VFReturnedArguments(function, call);
   if (result && aliases.size() == 1) {
     BindVarToMlir(result, GetExprAsCode(aliases[0]));

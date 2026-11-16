@@ -897,11 +897,17 @@ void BindPass(nb::module_& m) {
           },
           nb::arg("stmt"), "Return the predecessor stmts of the given stmt in region order");
 
-  dep_analysis.def("build_stmt_dependency_graph", &stmt_dep::BuildStmtDependencyGraph, nb::arg("region"),
-                   nb::arg("program").none() = nb::none(),
-                   "Build a dataflow dependency graph over a region's top-level stmts. "
-                   "When `program` is provided, the InOut-use discipline is checked first "
-                   "and any violation raises pypto.Error (VerificationError).");
+  dep_analysis.def(
+      "build_stmt_dependency_graph",
+      [](const StmtPtr& region, const ProgramPtr& program) {
+        // Python callers always get the checked graph. Only the
+        // internal reorder driver has already checked discipline.
+        return stmt_dep::BuildStmtDependencyGraph(region, program);
+      },
+      nb::arg("region"), nb::arg("program").none() = nb::none(),
+      "Build a dataflow dependency graph over a region's top-level stmts. "
+      "When `program` is provided, the InOut-use discipline is checked first "
+      "and any violation raises pypto.Error (VerificationError).");
 
   dep_analysis.def("check_inout_use_discipline", &stmt_dep::CheckInOutUseDiscipline, nb::arg("region"),
                    nb::arg("program"),

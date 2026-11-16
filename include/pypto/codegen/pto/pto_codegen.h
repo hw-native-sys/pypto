@@ -906,7 +906,11 @@ class PTOCodegen : public CodegenBase {
   std::set<std::pair<std::string, std::string>> entry_helper_uses_;
   void RecordEntryHelperUse(const std::string& symbol);
   std::string GenerateImpl(const ir::ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc);
+  // Retained for the generation call: owns original Vars used as alias keys.
   ir::ProgramPtr vf_program_;
+  // Bound regions own cloned Vars referenced by emission state. Both these
+  // regions and tuple alias mappings are cleared on the next GenerateImpl;
+  // per-function identities remain distinct within a multi-entry generation.
   std::vector<ir::RegScopeStmtPtr> bound_vf_regions_;
   std::map<const ir::Var*, std::vector<ir::ExprPtr>> vf_return_aliases_;
   bool TryEmitVFCall(const ir::CallPtr& call, const ir::VarPtr& result = nullptr);

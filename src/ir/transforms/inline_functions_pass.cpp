@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/inline_functions.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
@@ -1524,81 +1525,108 @@ namespace pass {
  *  - Inline body containing a non-trailing ReturnStmt is rejected at splice
  *    time with a CHECK (only a single trailing return is supported).
  */
-Pass InlineFunctions() {
-  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Collect inline functions
-    std::unordered_map<std::string, FunctionPtr> inline_fns;
-    for (const auto& [gvar, fn] : program->functions_) {
-      if (fn->func_type_ == FunctionType::Inline) {
-        INTERNAL_CHECK_SPAN(inline_fns.count(fn->name_) == 0, fn->span_)
-            << "Duplicate FunctionType::Inline function name '" << fn->name_ << "' in program";
-        inline_fns[fn->name_] = fn;
-      }
+ProgramPtr InlineProgram(const ProgramPtr& program) {
+  // Collect inline functions
+  std::unordered_map<std::string, FunctionPtr> inline_fns;
+  for (const auto& [gvar, fn] : program->functions_) {
+    if (fn->func_type_ == FunctionType::Inline) {
+      INTERNAL_CHECK_SPAN(inline_fns.count(fn->name_) == 0, fn->span_)
+          << "Duplicate FunctionType::Inline function name '" << fn->name_ << "' in program";
+      inline_fns[fn->name_] = fn;
     }
+  }
 
-    // Fast path: nothing to do
-    if (inline_fns.empty()) return program;
+  // Fast path: nothing to do
+  if (inline_fns.empty()) return program;
 
-    // The same O(functions + call edges) DFS checks cycles and orders callees
-    // before callers. Classify parameter definitions only after nested inline
-    // calls have exposed their intrinsic alias/value-producing operations.
-    const auto expansion_order = InlineExpansionOrder(inline_fns);
-    std::unordered_map<std::string, FunctionPtr> current;
-    for (const auto& [gvar, fn] : program->functions_) {
-      current[fn->name_] = fn;
+  // The same O(functions + call edges) DFS checks cycles and orders callees
+  // before callers. Classify parameter definitions only after nested inline
+  // calls have exposed their intrinsic alias/value-producing operations.
+  const auto expansion_order = InlineExpansionOrder(inline_fns);
+  std::unordered_map<std::string, FunctionPtr> current;
+  for (const auto& [gvar, fn] : program->functions_) {
+    current[fn->name_] = fn;
+  }
+
+  InlineParamBindingMap param_bindings;
+  auto expand = [&](const FunctionPtr& fn) -> FunctionPtr {
+    InlineCallsMutator mutator(inline_fns, fn, current, param_bindings);
+    auto folded_body = (IsOrchestrationLike(fn->func_type_) || fn->func_type_ == FunctionType::Inline)
+                           ? FoldParamDimReads(fn->params_, fn->body_, &current)
+                           : fn->body_;
+    auto new_body = mutator.VisitStmt(folded_body);
+    if (new_body != fn->body_) {
+      auto updated = MutableCopy(fn);
+      updated->body_ = new_body;
+      return updated;
     }
-
-    InlineParamBindingMap param_bindings;
-    auto expand = [&](const std::string& name) {
-      auto& fn = current.at(name);
-      InlineCallsMutator mutator(inline_fns, fn, current, param_bindings);
-      auto folded_body = (IsOrchestrationLike(fn->func_type_) || fn->func_type_ == FunctionType::Inline)
-                             ? FoldParamDimReads(fn->params_, fn->body_, &current)
-                             : fn->body_;
-      auto new_body = mutator.VisitStmt(folded_body);
-      if (mutator.Changed() || folded_body != fn->body_) {
-        auto updated = MutableCopy(fn);
-        updated->body_ = new_body;
-        fn = updated;
-      }
-    };
-
-    // Cache one expanded analysis body per helper. Keep inline_fns original:
-    // emitted clones need nested call sites for type/dump-tag specialization.
-    // Traversal cost includes the materialized analysis and output IR, which
-    // can be larger than the original program; no fixpoint rescans are needed.
-    for (const auto& name : expansion_order) {
-      const auto& original = inline_fns.at(name);
-      var_collectors::VarDefUseCollector original_defs;
-      original_defs.VisitStmt(original->body_);
-      InlineParamBindings bindings;
-      for (const auto& param : original->params_) {
-        if (original_defs.var_defs.count(param.get())) bindings.rebound.insert(param.get());
-      }
-      expand(name);
-      // expand replaces only the body, retaining original parameter identities.
-      // Compute the graph conclusion once, never rescan it at every clone site.
-      InlineParamDefCollector expanded_defs(original->params_);
-      expanded_defs.VisitStmt(current.at(name)->body_);
-      bindings.local_bindings = expanded_defs.LocalBindings();
-      param_bindings.emplace(name, std::move(bindings));
-    }
-
-    // Expand surviving callers and drop the fully expanded helper definitions.
-    std::vector<FunctionPtr> kept_functions;
-    for (const auto& [gvar, fn] : program->functions_) {
-      if (fn->func_type_ == FunctionType::Inline) continue;
-      expand(fn->name_);
-      kept_functions.push_back(current.at(fn->name_));
-    }
-
-    return std::make_shared<Program>(kept_functions, program->name_, program->span_);
+    return fn;
   };
 
-  return CreateProgramPass(pass_func, "InlineFunctions", kInlineFunctionsProperties);
+  // Cache one expanded analysis body per helper. Keep inline_fns original:
+  // emitted clones need nested call sites for type/dump-tag specialization.
+  // Traversal cost includes the materialized analysis and output IR, which
+  // can be larger than the original program; no fixpoint rescans are needed.
+  for (const auto& name : expansion_order) {
+    const auto& original = inline_fns.at(name);
+    var_collectors::VarDefUseCollector original_defs;
+    original_defs.VisitStmt(original->body_);
+    InlineParamBindings bindings;
+    for (const auto& param : original->params_) {
+      if (original_defs.var_defs.count(param.get())) bindings.rebound.insert(param.get());
+    }
+    current.at(name) = expand(current.at(name));
+    // expand replaces only the body, retaining original parameter identities.
+    // Compute the graph conclusion once, never rescan it at every clone site.
+    InlineParamDefCollector expanded_defs(original->params_);
+    expanded_defs.VisitStmt(current.at(name)->body_);
+    bindings.local_bindings = expanded_defs.LocalBindings();
+    param_bindings.emplace(name, std::move(bindings));
+  }
+
+  // Expand surviving callers and drop the fully expanded helper definitions.
+  std::vector<FunctionPtr> kept_functions;
+  for (const auto& [gvar, fn] : program->functions_) {
+    if (fn->func_type_ == FunctionType::Inline) continue;
+    current.at(fn->name_) = expand(fn);
+    kept_functions.push_back(current.at(fn->name_));
+  }
+
+  return std::make_shared<Program>(kept_functions, program->name_, program->span_);
+}
+
+Pass InlineFunctions() {
+  return CreateProgramPass([](const ProgramPtr& program) { return InlineProgram(program); },
+                           "InlineFunctions", kInlineFunctionsProperties);
 }
 
 }  // namespace pass
+
+namespace transform_utils {
+ProgramPtr InlineRegScopeCalls(const ProgramPtr& program) {
+  class RegScopeFinder : public IRVisitor {
+   public:
+    bool found = false;
+
+   protected:
+    void VisitStmt_(const RegScopeStmtPtr&) override { found = true; }
+  };
+  RegScopeFinder finder;
+  for (const auto& [_, function] : program->functions_) {
+    if (function->func_type_ == FunctionType::VF || !function->body_) continue;
+    finder.VisitStmt(function->body_);
+    if (finder.found) {
+      // Use ordinary caller-context inlining, not a partial call selection:
+      // even a scope-free callee can produce a constant or write a scalar Out
+      // used by a later region. Those definitions must be visible before
+      // pre-SSA constant propagation and before deriving the VF alias ABI.
+      return pass::InlineProgram(program);
+    }
+  }
+  // Programs without source register scopes retain their ordinary pass order.
+  return program;
+}
+}  // namespace transform_utils
 
 }  // namespace ir
 }  // namespace pypto

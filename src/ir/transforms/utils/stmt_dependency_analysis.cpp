@@ -38,8 +38,9 @@ namespace stmt_dep {
 // BuildStmtDependencyGraph
 // ---------------------------------------------------------------------------
 
-StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const ProgramPtr& program) {
-  if (program) CheckInOutUseDiscipline(region, program);
+StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const ProgramPtr& program,
+                                             bool check_discipline) {
+  if (program && check_discipline) CheckInOutUseDiscipline(region, program);
 
   StmtDependencyGraph graph;
   if (!region) return graph;
@@ -178,6 +179,9 @@ class InOutUseDisciplineChecker : public IRVisitor {
     // handled as Mode B in RFC #1026, which is out of scope here.
     if (!program_) return;
     FunctionPtr callee = program_->GetFunction(op->op_->name_);
+    // VF helpers borrow caller storage: old SSA names remain usable after a
+    // call. BuildStmtDependencyGraph detects VF calls and retains their source
+    // order to preserve these storage effects independently of return values.
     if (!callee || callee->func_type_ == FunctionType::VF) return;
 
     const size_t n = std::min(callee->param_directions_.size(), op->args_.size());
